@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { cn } from "@/lib/utils";
+
 import type {
   CalendarAppointmentRow,
   CalendarDayBounds,
@@ -9,6 +11,8 @@ import type {
 import {
   appointmentHref,
   appointmentLabel,
+  appointmentToneClass,
+  appointmentVisualTone,
   dayIndexForAppointment,
   todayDateKeyInZone,
 } from "./calendar-shared";
@@ -48,7 +52,7 @@ type Props = {
 };
 
 /**
- * Sunday-to-Saturday month grid (5 or 6 rows) — desktop-only like WeekGrid
+ * Sunday-to-Saturday month grid (fixed 6 rows) — desktop-only like WeekGrid
  * (caller gates visibility below `md`; mobile keeps the agenda). Cells in
  * the displayed month show up to MAX_PER_CELL compact appointment lines
  * (start time + the same label rule as every other surface) plus a
@@ -69,20 +73,24 @@ export function MonthGrid({
 }: Props) {
   void viewerRole;
   const todayKey = todayDateKeyInZone(timezone);
+  // Stable for this render; drives the same lifecycle-first visual resolver
+  // used by Week and Agenda.
+  // eslint-disable-next-line react-hooks/purity
+  const nowMs = Date.now();
 
   return (
     <div data-testid="calendar-month-grid">
-      <div className="grid grid-cols-7 gap-2">
+      <div className="grid grid-cols-7">
         {WEEKDAY_HEADERS.map((label) => (
           <div
             key={label}
-            className="text-muted-foreground px-1 text-[10px] font-bold tracking-widest uppercase"
+            className="text-muted-foreground px-2 py-2 text-[10px] font-bold tracking-widest uppercase"
           >
             {label}
           </div>
         ))}
       </div>
-      <div className="mt-2 grid grid-cols-7 gap-2">
+      <div className="bg-border grid grid-cols-7 gap-px overflow-hidden rounded-xl border">
         {days.map((day, i) => {
           const inMonth = day.date.slice(0, 7) === month;
           const isToday = day.date === todayKey;
@@ -99,18 +107,24 @@ export function MonthGrid({
           return (
             <div
               key={day.date}
-              className={`border-border rounded-xl border p-1.5 ${
-                inMonth ? "bg-card" : "bg-background"
-              } ${isToday ? "border-nav-active-border border-2" : ""}`}
+              className={cn(
+                "min-h-28 p-1.5",
+                inMonth ? "bg-card" : "bg-muted/20 text-muted-foreground",
+              )}
               data-testid={`calendar-month-cell-${day.date}`}
               data-today={isToday || undefined}
               data-outside-month={!inMonth || undefined}
             >
               <Link
                 href={dayHref(day.date)}
-                className={`block text-xs font-bold hover:underline ${
-                  inMonth ? "text-foreground" : "text-muted-foreground"
-                }`}
+                className={cn(
+                  "inline-flex size-7 items-center justify-center rounded-full text-xs font-bold hover:underline",
+                  isToday
+                    ? "bg-foreground text-background"
+                    : inMonth
+                      ? "text-foreground"
+                      : "text-muted-foreground",
+                )}
                 data-testid={`calendar-month-day-link-${day.date}`}
               >
                 {dayNumber}
@@ -118,6 +132,7 @@ export function MonthGrid({
               <div className="mt-1 flex min-h-16 flex-col gap-0.5">
                 {visible.map((appt) => {
                   const href = appointmentHref(appt);
+                  const tone = appointmentVisualTone(appt, nowMs);
                   // Ownership must survive the compact format (Codex
                   // round 4): in the owner's Everyone view several
                   // teammates' rows — especially personal blocks, which
@@ -132,7 +147,7 @@ export function MonthGrid({
                       : null;
                   const line = (
                     <span className="block truncate text-[11px] leading-4">
-                      <span className="text-muted-foreground font-bold tabular-nums">
+                      <span className="font-bold text-current tabular-nums">
                         {startTimeLabel(appt.due_at, timezone)}
                       </span>{" "}
                       <span
@@ -159,15 +174,24 @@ export function MonthGrid({
                     <Link
                       key={appt.id}
                       href={href}
-                      className="hover:underline"
+                      className={cn(
+                        "block rounded border px-1 hover:underline",
+                        appointmentToneClass(tone),
+                      )}
                       data-testid={`calendar-month-appointment-${appt.id}`}
+                      data-appointment-tone={tone}
                     >
                       {line}
                     </Link>
                   ) : (
                     <span
                       key={appt.id}
+                      className={cn(
+                        "block rounded border px-1",
+                        appointmentToneClass(tone),
+                      )}
                       data-testid={`calendar-month-appointment-${appt.id}`}
+                      data-appointment-tone={tone}
                     >
                       {line}
                     </span>

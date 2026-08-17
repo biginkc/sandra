@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveMonth } from "../range";
 import type { CalendarAppointmentRow } from "../types";
@@ -14,7 +14,9 @@ function makeAppt(
   return {
     title: "Appointment",
     description: null,
-    end_at: new Date(new Date(overrides.due_at).getTime() + 30 * 60 * 1000).toISOString(),
+    end_at: new Date(
+      new Date(overrides.due_at).getTime() + 30 * 60 * 1000,
+    ).toISOString(),
     status: "open",
     outcome: null,
     assignee_id: "user-1",
@@ -52,19 +54,25 @@ function renderGrid(
 }
 
 describe("<MonthGrid />", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders a full padded grid (Aug 2026 in Chicago = 6 rows / 42 cells) with outside-month cells muted", () => {
     renderGrid();
     // Aug 1 2026 is a Saturday -> 6 leading July cells; 42 cells total.
     expect(DAYS).toHaveLength(42);
     for (const day of DAYS) {
-      expect(screen.getByTestId(`calendar-month-cell-${day.date}`)).toBeInTheDocument();
+      expect(
+        screen.getByTestId(`calendar-month-cell-${day.date}`),
+      ).toBeInTheDocument();
     }
-    expect(screen.getByTestId("calendar-month-cell-2026-07-26")).toHaveAttribute(
-      "data-outside-month",
-    );
-    expect(screen.getByTestId("calendar-month-cell-2026-08-01")).not.toHaveAttribute(
-      "data-outside-month",
-    );
+    expect(
+      screen.getByTestId("calendar-month-cell-2026-07-26"),
+    ).toHaveAttribute("data-outside-month");
+    expect(
+      screen.getByTestId("calendar-month-cell-2026-08-01"),
+    ).not.toHaveAttribute("data-outside-month");
   });
 
   it("places an appointment in its zone-local day cell with a compact start-time line", () => {
@@ -78,15 +86,39 @@ describe("<MonthGrid />", () => {
     ).toContainElement(line);
   });
 
+  it("renders today as an inverted circle instead of changing the cell border", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-14T17:00:00.000Z"));
+    renderGrid();
+
+    const cell = screen.getByTestId("calendar-month-cell-2026-08-14");
+    const dayLink = screen.getByTestId("calendar-month-day-link-2026-08-14");
+    expect(cell).toHaveAttribute("data-today", "true");
+    expect(dayLink).toHaveClass(
+      "rounded-full",
+      "bg-foreground",
+      "text-background",
+    );
+  });
+
   it("collapses more than three appointments into a +N more link to that day's week view", () => {
     const base = new Date("2026-08-14T15:00:00Z").getTime();
     const appts = [0, 1, 2, 3, 4].map((i) =>
-      makeAppt({ id: `a${i}`, due_at: new Date(base + i * 3_600_000).toISOString() }),
+      makeAppt({
+        id: `a${i}`,
+        due_at: new Date(base + i * 3_600_000).toISOString(),
+      }),
     );
     renderGrid(appts);
-    expect(screen.getByTestId("calendar-month-appointment-a0")).toBeInTheDocument();
-    expect(screen.getByTestId("calendar-month-appointment-a2")).toBeInTheDocument();
-    expect(screen.queryByTestId("calendar-month-appointment-a3")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("calendar-month-appointment-a0"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("calendar-month-appointment-a2"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("calendar-month-appointment-a3"),
+    ).not.toBeInTheDocument();
     const more = screen.getByTestId("calendar-month-more-2026-08-14");
     expect(more).toHaveTextContent("+2 more");
     expect(more).toHaveAttribute("href", dayHref("2026-08-14"));
@@ -105,10 +137,60 @@ describe("<MonthGrid />", () => {
       "href",
       "/leads/prop-9",
     );
-    expect(screen.getByTestId("calendar-month-day-link-2026-08-05")).toHaveAttribute(
-      "href",
-      dayHref("2026-08-05"),
-    );
+    expect(
+      screen.getByTestId("calendar-month-day-link-2026-08-05"),
+    ).toHaveAttribute("href", dayHref("2026-08-05"));
+  });
+
+  it("shares lifecycle-first visual tones while preserving link semantics", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-14T18:00:00.000Z"));
+    renderGrid([
+      makeAppt({
+        id: "property",
+        due_at: "2026-08-15T15:00:00.000Z",
+        property_id: "property-1",
+      }),
+      makeAppt({
+        id: "contact",
+        due_at: "2026-08-15T16:00:00.000Z",
+        contact_id: "contact-1",
+      }),
+      makeAppt({
+        id: "personal",
+        due_at: "2026-08-15T17:00:00.000Z",
+      }),
+      makeAppt({
+        id: "past",
+        due_at: "2026-08-14T15:00:00.000Z",
+        property_id: "property-past",
+      }),
+      makeAppt({
+        id: "completed",
+        due_at: "2026-08-14T16:00:00.000Z",
+        contact_id: "contact-completed",
+        status: "completed",
+      }),
+    ]);
+
+    expect(
+      screen.getByTestId("calendar-month-appointment-property"),
+    ).toHaveAttribute("data-appointment-tone", "property");
+    expect(
+      screen.getByTestId("calendar-month-appointment-contact"),
+    ).toHaveAttribute("data-appointment-tone", "contact");
+    expect(
+      screen.getByTestId("calendar-month-appointment-personal"),
+    ).toHaveAttribute("data-appointment-tone", "personal");
+    expect(
+      screen.getByTestId("calendar-month-appointment-past"),
+    ).toHaveAttribute("data-appointment-tone", "needs_outcome");
+    expect(
+      screen.getByTestId("calendar-month-appointment-completed"),
+    ).toHaveAttribute("data-appointment-tone", "completed");
+    expect(
+      screen.getByTestId("calendar-month-appointment-contact"),
+    ).toHaveAttribute("href", "/messages?thread=contact-1");
   });
 
   it("labels every non-self appointment with its owner in the Everyone view (former teammates get the fallback)", () => {
@@ -128,10 +210,12 @@ describe("<MonthGrid />", () => {
       ],
       { "user-2": "gretchen@bmhgroupkc.com" },
     );
-    expect(screen.queryByTestId("calendar-month-owner-mine")).not.toBeInTheDocument();
-    expect(screen.getByTestId("calendar-month-owner-teammate")).toHaveTextContent(
-      "gretchen@bmhgroupkc.com",
-    );
+    expect(
+      screen.queryByTestId("calendar-month-owner-mine"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("calendar-month-owner-teammate"),
+    ).toHaveTextContent("gretchen@bmhgroupkc.com");
     expect(screen.getByTestId("calendar-month-owner-former")).toHaveTextContent(
       /Former teammate \(user-gon/,
     );

@@ -2,12 +2,15 @@ import Link from "next/link";
 
 import { AppointmentOutcomeRow } from "@/components/appointments/appointment-outcome-row";
 import { StatusChip } from "@/components/ui/status-chip";
+import { cn } from "@/lib/utils";
 
 import type { CalendarAppointmentRow, CalendarViewerRole } from "../types";
 
 import {
   appointmentHref,
   appointmentLabel,
+  appointmentToneClass,
+  appointmentVisualTone,
   formatTimeRange,
   isPastDueOpen,
   outcomeChip,
@@ -48,20 +51,21 @@ export function AppointmentBlock({
   // members can view teammates (scoping.ts honors ?assignee=), so the
   // label follows the row's owner, not the viewer's role.
   const assigneeEmail =
-    appt.assignee_id !== currentUserId ? assignees[appt.assignee_id] : undefined;
+    appt.assignee_id !== currentUserId
+      ? assignees[appt.assignee_id]
+      : undefined;
   const chip =
     appt.status === "completed" && appt.outcome
       ? outcomeChip(appt.outcome)
       : null;
+  const tone = appointmentVisualTone(appt, nowMs);
 
   const body = (
     <>
       <div className="text-foreground truncate text-xs font-bold tabular-nums">
         {formatTimeRange(appt.due_at, appt.end_at, timezone)}
       </div>
-      <div className="text-foreground truncate text-sm font-bold">
-        {label}
-      </div>
+      <div className="text-foreground truncate text-sm font-bold">{label}</div>
       {assigneeEmail ? (
         <div className="text-muted-foreground truncate text-xs font-medium">
           {assigneeEmail}
@@ -80,8 +84,12 @@ export function AppointmentBlock({
 
   return (
     <div
-      className="border-border bg-card rounded-lg border px-2 py-1.5"
+      className={cn(
+        "rounded-lg border px-2 py-1.5",
+        appointmentToneClass(tone),
+      )}
       data-testid={`calendar-appointment-${appt.id}`}
+      data-appointment-tone={tone}
     >
       {href ? (
         <Link
@@ -98,6 +106,9 @@ export function AppointmentBlock({
       )}
       {isPastDueOpen(appt, nowMs) ? (
         <div className="mt-1.5">
+          <div className="mb-1 text-[10px] font-bold tracking-wide text-amber-800 uppercase">
+            Needs outcome
+          </div>
           <AppointmentOutcomeRow
             taskId={appt.id}
             assigneeId={appt.assignee_id}

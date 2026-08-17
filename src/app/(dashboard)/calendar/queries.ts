@@ -11,8 +11,7 @@ import type { CalendarAppointmentRow } from "./types";
  * `{ ok: false }` and only shows the empty-week UI for `{ ok: true, rows: [] }`.
  */
 export type FetchCalendarAppointmentsResult =
-  | { ok: true; rows: CalendarAppointmentRow[] }
-  | { ok: false };
+  { ok: true; rows: CalendarAppointmentRow[] } | { ok: false };
 
 /**
  * Loads open + completed appointment-type tasks whose `due_at` falls in
@@ -85,7 +84,9 @@ function buildAppointmentsQuery(
   return query;
 }
 
-type AppointmentQueryResult = Awaited<ReturnType<typeof buildAppointmentsQuery>>;
+type AppointmentQueryResult = Awaited<
+  ReturnType<typeof buildAppointmentsQuery>
+>;
 type RawAppointmentRow = NonNullable<AppointmentQueryResult["data"]>[number];
 
 export async function fetchCalendarAppointments(
@@ -225,7 +226,9 @@ export type FetchOrgRosterResult =
 // the appointments one, and a per-org roster is just as naturally bounded.
 const ROSTER_CAP = 400; // sentinel-safe under the same 1000-row transport ceiling
 
-export async function fetchOrgRoster(orgId: string): Promise<FetchOrgRosterResult> {
+export async function fetchOrgRoster(
+  orgId: string,
+): Promise<FetchOrgRosterResult> {
   const admin = createAdminClient();
   const activeAt = new Date().toISOString();
 
@@ -302,7 +305,10 @@ export async function fetchAssigneeEmails(
     // short page, every needed identity resolved, or the hard page bound.
     const MAX_AUTH_PAGES = 25; // 25 * 200 = 5,000 users — far beyond this app
     for (let page = 1; page <= MAX_AUTH_PAGES; page++) {
-      const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
+      const { data, error } = await admin.auth.admin.listUsers({
+        page,
+        perPage,
+      });
       if (error) {
         console.error("[calendar] fetchAssigneeEmails failed", {
           message: error.message,
@@ -325,13 +331,13 @@ export async function fetchAssigneeEmails(
 
 /**
  * Month-view retrieval, third design (Codex month-view rounds 2+3):
- * a 35/42-day grid must neither stretch the per-WEEK `APPOINTMENTS_CAP`
+ * a 42-day grid must neither stretch the per-WEEK `APPOINTMENTS_CAP`
  * over six weeks (round 2 — a month at plausible weekly volumes would
  * fail closed while every individual week loads) nor be assembled from
  * per-week SELECTs (round 3 — each statement reads its own snapshot, so
  * an appointment rescheduled mid-fetch between windows can be omitted by
  * every window or returned twice). `fn_calendar_month_appointments`
- * (migration 20260815060000) is a single-statement SECURITY INVOKER SQL
+ * (migration 20260816100000) is a single-statement SECURITY INVOKER SQL
  * function: one snapshot for all windows, the same per-week cap enforced
  * INSIDE that snapshot, plus a total cap kept under PostgREST's 1000-row
  * response ceiling so the result can never be silently truncated in
@@ -407,9 +413,9 @@ export async function fetchCalendarAppointmentsForWindows(
   const rows: CalendarAppointmentRow[] = data.map((row) => {
     const propertyLinked = Boolean(
       row.related_property_id &&
-        row.property_deleted_at === null &&
-        row.property_address &&
-        row.property_state,
+      row.property_deleted_at === null &&
+      row.property_address &&
+      row.property_state,
     );
     const contactName =
       row.contact_entity_name ??

@@ -133,6 +133,37 @@ export function isPastDueOpen(
   return appt.status === "open" && new Date(appt.due_at).getTime() < nowMs;
 }
 
+export type AppointmentVisualTone =
+  "property" | "contact" | "personal" | "needs_outcome" | "completed";
+
+const APPOINTMENT_TONE_CLASSES: Record<AppointmentVisualTone, string> = {
+  property: "border-indigo-200 bg-indigo-50",
+  contact: "border-teal-200 bg-teal-50",
+  personal: "border-stone-300 bg-stone-50 border-dashed",
+  needs_outcome: "border-amber-300 bg-amber-50",
+  completed: "border-stone-200 bg-stone-100 opacity-70",
+};
+
+/**
+ * Visual treatment shared by Week, Agenda, and Month. Lifecycle state wins
+ * over linkage so a past-due or completed appointment is unmistakable even
+ * when it is attached to a property or contact.
+ */
+export function appointmentVisualTone(
+  appt: CalendarAppointmentRow,
+  nowMs: number,
+): AppointmentVisualTone {
+  if (appt.status === "completed") return "completed";
+  if (isPastDueOpen(appt, nowMs)) return "needs_outcome";
+  if (appt.property_id) return "property";
+  if (appt.contact_id) return "contact";
+  return "personal";
+}
+
+export function appointmentToneClass(tone: AppointmentVisualTone): string {
+  return APPOINTMENT_TONE_CLASSES[tone];
+}
+
 /** Index into `days` whose `[startUtc, endUtc)` window contains the
  *  appointment's start, or -1 if none match (shouldn't happen given the
  *  week-scoped read model, but this degrades to "don't render" rather than
@@ -148,12 +179,13 @@ export function dayIndexForAppointment(
   );
 }
 
-const OUTCOME_CHIP: Record<string, { variant: StatusVariant; label: string }> = {
-  held: { variant: "new", label: "Held" },
-  no_show: { variant: "hot", label: "No-show" },
-  rescheduled: { variant: "cold", label: "Rescheduled" },
-  cancelled: { variant: "dead", label: "Cancelled" },
-};
+const OUTCOME_CHIP: Record<string, { variant: StatusVariant; label: string }> =
+  {
+    held: { variant: "new", label: "Held" },
+    no_show: { variant: "hot", label: "No-show" },
+    rescheduled: { variant: "cold", label: "Rescheduled" },
+    cancelled: { variant: "dead", label: "Cancelled" },
+  };
 
 /** Maps a completed appointment's `outcome` to the existing 6-hue
  *  StatusChip rather than inventing new colors (semantic tokens only). An
@@ -231,7 +263,10 @@ export function addDaysToDateKey(dateKey: string, days: number): string {
  * `addDaysToDateKey`), used only to build the month-nav prev/next
  * `?week=` hrefs; the page re-derives real zone-local bounds from it.
  */
-export function monthStartDateKey(monthKey: string, deltaMonths: number): string {
+export function monthStartDateKey(
+  monthKey: string,
+  deltaMonths: number,
+): string {
   const [y, m] = monthKey.split("-").map(Number);
   const dt = new Date(Date.UTC(y, (m ?? 1) - 1 + deltaMonths, 1));
   const yy = dt.getUTCFullYear();

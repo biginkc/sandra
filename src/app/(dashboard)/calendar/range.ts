@@ -5,7 +5,11 @@
  * route module (Next.js validates a page file's exports, so test-only
  * exports can't live there).
  */
-import { addDaysInZone, getDayBoundsInZone, wallTimeToUtc } from "@/lib/time/zoned";
+import {
+  addDaysInZone,
+  getDayBoundsInZone,
+  wallTimeToUtc,
+} from "@/lib/time/zoned";
 
 import type { CalendarDayBounds } from "./types";
 
@@ -88,10 +92,15 @@ export function resolveWeek(
     anchorInstant = new Date();
   }
 
-  const { dayStart: anchorDayStart } = getDayBoundsInZone(anchorInstant, timeZone);
+  const { dayStart: anchorDayStart } = getDayBoundsInZone(
+    anchorInstant,
+    timeZone,
+  );
   const weekday = weekdayIndexInZone(anchorDayStart, timeZone);
   const weekStart =
-    weekday === 0 ? anchorDayStart : addDaysInZone(anchorDayStart, -weekday, timeZone);
+    weekday === 0
+      ? anchorDayStart
+      : addDaysInZone(anchorDayStart, -weekday, timeZone);
 
   const days: CalendarDayBounds[] = [];
   let cursor = weekStart;
@@ -110,8 +119,8 @@ export function resolveWeek(
 
 /**
  * Month-view sibling of `resolveWeek`: resolves the anchor day to its
- * zone-local calendar MONTH, padded to full Sunday-to-Saturday grid rows
- * (35 or 42 cells — leading cells can fall in the previous month, trailing
+ * zone-local calendar MONTH, padded to a fixed six-row Sunday-to-Saturday
+ * grid (42 cells — leading cells can fall in the previous month, trailing
  * ones in the next). Day bounds are walked with the same DST-safe
  * `addDaysInZone` stepper as the week, never +24h math; only the CELL
  * COUNT is computed with plain calendar arithmetic (a month's length is a
@@ -129,7 +138,10 @@ export function resolveMonth(
     anchorInstant = new Date();
   }
 
-  const { dayStart: anchorDayStart } = getDayBoundsInZone(anchorInstant, timeZone);
+  const { dayStart: anchorDayStart } = getDayBoundsInZone(
+    anchorInstant,
+    timeZone,
+  );
   const monthKey = zonedDateLabel(anchorDayStart, timeZone).slice(0, 7);
 
   // First zone-local day of the month, then back to its week's Sunday —
@@ -150,18 +162,10 @@ export function resolveMonth(
       ? monthFirstDayStart
       : addDaysInZone(monthFirstDayStart, -firstWeekday, timeZone);
 
-  const [yearNum, monthNum] = monthKey.split("-").map(Number);
-  // Day 0 of the NEXT month = last day of this month (calendar fact).
-  const daysInMonth = new Date(Date.UTC(yearNum, monthNum, 0)).getUTCDate();
-  // Clamped to a 5-row floor (Codex round 1): a 28-day month starting on
-  // Sunday (e.g. February 2026) otherwise produces exactly 28 cells — a
-  // 4-row grid that visibly breaks the fixed-height 35/42-cell contract
-  // the component and its callers document. The extra row is the next
-  // month's first week, muted like any other outside-month cells.
-  const cellCount = Math.max(
-    35,
-    Math.ceil((firstWeekday + daysInMonth) / 7) * 7,
-  );
+  // The approved Month design is always 7×6. A constant cell count also
+  // prevents the calendar from jumping vertically between short and long
+  // months; outside-month cells remain truthful, dimmed navigation targets.
+  const cellCount = 42;
 
   const days: CalendarDayBounds[] = [];
   let cursor = gridStart;
@@ -177,4 +181,3 @@ export function resolveMonth(
 
   return { monthKey, weekStartDate: days[0].date, days };
 }
-

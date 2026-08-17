@@ -53,7 +53,8 @@ export function WeekGrid({
         const dayAppointments = appointments
           .filter((a) => dayIndexForAppointment(a, days) === i)
           .sort(
-            (a, b) => new Date(a.due_at).getTime() - new Date(b.due_at).getTime(),
+            (a, b) =>
+              new Date(a.due_at).getTime() - new Date(b.due_at).getTime(),
           );
 
         return (
@@ -74,12 +75,12 @@ export function WeekGrid({
               ) : (
                 dayAppointments.map((appt) => (
                   <AppointmentBlock
-                  currentUserId={currentUserId}
                     key={appt.id}
                     appt={appt}
                     timezone={timezone}
                     viewerRole={viewerRole}
                     assignees={assignees}
+                    currentUserId={currentUserId}
                     nowMs={nowMs}
                   />
                 ))

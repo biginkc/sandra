@@ -7,10 +7,13 @@ const CHI = "America/Chicago";
 /** Asserts the day-bounds chain is gapless: each cell's endUtc is the next
  *  cell's startUtc, and every cell spans 23/24/25 real hours (DST days
  *  included, nothing else). */
-function expectConsecutiveDstSafe(days: { startUtc: string; endUtc: string }[]) {
+function expectConsecutiveDstSafe(
+  days: { startUtc: string; endUtc: string }[],
+) {
   for (let i = 0; i < days.length; i++) {
     const span =
-      (new Date(days[i].endUtc).getTime() - new Date(days[i].startUtc).getTime()) /
+      (new Date(days[i].endUtc).getTime() -
+        new Date(days[i].startUtc).getTime()) /
       3_600_000;
     expect([23, 24, 25]).toContain(span);
     if (i > 0) expect(days[i].startUtc).toBe(days[i - 1].endUtc);
@@ -18,13 +21,12 @@ function expectConsecutiveDstSafe(days: { startUtc: string; endUtc: string }[]) 
 }
 
 describe("resolveMonth", () => {
-  it("February 2026 in Chicago (28 days starting Sunday) is clamped to 35 consecutive cells, not 28", () => {
+  it("February 2026 in Chicago (28 days starting Sunday) still renders the fixed 42-cell grid", () => {
     const { monthKey, days } = resolveMonth("2026-02-10", CHI);
     expect(monthKey).toBe("2026-02");
-    expect(days).toHaveLength(35);
+    expect(days).toHaveLength(42);
     expect(days[0].date).toBe("2026-02-01");
-    // Row 5 is the next month's first week, present and consecutive.
-    expect(days[34].date).toBe("2026-03-07");
+    expect(days[41].date).toBe("2026-03-14");
     expectConsecutiveDstSafe(days);
   });
 

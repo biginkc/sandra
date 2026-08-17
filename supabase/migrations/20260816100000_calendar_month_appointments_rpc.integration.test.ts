@@ -76,7 +76,9 @@ async function insertAppointment(
       assignee_id: assigneeId,
       created_by: assigneeId,
       due_at: dueAtIso,
-      end_at: new Date(new Date(dueAtIso).getTime() + 30 * 60_000).toISOString(),
+      end_at: new Date(
+        new Date(dueAtIso).getTime() + 30 * 60_000,
+      ).toISOString(),
       calendar_chain_id: crypto.randomUUID(),
       status: "open",
     } as never)
@@ -96,14 +98,14 @@ beforeAll(async () => {
   await seedTwoOrgs(serviceClient);
   const a = await createOrgUser(serviceClient, {
     orgId: BMH_ORG_ID,
-    email: `mig20260815060000-a-${Date.now()}@bmhgroupkc.com`,
+    email: `mig20260816100000-a-${Date.now()}@bmhgroupkc.com`,
     role: "member",
   });
   createdUserIds.push(a.userId);
   member = { userId: a.userId, client: clientForUser(a.jwt) };
   const b = await createOrgUser(serviceClient, {
     orgId: TEST_ORG_B_ID,
-    email: `mig20260815060000-b-${Date.now()}@bmhgroupkc.com`,
+    email: `mig20260816100000-b-${Date.now()}@bmhgroupkc.com`,
     role: "member",
   });
   createdUserIds.push(b.userId);
@@ -117,7 +119,7 @@ afterAll(async () => {
   await resetTenantTables(serviceClient);
 });
 
-describe("Migration 20260815060000 — fn_calendar_month_appointments", () => {
+describe("Migration 20260816100000 — fn_calendar_month_appointments", () => {
   it("rejects an anon call (privileges revoked)", async () => {
     const { error } = await callMonthRpc(anonClient(), {
       p_org: BMH_ORG_ID,
@@ -128,9 +130,21 @@ describe("Migration 20260815060000 — fn_calendar_month_appointments", () => {
   });
 
   it("returns appointments across every window in one due_at-ordered list, with the assignee filter honored", async () => {
-    const t1 = await insertAppointment(BMH_ORG_ID, member.userId, "2026-08-03T15:00:00Z");
-    const t2 = await insertAppointment(BMH_ORG_ID, member.userId, "2026-08-10T15:00:00Z");
-    const outside = await insertAppointment(BMH_ORG_ID, member.userId, "2026-08-20T15:00:00Z");
+    const t1 = await insertAppointment(
+      BMH_ORG_ID,
+      member.userId,
+      "2026-08-03T15:00:00Z",
+    );
+    const t2 = await insertAppointment(
+      BMH_ORG_ID,
+      member.userId,
+      "2026-08-10T15:00:00Z",
+    );
+    const outside = await insertAppointment(
+      BMH_ORG_ID,
+      member.userId,
+      "2026-08-20T15:00:00Z",
+    );
 
     const all = await callMonthRpc(member.client, {
       p_org: BMH_ORG_ID,

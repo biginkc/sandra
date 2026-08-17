@@ -126,7 +126,10 @@ export function CalendarView({
             href={buildHref({ view: "week" })}
             data-testid="calendar-view-week"
             aria-current={view === "week" || undefined}
-            className={cn(TAB_BASE, view === "week" ? TAB_ACTIVE : TAB_INACTIVE)}
+            className={cn(
+              TAB_BASE,
+              view === "week" ? TAB_ACTIVE : TAB_INACTIVE,
+            )}
           >
             Week
           </Link>
@@ -241,7 +244,7 @@ export function CalendarView({
       {view === "week" ? (
         <div className="hidden md:block">
           <WeekGrid
-          currentUserId={currentUserId}
+            currentUserId={currentUserId}
             days={days}
             appointments={appointments}
             timezone={timezone}

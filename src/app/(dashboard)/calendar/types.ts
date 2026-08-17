@@ -76,8 +76,8 @@ export type CalendarViewProps = {
    *  `view === "month"`, else null. Drives the month grid's
    *  outside-month muting and the month-step prev/next nav. */
   month: string | null;
-  /** Week view: exactly 7 entries. Month view: 35 or 42 entries (full
-   *  Sunday-to-Saturday grid rows covering the month). Always
+  /** Week view: exactly 7 entries. Month view: exactly 42 entries (the
+   *  fixed six-row Sunday-to-Saturday grid). Always
    *  `days[0].date === week`, consecutive zone-local days in order. */
   days: CalendarDayBounds[];
   appointments: CalendarAppointmentRow[];

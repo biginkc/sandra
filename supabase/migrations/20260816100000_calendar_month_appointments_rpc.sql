@@ -1,7 +1,7 @@
 -- fn_calendar_month_appointments — single-snapshot month read for the
 -- Calendar page's month view (Codex month-view rounds 3+4).
 --
--- Why an RPC: the month grid spans 5-6 weeks. One PostgREST SELECT over
+-- Why an RPC: the month grid spans a fixed 6 weeks. One PostgREST SELECT over
 -- the whole range can't distinguish "a busy month" from "a busy week"
 -- under the response ceiling, and issuing one SELECT per week runs each
 -- window in its OWN read-committed snapshot — an appointment rescheduled
