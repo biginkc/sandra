@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ComponentProps } from "react";
 
 import { resolveMonth } from "../range";
 import type { CalendarAppointmentRow } from "../types";
@@ -53,6 +54,7 @@ const dayHref = (date: string) => `/calendar?view=week&week=${date}`;
 function renderGrid(
   appointments: CalendarAppointmentRow[] = [],
   assignees: Record<string, string> = {},
+  overrides: Partial<ComponentProps<typeof MonthGrid>> = {},
 ) {
   return render(
     <MonthGrid
@@ -66,6 +68,7 @@ function renderGrid(
       nowMs={Date.now()}
       todayKey={dateKeyInZone(new Date(), CHI)}
       dayHref={dayHref}
+      {...overrides}
     />,
   );
 }
@@ -90,6 +93,14 @@ describe("<MonthGrid />", () => {
     expect(
       screen.getByTestId("calendar-month-cell-2026-08-01"),
     ).not.toHaveAttribute("data-outside-month");
+    expect(screen.getByTestId("calendar-month-cell-2026-08-01")).toHaveClass(
+      "rounded-xl",
+      "border",
+      "min-h-[86px]",
+    );
+    expect(
+      screen.getByTestId("calendar-month-cell-2026-08-01").parentElement,
+    ).toHaveClass("gap-1.5");
   });
 
   it("places an appointment in its zone-local day cell with a compact start-time line", () => {
@@ -116,6 +127,21 @@ describe("<MonthGrid />", () => {
       "bg-foreground",
       "text-background",
     );
+    expect(dayLink).toHaveAttribute(
+      "aria-label",
+      "View week containing Friday, August 14, 2026",
+    );
+  });
+
+  it("does not mark today when it appears only as an adjacent-month padding cell", () => {
+    renderGrid([], {}, { month: "2026-08", todayKey: "2026-07-31" });
+
+    expect(
+      screen.getByTestId("calendar-month-cell-2026-07-31"),
+    ).not.toHaveAttribute("data-today");
+    expect(
+      screen.getByTestId("calendar-month-day-link-2026-07-31"),
+    ).not.toHaveClass("bg-foreground", "text-background");
   });
 
   it("collapses more than three appointments into a +N more link to that day's week view", () => {

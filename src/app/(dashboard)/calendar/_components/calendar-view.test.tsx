@@ -14,14 +14,18 @@ const CHI = "America/Chicago";
 // Mutable holder read by the useSearchParams mock below — vi.mock factories
 // are hoisted, so the mock reads through this ref rather than a plain
 // module-scope `let` (which vi.mock can't close over safely).
-const nav = vi.hoisted(() => ({ search: "", replace: vi.fn() }));
+const nav = vi.hoisted(() => ({
+  search: "",
+  replace: vi.fn(),
+  push: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/calendar",
   useSearchParams: () => new URLSearchParams(nav.search),
   useRouter: () => ({
     replace: nav.replace,
-    push: vi.fn(),
+    push: nav.push,
     refresh: vi.fn(),
     back: vi.fn(),
     forward: vi.fn(),
@@ -136,6 +140,7 @@ function baseProps(
     view: "week" as const,
     week: WEEK,
     month: null,
+    isCurrentPeriod: true,
     days: DAYS,
     appointments: [],
     timezone: CHI,
@@ -155,6 +160,7 @@ describe("<CalendarView />", () => {
   beforeEach(() => {
     nav.search = "";
     nav.replace.mockClear();
+    nav.push.mockClear();
   });
 
   it("renders view-switcher links that preserve other params", () => {
@@ -169,33 +175,42 @@ describe("<CalendarView />", () => {
       "href",
       "/calendar?assignee=rep-1&view=agenda",
     );
+    expect(screen.getByTestId("calendar-view-month")).toHaveAttribute(
+      "href",
+      "/calendar?assignee=rep-1&view=month&month=2026-08",
+    );
     expect(
       screen.getByRole("navigation", { name: "Calendar view" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
   });
 
-  it("renders week-nav prev/today/next links preserving view+assignee and shifting by 7 days", () => {
+  it("uses real week-nav buttons, preserves view+assignee, shifts by 7 days, and Today clears both independent anchors", async () => {
     nav.search = "view=agenda&assignee=rep-1";
     render(
       <CalendarView {...baseProps({ view: "agenda", week: "2026-08-17" })} />,
     );
 
-    expect(screen.getByTestId("calendar-week-prev")).toHaveAttribute(
-      "href",
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("calendar-prev"));
+    expect(nav.push).toHaveBeenLastCalledWith(
       "/calendar?view=agenda&assignee=rep-1&week=2026-08-10",
     );
-    expect(screen.getByTestId("calendar-week-next")).toHaveAttribute(
-      "href",
+    await user.click(screen.getByTestId("calendar-next"));
+    expect(nav.push).toHaveBeenLastCalledWith(
       "/calendar?view=agenda&assignee=rep-1&week=2026-08-24",
     );
-    // "Today" targets today's own date key in the viewer's zone — just
-    // assert it's present and well-formed (exact value depends on the
-    // real clock, deliberately not frozen here).
-    expect(
-      screen.getByTestId("calendar-week-today").getAttribute("href"),
-    ).toMatch(
-      /^\/calendar\?view=agenda&assignee=rep-1&week=\d{4}-\d{2}-\d{2}$/,
+    await user.click(screen.getByTestId("calendar-today"));
+    expect(nav.push).toHaveBeenLastCalledWith(
+      "/calendar?view=agenda&assignee=rep-1",
+    );
+    expect(screen.getByTestId("calendar-prev")).toHaveAttribute(
+      "aria-label",
+      "Previous period",
+    );
+    expect(screen.getByTestId("calendar-next")).toHaveAttribute(
+      "aria-label",
+      "Next period",
     );
   });
 
@@ -289,11 +304,17 @@ describe("<CalendarView />", () => {
       "calendar-week-prev",
       "calendar-week-today",
       "calendar-week-next",
+      "calendar-prev",
+      "calendar-today",
+      "calendar-next",
       "calendar-assignee-filter",
     ]) {
       expect(screen.getByTestId(testId)).toHaveClass("min-h-11");
     }
     expect(screen.getByTestId("calendar-week-today")).toHaveClass("min-w-11");
+    for (const testId of ["calendar-prev", "calendar-today", "calendar-next"]) {
+      expect(screen.getByTestId(testId)).toHaveClass("whitespace-nowrap");
+    }
     expect(screen.getByTestId("calendar-timezone-caption")).toHaveTextContent(
       "All times shown in America/Chicago.",
     );
@@ -376,11 +397,22 @@ describe("<CalendarView /> month view", () => {
   beforeEach(() => {
     nav.search = "";
     nav.replace.mockClear();
+    nav.push.mockClear();
   });
 
   it("keeps Month visible on narrow screens so the active deep-link state is truthful", () => {
     render(<CalendarView {...baseProps()} />);
     expect(screen.getByTestId("calendar-view-month")).not.toHaveClass("hidden");
+  });
+
+  it("opens Month at its independent current anchor after Week was offset", () => {
+    nav.search = "view=week&week=2040-06-10";
+    render(<CalendarView {...baseProps({ week: "2040-06-10" })} />);
+
+    expect(screen.getByTestId("calendar-view-month")).toHaveAttribute(
+      "href",
+      "/calendar?view=month&week=2040-06-10&month=2026-08",
+    );
   });
 
   it("renders the Month tab and mounts MonthGrid when view=month", () => {
@@ -400,28 +432,52 @@ describe("<CalendarView /> month view", () => {
     );
   });
 
-  it("steps prev/next by whole months from the month key, not the grid start", () => {
+  it("steps Month independently by whole months and Today resets both anchors", async () => {
+    nav.search = "view=month&week=2026-08-16&month=2026-08";
     render(
       <CalendarView
         {...baseProps({ view: "month", month: "2026-08", week: "2026-07-26" })}
       />,
     );
-    expect(screen.getByTestId("calendar-week-prev")).toHaveAttribute(
-      "href",
-      expect.stringContaining("week=2026-07-01"),
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("calendar-prev"));
+    expect(nav.push).toHaveBeenLastCalledWith(
+      "/calendar?view=month&week=2026-08-16&month=2026-07",
     );
-    expect(screen.getByTestId("calendar-week-next")).toHaveAttribute(
-      "href",
-      expect.stringContaining("week=2026-09-01"),
+    await user.click(screen.getByTestId("calendar-next"));
+    expect(nav.push).toHaveBeenLastCalledWith(
+      "/calendar?view=month&week=2026-08-16&month=2026-09",
+    );
+    await user.click(screen.getByTestId("calendar-today"));
+    expect(nav.push).toHaveBeenLastCalledWith("/calendar?view=month");
+  });
+
+  it("keeps 7-day stepping for the week view", async () => {
+    render(<CalendarView {...baseProps()} />);
+    await userEvent.setup().click(screen.getByTestId("calendar-prev"));
+    expect(nav.push).toHaveBeenCalledWith(
+      expect.stringContaining(`week=${addDaysToDateKeyForTest(WEEK, -7)}`),
     );
   });
 
-  it("keeps 7-day stepping for the week view", () => {
-    render(<CalendarView {...baseProps()} />);
-    expect(screen.getByTestId("calendar-week-prev")).toHaveAttribute(
-      "href",
-      expect.stringContaining(`week=${addDaysToDateKeyForTest(WEEK, -7)}`),
+  it("fills Today only while the displayed period is offset", () => {
+    const { rerender } = render(
+      <CalendarView {...baseProps({ isCurrentPeriod: false })} />,
     );
+    expect(screen.getByTestId("calendar-today")).toHaveClass(
+      "bg-foreground",
+      "text-background",
+    );
+    rerender(<CalendarView {...baseProps({ isCurrentPeriod: true })} />);
+    expect(screen.getByTestId("calendar-today")).toHaveClass("bg-card");
+  });
+
+  it("renders a truthful empty-period notice without replacing the grid", () => {
+    render(<CalendarView {...baseProps({ appointments: [] })} />);
+    expect(screen.getByTestId("calendar-empty-range-notice")).toHaveTextContent(
+      "Nothing scheduled in this period.",
+    );
+    expect(screen.getByTestId("calendar-week-grid")).toBeInTheDocument();
   });
 });
 

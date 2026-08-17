@@ -1,69 +1,30 @@
 import { render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import {
-  addDaysInZone,
-  getDayBoundsInZone,
-  wallTimeToUtc,
-} from "@/lib/time/zoned";
+import { wallTimeToUtc } from "@/lib/time/zoned";
 
-import type { CalendarAppointmentRow, CalendarDayBounds } from "../types";
+import type { CalendarAppointmentRow } from "../types";
 
+import { resolveWeek } from "../range";
 import { WeekGrid } from "./week-grid";
 
-// Outcome-row internals (server actions, reschedule popover) are covered by
-// appointment-outcome-row.test.tsx — stub it here so this suite only
-// asserts WHEN WeekGrid decides to show it, matching the tasks-panel.test.tsx
-// convention.
-vi.mock("@/components/appointments/appointment-outcome-row", () => ({
-  AppointmentOutcomeRow: ({ taskId }: { taskId: string }) => (
-    <div data-testid={`stub-outcome-row-${taskId}`}>outcome row</div>
-  ),
-  AppointmentUpcomingActions: ({ taskId }: { taskId: string }) => (
-    <div data-testid={`stub-upcoming-actions-${taskId}`}>upcoming actions</div>
-  ),
-}));
+const CHI = "America/Chicago";
+const DAYS = resolveWeek("2026-08-19", CHI).days;
 
-const LA = "America/Los_Angeles";
-
-function dateKeyInZone(d: Date, tz: string): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(d);
-  const map: Record<string, string> = {};
-  for (const p of parts) if (p.type !== "literal") map[p.type] = p.value;
-  return `${map.year}-${map.month}-${map.day}`;
-}
-
-/** Builds a real 7-day week (using the production zoned.ts helpers, not
- *  hand-computed offsets) anchored on whichever zone-local day `anchor`
- *  falls in, in `tz`. */
-function buildWeek(anchor: Date, tz: string): CalendarDayBounds[] {
-  const days: CalendarDayBounds[] = [];
-  let cursor = getDayBoundsInZone(anchor, tz).dayStart;
-  for (let i = 0; i < 7; i++) {
-    const dayEnd = addDaysInZone(cursor, 1, tz);
-    days.push({
-      date: dateKeyInZone(cursor, tz),
-      startUtc: cursor.toISOString(),
-      endUtc: dayEnd.toISOString(),
-    });
-    cursor = dayEnd;
-  }
-  return days;
+function at(date: string, time: string): string {
+  const converted = wallTimeToUtc({ date, time, timeZone: CHI });
+  if (!converted.ok) throw new Error("fixture conversion failed");
+  return converted.utc.toISOString();
 }
 
 function makeAppt(
   overrides: Partial<CalendarAppointmentRow> & { id: string },
 ): CalendarAppointmentRow {
   return {
-    title: "Appointment",
+    title: "Seller walkthrough",
     description: null,
-    due_at: new Date().toISOString(),
-    end_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    due_at: at(DAYS[2].date, "09:00"),
+    end_at: at(DAYS[2].date, "09:30"),
     status: "open",
     outcome: null,
     assignee_id: "user-1",
@@ -78,338 +39,291 @@ function makeAppt(
   };
 }
 
-describe("<WeekGrid />", () => {
-  afterEach(() => {
-    vi.useRealTimers();
+function renderWeek(
+  appointments: CalendarAppointmentRow[] = [],
+  todayKey = DAYS[3].date,
+) {
+  return render(
+    <WeekGrid
+      days={DAYS}
+      appointments={appointments}
+      timezone={CHI}
+      viewerRole="owner"
+      assignees={{
+        "user-1": "Owner",
+        "rep-1": "Hugo R.",
+      }}
+      currentUserId="user-1"
+      nowMs={new Date(at(DAYS[2].date, "12:00")).getTime()}
+      todayKey={todayKey}
+    />,
+  );
+}
+
+describe("<WeekGrid /> timeline", () => {
+  it("renders the fixed 52px + seven-lane timeline with 11 hour rows", () => {
+    renderWeek();
+
+    expect(screen.getByTestId("calendar-week-grid")).toHaveTextContent("8 AM");
+    expect(screen.getByTestId("calendar-week-grid")).toHaveTextContent("6 PM");
+    expect(screen.getAllByTestId(/calendar-day-column-/)).toHaveLength(7);
+    expect(screen.getAllByTestId(/calendar-day-header-/)).toHaveLength(7);
+    expect(
+      screen
+        .getByTestId("calendar-week-grid")
+        .querySelector(
+          ".grid-cols-\\[52px_repeat\\(7\\,minmax\\(0\\,1fr\\)\\)\\]",
+        ),
+    ).not.toBeNull();
   });
 
-  it("renders 7 day columns headered in the given timezone", () => {
-    const days = buildWeek(new Date("2026-08-19T12:00:00Z"), LA);
-    render(
-      <WeekGrid
-        days={days}
-        appointments={[]}
-        timezone={LA}
-        viewerRole="owner"
-        assignees={{}}
-        currentUserId="viewer-1"
-        nowMs={Date.now()}
-        todayKey={dateKeyInZone(new Date(), LA)}
-      />,
-    );
+  it("positions events from viewer-zone wall time and duration using the approved formula", () => {
+    const oneHour = makeAppt({
+      id: "one-hour",
+      due_at: at(DAYS[2].date, "09:30"),
+      end_at: at(DAYS[2].date, "10:30"),
+      assignee_id: "rep-1",
+    });
+    const short = makeAppt({
+      id: "short",
+      due_at: at(DAYS[3].date, "08:00"),
+      end_at: at(DAYS[3].date, "08:15"),
+    });
 
-    expect(screen.getAllByTestId(/calendar-day-column-/)).toHaveLength(7);
-    for (const day of days) {
-      const expectedHeader = new Intl.DateTimeFormat("en-US", {
-        timeZone: LA,
-        weekday: "short",
-        month: "numeric",
-        day: "numeric",
-      }).format(new Date(day.startUtc));
-      expect(
-        screen.getByTestId(`calendar-day-column-${day.date}`),
-      ).toHaveTextContent(expectedHeader);
+    renderWeek([oneHour, short]);
+
+    expect(screen.getByTestId("calendar-appointment-one-hour")).toHaveAttribute(
+      "data-calendar-top",
+      "66",
+    );
+    expect(screen.getByTestId("calendar-appointment-one-hour")).toHaveAttribute(
+      "data-calendar-height",
+      "40",
+    );
+    expect(screen.getByTestId("calendar-appointment-short")).toHaveAttribute(
+      "data-calendar-top",
+      "0",
+    );
+    expect(screen.getByTestId("calendar-appointment-short")).toHaveAttribute(
+      "data-calendar-height",
+      "36",
+    );
+    expect(
+      screen.getByTestId("calendar-appointment-one-hour"),
+    ).toHaveTextContent("9:30 AM");
+    expect(
+      screen.getByTestId("calendar-appointment-one-hour"),
+    ).toHaveTextContent("Seller walkthrough");
+    expect(
+      screen.getByTestId("calendar-appointment-one-hour"),
+    ).toHaveTextContent("Hugo R.");
+    expect(screen.getByText("8:00 AM")).toHaveClass("leading-[10px]");
+  });
+
+  it("splits overlapping appointments into stable horizontal columns", () => {
+    renderWeek([
+      makeAppt({
+        id: "overlap-a",
+        due_at: at(DAYS[2].date, "09:00"),
+        end_at: at(DAYS[2].date, "10:00"),
+      }),
+      makeAppt({
+        id: "overlap-b",
+        due_at: at(DAYS[2].date, "09:00"),
+        end_at: at(DAYS[2].date, "10:00"),
+      }),
+      makeAppt({
+        id: "overlap-c",
+        due_at: at(DAYS[2].date, "09:30"),
+        end_at: at(DAYS[2].date, "10:30"),
+      }),
+    ]);
+
+    const events = ["overlap-a", "overlap-b", "overlap-c"].map((id) =>
+      screen.getByTestId(`calendar-appointment-${id}`),
+    );
+    expect(events.map((event) => event.dataset.calendarColumn)).toEqual([
+      "0",
+      "1",
+      "2",
+    ]);
+    for (const event of events) {
+      expect(event).toHaveAttribute("data-calendar-column-count", "3");
+      expect(event.style.width).toContain("33.3333%");
     }
   });
 
-  it("places an appointment in its zone-local day column with a time label that reflects the PASSED timezone, not the runtime default", () => {
-    const days = buildWeek(new Date("2026-08-19T12:00:00Z"), LA);
-    const wednesday = days[2];
-    const conversion = wallTimeToUtc({
-      date: wednesday.date,
-      time: "14:00",
-      timeZone: LA,
-    });
-    if (!conversion.ok) throw new Error("fixture conversion failed");
-    const dueAt = conversion.utc.toISOString();
-    const endAt = new Date(
-      conversion.utc.getTime() + 30 * 60 * 1000,
-    ).toISOString();
-    const appt = makeAppt({
-      id: "appt-1",
-      due_at: dueAt,
-      end_at: endAt,
-      title: "Walkthrough",
-    });
+  it("splits back-to-back short appointments when their minimum rendered heights collide", () => {
+    renderWeek([
+      makeAppt({
+        id: "short-a",
+        due_at: at(DAYS[2].date, "08:00"),
+        end_at: at(DAYS[2].date, "08:15"),
+      }),
+      makeAppt({
+        id: "short-b",
+        due_at: at(DAYS[2].date, "08:15"),
+        end_at: at(DAYS[2].date, "08:30"),
+      }),
+    ]);
 
-    const { rerender } = render(
-      <WeekGrid
-        days={days}
-        appointments={[appt]}
-        timezone={LA}
-        viewerRole="owner"
-        assignees={{}}
-        currentUserId="viewer-1"
-        nowMs={Date.now()}
-        todayKey={dateKeyInZone(new Date(), LA)}
-      />,
+    expect(screen.getByTestId("calendar-appointment-short-a")).toHaveAttribute(
+      "data-calendar-column-count",
+      "2",
     );
-
-    // Same instant rendered in LA reads as 2:00 PM inside Wednesday's column.
-    const wedColumn = screen.getByTestId(
-      `calendar-day-column-${wednesday.date}`,
+    expect(screen.getByTestId("calendar-appointment-short-b")).toHaveAttribute(
+      "data-calendar-column",
+      "1",
     );
-    expect(wedColumn).toHaveTextContent(/2:00.*2:30 PM/);
-    expect(
-      screen.getByTestId("calendar-appointment-appt-1"),
-    ).toBeInTheDocument();
-
-    // Re-rendering with a DIFFERENT display timezone changes the label —
-    // proves the component reads the passed `timezone` prop, not whatever
-    // the runtime/process default happens to be.
-    rerender(
-      <WeekGrid
-        days={days}
-        appointments={[appt]}
-        timezone="America/New_York"
-        viewerRole="owner"
-        assignees={{}}
-        currentUserId="viewer-1"
-        nowMs={Date.now()}
-        todayKey={dateKeyInZone(new Date(), "America/New_York")}
-      />,
-    );
-    expect(
-      screen.getByTestId("calendar-appointment-appt-1"),
-    ).not.toHaveTextContent(/2:00.*2:30 PM/);
   });
 
-  it("accents today's column", () => {
-    const days = buildWeek(new Date("2026-08-19T12:00:00Z"), LA);
-    const today = days[3];
-    vi.useFakeTimers();
-    vi.setSystemTime(
-      new Date(new Date(today.startUtc).getTime() + 60 * 60 * 1000),
-    );
-
-    render(
-      <WeekGrid
-        days={days}
-        appointments={[]}
-        timezone={LA}
-        viewerRole="owner"
-        assignees={{}}
-        currentUserId="viewer-1"
-        nowMs={Date.now()}
-        todayKey={dateKeyInZone(new Date(), LA)}
-      />,
-    );
-
-    expect(
-      screen.getByTestId(`calendar-day-column-${today.date}`),
-    ).toHaveAttribute("data-today", "true");
-    expect(
-      screen.getByTestId(`calendar-day-column-${days[0].date}`),
-    ).not.toHaveAttribute("data-today");
-  });
-
-  it("shows the assignee email for owner role and hides it for member role", () => {
-    const days = buildWeek(new Date("2026-08-19T12:00:00Z"), LA);
-    const appt = makeAppt({
-      id: "appt-1",
-      due_at: days[0].startUtc,
-      end_at: new Date(
-        new Date(days[0].startUtc).getTime() + 30 * 60 * 1000,
-      ).toISOString(),
-      assignee_id: "rep-1",
-    });
-    const assignees = { "rep-1": "rep@bmh.com" };
-
-    // The label follows the ROW's owner, not the viewer's role: any
-    // non-self appointment is labeled (members can view teammates), and
-    // your own rows never are.
-    const { rerender } = render(
-      <WeekGrid
-        days={days}
-        appointments={[appt]}
-        timezone={LA}
-        viewerRole="member"
-        assignees={assignees}
-        currentUserId="viewer-1"
-        nowMs={Date.now()}
-        todayKey={dateKeyInZone(new Date(), LA)}
-      />,
-    );
-    expect(screen.getByText("rep@bmh.com")).toBeInTheDocument();
-
-    rerender(
-      <WeekGrid
-        days={days}
-        appointments={[appt]}
-        timezone={LA}
-        viewerRole="member"
-        assignees={assignees}
-        currentUserId="rep-1"
-        nowMs={Date.now()}
-        todayKey={dateKeyInZone(new Date(), LA)}
-      />,
-    );
-    expect(screen.queryByText("rep@bmh.com")).not.toBeInTheDocument();
-  });
-
-  it("click-through hrefs follow linkage: property -> /leads, contact-only -> /messages?thread, personal block -> unlinked", () => {
-    const days = buildWeek(new Date("2026-08-19T12:00:00Z"), LA);
-    const start = days[0].startUtc;
-    const end = new Date(
-      new Date(start).getTime() + 30 * 60 * 1000,
-    ).toISOString();
+  it("keeps early, late, and boundary-crossing appointments visible in an outside-hours rail", () => {
     const appointments = [
       makeAppt({
-        id: "prop-appt",
-        due_at: start,
-        end_at: end,
-        property_id: "prop-1",
-        address: "123 Main St",
+        id: "early",
+        due_at: at(DAYS[1].date, "07:30"),
+        end_at: at(DAYS[1].date, "08:30"),
       }),
       makeAppt({
-        id: "contact-appt",
-        due_at: start,
-        end_at: end,
-        contact_id: "contact-1",
-        contact_name: "Jane Owner",
+        id: "late",
+        due_at: at(DAYS[2].date, "19:00"),
+        end_at: at(DAYS[2].date, "19:30"),
       }),
-      makeAppt({ id: "personal-appt", due_at: start, end_at: end }),
+      makeAppt({
+        id: "crosses-boundary",
+        due_at: at(DAYS[3].date, "18:30"),
+        end_at: at(DAYS[3].date, "19:30"),
+      }),
     ];
+    renderWeek(appointments);
 
-    const { container } = render(
-      <WeekGrid
-        days={days}
-        appointments={appointments}
-        timezone={LA}
-        viewerRole="owner"
-        assignees={{}}
-        currentUserId="viewer-1"
-        nowMs={Date.now()}
-        todayKey={dateKeyInZone(new Date(), LA)}
-      />,
+    const rail = screen.getByTestId("calendar-outside-hours");
+    expect(rail).toHaveTextContent("Outside hours");
+    for (const appointment of appointments) {
+      expect(rail).toContainElement(
+        screen.getByTestId(`calendar-appointment-${appointment.id}`),
+      );
+    }
+    expect(screen.getByTestId("calendar-appointment-early")).toHaveTextContent(
+      "7:30 AM",
     );
-
-    expect(container.querySelector("a[href='/leads/prop-1']")).not.toBeNull();
-    expect(
-      container.querySelector("a[href='/messages?thread=contact-1']"),
-    ).not.toBeNull();
-    expect(
-      screen.getByTestId("calendar-appointment-unlinked-personal-appt"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Personal block")).toBeInTheDocument();
+    expect(screen.getByTestId("calendar-appointment-late")).toHaveTextContent(
+      "7:00 PM",
+    );
   });
 
-  it("shows an outcome chip for a completed appointment, and the outcome row ONLY for a past-due open one", () => {
-    const days = buildWeek(new Date("2026-08-19T12:00:00Z"), LA);
-    const dayStart = new Date(days[0].startUtc).getTime();
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(dayStart + 6 * 60 * 60 * 1000)); // noon-ish that day
-
-    const pastDueOpen = makeAppt({
-      id: "past-due",
-      due_at: new Date(dayStart + 60 * 60 * 1000).toISOString(), // 1h in, already past "now"
-      end_at: new Date(dayStart + 90 * 60 * 1000).toISOString(),
-      status: "open",
-    });
-    const futureOpen = makeAppt({
-      id: "future",
-      due_at: new Date(dayStart + 8 * 60 * 60 * 1000).toISOString(), // still ahead of "now"
-      end_at: new Date(dayStart + 8.5 * 60 * 60 * 1000).toISOString(),
-      status: "open",
-    });
-    const completed = makeAppt({
-      id: "completed",
-      due_at: new Date(dayStart + 2 * 60 * 60 * 1000).toISOString(),
-      end_at: new Date(dayStart + 2.5 * 60 * 60 * 1000).toISOString(),
-      status: "completed",
-      outcome: "held",
-    });
-
-    render(
-      <WeekGrid
-        days={days}
-        appointments={[pastDueOpen, futureOpen, completed]}
-        timezone={LA}
-        viewerRole="owner"
-        assignees={{}}
-        currentUserId="viewer-1"
-        nowMs={Date.now()}
-        todayKey={dateKeyInZone(new Date(), LA)}
-      />,
-    );
-
-    expect(screen.getByTestId("stub-outcome-row-past-due")).toBeInTheDocument();
-    expect(
-      screen.queryByTestId("stub-outcome-row-future"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByTestId("stub-upcoming-actions-future"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByTestId("stub-upcoming-actions-past-due"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("stub-outcome-row-completed"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("stub-upcoming-actions-completed"),
-    ).not.toBeInTheDocument();
+  it("tints only the actual today lane and inverts its day number", () => {
+    renderWeek([], DAYS[3].date);
 
     expect(
-      screen.getByTestId("calendar-outcome-chip-completed"),
-    ).toHaveTextContent("Held");
+      screen.getByTestId(`calendar-day-column-${DAYS[3].date}`),
+    ).toHaveAttribute("data-today", "true");
     expect(
-      screen.queryByTestId("calendar-outcome-chip-past-due"),
-    ).not.toBeInTheDocument();
+      screen.getByTestId(`calendar-day-column-${DAYS[0].date}`),
+    ).not.toHaveAttribute("data-today");
     expect(
-      screen.queryByTestId("calendar-outcome-chip-future"),
-    ).not.toBeInTheDocument();
-    expect(screen.getByTestId("calendar-appointment-past-due")).toHaveAttribute(
+      screen.getByTestId(`calendar-day-header-${DAYS[3].date}`).lastChild,
+    ).toHaveClass("bg-foreground", "text-background");
+  });
+
+  it("preserves property/contact/personal, needs-outcome, completed, and DNC tones", () => {
+    const futureStart = at(DAYS[2].date, "13:00");
+    const futureEnd = at(DAYS[2].date, "13:30");
+    const appointments = [
+      makeAppt({
+        id: "property",
+        property_id: "prop-1",
+        due_at: futureStart,
+        end_at: futureEnd,
+      }),
+      makeAppt({
+        id: "contact",
+        contact_id: "contact-1",
+        due_at: futureStart,
+        end_at: futureEnd,
+      }),
+      makeAppt({
+        id: "personal",
+        due_at: futureStart,
+        end_at: futureEnd,
+      }),
+      makeAppt({
+        id: "needs",
+        due_at: at(DAYS[2].date, "10:00"),
+        end_at: at(DAYS[2].date, "10:30"),
+      }),
+      makeAppt({ id: "done", status: "completed", outcome: "held" }),
+      makeAppt({ id: "locked", is_dnc_locked: true }),
+    ];
+    renderWeek(appointments);
+
+    expect(screen.getByTestId("calendar-appointment-property")).toHaveAttribute(
       "data-appointment-tone",
-      "needs_outcome",
+      "property",
     );
-    expect(
-      screen.getByTestId("calendar-appointment-past-due"),
-    ).toHaveTextContent("Needs outcome");
-    expect(screen.getByTestId("calendar-appointment-future")).toHaveAttribute(
+    expect(screen.getByTestId("calendar-appointment-contact")).toHaveAttribute(
+      "data-appointment-tone",
+      "contact",
+    );
+    expect(screen.getByTestId("calendar-appointment-personal")).toHaveAttribute(
       "data-appointment-tone",
       "personal",
     );
-    expect(
-      screen.getByTestId("calendar-appointment-completed"),
-    ).toHaveAttribute("data-appointment-tone", "completed");
+    expect(screen.getByTestId("calendar-appointment-needs")).toHaveAttribute(
+      "data-appointment-tone",
+      "needs_outcome",
+    );
+    expect(screen.getByTestId("calendar-appointment-needs")).toHaveTextContent(
+      "Needs outcome",
+    );
+    expect(screen.getByTestId("calendar-appointment-done")).toHaveAttribute(
+      "data-appointment-tone",
+      "completed",
+    );
+    expect(screen.getByTestId("calendar-appointment-locked")).toHaveAttribute(
+      "data-appointment-tone",
+      "dnc_locked",
+    );
+    expect(screen.getByTestId("calendar-appointment-locked")).toHaveTextContent(
+      "Read-only · Do not contact",
+    );
   });
 
-  it("keeps a DNC-locked appointment as read-only history without lifecycle controls", () => {
-    const days = buildWeek(new Date("2026-08-19T12:00:00Z"), LA);
-    const dayStart = new Date(days[0].startUtc).getTime();
-    const nowMs = dayStart + 6 * 60 * 60 * 1000;
-    const locked = makeAppt({
-      id: "locked-history",
-      due_at: new Date(dayStart + 60 * 60 * 1000).toISOString(),
-      end_at: new Date(dayStart + 90 * 60 * 1000).toISOString(),
-      is_dnc_locked: true,
-    });
+  it("keeps property and contact click-throughs while personal blocks remain unlinked", () => {
+    renderWeek([
+      makeAppt({ id: "property", property_id: "prop-1" }),
+      makeAppt({ id: "contact", contact_id: "contact-1" }),
+      makeAppt({ id: "personal" }),
+    ]);
 
-    render(
-      <WeekGrid
-        days={days}
-        appointments={[locked]}
-        timezone={LA}
-        viewerRole="owner"
-        assignees={{}}
-        currentUserId="viewer-1"
-        nowMs={nowMs}
-        todayKey={days[0].date}
-      />,
+    expect(
+      screen.getByTestId("calendar-appointment-link-property"),
+    ).toHaveAttribute("href", "/leads/prop-1");
+    expect(
+      screen.getByTestId("calendar-appointment-link-property"),
+    ).toHaveAttribute(
+      "aria-label",
+      expect.stringContaining("Tuesday, August 18, 2026"),
     );
+    expect(
+      screen.getByTestId("calendar-appointment-link-contact"),
+    ).toHaveAttribute("href", "/messages?thread=contact-1");
+    expect(
+      screen.getByTestId("calendar-appointment-unlinked-personal"),
+    ).toBeInTheDocument();
+  });
 
+  it("renders a full empty timeline without a false today marker for an offset week", () => {
+    renderWeek([], "2099-01-01");
+
+    expect(screen.getAllByTestId(/calendar-day-column-/)).toHaveLength(7);
     expect(
-      screen.getByTestId("calendar-dnc-read-only-locked-history"),
-    ).toHaveTextContent("Read-only · Do not contact");
+      screen
+        .getAllByTestId(/calendar-day-column-/)
+        .some((lane) => lane.hasAttribute("data-today")),
+    ).toBe(false);
     expect(
-      screen.getByTestId("calendar-appointment-locked-history"),
-    ).toHaveAttribute("data-appointment-tone", "dnc_locked");
-    expect(
-      screen.queryByTestId("stub-outcome-row-locked-history"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("stub-upcoming-actions-locked-history"),
+      screen.queryByTestId(/calendar-appointment-/),
     ).not.toBeInTheDocument();
   });
 });
