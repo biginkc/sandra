@@ -150,23 +150,29 @@ export default async function CalendarPage({
   const labelsDegraded = rosterResult.labelsDegraded;
   const rosterIds = new Set(rosterResult.roster.map((entry) => entry.id));
 
-  const assigneeId = resolveAssigneeId(viewerRole, params.assignee, user.id, rosterIds);
+  const assigneeId = resolveAssigneeId(
+    viewerRole,
+    params.assignee,
+    user.id,
+    rosterIds,
+  );
 
   const prefs = await loadIntegrationPrefs(supabase, user.id);
   const timezone = prefs.timezone;
 
-  // Month view fetches the whole padded grid range through the same
-  // sentinel-capped query as the week (a month is ~5 weeks of rows; the
-  // APPOINTMENTS_CAP contract in queries.ts is unchanged).
-  const monthRange = view === "month" ? resolveMonth(params.week, timezone) : null;
-  const { weekStartDate, days } = monthRange ?? resolveWeek(params.week, timezone);
+  // Month view always resolves a fixed six-week grid. Its single-snapshot
+  // RPC enforces the existing cap independently for every week rather than
+  // stretching a week-sized limit over the whole 42-day range.
+  const monthRange =
+    view === "month" ? resolveMonth(params.week, timezone) : null;
+  const { weekStartDate, days } =
+    monthRange ?? resolveWeek(params.week, timezone);
   const monthKey = monthRange?.monthKey ?? null;
   const weekStartUtc = days[0].startUtc;
   const weekEndUtc = days[days.length - 1].endUtc;
 
-  // Month view fetches its grid as per-week windows (Codex month-view
-  // round 2) — each window keeps the week-proven APPOINTMENTS_CAP
-  // semantics instead of stretching one week-sized cap over six weeks.
+  // Month view supplies six adjacent weekly windows to one RPC statement:
+  // per-week caps stay intact without assembling six different snapshots.
   const appointmentsResult =
     view === "month"
       ? await fetchCalendarAppointmentsForWindows(orgId, {
@@ -212,7 +218,8 @@ export default async function CalendarPage({
       : {};
   const assigneeLabels: Record<string, string> = { ...assignees };
   for (const id of inactiveAssigneeIds) {
-    assigneeLabels[id] = inactiveEmails[id] ?? `Former teammate (${id.slice(0, 8)})`;
+    assigneeLabels[id] =
+      inactiveEmails[id] ?? `Former teammate (${id.slice(0, 8)})`;
   }
 
   return (
