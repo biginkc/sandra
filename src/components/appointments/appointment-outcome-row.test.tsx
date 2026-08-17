@@ -36,21 +36,37 @@ vi.mock("./book-appointment-popover", () => ({
     mode?: string;
     triggerLabel?: string;
     triggerRef?: React.Ref<HTMLButtonElement>;
+    triggerTabIndex?: number;
+    onOpenChange?: (open: boolean) => void;
   }) => {
     const [opened, setOpened] = React.useState(false);
     return (
       <>
         <button
           ref={props.triggerRef}
+          tabIndex={props.triggerTabIndex}
           type="button"
           data-testid={`stub-reschedule-trigger-${props.taskId}`}
-          onClick={() => setOpened(true)}
+          onClick={() => {
+            setOpened(true);
+            props.onOpenChange?.(true);
+          }}
         >
           {props.triggerLabel}
         </button>
         {opened ? (
           <div data-testid={`stub-reschedule-opened-${props.taskId}`}>
             mode={props.mode} assignee={props.assigneeId}
+            <button
+              type="button"
+              data-testid={`stub-reschedule-close-${props.taskId}`}
+              onClick={() => {
+                setOpened(false);
+                props.onOpenChange?.(false);
+              }}
+            >
+              Close reschedule
+            </button>
           </div>
         ) : null}
       </>
@@ -283,6 +299,22 @@ describe("<AppointmentUpcomingActions />", () => {
     expect(
       screen.getByTestId("stub-reschedule-opened-task-2"),
     ).toHaveTextContent("mode=reschedule assignee=user-1");
+  });
+
+  it("keeps the programmatic trigger out of tab order and restores focus to the visible actions button", async () => {
+    const user = userEvent.setup();
+    render(<AppointmentUpcomingActions taskId="task-2" assigneeId="user-1" />);
+
+    const visibleTrigger = screen.getByTestId("appointment-menu-task-2");
+    const hiddenTrigger = screen.getByTestId("stub-reschedule-trigger-task-2");
+    expect(hiddenTrigger).toHaveAttribute("tabindex", "-1");
+
+    await user.tab();
+    expect(visibleTrigger).toHaveFocus();
+
+    await user.click(screen.getByTestId("appointment-menu-reschedule-task-2"));
+    await user.click(screen.getByTestId("stub-reschedule-close-task-2"));
+    await waitFor(() => expect(visibleTrigger).toHaveFocus());
   });
 
   it("clicking the Cancel menu item confirms via window.confirm then calls cancelAppointmentAction", async () => {

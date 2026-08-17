@@ -169,6 +169,7 @@ export function AppointmentUpcomingActions({
   assigneeId,
 }: UpcomingProps) {
   const [pending, startTransition] = useTransition();
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
   const rescheduleTriggerRef = useRef<HTMLButtonElement>(null);
 
   function cancel() {
@@ -187,6 +188,7 @@ export function AppointmentUpcomingActions({
         <DropdownMenuTrigger
           render={
             <Button
+              ref={menuTriggerRef}
               size="sm"
               variant="ghost"
               disabled={pending}
@@ -232,6 +234,12 @@ export function AppointmentUpcomingActions({
           currentUserId={assigneeId}
           triggerLabel="Reschedule"
           triggerRef={rescheduleTriggerRef}
+          triggerTabIndex={-1}
+          onOpenChange={(open) => {
+            if (!open) {
+              queueMicrotask(() => menuTriggerRef.current?.focus());
+            }
+          }}
         />
       </div>
     </div>
