@@ -24,4 +24,3 @@ describe("Migration 20260816150000 — SMS conversation organization guard", () 
     expect(sql).toContain("revoke all on function public.resolve_sms_conversation_org(uuid) from anon");
   });
 });
-
