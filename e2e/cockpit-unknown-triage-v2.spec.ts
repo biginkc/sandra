@@ -6,7 +6,10 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
-import { clickMenuItemByTestId } from "./menu-helpers";
+import {
+  clickMenuItemByTestId,
+  openMenuByTestId,
+} from "./menu-helpers";
 
 /**
  * Feature 8 Phase 2.5 — Triage UX polish:
@@ -51,10 +54,11 @@ test("Triage dropdown shows the renamed 3 primary options + dismiss after the di
   await seedUnknown(admin, { from: phone, body: "drop test" });
 
   await page.goto("/messages?filter=unknown");
-  await page.getByTestId(`unknown-actions-${phone}`).click();
-  await expect(page.getByTestId(`unknown-match-${phone}`)).toBeVisible({
-    timeout: 10_000,
-  });
+  await openMenuByTestId(
+    page,
+    `unknown-actions-${phone}`,
+    `unknown-match-${phone}`,
+  );
 
   // The four items in the renamed order.
   await expect(

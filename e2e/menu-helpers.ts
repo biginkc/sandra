@@ -1,10 +1,10 @@
 import { expect, type Page } from "@playwright/test";
 
-export async function clickMenuItemByTestId(
+export async function openMenuByTestId(
   page: Page,
   triggerTestId: string,
   itemTestId: string,
-): Promise<void> {
+): Promise<ReturnType<Page["getByTestId"]>> {
   const trigger = page.getByTestId(triggerTestId);
   const item = page.getByTestId(itemTestId);
 
@@ -26,11 +26,19 @@ export async function clickMenuItemByTestId(
   for (const open of openAttempts) {
     await open();
     if (await item.isVisible({ timeout: 1_500 })) {
-      await item.click();
-      return;
+      return item;
     }
   }
 
   await expect(item).toBeVisible({ timeout: 10_000 });
+  return item;
+}
+
+export async function clickMenuItemByTestId(
+  page: Page,
+  triggerTestId: string,
+  itemTestId: string,
+): Promise<void> {
+  const item = await openMenuByTestId(page, triggerTestId, itemTestId);
   await item.click();
 }
