@@ -4,6 +4,7 @@ import { createTestClient } from "@tests/integration/client";
 import {
   clientForUser,
   createOrgUser,
+  getCanonicalTestOrgId,
 } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
@@ -21,13 +22,7 @@ afterAll(async () => {
 });
 
 async function getOrgId(): Promise<string> {
-  const { data } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  if (!data) throw new Error("no organization seeded in test project");
-  return data.id;
+  return getCanonicalTestOrgId(supabase);
 }
 
 async function seedProperty(args: {

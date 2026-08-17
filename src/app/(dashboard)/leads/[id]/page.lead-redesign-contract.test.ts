@@ -42,6 +42,12 @@ describe("Lead Detail redesign integration contract", () => {
     expect(source).toContain('data-testid="permanent-dnc-lock"');
   });
 
+  it("passes one request instant to every relative-time client surface", () => {
+    expect(source).toContain("const requestNowMs = Date.now()");
+    expect(source).toContain("persistedMessageIds={initialMessages.map(");
+    expect(source.match(/nowMs=\{requestNowMs\}/g)).toHaveLength(3);
+  });
+
   it("preserves secondary capabilities and navigation selectors", () => {
     for (const token of [
       "EnrollInSequenceWidget",

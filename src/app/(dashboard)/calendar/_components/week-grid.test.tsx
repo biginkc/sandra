@@ -19,6 +19,9 @@ vi.mock("@/components/appointments/appointment-outcome-row", () => ({
   AppointmentOutcomeRow: ({ taskId }: { taskId: string }) => (
     <div data-testid={`stub-outcome-row-${taskId}`}>outcome row</div>
   ),
+  AppointmentUpcomingActions: ({ taskId }: { taskId: string }) => (
+    <div data-testid={`stub-upcoming-actions-${taskId}`}>upcoming actions</div>
+  ),
 }));
 
 const LA = "America/Los_Angeles";
@@ -335,7 +338,16 @@ describe("<WeekGrid />", () => {
       screen.queryByTestId("stub-outcome-row-future"),
     ).not.toBeInTheDocument();
     expect(
+      screen.getByTestId("stub-upcoming-actions-future"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("stub-upcoming-actions-past-due"),
+    ).not.toBeInTheDocument();
+    expect(
       screen.queryByTestId("stub-outcome-row-completed"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("stub-upcoming-actions-completed"),
     ).not.toBeInTheDocument();
 
     expect(
@@ -395,6 +407,9 @@ describe("<WeekGrid />", () => {
     ).toHaveAttribute("data-appointment-tone", "dnc_locked");
     expect(
       screen.queryByTestId("stub-outcome-row-locked-history"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("stub-upcoming-actions-locked-history"),
     ).not.toBeInTheDocument();
   });
 });

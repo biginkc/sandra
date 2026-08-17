@@ -214,6 +214,7 @@ const baseProps = {
   },
   hideDnc: true,
   hiddenDncCount: 0,
+  nowMs: Date.parse("2026-08-17T12:00:00.000Z"),
 };
 
 describe("<CockpitView /> URL deep-linking", () => {
@@ -365,6 +366,104 @@ describe("<CockpitView /> URL deep-linking", () => {
       view.unmount();
       vi.useRealTimers();
     }
+  });
+
+  it("advances the serialized clock after hydration so queue countdowns do not freeze", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(baseProps.nowMs));
+    const queueStats = {
+      ...baseProps.queueStats,
+      queued: 1,
+      nextScheduledFor: new Date(baseProps.nowMs + 90_000).toISOString(),
+      lastScheduledFor: new Date(baseProps.nowMs + 90_000).toISOString(),
+    };
+    getQueueStatsMock.mockResolvedValue({ ok: true, data: queueStats });
+    const view = render(
+      <CockpitView
+        {...baseProps}
+        activeTab="outbox"
+        queueStats={queueStats}
+      />,
+    );
+    try {
+      expect(screen.getByText(/Next release: in 2m/)).toBeVisible();
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+        await Promise.resolve();
+      });
+      expect(screen.getByText(/Next release: in 1m/)).toBeVisible();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("advances conversation relative ages without navigation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(baseProps.nowMs));
+    const thread = makeThread({
+      contactId: "live-clock-thread",
+      lastMessageAt: new Date(baseProps.nowMs - 10_000).toISOString(),
+    });
+    const view = render(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        threads={[thread]}
+      />,
+    );
+    try {
+      expect(screen.getByText("less than a minute ago")).toBeVisible();
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+        await Promise.resolve();
+      });
+      expect(screen.getByText("1 minute ago")).toBeVisible();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("Retry totals clears stale failure after an unchanged successful snapshot", async () => {
+    vi.useFakeTimers();
+    getQueueStatsMock
+      .mockResolvedValueOnce({ ok: false, error: "offline" })
+      .mockResolvedValueOnce({ ok: true, data: baseProps.queueStats });
+    const view = render(
+      <CockpitView {...baseProps} activeTab="outbox" />,
+    );
+    try {
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+        await Promise.resolve();
+      });
+      expect(screen.getByTestId("queue-stats-failure")).toBeVisible();
+
+      fireEvent.click(screen.getByRole("button", { name: "Retry totals" }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(screen.queryByTestId("queue-stats-failure")).toBeNull();
+      expect(screen.getByTestId("tab-outbox-stats")).toBeVisible();
+      expect(getQueueStatsMock).toHaveBeenCalledTimes(2);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves both compose entries while reserving mobile safe-area space", () => {
+    render(<CockpitView {...baseProps} activeTab="outbox" />);
+
+    expect(screen.getByTestId("messages-new-message")).toBeVisible();
+    expect(screen.getByTestId("messages-fab")).toHaveClass(
+      "bottom-[calc(1.5rem+env(safe-area-inset-bottom))]",
+    );
+    expect(screen.getByTestId("messages-fab").closest("div")).toHaveClass(
+      "pb-[calc(6rem+env(safe-area-inset-bottom))]",
+    );
   });
 
   it("inbox grid is viewport-constrained so dispo + reply stay pinned (regression: page-scroll bug)", () => {

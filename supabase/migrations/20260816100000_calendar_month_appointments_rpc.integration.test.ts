@@ -291,6 +291,103 @@ describe("Migration 20260816100000 — fn_calendar_month_appointments", () => {
     ).toBeNull();
   });
 
+  it("locks contact-only and non-homeowner-contact appointments from the exact contact DNC", async () => {
+    const homeownerId = crypto.randomUUID();
+    const dncContactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const propertyAppointmentId = crypto.randomUUID();
+    const contactOnlyAppointmentId = crypto.randomUUID();
+    const chainA = crypto.randomUUID();
+    const chainB = crypto.randomUUID();
+
+    const { error: contactsError } = await serviceClient
+      .from("contacts")
+      .insert([
+        {
+          id: homeownerId,
+          org_id: BMH_ORG_ID,
+          contact_type: "person",
+          first_name: "Clean homeowner",
+        },
+        {
+          id: dncContactId,
+          org_id: BMH_ORG_ID,
+          contact_type: "person",
+          first_name: "Exact task contact",
+        },
+      ]);
+    expect(contactsError).toBeNull();
+    const { error: propertyError } = await serviceClient
+      .from("properties")
+      .insert({
+        id: propertyId,
+        org_id: BMH_ORG_ID,
+        address: `Calendar contact DNC ${crypto.randomUUID()}`,
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: homeownerId,
+      });
+    expect(propertyError).toBeNull();
+    const { error: tasksError } = await serviceClient.from("tasks").insert([
+      {
+        id: propertyAppointmentId,
+        org_id: BMH_ORG_ID,
+        type: "appointment",
+        title: "Unrelated property contact",
+        assignee_id: member.userId,
+        created_by: member.userId,
+        due_at: "2026-08-05T15:00:00Z",
+        end_at: "2026-08-05T15:30:00Z",
+        calendar_chain_id: chainA,
+        related_property_id: propertyId,
+        contact_id: dncContactId,
+        status: "open",
+      },
+      {
+        id: contactOnlyAppointmentId,
+        org_id: BMH_ORG_ID,
+        type: "appointment",
+        title: "Contact only",
+        assignee_id: member.userId,
+        created_by: member.userId,
+        due_at: "2026-08-06T15:00:00Z",
+        end_at: "2026-08-06T15:30:00Z",
+        calendar_chain_id: chainB,
+        contact_id: dncContactId,
+        status: "open",
+      },
+    ] as never);
+    expect(tasksError).toBeNull();
+
+    const { error: dncError } = await serviceClient
+      .from("contacts")
+      .update({ do_not_contact: true })
+      .eq("id", dncContactId);
+    expect(dncError).toBeNull();
+    const { data: propertyAfterDnc, error: propertyReadError } =
+      await serviceClient
+        .from("properties")
+        .select("is_dnc_locked")
+        .eq("id", propertyId)
+        .single();
+    expect(propertyReadError).toBeNull();
+    expect(propertyAfterDnc?.is_dnc_locked).toBe(false);
+
+    const result = await callMonthRpc(member.client, {
+      p_org: BMH_ORG_ID,
+      p_week_starts: STARTS,
+      p_week_ends: ENDS,
+    });
+    expect(result.error).toBeNull();
+    const rowsById = new Map((result.data ?? []).map((row) => [row.id, row]));
+    expect(rowsById.get(propertyAppointmentId)?.property_is_dnc_locked).toBe(
+      true,
+    );
+    expect(rowsById.get(contactOnlyAppointmentId)?.property_is_dnc_locked).toBe(
+      true,
+    );
+  });
+
   it("suppresses completed/rescheduled predecessors of a cancelled org+chain without rewriting DNC-locked audit history", async () => {
     const chainId = crypto.randomUUID();
     const { data: contact, error: contactError } = await serviceClient

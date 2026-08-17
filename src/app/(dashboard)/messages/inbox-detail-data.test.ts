@@ -37,6 +37,7 @@ function makeMessage(
     from_address: overrides.from_address ?? "+15551234567",
     to_address: overrides.to_address ?? "+18165550000",
     created_at: overrides.created_at ?? "2026-06-09T12:00:00.000Z",
+    org_id: overrides.org_id ?? "org-1",
     read_at: overrides.read_at ?? null,
     metadata: overrides.metadata ?? null,
   } as MessageRow;
@@ -250,6 +251,27 @@ function makeSupabaseStub(seed: SeedData) {
   }
 
   return {
+    rpc(_name: string, args: { p_conversation_id: string }) {
+      const orgIds = [
+        ...new Set(
+          seed.messages
+            .filter(
+              (message) =>
+                message.channel === "sms" &&
+                message.conversation_id === args.p_conversation_id,
+            )
+            .map((message) => message.org_id),
+        ),
+      ];
+      return Promise.resolve(
+        orgIds.length > 1
+          ? {
+              data: null,
+              error: { message: "SMS_CONVERSATION_ORG_AMBIGUOUS" },
+            }
+          : { data: orgIds[0] ?? null, error: null },
+      );
+    },
     from(table: keyof SeedData) {
       return makeBuilder(table);
     },
@@ -260,6 +282,72 @@ describe("fetchInboxDetail", () => {
   // Stale URL formats (legacy keys, bare contact ids) are translated by
   // canonicalizeThreadId at the page boundary — see threading.test.ts.
   // fetchInboxDetail's contract is conversation-UUID-only.
+
+  it.each(["received", "queued", "paused"] as const)(
+    "fails closed when an older %s row for the conversation belongs to another organization",
+    async (status) => {
+      const supabase = makeSupabaseStub({
+        messages: [
+          makeMessage({
+            id: "current-org-latest",
+            contact_id: CONTACT_ID,
+            property_id: RECENT_PROPERTY_ID,
+            conversation_id: CONVERSATION_ID,
+            org_id: "org-1",
+            created_at: "2026-06-09T12:00:00.000Z",
+          }),
+          makeMessage({
+            id: `other-org-old-${status}`,
+            contact_id: CONTACT_ID,
+            property_id: RECENT_PROPERTY_ID,
+            conversation_id: CONVERSATION_ID,
+            org_id: "org-2",
+            status,
+            created_at: "2026-06-08T12:00:00.000Z",
+          }),
+        ],
+        contacts: [],
+        properties: [],
+      });
+
+      await expect(
+        fetchInboxDetail(supabase as never, CONVERSATION_ID),
+      ).rejects.toThrow("SMS_CONVERSATION_ORG_AMBIGUOUS");
+    },
+  );
+
+  it("detects an old cross-org row beyond the 100-message detail window", async () => {
+    const recent = Array.from({ length: 100 }, (_, index) =>
+      makeMessage({
+        id: `recent-${index}`,
+        contact_id: CONTACT_ID,
+        property_id: RECENT_PROPERTY_ID,
+        conversation_id: CONVERSATION_ID,
+        org_id: "org-1",
+        created_at: `2026-06-09T12:${String(index % 60).padStart(2, "0")}:00.000Z`,
+      }),
+    );
+    const supabase = makeSupabaseStub({
+      messages: [
+        ...recent,
+        makeMessage({
+          id: "old-contactless-paused-other-org",
+          contact_id: CONTACT_ID,
+          property_id: null,
+          conversation_id: CONVERSATION_ID,
+          org_id: "org-2",
+          status: "paused",
+          created_at: "2020-01-01T00:00:00.000Z",
+        }),
+      ],
+      contacts: [],
+      properties: [],
+    });
+
+    await expect(
+      fetchInboxDetail(supabase as never, CONVERSATION_ID),
+    ).rejects.toThrow("SMS_CONVERSATION_ORG_AMBIGUOUS");
+  });
 
   it("returns null when the conversation has no messages", async () => {
     const supabase = makeSupabaseStub({
@@ -393,7 +481,7 @@ describe("fetchInboxDetail", () => {
     });
   });
 
-  it("ignores queued and paused rows in the conversation", async () => {
+  it("retains queued and paused Outbox rows in the conversation after reload", async () => {
     const supabase = makeSupabaseStub({
       messages: [
         makeMessage({
@@ -440,6 +528,8 @@ describe("fetchInboxDetail", () => {
     expect(detail?.threadId).toBe(CONVERSATION_ID);
     expect(detail?.initialMessages.map((message) => message.id)).toEqual([
       "live-thread",
+      "queued-draft",
+      "paused-draft",
     ]);
     expect(detail?.propertyAddress).toContain("100 Live Ave");
     expect(detail?.homeownerContactId).toBe(CONTACT_ID);

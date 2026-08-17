@@ -1,6 +1,9 @@
 import Link from "next/link";
 
-import { AppointmentOutcomeRow } from "@/components/appointments/appointment-outcome-row";
+import {
+  AppointmentOutcomeRow,
+  AppointmentUpcomingActions,
+} from "@/components/appointments/appointment-outcome-row";
 import { StatusChip } from "@/components/ui/status-chip";
 import { cn } from "@/lib/utils";
 
@@ -103,7 +106,7 @@ export function AppointmentBlock({
       {href ? (
         <Link
           href={href}
-          className="block hover:underline"
+          className="flex min-h-11 flex-col justify-center hover:underline"
           data-testid={`calendar-appointment-link-${appt.id}`}
         >
           {body}
@@ -119,6 +122,13 @@ export function AppointmentBlock({
             Needs outcome
           </div>
           <AppointmentOutcomeRow
+            taskId={appt.id}
+            assigneeId={appt.assignee_id}
+          />
+        </div>
+      ) : !appt.is_dnc_locked && appt.status === "open" ? (
+        <div className="mt-1.5">
+          <AppointmentUpcomingActions
             taskId={appt.id}
             assigneeId={appt.assignee_id}
           />

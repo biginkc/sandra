@@ -289,6 +289,204 @@ describe("listThreads (integration)", () => {
     expect(await listThreads(clientForUser(userA.jwt), {})).toEqual([]);
   });
 
+  it("keeps a recreated contact opted out through durable org-scoped phone suppression", async () => {
+    const phone = "+18165554991";
+    const oldContactId = crypto.randomUUID();
+    const newContactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const conversationId = crypto.randomUUID();
+
+    const { error: oldContactError } = await supabase.from("contacts").insert({
+      id: oldContactId,
+      org_id: BMH_ORG_ID,
+      first_name: "Original suppressed",
+      phone_1: phone,
+      phone_1_type: "mobile",
+    });
+    if (oldContactError) throw oldContactError;
+    const { error: suppressionError } = await supabase
+      .from("sms_phone_suppressions")
+      .insert({
+        org_id: BMH_ORG_ID,
+        channel: "sms",
+        phone_e164: phone,
+        source: "integration_recreated_contact",
+        first_contact_id: oldContactId,
+      });
+    if (suppressionError) throw suppressionError;
+    const { error: deleteError } = await supabase
+      .from("contacts")
+      .delete()
+      .eq("id", oldContactId);
+    if (deleteError) throw deleteError;
+
+    const { error: recreatedContactError } = await supabase
+      .from("contacts")
+      .insert({
+        id: newContactId,
+        org_id: BMH_ORG_ID,
+        first_name: "Recreated suppressed",
+        phone_1: phone,
+        phone_1_type: "mobile",
+      });
+    if (recreatedContactError) throw recreatedContactError;
+    const { error: propertyError } = await supabase.from("properties").insert({
+      id: propertyId,
+      org_id: BMH_ORG_ID,
+      address: "991 Durable Suppression Ln",
+      state: "MO",
+      status: "prospect",
+      homeowner_contact_id: newContactId,
+    });
+    if (propertyError) throw propertyError;
+    const { error: messageError } = await supabase.from("messages").insert({
+      org_id: BMH_ORG_ID,
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      contact_id: newContactId,
+      property_id: propertyId,
+      conversation_id: conversationId,
+      from_address: "(816) 555-4991",
+      to_address: "+18162804181",
+      body: "Recreated contact still suppressed",
+    });
+    if (messageError) throw messageError;
+
+    const threads = await listThreads(supabase, {});
+    const recreated = threads.find(
+      (thread) => thread.threadId === conversationId,
+    );
+    expect(recreated?.contactId).toBe(newContactId);
+    expect(recreated?.isOptedOut).toBe(true);
+    expect(recreated?.needsOutcome).toBe(false);
+  });
+
+  it.each([
+    {
+      otherRow: "eligible",
+      otherStatus: "received",
+      otherCreatedAt: () => new Date().toISOString(),
+    },
+    {
+      otherRow: "older than the inbox cutoff",
+      otherStatus: "received",
+      otherCreatedAt: () =>
+        new Date(Date.now() - 100 * 24 * 60 * 60 * 1_000).toISOString(),
+    },
+    {
+      otherRow: "queued",
+      otherStatus: "queued",
+      otherCreatedAt: () => new Date().toISOString(),
+    },
+    {
+      otherRow: "paused",
+      otherStatus: "paused",
+      otherCreatedAt: () => new Date().toISOString(),
+    },
+  ] as const)(
+    "fails closed when a dual-active user sees an $otherRow row sharing an emitted conversation UUID across orgs",
+    async ({ otherStatus, otherCreatedAt }) => {
+      await seedTwoOrgs(supabase);
+      const user = await createOrgUser(supabase, {
+        orgId: BMH_ORG_ID,
+        email: `thread-collision-${crypto.randomUUID()}@example.com`,
+        role: "member",
+      });
+      try {
+        const { error: secondMembershipError } = await supabase
+          .from("memberships")
+          .insert({
+            user_id: user.userId,
+            org_id: TEST_ORG_B_ID,
+            role: "member",
+          });
+        if (secondMembershipError) throw secondMembershipError;
+
+        const conversationId = crypto.randomUUID();
+        const contactA = crypto.randomUUID();
+        const contactB = crypto.randomUUID();
+        const propertyA = crypto.randomUUID();
+        const propertyB = crypto.randomUUID();
+        const { error: contactsError } = await supabase
+          .from("contacts")
+          .insert([
+            {
+              id: contactA,
+              org_id: BMH_ORG_ID,
+              first_name: "Collision A",
+              phone_1: "+18165554992",
+              phone_1_type: "mobile",
+            },
+            {
+              id: contactB,
+              org_id: TEST_ORG_B_ID,
+              first_name: "Collision B",
+              phone_1: "+18165554993",
+              phone_1_type: "mobile",
+            },
+          ]);
+        if (contactsError) throw contactsError;
+        const { error: propertiesError } = await supabase
+          .from("properties")
+          .insert([
+            {
+              id: propertyA,
+              org_id: BMH_ORG_ID,
+              address: "1 Collision A Ln",
+              state: "MO",
+              homeowner_contact_id: contactA,
+            },
+            {
+              id: propertyB,
+              org_id: TEST_ORG_B_ID,
+              address: "2 Collision B Ln",
+              state: "MO",
+              homeowner_contact_id: contactB,
+            },
+          ]);
+        if (propertiesError) throw propertiesError;
+        const { error: messagesError } = await supabase
+          .from("messages")
+          .insert([
+            {
+              org_id: BMH_ORG_ID,
+              channel: "sms",
+              direction: "inbound",
+              status: "received",
+              contact_id: contactA,
+              property_id: propertyA,
+              conversation_id: conversationId,
+              from_address: "+18165554992",
+          to_address: "+18162804181",
+          body: "collision A",
+          created_at: new Date().toISOString(),
+        },
+            {
+              org_id: TEST_ORG_B_ID,
+              channel: "sms",
+              direction: "inbound",
+              status: otherStatus,
+              contact_id: contactB,
+              property_id: propertyB,
+              conversation_id: conversationId,
+              from_address: "+18165554993",
+              to_address: "+18162804182",
+              body: "collision B",
+              created_at: otherCreatedAt(),
+            },
+          ]);
+        if (messagesError) throw messagesError;
+
+        await expect(listThreads(clientForUser(user.jwt), {})).rejects.toThrow(
+          "cross_org_conversation_id_ambiguity",
+        );
+      } finally {
+        await supabase.auth.admin.deleteUser(user.userId);
+      }
+    },
+  );
+
   // Test case #1
   it("returns one row per contact/property thread with the most recent message", async () => {
     const { contactId } = await seedConversation({

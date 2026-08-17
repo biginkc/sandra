@@ -177,6 +177,22 @@ describe("listThreads — chunking", () => {
     );
   });
 
+  it("fails closed when the server reports a cross-organization thread identity collision", async () => {
+    const supabase = {
+      rpc: vi.fn(async () => ({
+        data: {
+          __error: "cross_org_conversation_id_ambiguity",
+          count: 1,
+        },
+        error: null,
+      })),
+    } as unknown as SupabaseClient<Database>;
+
+    await expect(listThreads(supabase, {})).rejects.toThrow(
+      "cross_org_conversation_id_ambiguity",
+    );
+  });
+
   it("splits oversized contact-id IN clauses into multiple Supabase calls", async () => {
     // 600 contacts > the 250 chunk threshold ⇒ should produce 3 chunked calls.
     const N = 600;

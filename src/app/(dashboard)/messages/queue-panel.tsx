@@ -1,6 +1,6 @@
 "use client";
 
-import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
+import { formatDistance } from "date-fns/formatDistance";
 import {
   AlertCircleIcon,
   PauseIcon,
@@ -11,7 +11,13 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, useTransition } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -58,6 +64,7 @@ export function QueuePanel({
   initialHasMore = false,
   totalQueued,
   initialLoadFailed = false,
+  nowMs,
 }: {
   initial: QueuedRow[];
   /** True when the server's first page was full — more rows exist beyond it. */
@@ -66,7 +73,10 @@ export function QueuePanel({
   totalQueued?: number;
   /** The first page query failed. An empty array is fallback data, not empty truth. */
   initialLoadFailed?: boolean;
+  nowMs?: number;
 }) {
+  const [fallbackNowMs] = useState(Date.now);
+  const renderNowMs = nowMs ?? fallbackNowMs;
   const router = useRouter();
   const [rows, setRows] = useState<QueuedRow[]>(initial);
   const [pending, startTransition] = useTransition();
@@ -107,7 +117,7 @@ export function QueuePanel({
     // Empty list → null cursor re-seeds from page 1 (dedup makes this
     // idempotent). Happens when live stats re-arm the sentinel on a
     // queue that grew from zero.
-    const last = rowsRef.current[rowsRef.current.length - 1];
+    const last = rows[rows.length - 1];
     const cursor = last
       ? { scheduledFor: last.scheduledFor, id: last.id }
       : null;
@@ -197,29 +207,23 @@ export function QueuePanel({
   const [autoOn, setAutoOn] = useState(false);
   const [cadence, setCadence] = useState<number>(DEFAULT_CADENCE_S);
   const intervalRef = useRef<number | null>(null);
-  // Always-current view of rows + the send closure, so the auto-send
-  // interval tick reads the LATEST state without needing to be restarted
-  // every time the queue changes. Restarting the interval on rows
-  // change causes back-to-back immediate ticks and breaks cadence.
-  const rowsRef = useRef<QueuedRow[]>(initial);
-  useEffect(() => {
-    rowsRef.current = rows;
-  }, [rows]);
-  const sendOneRef = useRef<(row: QueuedRow) => Promise<boolean>>(
-    async () => false,
-  );
-
+  const skipInitialCadencePersistRef = useRef(true);
   useEffect(() => {
     const raw = localStorage.getItem(CADENCE_STORAGE_KEY);
     if (raw) {
       const n = Number(raw);
       if (Number.isFinite(n) && n >= MIN_CADENCE_S && n <= MAX_CADENCE_S) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- localStorage is the external cadence source; adopt it after hydration so server/client first paint remains identical.
         setCadence(n);
       }
     }
   }, []);
 
   useEffect(() => {
+    if (skipInitialCadencePersistRef.current) {
+      skipInitialCadencePersistRef.current = false;
+      return;
+    }
     localStorage.setItem(CADENCE_STORAGE_KEY, String(cadence));
   }, [cadence]);
 
@@ -268,12 +272,6 @@ export function QueuePanel({
     };
   }, []);
 
-  // Keep the ref in sync with the latest sendOne closure so the
-  // interval tick always calls the current version.
-  useEffect(() => {
-    sendOneRef.current = sendOne;
-  });
-
   const sendOne = async (row: QueuedRow) => {
     const result = await callAction(releaseMessage(row.id), {
       fallbackMessage: "Send failed",
@@ -311,6 +309,26 @@ export function QueuePanel({
     }
   };
 
+  // Read the latest rows without making the long-lived interval restart
+  // after every queue update. Restarting it resets the cadence and can
+  // produce back-to-back sends.
+  const autoSendTick = useEffectEvent(async () => {
+    const first = rows[0];
+    if (!first) {
+      setAutoOn(false);
+      toast.info("Queue empty — auto-send stopped");
+      return;
+    }
+    const ok = await sendOne(first);
+    if (!ok) {
+      setAutoOn(false);
+      toast.warning("Auto-send paused", {
+        description:
+          "Last send didn't complete cleanly — review before resuming.",
+      });
+    }
+  });
+
   const sendNext = () => {
     if (rows.length === 0) return;
     const next = rows[0];
@@ -322,8 +340,8 @@ export function QueuePanel({
 
   // Auto-send loop. The interval itself only depends on [autoOn, cadence]
   // so it doesn't restart every time a row gets consumed — that earlier
-  // mistake caused immediate back-to-back sends. Inside the tick we read
-  // from rowsRef + sendOneRef to get the always-current values.
+  // mistake caused immediate back-to-back sends. The Effect Event reads
+  // the latest queue without becoming an interval dependency.
   useEffect(() => {
     if (!autoOn) {
       if (intervalRef.current !== null) {
@@ -337,20 +355,7 @@ export function QueuePanel({
       if (busy) return;
       busy = true;
       try {
-        const first = rowsRef.current[0];
-        if (!first) {
-          setAutoOn(false);
-          toast.info("Queue empty — auto-send stopped");
-          return;
-        }
-        const ok = await sendOneRef.current(first);
-        if (!ok) {
-          setAutoOn(false);
-          toast.warning("Auto-send paused", {
-            description:
-              "Last send didn't complete cleanly — review before resuming.",
-          });
-        }
+        await autoSendTick();
       } finally {
         busy = false;
       }
@@ -564,9 +569,11 @@ export function QueuePanel({
                     </span>
                     {" · "}
                     queued{" "}
-                    {formatDistanceToNow(new Date(r.createdAt), {
-                      addSuffix: true,
-                    })}
+                    {formatDistance(
+                      new Date(r.createdAt),
+                      new Date(renderNowMs),
+                      { addSuffix: true },
+                    )}
                   </div>
                 </div>
                 {editingId === r.id ? null : (

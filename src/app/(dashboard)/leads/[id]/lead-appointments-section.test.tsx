@@ -134,6 +134,7 @@ describe("<LeadAppointmentsSection />", () => {
     expect(items).toHaveLength(2);
     expect(screen.getByText("Appointment — 123 Main St")).toBeInTheDocument();
     expect(screen.getByText("Appointment — 456 Oak Ave")).toBeInTheDocument();
+    expect(items[0]).toHaveClass("flex-col", "items-stretch", "sm:flex-row");
   });
 
   describe("device-timezone display (Codex round 3)", () => {

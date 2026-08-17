@@ -3,11 +3,25 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { OPERATOR_TIME_ZONE } from "@/lib/messages/message-metrics";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
 import { cn } from "@/lib/utils";
 
 type Message = Database["public"]["Tables"]["messages"]["Row"];
+
+const DAY_KEY_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: OPERATOR_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+const TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: OPERATOR_TIME_ZONE,
+  hour: "numeric",
+  minute: "2-digit",
+});
+const LIVE_CLOCK_INTERVAL_MS = 30_000;
 
 type Props = {
   /** Initial rows server-rendered so first paint is never blank. */
@@ -17,6 +31,7 @@ type Props = {
   conversationId?: string | null;
   propertyId: string | null;
   onLiveMessage?: (message: Message) => void;
+  nowMs?: number;
 };
 
 export function messageBelongsToThread(
@@ -56,7 +71,10 @@ export function MessagesThread({
   conversationId = null,
   propertyId,
   onLiveMessage,
+  nowMs,
 }: Props) {
+  const [fallbackNowMs] = useState(Date.now);
+  const renderNowMs = useLiveNow(nowMs ?? fallbackNowMs);
   const [messages, setMessages] = useState<Message[]>(() =>
     filterThreadMessages(initial, {
       contactId,
@@ -143,7 +161,7 @@ export function MessagesThread({
   if (messages.length === 0) {
     return (
       <div className="text-muted-foreground py-8 text-center text-sm">
-        No messages yet. Send an SMS to start a thread.
+        No messages in this conversation yet.
       </div>
     );
   }
@@ -169,9 +187,13 @@ export function MessagesThread({
   let prevDay: string | null = null;
   let prevDirection: Message["direction"] | null = null;
   for (const m of messages) {
-    const day = new Date(m.created_at).toDateString();
+    const day = zonedDateKey(new Date(m.created_at));
     if (day !== prevDay) {
-      items.push({ kind: "sep", key: `sep-${day}`, label: formatDayLabel(m.created_at) });
+      items.push({
+        kind: "sep",
+        key: `sep-${day}`,
+        label: formatDayLabel(m.created_at, renderNowMs),
+      });
       prevDay = day;
       // Day boundary always breaks the group — next bubble starts fresh.
       prevDirection = null;
@@ -232,6 +254,36 @@ export function MessagesThread({
   );
 }
 
+function useLiveNow(seedNowMs: number): number {
+  const [clock, setClock] = useState({ seedNowMs, value: seedNowMs });
+  if (clock.seedNowMs !== seedNowMs) {
+    setClock({
+      seedNowMs,
+      value: Math.max(clock.value, seedNowMs),
+    });
+  }
+
+  useEffect(() => {
+    const tick = () => {
+      setClock((current) => ({
+        ...current,
+        value: Math.max(current.value, Date.now()),
+      }));
+    };
+    const intervalId = window.setInterval(tick, LIVE_CLOCK_INTERVAL_MS);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
+
+  return clock.value;
+}
+
 function filterThreadMessages(
   rows: Message[],
   scope: {
@@ -243,29 +295,38 @@ function filterThreadMessages(
   return rows.filter((row) => messageBelongsToThread(row, scope));
 }
 
-function formatDayLabel(iso: string): string {
+function formatDayLabel(iso: string, nowMs: number): string {
   const d = new Date(iso);
-  const today = new Date();
-  const yesterday = new Date(today);
-  yesterday.setDate(today.getDate() - 1);
-
-  const sameDay = (a: Date, b: Date) =>
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate();
-
-  const monthDay = d.toLocaleDateString(undefined, {
+  const today = new Date(nowMs);
+  const dayKey = zonedDateKey(d);
+  const todayKey = zonedDateKey(today);
+  const yesterdayKey = previousDateKey(todayKey);
+  const monthDay = new Intl.DateTimeFormat("en-US", {
+    timeZone: OPERATOR_TIME_ZONE,
     month: "long",
     day: "numeric",
-  });
-  if (sameDay(d, today)) return `Today, ${monthDay}`;
-  if (sameDay(d, yesterday)) return `Yesterday, ${monthDay}`;
-  return d.toLocaleDateString(undefined, {
+  }).format(d);
+  if (dayKey === todayKey) return `Today, ${monthDay}`;
+  if (dayKey === yesterdayKey) return `Yesterday, ${monthDay}`;
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: OPERATOR_TIME_ZONE,
     weekday: "short",
     month: "short",
     day: "numeric",
-    year: d.getFullYear() !== today.getFullYear() ? "numeric" : undefined,
-  });
+    year: dayKey.slice(0, 4) !== todayKey.slice(0, 4) ? "numeric" : undefined,
+  }).format(d);
+}
+
+function zonedDateKey(date: Date): string {
+  const parts = DAY_KEY_FORMATTER.formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((candidate) => candidate.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function previousDateKey(dateKey: string): string {
+  const noonUtc = Date.parse(`${dateKey}T12:00:00.000Z`);
+  return new Date(noonUtc - 86_400_000).toISOString().slice(0, 10);
 }
 
 function MessageBubble({
@@ -280,10 +341,7 @@ function MessageBubble({
   isMostRecentOutbound: boolean;
 }) {
   const outbound = message.direction === "outbound";
-  const time = new Date(message.created_at).toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  const time = TIME_FORMATTER.format(new Date(message.created_at));
   const outboundStatusBadge = getOutboundStatusBadge(message);
   const deliveryStatusLabel = getDeliveryStatusLabel(
     message,
@@ -428,6 +486,7 @@ function getOutboundStatusBadge(message: Message): {
 
   switch (message.status) {
     case "queued":
+    case "paused":
     case "pending":
     case "sent":
     case "delivered":
@@ -452,10 +511,15 @@ function getDeliveryStatusLabel(
   if (message.status === "failed") {
     return { label: "Not delivered", tone: "destructive" };
   }
+  if (message.status === "queued") {
+    return { label: "Queued · in Outbox", tone: "muted" };
+  }
+  if (message.status === "paused") {
+    return { label: "Paused · in Outbox", tone: "muted" };
+  }
   if (!isMostRecentOutbound) return null;
 
   switch (message.status) {
-    case "queued":
     case "pending":
       return { label: "Pending", tone: "muted" };
     case "sent":

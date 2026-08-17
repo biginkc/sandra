@@ -125,6 +125,7 @@ const baseProps = {
   },
   hideDnc: true,
   hiddenDncCount: 0,
+  nowMs: Date.parse("2026-08-17T12:00:00.000Z"),
 };
 
 describe("<CockpitView /> assignment chips", () => {
@@ -518,6 +519,47 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     ]) {
       expect(screen.queryByTestId(`${id}-count`)).not.toBeInTheDocument();
     }
+  });
+
+  it("keeps Unknown and Dismissed primary controls at least 44px tall", () => {
+    const sender = {
+      fromAddress: "+15550009999",
+      toAddress: "+18162804181",
+      latestBody: "Who is this?",
+      latestAt: "2026-08-17T11:00:00.000Z",
+      messageCount: 1,
+      isDismissed: false,
+    };
+    const view = render(
+      <CockpitView
+        {...baseProps}
+        filter="unknown"
+        threads={[]}
+        unknownSenders={[sender]}
+      />,
+    );
+
+    expect(screen.getByTestId("filter-unknown")).toHaveClass("min-h-11");
+    expect(screen.getByTestId("filter-dismissed")).toHaveClass("min-h-11");
+    expect(screen.getByTestId("unknown-view-thread-+15550009999")).toHaveClass(
+      "min-h-11",
+      "min-w-11",
+    );
+    expect(screen.getByTestId("unknown-actions-+15550009999")).toHaveClass(
+      "min-h-11",
+    );
+
+    view.rerender(
+      <CockpitView
+        {...baseProps}
+        filter="dismissed"
+        threads={[]}
+        unknownSenders={[{ ...sender, isDismissed: true }]}
+      />,
+    );
+    expect(screen.getByTestId("unknown-restore-+15550009999")).toHaveClass(
+      "min-h-11",
+    );
   });
 });
 

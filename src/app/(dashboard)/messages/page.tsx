@@ -53,6 +53,8 @@ export default async function MessagesPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  // eslint-disable-next-line react-hooks/purity -- Server Component request timestamp is intentionally captured once and serialized to every client relative-time formatter.
+  const requestNowMs = Date.now();
   const sp = await searchParams;
   const rawFilter = firstSearchParam(sp.filter);
   if (rawFilter === "handled") {
@@ -173,6 +175,7 @@ export default async function MessagesPage({
       hiddenDncCount={hiddenDncCount}
       queueLoadFailed={!queuedResult.ok}
       queueStatsFailed={!queueStatsResult.ok}
+      nowMs={requestNowMs}
     />
   );
 }

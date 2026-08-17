@@ -59,6 +59,7 @@ export function TemplatePicker({ onSelect }: Props) {
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- opening the external popover begins a new asynchronous loading lifecycle.
     setLoadState({ status: "loading" });
     listTemplates().then((result) => {
       if (cancelled) return;
@@ -123,7 +124,7 @@ export function TemplatePicker({ onSelect }: Props) {
           <Button
             variant="outline"
             size="sm"
-            className="gap-1.5"
+            className="min-h-11 gap-1.5"
             aria-label="Insert template"
           />
         }
@@ -142,7 +143,7 @@ export function TemplatePicker({ onSelect }: Props) {
             placeholder="Search templates…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="h-8 text-xs"
+            className="min-h-11 text-xs"
           />
         </div>
         <div className="max-h-[280px] overflow-y-auto">
@@ -177,7 +178,7 @@ export function TemplatePicker({ onSelect }: Props) {
                 variant="outline"
                 size="sm"
                 onClick={retry}
-                className="h-7 text-xs"
+                className="min-h-11 text-xs"
               >
                 Retry
               </Button>
@@ -202,7 +203,7 @@ export function TemplatePicker({ onSelect }: Props) {
                       setOpen(false);
                       setSearch("");
                     }}
-                    className="hover:bg-muted flex w-full flex-col gap-0.5 px-3 py-2 text-left transition-colors"
+                    className="hover:bg-muted flex min-h-11 w-full flex-col gap-0.5 px-3 py-2 text-left transition-colors"
                   >
                     <span className="text-sm font-medium">{t.name}</span>
                     <span className="text-muted-foreground line-clamp-1 text-xs">

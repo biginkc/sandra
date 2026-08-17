@@ -34,10 +34,13 @@ export function useQueueStats(
   initialStats: QueueStats,
   {
     enabled = true,
+    refreshSignal = 0,
     onRefreshSuccess,
     onRefreshFailure,
   }: {
     enabled?: boolean;
+    /** Increment to request an immediate refresh (for an operator Retry). */
+    refreshSignal?: number;
     onRefreshSuccess?: (refreshedAt: string) => void;
     onRefreshFailure?: () => void;
   } = {},
@@ -86,6 +89,8 @@ export function useQueueStats(
       }
     }
 
+    if (refreshSignal > 0) void refresh();
+
     const intervalId = setInterval(() => {
       if (
         typeof document !== "undefined" &&
@@ -117,6 +122,7 @@ export function useQueueStats(
     initialStats.sentOutToday,
     onRefreshSuccess,
     onRefreshFailure,
+    refreshSignal,
   ]);
 
   return stats;

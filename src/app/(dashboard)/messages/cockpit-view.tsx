@@ -50,6 +50,8 @@ type Props = {
   queueLoadFailed?: boolean;
   /** Queue summary failed; zeroes are fallback data, not confirmed counts. */
   queueStatsFailed?: boolean;
+  /** Request-scoped clock so SSR and hydration render identical relative times. */
+  nowMs: number;
 };
 
 const THREAD_FILTERS = new Set<InboxFilter>([
@@ -61,6 +63,7 @@ const THREAD_FILTERS = new Set<InboxFilter>([
   "dispo",
   "needs_outcome",
 ]);
+const LIVE_CLOCK_INTERVAL_MS = 30_000;
 
 export function CockpitView({
   activeTab,
@@ -79,9 +82,11 @@ export function CockpitView({
   hiddenDncCount,
   queueLoadFailed = false,
   queueStatsFailed = false,
+  nowMs,
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const liveNowMs = useLiveNow(nowMs);
 
   // One live stats source for the Outbox tab badge + the stats banner,
   // so the two never show different numbers. Seeds from the server
@@ -94,6 +99,7 @@ export function CockpitView({
   const [lastQueueStatsSuccessAt, setLastQueueStatsSuccessAt] = useState<
     string | null
   >(queueStatsFailed ? null : "server-snapshot");
+  const [queueStatsRefreshSignal, setQueueStatsRefreshSignal] = useState(0);
   if (lastServerQueueStatsFailed !== queueStatsFailed) {
     setLastServerQueueStatsFailed(queueStatsFailed);
     setLiveQueueStatsFailed(queueStatsFailed);
@@ -108,6 +114,7 @@ export function CockpitView({
     [],
   );
   const liveQueueStats = useQueueStats(queueStats, {
+    refreshSignal: queueStatsRefreshSignal,
     onRefreshSuccess: handleQueueStatsRefreshSuccess,
     onRefreshFailure: handleQueueStatsRefreshFailure,
   });
@@ -256,7 +263,7 @@ export function CockpitView({
     pendingThreadId !== null && selectedThreadId !== pendingThreadId;
 
   return (
-    <Page>
+    <Page className="pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-8">
       <PageHeader
         breadcrumb={[{ label: "Workspace" }, { label: "Messages" }]}
         title="Messages"
@@ -337,6 +344,7 @@ export function CockpitView({
                   currentUserId={currentUserId}
                   onSelectThread={handleSelectThread}
                   emptyMessage={emptyInboxMessage(filter, hiddenDncCount)}
+                  nowMs={liveNowMs}
                 />
               </div>
               <div
@@ -349,17 +357,26 @@ export function CockpitView({
                   assigneeEmails={assigneeEmails}
                   currentUserId={currentUserId}
                   onBackToList={handleBackToList}
+                  nowMs={liveNowMs}
                 />
               </div>
             </div>
           )}
 
           {filter === "unknown" && (
-            <UnknownSenderList senders={unknownSenders} showRestore={false} />
+            <UnknownSenderList
+              senders={unknownSenders}
+              showRestore={false}
+              nowMs={liveNowMs}
+            />
           )}
 
           {filter === "dismissed" && (
-            <UnknownSenderList senders={unknownSenders} showRestore={true} />
+            <UnknownSenderList
+              senders={unknownSenders}
+              showRestore={true}
+              nowMs={liveNowMs}
+            />
           )}
         </div>
       ) : (
@@ -372,13 +389,17 @@ export function CockpitView({
             stats={liveQueueStats}
             loadFailed={liveQueueStatsFailed}
             lastSuccessfulAt={lastQueueStatsSuccessAt}
-            onRetry={() => router.refresh()}
+            onRetry={() =>
+              setQueueStatsRefreshSignal((current) => current + 1)
+            }
+            nowMs={liveNowMs}
           />
           <QueuePanel
             initial={queued}
             initialHasMore={queuedHasMore}
             totalQueued={liveQueueStats.queued}
             initialLoadFailed={queueLoadFailed}
+            nowMs={liveNowMs}
           />
         </div>
       )}
@@ -392,12 +413,39 @@ export function CockpitView({
         aria-label="Compose new message"
         data-testid="messages-fab"
         onClick={() => router.push(`/leads?compose=1`)}
-        className="fixed bottom-6 right-6 w-14 h-14 bg-primary text-primary-foreground rounded-full flex items-center justify-center shadow-2xl hover:scale-105 transition-transform z-40"
+        className="fixed bottom-[calc(1.5rem+env(safe-area-inset-bottom))] right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-2xl transition-transform hover:scale-105"
       >
         <MessageSquarePlusIcon className="h-6 w-6" />
       </button>
     </Page>
   );
+}
+
+function useLiveNow(seedNowMs: number): number {
+  const [clock, setClock] = useState({ seedNowMs, value: seedNowMs });
+  if (clock.seedNowMs !== seedNowMs) {
+    setClock({ seedNowMs, value: seedNowMs });
+  }
+
+  useEffect(() => {
+    const tick = () => {
+      setClock((current) => ({
+        ...current,
+        value: Math.max(current.value, Date.now()),
+      }));
+    };
+    const intervalId = window.setInterval(tick, LIVE_CLOCK_INTERVAL_MS);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
+
+  return clock.value;
 }
 
 function TabButton({

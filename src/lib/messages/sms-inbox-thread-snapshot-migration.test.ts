@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const sql = readFileSync(
   new URL(
-    "../../../supabase/migrations/20260816120000_sms_inbox_thread_snapshot.sql",
+    "../../../supabase/migrations/20260816140000_sms_inbox_snapshot_tenant_suppression_hardening.sql",
     import.meta.url,
   ),
   "utf8",
@@ -33,5 +33,25 @@ describe("SMS inbox thread snapshot migration", () => {
     expect(sql).toContain("returns jsonb");
     expect(sql).toContain("hydrated as materialized");
     expect(sql).toContain("jsonb_agg(");
+  });
+
+  it("preserves tenant identity through grouping and every hydration join", () => {
+    expect(sql).toContain("partition by m.org_id, m.conversation_id");
+    expect(sql).toContain("group by e.org_id, e.conversation_id");
+    expect(sql).toContain("c.org_id = g.org_id");
+    expect(sql).toContain("p.org_id = g.org_id");
+    expect(sql).toContain("mt.org_id = g.org_id");
+    expect(sql).toContain("consent.org_id = g.org_id");
+  });
+
+  it("uses durable org-and-phone suppression and rejects cross-org thread identity collisions", () => {
+    expect(sql).toContain("suppression.org_id = g.org_id");
+    expect(sql).toContain("suppression.phone_e164 = case");
+    expect(sql).toContain("h.is_phone_suppressed");
+    expect(sql).toContain("having count(distinct m.org_id) > 1");
+    expect(sql).toContain("from public.messages m");
+    expect(sql).toContain("select grouped_thread.conversation_id from grouped");
+    expect(sql).toContain("regexp_replace(coalesce(");
+    expect(sql).toContain("'__error', 'cross_org_conversation_id_ambiguity'");
   });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
+import { formatDistance } from "date-fns/formatDistance";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -38,6 +38,7 @@ type Props = {
   onSelectThread: (threadId: string) => void;
   /** Truthful copy for an empty all-inbox vs an empty filtered view. */
   emptyMessage?: string;
+  nowMs?: number;
 };
 
 const THREAD_DISPO_LABELS: Record<string, string> = {
@@ -74,7 +75,10 @@ export function InboxThreadList({
   currentUserId,
   onSelectThread,
   emptyMessage = "No conversations yet. Inbound messages will appear here.",
+  nowMs,
 }: Props) {
+  const [fallbackNowMs] = useState(Date.now);
+  const renderNowMs = nowMs ?? fallbackNowMs;
   const requestRefresh = useThrottledRefresh();
   const [threadUpdates, setThreadUpdates] = useState<
     Record<string, ThreadUpdate>
@@ -181,9 +185,11 @@ export function InboxThreadList({
                   />
                 </span>
                 <span className="shrink-0 text-[11px] tabular-nums text-[#78716c]">
-                  {formatDistanceToNow(new Date(t.lastMessageAt), {
-                    addSuffix: true,
-                  })}
+                  {formatDistance(
+                    new Date(t.lastMessageAt),
+                    new Date(renderNowMs),
+                    { addSuffix: true },
+                  )}
                 </span>
               </div>
               <div className="flex w-full items-center gap-2">

@@ -143,9 +143,15 @@ export default async function LeadDetailPage({
   // eslint-disable-next-line react-hooks/purity -- this async Server Component intentionally serializes one request instant to the client
   const requestNowMs = Date.now();
   if (lead.is_dnc_locked) {
-    const { prevId, nextId } = await getPropertyNeighbors(id, "prospect");
+    const lockedMode = lead.status === "prospect" ? "prospect" : "lead";
+    const { prevId, nextId } = await getPropertyNeighbors(id, lockedMode);
     return (
-      <LockedDncPropertyDetail lead={lead} prevId={prevId} nextId={nextId} />
+      <LockedDncPropertyDetail
+        lead={lead}
+        prevId={prevId}
+        nextId={nextId}
+        mode={lockedMode}
+      />
     );
   }
   const homeownerSmsChoice = selectBestSmsPhone(lead.homeowner);
@@ -480,6 +486,7 @@ export default async function LeadDetailPage({
         initialVisible={lead.needs_human_attention}
         reason={lead.last_ai_escalation_reason}
         escalatedAt={lead.last_ai_escalation_at}
+        nowMs={requestNowMs}
       />
 
       <LeadIdentityActions
@@ -626,6 +633,7 @@ export default async function LeadDetailPage({
                     initial={initialMessages}
                     contactId={lead.homeowner?.id ?? null}
                     propertyId={lead.id}
+                    nowMs={requestNowMs}
                   />
                 )}
                 <SmsEntryPointGate
@@ -640,6 +648,9 @@ export default async function LeadDetailPage({
                     homeownerPhone={homeownerSmsPhone}
                     replyToPhone={homeownerSmsPhone}
                     preferredFromNumber={preferredFromNumber}
+                    persistedMessageIds={initialMessages.map(
+                      (message) => message.id,
+                    )}
                   />
                 </SmsEntryPointGate>
               </div>
@@ -936,11 +947,16 @@ function LockedDncPropertyDetail({
   lead,
   prevId,
   nextId,
+  mode,
 }: {
   lead: DetailedLead;
   prevId: string | null;
   nextId: string | null;
+  mode: "prospect" | "lead";
 }) {
+  const collectionHref = mode === "prospect" ? "/properties" : "/leads";
+  const collectionLabel = mode === "prospect" ? "Prospects" : "Leads";
+  const recordLabel = mode === "prospect" ? "prospect" : "lead";
   const zillowHref = zillowUrl({
     address: lead.address,
     city: lead.city,
@@ -952,7 +968,7 @@ function LockedDncPropertyDetail({
       <PageHeader
         breadcrumb={[
           { label: "Workspace" },
-          { label: "Prospects", href: "/properties" },
+          { label: collectionLabel, href: collectionHref },
           { label: lead.address },
         ]}
         title={lead.address}
@@ -960,19 +976,24 @@ function LockedDncPropertyDetail({
           [lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"
         }
         actions={
-          <div className="flex items-center gap-1">
-            <Link href="/properties">
+          <div className="grid w-full grid-cols-2 gap-2 [&_button]:min-h-11 sm:flex sm:w-auto sm:items-center">
+            <Link href={collectionHref}>
               <Button
                 variant="outline"
                 size="sm"
-                aria-label="Back to prospects"
+                aria-label={`Back to ${collectionLabel.toLowerCase()}`}
               >
                 <ChevronLeft className="mr-1 h-4 w-4" />
-                Back to prospects
+                Back to {collectionLabel.toLowerCase()}
               </Button>
             </Link>
             {zillowHref ? (
-              <a href={zillowHref} target="_blank" rel="noopener noreferrer">
+              <a
+                href={zillowHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="View on Zillow"
+              >
                 <Button variant="outline" size="sm">
                   <ExternalLink className="mr-1 h-4 w-4" />
                   Zillow
@@ -984,7 +1005,8 @@ function LockedDncPropertyDetail({
                 <Button
                   variant="ghost"
                   size="icon"
-                  aria-label="Previous prospect"
+                  aria-label={`Previous ${recordLabel}`}
+                  className="min-w-11"
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
@@ -992,7 +1014,12 @@ function LockedDncPropertyDetail({
             ) : null}
             {nextId ? (
               <Link href={`/leads/${nextId}`}>
-                <Button variant="ghost" size="icon" aria-label="Next prospect">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Next ${recordLabel}`}
+                  className="min-w-11"
+                >
                   <ChevronRight className="h-4 w-4" />
                 </Button>
               </Link>

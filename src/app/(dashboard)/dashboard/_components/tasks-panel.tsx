@@ -35,7 +35,7 @@ const TYPE_LABELS: Record<string, string> = {
  *
  * Row linking depends on what the task is attached to (property is now
  * optional — appointment-type tasks may have neither):
- *   - property-linked → /messages?property_id=<id> (unchanged)
+ *   - property-linked → /leads/<id>, the actual lead record
  *   - contact-only (no property) → /messages?thread=<contactId>, same
  *     canonical thread param the cockpit itself reads/writes
  *     (canonicalizeThreadId resolves a raw contact id to its conversation)
@@ -141,7 +141,7 @@ export function TasksPanel(props: Props) {
 /** href for a task row, or null when there's nothing to link to (a fully
  *  unlinked personal block). */
 function taskHref(t: TaskRow): string | null {
-  if (t.property_id) return `/messages?property_id=${t.property_id}`;
+  if (t.property_id) return `/leads/${t.property_id}`;
   if (t.contact_id) return `/messages?thread=${t.contact_id}`;
   return null;
 }
@@ -205,6 +205,7 @@ function Section({
           const href = taskHref(t);
           const primary = taskPrimaryLabel(t);
           const isAppointment = t.type === "appointment";
+          const isDncLocked = t.is_dnc_locked;
           const rowContent = (
             <>
               <div className="text-foreground truncate text-sm font-bold">
@@ -224,7 +225,16 @@ function Section({
           );
 
           let actions: React.ReactNode;
-          if (!isAppointment) {
+          if (isDncLocked) {
+            actions = (
+              <span
+                className="text-muted-foreground inline-flex min-h-11 items-center text-xs font-bold tracking-wide uppercase"
+                data-testid={`task-dnc-read-only-${t.id}`}
+              >
+                Read-only · Do not contact
+              </span>
+            );
+          } else if (!isAppointment) {
             actions = <TaskActionsRow taskId={t.id} />;
           } else if (new Date(t.due_at).getTime() < nowMs) {
             actions = (
@@ -242,7 +252,9 @@ function Section({
           return (
             <li
               key={t.id}
-              className="py-2.5 first:pt-0 last:pb-0"
+              className={`py-2.5 first:pt-0 last:pb-0 ${
+                isDncLocked ? "text-muted-foreground opacity-70" : ""
+              }`}
               data-testid={`task-row-${t.id}`}
             >
               <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">

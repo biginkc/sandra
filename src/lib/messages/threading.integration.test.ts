@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import { resolveInboundThread } from "./threading";
@@ -8,15 +9,7 @@ import { resolveInboundThread } from "./threading";
 const supabase = createTestClient();
 
 async function getOrgId(): Promise<string> {
-  const { data, error } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  if (error || !data?.id) {
-    throw new Error(`org lookup failed: ${error?.message ?? "no org"}`);
-  }
-  return data.id;
+  return getCanonicalTestOrgId(supabase);
 }
 
 async function seedContact(phone: string): Promise<string> {

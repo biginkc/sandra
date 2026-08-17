@@ -19,11 +19,13 @@ export function QueueStatsBanner({
   loadFailed = false,
   lastSuccessfulAt = null,
   onRetry,
+  nowMs,
 }: {
   stats: QueueStats;
   loadFailed?: boolean;
   lastSuccessfulAt?: string | null;
   onRetry?: () => void;
+  nowMs: number;
 }) {
   if (loadFailed) {
     return (
@@ -71,8 +73,8 @@ export function QueueStatsBanner({
         {stats.sentOutToday} sent out today · {stats.failedToday} failed today
       </div>
       <div className="text-muted-foreground mt-1">
-        Next release: {formatNextRelease(stats.nextScheduledFor)} · drain ETA:{" "}
-        {formatDrainEta(stats.lastScheduledFor)}
+        Next release: {formatNextRelease(stats.nextScheduledFor, nowMs)} · drain
+        ETA: {formatDrainEta(stats.lastScheduledFor, nowMs)}
       </div>
     </div>
   );
@@ -97,11 +99,14 @@ function formatLastSuccessfulRefresh(iso: string | null): string {
  *  - <60s → "in <N>s"
  *  - else → "in <N>m"
  */
-export function formatNextRelease(iso: string | null): string {
+export function formatNextRelease(
+  iso: string | null,
+  nowMs = Date.now(),
+): string {
   if (iso === null) return "none queued";
   const target = Date.parse(iso);
   if (!Number.isFinite(target)) return "—";
-  const diffMs = target - Date.now();
+  const diffMs = target - nowMs;
   if (diffMs <= 0) return "now";
   const diffS = Math.round(diffMs / 1000);
   if (diffS < 60) return `in ${diffS}s`;
@@ -116,11 +121,14 @@ export function formatNextRelease(iso: string | null): string {
  *  - <1h → "<N>m"
  *  - else → "<H>h <M>m"
  */
-export function formatDrainEta(iso: string | null): string {
+export function formatDrainEta(
+  iso: string | null,
+  nowMs = Date.now(),
+): string {
   if (iso === null) return "—";
   const target = Date.parse(iso);
   if (!Number.isFinite(target)) return "—";
-  const diffMs = target - Date.now();
+  const diffMs = target - nowMs;
   if (diffMs < 60_000) return "<1m";
   const totalMinutes = Math.floor(diffMs / 60_000);
   if (totalMinutes < 60) return `${totalMinutes}m`;

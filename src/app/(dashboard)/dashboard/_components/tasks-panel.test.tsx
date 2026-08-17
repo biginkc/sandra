@@ -48,6 +48,7 @@ function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
     address: "123 Main St",
     city: "Kansas City",
     state: "MO",
+    is_dnc_locked: false,
     ...overrides,
   };
 }
@@ -185,7 +186,7 @@ describe("<TasksPanel />", () => {
     expect(screen.getByText(/Follow-up · overdue/)).toBeInTheDocument();
   });
 
-  it("each row links to the property's messages thread", () => {
+  it("each property-linked row opens the actual lead record", () => {
     const today = [makeRow({ id: "t1", property_id: "prop-abc" })];
     const { container } = render(
       <TasksPanel
@@ -199,9 +200,7 @@ describe("<TasksPanel />", () => {
       />,
     );
 
-    const link = container.querySelector(
-      "a[href='/messages?property_id=prop-abc']",
-    );
+    const link = container.querySelector("a[href='/leads/prop-abc']");
     expect(link).not.toBeNull();
   });
 
@@ -274,6 +273,42 @@ describe("<TasksPanel />", () => {
       "a[href='/messages?thread=contact-abc']",
     );
     expect(link).not.toBeNull();
+  });
+
+  it("keeps exact-contact DNC work visible on its truthful Messages route but exposes no mutation controls", () => {
+    const { container } = render(
+      <TasksPanel
+        status="success"
+        overdue={[]}
+        today={[
+          makeRow({
+            id: "locked-1",
+            type: "appointment",
+            property_id: null,
+            contact_id: "contact-locked",
+            address: null,
+            city: null,
+            state: null,
+            is_dnc_locked: true,
+          }),
+        ]}
+        upcoming={[]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+        nowMs={Date.now() + 60_000}
+      />,
+    );
+
+    expect(screen.getByTestId("task-dnc-read-only-locked-1")).toHaveTextContent(
+      "Read-only · Do not contact",
+    );
+    expect(screen.queryByTestId("stub-outcome-row-locked-1")).toBeNull();
+    expect(screen.queryByTestId("stub-upcoming-actions-locked-1")).toBeNull();
+    expect(screen.queryByTestId("task-done-locked-1")).toBeNull();
+    expect(screen.queryByTestId("task-snooze-locked-1")).toBeNull();
+    expect(
+      container.querySelector("a[href='/messages?thread=contact-locked']"),
+    ).not.toBeNull();
   });
 
   it("each row exposes Done and Snooze action buttons", () => {

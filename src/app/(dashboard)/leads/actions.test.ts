@@ -94,11 +94,76 @@ import {
   addPropertiesToListBulk,
   assignLeadsBulk,
   createLeadTaskAction,
+  getPropertyNeighbors,
   listOrgUsers,
   markMessagesReadForThread,
   updatePropertyStatus,
   updateLeadAssignee,
 } from "./actions";
+
+type NeighborFixture = {
+  id: string;
+  created_at: string;
+  status: string;
+  is_dnc_locked: boolean;
+  deleted_at: string | null;
+};
+
+function makeNeighborClient(fixtures: NeighborFixture[]) {
+  return {
+    from: vi.fn((table: string) => {
+      if (table !== "properties") throw new Error(`unexpected table ${table}`);
+      let rows = [...fixtures];
+      const builder = {
+        select: () => builder,
+        eq: (column: keyof NeighborFixture, value: unknown) => {
+          rows = rows.filter((row) => row[column] === value);
+          return builder;
+        },
+        neq: (column: keyof NeighborFixture, value: unknown) => {
+          rows = rows.filter((row) => row[column] !== value);
+          return builder;
+        },
+        is: (column: keyof NeighborFixture, value: unknown) => {
+          rows = rows.filter((row) => row[column] === value);
+          return builder;
+        },
+        gt: (column: keyof NeighborFixture, value: unknown) => {
+          rows = rows.filter((row) => String(row[column]) > String(value));
+          return builder;
+        },
+        lt: (column: keyof NeighborFixture, value: unknown) => {
+          rows = rows.filter((row) => String(row[column]) < String(value));
+          return builder;
+        },
+        order: (
+          column: keyof NeighborFixture,
+          { ascending }: { ascending: boolean },
+        ) => {
+          rows.sort((a, b) => {
+            const comparison = String(a[column]).localeCompare(
+              String(b[column]),
+            );
+            return ascending ? comparison : -comparison;
+          });
+          return builder;
+        },
+        limit: (count: number) => {
+          rows = rows.slice(0, count);
+          return builder;
+        },
+        single: () =>
+          Promise.resolve({
+            data: rows[0] ?? null,
+            error: rows[0] ? null : {},
+          }),
+        maybeSingle: () =>
+          Promise.resolve({ data: rows[0] ?? null, error: null }),
+      };
+      return builder;
+    }),
+  };
+}
 
 type StubResult<T> = {
   data: T | null;
@@ -181,6 +246,101 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+describe("getPropertyNeighbors historical collection", () => {
+  const base = {
+    is_dnc_locked: true,
+    deleted_at: null,
+  } as const;
+
+  it("keeps locked prospect history in Prospects and skips locked lead history", async () => {
+    createClient.mockResolvedValue(
+      makeNeighborClient([
+        {
+          ...base,
+          id: "current-prospect",
+          created_at: "2026-08-10T00:00:00.000Z",
+          status: "prospect",
+        },
+        {
+          ...base,
+          id: "nearer-newer-locked-lead",
+          created_at: "2026-08-11T00:00:00.000Z",
+          status: "interested",
+        },
+        {
+          ...base,
+          id: "newer-locked-prospect",
+          created_at: "2026-08-12T00:00:00.000Z",
+          status: "prospect",
+        },
+        {
+          ...base,
+          id: "nearer-older-locked-lead",
+          created_at: "2026-08-09T00:00:00.000Z",
+          status: "closed",
+        },
+        {
+          ...base,
+          id: "older-locked-prospect",
+          created_at: "2026-08-08T00:00:00.000Z",
+          status: "prospect",
+        },
+      ]),
+    );
+
+    await expect(
+      getPropertyNeighbors("current-prospect", "prospect"),
+    ).resolves.toEqual({
+      prevId: "newer-locked-prospect",
+      nextId: "older-locked-prospect",
+    });
+  });
+
+  it("keeps locked lead history in Leads and skips locked prospect history", async () => {
+    createClient.mockResolvedValue(
+      makeNeighborClient([
+        {
+          ...base,
+          id: "current-lead",
+          created_at: "2026-08-10T00:00:00.000Z",
+          status: "interested",
+        },
+        {
+          ...base,
+          id: "nearer-newer-locked-prospect",
+          created_at: "2026-08-11T00:00:00.000Z",
+          status: "prospect",
+        },
+        {
+          ...base,
+          id: "newer-locked-lead",
+          created_at: "2026-08-12T00:00:00.000Z",
+          status: "closed",
+        },
+        {
+          ...base,
+          id: "nearer-older-locked-prospect",
+          created_at: "2026-08-09T00:00:00.000Z",
+          status: "prospect",
+        },
+        {
+          ...base,
+          id: "older-locked-lead",
+          created_at: "2026-08-08T00:00:00.000Z",
+          status: "dead",
+        },
+      ]),
+    );
+
+    await expect(getPropertyNeighbors("current-lead", "lead")).resolves.toEqual(
+      {
+        prevId: "newer-locked-lead",
+        nextId: "older-locked-lead",
+      },
+    );
+  });
+});
+
 describe("lead assignment membership gate", () => {
   it("rejects a forged single-lead assignee before writing", async () => {
     const supabase = { from: vi.fn() };
@@ -219,6 +379,7 @@ describe("markMessagesReadForThread — permanent DNC", () => {
 
   function readThreadClient(propertyIds: Array<string | null>) {
     let call = 0;
+    const eqCalls: Array<[string, unknown]> = [];
     const from = vi.fn(() => {
       call += 1;
       const result = Promise.resolve({
@@ -233,10 +394,18 @@ describe("markMessagesReadForThread — permanent DNC", () => {
       for (const method of ["select", "eq", "not", "update", "is"]) {
         builder[method] = chain;
       }
+      builder.eq = (column: string, value: unknown) => {
+        eqCalls.push([column, value]);
+        return builder;
+      };
       builder.then = result.then.bind(result);
       return builder;
     });
-    return { from };
+    return {
+      from,
+      rpc: vi.fn().mockResolvedValue({ data: "org-1", error: null }),
+      eqCalls,
+    };
   }
 
   it("rejects a locked conversation before changing read state", async () => {
@@ -280,6 +449,27 @@ describe("markMessagesReadForThread — permanent DNC", () => {
     });
     expect(assertPropertyDncUnlocked).not.toHaveBeenCalled();
     expect(supabase.from).toHaveBeenCalledTimes(2);
+    expect(supabase.eqCalls.filter(([column]) => column === "org_id")).toEqual([
+      ["org_id", "org-1"],
+      ["org_id", "org-1"],
+    ]);
+  });
+
+  it("fails closed before any read-state mutation when tenant resolution is ambiguous", async () => {
+    const supabase = readThreadClient([null]);
+    supabase.rpc.mockResolvedValueOnce({
+      data: null,
+      error: { message: "SMS_CONVERSATION_ORG_AMBIGUOUS" },
+    });
+    createClient.mockResolvedValue(supabase);
+
+    const result = await markMessagesReadForThread(conversationId);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "MARK_READ_FAILED" },
+    });
+    expect(supabase.from).not.toHaveBeenCalled();
   });
 });
 

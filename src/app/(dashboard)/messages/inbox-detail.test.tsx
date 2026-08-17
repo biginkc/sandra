@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import { InboxDetail } from "./inbox-detail";
@@ -115,7 +116,9 @@ function makeMessage(
     id: overrides.id,
     body: overrides.body,
     direction: overrides.direction,
-    status: overrides.direction === "inbound" ? "received" : "sent",
+    status:
+      overrides.status ??
+      (overrides.direction === "inbound" ? "received" : "sent"),
     channel: "sms",
     contact_id: overrides.contact_id ?? "contact-1",
     property_id: overrides.property_id ?? "prop-1",
@@ -188,7 +191,10 @@ function expectSharedOutcomeControls({
   );
   expect(screen.getByTestId("dispo-not-interested")).toBeInTheDocument();
   expect(screen.getByTestId("dispo-follow-up")).toHaveTextContent("Follow up");
-  expect(screen.getByTestId("dispo-dnc")).toHaveTextContent("Do not call");
+  expect(screen.getByTestId("dispo-dnc-deferred")).toHaveTextContent(
+    "Permanent DNC unavailable here",
+  );
+  expect(screen.getByTestId("dispo-dnc-deferred")).toBeDisabled();
   expect(screen.getByTestId("dispo-needs-sequence")).toHaveTextContent(
     "Needs sequence",
   );
@@ -222,7 +228,7 @@ describe("<InboxDetail />", () => {
     vi.mocked(sendSmsFromLead).mockReset();
     vi.mocked(sendSmsFromLead).mockResolvedValue({
       ok: true,
-      data: { outcome: { status: "queued" } },
+      data: { outcome: { status: "queued", messageId: "queued-reply-1" } },
     } as Awaited<ReturnType<typeof sendSmsFromLead>>);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -406,7 +412,7 @@ describe("<InboxDetail />", () => {
       initialMessages: [],
     });
 
-    render(
+    const view = render(
       <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
@@ -427,6 +433,44 @@ describe("<InboxDetail />", () => {
       );
     });
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
+    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
+      "Queued · in Outbox",
+    );
+    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
+      "Thanks",
+    );
+    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
+      "Outbox controls delivery",
+    );
+    expect(screen.getByRole("button", { name: "Insert template" })).toHaveClass(
+      "min-h-11",
+    );
+
+    view.rerender(
+      <InboxDetail
+        data={{
+          ...data,
+          initialMessages: [
+            makeMessage({
+              id: "queued-reply-1",
+              body: "Thanks",
+              direction: "outbound",
+              status: "queued",
+              contact_id: "contact-reply-phone",
+              property_id: "prop-reply-phone",
+              conversation_id: data.conversationId,
+            }),
+          ],
+        }}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+    expect(screen.queryByTestId("inline-reply-queued-receipt")).toBeNull();
+    expect(screen.getAllByText("Thanks")).toHaveLength(1);
+    expect(screen.getByTestId("messages-thread-delivery-status")).toHaveTextContent(
+      "Queued · in Outbox",
+    );
   });
 
   it("does not claim success or clear the draft if queueOnly returns an impossible immediate send", async () => {
@@ -449,6 +493,65 @@ describe("<InboxDetail />", () => {
 
     await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
     expect(composer).toHaveValue("keep this draft");
+  });
+
+  it("explains a missing approved sender and preserves the reply draft", async () => {
+    const user = userEvent.setup();
+    vi.mocked(sendSmsFromLead).mockResolvedValueOnce({
+      ok: true,
+      data: {
+        outcome: {
+          status: "blocked_no_approved_sender",
+          reason: "No approved sender is available for this conversation.",
+        },
+      },
+    });
+    render(
+      <InboxDetail
+        data={makeData({ contactId: "contact-no-approved-sender" })}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    const composer = screen.getByLabelText("Reply to this lead");
+    await user.type(composer, "keep this draft too");
+    await user.click(screen.getByTestId("inline-reply-send"));
+
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    expect(toast.error).toHaveBeenCalledWith("No approved sender", {
+      description: "No approved sender is available for this conversation.",
+    });
+    expect(composer).toHaveValue("keep this draft too");
+  });
+
+  it("renders a persisted queued reply after reload instead of dropping it from the thread", () => {
+    render(
+      <InboxDetail
+        data={makeData({
+          contactId: "contact-persisted-queued",
+          propertyId: "prop-persisted-queued",
+          initialMessages: [
+            makeMessage({
+              id: "queued-after-reload",
+              contact_id: "contact-persisted-queued",
+              property_id: "prop-persisted-queued",
+              conversation_id: "conv-contact-persisted-queued",
+              direction: "outbound",
+              status: "queued",
+              body: "durable queued body",
+            }),
+          ],
+        })}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByText("durable queued body")).toBeInTheDocument();
+    expect(screen.getByTestId("messages-thread-delivery-status")).toHaveTextContent(
+      "Queued · in Outbox",
+    );
   });
 
   it("pauses Messages replies after a live same-thread insert until server detail refreshes", async () => {
@@ -639,8 +742,7 @@ describe("<InboxDetail />", () => {
     );
   });
 
-  it("immediately removes every mutable outreach control after permanent DNC succeeds", async () => {
-    const user = userEvent.setup();
+  it("defers permanent DNC to the confirmed compliance workflow instead of exposing a one-click Messages action", () => {
     const data = makeData({
       contactId: "contact-permanent-dnc",
       propertyId: "prop-permanent-dnc",
@@ -657,21 +759,16 @@ describe("<InboxDetail />", () => {
 
     expect(screen.getByTestId("assign-dropdown-trigger")).toBeInTheDocument();
     expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
-    await user.click(screen.getByTestId("dispo-dnc"));
-
-    expect(setOutreachDispoMock).toHaveBeenCalledWith(
-      "prop-permanent-dnc",
-      "dnc",
+    const deferred = screen.getByTestId("dispo-dnc-deferred");
+    expect(deferred).toBeDisabled();
+    expect(deferred).toHaveAttribute(
+      "title",
+      "Permanent DNC requires the deferred confirmed compliance workflow.",
     );
-    expect(
-      await screen.findByTestId("messages-permanent-dnc-lock"),
-    ).toBeInTheDocument();
-    expect(screen.queryByTestId("assign-dropdown-trigger")).toBeNull();
-    expect(screen.queryByTestId("dispo-wrong-number")).toBeNull();
-    expect(screen.queryByTestId("message-move-to-lead")).toBeNull();
-    expect(screen.queryByTestId("inline-reply")).toBeNull();
-    expect(screen.queryByTestId("inline-reply-restricted")).toBeNull();
-    expect(refreshCalls).toHaveLength(1);
+    expect(screen.queryByTestId("dispo-dnc")).toBeNull();
+    expect(setOutreachDispoMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId("assign-dropdown-trigger")).toBeInTheDocument();
+    expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
   });
 
   it("Move to Lead promotes then opens the lead page", async () => {
@@ -941,6 +1038,9 @@ describe("<InboxDetail />", () => {
     ).toHaveTextContent("not the permanent organization-wide DNC lock");
     expect(screen.getByTestId("inline-reply-restricted")).toBeInTheDocument();
     expect(screen.getByTestId("dispo-follow-up")).toBeInTheDocument();
+    expect(screen.getByTestId("dispo-dnc-deferred")).not.toHaveClass(
+      "bg-red-50",
+    );
     expect(
       screen.queryByTestId("messages-permanent-dnc-lock"),
     ).not.toBeInTheDocument();

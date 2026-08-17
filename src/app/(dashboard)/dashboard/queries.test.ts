@@ -14,15 +14,8 @@ vi.mock("@/lib/time/zoned", () => ({
 
 let queuedData: unknown[] | null = [];
 let queuedError: { message: string; code?: string } | null = null;
-// Set by the 42703-retry tests to hand back a *different* response per
-// `.from("tasks")` call (first select fails, legacy retry succeeds). null
-// (the default) preserves the single-response behavior every other test
-// relies on: every call resolves from queuedData/queuedError.
-let queuedResponses:
-  | Array<{ data: unknown[] | null; error: { message: string; code?: string } | null }>
-  | null = null;
 // Column-list string passed to each `.select(...)` call, in call order —
-// lets the retry tests assert the legacy select really dropped contact_id.
+// lets safety tests prove no reduced-column retry silently drops DNC state.
 let selectCalls: string[] = [];
 
 function makeBuilder(): Record<string, unknown> {
@@ -32,12 +25,8 @@ function makeBuilder(): Record<string, unknown> {
     return builder;
   };
   builder.eq = () => builder;
-  builder.order = () => {
-    if (queuedResponses && queuedResponses.length > 0) {
-      return Promise.resolve(queuedResponses.shift()!);
-    }
-    return Promise.resolve({ data: queuedData, error: queuedError });
-  };
+  builder.order = () =>
+    Promise.resolve({ data: queuedData, error: queuedError });
   return builder;
 }
 
@@ -62,7 +51,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   queuedData = [];
   queuedError = null;
-  queuedResponses = null;
   selectCalls = [];
   mocks.loadIntegrationPrefs.mockResolvedValue({
     slackEnabled: true,
@@ -92,6 +80,7 @@ describe("fetchMyTasks", () => {
           city: "KC",
           state: "MO",
           deleted_at: null,
+          is_dnc_locked: true,
         },
       },
       {
@@ -116,6 +105,7 @@ describe("fetchMyTasks", () => {
         related_property_id: null,
         contact_id: "contact-1",
         properties: null,
+        task_contact: { do_not_contact: false },
       },
     ];
 
@@ -123,8 +113,11 @@ describe("fetchMyTasks", () => {
     expectTaskLoadSuccess(result);
 
     expect(result.overdue.map((r) => r.id)).toEqual(["t-overdue"]);
+    expect(result.overdue[0].is_dnc_locked).toBe(true);
     expect(result.today.map((r) => r.id)).toEqual(["t-today"]);
+    expect(result.today[0].is_dnc_locked).toBe(false);
     expect(result.upcoming.map((r) => r.id)).toEqual(["t-upcoming"]);
+    expect(result.upcoming[0].is_dnc_locked).toBe(false);
     expect(result.timezone).toBe("America/Chicago");
   });
 
@@ -150,6 +143,7 @@ describe("fetchMyTasks", () => {
       address: null,
       city: null,
       state: null,
+      is_dnc_locked: false,
     });
   });
 
@@ -175,6 +169,89 @@ describe("fetchMyTasks", () => {
     expectTaskLoadSuccess(result);
     expect(result.today[0].property_id).toBeNull();
     expect(result.today[0].address).toBeNull();
+  });
+
+  it("preserves a property DNC lock even when its display fields are too malformed to link", async () => {
+    queuedData = [
+      {
+        id: "t-locked-malformed",
+        type: "appointment",
+        title: "Historical appointment",
+        due_at: "2026-05-09T15:00:00.000Z",
+        related_property_id: "prop-locked",
+        contact_id: null,
+        properties: {
+          address: null,
+          city: "KC",
+          state: "MO",
+          deleted_at: null,
+          is_dnc_locked: true,
+        },
+      },
+    ];
+
+    const result = await fetchMyTasks("user-1");
+    expectTaskLoadSuccess(result);
+    expect(result.today[0]).toMatchObject({
+      property_id: null,
+      address: null,
+      is_dnc_locked: true,
+    });
+  });
+
+  it("locks lifecycle controls for the exact task contact's permanent DNC", async () => {
+    queuedData = [
+      {
+        id: "t-contact-dnc",
+        type: "appointment",
+        title: "Contact-only appointment",
+        due_at: "2026-05-09T15:00:00.000Z",
+        related_property_id: null,
+        contact_id: "contact-dnc",
+        properties: null,
+        task_contact: { do_not_contact: true },
+      },
+    ];
+
+    const result = await fetchMyTasks("user-1");
+    expectTaskLoadSuccess(result);
+    expect(result.today[0]).toMatchObject({
+      property_id: null,
+      contact_id: "contact-dnc",
+      is_dnc_locked: true,
+    });
+    expect(selectCalls[0]).toContain(
+      "task_contact:contacts!tasks_contact_org_fkey(do_not_contact)",
+    );
+  });
+
+  it("fails closed when an expected property or contact safety join is missing", async () => {
+    queuedData = [
+      {
+        id: "t-missing-property-join",
+        type: "follow_up",
+        title: "Missing property relation",
+        due_at: "2026-05-09T15:00:00.000Z",
+        related_property_id: "prop-missing",
+        contact_id: null,
+        properties: null,
+        task_contact: null,
+      },
+      {
+        id: "t-missing-contact-join",
+        type: "appointment",
+        title: "Missing contact relation",
+        due_at: "2026-05-09T16:00:00.000Z",
+        related_property_id: null,
+        contact_id: "contact-missing",
+        properties: null,
+        task_contact: null,
+      },
+    ];
+
+    const result = await fetchMyTasks("user-1");
+    expectTaskLoadSuccess(result);
+    expect(result.today.map((row) => row.is_dnc_locked)).toEqual([true, true]);
   });
 
   it("returns an explicit failure on a query error instead of empty buckets", async () => {
@@ -229,51 +306,41 @@ describe("fetchMyTasks", () => {
     expect(result.timezone).toBe("America/Chicago");
   });
 
-  it("retries with the legacy column list on 42703 (undefined column, pre-migration schema) and shows tasks instead of the false all-caught-up state", async () => {
-    queuedResponses = [
-      {
-        data: null,
-        error: { message: 'column tasks.contact_id does not exist', code: "42703" },
-      },
-      {
-        data: [
-          {
-            id: "t-legacy",
-            type: "follow_up",
-            title: "Pre-migration row",
-            due_at: "2026-05-09T15:00:00.000Z", // within [dayStart, dayEnd)
-            related_property_id: "prop-1",
-            properties: {
-              address: "1 Main St",
-              city: "KC",
-              state: "MO",
-              deleted_at: null,
-            },
-          },
-        ],
-        error: null,
-      },
-    ];
+  it("fails closed on a pre-schema 42703 instead of retrying without DNC safety fields", async () => {
+    queuedData = null;
+    queuedError = {
+      message: "column tasks.contact_id does not exist",
+      code: "42703",
+    };
 
     const result = await fetchMyTasks("user-1");
-    expectTaskLoadSuccess(result);
 
-    expect(selectCalls).toHaveLength(2);
-    expect(selectCalls[1]).not.toContain("contact_id");
-
-    expect(result.today).toHaveLength(1);
-    expect(result.today[0]).toMatchObject({
-      id: "t-legacy",
-      contact_id: null,
-      address: "1 Main St",
-      city: "KC",
-      state: "MO",
+    expect(selectCalls).toHaveLength(1);
+    expect(result).toEqual({
+      status: "failure",
+      timezone: "America/Chicago",
     });
   });
 
   it("does not retry and returns failure when the first select fails with a non-42703 error", async () => {
     queuedData = null;
     queuedError = { message: "connection reset", code: "57P01" };
+
+    const result = await fetchMyTasks("user-1");
+
+    expect(selectCalls).toHaveLength(1);
+    expect(result).toEqual({
+      status: "failure",
+      timezone: "America/Chicago",
+    });
+  });
+
+  it("fails closed instead of dropping contact safety when the relationship cannot resolve", async () => {
+    queuedData = null;
+    queuedError = {
+      message: "Could not find a relationship for tasks_contact_org_fkey",
+      code: "PGRST200",
+    };
 
     const result = await fetchMyTasks("user-1");
 

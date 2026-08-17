@@ -1,6 +1,6 @@
 "use client";
 
-import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
+import { formatDistance } from "date-fns/formatDistance";
 import { MessageSquareTextIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
@@ -29,6 +29,7 @@ import { UnknownThreadDialog } from "./unknown-thread-dialog";
 type Props = {
   senders: UnknownSender[];
   showRestore: boolean;
+  nowMs?: number;
 };
 
 /**
@@ -37,7 +38,13 @@ type Props = {
  * preview. Action menu per row: Match, Create, Dismiss (or Restore on
  * the Dismissed sub-tab).
  */
-export function UnknownSenderList({ senders, showRestore }: Props) {
+export function UnknownSenderList({
+  senders,
+  showRestore,
+  nowMs,
+}: Props) {
+  const [fallbackNowMs] = useState(Date.now);
+  const renderNowMs = nowMs ?? fallbackNowMs;
   if (senders.length === 0) {
     return (
       <div
@@ -63,6 +70,7 @@ export function UnknownSenderList({ senders, showRestore }: Props) {
           key={s.fromAddress}
           sender={s}
           showRestore={showRestore}
+          nowMs={renderNowMs}
         />
       ))}
     </div>
@@ -72,9 +80,11 @@ export function UnknownSenderList({ senders, showRestore }: Props) {
 function UnknownRow({
   sender,
   showRestore,
+  nowMs,
 }: {
   sender: UnknownSender;
   showRestore: boolean;
+  nowMs: number;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -114,7 +124,7 @@ function UnknownRow({
 
   return (
     <div
-      className="flex items-start justify-between gap-3 p-3"
+      className="flex flex-col items-stretch justify-between gap-3 p-3 sm:flex-row sm:items-start"
       data-testid={`unknown-row-${sender.fromAddress}`}
     >
       <div className="min-w-0 flex-1">
@@ -128,18 +138,21 @@ function UnknownRow({
             </Badge>
           ) : null}
           <span className="text-muted-foreground ml-auto text-[11px]">
-            {formatDistanceToNow(new Date(sender.latestAt), { addSuffix: true })}
+            {formatDistance(new Date(sender.latestAt), new Date(nowMs), {
+              addSuffix: true,
+            })}
           </span>
         </div>
         <div className="text-muted-foreground line-clamp-2 mt-1 text-xs">
           {sender.latestBody}
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-1">
+      <div className="flex shrink-0 items-center gap-2">
         {!showRestore && (
           <Button
             variant="ghost"
             size="sm"
+            className="min-h-11 min-w-11"
             onClick={() => setThreadOpen(true)}
             disabled={pending}
             aria-label="View full thread"
@@ -153,6 +166,7 @@ function UnknownRow({
           <Button
             variant="outline"
             size="sm"
+            className="min-h-11"
             onClick={restore}
             disabled={pending}
             data-testid={`unknown-restore-${sender.fromAddress}`}
@@ -166,6 +180,7 @@ function UnknownRow({
                 <Button
                   variant="outline"
                   size="sm"
+                  className="min-h-11"
                   disabled={pending}
                   data-testid={`unknown-actions-${sender.fromAddress}`}
                 >
@@ -175,18 +190,21 @@ function UnknownRow({
             />
             <DropdownMenuContent align="end">
               <DropdownMenuItem
+                className="min-h-11"
                 onClick={() => setMatchOpen(true)}
                 data-testid={`unknown-match-${sender.fromAddress}`}
               >
                 Merge with existing contact…
               </DropdownMenuItem>
               <DropdownMenuItem
+                className="min-h-11"
                 onClick={() => setMergePropOpen(true)}
                 data-testid={`unknown-merge-property-${sender.fromAddress}`}
               >
                 Merge with existing property…
               </DropdownMenuItem>
               <DropdownMenuItem
+                className="min-h-11"
                 onClick={() => setCreateOpen(true)}
                 data-testid={`unknown-create-${sender.fromAddress}`}
               >
@@ -194,6 +212,7 @@ function UnknownRow({
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
+                className="min-h-11"
                 onClick={dismiss}
                 data-testid={`unknown-dismiss-${sender.fromAddress}`}
               >
@@ -224,6 +243,7 @@ function UnknownRow({
         open={threadOpen}
         onOpenChange={setThreadOpen}
         fromAddress={sender.fromAddress}
+        nowMs={nowMs}
       />
     </div>
   );

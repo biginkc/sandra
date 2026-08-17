@@ -6,7 +6,10 @@ import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { cassBulkWorkflow } from "@/workflows/cass-bulk";
-import { parseThreadId } from "@/lib/messages/threading";
+import {
+  parseThreadId,
+  resolveSmsConversationOrg,
+} from "@/lib/messages/threading";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
@@ -1953,11 +1956,25 @@ export async function markMessagesReadForThread(
     }
 
     const supabase = await createClient();
+    const conversationOrgId = await resolveSmsConversationOrg(
+      supabase,
+      parsed.conversationId,
+    );
+    if (!conversationOrgId) {
+      return {
+        ok: false,
+        error: {
+          code: "MARK_READ_FAILED",
+          message: "Conversation was not found in an active organization.",
+        },
+      };
+    }
     const { data: threadProperties, error: threadLookupError } = await supabase
       .from("messages")
       .select("property_id")
       .eq("channel", "sms")
       .eq("conversation_id", parsed.conversationId)
+      .eq("org_id", conversationOrgId)
       .not("property_id", "is", null);
     if (threadLookupError) {
       return {
@@ -1982,7 +1999,8 @@ export async function markMessagesReadForThread(
       .eq("channel", "sms")
       .eq("direction", "inbound")
       .is("read_at", null)
-      .eq("conversation_id", parsed.conversationId);
+      .eq("conversation_id", parsed.conversationId)
+      .eq("org_id", conversationOrgId);
     if (error) {
       return {
         ok: false,
@@ -1995,7 +2013,13 @@ export async function markMessagesReadForThread(
       tags: { surface: "mark_messages_read_thread" },
       extra: { threadId },
     });
-    return errFromUnknown(e, "MARK_READ_FAILED");
+    return {
+      ok: false,
+      error: {
+        code: "MARK_READ_FAILED",
+        message: e instanceof Error ? e.message : "Unable to mark thread read.",
+      },
+    };
   }
 }
 
@@ -2168,11 +2192,14 @@ export async function getPropertyNeighbors(
       .is("deleted_at", null)
       .lt("created_at", current.created_at);
   if (mode === "prospect") {
-    previousQuery = previousQuery.or("status.eq.prospect,is_dnc_locked.eq.true");
-    nextQuery = nextQuery.or("status.eq.prospect,is_dnc_locked.eq.true");
+    // Permanent DNC preserves the record's historical pipeline stage; it
+    // does not move every locked record into Prospects. Keep neighbor
+    // navigation inside the same historical collection as the current row.
+    previousQuery = previousQuery.eq("status", "prospect");
+    nextQuery = nextQuery.eq("status", "prospect");
   } else {
-    previousQuery = previousQuery.neq("status", "prospect").eq("is_dnc_locked", false);
-    nextQuery = nextQuery.neq("status", "prospect").eq("is_dnc_locked", false);
+    previousQuery = previousQuery.neq("status", "prospect");
+    nextQuery = nextQuery.neq("status", "prospect");
   }
 
   const [{ data: prevData }, { data: nextData }] = await Promise.all([

@@ -51,6 +51,7 @@ type Props = {
   currentUserId: string | null;
   /** Narrow list/detail navigation. The parent owns focus restoration. */
   onBackToList?: () => void;
+  nowMs?: number;
 };
 
 const DISPO_LABELS: Record<string, string> = {
@@ -98,7 +99,6 @@ function DispoBar({
   initialDispo,
   propertyStatus,
   currentUserId,
-  onPermanentDnc,
 }: {
   propertyId: string;
   contactId: string;
@@ -106,7 +106,6 @@ function DispoBar({
   initialDispo: string | null;
   propertyStatus: string | null;
   currentUserId: string | null;
-  onPermanentDnc: () => void;
 }) {
   const router = useRouter();
   const [dispo, setDispo] = useState<string | null>(initialDispo);
@@ -119,9 +118,6 @@ function DispoBar({
       const result = await setOutreachDispo(propertyId, newDispo);
       if (result.ok) {
         setDispo(newDispo);
-        if (newDispo === "dnc") {
-          onPermanentDnc();
-        }
         if (newDispo === "wrong_number") {
           toast.info(
             "Marked wrong number — consider skip-tracing a new number.",
@@ -149,7 +145,7 @@ function DispoBar({
     });
   }
 
-  const isDnc = dispo === "dnc" || dispo === "opted_out";
+  const isPermanentDnc = dispo === "dnc";
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -188,15 +184,16 @@ function DispoBar({
       </button>
 
       <button
-        onClick={() => apply("dnc")}
-        disabled={pending}
-        className={outcomeButtonClass(
-          isDnc,
-          "bg-red-50 border-red-200 text-red-700",
+        type="button"
+        disabled
+        className={cn(
+          outcomeButtonClass(false),
+          "cursor-not-allowed opacity-60",
         )}
-        data-testid="dispo-dnc"
+        data-testid="dispo-dnc-deferred"
+        title="Permanent DNC requires the deferred confirmed compliance workflow."
       >
-        Do not call
+        Permanent DNC unavailable here
       </button>
 
       <button
@@ -267,7 +264,7 @@ function DispoBar({
         <span
           className={cn(
             "ml-1 text-[10px] font-medium",
-            isDnc ? "text-destructive" : "text-[#78716c]",
+            isPermanentDnc ? "text-destructive" : "text-[#78716c]",
           )}
         >
           {DISPO_LABELS[dispo] ?? dispo}
@@ -293,15 +290,16 @@ export function InboxDetail({
   assigneeEmails,
   currentUserId,
   onBackToList,
+  nowMs,
 }: Props) {
+  const [fallbackNowMs] = useState(Date.now);
+  const renderNowMs = nowMs ?? fallbackNowMs;
   const router = useRouter();
   const searchParams = useSearchParams();
   const [openLeadPending, startOpenLeadTransition] = useTransition();
   const [resolveOpen, setResolveOpen] = useState(false);
   const [replyRefreshGate, setReplyRefreshGate] =
     useState<ReplyRefreshGate | null>(null);
-  const [optimisticallyLockedThreadId, setOptimisticallyLockedThreadId] =
-    useState<string | null>(null);
 
   const closeDetail = useCallback(() => {
     if (onBackToList) {
@@ -314,12 +312,6 @@ export function InboxDetail({
     router.replace(qs ? `/messages?${qs}` : "/messages", { scroll: false });
     router.refresh();
   }, [onBackToList, router, searchParams]);
-
-  const handlePermanentDnc = useCallback(() => {
-    if (!data) return;
-    setOptimisticallyLockedThreadId(data.threadId);
-    router.refresh();
-  }, [data, router]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -414,8 +406,7 @@ export function InboxDetail({
   });
   const isSmsRestricted =
     data.contactDoNotContact || smsPresentation.smsRestricted;
-  const isPermanentlyLocked =
-    data.isDncLocked || optimisticallyLockedThreadId === data.threadId;
+  const isPermanentlyLocked = data.isDncLocked;
   const canCall =
     Boolean(phoneHref) &&
     !isPermanentlyLocked &&
@@ -659,6 +650,7 @@ export function InboxDetail({
           conversationId={data.conversationId}
           propertyId={data.propertyId}
           onLiveMessage={handleLiveMessage}
+          nowMs={renderNowMs}
         />
       </div>
       {data.propertyId && !isPermanentlyLocked ? (
@@ -673,7 +665,6 @@ export function InboxDetail({
                 initialDispo={data.outreachDispo}
                 propertyStatus={data.propertyStatus}
                 currentUserId={currentUserId}
-                onPermanentDnc={handlePermanentDnc}
               />
             </div>
           ) : null}
@@ -703,6 +694,9 @@ export function InboxDetail({
                 homeownerPhone={data.replyToPhone}
                 replyToPhone={data.replyToPhone}
                 phoneUnavailableMessage="This thread number is not saved on the homeowner contact — save or resolve it before replying."
+                persistedMessageIds={data.initialMessages.map(
+                  (message) => message.id,
+                )}
               />
             ) : (
               <div

@@ -82,7 +82,9 @@ describe("updatePropertyStatus (integration)", () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error.code).toBe("STATUS_CONFLICT");
+      // A missing row cannot be proven unlocked, so the permanent-DNC
+      // preflight correctly fails closed before compare-and-set reconciliation.
+      expect(result.error.code).toBe("PROPERTY_LOCK_CHECK_FAILED");
     }
   });
 

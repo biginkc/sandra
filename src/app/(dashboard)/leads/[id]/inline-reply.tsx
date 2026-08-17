@@ -23,7 +23,11 @@ type Props = {
   replyToPhone?: string | null;
   preferredFromNumber?: string | null;
   phoneUnavailableMessage?: string;
+  /** Persisted thread rows retire the temporary receipt after refresh. */
+  persistedMessageIds?: readonly string[];
 };
+
+type QueuedReceipt = { messageId: string; body: string };
 
 /**
  * Inline reply box under the SMS thread. Queues via the existing
@@ -39,9 +43,11 @@ export function InlineReply({
   replyToPhone = null,
   preferredFromNumber = null,
   phoneUnavailableMessage,
+  persistedMessageIds = [],
 }: Props) {
   const router = useRouter();
   const [body, setBody] = useState("");
+  const [queuedReceipt, setQueuedReceipt] = useState<QueuedReceipt | null>(null);
   const [pending, startTransition] = useTransition();
   // Tracks the most recent template selection so a slower in-flight
   // `loadLeadVars` for an earlier click can't overwrite the body the user
@@ -65,9 +71,16 @@ export function InlineReply({
 
   const send = () => {
     if (!canSend) return;
+    const submittedBody = body;
     startTransition(async () => {
       const result = await callAction(
-        sendSmsFromLead(propertyId, body, fromNumber, true, effectiveToPhone),
+        sendSmsFromLead(
+          propertyId,
+          submittedBody,
+          fromNumber,
+          true,
+          effectiveToPhone,
+        ),
         { fallbackMessage: "SMS queue failed" },
       );
       if (!result.ok) return;
@@ -85,6 +98,10 @@ export function InlineReply({
         case "queued":
           toast.success("Added to Outbox", {
             description: `Queued for ${effectiveToPhone}. Review delivery in Outbox.`,
+          });
+          setQueuedReceipt({
+            messageId: outcome.messageId,
+            body: submittedBody,
           });
           setBody("");
           router.refresh();
@@ -106,6 +123,9 @@ export function InlineReply({
           break;
         case "blocked_provider_off":
           toast.error("Messaging disabled", { description: outcome.reason });
+          break;
+        case "blocked_no_approved_sender":
+          toast.error("No approved sender", { description: outcome.reason });
           break;
         case "provider_failed":
           toast.error("Provider error", { description: outcome.error });
@@ -169,6 +189,22 @@ export function InlineReply({
 
   return (
     <div className="flex flex-col gap-2" data-testid="inline-reply">
+      {queuedReceipt &&
+      !persistedMessageIds.includes(queuedReceipt.messageId) ? (
+        <div
+          className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950"
+          role="status"
+          data-testid="inline-reply-queued-receipt"
+        >
+          <p className="font-bold">Queued · in Outbox</p>
+          <p className="mt-1 whitespace-pre-wrap break-words text-xs text-blue-800">
+            {queuedReceipt.body}
+          </p>
+          <p className="mt-1 text-[11px] text-blue-700">
+            Outbox controls delivery.
+          </p>
+        </div>
+      ) : null}
       <div className="bg-[#fdfcfb] border border-[#e5e1df] rounded-xl p-4 transition-colors focus-within:border-[#111827]">
         <textarea
           value={body}

@@ -23,11 +23,15 @@ export function AiAttentionBanner({
   initialVisible,
   reason,
   escalatedAt,
+  nowMs,
 }: {
   propertyId: string;
   initialVisible: boolean;
   reason?: string | null;
   escalatedAt?: string | null;
+  /** Request-captured instant from the server page. Keeping this stable
+   *  prevents relative-time copy changing between SSR and hydration. */
+  nowMs: number;
 }) {
   // `initialVisible` is the source of truth (re-fetched on each
   // server-rendered page load); `dismissed` carries the optimistic
@@ -61,7 +65,7 @@ export function AiAttentionBanner({
   };
 
   const friendly = parseEscalationReason(reason)?.longLabel ?? null;
-  const when = escalatedAt ? formatRelative(escalatedAt) : null;
+  const when = escalatedAt ? formatRelative(escalatedAt, nowMs) : null;
 
   return (
     <div
@@ -113,8 +117,8 @@ export function AiAttentionBanner({
 
 /** "5 minutes ago" / "2 hours ago" — small inline helper to avoid pulling
  *  date-fns into this client component just for one string. */
-function formatRelative(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
+function formatRelative(iso: string, nowMs: number): string {
+  const ms = nowMs - new Date(iso).getTime();
   if (ms < 60_000) return "just now";
   const mins = Math.round(ms / 60_000);
   if (mins < 60) return `${mins}m ago`;

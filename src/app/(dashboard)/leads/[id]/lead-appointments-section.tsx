@@ -79,7 +79,7 @@ export function LeadAppointmentsSection({
         return (
           <li
             key={appt.id}
-            className="flex items-center justify-between gap-3 px-3 py-2.5"
+            className="flex flex-col items-stretch gap-3 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
             data-testid={`lead-appointment-${appt.id}`}
           >
             <div className="min-w-0 flex-1">

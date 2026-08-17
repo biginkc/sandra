@@ -12,6 +12,9 @@ vi.mock("@/components/appointments/appointment-outcome-row", () => ({
   AppointmentOutcomeRow: ({ taskId }: { taskId: string }) => (
     <div data-testid={`stub-outcome-row-${taskId}`}>outcome row</div>
   ),
+  AppointmentUpcomingActions: ({ taskId }: { taskId: string }) => (
+    <div data-testid={`stub-upcoming-actions-${taskId}`}>upcoming actions</div>
+  ),
 }));
 
 const CHI = "America/Chicago";
@@ -250,5 +253,37 @@ describe("<AgendaList />", () => {
     expect(
       screen.queryByTestId("stub-outcome-row-future"),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("stub-upcoming-actions-future"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("stub-upcoming-actions-past-due"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("gives linked appointment rows a 44px minimum tap target", () => {
+    const days = buildWeek(new Date("2026-08-19T12:00:00Z"), CHI);
+    render(
+      <AgendaList
+        days={days}
+        appointments={[
+          makeAppt({
+            id: "linked",
+            property_id: "prop-1",
+            address: "123 Main St",
+            due_at: days[0].startUtc,
+          }),
+        ]}
+        timezone={CHI}
+        viewerRole="owner"
+        assignees={{}}
+        currentUserId="viewer-1"
+        nowMs={new Date(days[0].startUtc).getTime() - 1}
+      />,
+    );
+
+    expect(screen.getByTestId("calendar-appointment-link-linked")).toHaveClass(
+      "min-h-11",
+    );
   });
 });

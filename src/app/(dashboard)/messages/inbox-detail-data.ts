@@ -8,6 +8,7 @@ import {
   computeConsentState,
   type ConsentState,
 } from "@/lib/messaging/consent";
+import { resolveSmsConversationOrg } from "@/lib/messages/threading";
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import type { Database } from "@/lib/supabase/types";
 
@@ -62,18 +63,30 @@ export async function fetchInboxDetail(
   supabase: SupabaseClient<Database>,
   conversationId: string,
 ): Promise<InboxDetail | null> {
+  const conversationOrgId = await resolveSmsConversationOrg(
+    supabase,
+    conversationId,
+  );
+  if (!conversationOrgId) return null;
+
   const { data: newestMessages, error } = await supabase
     .from("messages")
     .select("*")
     .eq("channel", "sms")
     .eq("conversation_id", conversationId)
-    .not("status", "in", "(queued,paused)")
+    .eq("org_id", conversationOrgId)
     .order("created_at", { ascending: false })
     .limit(100);
   if (error) {
     throw new Error(`fetchInboxDetail messages: ${error.message}`);
   }
   if (!newestMessages || newestMessages.length === 0) return null;
+
+  if (newestMessages.some((message) => message.org_id !== conversationOrgId)) {
+    throw new Error(
+      "fetchInboxDetail isolation: conversation spans multiple organizations",
+    );
+  }
 
   const messages = [...newestMessages].reverse();
 
@@ -93,6 +106,7 @@ export async function fetchInboxDetail(
         "org_id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out",
       )
       .eq("id", contactId)
+      .eq("org_id", conversationOrgId)
       .maybeSingle(),
     propertyId
       ? supabase
@@ -101,6 +115,7 @@ export async function fetchInboxDetail(
             "address, city, state, homeowner_contact_id, agent_contact_id, assigned_user_id, status, outreach_dispo, is_dnc_locked",
           )
           .eq("id", propertyId)
+          .eq("org_id", conversationOrgId)
           .maybeSingle()
       : Promise.resolve({ data: null, error: null }),
   ]);
@@ -124,6 +139,7 @@ export async function fetchInboxDetail(
       .from("consent_events")
       .select("event_type, occurred_at")
       .eq("contact_id", contactId)
+      .eq("org_id", conversationOrgId)
       .eq("channel", "sms")
       .order("occurred_at", { ascending: false })
       .limit(20);
@@ -131,7 +147,11 @@ export async function fetchInboxDetail(
       ? null
       : computeConsentState(consentResult.data ?? []);
     phoneSuppressed = parties.customerPhone
-      ? await isSmsPhoneSuppressed(supabase, parties.customerPhone, c.org_id)
+      ? await isSmsPhoneSuppressed(
+          supabase,
+          parties.customerPhone,
+          conversationOrgId,
+        )
           .then((value) => value)
           .catch(() => null)
       : false;

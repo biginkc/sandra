@@ -57,9 +57,7 @@ vi.mock("sonner", () => ({
   },
 }));
 
-// eslint-disable-next-line import/first
 import { QueuePanel, type QueuedRow } from "./queue-panel";
-// eslint-disable-next-line import/first
 import { toast } from "sonner";
 
 function makeRow(n: number): QueuedRow {
@@ -91,6 +89,7 @@ beforeEach(() => {
   intersect = null;
   observe.mockClear();
   disconnect.mockClear();
+  localStorage.clear();
   vi.stubGlobal(
     "IntersectionObserver",
     class {
@@ -387,5 +386,156 @@ describe("<QueuePanel /> infinite scroll", () => {
     });
     expect(screen.queryByText("1 Main St")).not.toBeInTheDocument();
     expect(toast.error).not.toHaveBeenCalledWith("blocked_terminal_dispo");
+  });
+
+  it("keeps the configured cadence after a row is consumed instead of restarting immediately", async () => {
+    vi.useFakeTimers();
+    releaseMessage.mockResolvedValue({
+      ok: true,
+      data: { outcome: { status: "sent" } },
+    });
+    const view = render(
+      <QueuePanel initial={[makeRow(1), makeRow(2)]} initialHasMore={false} />,
+    );
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Auto-send" }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(releaseMessage).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(14_000);
+        await Promise.resolve();
+      });
+      expect(releaseMessage).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(1_000);
+        await Promise.resolve();
+      });
+      expect(releaseMessage).toHaveBeenCalledTimes(2);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("restores a saved cadence without overwriting it with the default on mount", async () => {
+    localStorage.setItem("sandra.queue.cadence", "30");
+    render(<QueuePanel initial={[makeRow(1)]} initialHasMore={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Cadence")).toHaveValue(30);
+    });
+    expect(localStorage.getItem("sandra.queue.cadence")).toBe("30");
+  });
+
+  it("stops auto-send on the next tick when the queue becomes empty", async () => {
+    vi.useFakeTimers();
+    releaseMessage.mockResolvedValue({
+      ok: true,
+      data: { outcome: { status: "sent" } },
+    });
+    const view = render(
+      <QueuePanel initial={[makeRow(1)]} initialHasMore={false} />,
+    );
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Auto-send" }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(releaseMessage).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(15_000);
+        await Promise.resolve();
+      });
+      expect(releaseMessage).toHaveBeenCalledTimes(1);
+      expect(toast.info).toHaveBeenCalledWith("Queue empty — auto-send stopped");
+      expect(screen.getByRole("button", { name: "Auto-send" })).toBeDisabled();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["blocked_provider_off", { status: "blocked_provider_off", reason: "off" }],
+    ["blocked_no_approved_sender", { status: "blocked_no_approved_sender", reason: "none" }],
+    ["blocked_no_phone", { status: "blocked_no_phone", reason: "none" }],
+    ["blocked_landline", { status: "blocked_landline", reason: "landline" }],
+    ["blocked_terminal_dispo", { status: "blocked_terminal_dispo", reason: "terminal" }],
+    ["blocked_automated_suppressed", { status: "blocked_automated_suppressed", reason: "suppressed" }],
+    ["blocked_fresh_state_unavailable", { status: "blocked_fresh_state_unavailable", error: "unavailable" }],
+    ["blocked_no_consent", { status: "blocked_no_consent", reason: "no consent" }],
+    ["blocked_quiet_hours", { status: "blocked_quiet_hours", reason: "quiet" }],
+    ["blocked_not_due", { status: "blocked_not_due", retryAt: "2026-08-17T13:00:00Z" }],
+    ["blocked_campaign_paused", { status: "blocked_campaign_paused", reason: "paused" }],
+    ["provider_failed", { status: "provider_failed", error: "provider" }],
+    ["provider_deferred", { status: "provider_deferred", error: "retry", attempt: 1, retryAt: "2026-08-17T13:00:00Z" }],
+    ["contact_not_found", { status: "contact_not_found" }],
+    ["property_not_found", { status: "property_not_found" }],
+    ["db_error", { status: "db_error", error: "database" }],
+  ])("stops auto-send after %s", async (_status, outcome) => {
+    vi.useFakeTimers();
+    releaseMessage.mockResolvedValue({ ok: true, data: { outcome } });
+    const view = render(
+      <QueuePanel initial={[makeRow(1), makeRow(2)]} initialHasMore={false} />,
+    );
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Auto-send" }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(releaseMessage).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+        await Promise.resolve();
+      });
+      expect(releaseMessage).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("button", { name: "Auto-send" })).toBeVisible();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("never overlaps auto-send releases when the provider response is slow", async () => {
+    vi.useFakeTimers();
+    let resolveRelease!: (value: unknown) => void;
+    releaseMessage.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRelease = resolve;
+      }),
+    );
+    const view = render(
+      <QueuePanel initial={[makeRow(1), makeRow(2)]} initialHasMore={false} />,
+    );
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Auto-send" }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(releaseMessage).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+        await Promise.resolve();
+      });
+      expect(releaseMessage).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        resolveRelease({
+          ok: true,
+          data: { outcome: { status: "sent" } },
+        });
+        await Promise.resolve();
+      });
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
   });
 });
