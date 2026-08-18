@@ -23,6 +23,12 @@ export type JitterAuthResult =
 
 export type IdempotencyResult =
   | { state: "fresh"; idempotencyKey: string }
+  // A prior attempt inserted the idempotency record but crashed (or is
+  // still in flight) before the mutation committed and flipped it to
+  // 'processed'. Routes must treat this exactly like 'fresh' — re-run the
+  // mutation. All jitter mutations this feeds are themselves idempotent
+  // (org-scoped CAS/fencing RPCs, org-scoped upserts), so replaying is safe.
+  | { state: "retry"; idempotencyKey: string }
   | { state: "cached"; cachedPayload: unknown };
 
 function unauthorized(): JitterAuthResult {
@@ -107,6 +113,14 @@ export async function checkAndRecordIdempotency(
     throw new Error("checkAndRecordIdempotency requires a non-empty key");
   }
 
+  // Crash-safe idempotency: insert the record BEFORE the mutation runs, but
+  // with processing_status='pending' (the column's own default) rather than
+  // a cached response. A crash between this insert and the mutation
+  // committing leaves the record 'pending' forever — on replay we detect
+  // that below and tell the caller to re-run the mutation ('retry') instead
+  // of replaying a request payload as a fake cached success.
+  // recordIdempotentResponse() is what flips this row to 'processed' with
+  // the real response payload, once the mutation has actually committed.
   const { error } = await (serviceClient as any).from("webhook_events").insert({
     org_id: args.orgId,
     provider: "jitter",
@@ -114,6 +128,7 @@ export async function checkAndRecordIdempotency(
     external_id: idempotencyKey,
     signature_verified: true,
     payload: args.payload as Json,
+    processing_status: "pending",
   });
 
   if (!error) return { state: "fresh", idempotencyKey };
@@ -122,14 +137,22 @@ export async function checkAndRecordIdempotency(
 
   const { data: existing } = await (serviceClient as any)
     .from("webhook_events")
-    .select("payload")
+    .select("payload, processing_status")
     .eq("org_id", args.orgId)
     .eq("provider", "jitter")
     .eq("event_type", args.eventType)
     .eq("external_id", idempotencyKey)
     .maybeSingle();
 
-  return { state: "cached", cachedPayload: existing?.payload ?? null };
+  if (existing?.processing_status === "processed") {
+    return { state: "cached", cachedPayload: existing?.payload ?? null };
+  }
+
+  // No processed record yet: either the first attempt is still in flight,
+  // or it crashed before committing. Either way, replaying the ORIGINAL
+  // request payload as a response would be a lie — tell the caller to
+  // re-run the (idempotent) mutation instead.
+  return { state: "retry", idempotencyKey };
 }
 
 export async function recordIdempotentResponse(

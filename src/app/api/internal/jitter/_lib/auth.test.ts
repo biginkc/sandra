@@ -286,6 +286,30 @@ describe("Jitter writeback idempotency helpers", () => {
     expect(result).toEqual({ state: "cached", cachedPayload: { ok: true } });
   });
 
+  it("checkAndRecordIdempotency on duplicate key with no committed response returns retry (crash-safe)", async () => {
+    // First attempt inserts the record ('pending') but never calls
+    // recordIdempotentResponse — simulates a crash between the insert and
+    // the mutation committing.
+    await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      idempotencyKey: "key-crash",
+      payload: { request: true },
+    });
+
+    // A retry with the same key must NOT replay the original request
+    // payload as a cached success — it must tell the caller to re-run the
+    // (idempotent) mutation.
+    const result = await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      idempotencyKey: "key-crash",
+      payload: { request: true },
+    });
+
+    expect(result).toEqual({ state: "retry", idempotencyKey: "key-crash" });
+  });
+
   it("checkAndRecordIdempotency uses event_type matching route name", async () => {
     await checkAndRecordIdempotency(serviceClient as any, {
       orgId: ORG_ID,
