@@ -539,6 +539,8 @@ type DialerPropertyRow = {
   id: string;
   org_id: string;
   state: string;
+  is_dnc_locked: boolean | null;
+  outreach_dispo: string | null;
   homeowner: {
     id: string;
     phone_1: string | null;
@@ -585,7 +587,12 @@ const DIALER_CHUNK = 250;
 
 function toClassifyInputs(rows: DialerPropertyRow[]): ClassifyInput[] {
   return rows.map((row) => ({
-    property: { id: row.id, state: row.state },
+    property: {
+      id: row.id,
+      state: row.state,
+      is_dnc_locked: row.is_dnc_locked,
+      outreach_dispo: row.outreach_dispo,
+    },
     contact: row.homeowner,
   }));
 }
@@ -601,7 +608,7 @@ async function fetchDialerPropertyRows(
     const { data, error } = await supabase
       .from("properties")
       .select(
-        `id, org_id, state,
+        `id, org_id, state, is_dnc_locked, outreach_dispo,
          homeowner:contacts!properties_homeowner_contact_id_fkey(
            id, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out
          )`,

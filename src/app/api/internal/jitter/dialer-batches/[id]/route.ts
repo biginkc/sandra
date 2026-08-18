@@ -19,7 +19,22 @@ type ItemRow = {
   timezone: string;
   status: string;
   sort_order: number;
-  property: { id: string; state: string | null } | { id: string; state: string | null }[] | null;
+  calling_window_start_hour: number;
+  calling_window_end_hour: number;
+  property:
+    | {
+        id: string;
+        state: string | null;
+        is_dnc_locked: boolean | null;
+        outreach_dispo: string | null;
+      }
+    | {
+        id: string;
+        state: string | null;
+        is_dnc_locked: boolean | null;
+        outreach_dispo: string | null;
+      }[]
+    | null;
   contact:
     | {
         id: string;
@@ -82,6 +97,10 @@ export async function GET(
         "id, org_id, title, source_kind, source_meta, status, jitter_session_id, claimed_at, completed_at, created_at, updated_at",
       )
       .eq("id", id)
+      // Org-scoped: a foreign org's token that learns this batch's UUID
+      // must not be able to read it. Not found is indistinguishable from
+      // wrong org — 404, never 403 — so existence isn't leaked.
+      .eq("org_id", auth.orgId)
       .maybeSingle();
 
     if (batchError) throw batchError;
@@ -93,11 +112,15 @@ export async function GET(
       return NextResponse.json({ batch });
     }
 
+    // No separate org filter needed here: `batch` above was already
+    // verified to belong to auth.orgId, and items are scoped to this
+    // batch_id, so they inherit that org scoping transitively.
     const { data: items, error: itemError } = await (auth.serviceClient as any)
       .from("dialer_batch_items")
       .select(
         `id, batch_id, property_id, contact_id, phone_e164, phone_label, state, timezone, status, sort_order,
-         property:properties!dialer_batch_items_property_id_fkey(id, state),
+         calling_window_start_hour, calling_window_end_hour,
+         property:properties!dialer_batch_items_property_id_fkey(id, state, is_dnc_locked, outreach_dispo),
          contact:contacts!dialer_batch_items_contact_id_fkey(id, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)`,
       )
       .eq("batch_id", id)
@@ -118,6 +141,8 @@ export async function GET(
         timezone: item.timezone,
         status: item.status,
         sort_order: item.sort_order,
+        calling_window_start_hour: item.calling_window_start_hour,
+        calling_window_end_hour: item.calling_window_end_hour,
         eligibility: itemEligibility(item),
       })),
     });

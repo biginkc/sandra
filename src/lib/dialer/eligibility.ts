@@ -9,7 +9,19 @@ export type BatchEligibilityCounts = {
 };
 
 export type ClassifyInput = {
-  property: { id: string; state: string | null | undefined };
+  property: {
+    id: string;
+    state: string | null | undefined;
+    // Durable, permanent compliance signals (true DNC lock migration
+    // 20260815190000). Optional so existing callers that don't carry
+    // these fields keep compiling; undefined/null is treated as "not
+    // locked". A permanently DNC-locked property blocks every phone —
+    // checked BEFORE quiet hours because this is a durable block, not a
+    // time-of-day one (contract §1.3.3: only durable blocks map to
+    // Jitter-side permanent suppression).
+    is_dnc_locked?: boolean | null;
+    outreach_dispo?: string | null;
+  };
   contact: {
     id: string;
     phone_1: string | null;
@@ -39,6 +51,14 @@ export function classifyItem(
 
   if (input.contact.do_not_contact) {
     return snapshots.map(() => ({ blocked: "do_not_contact" }));
+  }
+
+  // True DNC lock (permanent, property-level) — checked before quiet
+  // hours because it's a durable block. A quiet-hours block is
+  // time-of-day and must never map to permanent suppression; this one
+  // does (Jitter's callable=false is one-way).
+  if (input.property.is_dnc_locked === true || input.property.outreach_dispo === "dnc") {
+    return snapshots.map(() => ({ blocked: "do_not_call" }));
   }
 
   const window = checkQuietHours(input.property.state, now);

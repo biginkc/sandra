@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { TEST_ORG_B_ID } from "@tests/integration/fixtures/multi-user";
 
 import {
   authHeaders,
@@ -98,5 +99,56 @@ describe("internal.jitter.dialer-batch GET", () => {
     expect(response.status).toBe(200);
     const json = (await response.json()) as any;
     expect(json.items[0].eligibility.status).toBe("callable");
+  });
+
+  it("returns 404 for a batch belonging to a different org (org-scoping)", async () => {
+    const seeded = await seedDialerBatch(testClient, { org_id: TEST_ORG_B_ID });
+    const response = await GET(
+      signedGet(`https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}`),
+      context(seeded.batchId),
+    );
+
+    // The authenticated consumer belongs to BMH_ORG_ID; this batch belongs
+    // to TEST_ORG_B_ID. Must be 404 (existence not leaked), never 403.
+    expect(response.status).toBe(404);
+  });
+
+  it("includes calling-window fields on each item", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const response = await GET(
+      signedGet(
+        `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}?include=items`,
+      ),
+      context(seeded.batchId),
+    );
+
+    expect(response.status).toBe(200);
+    const json = (await response.json()) as any;
+    expect(json.items[0]).toMatchObject({
+      calling_window_start_hour: expect.any(Number),
+      calling_window_end_hour: expect.any(Number),
+    });
+  });
+
+  it("classifies a DNC-locked property's item as blocked:do_not_call", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    await testClient
+      .from("properties")
+      .update({ outreach_dispo: "dnc" })
+      .eq("id", seeded.propertyId);
+
+    const response = await GET(
+      signedGet(
+        `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}?eligibility=fresh`,
+      ),
+      context(seeded.batchId),
+    );
+
+    expect(response.status).toBe(200);
+    const json = (await response.json()) as any;
+    expect(json.items[0].eligibility).toEqual({
+      status: "blocked",
+      reason: "do_not_call",
+    });
   });
 });

@@ -2,9 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import { classifyItem, previewBatchEligibility } from "./eligibility";
 
-const property = (overrides: Partial<{ id: string; state: string }> = {}) => ({
+const property = (
+  overrides: Partial<{
+    id: string;
+    state: string;
+    is_dnc_locked: boolean | null;
+    outreach_dispo: string | null;
+  }> = {},
+) => ({
   id: overrides.id ?? crypto.randomUUID(),
   state: overrides.state ?? "MO",
+  is_dnc_locked: overrides.is_dnc_locked ?? false,
+  outreach_dispo: overrides.outreach_dispo ?? null,
 });
 
 const contact = (
@@ -163,5 +172,62 @@ describe("classifyItem", () => {
         inWindow,
       ),
     ).toEqual(["callable"]);
+  });
+
+  it("blocks all phones with do_not_call when property.is_dnc_locked is true", () => {
+    expect(
+      classifyItem(
+        {
+          property: property({ is_dnc_locked: true }),
+          contact: contact({ phone_1: "5551112222", phone_2: "5553334444" }),
+        },
+        inWindow,
+      ),
+    ).toEqual([{ blocked: "do_not_call" }, { blocked: "do_not_call" }]);
+  });
+
+  it("blocks all phones with do_not_call when property.outreach_dispo is 'dnc'", () => {
+    expect(
+      classifyItem(
+        {
+          property: property({ outreach_dispo: "dnc" }),
+          contact: contact(),
+        },
+        inWindow,
+      ),
+    ).toEqual([{ blocked: "do_not_call" }]);
+  });
+
+  it("checks the DNC lock BEFORE quiet hours (durable block wins over time-of-day)", () => {
+    expect(
+      classifyItem(
+        {
+          property: property({ is_dnc_locked: true }),
+          contact: contact(),
+        },
+        outsideWindow,
+      ),
+    ).toEqual([{ blocked: "do_not_call" }]);
+  });
+
+  it("does not block on DNC lock when is_dnc_locked is false and outreach_dispo is unrelated", () => {
+    expect(
+      classifyItem(
+        {
+          property: property({ is_dnc_locked: false, outreach_dispo: "interested" }),
+          contact: contact(),
+        },
+        inWindow,
+      ),
+    ).toEqual(["callable"]);
+  });
+
+  it("previewBatchEligibility counts dnc-locked properties under blocked.do_not_call", () => {
+    expect(
+      previewBatchEligibility(
+        [{ property: property({ is_dnc_locked: true }), contact: contact() }],
+        inWindow,
+      ),
+    ).toEqual({ callable: 0, blocked: { do_not_call: 1 }, missing: 0 });
   });
 });
