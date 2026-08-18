@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { TEST_ORG_B_ID } from "@tests/integration/fixtures/multi-user";
 
 import {
   authHeaders,
@@ -8,6 +9,7 @@ import {
   jsonRequest,
   resetJitterIntegration,
   seedDialerBatch,
+  setBatchClaim,
 } from "../../../_lib/test-helpers.integration";
 import { POST } from "./route";
 
@@ -127,6 +129,111 @@ describe("internal.jitter.dialer-batch claim POST", () => {
         "POST",
         { jitter_session_id: "session-1" },
         { "idempotency-key": "claim-conflict" },
+      ),
+      context(seeded.batchId),
+    );
+
+    expect(response.status).toBe(409);
+  });
+
+  it("returns 404 when the batch belongs to a different org (org-scoping)", async () => {
+    const seeded = await seedDialerBatch(testClient, { org_id: TEST_ORG_B_ID });
+
+    const response = await POST(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}/claim`,
+        "POST",
+        { jitter_session_id: "session-1" },
+        { "idempotency-key": "claim-org-scope" },
+      ),
+      context(seeded.batchId),
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("double claim with different sessions and different idempotency keys: one wins, one 409", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const requestUrl = `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}/claim`;
+
+    const winner = await POST(
+      jsonRequest(requestUrl, "POST", { jitter_session_id: "session-a" }, { "idempotency-key": "claim-race-a" }),
+      context(seeded.batchId),
+    );
+    const loser = await POST(
+      jsonRequest(requestUrl, "POST", { jitter_session_id: "session-b" }, { "idempotency-key": "claim-race-b" }),
+      context(seeded.batchId),
+    );
+
+    expect(winner.status).toBe(200);
+    expect(loser.status).toBe(409);
+  });
+
+  it("re-claiming with the SAME session_id (different idempotency key) is CAS-idempotent, not just cached", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const requestUrl = `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}/claim`;
+
+    const first = await POST(
+      jsonRequest(requestUrl, "POST", { jitter_session_id: "session-1" }, { "idempotency-key": "claim-same-a" }),
+      context(seeded.batchId),
+    );
+    // Different idempotency key, so this exercises the RPC's CAS predicate
+    // (jitter_session_id = p_session_id), not the idempotency cache.
+    const second = await POST(
+      jsonRequest(requestUrl, "POST", { jitter_session_id: "session-1" }, { "idempotency-key": "claim-same-b" }),
+      context(seeded.batchId),
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    const secondJson = (await second.json()) as any;
+    expect(secondJson.batch).toMatchObject({
+      id: seeded.batchId,
+      status: "claimed",
+      jitter_session_id: "session-1",
+    });
+  });
+
+  it("allows takeover after the 30-minute claim TTL expires", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const staleClaimedAt = new Date(Date.now() - 31 * 60 * 1000);
+    await setBatchClaim(testClient, seeded.batchId, {
+      sessionId: "abandoned-session",
+      claimedAt: staleClaimedAt,
+    });
+
+    const response = await POST(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}/claim`,
+        "POST",
+        { jitter_session_id: "new-session" },
+        { "idempotency-key": "claim-ttl-takeover" },
+      ),
+      context(seeded.batchId),
+    );
+
+    expect(response.status).toBe(200);
+    const json = (await response.json()) as any;
+    expect(json.batch).toMatchObject({
+      status: "claimed",
+      jitter_session_id: "new-session",
+    });
+  });
+
+  it("refuses takeover within the 30-minute claim TTL", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const recentClaimedAt = new Date(Date.now() - 5 * 60 * 1000);
+    await setBatchClaim(testClient, seeded.batchId, {
+      sessionId: "active-session",
+      claimedAt: recentClaimedAt,
+    });
+
+    const response = await POST(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}/claim`,
+        "POST",
+        { jitter_session_id: "new-session" },
+        { "idempotency-key": "claim-ttl-too-early" },
       ),
       context(seeded.batchId),
     );

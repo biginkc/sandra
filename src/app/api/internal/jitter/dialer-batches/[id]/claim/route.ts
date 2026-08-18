@@ -43,40 +43,33 @@ export async function POST(
       return NextResponse.json(idempotency.cachedPayload);
     }
 
-    const { data: existing, error: existingError } = await (auth.serviceClient as any)
-      .from("dialer_batches")
-      .select("id, status, jitter_session_id")
-      .eq("id", id)
-      .maybeSingle();
-    if (existingError) throw existingError;
-    if (!existing) {
+    // Atomic compare-and-swap claim, scoped to the authenticated org and
+    // fenced by session id, with a 30-min TTL takeover for abandoned
+    // claims (see migration 20260818120000_jitter_claim_fencing.sql).
+    // Replaces the previous read-then-update, which let two concurrent
+    // sessions both pass the "not already claimed" check.
+    const { data: rpcResult, error: rpcError } = await (auth.serviceClient as any).rpc(
+      "jitter_claim_dialer_batch",
+      {
+        p_batch_id: id,
+        p_org_id: auth.orgId,
+        p_session_id: jitterSessionId,
+      },
+    );
+    if (rpcError) throw rpcError;
+
+    const outcome = (rpcResult as { outcome?: string } | null)?.outcome;
+    if (outcome === "not_found") {
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
-
-    if (
-      existing.jitter_session_id &&
-      existing.jitter_session_id !== jitterSessionId
-    ) {
+    if (outcome === "conflict") {
       return NextResponse.json(
         { error: "conflict", error_code: "batch_already_claimed" },
         { status: 409 },
       );
     }
 
-    const { data: batch, error: updateError } = await (auth.serviceClient as any)
-      .from("dialer_batches")
-      .update({
-        status: "claimed",
-        jitter_session_id: jitterSessionId,
-        claimed_at: new Date().toISOString(),
-      })
-      .eq("id", id)
-      .select("id, org_id, status, jitter_session_id, claimed_at")
-      .single();
-
-    if (updateError) throw updateError;
-
-    const payload = { batch };
+    const payload = { batch: (rpcResult as { batch: unknown }).batch };
     await recordIdempotentResponse(auth.serviceClient, {
       orgId: auth.orgId,
       eventType: "dialer_batch_claim",

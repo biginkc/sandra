@@ -122,8 +122,11 @@ export async function seedDialerLead(
   };
 }
 
-export async function seedDialerBatch(client: SupabaseClient<any>) {
-  const lead = await seedDialerLead(client);
+export async function seedDialerBatch(
+  client: SupabaseClient<any>,
+  opts: { org_id?: string } = {},
+) {
+  const lead = await seedDialerLead(client, { org_id: opts.org_id });
   const { data: batch, error: batchError } = await (client as any)
     .from("dialer_batches")
     .insert({
@@ -152,6 +155,27 @@ export async function seedDialerBatch(client: SupabaseClient<any>) {
   if (itemError || !item) throw itemError ?? new Error("seed item");
 
   return { ...lead, batchId: batch.id as string, itemId: item.id as string };
+}
+
+/**
+ * Directly sets a batch's claim state (bypassing the claim route/RPC) so
+ * fencing tests can put a batch into an arbitrary claimed-by-session and
+ * claimed_at state without exercising the CAS logic under test.
+ */
+export async function setBatchClaim(
+  client: SupabaseClient<any>,
+  batchId: string,
+  opts: { sessionId: string; claimedAt?: Date; status?: string },
+) {
+  const { error } = await (client as any)
+    .from("dialer_batches")
+    .update({
+      status: opts.status ?? "claimed",
+      jitter_session_id: opts.sessionId,
+      claimed_at: (opts.claimedAt ?? new Date()).toISOString(),
+    })
+    .eq("id", batchId);
+  if (error) throw error;
 }
 
 export async function seedCallActivity(client: SupabaseClient<any>) {
