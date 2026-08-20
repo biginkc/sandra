@@ -274,6 +274,37 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       error_code: "callback_at_required",
       field: "callback_at",
     });
+
+    const { data: reservations } = await (testClient as any)
+      .from("webhook_events")
+      .select("id")
+      .eq("external_id", "activity-callback-missing-at");
+    expect(reservations).toHaveLength(0);
+  });
+
+  it("rejects a non-Jitter provider before reserving the idempotency key", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        { ...writebackBody(seeded), provider: "twilio" },
+        { "idempotency-key": "activity-provider-mismatch" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error_code: "provider_mismatch",
+      field: "provider",
+    });
+    const { data: reservations } = await (testClient as any)
+      .from("webhook_events")
+      .select("id")
+      .eq("external_id", "activity-provider-mismatch");
+    expect(reservations).toHaveLength(0);
   });
 
   it("updates an existing row for the same provider and jitter_attempt_id", async () => {
@@ -643,5 +674,32 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       error_code: "org_mismatch",
       field: "property_id",
     });
+  });
+
+  it("keeps one call_activity row for two identical concurrent writebacks", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const requestUrl = `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`;
+    const body = writebackBody(seeded);
+
+    const responses = await Promise.all([
+      PUT(
+        jsonRequest(requestUrl, "PUT", body, { "idempotency-key": "activity-race-a" }),
+        attemptContext(attemptId),
+      ),
+      PUT(
+        jsonRequest(requestUrl, "PUT", body, { "idempotency-key": "activity-race-b" }),
+        attemptContext(attemptId),
+      ),
+    ]);
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    const { data: activities } = await (testClient as any)
+      .from("call_activities")
+      .select("id, org_id, provider, jitter_attempt_id")
+      .eq("org_id", seeded.orgId)
+      .eq("provider", "jitter")
+      .eq("jitter_attempt_id", attemptId);
+    expect(activities).toHaveLength(1);
   });
 });

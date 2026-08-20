@@ -191,6 +191,10 @@ export async function PUT(
     const validation = await validateOrgConsistency(auth.serviceClient as any, body);
     if (!validation.ok) return validation.response;
 
+    if (body.provider !== "jitter") {
+      return unprocessable("provider_mismatch", "provider");
+    }
+
     // Tenant isolation: validateOrgConsistency only proves the body ids are
     // internally consistent with body.org_id — it never compares against the
     // AUTHENTICATED consumer's org. The writes below use the service-role
@@ -199,6 +203,17 @@ export async function PUT(
     // consent_events).
     if (body.org_id !== auth.orgId) {
       return forbidden("org_consumer_mismatch");
+    }
+
+    let callbackAssigneeId: string | null = null;
+    if (body.disposition === "callback_requested") {
+      if (!validTimestamp(body.callback_at)) {
+        return unprocessable("callback_at_required", "callback_at");
+      }
+      callbackAssigneeId = await resolveCallbackAssignee(auth.serviceClient as any, body);
+      if (!callbackAssigneeId) {
+        return unprocessable("callback_assignee_required", "callback_assignee_id");
+      }
     }
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
@@ -216,17 +231,6 @@ export async function PUT(
         { error: "conflict", error_code: "idempotency_key_reused" },
         { status: 409 },
       );
-    }
-
-    let callbackAssigneeId: string | null = null;
-    if (body.disposition === "callback_requested") {
-      if (!validTimestamp(body.callback_at)) {
-        return unprocessable("callback_at_required", "callback_at");
-      }
-      callbackAssigneeId = await resolveCallbackAssignee(auth.serviceClient as any, body);
-      if (!callbackAssigneeId) {
-        return unprocessable("callback_assignee_required", "callback_assignee_id");
-      }
     }
 
     const { data: payload, error: mutationError } = await (auth.serviceClient as any).rpc(
