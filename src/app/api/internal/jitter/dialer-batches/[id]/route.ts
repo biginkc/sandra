@@ -19,7 +19,12 @@ type ItemRow = {
   timezone: string;
   status: string;
   sort_order: number;
-  property: { id: string; state: string | null } | { id: string; state: string | null }[] | null;
+  calling_window_start_hour: number;
+  calling_window_end_hour: number;
+  property:
+    | { id: string; state: string | null; is_dnc_locked: boolean }
+    | { id: string; state: string | null; is_dnc_locked: boolean }[]
+    | null;
   contact:
     | {
         id: string;
@@ -55,7 +60,10 @@ function itemEligibility(row: ItemRow) {
       snapshot.phone_e164 === row.phone_e164 &&
       snapshot.phone_label === row.phone_label,
   );
-  const classifications = classifyItem({ property, contact });
+  const classifications = classifyItem({
+    property: { id: property.id, state: property.state, is_dnc_locked: property.is_dnc_locked },
+    contact,
+  });
   const classification = classifications[index] ?? "missing";
 
   if (classification === "callable") return { status: "callable" };
@@ -98,7 +106,8 @@ export async function GET(
       .from("dialer_batch_items")
       .select(
         `id, batch_id, property_id, contact_id, phone_e164, phone_label, state, timezone, status, sort_order,
-         property:properties!dialer_batch_items_property_id_fkey(id, state),
+         calling_window_start_hour, calling_window_end_hour,
+         property:properties!dialer_batch_items_property_id_fkey(id, state, is_dnc_locked),
          contact:contacts!dialer_batch_items_contact_id_fkey(id, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)`,
       )
       .eq("batch_id", id)
@@ -119,6 +128,8 @@ export async function GET(
         timezone: item.timezone,
         status: item.status,
         sort_order: item.sort_order,
+        calling_window_start_hour: item.calling_window_start_hour,
+        calling_window_end_hour: item.calling_window_end_hour,
         eligibility: itemEligibility(item),
       })),
     });
