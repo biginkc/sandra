@@ -27,7 +27,7 @@ fresh worktree, then verify and open a PR without merging.
 - [x] `call_activities` uniqueness is org-scoped and the writeback conflict
       target matches it.
 - [x] Focused tests and the repository's standard full verification pass.
-- [ ] Manual review is complete for the final head; PR is opened with
+- [x] Manual review is complete for the final head; PR is opened with
       `Depends on: none`; no merge is performed.
 
 ## Baseline and preflight
@@ -106,5 +106,6 @@ fresh worktree, then verify and open a PR without merging.
 
 ## Final outcome
 
-The implementation commit is created. PR creation remains; no merge or
-deployment has occurred.
+Implementation commit is created and PR #378 is open at
+https://github.com/biginkc/sandra/pull/378. No merge or deployment has
+occurred.
