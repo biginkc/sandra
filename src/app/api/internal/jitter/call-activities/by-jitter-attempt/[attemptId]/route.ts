@@ -29,6 +29,8 @@ type WritebackBody = {
   provider_call_id?: string | null;
   error_code?: string | null;
   error_message?: string | null;
+  notes?: string | null;
+  recording_path?: string | null;
 };
 
 type ValidatedWriteback = {
@@ -60,6 +62,8 @@ const UUID_FIELDS = [
   "callback_assignee_id",
 ] as const;
 const TIMESTAMP_FIELDS = ["started_at", "ended_at", "callback_at"] as const;
+const NOTES_MAX_LENGTH = 10000;
+const RECORDING_PATH_MAX_LENGTH = 2048;
 
 function unprocessable(error_code: string, field?: string) {
   return NextResponse.json(
@@ -219,6 +223,23 @@ function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
     body[field] = normalized;
   }
 
+  if (
+    body.notes !== undefined &&
+    body.notes !== null &&
+    (typeof body.notes !== "string" || body.notes.length > NOTES_MAX_LENGTH)
+  ) {
+    return unprocessable("invalid_notes", "notes");
+  }
+
+  if (
+    body.recording_path !== undefined &&
+    body.recording_path !== null &&
+    (typeof body.recording_path !== "string" ||
+      body.recording_path.length > RECORDING_PATH_MAX_LENGTH)
+  ) {
+    return unprocessable("invalid_recording_path", "recording_path");
+  }
+
   return null;
 }
 
@@ -326,7 +347,9 @@ export async function PUT(
         p_body: body,
         p_callback_assignee_id: callbackAssigneeId,
         p_external_id: idempotencyKey,
+        p_notes: body.notes ?? null,
         p_org_id: auth.orgId,
+        p_recording_path: body.recording_path ?? null,
         p_request_hash: idempotency.requestHash,
       },
     );

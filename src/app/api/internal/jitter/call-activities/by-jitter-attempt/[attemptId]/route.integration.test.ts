@@ -169,6 +169,120 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     expect(item.last_call_activity_id).toBe(json.call_activity.id);
   });
 
+  it("persists notes and recording_path on insert and on update", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const requestUrl = `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`;
+
+    const first = await PUT(
+      jsonRequest(
+        requestUrl,
+        "PUT",
+        {
+          ...writebackBody(seeded),
+          notes: "Left a voicemail, will retry tomorrow.",
+          recording_path: "recordings/2026/08/20/attempt-1.mp3",
+        },
+        { "idempotency-key": "activity-notes-insert" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(first.status).toBe(200);
+    const firstJson = (await first.json()) as any;
+    expect(firstJson.call_activity.notes).toBe(
+      "Left a voicemail, will retry tomorrow.",
+    );
+    expect(firstJson.call_activity.recording_path).toBe(
+      "recordings/2026/08/20/attempt-1.mp3",
+    );
+
+    const { data: row } = await (testClient as any)
+      .from("call_activities")
+      .select("notes, recording_path")
+      .eq("id", firstJson.call_activity.id)
+      .single();
+    expect(row.notes).toBe("Left a voicemail, will retry tomorrow.");
+    expect(row.recording_path).toBe("recordings/2026/08/20/attempt-1.mp3");
+
+    const second = await PUT(
+      jsonRequest(
+        requestUrl,
+        "PUT",
+        {
+          ...writebackBody(seeded),
+          notes: "Reached the contact on retry.",
+          recording_path: "recordings/2026/08/20/attempt-2.mp3",
+        },
+        { "idempotency-key": "activity-notes-update" },
+      ),
+      attemptContext(attemptId),
+    );
+    expect(second.status).toBe(200);
+    const secondJson = (await second.json()) as any;
+    expect(secondJson.call_activity.notes).toBe("Reached the contact on retry.");
+    expect(secondJson.call_activity.recording_path).toBe(
+      "recordings/2026/08/20/attempt-2.mp3",
+    );
+  });
+
+  it("accepts a writeback with notes and recording_path absent (backward compatible)", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        writebackBody(seeded),
+        { "idempotency-key": "activity-notes-absent" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(200);
+    const json = (await response.json()) as any;
+    expect(json.call_activity.notes ?? null).toBeNull();
+    expect(json.call_activity.recording_path ?? null).toBeNull();
+  });
+
+  it("rejects oversized or non-string notes/recording_path before reserving", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const requestUrl = `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`;
+    const invalidBodies = [
+      { notes: 12345 },
+      { notes: "x".repeat(10001) },
+      { recording_path: 12345 },
+      { recording_path: "x".repeat(2049) },
+    ];
+
+    for (const [index, invalidBody] of invalidBodies.entries()) {
+      const key = `activity-invalid-notes-${index}`;
+      const response = await PUT(
+        jsonRequest(
+          requestUrl,
+          "PUT",
+          { ...writebackBody(seeded), ...invalidBody },
+          { "idempotency-key": key },
+        ),
+        attemptContext(attemptId),
+      );
+
+      expect(response.status).toBe(422);
+    }
+
+    const { data: reservations } = await (testClient as any)
+      .from("webhook_events")
+      .select("external_id")
+      .in("external_id", [
+        "activity-invalid-notes-0",
+        "activity-invalid-notes-1",
+        "activity-invalid-notes-2",
+        "activity-invalid-notes-3",
+      ]);
+    expect(reservations).toHaveLength(0);
+  });
+
   it("derives org, property, and contact from dialer_batch_item_id", async () => {
     const seeded = await seedDialerBatch(testClient);
     const attemptId = `attempt-${crypto.randomUUID()}`;
