@@ -91,9 +91,15 @@ describe("internal.jitter.dialer-batch GET", () => {
     expect(response.status).toBe(200);
     const json = (await response.json()) as any;
     expect(json.items).toHaveLength(1);
+    // As of migration 20260815190000_true_dnc_property_lock.sql, the
+    // `contacts_propagate_true_dnc_lock` trigger fires AFTER this update and
+    // immediately locks every property linked to the contact
+    // (`is_dnc_locked = true`), so classifyItem's durable-lock check now wins
+    // over the transient contact-level do_not_contact reason.
+    // "property_dnc_locked" is the accurate, more specific classification.
     expect(json.items[0].eligibility).toEqual({
       status: "blocked",
-      reason: "do_not_contact",
+      reason: "property_dnc_locked",
     });
   });
 
