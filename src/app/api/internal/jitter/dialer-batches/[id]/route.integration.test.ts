@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { TEST_ORG_B_ID } from "@tests/integration/fixtures/multi-user";
 
 import {
   authHeaders,
@@ -49,7 +50,7 @@ describe("internal.jitter.dialer-batch GET", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
-      batch: { id: seeded.batchId, status: "pending" },
+      batch: { id: seeded.batchId, status: "pending", claim_generation: 0 },
     });
   });
 
@@ -58,6 +59,16 @@ describe("internal.jitter.dialer-batch GET", () => {
     const response = await GET(
       signedGet(`https://sandra.test/api/internal/jitter/dialer-batches/${id}`),
       context(id),
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("returns 404 when the batch belongs to another org", async () => {
+    const seeded = await seedDialerBatch(testClient, { org_id: TEST_ORG_B_ID });
+    const response = await GET(
+      signedGet(`https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}`),
+      context(seeded.batchId),
     );
 
     expect(response.status).toBe(404);

@@ -22,8 +22,40 @@ export type JitterAuthResult =
   | { ok: false; response: NextResponse };
 
 export type IdempotencyResult =
-  | { state: "fresh"; idempotencyKey: string }
+  | { state: "fresh"; idempotencyKey: string; requestHash: string }
+  // A prior request reserved this key but did not commit its response. The
+  // mutation must be retried; the original request body is never a success
+  // response.
+  | { state: "retry"; idempotencyKey: string; requestHash: string }
+  | { state: "conflict"; idempotencyKey: string }
   | { state: "cached"; cachedPayload: unknown };
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+export function computeJitterRequestHash(args: {
+  route: string;
+  resourceId: string;
+  payload: unknown;
+}): string {
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        payload: args.payload,
+        resource_id: args.resourceId,
+        route: args.route,
+      }),
+    )
+    .digest("hex");
+}
 
 function unauthorized(): JitterAuthResult {
   return {
@@ -100,12 +132,23 @@ export function requireIdempotencyKey(request: Request): NextResponse | null {
 
 export async function checkAndRecordIdempotency(
   serviceClient: JitterServiceClient,
-  args: { orgId: string; eventType: string; idempotencyKey: string; payload: unknown },
+  args: {
+    orgId: string;
+    eventType: string;
+    resourceId: string;
+    idempotencyKey: string;
+    payload: unknown;
+  },
 ): Promise<IdempotencyResult> {
   const idempotencyKey = args.idempotencyKey.trim();
   if (!idempotencyKey) {
     throw new Error("checkAndRecordIdempotency requires a non-empty key");
   }
+  const hash = computeJitterRequestHash({
+    route: args.eventType,
+    resourceId: args.resourceId,
+    payload: args.payload,
+  });
 
   const { error } = await (serviceClient as any).from("webhook_events").insert({
     org_id: args.orgId,
@@ -114,20 +157,65 @@ export async function checkAndRecordIdempotency(
     external_id: idempotencyKey,
     signature_verified: true,
     payload: args.payload as Json,
+    request_hash: hash,
+    processing_status: "pending",
   });
 
-  if (!error) return { state: "fresh", idempotencyKey };
+  if (!error) return { state: "fresh", idempotencyKey, requestHash: hash };
 
   if (error.code !== "23505") throw error;
 
-  const { data: existing } = await (serviceClient as any)
+  const { data: existing, error: existingError } = await (serviceClient as any)
     .from("webhook_events")
-    .select("payload")
+    .select("payload, processing_status, request_hash")
     .eq("org_id", args.orgId)
     .eq("provider", "jitter")
     .eq("event_type", args.eventType)
     .eq("external_id", idempotencyKey)
     .maybeSingle();
+
+  if (existingError) throw existingError;
+
+  if (existing?.processing_status === "pending" && existing.request_hash === null) {
+    // Rows created before route/resource-bound hashes were introduced have no
+    // trustworthy request identity. Claim the first retry's hash atomically;
+    // a concurrent different retry must then observe the adopted hash and
+    // become a conflict instead of mutating the legacy request.
+    const { error: adoptError } = await (serviceClient as any)
+      .from("webhook_events")
+      .update({ request_hash: hash })
+      .eq("org_id", args.orgId)
+      .eq("provider", "jitter")
+      .eq("event_type", args.eventType)
+      .eq("external_id", idempotencyKey)
+      .eq("processing_status", "pending")
+      .is("request_hash", null);
+    if (adoptError) throw adoptError;
+
+    const { data: adopted, error: adoptedError } = await (serviceClient as any)
+      .from("webhook_events")
+      .select("payload, processing_status, request_hash")
+      .eq("org_id", args.orgId)
+      .eq("provider", "jitter")
+      .eq("event_type", args.eventType)
+      .eq("external_id", idempotencyKey)
+      .maybeSingle();
+    if (adoptedError) throw adoptedError;
+    if (adopted?.request_hash !== hash) {
+      return { state: "conflict", idempotencyKey };
+    }
+    return { state: "retry", idempotencyKey, requestHash: hash };
+  }
+
+  // A processed response is only reusable for the exact same route,
+  // resource, and body. Never return a cached payload for a reused key.
+  if (existing?.request_hash !== hash) {
+    return { state: "conflict", idempotencyKey };
+  }
+
+  if (existing?.processing_status !== "processed") {
+    return { state: "retry", idempotencyKey, requestHash: hash };
+  }
 
   return { state: "cached", cachedPayload: existing?.payload ?? null };
 }
@@ -136,11 +224,19 @@ export async function recordIdempotentResponse(
   serviceClient: JitterServiceClient,
   args: { orgId: string; eventType: string; idempotencyKey: string; payload: unknown },
 ): Promise<void> {
-  await (serviceClient as any)
+  const { error } = await (serviceClient as any)
     .from("webhook_events")
-    .update({ payload: args.payload as Json, processing_status: "processed" })
+    .update({
+      payload: args.payload as Json,
+      processing_status: "processed",
+      processed_at: new Date().toISOString(),
+    })
     .eq("org_id", args.orgId)
     .eq("provider", "jitter")
     .eq("event_type", args.eventType)
     .eq("external_id", args.idempotencyKey);
+
+  if (error) {
+    throw new Error(error.message ?? JSON.stringify(error));
+  }
 }

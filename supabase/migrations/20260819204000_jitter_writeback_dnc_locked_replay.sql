@@ -1,0 +1,2 @@
+-- Compatibility marker for the isolated test database. DNC replay fencing
+-- is included in the final definition installed by 20260819200000.

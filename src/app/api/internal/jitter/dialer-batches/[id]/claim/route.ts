@@ -5,7 +5,6 @@ import { reportError } from "@/lib/errors/report";
 import {
   authenticateJitterWriteback,
   checkAndRecordIdempotency,
-  recordIdempotentResponse,
   requireIdempotencyKey,
 } from "../../../_lib/auth";
 
@@ -24,8 +23,11 @@ export async function POST(
 
     const { id } = await context.params;
     const idempotencyKey = request.headers.get("idempotency-key")!.trim();
-    const body = JSON.parse(auth.rawBody || "{}") as { jitter_session_id?: string };
-    const jitterSessionId = body.jitter_session_id?.trim();
+    const body = JSON.parse(auth.rawBody || "{}") as { jitter_session_id?: unknown };
+    const jitterSessionId =
+      typeof body.jitter_session_id === "string"
+        ? body.jitter_session_id.trim()
+        : undefined;
     if (!jitterSessionId) {
       return NextResponse.json(
         { error: "validation_error", field: "jitter_session_id" },
@@ -36,54 +38,46 @@ export async function POST(
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       orgId: auth.orgId,
       eventType: "dialer_batch_claim",
+      resourceId: id,
       idempotencyKey,
       payload: body,
     });
     if (idempotency.state === "cached") {
       return NextResponse.json(idempotency.cachedPayload);
     }
-
-    const { data: existing, error: existingError } = await (auth.serviceClient as any)
-      .from("dialer_batches")
-      .select("id, status, jitter_session_id")
-      .eq("id", id)
-      .maybeSingle();
-    if (existingError) throw existingError;
-    if (!existing) {
-      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    if (idempotency.state === "conflict") {
+      return NextResponse.json(
+        { error: "conflict", error_code: "idempotency_key_reused" },
+        { status: 409 },
+      );
     }
 
-    if (
-      existing.jitter_session_id &&
-      existing.jitter_session_id !== jitterSessionId
-    ) {
+    const { data: claimResult, error: claimError } = await (auth.serviceClient as any).rpc(
+      "jitter_claim_dialer_batch",
+      {
+        p_batch_id: id,
+        p_org_id: auth.orgId,
+        p_session_id: jitterSessionId,
+        p_external_id: idempotencyKey,
+        p_request_hash: idempotency.requestHash,
+      },
+    );
+    if (claimError) throw claimError;
+
+    const outcome = (claimResult as { outcome?: string } | null)?.outcome;
+    if (outcome === "not_found") {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
+    if (outcome === "conflict") {
       return NextResponse.json(
         { error: "conflict", error_code: "batch_already_claimed" },
         { status: 409 },
       );
     }
 
-    const { data: batch, error: updateError } = await (auth.serviceClient as any)
-      .from("dialer_batches")
-      .update({
-        status: "claimed",
-        jitter_session_id: jitterSessionId,
-        claimed_at: new Date().toISOString(),
-      })
-      .eq("id", id)
-      .select("id, org_id, status, jitter_session_id, claimed_at")
-      .single();
-
-    if (updateError) throw updateError;
-
-    const payload = { batch };
-    await recordIdempotentResponse(auth.serviceClient, {
-      orgId: auth.orgId,
-      eventType: "dialer_batch_claim",
-      idempotencyKey,
-      payload,
-    });
-
+    const payload = {
+      batch: (claimResult as { batch: unknown }).batch,
+    };
     return NextResponse.json(payload);
   } catch (e) {
     reportError(e, { tags: { surface: "jitter_claim_dialer_batch" } });

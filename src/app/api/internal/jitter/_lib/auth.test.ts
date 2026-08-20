@@ -58,6 +58,16 @@ function makeBuilder(table: string) {
           }
           return updateChain;
         }),
+        is: vi.fn((key: string, value: unknown) => {
+          filters.push({ key, value, op: "is" });
+          if (table === "webhook_events") {
+            for (const [eventMapKey, row] of webhookEvents.entries()) {
+              const matches = filters.every((filter) => row[filter.key] === filter.value);
+              if (matches) webhookEvents.set(eventMapKey, { ...row, ...payload });
+            }
+          }
+          return updateChain;
+        }),
       };
       return updateChain;
     }),
@@ -250,11 +260,13 @@ describe("Jitter writeback idempotency helpers", () => {
     const result = await checkAndRecordIdempotency(serviceClient as any, {
       orgId: ORG_ID,
       eventType: "dialer_batch_claim",
+      resourceId: "batch-1",
       idempotencyKey: "key-1",
       payload: { request: true },
     });
 
-    expect(result).toEqual({ state: "fresh", idempotencyKey: "key-1" });
+    expect(result).toMatchObject({ state: "fresh", idempotencyKey: "key-1" });
+    expect((result as { requestHash: string }).requestHash).toMatch(/^[0-9a-f]{64}$/);
     expect(
       webhookEvents.get(`${ORG_ID}:jitter:dialer_batch_claim:key-1`)?.payload,
     ).toEqual({
@@ -266,6 +278,7 @@ describe("Jitter writeback idempotency helpers", () => {
     await checkAndRecordIdempotency(serviceClient as any, {
       orgId: ORG_ID,
       eventType: "dialer_batch_claim",
+      resourceId: "batch-1",
       idempotencyKey: "key-1",
       payload: { request: true },
     });
@@ -279,6 +292,7 @@ describe("Jitter writeback idempotency helpers", () => {
     const result = await checkAndRecordIdempotency(serviceClient as any, {
       orgId: ORG_ID,
       eventType: "dialer_batch_claim",
+      resourceId: "batch-1",
       idempotencyKey: "key-1",
       payload: { request: true },
     });
@@ -286,10 +300,106 @@ describe("Jitter writeback idempotency helpers", () => {
     expect(result).toEqual({ state: "cached", cachedPayload: { ok: true } });
   });
 
+  it("never treats an unprocessed reservation as a cached success after a crash", async () => {
+    await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      resourceId: "batch-1",
+      idempotencyKey: "key-crash",
+      payload: { request: true },
+    });
+
+    const replay = await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      resourceId: "batch-1",
+      idempotencyKey: "key-crash",
+      payload: { request: true },
+    });
+
+    expect(replay).toMatchObject({ state: "retry", idempotencyKey: "key-crash" });
+  });
+
+  it("rejects reusing a key with a different request payload", async () => {
+    await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      resourceId: "batch-1",
+      idempotencyKey: "key-reused",
+      payload: { jitter_session_id: "session-a" },
+    });
+
+    const replay = await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      resourceId: "batch-1",
+      idempotencyKey: "key-reused",
+      payload: { jitter_session_id: "session-b" },
+    });
+
+    expect(replay).toEqual({ state: "conflict", idempotencyKey: "key-reused" });
+  });
+
+  it("rejects a processed key when route or resource identity changes", async () => {
+    await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      resourceId: "batch-1",
+      idempotencyKey: "key-route-bound",
+      payload: { request: true },
+    });
+    await recordIdempotentResponse(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      idempotencyKey: "key-route-bound",
+      payload: { ok: true },
+    });
+
+    const differentResource = await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      resourceId: "batch-2",
+      idempotencyKey: "key-route-bound",
+      payload: { request: true },
+    });
+    expect(differentResource).toEqual({ state: "conflict", idempotencyKey: "key-route-bound" });
+  });
+
+  it("lets the first retry adopt a legacy pending row, then rejects a different retry", async () => {
+    webhookEvents.set(`${ORG_ID}:jitter:dialer_batch_claim:key-legacy`, {
+      org_id: ORG_ID,
+      provider: "jitter",
+      event_type: "dialer_batch_claim",
+      external_id: "key-legacy",
+      payload: { request: true },
+      processing_status: "pending",
+      request_hash: null,
+    });
+
+    const first = await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      resourceId: "batch-1",
+      idempotencyKey: "key-legacy",
+      payload: { request: true },
+    });
+    const second = await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      resourceId: "batch-2",
+      idempotencyKey: "key-legacy",
+      payload: { request: true },
+    });
+
+    expect(first.state).toBe("retry");
+    expect(second.state).toBe("conflict");
+  });
+
   it("checkAndRecordIdempotency uses event_type matching route name", async () => {
     await checkAndRecordIdempotency(serviceClient as any, {
       orgId: ORG_ID,
       eventType: "dialer_batch_item_patch",
+      resourceId: "item-1",
       idempotencyKey: "key-2",
       payload: {},
     });
@@ -302,6 +412,7 @@ describe("Jitter writeback idempotency helpers", () => {
       checkAndRecordIdempotency(serviceClient as any, {
         orgId: ORG_ID,
         eventType: "dialer_batch_claim",
+        resourceId: "batch-1",
         idempotencyKey: " ",
         payload: {},
       }),

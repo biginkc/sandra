@@ -1,0 +1,3 @@
+-- Compatibility marker for the isolated test database, which applied this
+-- revision while the atomic writeback RPC was being validated. Fresh installs
+-- receive the final definition from 20260819200000.

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { TEST_ORG_B_ID } from "@tests/integration/fixtures/multi-user";
 
 import {
   authHeaders,
@@ -119,6 +120,50 @@ describe("internal.jitter.call-activities transcript PUT", () => {
     await expect(response.json()).resolves.toMatchObject({
       field: "call_activity_id",
     });
+  });
+
+  it("denies an org-A token from reading or mutating an org-B activity", async () => {
+    const seeded = await seedCallActivity(testClient, { org_id: TEST_ORG_B_ID });
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/transcript`,
+        "PUT",
+        { status: "available", text: "foreign" },
+        { "idempotency-key": "transcript-cross-org" },
+      ),
+      context(seeded.callActivityId),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({ field: "call_activity_id" });
+    const { data: transcripts } = await testClient
+      .from("call_transcripts")
+      .select("id")
+      .eq("call_activity_id", seeded.callActivityId);
+    expect(transcripts).toHaveLength(0);
+  });
+
+  it("refuses a reused idempotency key with a different transcript body", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const url = `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/transcript`;
+    const first = await PUT(
+      jsonRequest(url, "PUT", { status: "pending" }, { "idempotency-key": "transcript-conflict" }),
+      context(seeded.callActivityId),
+    );
+    const second = await PUT(
+      jsonRequest(url, "PUT", { status: "failed" }, { "idempotency-key": "transcript-conflict" }),
+      context(seeded.callActivityId),
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(409);
+    await expect(second.json()).resolves.toMatchObject({ error_code: "idempotency_key_reused" });
+    const { data: transcript } = await testClient
+      .from("call_transcripts")
+      .select("status")
+      .eq("call_activity_id", seeded.callActivityId)
+      .single();
+    expect(transcript?.status).toBe("pending");
   });
 
   it("inserts a call_transcripts row for an existing call_activity", async () => {
