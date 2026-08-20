@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { TEST_ORG_B_ID } from "@tests/integration/fixtures/multi-user";
 
 import {
   authHeaders,
@@ -8,6 +9,7 @@ import {
   jsonRequest,
   resetJitterIntegration,
   seedDialerBatch,
+  setBatchClaim,
 } from "../../_lib/test-helpers.integration";
 import { PATCH } from "./route";
 
@@ -74,13 +76,46 @@ describe("internal.jitter.dialer-batch-item PATCH", () => {
     expect(response.status).toBe(422);
   });
 
-  it("updates item.status with valid Idempotency-Key", async () => {
+  it("returns 422 when the claim session is missing", async () => {
     const seeded = await seedDialerBatch(testClient);
     const response = await PATCH(
       jsonRequest(
         `https://sandra.test/api/internal/jitter/dialer-batch-items/${seeded.itemId}`,
         "PATCH",
-        { status: "skipped" },
+        { status: "skipped", claim_generation: 1 },
+        { "idempotency-key": "patch-missing-session" },
+      ),
+      context(seeded.itemId),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({ field: "jitter_session_id" });
+  });
+
+  it("returns 422 when the claim generation is missing", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const response = await PATCH(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batch-items/${seeded.itemId}`,
+        "PATCH",
+        { status: "skipped", jitter_session_id: "session-1" },
+        { "idempotency-key": "patch-missing-generation" },
+      ),
+      context(seeded.itemId),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({ field: "claim_generation" });
+  });
+
+  it("updates item.status only with the current claim generation", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    await setBatchClaim(testClient, seeded.batchId, { sessionId: "session-1", claimGeneration: 7 });
+    const response = await PATCH(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batch-items/${seeded.itemId}`,
+        "PATCH",
+        { status: "skipped", jitter_session_id: "session-1", claim_generation: 7 },
         { "idempotency-key": "patch-1" },
       ),
       context(seeded.itemId),
@@ -90,6 +125,23 @@ describe("internal.jitter.dialer-batch-item PATCH", () => {
     await expect(response.json()).resolves.toMatchObject({
       item: { id: seeded.itemId, status: "skipped" },
     });
+  });
+
+  it("rejects a stale claim generation", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    await setBatchClaim(testClient, seeded.batchId, { sessionId: "session-current", claimGeneration: 2 });
+    const response = await PATCH(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batch-items/${seeded.itemId}`,
+        "PATCH",
+        { status: "skipped", jitter_session_id: "session-old", claim_generation: 1 },
+        { "idempotency-key": "patch-stale-generation" },
+      ),
+      context(seeded.itemId),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error_code: "stale_claim" });
   });
 
   it("rejects invalid status values", async () => {
@@ -105,5 +157,21 @@ describe("internal.jitter.dialer-batch-item PATCH", () => {
     );
 
     expect(response.status).toBe(422);
+  });
+
+  it("returns 404 for an item whose batch belongs to another org", async () => {
+    const seeded = await seedDialerBatch(testClient, { org_id: TEST_ORG_B_ID });
+    await setBatchClaim(testClient, seeded.batchId, { sessionId: "session-1", claimGeneration: 1 });
+    const response = await PATCH(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batch-items/${seeded.itemId}`,
+        "PATCH",
+        { status: "skipped", jitter_session_id: "session-1", claim_generation: 1 },
+        { "idempotency-key": "patch-cross-org" },
+      ),
+      context(seeded.itemId),
+    );
+
+    expect(response.status).toBe(404);
   });
 });

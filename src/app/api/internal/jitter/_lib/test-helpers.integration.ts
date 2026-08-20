@@ -122,8 +122,11 @@ export async function seedDialerLead(
   };
 }
 
-export async function seedDialerBatch(client: SupabaseClient<any>) {
-  const lead = await seedDialerLead(client);
+export async function seedDialerBatch(
+  client: SupabaseClient<any>,
+  opts: { org_id?: string } = {},
+) {
+  const lead = await seedDialerLead(client, opts);
   const { data: batch, error: batchError } = await (client as any)
     .from("dialer_batches")
     .insert({
@@ -152,6 +155,27 @@ export async function seedDialerBatch(client: SupabaseClient<any>) {
   if (itemError || !item) throw itemError ?? new Error("seed item");
 
   return { ...lead, batchId: batch.id as string, itemId: item.id as string };
+}
+
+export async function setBatchClaim(
+  client: SupabaseClient<any>,
+  batchId: string,
+  opts: {
+    sessionId: string;
+    claimGeneration?: number;
+    claimedAt?: Date;
+  },
+) {
+  const { error } = await (client as any)
+    .from("dialer_batches")
+    .update({
+      status: "claimed",
+      jitter_session_id: opts.sessionId,
+      claim_generation: opts.claimGeneration ?? 1,
+      claimed_at: (opts.claimedAt ?? new Date()).toISOString(),
+    })
+    .eq("id", batchId);
+  if (error) throw error;
 }
 
 export async function seedCallActivity(client: SupabaseClient<any>) {

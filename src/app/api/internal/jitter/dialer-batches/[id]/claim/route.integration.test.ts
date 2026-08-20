@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
+
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { TEST_ORG_B_ID } from "@tests/integration/fixtures/multi-user";
 
 import {
   authHeaders,
@@ -8,6 +11,7 @@ import {
   jsonRequest,
   resetJitterIntegration,
   seedDialerBatch,
+  setBatchClaim,
 } from "../../../_lib/test-helpers.integration";
 import { POST } from "./route";
 
@@ -92,6 +96,7 @@ describe("internal.jitter.dialer-batch claim POST", () => {
       id: seeded.batchId,
       status: "claimed",
       jitter_session_id: "session-1",
+      claim_generation: 1,
     });
     expect(json.batch.claimed_at).toEqual(expect.any(String));
   });
@@ -114,6 +119,52 @@ describe("internal.jitter.dialer-batch claim POST", () => {
     expect(await retry.json()).toStrictEqual(await first.json());
   });
 
+  it("recovers a committed claim when the response record was not written", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    await setBatchClaim(testClient, seeded.batchId, {
+      sessionId: "session-crashed",
+      claimGeneration: 1,
+    });
+    const idempotencyKey = "claim-crash-replay";
+    const { error } = await testClient.from("webhook_events").insert({
+      org_id: seeded.orgId,
+      provider: "jitter",
+      event_type: "dialer_batch_claim",
+      external_id: idempotencyKey,
+      signature_verified: true,
+      processing_status: "pending",
+      payload: { jitter_session_id: "session-crashed" },
+      request_hash: createHash("sha256")
+        .update('{"jitter_session_id":"session-crashed"}')
+        .digest("hex"),
+    });
+    if (error) throw error;
+
+    const response = await POST(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}/claim`,
+        "POST",
+        { jitter_session_id: "session-crashed" },
+        { "idempotency-key": idempotencyKey },
+      ),
+      context(seeded.batchId),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      batch: { id: seeded.batchId, claim_generation: 1 },
+    });
+    const { data: event } = await testClient
+      .from("webhook_events")
+      .select("processing_status")
+      .eq("org_id", seeded.orgId)
+      .eq("provider", "jitter")
+      .eq("event_type", "dialer_batch_claim")
+      .eq("external_id", idempotencyKey)
+      .single();
+    expect(event?.processing_status).toBe("processed");
+  });
+
   it("returns 409 when batch is already claimed by a different jitter_session_id", async () => {
     const seeded = await seedDialerBatch(testClient);
     await (testClient as any)
@@ -132,5 +183,47 @@ describe("internal.jitter.dialer-batch claim POST", () => {
     );
 
     expect(response.status).toBe(409);
+  });
+
+  it("returns 404 when the batch belongs to another org", async () => {
+    const seeded = await seedDialerBatch(testClient, { org_id: TEST_ORG_B_ID });
+    const response = await POST(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}/claim`,
+        "POST",
+        { jitter_session_id: "session-1" },
+        { "idempotency-key": "claim-cross-org" },
+      ),
+      context(seeded.batchId),
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("has exactly one winner when two sessions claim concurrently", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const requestUrl = `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}/claim`;
+
+    const responses = await Promise.all([
+      POST(
+        jsonRequest(requestUrl, "POST", { jitter_session_id: "session-a" }, { "idempotency-key": "claim-race-a" }),
+        context(seeded.batchId),
+      ),
+      POST(
+        jsonRequest(requestUrl, "POST", { jitter_session_id: "session-b" }, { "idempotency-key": "claim-race-b" }),
+        context(seeded.batchId),
+      ),
+    ]);
+
+    expect(responses.filter((response) => response.status === 200)).toHaveLength(1);
+    expect(responses.filter((response) => response.status === 409)).toHaveLength(1);
+
+    const { data: batch } = await (testClient as any)
+      .from("dialer_batches")
+      .select("status, jitter_session_id, claim_generation")
+      .eq("id", seeded.batchId)
+      .single();
+    expect(batch).toMatchObject({ status: "claimed", claim_generation: 1 });
+    expect(["session-a", "session-b"]).toContain(batch.jitter_session_id);
   });
 });

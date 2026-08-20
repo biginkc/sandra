@@ -286,6 +286,42 @@ describe("Jitter writeback idempotency helpers", () => {
     expect(result).toEqual({ state: "cached", cachedPayload: { ok: true } });
   });
 
+  it("never treats an unprocessed reservation as a cached success after a crash", async () => {
+    await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      idempotencyKey: "key-crash",
+      payload: { request: true },
+    });
+
+    const replay = await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      idempotencyKey: "key-crash",
+      payload: { request: true },
+    });
+
+    expect(replay).toEqual({ state: "retry", idempotencyKey: "key-crash" });
+  });
+
+  it("rejects reusing a key with a different request payload", async () => {
+    await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      idempotencyKey: "key-reused",
+      payload: { jitter_session_id: "session-a" },
+    });
+
+    const replay = await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
+      eventType: "dialer_batch_claim",
+      idempotencyKey: "key-reused",
+      payload: { jitter_session_id: "session-b" },
+    });
+
+    expect(replay).toEqual({ state: "conflict", idempotencyKey: "key-reused" });
+  });
+
   it("checkAndRecordIdempotency uses event_type matching route name", async () => {
     await checkAndRecordIdempotency(serviceClient as any, {
       orgId: ORG_ID,

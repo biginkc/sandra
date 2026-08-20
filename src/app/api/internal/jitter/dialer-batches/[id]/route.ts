@@ -79,9 +79,10 @@ export async function GET(
     const { data: batch, error: batchError } = await (auth.serviceClient as any)
       .from("dialer_batches")
       .select(
-        "id, org_id, title, source_kind, source_meta, status, jitter_session_id, claimed_at, completed_at, created_at, updated_at",
+        "id, org_id, title, source_kind, source_meta, status, jitter_session_id, claim_generation, claimed_at, completed_at, created_at, updated_at",
       )
       .eq("id", id)
+      .eq("org_id", auth.orgId)
       .maybeSingle();
 
     if (batchError) throw batchError;

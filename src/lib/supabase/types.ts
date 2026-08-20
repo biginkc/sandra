@@ -1326,6 +1326,7 @@ export type Database = {
       }
       dialer_batches: {
         Row: {
+          claim_generation: number
           claimed_at: string | null
           completed_at: string | null
           created_at: string
@@ -1340,6 +1341,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          claim_generation?: number
           claimed_at?: string | null
           completed_at?: string | null
           created_at?: string
@@ -1354,6 +1356,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          claim_generation?: number
           claimed_at?: string | null
           completed_at?: string | null
           created_at?: string
@@ -3547,6 +3550,7 @@ export type Database = {
           processing_started_at: string | null
           processing_status: string
           provider: string
+          request_hash: string | null
           received_at: string
           signature_verified: boolean
         }
@@ -3561,6 +3565,7 @@ export type Database = {
           processing_started_at?: string | null
           processing_status?: string
           provider: string
+          request_hash?: string | null
           received_at?: string
           signature_verified?: boolean
         }
@@ -3575,6 +3580,7 @@ export type Database = {
           processing_started_at?: string | null
           processing_status?: string
           provider?: string
+          request_hash?: string | null
           received_at?: string
           signature_verified?: boolean
         }
@@ -3777,6 +3783,24 @@ export type Database = {
       }
     }
     Functions: {
+      jitter_claim_dialer_batch: {
+        Args: {
+          p_batch_id: string
+          p_org_id: string
+          p_session_id: string
+        }
+        Returns: Json
+      }
+      jitter_patch_dialer_batch_item: {
+        Args: {
+          p_claim_generation: number
+          p_item_id: string
+          p_org_id: string
+          p_session_id: string
+          p_status: string
+        }
+        Returns: Json
+      }
       assert_appointment_task_dnc_unlocked: {
         Args: { p_task_id: string }
         Returns: undefined

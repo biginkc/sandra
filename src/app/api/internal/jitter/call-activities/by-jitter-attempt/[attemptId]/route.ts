@@ -249,6 +249,14 @@ async function applyDoNotCallOptOut(
   // bounded writeback retry replays this fully replay-safe helper. (The
   // "best-effort audit" precedent in inbound.ts doesn't apply here —
   // inbound SMS senders don't retry; Jitter does.)
+  const { data: contact, error: contactError } = await serviceClient
+    .from("contacts")
+    .select("do_not_contact")
+    .eq("id", contactId)
+    .maybeSingle();
+  if (contactError) throw contactError;
+  if (!contact) throw new Error("DNC writeback contact not found");
+
   await recordConsentEvent(serviceClient, {
     contactId,
     channel: "voice",
@@ -267,11 +275,13 @@ async function applyDoNotCallOptOut(
 
   // Also enforced: if this fails the route must 500 so Jitter's bounded
   // writeback retry replays the request.
-  const { error } = await serviceClient
-    .from("contacts")
-    .update({ do_not_contact: true })
-    .eq("id", contactId);
-  if (error) throw error;
+  if (!contact.do_not_contact) {
+    const { error } = await serviceClient
+      .from("contacts")
+      .update({ do_not_contact: true })
+      .eq("id", contactId);
+    if (error) throw error;
+  }
 }
 
 export async function PUT(
@@ -302,14 +312,6 @@ export async function PUT(
       return forbidden("org_consumer_mismatch");
     }
 
-    const callbackTask = await syncCallbackTask(auth.serviceClient as any, body, validation);
-    if (callbackTask && !callbackTask.ok) return callbackTask.response;
-
-    // Must run BEFORE checkAndRecordIdempotency: the idempotency record is
-    // written before processing, so anything after it that throws would be
-    // skipped (cached) on Jitter's retry and never replayed.
-    await applyDoNotCallOptOut(auth.serviceClient as any, body, attemptId);
-
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       orgId: auth.orgId,
       eventType: "call_activity_writeback",
@@ -319,47 +321,102 @@ export async function PUT(
     if (idempotency.state === "cached") {
       return NextResponse.json(idempotency.cachedPayload);
     }
+    if (idempotency.state === "conflict") {
+      return NextResponse.json(
+        { error: "conflict", error_code: "idempotency_key_reused" },
+        { status: 409 },
+      );
+    }
+
+    const callbackTask = await syncCallbackTask(auth.serviceClient as any, body, validation);
+    if (callbackTask && !callbackTask.ok) return callbackTask.response;
 
     const provider = body.provider ?? "jitter";
-    const { data: activity, error } = await (auth.serviceClient as any)
-      .from("call_activities")
-      .upsert(
-        {
-          org_id: body.org_id,
-          property_id: body.property_id,
-          contact_id: body.contact_id,
-          dialer_batch_item_id: body.dialer_batch_item_id ?? null,
-          jitter_attempt_id: attemptId,
-          jitter_session_id: body.jitter_session_id ?? null,
-          operator_user_id: body.operator_user_id ?? null,
-          started_at: body.started_at ?? null,
-          ended_at: body.ended_at ?? null,
-          duration_seconds: body.duration_seconds ?? null,
-          outcome: body.outcome ?? "unknown",
-          disposition: body.disposition ?? null,
-          do_not_call_requested: body.do_not_call_requested ?? false,
-          provider,
-          provider_call_id: body.provider_call_id ?? null,
-          error_code: body.error_code ?? null,
-          error_message: body.error_message ?? null,
-          raw_event_count: 1,
-        },
-        // Org-scoped (migration 083): a colliding attemptId from another
-        // org inserts its own row instead of overwriting the existing one.
-        { onConflict: "org_id,provider,jitter_attempt_id" },
-      )
-      .select("id, org_id, property_id, contact_id, dialer_batch_item_id, jitter_attempt_id, provider, outcome")
-      .single();
+    let activity: any = null;
 
-    if (error) throw error;
+    // Once the first DNC writeback has committed, the contact's related rows
+    // are intentionally read-only. A later retry with a different
+    // Idempotency-Key must reuse the committed activity instead of attempting
+    // to upsert it again and being rejected by that database guard.
+    if (body.do_not_call_requested === true) {
+      const { data: existing, error: existingError } = await (auth.serviceClient as any)
+        .from("call_activities")
+        .select("id, org_id, property_id, contact_id, dialer_batch_item_id, jitter_attempt_id, provider, outcome")
+        .eq("org_id", auth.orgId)
+        .eq("provider", provider)
+        .eq("jitter_attempt_id", attemptId)
+        .maybeSingle();
+      if (existingError) throw existingError;
+
+      if (existing) {
+        const { data: contact, error: contactError } = await (auth.serviceClient as any)
+          .from("contacts")
+          .select("do_not_contact")
+          .eq("id", body.contact_id)
+          .maybeSingle();
+        if (contactError) throw contactError;
+        if (contact?.do_not_contact === true) activity = existing;
+      }
+    }
+
+    if (!activity) {
+      const { data: upsertedActivity, error } = await (auth.serviceClient as any)
+        .from("call_activities")
+        .upsert(
+          {
+            org_id: body.org_id,
+            property_id: body.property_id,
+            contact_id: body.contact_id,
+            dialer_batch_item_id: body.dialer_batch_item_id ?? null,
+            jitter_attempt_id: attemptId,
+            jitter_session_id: body.jitter_session_id ?? null,
+            operator_user_id: body.operator_user_id ?? null,
+            started_at: body.started_at ?? null,
+            ended_at: body.ended_at ?? null,
+            duration_seconds: body.duration_seconds ?? null,
+            outcome: body.outcome ?? "unknown",
+            disposition: body.disposition ?? null,
+            do_not_call_requested: body.do_not_call_requested ?? false,
+            provider,
+            provider_call_id: body.provider_call_id ?? null,
+            error_code: body.error_code ?? null,
+            error_message: body.error_message ?? null,
+            raw_event_count: 1,
+          },
+          // Org-scoped (migration 083): a colliding attemptId from another
+          // org inserts its own row instead of overwriting the existing one.
+          { onConflict: "org_id,provider,jitter_attempt_id" },
+        )
+        .select("id, org_id, property_id, contact_id, dialer_batch_item_id, jitter_attempt_id, provider, outcome")
+        .single();
+
+      if (error) throw error;
+      activity = upsertedActivity;
+    }
 
     if (body.dialer_batch_item_id) {
-      const { error: itemError } = await (auth.serviceClient as any)
+      const { data: item, error: itemLookupError } = await (auth.serviceClient as any)
         .from("dialer_batch_items")
-        .update({ last_call_activity_id: activity.id })
-        .eq("id", body.dialer_batch_item_id);
-      if (itemError) throw itemError;
+        .select("last_call_activity_id")
+        .eq("id", body.dialer_batch_item_id)
+        .maybeSingle();
+      if (itemLookupError) throw itemLookupError;
+
+      if (item?.last_call_activity_id !== activity.id) {
+        const { error: itemError } = await (auth.serviceClient as any)
+          .from("dialer_batch_items")
+          .update({ last_call_activity_id: activity.id })
+          .eq("id", body.dialer_batch_item_id);
+        if (itemError) throw itemError;
+      }
     }
+
+    // Apply the durable DNC lock after the activity mutation. The database
+    // intentionally rejects creating related activity rows for an already
+    // locked contact; ordering this side effect here lets the writeback land
+    // first, while a pending idempotency reservation makes a crash replay
+    // finish this step instead of returning a false success.
+    await applyDoNotCallOptOut(auth.serviceClient as any, body, attemptId);
 
     const payload = {
       call_activity: activity,
