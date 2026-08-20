@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { classifyItem, previewBatchEligibility } from "./eligibility";
 
-const property = (overrides: Partial<{ id: string; state: string }> = {}) => ({
+const property = (
+  overrides: Partial<{ id: string; state: string; is_dnc_locked: boolean }> = {},
+) => ({
   id: overrides.id ?? crypto.randomUUID(),
   state: overrides.state ?? "MO",
+  is_dnc_locked: overrides.is_dnc_locked ?? false,
 });
 
 const contact = (
@@ -163,5 +166,67 @@ describe("classifyItem", () => {
         inWindow,
       ),
     ).toEqual(["callable"]);
+  });
+
+  it("blocks with durable reason when property.is_dnc_locked is true, even in-window", () => {
+    expect(
+      classifyItem(
+        {
+          property: property({ is_dnc_locked: true }),
+          contact: contact(),
+        },
+        inWindow,
+      ),
+    ).toEqual([{ blocked: "property_dnc_locked" }]);
+  });
+
+  it("blocks with durable reason when property.is_dnc_locked is true, regardless of quiet hours", () => {
+    expect(
+      classifyItem(
+        {
+          property: property({ is_dnc_locked: true }),
+          contact: contact(),
+        },
+        outsideWindow,
+      ),
+    ).toEqual([{ blocked: "property_dnc_locked" }]);
+  });
+
+  it("property_dnc_locked reason is distinct from quiet-hours reasons", () => {
+    const durable = classifyItem(
+      { property: property({ is_dnc_locked: true }), contact: contact() },
+      inWindow,
+    );
+    const quietHours = classifyItem(
+      { property: property(), contact: contact() },
+      outsideWindow,
+    );
+
+    expect(durable).toEqual([{ blocked: "property_dnc_locked" }]);
+    expect(quietHours).toEqual([{ blocked: "outside_window" }]);
+    expect((durable[0] as { blocked: string }).blocked).not.toBe(
+      (quietHours[0] as { blocked: string }).blocked,
+    );
+  });
+
+  it("property_dnc_locked takes priority over all phones for a multi-phone prospect", () => {
+    expect(
+      previewBatchEligibility(
+        [
+          {
+            property: property({ is_dnc_locked: true }),
+            contact: contact({
+              phone_1: "5551112222",
+              phone_2: "5553334444",
+            }),
+          },
+        ],
+        inWindow,
+      ),
+    ).toEqual({
+      callable: 0,
+      blocked: { property_dnc_locked: 2 },
+      missing: 0,
+    });
   });
 });
