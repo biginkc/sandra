@@ -87,6 +87,13 @@ export async function POST(
     );
     if (mutationError) throw mutationError;
 
+    if ((payload as { outcome?: string } | null)?.outcome === "not_found") {
+      return NextResponse.json(
+        { error: "validation_error", field: "call_activity_id" },
+        { status: 422 },
+      );
+    }
+
     return NextResponse.json(payload);
   } catch (e) {
     reportError(e, { tags: { surface: "jitter_call_recording_writeback" } });

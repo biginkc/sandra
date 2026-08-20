@@ -3,13 +3,15 @@
 -- 20260819152000 files are corrected for fresh installs, but an applied
 -- migration cannot be edited into an existing database.
 
--- Legacy pending rows have no compatible application hash. The first retry
--- adopts its route/resource-bound hash in auth.ts.
+-- Repair only malformed legacy hashes. Valid route/resource-bound SHA-256
+-- hashes already carry trustworthy request identity and must be preserved;
+-- the first retry adopts its app-computed hash only for malformed rows.
 update public.webhook_events
 set request_hash = null
 where provider = 'jitter'
   and processing_status = 'pending'
-  and request_hash is not null;
+  and request_hash is not null
+  and request_hash !~ '^[0-9a-f]{64}$';
 
 create or replace function public.jitter_claim_dialer_batch(
   p_batch_id uuid,

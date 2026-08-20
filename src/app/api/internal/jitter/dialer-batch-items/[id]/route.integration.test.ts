@@ -144,6 +144,37 @@ describe("internal.jitter.dialer-batch-item PATCH", () => {
     await expect(response.json()).resolves.toMatchObject({ error_code: "stale_claim" });
   });
 
+  it("rejects a generation-only stale claim when the session is unchanged", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    await setBatchClaim(testClient, seeded.batchId, {
+      sessionId: "session-same",
+      claimGeneration: 1,
+    });
+    await (testClient as any)
+      .from("dialer_batches")
+      .update({ claim_generation: 2 })
+      .eq("id", seeded.batchId);
+
+    const response = await PATCH(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batch-items/${seeded.itemId}`,
+        "PATCH",
+        { status: "skipped", jitter_session_id: "session-same", claim_generation: 1 },
+        { "idempotency-key": "patch-generation-only-stale" },
+      ),
+      context(seeded.itemId),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error_code: "stale_claim" });
+    const { data: item } = await (testClient as any)
+      .from("dialer_batch_items")
+      .select("status")
+      .eq("id", seeded.itemId)
+      .single();
+    expect(item?.status).toBe("queued");
+  });
+
   it("rejects the old generation after the batch is reclaimed", async () => {
     const seeded = await seedDialerBatch(testClient);
     await setBatchClaim(testClient, seeded.batchId, {

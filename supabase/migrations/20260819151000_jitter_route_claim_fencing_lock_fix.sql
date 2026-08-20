@@ -10,15 +10,15 @@ set claim_generation = 1
 where status = 'claimed'
   and claim_generation = 0;
 
--- Pending rows from the pre-route/resource hash implementation are not
--- safely comparable: PostgreSQL JSONB text formatting is not the same
--- canonical representation used by the application. Leave them null so the
--- first retry can atomically adopt the application's hash.
+-- Only malformed pending hashes need legacy repair. A syntactically valid
+-- route/resource-bound SHA-256 hash is already safe to compare and must be
+-- preserved so the first retry cannot silently change its request identity.
 update public.webhook_events
 set request_hash = null
 where provider = 'jitter'
   and processing_status = 'pending'
-  and request_hash is not null;
+  and request_hash is not null
+  and request_hash !~ '^[0-9a-f]{64}$';
 
 create or replace function public.jitter_claim_dialer_batch(
   p_batch_id uuid,

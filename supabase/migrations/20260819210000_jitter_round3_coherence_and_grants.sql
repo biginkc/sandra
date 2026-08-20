@@ -341,6 +341,22 @@ begin
     end if;
   end if;
 
+  -- The batch-item branch above is optional. The activity's direct property
+  -- and contact references still have to belong to this org on every path.
+  if not exists (
+    select 1
+    from public.properties as p
+    where p.id = v_activity.property_id
+      and p.org_id = p_org_id
+  ) or not exists (
+    select 1
+    from public.contacts as c
+    where c.id = v_activity.contact_id
+      and c.org_id = p_org_id
+  ) then
+    raise exception 'jitter coherence check failed';
+  end if;
+
   select r.id into v_recording_id
   from public.call_recordings as r
   where r.call_activity_id = v_activity.id
@@ -460,6 +476,22 @@ begin
        or v_item.item_contact_id is distinct from v_activity.contact_id then
       raise exception 'jitter coherence check failed';
     end if;
+  end if;
+
+  -- The batch-item branch above is optional. The activity's direct property
+  -- and contact references still have to belong to this org on every path.
+  if not exists (
+    select 1
+    from public.properties as p
+    where p.id = v_activity.property_id
+      and p.org_id = p_org_id
+  ) or not exists (
+    select 1
+    from public.contacts as c
+    where c.id = v_activity.contact_id
+      and c.org_id = p_org_id
+  ) then
+    raise exception 'jitter coherence check failed';
   end if;
 
   select t.id into v_transcript_id

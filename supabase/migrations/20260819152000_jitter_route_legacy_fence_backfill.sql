@@ -6,14 +6,15 @@ set claim_generation = 1
 where status = 'claimed'
   and claim_generation = 0;
 
--- The old payload::text digest is incompatible with the application's
--- route/resource-bound canonical JSON hash. Null is an explicit legacy
--- marker; the first retry adopts its app-computed hash in auth.ts.
+-- Repair only malformed legacy hashes. Valid route/resource-bound SHA-256
+-- hashes already carry trustworthy request identity and must be preserved;
+-- the first retry adopts its app-computed hash only for malformed rows.
 update public.webhook_events
 set request_hash = null
 where provider = 'jitter'
   and processing_status = 'pending'
-  and request_hash is not null;
+  and request_hash is not null
+  and request_hash !~ '^[0-9a-f]{64}$';
 
 -- The route-level idempotency response is written in the same transaction as
 -- the mutation. The original three-argument claim function remains the CAS

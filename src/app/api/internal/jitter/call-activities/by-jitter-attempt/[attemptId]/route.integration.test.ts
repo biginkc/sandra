@@ -307,6 +307,42 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     expect(reservations).toHaveLength(0);
   });
 
+  it("rejects UUID, timestamp, and duration cast failures before reserving", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const requestUrl = `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`;
+    const invalidBodies = [
+      { operator_user_id: "not-a-uuid" },
+      { started_at: "not-a-timestamp" },
+      { duration_seconds: 1.5 },
+    ];
+
+    for (const [index, invalidBody] of invalidBodies.entries()) {
+      const key = `activity-invalid-cast-${index}`;
+      const response = await PUT(
+        jsonRequest(
+          requestUrl,
+          "PUT",
+          { ...writebackBody(seeded), ...invalidBody },
+          { "idempotency-key": key },
+        ),
+        attemptContext(attemptId),
+      );
+
+      expect(response.status).toBe(422);
+    }
+
+    const { data: reservations } = await (testClient as any)
+      .from("webhook_events")
+      .select("external_id")
+      .in("external_id", [
+        "activity-invalid-cast-0",
+        "activity-invalid-cast-1",
+        "activity-invalid-cast-2",
+      ]);
+    expect(reservations).toHaveLength(0);
+  });
+
   it("updates an existing row for the same provider and jitter_attempt_id", async () => {
     const seeded = await seedDialerBatch(testClient);
     const attemptId = `attempt-${crypto.randomUUID()}`;
@@ -696,10 +732,11 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     expect(responses.every((response) => response.status === 200)).toBe(true);
     const { data: activities } = await (testClient as any)
       .from("call_activities")
-      .select("id, org_id, provider, jitter_attempt_id")
+      .select("id, org_id, provider, jitter_attempt_id, raw_event_count")
       .eq("org_id", seeded.orgId)
       .eq("provider", "jitter")
       .eq("jitter_attempt_id", attemptId);
     expect(activities).toHaveLength(1);
+    expect(activities?.[0]?.raw_event_count).toBe(2);
   });
 });

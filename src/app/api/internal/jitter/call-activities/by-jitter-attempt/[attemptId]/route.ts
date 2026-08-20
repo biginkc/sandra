@@ -39,6 +39,28 @@ type ValidatedWriteback = {
   };
 };
 
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const VALID_OUTCOMES = new Set([
+  "connected_human",
+  "voicemail",
+  "no_answer",
+  "busy",
+  "failed",
+  "canceled",
+  "unknown",
+]);
+
+const UUID_FIELDS = [
+  "org_id",
+  "property_id",
+  "contact_id",
+  "dialer_batch_item_id",
+  "operator_user_id",
+  "callback_assignee_id",
+] as const;
+const TIMESTAMP_FIELDS = ["started_at", "ended_at", "callback_at"] as const;
+
 function unprocessable(error_code: string, field?: string) {
   return NextResponse.json(
     { error: "validation_error", error_code, ...(field ? { field } : {}) },
@@ -149,6 +171,57 @@ function validTimestamp(value: string | null | undefined): string | null {
   return date.toISOString();
 }
 
+function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
+  for (const field of UUID_FIELDS) {
+    const value = body[field];
+    if (
+      value !== undefined &&
+      value !== null &&
+      value !== "" &&
+      (typeof value !== "string" || !UUID_PATTERN.test(value))
+    ) {
+      return unprocessable("invalid_uuid", field);
+    }
+  }
+
+  if (
+    body.duration_seconds !== undefined &&
+    body.duration_seconds !== null &&
+    (typeof body.duration_seconds !== "number" ||
+      !Number.isSafeInteger(body.duration_seconds) ||
+      body.duration_seconds < 0)
+  ) {
+    return unprocessable("invalid_duration", "duration_seconds");
+  }
+
+  if (
+    body.do_not_call_requested !== undefined &&
+    typeof body.do_not_call_requested !== "boolean"
+  ) {
+    return unprocessable("invalid_boolean", "do_not_call_requested");
+  }
+
+  if (
+    body.outcome !== undefined &&
+    body.outcome !== null &&
+    body.outcome !== "" &&
+    (typeof body.outcome !== "string" || !VALID_OUTCOMES.has(body.outcome))
+  ) {
+    return unprocessable("invalid_outcome", "outcome");
+  }
+
+  for (const field of TIMESTAMP_FIELDS) {
+    const value = body[field];
+    if (value === undefined || value === null || value === "") continue;
+    if (typeof value !== "string") return unprocessable("invalid_timestamp", field);
+    const normalized = validTimestamp(value);
+    if (!normalized) return unprocessable("invalid_timestamp", field);
+    body[field] = normalized;
+  }
+
+  return null;
+}
+
 async function resolveCallbackAssignee(serviceClient: any, body: WritebackBody): Promise<string | null> {
   const preferred = body.callback_assignee_id ?? body.operator_user_id ?? null;
   if (preferred && body.org_id) {
@@ -186,10 +259,23 @@ export async function PUT(
 
     const { attemptId } = await context.params;
     const idempotencyKey = request.headers.get("idempotency-key")!.trim();
-    const body = JSON.parse(auth.rawBody || "{}") as WritebackBody;
+    const parsedBody: unknown = JSON.parse(auth.rawBody || "{}");
+    if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+      return unprocessable("invalid_body");
+    }
+    const body = parsedBody as WritebackBody;
+
+    const initialPayloadValidation = validatePayloadSyntax(body);
+    if (initialPayloadValidation) return initialPayloadValidation;
 
     const validation = await validateOrgConsistency(auth.serviceClient as any, body);
     if (!validation.ok) return validation.response;
+
+    // validateOrgConsistency may derive the three tenant ids from a batch
+    // item. Re-run syntax validation so those values are also proven safe
+    // before the idempotency reservation below.
+    const derivedPayloadValidation = validatePayloadSyntax(body);
+    if (derivedPayloadValidation) return derivedPayloadValidation;
 
     if (body.provider !== "jitter") {
       return unprocessable("provider_mismatch", "provider");
@@ -245,6 +331,13 @@ export async function PUT(
       },
     );
     if (mutationError) throw mutationError;
+
+    if ((payload as { outcome?: string } | null)?.outcome === "not_found") {
+      return NextResponse.json(
+        { error: "validation_error", field: "call_activity_id" },
+        { status: 422 },
+      );
+    }
 
     return NextResponse.json(payload);
   } catch (e) {
