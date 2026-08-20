@@ -12,6 +12,7 @@ import {
   setBatchClaim,
 } from "../../../_lib/test-helpers.integration";
 import { computeJitterRequestHash } from "../../../_lib/auth";
+import { PATCH as patchItem } from "../../../dialer-batch-items/[id]/route";
 import { POST } from "./route";
 
 const testClient = createTestClient();
@@ -199,6 +200,85 @@ describe("internal.jitter.dialer-batch claim POST", () => {
     );
 
     expect(response.status).toBe(404);
+  });
+
+  it("does not reclaim a batch claimed just under the 30-minute TTL — still conflicts", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    await setBatchClaim(testClient, seeded.batchId, {
+      sessionId: "session-recent",
+      claimGeneration: 1,
+      claimedAt: new Date(Date.now() - 29 * 60 * 1000),
+    });
+
+    const response = await POST(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}/claim`,
+        "POST",
+        { jitter_session_id: "session-new" },
+        { "idempotency-key": "claim-ttl-not-yet" },
+      ),
+      context(seeded.batchId),
+    );
+
+    expect(response.status).toBe(409);
+    const { data: batch } = await (testClient as any)
+      .from("dialer_batches")
+      .select("jitter_session_id, claim_generation")
+      .eq("id", seeded.batchId)
+      .single();
+    expect(batch).toMatchObject({
+      jitter_session_id: "session-recent",
+      claim_generation: 1,
+    });
+  });
+
+  it("reclaims a batch whose claim has gone stale past the 30-minute TTL, bumping claim_generation, and fences out the old session's writes", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    await setBatchClaim(testClient, seeded.batchId, {
+      sessionId: "session-crashed",
+      claimGeneration: 1,
+      claimedAt: new Date(Date.now() - 31 * 60 * 1000),
+    });
+
+    const reclaim = await POST(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}/claim`,
+        "POST",
+        { jitter_session_id: "session-reclaimer" },
+        { "idempotency-key": "claim-ttl-reclaim" },
+      ),
+      context(seeded.batchId),
+    );
+
+    expect(reclaim.status).toBe(200);
+    const reclaimJson = (await reclaim.json()) as any;
+    expect(reclaimJson.batch).toMatchObject({
+      jitter_session_id: "session-reclaimer",
+      claim_generation: 2,
+    });
+
+    // The crashed worker's own retries (old session, old generation) are now
+    // fenced out end-to-end via jitter_patch_dialer_batch_item's existing
+    // generation check — proving the claim-TTL reclaim actually composes
+    // with the item-PATCH fence, not just that the reclaim itself succeeds.
+    const stalePatch = await patchItem(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/dialer-batch-items/${seeded.itemId}`,
+        "PATCH",
+        {
+          status: "in_progress",
+          jitter_session_id: "session-crashed",
+          claim_generation: 1,
+        },
+        { "idempotency-key": "item-patch-after-stale-reclaim" },
+      ),
+      context(seeded.itemId),
+    );
+
+    expect(stalePatch.status).toBe(409);
+    await expect(stalePatch.json()).resolves.toMatchObject({
+      error_code: "stale_claim",
+    });
   });
 
   it("has exactly one winner when two sessions claim concurrently", async () => {
