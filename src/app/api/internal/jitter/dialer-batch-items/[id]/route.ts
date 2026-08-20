@@ -5,7 +5,6 @@ import { reportError } from "@/lib/errors/report";
 import {
   authenticateJitterWriteback,
   checkAndRecordIdempotency,
-  recordIdempotentResponse,
   requireIdempotencyKey,
 } from "../../_lib/auth";
 
@@ -68,6 +67,7 @@ export async function PATCH(
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       orgId: auth.orgId,
       eventType: "dialer_batch_item_patch",
+      resourceId: id,
       idempotencyKey,
       payload: body,
     });
@@ -89,6 +89,8 @@ export async function PATCH(
         p_session_id: jitterSessionId,
         p_claim_generation: body.claim_generation,
         p_status: body.status,
+        p_external_id: idempotencyKey,
+        p_request_hash: idempotency.requestHash,
       },
     );
     if (patchError) throw patchError;
@@ -107,13 +109,6 @@ export async function PATCH(
     const payload = {
       item: (patchResult as { item: unknown }).item,
     };
-    await recordIdempotentResponse(auth.serviceClient, {
-      orgId: auth.orgId,
-      eventType: "dialer_batch_item_patch",
-      idempotencyKey,
-      payload,
-    });
-
     return NextResponse.json(payload);
   } catch (e) {
     reportError(e, { tags: { surface: "jitter_patch_dialer_batch_item" } });

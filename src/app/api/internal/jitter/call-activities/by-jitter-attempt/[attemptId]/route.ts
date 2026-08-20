@@ -1,12 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { reportError } from "@/lib/errors/report";
-import { recordConsentEvent } from "@/lib/messaging/consent";
 
 import {
   authenticateJitterWriteback,
   checkAndRecordIdempotency,
-  recordIdempotentResponse,
   requireIdempotencyKey,
 } from "../../../_lib/auth";
 
@@ -175,115 +173,6 @@ async function resolveCallbackAssignee(serviceClient: any, body: WritebackBody):
   return fallback?.user_id ?? null;
 }
 
-async function syncCallbackTask(serviceClient: any, body: WritebackBody, validation: ValidatedWriteback) {
-  if (body.disposition !== "callback_requested") return null;
-
-  const callbackAt = validTimestamp(body.callback_at);
-  if (!callbackAt) {
-    return { ok: false as const, response: unprocessable("callback_at_required", "callback_at") };
-  }
-
-  const assigneeId = await resolveCallbackAssignee(serviceClient, body);
-  if (!assigneeId) {
-    return { ok: false as const, response: unprocessable("callback_assignee_required", "callback_assignee_id") };
-  }
-
-  const title = `Callback ${validation.property.address ?? "property"}`;
-  const now = new Date().toISOString();
-  const { error: propertyError } = await serviceClient
-    .from("properties")
-    .update({
-      outreach_dispo: "callback_requested",
-      follow_up_at: callbackAt,
-      updated_at: now,
-    })
-    .eq("id", validation.property.id);
-  if (propertyError) throw propertyError;
-
-  const { data: existing, error: existingError } = await serviceClient
-    .from("tasks")
-    .select("id")
-    .eq("related_property_id", validation.property.id)
-    .eq("type", "callback")
-    .eq("status", "open")
-    .eq("due_at", callbackAt)
-    .maybeSingle();
-  if (existingError) throw existingError;
-  if (existing?.id) return { ok: true as const, taskId: existing.id as string };
-
-  const { data: task, error: taskError } = await serviceClient
-    .from("tasks")
-    .insert({
-      org_id: body.org_id,
-      assignee_id: assigneeId,
-      related_property_id: validation.property.id,
-      type: "callback",
-      title,
-      due_at: callbackAt,
-      created_by: assigneeId,
-    })
-    .select("id")
-    .single();
-  if (taskError) throw taskError;
-
-  return { ok: true as const, taskId: task?.id as string };
-}
-
-async function applyDoNotCallOptOut(
-  serviceClient: any,
-  body: WritebackBody,
-  attemptId: string,
-) {
-  if (body.do_not_call_requested !== true) return;
-
-  // By this point validateOrgConsistency has resolved contact_id (deriving
-  // it from dialer_batch_item_id if needed) or already returned 422.
-  const contactId = body.contact_id!;
-  const occurredAt = validTimestamp(body.ended_at);
-
-  // Deliberately NOT wrapped in try/catch: recordConsentEvent already
-  // handles duplicates internally (externalId pre-lookup + unique-index
-  // conflict detection), so any error that escapes it is a real failure.
-  // Swallowing it would return 200 — Jitter stops retrying and the contact
-  // is flagged with no audit row. Let it throw: the route 500s and Jitter's
-  // bounded writeback retry replays this fully replay-safe helper. (The
-  // "best-effort audit" precedent in inbound.ts doesn't apply here —
-  // inbound SMS senders don't retry; Jitter does.)
-  const { data: contact, error: contactError } = await serviceClient
-    .from("contacts")
-    .select("do_not_contact")
-    .eq("id", contactId)
-    .maybeSingle();
-  if (contactError) throw contactError;
-  if (!contact) throw new Error("DNC writeback contact not found");
-
-  await recordConsentEvent(serviceClient, {
-    contactId,
-    channel: "voice",
-    eventType: "opt_out",
-    source: "jitter_writeback",
-    sourceDetail: {
-      disposition: body.disposition ?? null,
-      jitter_session_id: body.jitter_session_id ?? null,
-    },
-    occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
-    // attemptId → source_external_id; the partial unique index on
-    // (contact_id, channel, event_type, source, source_external_id)
-    // keeps writeback replays from duplicating the audit row.
-    idempotencyKey: attemptId,
-  });
-
-  // Also enforced: if this fails the route must 500 so Jitter's bounded
-  // writeback retry replays the request.
-  if (!contact.do_not_contact) {
-    const { error } = await serviceClient
-      .from("contacts")
-      .update({ do_not_contact: true })
-      .eq("id", contactId);
-    if (error) throw error;
-  }
-}
-
 export async function PUT(
   request: Request,
   context: RouteContext,
@@ -315,6 +204,7 @@ export async function PUT(
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       orgId: auth.orgId,
       eventType: "call_activity_writeback",
+      resourceId: attemptId,
       idempotencyKey,
       payload: body,
     });
@@ -328,106 +218,29 @@ export async function PUT(
       );
     }
 
-    const callbackTask = await syncCallbackTask(auth.serviceClient as any, body, validation);
-    if (callbackTask && !callbackTask.ok) return callbackTask.response;
-
-    const provider = body.provider ?? "jitter";
-    let activity: any = null;
-
-    // Once the first DNC writeback has committed, the contact's related rows
-    // are intentionally read-only. A later retry with a different
-    // Idempotency-Key must reuse the committed activity instead of attempting
-    // to upsert it again and being rejected by that database guard.
-    if (body.do_not_call_requested === true) {
-      const { data: existing, error: existingError } = await (auth.serviceClient as any)
-        .from("call_activities")
-        .select("id, org_id, property_id, contact_id, dialer_batch_item_id, jitter_attempt_id, provider, outcome")
-        .eq("org_id", auth.orgId)
-        .eq("provider", provider)
-        .eq("jitter_attempt_id", attemptId)
-        .maybeSingle();
-      if (existingError) throw existingError;
-
-      if (existing) {
-        const { data: contact, error: contactError } = await (auth.serviceClient as any)
-          .from("contacts")
-          .select("do_not_contact")
-          .eq("id", body.contact_id)
-          .maybeSingle();
-        if (contactError) throw contactError;
-        if (contact?.do_not_contact === true) activity = existing;
+    let callbackAssigneeId: string | null = null;
+    if (body.disposition === "callback_requested") {
+      if (!validTimestamp(body.callback_at)) {
+        return unprocessable("callback_at_required", "callback_at");
+      }
+      callbackAssigneeId = await resolveCallbackAssignee(auth.serviceClient as any, body);
+      if (!callbackAssigneeId) {
+        return unprocessable("callback_assignee_required", "callback_assignee_id");
       }
     }
 
-    if (!activity) {
-      const { data: upsertedActivity, error } = await (auth.serviceClient as any)
-        .from("call_activities")
-        .upsert(
-          {
-            org_id: body.org_id,
-            property_id: body.property_id,
-            contact_id: body.contact_id,
-            dialer_batch_item_id: body.dialer_batch_item_id ?? null,
-            jitter_attempt_id: attemptId,
-            jitter_session_id: body.jitter_session_id ?? null,
-            operator_user_id: body.operator_user_id ?? null,
-            started_at: body.started_at ?? null,
-            ended_at: body.ended_at ?? null,
-            duration_seconds: body.duration_seconds ?? null,
-            outcome: body.outcome ?? "unknown",
-            disposition: body.disposition ?? null,
-            do_not_call_requested: body.do_not_call_requested ?? false,
-            provider,
-            provider_call_id: body.provider_call_id ?? null,
-            error_code: body.error_code ?? null,
-            error_message: body.error_message ?? null,
-            raw_event_count: 1,
-          },
-          // Org-scoped (migration 083): a colliding attemptId from another
-          // org inserts its own row instead of overwriting the existing one.
-          { onConflict: "org_id,provider,jitter_attempt_id" },
-        )
-        .select("id, org_id, property_id, contact_id, dialer_batch_item_id, jitter_attempt_id, provider, outcome")
-        .single();
-
-      if (error) throw error;
-      activity = upsertedActivity;
-    }
-
-    if (body.dialer_batch_item_id) {
-      const { data: item, error: itemLookupError } = await (auth.serviceClient as any)
-        .from("dialer_batch_items")
-        .select("last_call_activity_id")
-        .eq("id", body.dialer_batch_item_id)
-        .maybeSingle();
-      if (itemLookupError) throw itemLookupError;
-
-      if (item?.last_call_activity_id !== activity.id) {
-        const { error: itemError } = await (auth.serviceClient as any)
-          .from("dialer_batch_items")
-          .update({ last_call_activity_id: activity.id })
-          .eq("id", body.dialer_batch_item_id);
-        if (itemError) throw itemError;
-      }
-    }
-
-    // Apply the durable DNC lock after the activity mutation. The database
-    // intentionally rejects creating related activity rows for an already
-    // locked contact; ordering this side effect here lets the writeback land
-    // first, while a pending idempotency reservation makes a crash replay
-    // finish this step instead of returning a false success.
-    await applyDoNotCallOptOut(auth.serviceClient as any, body, attemptId);
-
-    const payload = {
-      call_activity: activity,
-      ...(callbackTask?.ok ? { callback_task: { id: callbackTask.taskId } } : {}),
-    };
-    await recordIdempotentResponse(auth.serviceClient, {
-      orgId: auth.orgId,
-      eventType: "call_activity_writeback",
-      idempotencyKey,
-      payload,
-    });
+    const { data: payload, error: mutationError } = await (auth.serviceClient as any).rpc(
+      "jitter_writeback_call_activity",
+      {
+        p_attempt_id: attemptId,
+        p_body: body,
+        p_callback_assignee_id: callbackAssigneeId,
+        p_external_id: idempotencyKey,
+        p_org_id: auth.orgId,
+        p_request_hash: idempotency.requestHash,
+      },
+    );
+    if (mutationError) throw mutationError;
 
     return NextResponse.json(payload);
   } catch (e) {

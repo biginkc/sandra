@@ -10,16 +10,15 @@ set claim_generation = 1
 where status = 'claimed'
   and claim_generation = 0;
 
--- Pending legacy reservations still contain the original request in payload;
--- processed rows do not, because payload is their cached response.
+-- Pending rows from the pre-route/resource hash implementation are not
+-- safely comparable: PostgreSQL JSONB text formatting is not the same
+-- canonical representation used by the application. Leave them null so the
+-- first retry can atomically adopt the application's hash.
 update public.webhook_events
-set request_hash = encode(
-  extensions.digest(convert_to(payload::text, 'UTF8'), 'sha256'),
-  'hex'
-)
+set request_hash = null
 where provider = 'jitter'
   and processing_status = 'pending'
-  and request_hash is null;
+  and request_hash is not null;
 
 create or replace function public.jitter_claim_dialer_batch(
   p_batch_id uuid,

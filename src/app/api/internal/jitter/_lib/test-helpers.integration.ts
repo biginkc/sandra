@@ -178,8 +178,11 @@ export async function setBatchClaim(
   if (error) throw error;
 }
 
-export async function seedCallActivity(client: SupabaseClient<any>) {
-  const seeded = await seedDialerBatch(client);
+export async function seedCallActivity(
+  client: SupabaseClient<any>,
+  opts: { org_id?: string } = {},
+) {
+  const seeded = await seedDialerBatch(client, opts);
   const { data: activity, error } = await (client as any)
     .from("call_activities")
     .insert({

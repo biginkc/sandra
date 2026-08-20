@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
@@ -13,6 +11,7 @@ import {
   seedDialerBatch,
   setBatchClaim,
 } from "../../../_lib/test-helpers.integration";
+import { computeJitterRequestHash } from "../../../_lib/auth";
 import { POST } from "./route";
 
 const testClient = createTestClient();
@@ -134,9 +133,11 @@ describe("internal.jitter.dialer-batch claim POST", () => {
       signature_verified: true,
       processing_status: "pending",
       payload: { jitter_session_id: "session-crashed" },
-      request_hash: createHash("sha256")
-        .update('{"jitter_session_id":"session-crashed"}')
-        .digest("hex"),
+      request_hash: computeJitterRequestHash({
+        route: "dialer_batch_claim",
+        resourceId: seeded.batchId,
+        payload: { jitter_session_id: "session-crashed" },
+      }),
     });
     if (error) throw error;
 

@@ -1,0 +1,2 @@
+-- Compatibility marker for the isolated test database. The final DNC-safe
+-- writeback definition is installed by 20260819200000.

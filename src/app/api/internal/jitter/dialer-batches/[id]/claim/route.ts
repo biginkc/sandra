@@ -5,7 +5,6 @@ import { reportError } from "@/lib/errors/report";
 import {
   authenticateJitterWriteback,
   checkAndRecordIdempotency,
-  recordIdempotentResponse,
   requireIdempotencyKey,
 } from "../../../_lib/auth";
 
@@ -39,6 +38,7 @@ export async function POST(
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       orgId: auth.orgId,
       eventType: "dialer_batch_claim",
+      resourceId: id,
       idempotencyKey,
       payload: body,
     });
@@ -58,6 +58,8 @@ export async function POST(
         p_batch_id: id,
         p_org_id: auth.orgId,
         p_session_id: jitterSessionId,
+        p_external_id: idempotencyKey,
+        p_request_hash: idempotency.requestHash,
       },
     );
     if (claimError) throw claimError;
@@ -76,13 +78,6 @@ export async function POST(
     const payload = {
       batch: (claimResult as { batch: unknown }).batch,
     };
-    await recordIdempotentResponse(auth.serviceClient, {
-      orgId: auth.orgId,
-      eventType: "dialer_batch_claim",
-      idempotencyKey,
-      payload,
-    });
-
     return NextResponse.json(payload);
   } catch (e) {
     reportError(e, { tags: { surface: "jitter_claim_dialer_batch" } });

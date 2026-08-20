@@ -1,0 +1,2 @@
+-- Compatibility marker for the isolated test database. The generated
+-- consent-event id is handled by the final definition in 20260819200000.

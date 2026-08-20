@@ -5,7 +5,6 @@ import { reportError } from "@/lib/errors/report";
 import {
   authenticateJitterWriteback,
   checkAndRecordIdempotency,
-  recordIdempotentResponse,
   requireIdempotencyKey,
 } from "../../../_lib/auth";
 
@@ -45,6 +44,7 @@ export async function POST(
       .from("call_activities")
       .select("id")
       .eq("id", id)
+      .eq("org_id", auth.orgId)
       .maybeSingle();
     if (activityError) throw activityError;
     if (!activity) {
@@ -57,48 +57,35 @@ export async function POST(
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       orgId: auth.orgId,
       eventType: "call_recording_writeback",
+      resourceId: id,
       idempotencyKey,
       payload: body,
     });
     if (idempotency.state === "cached") {
       return NextResponse.json(idempotency.cachedPayload);
     }
+    if (idempotency.state === "conflict") {
+      return NextResponse.json(
+        { error: "conflict", error_code: "idempotency_key_reused" },
+        { status: 409 },
+      );
+    }
 
-    const row = {
-      call_activity_id: id,
-      status: body.status,
-      storage_path: body.storage_path ?? null,
-      duration_seconds: body.duration_seconds ?? null,
-      error_code: body.error_code ?? null,
-      error_message: body.error_message ?? null,
-    };
-
-    const { data: existing } = await (auth.serviceClient as any)
-      .from("call_recordings")
-      .select("id")
-      .eq("call_activity_id", id)
-      .maybeSingle();
-
-    const query = existing?.id
-      ? (auth.serviceClient as any)
-          .from("call_recordings")
-          .update(row)
-          .eq("id", existing.id)
-      : (auth.serviceClient as any).from("call_recordings").insert(row);
-
-    const { data: recording, error } = await query
-      .select("id, call_activity_id, status, storage_path, duration_seconds, error_code, error_message")
-      .single();
-    if (error) throw error;
-
-    // Parent status + updated_at are handled by bump_call_activities_on_child_change.
-    const payload = { recording };
-    await recordIdempotentResponse(auth.serviceClient, {
-      orgId: auth.orgId,
-      eventType: "call_recording_writeback",
-      idempotencyKey,
-      payload,
-    });
+    const { data: payload, error: mutationError } = await (auth.serviceClient as any).rpc(
+      "jitter_upsert_call_recording",
+      {
+        p_call_activity_id: id,
+        p_org_id: auth.orgId,
+        p_status: body.status,
+        p_storage_path: body.storage_path ?? null,
+        p_duration_seconds: body.duration_seconds ?? null,
+        p_error_code: body.error_code ?? null,
+        p_error_message: body.error_message ?? null,
+        p_external_id: idempotencyKey,
+        p_request_hash: idempotency.requestHash,
+      },
+    );
+    if (mutationError) throw mutationError;
 
     return NextResponse.json(payload);
   } catch (e) {
