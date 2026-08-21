@@ -59,6 +59,7 @@ type TelnyxNotificationLike = {
 };
 
 export type JitterTransportDependencies = {
+  prepareMicrophone(): Promise<void>;
   startCall(target: CallTarget): Promise<JitterProxyResult<{ callId: string; batchId: string }>>;
   getToken(callId: string): Promise<JitterProxyResult<JitterTokenResponse>>;
   connect(callId: string, phase: JitterConnectPhase): Promise<JitterProxyResult<{ dialing: true }>>;
@@ -73,6 +74,7 @@ export type JitterTransportDependencies = {
 };
 
 const defaultDependencies: JitterTransportDependencies = {
+  prepareMicrophone,
   startCall: startJitterSoftphoneCall,
   getToken: getJitterSoftphoneToken,
   connect: connectJitterSoftphoneCall,
@@ -199,6 +201,13 @@ export class JitterCallTransport implements CallTransport {
   private async startInternal(target: CallTarget): Promise<CallHandle> {
     this.emit("connecting");
     try {
+      // Ask for microphone access while the call-button gesture is still the
+      // active browser interaction. Waiting until Telnyx delivers the
+      // operator leg leaves the permission prompt inside the provider's
+      // answer timeout, which can terminate the leg as busy before the user
+      // has a chance to grant access. Do not provision anything until audio
+      // capture is proven available.
+      await this.dependencies.prepareMicrophone();
       const started = await this.startCallWithLostResponseRecovery(target);
       if (!started.ok) throw proxyError(started);
       this.callId = started.data.callId;
@@ -611,6 +620,19 @@ export class JitterCallTransport implements CallTransport {
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
   }
+}
+
+async function prepareMicrophone(): Promise<void> {
+  if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+    throw new Error("Microphone access is required to place calls.");
+  }
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    throw new Error("Microphone access is required to place calls.");
+  }
+  for (const track of stream.getTracks()) track.stop();
 }
 
 function proxyError(error: { error: string; errorCode: string; reason?: string }): Error {

@@ -63,6 +63,7 @@ function transportHarness(overrides: Partial<JitterTransportDependencies> = {}) 
   let now = Date.parse("2026-08-21T20:00:00.000Z");
   let pageHide: (() => void) | null = null;
   const dependencies: JitterTransportDependencies = {
+    prepareMicrophone: vi.fn(async () => undefined),
     startCall: vi.fn(async () => ({ ok: true as const, data: { callId: "call-1", batchId: "batch-1" } })),
     getToken: vi.fn(async () => ({
       ok: true as const,
@@ -112,6 +113,7 @@ describe("JitterCallTransport", () => {
       propertyId: "property-1",
       contactId: "contact-1",
     }))).resolves.toEqual({ id: "call-1" });
+    expect(harness.dependencies.prepareMicrophone).toHaveBeenCalledBefore(harness.dependencies.startCall as ReturnType<typeof vi.fn>);
     expect(harness.dependencies.startCall).toHaveBeenCalledBefore(harness.dependencies.getToken as ReturnType<typeof vi.fn>);
     expect(harness.dependencies.getToken).toHaveBeenCalledBefore(harness.dependencies.connect as ReturnType<typeof vi.fn>);
 
@@ -144,6 +146,23 @@ describe("JitterCallTransport", () => {
     expect(harness.dependencies.cancel).toHaveBeenCalledWith("call-1", "hangup");
     expect(harness.rtc.disconnect).toHaveBeenCalledTimes(1);
     expect(states).toEqual(["connecting", "ringing", "live", "ended"]);
+  });
+
+  it("fails before provisioning when microphone access is unavailable", async () => {
+    const prepareMicrophone = vi.fn(async () => {
+      throw new Error("Microphone access is required to place calls.");
+    });
+    const harness = transportHarness({ prepareMicrophone });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+
+    await expect(harness.transport.start(target())).rejects.toThrow("Microphone access is required");
+
+    expect(harness.dependencies.startCall).not.toHaveBeenCalled();
+    expect(harness.dependencies.getToken).not.toHaveBeenCalled();
+    expect(harness.dependencies.connect).not.toHaveBeenCalled();
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect(states).toEqual(["connecting", "failed"]);
   });
 
   it.each([
