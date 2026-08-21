@@ -2,11 +2,22 @@ export type CallTarget = {
   phoneE164: string;
   propertyId?: string;
   contactId?: string;
+  /** Stable per-call intent shared with wrap-up and Jitter idempotency. */
+  callToken?: string;
 };
 
 export type CallHandle = { id: string };
 export type CallResult = { durationSeconds: number; outcome: "connected_human" | "failed" };
-export type CallTransportState = "connecting" | "ringing" | "live" | "ended" | "failed";
+export type CallTransportState =
+  | "connecting"
+  | "ringing"
+  | "live"
+  | "ended"
+  | "failed"
+  | "operator_busy"
+  | "not_callable"
+  | "teardown_unconfirmed"
+  | "teardown_confirmed";
 
 export interface CallTransport {
   start(target: CallTarget): Promise<CallHandle>;
