@@ -19,7 +19,7 @@ import {
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getMessagingProvider } from "@/lib/messaging/registry";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
-import { classifyItem } from "@/lib/dialer/eligibility";
+import { canShowCallButton } from "@/lib/dialer/eligibility";
 import { zillowUrl } from "@/lib/utils/zillow-url";
 
 import {
@@ -172,7 +172,7 @@ export default async function LeadDetailPage({
     phones: [lead.homeowner?.phone_1, lead.homeowner?.phone_2, lead.homeowner?.phone_3].filter((phone): phone is string => Boolean(phone)),
     dncLocked: lead.is_dnc_locked,
     contactDnc: lead.homeowner?.do_not_contact ?? false,
-    callable: Boolean(lead.homeowner?.id) && classifyItem({ property: { id: lead.id, state: lead.state, is_dnc_locked: lead.is_dnc_locked }, contact: lead.homeowner ? { id: lead.homeowner.id, phone_1: lead.homeowner.phone_1, phone_2: lead.homeowner.phone_2, phone_3: lead.homeowner.phone_3, do_not_contact: lead.homeowner.do_not_contact, sms_opted_out: lead.homeowner.sms_opted_out } : null }).some((item) => item === "callable"),
+    callable: canShowCallButton({ property: { id: lead.id, state: lead.state, is_dnc_locked: lead.is_dnc_locked }, contact: lead.homeowner ? { id: lead.homeowner.id, phone_1: lead.homeowner.phone_1, phone_2: lead.homeowner.phone_2, phone_3: lead.homeowner.phone_3, do_not_contact: lead.homeowner.do_not_contact, sms_opted_out: lead.homeowner.sms_opted_out } : null }),
   };
 
   // Consent and phone-level suppression are separate existing read models.

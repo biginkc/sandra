@@ -13,6 +13,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/cron/sweep-stuck-call-in-progress",
+      "schedule": "1-59/5 * * * *"
+    },
+    {
       "path": "/api/cron/sweep-stuck-skip-trace",
       "schedule": "*/1 * * * *"
     },

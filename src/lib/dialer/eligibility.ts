@@ -1,6 +1,6 @@
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 
-import { buildSnapshotsForProperty } from "./snapshot-identity";
+import { buildSnapshotsForProperty, normalizeToE164 } from "./snapshot-identity";
 
 export type BatchEligibilityCounts = {
   callable: number;
@@ -35,6 +35,18 @@ export type ClassifyInput = {
 };
 
 export type ItemClassification = "callable" | "missing" | { blocked: string };
+
+/**
+ * Visibility policy for the click-to-call button. Quiet hours are checked at
+ * click time, so a temporary window block must not make the button disappear.
+ */
+export function canShowCallButton(input: ClassifyInput): boolean {
+  if (!input.contact || input.property.is_dnc_locked || input.contact.do_not_contact) {
+    return false;
+  }
+  return [input.contact.phone_1, input.contact.phone_2, input.contact.phone_3]
+    .some((phone) => Boolean(normalizeToE164(phone)));
+}
 
 /**
  * Classify per-(prospect, phone) items for the batch preview.

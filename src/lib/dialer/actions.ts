@@ -51,8 +51,8 @@ function phones(contact: Contact | null): string[] {
   return [contact.phone_1, contact.phone_2, contact.phone_3].filter((phone): phone is string => Boolean(phone?.trim()));
 }
 
-function leadTarget(lead: LeadRow): SoftphoneTarget | null {
-  const phone = phones(lead.homeowner).map(toPhoneE164).find(Boolean);
+function leadTarget(lead: LeadRow, preferredPhone?: string): SoftphoneTarget | null {
+  const phone = preferredPhone ?? phones(lead.homeowner).map(toPhoneE164).find(Boolean);
   if (!phone) return null;
   return {
     propertyId: lead.id,
@@ -94,6 +94,9 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
         sms_opted_out: lead.homeowner.sms_opted_out,
       },
     });
+    if (eligible.length === 0) {
+      return { ok: false, error: "Calling is unavailable during quiet hours." };
+    }
     const blocked = eligible.find((item) => item !== "callable");
     if (blocked) {
       return { ok: false, error: typeof blocked === "string" ? "This lead is not callable." : "This lead is blocked: " + blocked.blocked.replaceAll("_", " ") + "." };
@@ -105,24 +108,84 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
   }
 }
 
+/** Best-effort cleanup for a transport failure before wrap-up exists. */
+export async function resumeFailedSoftphoneCall(propertyId: string): Promise<void> {
+  try {
+    const supabase = await createClient();
+    await resumeByProperty(supabase, { propertyId });
+  } catch {
+    // The scheduled call-in-progress sweeper is the durable backstop.
+  }
+}
+
 export async function prepareManualCall(phone: string): Promise<SoftphoneActionResult<SoftphoneTarget>> {
   const phoneE164 = toPhoneE164(phone);
   if (!phoneE164) return { ok: false, error: "Enter a valid 10-digit number." };
-  const quietHours = checkQuietHours("MO");
-  if (!quietHours.ok) return { ok: false, error: "Calling is unavailable during quiet hours." };
-  return {
-    ok: true,
-    data: {
-      propertyId: null,
-      contactId: null,
-      phoneE164,
-      maskedPhone: formatPhoneE164(phoneE164) ?? phoneE164,
-      name: formatPhoneE164(phoneE164) ?? phoneE164,
-      address: null,
-      state: "MO",
-      startedAt: new Date().toISOString(),
-    },
-  };
+  try {
+    const supabase = await createClient();
+    const contactSelect = "id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out";
+    const contactResults = await Promise.all([
+      supabase.from("contacts").select(contactSelect).eq("phone_1", phoneE164),
+      supabase.from("contacts").select(contactSelect).eq("phone_2", phoneE164),
+      supabase.from("contacts").select(contactSelect).eq("phone_3", phoneE164),
+    ]);
+    const contactError = contactResults.find((result) => result.error)?.error;
+    if (contactError) throw new Error(contactError.message);
+    const contacts = new Map<string, Contact>();
+    for (const result of contactResults) {
+      for (const contact of (result.data ?? []) as unknown as Contact[]) {
+        if ([contact.phone_1, contact.phone_2, contact.phone_3].some((value) => toPhoneE164(value) === phoneE164)) {
+          contacts.set(contact.id, contact);
+        }
+      }
+    }
+
+    const contactIds = [...contacts.keys()];
+    const propertyRows = contactIds.length
+      ? await supabase
+        .from("properties")
+        .select("id, address, city, state, is_dnc_locked, homeowner_contact_id, homeowner:contacts!properties_homeowner_contact_id_fkey(id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)")
+        .in("homeowner_contact_id", contactIds)
+      : { data: [], error: null };
+    if (propertyRows.error) throw new Error(propertyRows.error.message);
+    const matchingLeads = (propertyRows.data ?? [])
+      .map((row) => row as unknown as LeadRow)
+      .filter((lead) => phones(lead.homeowner).some((value) => toPhoneE164(value) === phoneE164));
+
+    const hasBlockedMatch = [...contacts.values()].some((contact) => contact.do_not_contact || contact.sms_opted_out)
+      || matchingLeads.some((lead) => lead.is_dnc_locked || lead.homeowner?.do_not_contact || lead.homeowner?.sms_opted_out);
+    if (hasBlockedMatch) {
+      return { ok: false, error: "This number belongs to a DNC-locked lead" };
+    }
+
+    const linkedLead = matchingLeads.find((lead) => lead.homeowner && !lead.is_dnc_locked);
+    if (linkedLead) {
+      const quietHours = checkQuietHours(linkedLead.state);
+      if (!quietHours.ok) return { ok: false, error: "Calling is unavailable during quiet hours." };
+      const target = leadTarget(linkedLead, phoneE164);
+      if (!target || !linkedLead.homeowner) return { ok: false, error: "This lead has no callable phone number." };
+      await pausePropertyEnrollments(supabase, { propertyId: linkedLead.id, reason: "call_in_progress" });
+      return { ok: true, data: target };
+    }
+
+    const quietHours = checkQuietHours("MO");
+    if (!quietHours.ok) return { ok: false, error: "Calling is unavailable during quiet hours." };
+    return {
+      ok: true,
+      data: {
+        propertyId: null,
+        contactId: null,
+        phoneE164,
+        maskedPhone: formatPhoneE164(phoneE164) ?? phoneE164,
+        name: formatPhoneE164(phoneE164) ?? phoneE164,
+        address: null,
+        state: "MO",
+        startedAt: new Date().toISOString(),
+      },
+    };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Could not prepare the call." };
+  }
 }
 
 export type DialerSearchResult = {
@@ -253,56 +316,76 @@ export async function completeSoftphoneCall(input: {
         return { ok: false, error: "The call target no longer matches the lead." };
       }
     }
+    if (input.callback && !input.target.propertyId) {
+      return { ok: false, error: "A manual dial cannot schedule a lead callback." };
+    }
 
     let callbackTaskId: string | undefined;
-    if (input.callback) {
-      if (!input.target.propertyId) return { ok: false, error: "A manual dial cannot schedule a lead callback." };
-      const timezone = await getMemberTimezone(user.id);
-      const resolvedZone = timezone.ok ? timezone.data : input.callback.timeZone;
-      const booked = await bookAppointment({
-        propertyId: input.target.propertyId,
-        contactId: input.target.contactId ?? undefined,
-        assigneeId: user.id,
-        date: input.callback.date,
-        time: input.callback.time,
-        timeZone: resolvedZone,
-        durationMinutes: 30,
-        title: `Call back ${input.target.address ?? "lead"}`,
-        note: input.notes.trim(),
-        idempotencyKey: crypto.randomUUID(),
-      });
-      if (!booked.ok) return { ok: false, error: booked.error.message };
-      callbackTaskId = booked.data.taskId;
-    }
+    let dispositionSucceeded = false;
+    try {
+      // This is deliberately first: setOutreachDispo is the authoritative
+      // DNC_LOCKED race check. If it rejects, the wrap-up remains open and no
+      // activity or appointment is written.
+      if (input.target.propertyId) {
+        const dispo = await setOutreachDispo(input.target.propertyId, input.disposition);
+        if (!dispo.ok) return { ok: false, error: dispo.error };
+        dispositionSucceeded = true;
+      }
 
-    if (input.target.propertyId) {
-      const dispo = await setOutreachDispo(input.target.propertyId, input.disposition);
-      if (!dispo.ok) return { ok: false, error: dispo.error };
-    }
+      const { data: activity, error: activityError } = await supabase.from("call_activities").insert({
+        org_id: membership.org_id,
+        property_id: input.target.propertyId,
+        contact_id: input.target.contactId,
+        jitter_attempt_id: `sandra-${crypto.randomUUID()}`,
+        operator_user_id: user.id,
+        started_at: input.startedAt,
+        ended_at: input.endedAt,
+        duration_seconds: Math.max(0, Math.floor(input.durationSeconds)),
+        outcome: input.outcome,
+        disposition: input.disposition,
+        notes: input.notes.trim(),
+        direction: "outbound",
+        provider: "sandra_softphone",
+        phone_e164: input.target.phoneE164,
+        do_not_call_requested: input.disposition === "dnc",
+      }).select("id").single();
+      if (activityError || !activity) return { ok: false, error: activityError?.message ?? "The call activity was not saved." };
 
-    const { data: activity, error: activityError } = await supabase.from("call_activities").insert({
-      org_id: membership.org_id,
-      property_id: input.target.propertyId,
-      contact_id: input.target.contactId,
-      jitter_attempt_id: `sandra-${crypto.randomUUID()}`,
-      operator_user_id: user.id,
-      started_at: input.startedAt,
-      ended_at: input.endedAt,
-      duration_seconds: Math.max(0, Math.floor(input.durationSeconds)),
-      outcome: input.outcome,
-      disposition: input.disposition,
-      notes: input.notes.trim(),
-      direction: "outbound",
-      provider: "sandra_softphone",
-      phone_e164: input.target.phoneE164,
-      do_not_call_requested: input.disposition === "dnc",
-    }).select("id").single();
-    if (activityError || !activity) return { ok: false, error: activityError?.message ?? "The call activity was not saved." };
+      // fn_book_appointment owns the booked_appointment write. Supplying the
+      // activity UUID makes a retry after a lost response replay the same
+      // booking instead of creating a second appointment.
+      if (input.callback) {
+        const timezone = await getMemberTimezone(user.id);
+        const resolvedZone = timezone.ok ? timezone.data : input.callback.timeZone;
+        const booked = await bookAppointment({
+          propertyId: input.target.propertyId!,
+          contactId: input.target.contactId ?? undefined,
+          assigneeId: user.id,
+          date: input.callback.date,
+          time: input.callback.time,
+          timeZone: resolvedZone,
+          durationMinutes: 30,
+          title: `Call back ${input.target.address ?? "lead"}`,
+          note: input.notes.trim(),
+          idempotencyKey: activity.id,
+        });
+        if (!booked.ok) return { ok: false, error: booked.error.message };
+        callbackTaskId = booked.data.taskId;
+      }
 
-    if (input.target.propertyId && input.disposition !== "dnc") {
-      await resumeByProperty(supabase, { propertyId: input.target.propertyId });
+      return { ok: true, data: { activityId: activity.id, callbackTaskId } };
+    } finally {
+      // A failed activity insert or appointment booking must not strand the
+      // sequence pause created when the call began. This filter resumes only
+      // the softphone-owned pause, never an inbound-reply or appointment pause.
+      if (dispositionSucceeded && input.target.propertyId) {
+        try {
+          await resumeByProperty(supabase, { propertyId: input.target.propertyId });
+        } catch {
+          // The 30-minute call-in-progress sweeper is the durable backstop.
+        }
+      }
     }
-    return { ok: true, data: { activityId: activity.id, callbackTaskId } };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Could not save the call." };
   }

@@ -18,6 +18,7 @@ import {
   loadDialerRecents,
   prepareLeadCall,
   prepareManualCall,
+  resumeFailedSoftphoneCall,
   searchDialerLeads,
   type DialerRecent,
   type DialerSearchResult,
@@ -25,7 +26,7 @@ import {
 } from "@/lib/dialer/actions";
 import { SOFTPHONE_DISPOSITIONS, type SoftphoneDisposition } from "@/lib/dialer/dispositions";
 import { maskPhone } from "@/lib/phone-format";
-import { SimulatedCallTransport } from "@/lib/dialer/transport";
+import { isSimulatedTransportEnabled, SimulatedCallTransport, type CallTransport } from "@/lib/dialer/transport";
 import { transitionSoftphoneState, type SoftphoneState } from "@/lib/dialer/state-machine";
 
 export type SoftphoneLead = {
@@ -44,6 +45,7 @@ export type SoftphoneLead = {
 type SoftphoneContextValue = {
   openLead: (lead: SoftphoneLead) => void;
   toggleOpen: () => void;
+  callingEnabled: boolean;
   onCall: boolean;
   timer: string;
 };
@@ -103,7 +105,9 @@ export function SoftphoneProvider({ children }: Props) {
   const [toast, setToast] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [startedAt, setStartedAt] = useState<string | null>(null);
-  const transportRef = useRef<SimulatedCallTransport | null>(null);
+  const [callOutcome, setCallOutcome] = useState<"connected_human" | "failed">("connected_human");
+  const [callingEnabled] = useState(() => isSimulatedTransportEnabled());
+  const transportRef = useRef<CallTransport | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((message: string) => {
@@ -113,6 +117,19 @@ export function SoftphoneProvider({ children }: Props) {
   }, []);
 
   useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
+
+  useEffect(() => {
+    if (!["live", "held", "wrap"].includes(phone) || !target?.propertyId) return;
+    const propertyId = target.propertyId;
+    const resumeOnPageHide = () => {
+      const body = JSON.stringify({ propertyId });
+      const blob = new Blob([body], { type: "application/json" });
+      if (typeof navigator.sendBeacon === "function" && navigator.sendBeacon("/api/softphone/resume", blob)) return;
+      void fetch("/api/softphone/resume", { method: "POST", body, headers: { "content-type": "application/json" }, credentials: "same-origin", keepalive: true });
+    };
+    window.addEventListener("pagehide", resumeOnPageHide);
+    return () => window.removeEventListener("pagehide", resumeOnPageHide);
+  }, [phone, target?.propertyId]);
 
   useEffect(() => {
     if (phone !== "live" || held) return;
@@ -156,10 +173,15 @@ export function SoftphoneProvider({ children }: Props) {
     setCallbackTime("");
     setError(null);
     setStartedAt(null);
+    setCallOutcome("connected_human");
     setPhone("idle");
   }, []);
 
   const startTarget = useCallback(async (prepare: Promise<{ ok: true; data: SoftphoneTarget } | { ok: false; error: string }>) => {
+    if (!callingEnabled) {
+      setError("Calling not yet enabled");
+      return;
+    }
     setPhone("idle");
     setPending(true);
     setError(null);
@@ -171,30 +193,52 @@ export function SoftphoneProvider({ children }: Props) {
     setSeconds(0);
     setHeld(false);
     setMuted(false);
+    setCallOutcome("connected_human");
     const transport = new SimulatedCallTransport();
     transportRef.current = transport;
     transport.onStateChange((status) => {
       setCallStatus(status);
       if (status === "live") transition({ type: "call_live" });
-      if (status === "failed") { transition({ type: "call_failed" }); setError("The simulated call failed."); }
+      if (status === "failed") {
+        setCallOutcome("failed");
+        setFinalSeconds(seconds);
+        if (result.data.propertyId) void resumeFailedSoftphoneCall(result.data.propertyId);
+        transition({ type: "call_failed" });
+        setError("The call failed. Add a note to log the outcome.");
+      }
     });
     transition({ type: "call_started" });
-    await transport.start({ phoneE164: result.data.phoneE164, propertyId: result.data.propertyId ?? undefined, contactId: result.data.contactId ?? undefined });
-  }, [transition]);
+    try {
+      await transport.start({ phoneE164: result.data.phoneE164, propertyId: result.data.propertyId ?? undefined, contactId: result.data.contactId ?? undefined });
+    } catch {
+      setCallOutcome("failed");
+      setFinalSeconds(seconds);
+      if (result.data.propertyId) await resumeFailedSoftphoneCall(result.data.propertyId);
+      transition({ type: "call_failed" });
+      setError("The call failed. Add a note to log the outcome.");
+    }
+  }, [callingEnabled, seconds, transition]);
 
   const openLead = useCallback((lead: SoftphoneLead) => {
+    if (!callingEnabled) return;
     setPhone((state) => state === "closed" ? "idle" : state);
     void startTarget(prepareLeadCall(lead.id));
-  }, [startTarget]);
+  }, [callingEnabled, startTarget]);
 
   const openIdle = useCallback(() => {
-    if (phone === "closed") transition({ type: "open" });
-  }, [phone, transition]);
+    if (phone === "closed") {
+      transition({ type: "open" });
+    } else if (phone === "idle") {
+      resetIdle();
+      setPhone("closed");
+    }
+  }, [phone, resetIdle, transition]);
 
   const hangup = useCallback(async () => {
     const transport = transportRef.current;
     if (!transport) return;
     const result = await transport.hangup();
+    setCallOutcome(result.outcome);
     setFinalSeconds(result.durationSeconds || seconds);
     setCallStatus("ended");
     transition({ type: "hangup" });
@@ -204,14 +248,14 @@ export function SoftphoneProvider({ children }: Props) {
     if (!target || !startedAt) return;
     if (!notes.trim()) return;
     setPending(true);
-    const result = await completeSoftphoneCall({ target, startedAt, endedAt: new Date().toISOString(), durationSeconds: finalSeconds, outcome: "connected_human", disposition, notes, callback });
+    const result = await completeSoftphoneCall({ target, startedAt, endedAt: new Date().toISOString(), durationSeconds: finalSeconds, outcome: callOutcome, disposition, notes, callback });
     setPending(false);
     if (!result.ok) { setError(result.error); return; }
     showToast(`Logged "${SOFTPHONE_DISPOSITIONS.find((item) => item.value === disposition)?.label ?? disposition}" + notes for ${target.name} · ${timerText(finalSeconds)}`);
     transition({ type: "wrap_complete" });
     resetIdle();
     setPhone("closed");
-  }, [finalSeconds, notes, resetIdle, showToast, startedAt, target, transition]);
+  }, [callOutcome, finalSeconds, notes, resetIdle, showToast, startedAt, target, transition]);
 
   const manualDigits = dialInput.replace(/\D/g, "");
   const visibleSuggestions = phone === "idle" && dialInput.trim() ? suggestions : [];
@@ -222,9 +266,10 @@ export function SoftphoneProvider({ children }: Props) {
   const contextValue = useMemo(() => ({
     openLead,
     toggleOpen: openIdle,
+    callingEnabled,
     onCall: isOnCall,
     timer: timerText(seconds),
-  }), [isOnCall, openIdle, openLead, seconds]);
+  }), [callingEnabled, isOnCall, openIdle, openLead, seconds]);
 
   return (
     <SoftphoneContext.Provider value={contextValue}>
@@ -244,6 +289,7 @@ export function SoftphoneProvider({ children }: Props) {
                 manualReady={manualReady}
                 manualDigits={manualDigits}
                 pending={pending}
+                callingEnabled={callingEnabled}
                 onLead={(suggestion) => void startTarget(prepareLeadCall(suggestion.propertyId))}
                 onRecent={(recent) => void startTarget(recent.propertyId ? prepareLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164))}
                 onManual={() => void startTarget(prepareManualCall(manualDigits))}
@@ -277,25 +323,26 @@ export function SoftphoneProvider({ children }: Props) {
 }
 
 export function SoftphoneHeaderButton() {
-  const { toggleOpen, onCall, timer } = useSoftphone();
-  return <button type="button" data-testid="header-dialer-button" aria-label={onCall ? "Open active call" : "Open dialer"} onClick={toggleOpen} className={onCall ? "flex h-9 items-center gap-1.5 rounded-full border border-emerald-300/50 bg-emerald-400/20 px-3.5 font-mono text-[11.5px] font-bold text-emerald-100" : "flex size-9 items-center justify-center rounded-full text-white hover:bg-white/[0.12]"}><PhoneIcon className="size-[18px]" />{onCall ? timer : null}</button>;
+  const { toggleOpen, onCall, timer, callingEnabled } = useSoftphone();
+  return <button type="button" data-testid="header-dialer-button" aria-label={onCall ? "Open active call" : "Open dialer"} title={callingEnabled ? "Open dialer" : "Calling not yet enabled"} onClick={toggleOpen} className={onCall ? "flex h-9 items-center gap-1.5 rounded-full border border-emerald-300/50 bg-emerald-400/20 px-3.5 font-mono text-[11.5px] font-bold text-emerald-100" : "flex size-9 items-center justify-center rounded-full text-white hover:bg-white/[0.12]"}><PhoneIcon className="size-[18px]" />{onCall ? timer : null}</button>;
 }
 
 function formatFull(digits: string): string {
   return digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : digits;
 }
 
-function IdleView({ dialInput, setDialInput, suggestions, recents, manualReady, manualDigits, pending, onLead, onRecent, onManual, onDigit, onBackspace, error }: {
-  dialInput: string; setDialInput: (value: string) => void; suggestions: DialerSearchResult[]; recents: DialerRecent[]; manualReady: boolean; manualDigits: string; pending: boolean; onLead: (suggestion: DialerSearchResult) => void; onRecent: (recent: DialerRecent) => void; onManual: () => void; onDigit: (digit: string) => void; onBackspace: () => void; error: string | null;
+function IdleView({ dialInput, setDialInput, suggestions, recents, manualReady, manualDigits, pending, callingEnabled, onLead, onRecent, onManual, onDigit, onBackspace, error }: {
+  dialInput: string; setDialInput: (value: string) => void; suggestions: DialerSearchResult[]; recents: DialerRecent[]; manualReady: boolean; manualDigits: string; pending: boolean; callingEnabled: boolean; onLead: (suggestion: DialerSearchResult) => void; onRecent: (recent: DialerRecent) => void; onManual: () => void; onDigit: (digit: string) => void; onBackspace: () => void; error: string | null;
 }) {
   return <div className="p-4 pb-[18px]">
+    {!callingEnabled ? <div role="status" className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">Calling not yet enabled</div> : null}
     <input autoFocus data-testid="dialer-input" value={dialInput} onChange={(event) => setDialInput(event.target.value)} placeholder="Type a name or number…" className="w-full rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-[15px] font-semibold outline-none" />
-    {suggestions.length > 0 ? <div className="mt-2 flex max-h-42 flex-col gap-0.5 overflow-auto">{suggestions.map((suggestion) => <button type="button" data-testid="dialer-suggestion" key={suggestion.propertyId} onClick={() => onLead(suggestion)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-2 text-left hover:bg-emerald-50"><span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#f0eeec] text-[11px] font-extrabold text-[#57534e]">{initials(suggestion.name)}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold">{suggestion.name}</span><span className="block truncate text-[11px] text-[#78716c]">{suggestion.detail}</span></span><PhoneIcon className="size-3.5 shrink-0 text-emerald-600" /></button>)}</div> : null}
+    {suggestions.length > 0 ? <div className="mt-2 flex max-h-42 flex-col gap-0.5 overflow-auto">{suggestions.map((suggestion) => <button type="button" disabled={!callingEnabled} title={!callingEnabled ? "Calling not yet enabled" : undefined} data-testid="dialer-suggestion" key={suggestion.propertyId} onClick={() => onLead(suggestion)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-2 text-left hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#f0eeec] text-[11px] font-extrabold text-[#57534e]">{initials(suggestion.name)}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold">{suggestion.name}</span><span className="block truncate text-[11px] text-[#78716c]">{suggestion.detail}</span></span><PhoneIcon className="size-3.5 shrink-0 text-emerald-600" /></button>)}</div> : null}
     {dialInput.trim().length >= 2 && suggestions.length === 0 && !manualReady ? <div className="px-1 pt-2.5 text-[11.5px] text-[#78716c]">No matching lead — DNC-locked leads never appear here.</div> : null}
     {error ? <div role="alert" className="pt-2 text-xs text-red-700">{error}</div> : null}
     <div className="mt-3 grid grid-cols-3 gap-1.5">{KEYPAD.map(([digit, letters]) => <button type="button" key={digit} aria-label={`Keypad ${digit}`} onClick={() => onDigit(digit)} className="flex flex-col items-center rounded-[10px] border border-[#e5e1df] bg-white px-0 py-2 hover:border-[#d6d1ce] hover:bg-[#f5f4f2]"><span className="text-[17px] font-bold leading-none">{digit}</span><span className="h-2.5 text-[8px] font-bold tracking-[0.12em] text-[#a8a29e]">{letters}</span></button>)}</div>
-    <div className="mt-3 flex gap-2"><button type="button" aria-label="Delete digit" onClick={onBackspace} className="flex w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#e5e1df] bg-white text-[#78716c] hover:bg-[#f5f4f2]"><DeleteIcon className="size-[17px]" /></button><button type="button" data-testid="dialer-call-manual" disabled={!manualReady || pending} onClick={onManual} className={`flex-1 rounded-[10px] border-0 py-2.5 text-[13px] font-bold ${manualReady ? "bg-emerald-600 text-white hover:bg-emerald-700" : "cursor-default bg-[#f0eeec] text-[#a8a29e]"}`}>{manualReady ? `Call ${formatFull(manualDigits)}` : "Call"}</button></div>
-    {dialInput.trim() === "" ? <div className="mt-3.5 border-t border-[#e5e1df] pt-3"><div className="mb-1.5 text-[10px] font-extrabold uppercase tracking-[0.1em] text-[#a8a29e]">Recent calls</div>{recents.map((recent) => <button type="button" data-testid="dialer-recent" key={recent.id} onClick={() => onRecent(recent)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-1.5 text-left hover:bg-emerald-50"><span className={`flex size-6 shrink-0 items-center justify-center rounded-full ${recent.missed ? "bg-red-50 text-red-600" : "bg-[#f0eeec] text-[#78716c]"}`}>{recent.missed ? <ArrowDownLeftIcon className="size-3 -scale-y-100" /> : <ArrowUpRightIcon className="size-3" />}</span><span className="min-w-0 flex-1"><span className={`block truncate text-xs font-bold ${recent.missed ? "text-red-700" : "text-[#1c1917]"}`}>{recent.name}</span><span className="block truncate text-[11px] text-[#78716c]">{recent.detail}</span></span><span className="shrink-0 text-[11px] font-semibold text-[#a8a29e]">{recent.when}</span></button>)}</div> : null}
+    <div className="mt-3 flex gap-2"><button type="button" aria-label="Delete digit" onClick={onBackspace} className="flex w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#e5e1df] bg-white text-[#78716c] hover:bg-[#f5f4f2]"><DeleteIcon className="size-[17px]" /></button><button type="button" data-testid="dialer-call-manual" title={!callingEnabled ? "Calling not yet enabled" : undefined} disabled={!manualReady || pending || !callingEnabled} onClick={onManual} className={`flex-1 rounded-[10px] border-0 py-2.5 text-[13px] font-bold ${manualReady && callingEnabled ? "bg-emerald-600 text-white hover:bg-emerald-700" : "cursor-default bg-[#f0eeec] text-[#a8a29e]"}`}>{callingEnabled && manualReady ? `Call ${formatFull(manualDigits)}` : "Call"}</button></div>
+    {dialInput.trim() === "" ? <div className="mt-3.5 border-t border-[#e5e1df] pt-3"><div className="mb-1.5 text-[10px] font-extrabold uppercase tracking-[0.1em] text-[#a8a29e]">Recent calls</div>{recents.map((recent) => <button type="button" disabled={!callingEnabled} title={!callingEnabled ? "Calling not yet enabled" : undefined} data-testid="dialer-recent" key={recent.id} onClick={() => onRecent(recent)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-1.5 text-left hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><span className={`flex size-6 shrink-0 items-center justify-center rounded-full ${recent.missed ? "bg-red-50 text-red-600" : "bg-[#f0eeec] text-[#78716c]"}`}>{recent.missed ? <ArrowDownLeftIcon className="size-3 -scale-y-100" /> : <ArrowUpRightIcon className="size-3" />}</span><span className="min-w-0 flex-1"><span className={`block truncate text-xs font-bold ${recent.missed ? "text-red-700" : "text-[#1c1917]"}`}>{recent.name}</span><span className="block truncate text-[11px] text-[#78716c]">{recent.detail}</span></span><span className="shrink-0 text-[11px] font-semibold text-[#a8a29e]">{recent.when}</span></button>)}</div> : null}
   </div>;
 }
 

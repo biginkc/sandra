@@ -42,3 +42,33 @@ test("softphone popover completes a simulated lead call through wrap-up", async 
   await expect(page.getByTestId("softphone-popover")).toHaveCount(0);
   await expect(page.getByRole("status")).toContainText("Logged");
 });
+
+test("manual dialing an exact DNC lead number is refused", async ({ page }) => {
+  const admin = adminClient();
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+  const contact = await admin.from("contacts").insert({
+    org_id: "00000000-0000-0000-0000-000000000bbb",
+    first_name: "DNC",
+    last_name: "Manual Block",
+    phone_1: "+18165550124",
+    phone_1_type: "mobile",
+    do_not_contact: true,
+  }).select("id").single();
+  expect(contact.error).toBeNull();
+  const [property] = await seedProspects(admin, 1, "SOFTPHONE-DNC");
+  const propertyUpdate = await admin.from("properties").update({
+    homeowner_contact_id: contact.data!.id,
+    status: "new_lead",
+    is_dnc_locked: true,
+  }).eq("id", property.id);
+  expect(propertyUpdate.error).toBeNull();
+
+  await page.goto("/leads");
+  await page.getByTestId("header-dialer-button").click();
+  await page.getByTestId("dialer-input").fill("8165550124");
+  await expect(page.getByTestId("dialer-call-manual")).toBeEnabled();
+  await page.getByTestId("dialer-call-manual").click();
+  await expect(page.getByRole("alert")).toHaveText("This number belongs to a DNC-locked lead");
+  await expect(page.getByTestId("softphone-popover")).toBeVisible();
+});

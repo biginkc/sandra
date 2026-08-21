@@ -19,4 +19,10 @@ describe("softphone state machine", () => {
     expect(state).toBe("wrap");
     expect(transitionSoftphoneState(state, { type: "wrap_complete" })).toBe("closed");
   });
+
+  it("moves a failed live or held transport into wrap-up for recovery", () => {
+    expect(transitionSoftphoneState("live", { type: "call_failed" })).toBe("wrap");
+    expect(transitionSoftphoneState("held", { type: "call_failed" })).toBe("wrap");
+    expect(transitionSoftphoneState("idle", { type: "call_failed" })).toBe("idle");
+  });
 });

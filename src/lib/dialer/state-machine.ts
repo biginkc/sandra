@@ -34,6 +34,6 @@ export function transitionSoftphoneState(
     case "wrap_complete":
       return state === "wrap" ? "closed" : state;
     case "call_failed":
-      return state === "idle" ? "idle" : state;
+      return state === "live" || state === "held" ? "wrap" : state;
   }
 }

@@ -17,6 +17,18 @@ export interface CallTransport {
 }
 
 /**
+ * Phase 1 must never silently turn a production click into a fake call.
+ * Preview/staging may opt in explicitly while production remains off unless
+ * a real transport replaces this class.
+ */
+export function isSimulatedTransportEnabled(): boolean {
+  if (process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT !== "simulated") return false;
+  const stagingOverride = process.env.NEXT_PUBLIC_SOFTPHONE_ALLOW_SIMULATED === "true"
+    && process.env.VERCEL_ENV === "preview";
+  return process.env.NODE_ENV !== "production" || stagingOverride;
+}
+
+/**
  * Phase 1's deliberately boring transport. It exercises the exact seam that
  * Phase 2 will replace with Jitter without importing a telephony SDK here.
  */
@@ -25,6 +37,12 @@ export class SimulatedCallTransport implements CallTransport {
   private liveAt: number | null = null;
   private ended = false;
   private timers: ReturnType<typeof setTimeout>[] = [];
+
+  constructor() {
+    if (!isSimulatedTransportEnabled()) {
+      throw new Error("Simulated softphone transport is disabled");
+    }
+  }
 
   onStateChange(cb: (state: CallTransportState) => void): void {
     this.listener = cb;

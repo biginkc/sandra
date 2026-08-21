@@ -6,6 +6,10 @@ const migration = fs.readFileSync(
   path.join(process.cwd(), "supabase/migrations/20260815233000_leads_urgency_paging.sql"),
   "utf8",
 );
+const softphoneMigration = fs.readFileSync(
+  path.join(process.cwd(), "supabase/migrations/20260821100000_softphone_phase1.sql"),
+  "utf8",
+);
 
 describe("Leads urgency migration contract", () => {
   it("projects exactly one deterministic earliest open task", () => {
@@ -45,5 +49,13 @@ describe("Leads urgency migration contract", () => {
     expect(migration).not.toMatch(
       /outreach_dispo::text not in \([^)]*'opted_out'[^)]*\)/i,
     );
+  });
+
+  it("leaves the applied urgency migration historical and moves the rich homeowner view forward", () => {
+    expect(migration).not.toContain("'phone_1', hc.phone_1");
+    expect(softphoneMigration).toMatch(/create or replace view public\.leads_board/i);
+    for (const field of ["id", "phone_1", "phone_2", "phone_3", "do_not_contact", "sms_opted_out"]) {
+      expect(softphoneMigration).toContain(`'${field}'`);
+    }
   });
 });
