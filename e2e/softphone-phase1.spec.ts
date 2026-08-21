@@ -40,7 +40,7 @@ test("softphone popover completes a simulated lead call through wrap-up", async 
   await page.getByTestId("dispo-notes").fill("Simulated call completed during Phase 1.");
   await page.getByTestId("dispo-not-interested").click();
   await expect(page.getByTestId("softphone-popover")).toHaveCount(0);
-  await expect(page.getByRole("status")).toContainText("Logged");
+  await expect(page.getByRole("status").filter({ hasText: "Logged" })).toContainText("Logged");
 });
 
 test("manual dialing an exact DNC lead number is refused", async ({ page }) => {
