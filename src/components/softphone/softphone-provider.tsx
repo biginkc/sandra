@@ -26,7 +26,8 @@ import {
 } from "@/lib/dialer/actions";
 import { SOFTPHONE_DISPOSITIONS, type SoftphoneDisposition } from "@/lib/dialer/dispositions";
 import { maskPhone } from "@/lib/phone-format";
-import { isSimulatedTransportEnabled, SimulatedCallTransport, type CallTransport } from "@/lib/dialer/transport";
+import { type CallTransport } from "@/lib/dialer/transport";
+import { createSoftphoneCallTransport, isSoftphoneTransportEnabled } from "@/lib/dialer/transport-selection";
 import { transitionSoftphoneState, type SoftphoneState } from "@/lib/dialer/state-machine";
 
 export type SoftphoneLead = {
@@ -107,8 +108,11 @@ export function SoftphoneProvider({ children }: Props) {
   const [startedAt, setStartedAt] = useState<string | null>(null);
   const [callOutcome, setCallOutcome] = useState<"connected_human" | "failed">("connected_human");
   const [wrapToken, setWrapToken] = useState<string | null>(null);
-  const [callingEnabled] = useState(() => isSimulatedTransportEnabled());
+  const [callingEnabled] = useState(() => isSoftphoneTransportEnabled());
   const transportRef = useRef<CallTransport | null>(null);
+  const manualHangupRef = useRef(false);
+  const startInFlightRef = useRef(false);
+  const terminalHandledRef = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((message: string) => {
@@ -133,10 +137,10 @@ export function SoftphoneProvider({ children }: Props) {
   }, [phone, target?.propertyId]);
 
   useEffect(() => {
-    if (phone !== "live" || held) return;
+    if (phone !== "live" || held || callStatus !== "live") return;
     const timer = setInterval(() => setSeconds((value) => value + 1), 1000);
     return () => clearInterval(timer);
-  }, [phone, held]);
+  }, [callStatus, phone, held]);
 
   useEffect(() => {
     if (phone !== "idle" || dialInput.trim()) return;
@@ -161,6 +165,9 @@ export function SoftphoneProvider({ children }: Props) {
 
   const resetIdle = useCallback(() => {
     transportRef.current = null;
+    manualHangupRef.current = false;
+    startInFlightRef.current = false;
+    terminalHandledRef.current = false;
     setTarget(null);
     setDialInput("");
     setSuggestions([]);
@@ -184,12 +191,19 @@ export function SoftphoneProvider({ children }: Props) {
       setError("Calling not yet enabled");
       return;
     }
+    if (startInFlightRef.current) return;
+    startInFlightRef.current = true;
+    terminalHandledRef.current = false;
     setPhone("idle");
     setPending(true);
     setError(null);
     const result = await prepare;
     setPending(false);
-    if (!result.ok) { setError(result.error); return; }
+    if (!result.ok) {
+      startInFlightRef.current = false;
+      setError(result.error);
+      return;
+    }
     setTarget(result.data);
     setStartedAt(result.data.startedAt);
     setSeconds(0);
@@ -197,35 +211,45 @@ export function SoftphoneProvider({ children }: Props) {
     setMuted(false);
     setCallOutcome("connected_human");
     setWrapToken(null);
-    const transport = new SimulatedCallTransport();
+    const transport = createSoftphoneCallTransport();
     transportRef.current = transport;
+    let terminalPromise: Promise<void> | null = null;
+    const finishTerminal = (kind: "ended" | "failed") => {
+      if (terminalPromise) return terminalPromise;
+      terminalHandledRef.current = true;
+      terminalPromise = (async () => {
+        const terminalResult = await transport.hangup();
+        setCallOutcome(kind === "failed" ? "failed" : terminalResult.outcome);
+        setFinalSeconds(terminalResult.durationSeconds);
+        setWrapToken((value) => value ?? crypto.randomUUID());
+        if (kind === "failed" && result.data.propertyId) {
+          await resumeFailedSoftphoneCall(result.data.propertyId);
+        }
+        transition(kind === "failed" ? { type: "call_failed" } : { type: "hangup" });
+        if (kind === "failed") setError("The call failed. Add a note to log the outcome.");
+      })();
+      return terminalPromise;
+    };
     transport.onStateChange((status) => {
       setCallStatus(status);
-      if (status === "live") transition({ type: "call_live" });
-      if (status === "failed") {
-        setCallOutcome("failed");
-        setFinalSeconds(seconds);
-        setWrapToken((value) => value ?? crypto.randomUUID());
-        if (result.data.propertyId) void resumeFailedSoftphoneCall(result.data.propertyId);
-        transition({ type: "call_failed" });
-        setError("The call failed. Add a note to log the outcome.");
+      if (status === "connecting" || status === "ringing" || status === "live") {
+        transition({ type: "call_live" });
       }
+      if (status === "ended" && !manualHangupRef.current) {
+        void finishTerminal("ended");
+      }
+      if (status === "failed") void finishTerminal("failed");
     });
     transition({ type: "call_started" });
     try {
       await transport.start({ phoneE164: result.data.phoneE164, propertyId: result.data.propertyId ?? undefined, contactId: result.data.contactId ?? undefined });
     } catch {
-      setCallOutcome("failed");
-      setFinalSeconds(seconds);
-      setWrapToken((value) => value ?? crypto.randomUUID());
-      if (result.data.propertyId) await resumeFailedSoftphoneCall(result.data.propertyId);
-      transition({ type: "call_failed" });
-      setError("The call failed. Add a note to log the outcome.");
+      if (!terminalHandledRef.current) await finishTerminal("failed");
     }
-  }, [callingEnabled, seconds, transition]);
+  }, [callingEnabled, transition]);
 
   const openLead = useCallback((lead: SoftphoneLead) => {
-    if (!callingEnabled) return;
+    if (!callingEnabled || startInFlightRef.current) return;
     setPhone((state) => state === "closed" ? "idle" : state);
     void startTarget(prepareLeadCall(lead.id));
   }, [callingEnabled, startTarget]);
@@ -242,13 +266,19 @@ export function SoftphoneProvider({ children }: Props) {
   const hangup = useCallback(async () => {
     const transport = transportRef.current;
     if (!transport) return;
-    const result = await transport.hangup();
-    setCallOutcome(result.outcome);
-    setFinalSeconds(result.durationSeconds || seconds);
-    setCallStatus("ended");
-    setWrapToken((value) => value ?? crypto.randomUUID());
-    transition({ type: "hangup" });
-  }, [seconds, transition]);
+    manualHangupRef.current = true;
+    terminalHandledRef.current = true;
+    try {
+      const result = await transport.hangup();
+      setCallOutcome(result.outcome);
+      setFinalSeconds(result.durationSeconds);
+      setCallStatus("ended");
+      setWrapToken((value) => value ?? crypto.randomUUID());
+      transition({ type: "hangup" });
+    } finally {
+      manualHangupRef.current = false;
+    }
+  }, [transition]);
 
   const complete = useCallback(async (disposition: SoftphoneDisposition, callback?: { date: string; time: string; timeZone: string }) => {
     if (!target || !startedAt || !wrapToken) return;
