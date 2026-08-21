@@ -60,9 +60,15 @@ select
   p.deleted_at,
   p.created_at,
   case when hc.id is null then null else jsonb_build_object(
+    'id', hc.id,
     'first_name', hc.first_name,
     'last_name', hc.last_name,
-    'entity_name', hc.entity_name
+    'entity_name', hc.entity_name,
+    'phone_1', hc.phone_1,
+    'phone_2', hc.phone_2,
+    'phone_3', hc.phone_3,
+    'do_not_contact', hc.do_not_contact,
+    'sms_opted_out', hc.sms_opted_out
   ) end as homeowner,
   lower(concat_ws(' ', p.address, p.city, p.state, p.zip, p.market,
     hc.first_name, hc.last_name, hc.entity_name)) as search_text,

@@ -30,12 +30,19 @@ export type LeadBoardLead = Pick<
   | "next_task_title" | "next_task_due_at"
 > & {
   homeowner: {
+    id?: string;
     first_name: string | null;
     last_name: string | null;
     entity_name: string | null;
+    phone_1?: string | null;
+    phone_2?: string | null;
+    phone_3?: string | null;
+    do_not_contact?: boolean;
+    sms_opted_out?: boolean;
   } | null;
   homeowner_sms_opted_out: boolean | null;
   homeowner_sms_opted_out_at: string | null;
+  is_dnc_locked?: boolean;
 };
 
 export type ListMembership = { listId: string; name: string; color: string | null };
