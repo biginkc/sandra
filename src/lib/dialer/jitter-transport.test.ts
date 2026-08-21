@@ -78,9 +78,12 @@ function transportHarness(overrides: Partial<JitterTransportDependencies> = {}) 
     createRemoteAudio: vi.fn(() => null),
     subscribePageHide: vi.fn((handler) => {
       pageHide = handler;
-      return vi.fn();
+      return vi.fn(() => {
+        if (pageHide === handler) pageHide = null;
+      });
     }),
     sendCancelBeacon: vi.fn(() => false),
+    sleep: vi.fn(async () => undefined),
     now: () => now,
     registrationTimeoutMs: 100,
     ...overrides,
@@ -180,6 +183,20 @@ describe("JitterCallTransport", () => {
     expect(connect).toHaveBeenNthCalledWith(3, "call-1", "accepted");
     expect(states).toEqual(["connecting", "ringing", "live"]);
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it("retries a lost start Server Action response with the identical call token", async () => {
+    const startCall = vi.fn()
+      .mockRejectedValueOnce(new Error("start action response lost"))
+      .mockResolvedValueOnce({ ok: true, data: { callId: "call-1", batchId: "batch-1" } });
+    const harness = transportHarness({ startCall });
+    const callTarget = target({ propertyId: "property-1", contactId: "contact-1" });
+
+    await expect(harness.transport.start(callTarget)).resolves.toEqual({ id: "call-1" });
+    expect(startCall).toHaveBeenCalledTimes(2);
+    expect(startCall).toHaveBeenNthCalledWith(1, callTarget);
+    expect(startCall).toHaveBeenNthCalledWith(2, callTarget);
+    expect(startCall.mock.calls[1][0].callToken).toBe(CALL_TOKEN);
   });
 
   it("rejects an expired initial RTC token and cancels the provisioned session", async () => {
@@ -287,15 +304,24 @@ describe("JitterCallTransport", () => {
     expect(harness.dependencies.cancel).toHaveBeenCalledWith("call-1", "failed");
   });
 
-  it("fails locally without rejecting hangup when the cancel Server Action throws", async () => {
-    const cancel = vi.fn(async () => { throw new Error("action transport failed"); });
+  it("warns after bounded cancel retries and does not memoize the failed attempt", async () => {
+    const cancel = vi.fn()
+      .mockRejectedValueOnce(new Error("action transport failed 1"))
+      .mockRejectedValueOnce(new Error("action transport failed 2"))
+      .mockRejectedValueOnce(new Error("action transport failed 3"))
+      .mockResolvedValueOnce({ ok: true, data: cancelData });
     const harness = transportHarness({ cancel });
     const states: string[] = [];
     harness.transport.onStateChange((state) => states.push(state));
     await harness.transport.start(target());
     await expect(harness.transport.hangup()).resolves.toEqual({ durationSeconds: 0, outcome: "failed" });
-    expect(states).toEqual(["connecting", "failed"]);
+    expect(cancel).toHaveBeenCalledTimes(3);
+    expect(harness.dependencies.sleep).toHaveBeenCalledTimes(2);
+    expect(states).toEqual(["connecting", "teardown_unconfirmed", "failed"]);
+    await expect(harness.transport.hangup()).resolves.toEqual({ durationSeconds: 0, outcome: "failed" });
+    expect(cancel).toHaveBeenCalledTimes(4);
     expect(harness.rtc.disconnect).toHaveBeenCalledTimes(1);
+    expect(states).toEqual(["connecting", "teardown_unconfirmed", "failed", "teardown_confirmed"]);
   });
 
   it("does not duplicate hold signaling and fails closed when hold state cannot be trusted", async () => {
@@ -384,17 +410,55 @@ describe("JitterCallTransport", () => {
     await expect(result).resolves.toEqual({ durationSeconds: 2, outcome: "connected_human" });
   });
 
-  it("uses the authenticated same-origin beacon on pagehide and avoids duplicate cancellation", async () => {
+  it("treats an accepted pagehide beacon as queueing only and still confirms with the Server Action", async () => {
     const sendCancelBeacon = vi.fn(() => true);
     const harness = transportHarness({ sendCancelBeacon });
     await harness.transport.start(target());
     harness.firePageHide();
     await flush();
     expect(sendCancelBeacon).toHaveBeenCalledWith("call-1", "abandoned");
-    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect(harness.dependencies.cancel).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.cancel).toHaveBeenCalledWith("call-1", "abandoned");
     expect(harness.rtc.disconnect).toHaveBeenCalledTimes(1);
     await harness.transport.hangup();
-    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect(harness.dependencies.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("queues the pagehide beacon while an authoritative cancel is still in flight", async () => {
+    let resolveCancel!: (value: { ok: true; data: typeof cancelData }) => void;
+    const cancel = vi.fn(() => new Promise<{ ok: true; data: typeof cancelData }>((resolve) => {
+      resolveCancel = resolve;
+    }));
+    const sendCancelBeacon = vi.fn(() => true);
+    const harness = transportHarness({ cancel, sendCancelBeacon });
+    await harness.transport.start(target());
+    const hangup = harness.transport.hangup();
+    await flush();
+
+    harness.firePageHide();
+    expect(sendCancelBeacon).toHaveBeenCalledWith("call-1", "abandoned");
+    expect(cancel).toHaveBeenCalledTimes(1);
+
+    resolveCancel({ ok: true, data: cancelData });
+    await hangup;
+  });
+
+  it("retains pagehide recovery after bounded cancel attempts remain unconfirmed", async () => {
+    const cancel = vi.fn()
+      .mockRejectedValueOnce(new Error("lost 1"))
+      .mockRejectedValueOnce(new Error("lost 2"))
+      .mockRejectedValueOnce(new Error("lost 3"))
+      .mockResolvedValueOnce({ ok: true, data: cancelData });
+    const sendCancelBeacon = vi.fn(() => true);
+    const harness = transportHarness({ cancel, sendCancelBeacon });
+    await harness.transport.start(target());
+    await harness.transport.hangup();
+
+    harness.firePageHide();
+    await flush();
+    expect(sendCancelBeacon).toHaveBeenCalledWith("call-1", "abandoned");
+    expect(cancel).toHaveBeenLastCalledWith("call-1", "abandoned");
+    expect(cancel).toHaveBeenCalledTimes(4);
   });
 
 });

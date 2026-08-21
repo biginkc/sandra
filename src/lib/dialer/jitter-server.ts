@@ -23,6 +23,8 @@ import type { CallTarget } from "./transport";
 const E164 = /^\+[1-9]\d{7,14}$/;
 const MAX_REF_LENGTH = 200;
 const MAX_CAPABILITY_LENGTH = 1_024;
+const MIN_CAPABILITY_KEY_LENGTH = 32;
+const MAX_CAPABILITY_KEY_LENGTH = 512;
 
 type AuthenticatedOperator = { ok: true; userId: string };
 type ClientStartResponse = { callId: string; batchId: string };
@@ -73,6 +75,15 @@ export async function startAuthenticatedJitterCall(
   if (target.propertyId !== undefined && !validRef(target.propertyId)) return invalidInput("Invalid property reference.");
   if (target.contactId !== undefined && !validRef(target.contactId)) return invalidInput("Invalid contact reference.");
   if (!validRef(target.callToken, 200)) return invalidInput("A stable call token is required.");
+  const capabilitySigningKey = capabilityKey(process.env.SOFTPHONE_CAPABILITY_KEY);
+  if (!capabilitySigningKey) {
+    return {
+      ok: false,
+      status: 503,
+      error: "Jitter softphone is not configured.",
+      errorCode: "jitter_not_configured",
+    };
+  }
 
   // Server Actions are public mutation boundaries. Authorize before the
   // eligibility path, which can pause a lead's active sequences.
@@ -138,15 +149,7 @@ export async function startAuthenticatedJitterCall(
     timezone,
   }, target.callToken);
   if (!started.ok) return started;
-  const capability = sealCallCapability(started.data.call_id, operator.userId);
-  if (!capability) {
-    return {
-      ok: false,
-      status: 503,
-      error: "Jitter softphone is not configured.",
-      errorCode: "jitter_not_configured",
-    };
-  }
+  const capability = sealCallCapability(started.data.call_id, operator.userId, capabilitySigningKey);
   return { ok: true, data: { callId: capability, batchId: started.data.batch_id } };
 }
 
@@ -203,28 +206,35 @@ function isCancelReason(value: unknown): value is JitterCancelReason {
   return value === "hangup" || value === "failed" || value === "abandoned";
 }
 
-function sealCallCapability(callId: string, userId: string): string | null {
-  const token = process.env.JITTER_SOFTPHONE_SERVICE_TOKEN?.trim();
-  if (!token) return null;
+function sealCallCapability(callId: string, userId: string, key: string): string {
   const payload = Buffer.from(JSON.stringify({ callId, userId }), "utf8").toString("base64url");
-  const signature = createHmac("sha256", token).update(`sandra-softphone:${payload}`).digest("base64url");
+  const signature = createHmac("sha256", key).update(`sandra-softphone:${payload}`).digest("base64url");
   return `v1.${payload}.${signature}`;
 }
 
 function openCallCapability(value: unknown, userId: string): string | null {
   if (!validRef(value, MAX_CAPABILITY_LENGTH)) return null;
-  const token = process.env.JITTER_SOFTPHONE_SERVICE_TOKEN?.trim();
-  if (!token) return null;
+  const currentKey = capabilityKey(process.env.SOFTPHONE_CAPABILITY_KEY);
+  if (!currentKey) return null;
+  const previousKey = capabilityKey(process.env.SOFTPHONE_CAPABILITY_KEY_PREVIOUS);
   const [version, payload, signature, extra] = value.split(".");
   if (version !== "v1" || !payload || !signature || extra !== undefined) return null;
-  const expected = createHmac("sha256", token).update(`sandra-softphone:${payload}`).digest();
   let actual: Buffer;
   try {
     actual = Buffer.from(signature, "base64url");
   } catch {
     return null;
   }
-  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
+  const verified = [currentKey, previousKey]
+    .filter((candidate): candidate is string => Boolean(candidate))
+    .slice(0, 2)
+    .some((candidate) => {
+      const expected = createHmac("sha256", candidate)
+        .update(`sandra-softphone:${payload}`)
+        .digest();
+      return actual.length === expected.length && timingSafeEqual(actual, expected);
+    });
+  if (!verified) return null;
   try {
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as unknown;
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return null;
@@ -233,4 +243,13 @@ function openCallCapability(value: unknown, userId: string): string | null {
   } catch {
     return null;
   }
+}
+
+function capabilityKey(value: string | undefined): string | null {
+  const normalized = value?.trim();
+  if (!normalized?.startsWith("v1:")) return null;
+  const key = normalized.slice(3);
+  return key.length >= MIN_CAPABILITY_KEY_LENGTH && key.length <= MAX_CAPABILITY_KEY_LENGTH
+    ? key
+    : null;
 }

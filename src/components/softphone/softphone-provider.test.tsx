@@ -218,6 +218,73 @@ describe("SoftphoneProvider transport gate", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("The call failed. Add a note to log the outcome.");
   });
 
+  it("shows a blocking warning when Jitter teardown is still unconfirmed", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        contactId: "contact-1",
+        phoneE164: "+18165550123",
+        maskedPhone: "(816) 555-0123",
+        name: "Softphone Lead",
+        address: "1 Main St",
+        state: "MO",
+        startedAt: "2026-08-21T15:00:00.000Z",
+      },
+    });
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "connecting" | "live" | "ended" | "teardown_unconfirmed" | "teardown_confirmed") => void) | null = null;
+      let hangupAttempts = 0;
+      return {
+        onStateChange: vi.fn((cb) => { listener = cb; }),
+        start: vi.fn(async () => {
+          listener?.("connecting");
+          listener?.("live");
+          return { id: "jitter-call" };
+        }),
+        mute: vi.fn(),
+        hold: vi.fn(),
+        hangup: vi.fn(async () => {
+          hangupAttempts += 1;
+          listener?.(hangupAttempts === 1 ? "teardown_unconfirmed" : "teardown_confirmed");
+          return { durationSeconds: 2, outcome: "failed" as const };
+        }),
+      };
+    });
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
+
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"));
+    await user.click(screen.getByTestId("call-hangup"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Jitter could not confirm that the call ended. Do not start another call yet",
+    );
+    await user.type(screen.getByTestId("dispo-notes"), "Left voicemail");
+    expect(screen.getByTestId("dispo-not-interested")).toBeDisabled();
+    await user.click(screen.getByTestId("retry-jitter-teardown"));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.getByTestId("dispo-not-interested")).toBeEnabled();
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
   });

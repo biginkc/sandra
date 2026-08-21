@@ -42,6 +42,8 @@ import {
 const SANDRA_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 const CALL_ID = "00000000-0000-4000-8000-000000000011";
 const CALL_TOKEN = "11111111-1111-4111-8111-111111111111";
+const OLD_CAPABILITY_KEY = `v1:${"o".repeat(48)}`;
+const NEW_CAPABILITY_KEY = `v1:${"n".repeat(48)}`;
 
 const preparedTarget = {
   propertyId: "property-1",
@@ -75,6 +77,8 @@ describe("authenticated Jitter softphone server boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", "test-service-token");
+    vi.stubEnv("SOFTPHONE_CAPABILITY_KEY", OLD_CAPABILITY_KEY);
+    vi.stubEnv("SOFTPHONE_CAPABILITY_KEY_PREVIOUS", "");
     mocks.getUser.mockResolvedValue({
       data: { user: { id: "user-1", email: "Operator@Example.Test" } },
       error: null,
@@ -227,5 +231,39 @@ describe("authenticated Jitter softphone server boundary", () => {
       errorCode: "invalid_request",
     });
     expect(mocks.requestToken).not.toHaveBeenCalled();
+  });
+
+  it("accepts an in-flight capability minted under the bounded previous key after rotation", async () => {
+    const started = await startAuthenticatedJitterCall(callTarget({
+      propertyId: "property-1",
+      contactId: "contact-1",
+    }));
+    if (!started.ok) throw new Error("expected successful start");
+
+    vi.stubEnv("SOFTPHONE_CAPABILITY_KEY", NEW_CAPABILITY_KEY);
+    vi.stubEnv("SOFTPHONE_CAPABILITY_KEY_PREVIOUS", OLD_CAPABILITY_KEY);
+    await expect(cancelAuthenticatedJitterCall(started.data.callId, "abandoned")).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(mocks.requestCancel).toHaveBeenCalledWith(CALL_ID, "abandoned");
+  });
+
+  it.each([
+    ["missing", ""],
+    ["unversioned", "x".repeat(48)],
+    ["too short", `v1:${"x".repeat(31)}`],
+    ["too long", `v1:${"x".repeat(513)}`],
+  ])("does not provision when the dedicated capability key is %s", async (_label, key) => {
+    vi.stubEnv("SOFTPHONE_CAPABILITY_KEY", key);
+    await expect(startAuthenticatedJitterCall(callTarget({
+      propertyId: "property-1",
+      contactId: "contact-1",
+    }))).resolves.toMatchObject({
+      ok: false,
+      status: 503,
+      errorCode: "jitter_not_configured",
+    });
+    expect(mocks.requestStart).not.toHaveBeenCalled();
+    expect(mocks.prepareLeadCall).not.toHaveBeenCalled();
   });
 });

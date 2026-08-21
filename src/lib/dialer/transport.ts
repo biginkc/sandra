@@ -15,7 +15,9 @@ export type CallTransportState =
   | "ended"
   | "failed"
   | "operator_busy"
-  | "not_callable";
+  | "not_callable"
+  | "teardown_unconfirmed"
+  | "teardown_confirmed";
 
 export interface CallTransport {
   start(target: CallTarget): Promise<CallHandle>;

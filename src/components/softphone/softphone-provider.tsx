@@ -71,6 +71,8 @@ const KEYPAD = [
   ["*", ""], ["0", "+"], ["#", ""],
 ] as const;
 
+const TEARDOWN_WARNING = "Jitter could not confirm that the call ended. Do not start another call yet; automatic cleanup is still pending.";
+
 function timerText(seconds: number): string {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
@@ -107,12 +109,14 @@ export function SoftphoneProvider({ children }: Props) {
   const [pending, setPending] = useState(false);
   const [startedAt, setStartedAt] = useState<string | null>(null);
   const [callOutcome, setCallOutcome] = useState<"connected_human" | "failed">("connected_human");
+  const [teardownUnconfirmed, setTeardownUnconfirmed] = useState(false);
   const [wrapToken, setWrapToken] = useState<string | null>(null);
   const [callingEnabled] = useState(() => isSoftphoneTransportEnabled());
   const transportRef = useRef<CallTransport | null>(null);
   const manualHangupRef = useRef(false);
   const startInFlightRef = useRef(false);
   const terminalHandledRef = useRef(false);
+  const teardownWarningRef = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((message: string) => {
@@ -168,6 +172,8 @@ export function SoftphoneProvider({ children }: Props) {
     manualHangupRef.current = false;
     startInFlightRef.current = false;
     terminalHandledRef.current = false;
+    teardownWarningRef.current = false;
+    setTeardownUnconfirmed(false);
     setTarget(null);
     setDialInput("");
     setSuggestions([]);
@@ -194,6 +200,8 @@ export function SoftphoneProvider({ children }: Props) {
     if (startInFlightRef.current) return;
     startInFlightRef.current = true;
     terminalHandledRef.current = false;
+    teardownWarningRef.current = false;
+    setTeardownUnconfirmed(false);
     setPhone("idle");
     setPending(true);
     setError(null);
@@ -234,11 +242,25 @@ export function SoftphoneProvider({ children }: Props) {
           }
         }
         transition(kind === "failed" ? { type: "call_failed" } : { type: "hangup" });
-        if (kind === "failed") setError("The call failed. Add a note to log the outcome.");
+        if (kind === "failed" && !teardownWarningRef.current) {
+          setError("The call failed. Add a note to log the outcome.");
+        }
       })();
       return terminalPromise;
     };
     transport.onStateChange((status) => {
+      if (status === "teardown_unconfirmed") {
+        teardownWarningRef.current = true;
+        setTeardownUnconfirmed(true);
+        setError(TEARDOWN_WARNING);
+        return;
+      }
+      if (status === "teardown_confirmed") {
+        teardownWarningRef.current = false;
+        setTeardownUnconfirmed(false);
+        setError((value) => value === TEARDOWN_WARNING ? null : value);
+        return;
+      }
       if (status === "operator_busy" || status === "not_callable") {
         terminalHandledRef.current = true;
         void (async () => {
@@ -318,9 +340,21 @@ export function SoftphoneProvider({ children }: Props) {
     }
   }, [transition]);
 
+  const retryTeardown = useCallback(async () => {
+    const transport = transportRef.current;
+    if (!transport || !teardownUnconfirmed || pending) return;
+    setPending(true);
+    try {
+      await transport.hangup();
+    } finally {
+      setPending(false);
+    }
+  }, [pending, teardownUnconfirmed]);
+
   const complete = useCallback(async (disposition: SoftphoneDisposition, callback?: { date: string; time: string; timeZone: string }) => {
     if (!target || !startedAt || !wrapToken) return;
     if (!notes.trim()) return;
+    if (teardownUnconfirmed) return;
     setPending(true);
     setError(null);
     try {
@@ -335,7 +369,7 @@ export function SoftphoneProvider({ children }: Props) {
     } finally {
       setPending(false);
     }
-  }, [callOutcome, finalSeconds, notes, resetIdle, showToast, startedAt, target, transition, wrapToken]);
+  }, [callOutcome, finalSeconds, notes, resetIdle, showToast, startedAt, target, teardownUnconfirmed, transition, wrapToken]);
 
   const manualDigits = dialInput.replace(/\D/g, "");
   const visibleSuggestions = phone === "idle" && dialInput.trim() ? suggestions : [];
@@ -380,7 +414,7 @@ export function SoftphoneProvider({ children }: Props) {
             ) : isOnCall ? (
               <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} onMute={() => { setMuted((value) => !value); transportRef.current?.mute(!muted); }} onHold={() => { setHeld((value) => !value); transportRef.current?.hold(!held); transition(held ? { type: "resume" } : { type: "hold" }); }} onHangup={hangup} />
             ) : (
-              <WrapView target={target} finalSeconds={finalSeconds} notes={notes} setNotes={setNotes} callbackOpen={callbackOpen} setCallbackOpen={setCallbackOpen} callbackTime={callbackTime} setCallbackTime={setCallbackTime} pending={pending} error={error} onDisposition={(disposition) => {
+              <WrapView target={target} finalSeconds={finalSeconds} notes={notes} setNotes={setNotes} callbackOpen={callbackOpen} setCallbackOpen={setCallbackOpen} callbackTime={callbackTime} setCallbackTime={setCallbackTime} pending={pending} error={error} teardownUnconfirmed={teardownUnconfirmed} onRetryTeardown={() => { void retryTeardown(); }} onDisposition={(disposition) => {
                 const config = SOFTPHONE_DISPOSITIONS.find((item) => item.value === disposition);
                 if (config?.schedulesCallback) { setCallbackOpen(true); return; }
                 void complete(disposition);
@@ -430,7 +464,7 @@ function LiveView({ target, callName, callStatus, seconds, muted, held, onMute, 
   return <div className="p-5 pb-4 text-center"><span data-testid="call-live-pill" className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-emerald-800"><span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />{held ? "On hold" : callStatus === "connecting" ? "Connecting" : callStatus === "ringing" ? "Ringing" : "Live · browser audio"}</span><div className="mt-3.5 text-lg font-extrabold">{callName}</div><div className="mt-0.5 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : ""}</div><div data-testid="call-timer" className={`my-4.5 font-mono text-[34px] font-bold leading-none ${held ? "text-amber-700" : "text-emerald-600"}`}>{timerText(seconds)}</div><div className="flex justify-center gap-2"><button type="button" aria-pressed={muted} data-testid="call-mute" onClick={onMute} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${muted ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{muted ? "Unmute" : "Mute"}</button><button type="button" aria-pressed={held} data-testid="call-hold" onClick={onHold} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${held ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{held ? "Resume" : "Hold"}</button><button type="button" data-testid="call-hangup" onClick={onHangup} className="rounded-[9px] border-0 bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-700">Hang up</button></div></div>;
 }
 
-function WrapView({ target, finalSeconds, notes, setNotes, callbackOpen, setCallbackOpen, callbackTime, setCallbackTime, pending, error, onDisposition, onCallback, onCustomCallback }: { target: SoftphoneTarget | null; finalSeconds: number; notes: string; setNotes: (value: string) => void; callbackOpen: boolean; setCallbackOpen: (value: boolean) => void; callbackTime: string; setCallbackTime: (value: string) => void; pending: boolean; error: string | null; onDisposition: (disposition: SoftphoneDisposition) => void; onCallback: (kind: "today_pm" | "tomorrow_am") => void; onCustomCallback: () => void }) {
-  const disabled = !notes.trim() || pending;
-  return <div className="p-[18px] pb-4 text-center"><span className="inline-flex rounded-full border border-[#e5e1df] bg-[#f6f4f2] px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-[#78716c]">Call ended · {timerText(finalSeconds)}</span><div className="mt-3 text-[15px] font-extrabold">{target?.name}</div><div className="my-1.5 mb-3 text-[11.5px] text-[#78716c]">How&apos;d it go? One tap logs it and you&apos;re done.</div><textarea data-testid="dispo-notes" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Notes (required) — saved to the lead with the outcome…" rows={3} className="mb-3 w-full resize-none rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-[12.5px] leading-[1.5] outline-none" />{error ? <div role="alert" className="mb-2 text-xs text-red-700">{error}</div> : null}<div className="flex flex-wrap justify-center gap-1.5">{SOFTPHONE_DISPOSITIONS.map((item) => <button type="button" key={item.value} data-testid={item.testId} disabled={disabled} onClick={() => onDisposition(item.value)} className={`rounded-full border px-3 py-1.5 text-[11.5px] font-bold ${disabled ? "cursor-not-allowed border-[#e5e1df] bg-[#fafaf9] text-[#a8a29e]" : item.danger ? "border-red-200 bg-white text-red-700 hover:border-red-400 hover:bg-red-50" : "border-[#e5e1df] bg-white hover:border-[#111827] hover:bg-[#111827] hover:text-white"}`}>{item.label}</button>)}</div>{disabled ? <div className="mt-2.5 text-[11px] text-[#a8a29e]">Add a note to log the outcome.</div> : null}{callbackOpen ? <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50/60 p-2.5 text-left"><div className="mb-2 text-xs font-bold text-blue-900">Schedule callback</div><div className="flex flex-wrap gap-1.5"><button type="button" onClick={() => onCallback("today_pm")} className="rounded-full border border-blue-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-blue-900">Today PM</button><button type="button" onClick={() => onCallback("tomorrow_am")} className="rounded-full border border-blue-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-blue-900">Tomorrow AM</button><input aria-label="Pick a time" type="datetime-local" value={callbackTime} onChange={(event) => setCallbackTime(event.target.value)} className="rounded-md border border-blue-200 bg-white px-2 py-1 text-[11px]" /><button type="button" onClick={onCustomCallback} disabled={!callbackTime} className="rounded-full bg-blue-700 px-2.5 py-1.5 text-[11px] font-bold text-white disabled:opacity-50">Schedule</button><button type="button" onClick={() => setCallbackOpen(false)} className="rounded-full px-2 py-1.5 text-[11px] font-bold text-[#78716c]">Cancel</button></div></div> : null}</div>;
+function WrapView({ target, finalSeconds, notes, setNotes, callbackOpen, setCallbackOpen, callbackTime, setCallbackTime, pending, error, teardownUnconfirmed, onRetryTeardown, onDisposition, onCallback, onCustomCallback }: { target: SoftphoneTarget | null; finalSeconds: number; notes: string; setNotes: (value: string) => void; callbackOpen: boolean; setCallbackOpen: (value: boolean) => void; callbackTime: string; setCallbackTime: (value: string) => void; pending: boolean; error: string | null; teardownUnconfirmed: boolean; onRetryTeardown: () => void; onDisposition: (disposition: SoftphoneDisposition) => void; onCallback: (kind: "today_pm" | "tomorrow_am") => void; onCustomCallback: () => void }) {
+  const disabled = !notes.trim() || pending || teardownUnconfirmed;
+  return <div className="p-[18px] pb-4 text-center"><span className="inline-flex rounded-full border border-[#e5e1df] bg-[#f6f4f2] px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-[#78716c]">Call ended · {timerText(finalSeconds)}</span><div className="mt-3 text-[15px] font-extrabold">{target?.name}</div><div className="my-1.5 mb-3 text-[11.5px] text-[#78716c]">How&apos;d it go? One tap logs it and you&apos;re done.</div><textarea data-testid="dispo-notes" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Notes (required) — saved to the lead with the outcome…" rows={3} className="mb-3 w-full resize-none rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-[12.5px] leading-[1.5] outline-none" />{error ? <div role="alert" className="mb-2 text-xs text-red-700">{error}</div> : null}{teardownUnconfirmed ? <button type="button" data-testid="retry-jitter-teardown" disabled={pending} onClick={onRetryTeardown} className="mb-2 rounded-[9px] border border-red-300 bg-white px-3 py-2 text-xs font-bold text-red-700 disabled:opacity-50">Retry ending call</button> : null}<div className="flex flex-wrap justify-center gap-1.5">{SOFTPHONE_DISPOSITIONS.map((item) => <button type="button" key={item.value} data-testid={item.testId} disabled={disabled} onClick={() => onDisposition(item.value)} className={`rounded-full border px-3 py-1.5 text-[11.5px] font-bold ${disabled ? "cursor-not-allowed border-[#e5e1df] bg-[#fafaf9] text-[#a8a29e]" : item.danger ? "border-red-200 bg-white text-red-700 hover:border-red-400 hover:bg-red-50" : "border-[#e5e1df] bg-white hover:border-[#111827] hover:bg-[#111827] hover:text-white"}`}>{item.label}</button>)}</div>{disabled ? <div className="mt-2.5 text-[11px] text-[#a8a29e]">{teardownUnconfirmed ? "Confirm the call ended before logging the outcome." : "Add a note to log the outcome."}</div> : null}{callbackOpen ? <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50/60 p-2.5 text-left"><div className="mb-2 text-xs font-bold text-blue-900">Schedule callback</div><div className="flex flex-wrap gap-1.5"><button type="button" onClick={() => onCallback("today_pm")} className="rounded-full border border-blue-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-blue-900">Today PM</button><button type="button" onClick={() => onCallback("tomorrow_am")} className="rounded-full border border-blue-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-blue-900">Tomorrow AM</button><input aria-label="Pick a time" type="datetime-local" value={callbackTime} onChange={(event) => setCallbackTime(event.target.value)} className="rounded-md border border-blue-200 bg-white px-2 py-1 text-[11px]" /><button type="button" onClick={onCustomCallback} disabled={!callbackTime} className="rounded-full bg-blue-700 px-2.5 py-1.5 text-[11px] font-bold text-white disabled:opacity-50">Schedule</button><button type="button" onClick={() => setCallbackOpen(false)} className="rounded-full px-2 py-1.5 text-[11px] font-bold text-[#78716c]">Cancel</button></div></div> : null}</div>;
 }

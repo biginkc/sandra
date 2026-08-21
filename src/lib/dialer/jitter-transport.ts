@@ -20,6 +20,9 @@ import type {
 } from "./transport";
 
 const TELNYX_REGISTER_TIMEOUT_MS = 25_000;
+const JITTER_START_ACTION_ATTEMPTS = 2;
+const JITTER_CANCEL_ATTEMPTS = 3;
+const JITTER_CANCEL_BACKOFF_MS = [100, 300] as const;
 const TELNYX_TOKEN_EXPIRING_SOON = 34_001;
 const TELNYX_HOLD_FAILED = 44_001;
 const TELNYX_BYE_SEND_FAILED = 44_003;
@@ -64,6 +67,7 @@ export type JitterTransportDependencies = {
   createRemoteAudio(): HTMLAudioElement | null;
   subscribePageHide(handler: () => void): () => void;
   sendCancelBeacon(callId: string, reason: JitterCancelReason): boolean;
+  sleep(delayMs: number): Promise<void>;
   now(): number;
   registrationTimeoutMs: number;
 };
@@ -80,6 +84,7 @@ const defaultDependencies: JitterTransportDependencies = {
     window.addEventListener("pagehide", handler);
     return () => window.removeEventListener("pagehide", handler);
   },
+  sleep: (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
   sendCancelBeacon(callId, reason) {
     if (typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") return false;
     const body = JSON.stringify({ callId, reason });
@@ -128,6 +133,7 @@ export class JitterCallTransport implements CallTransport {
   private startPromise: Promise<CallHandle> | null = null;
   private hangupPromise: Promise<CallResult> | null = null;
   private cancelPromise: Promise<boolean> | null = null;
+  private lastTeardownConfirmed = true;
   private refreshPromise: Promise<void> | null = null;
   private registrationPromise: Promise<void> | null = null;
   private resolveRegistration: (() => void) | null = null;
@@ -173,14 +179,27 @@ export class JitterCallTransport implements CallTransport {
   }
 
   hangup(): Promise<CallResult> {
-    if (!this.hangupPromise) this.hangupPromise = this.hangupInternal();
+    if (!this.hangupPromise) {
+      const attempt = this.hangupInternal();
+      this.hangupPromise = attempt;
+      void attempt.then(
+        () => {
+          if (!this.lastTeardownConfirmed && this.hangupPromise === attempt) {
+            this.hangupPromise = null;
+          }
+        },
+        () => {
+          if (this.hangupPromise === attempt) this.hangupPromise = null;
+        },
+      );
+    }
     return this.hangupPromise;
   }
 
   private async startInternal(target: CallTarget): Promise<CallHandle> {
     this.emit("connecting");
     try {
-      const started = await this.dependencies.startCall(target);
+      const started = await this.startCallWithLostResponseRecovery(target);
       if (!started.ok) throw proxyError(started);
       this.callId = started.data.callId;
       this.removePageHideListener = this.dependencies.subscribePageHide(() => this.onPageHide());
@@ -215,6 +234,23 @@ export class JitterCallTransport implements CallTransport {
       await this.failAndCancel(error, proxyFailureState(error));
       throw error;
     }
+  }
+
+  private async startCallWithLostResponseRecovery(
+    target: CallTarget,
+  ): Promise<JitterProxyResult<{ callId: string; batchId: string }>> {
+    let lastResult: JitterProxyResult<{ callId: string; batchId: string }> | undefined;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < JITTER_START_ACTION_ATTEMPTS; attempt += 1) {
+      try {
+        lastResult = await this.dependencies.startCall(target);
+        if (lastResult.ok || lastResult.status < 500) return lastResult;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastResult) return lastResult;
+    throw lastError instanceof Error ? lastError : new Error("Jitter call start response was lost.");
   }
 
   private bindRtcEvents(client: TelnyxRtcLike): void {
@@ -456,6 +492,7 @@ export class JitterCallTransport implements CallTransport {
       // The server-side cancel remains authoritative and idempotent.
     }
     const canceled = await this.cancel("hangup");
+    this.lastTeardownConfirmed = canceled;
     if (!this.terminal) {
       this.terminal = canceled ? "ended" : "failed";
       this.emit(this.terminal);
@@ -471,25 +508,52 @@ export class JitterCallTransport implements CallTransport {
   private cancel(reason: JitterCancelReason): Promise<boolean> {
     if (this.cancelPromise) return this.cancelPromise;
     if (!this.callId) {
+      this.lastTeardownConfirmed = true;
       this.destroyRtc();
       return Promise.resolve(true);
     }
-    this.cancelPromise = (async () => {
-      let canceled = true;
-      try {
-        const result = await this.dependencies.cancel(this.callId!, reason);
-        canceled = result.ok;
-      } catch {
-        canceled = false;
+    const callId = this.callId;
+    const attempt = (async () => {
+      for (let index = 0; index < JITTER_CANCEL_ATTEMPTS; index += 1) {
+        try {
+          const result = await this.dependencies.cancel(callId, reason);
+          if (result.ok) {
+            const recovered = !this.lastTeardownConfirmed;
+            this.lastTeardownConfirmed = true;
+            this.destroyRtc();
+            if (recovered) this.emit("teardown_confirmed");
+            return true;
+          }
+        } catch {
+          // A thrown/lost Server Action response is just as unconfirmed as a
+          // retryable error envelope. The Jitter cancel operation is idempotent.
+        }
+        const delayMs = JITTER_CANCEL_BACKOFF_MS[index];
+        if (delayMs !== undefined) await this.dependencies.sleep(delayMs);
       }
-      this.destroyRtc();
-      return canceled;
+      this.lastTeardownConfirmed = false;
+      this.emit("teardown_unconfirmed");
+      // Stop media now, but retain the pagehide listener so a later navigation
+      // still gets an unload-safe best-effort cancel attempt.
+      this.destroyRtc(true);
+      return false;
     })();
-    return this.cancelPromise;
+    this.cancelPromise = attempt;
+    void attempt.then(
+      (confirmed) => {
+        if (!confirmed && this.cancelPromise === attempt) this.cancelPromise = null;
+      },
+      () => {
+        this.lastTeardownConfirmed = false;
+        if (this.cancelPromise === attempt) this.cancelPromise = null;
+      },
+    );
+    return attempt;
   }
 
   private onPageHide(): void {
-    if (!this.callId || this.cancelPromise) return;
+    if (!this.callId) return;
+    const cancelInFlight = this.cancelPromise !== null;
     this.hangupRequested = true;
     this.expectedIncoming = false;
     this.terminalAt ??= this.dependencies.now();
@@ -498,23 +562,22 @@ export class JitterCallTransport implements CallTransport {
     } catch {
       // The beacon/server action remains the teardown path.
     }
-    let beaconAccepted = false;
     try {
-      beaconAccepted = this.dependencies.sendCancelBeacon(this.callId, "abandoned");
+      // `true` means only that the browser queued the beacon. It is not an
+      // acknowledgment from Sandra or Jitter, so the authenticated Server
+      // Action remains the confirmation path.
+      this.dependencies.sendCancelBeacon(this.callId, "abandoned");
     } catch {
       // Fall through to the authenticated Server Action path.
     }
-    if (beaconAccepted) {
-      this.cancelPromise = Promise.resolve(true);
-      this.destroyRtc();
-      return;
-    }
-    void this.cancel("abandoned");
+    if (!cancelInFlight) void this.cancel("abandoned");
   }
 
-  private destroyRtc(): void {
-    this.removePageHideListener?.();
-    this.removePageHideListener = null;
+  private destroyRtc(preservePageHideListener = false): void {
+    if (!preservePageHideListener) {
+      this.removePageHideListener?.();
+      this.removePageHideListener = null;
+    }
     this.clearRegistration();
     this.clearRecoveryTimer();
     const client = this.rtcClient;
