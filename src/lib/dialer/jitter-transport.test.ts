@@ -186,6 +186,10 @@ describe("JitterCallTransport", () => {
     harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
     call.state = "active";
     harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    const unexpectedCall = new FakeCall();
+    unexpectedCall.id = "unexpected-browser-leg";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: unexpectedCall });
+    expect(unexpectedCall.answer).not.toHaveBeenCalled();
     call.state = "hangup";
     call.cause = "NORMAL_CLEARING";
     call.sipReason = "Normal Clearing";
@@ -195,7 +199,7 @@ describe("JitterCallTransport", () => {
     await flush();
     expect(states).toEqual(["connecting", "ringing", "live", "ended"]);
     expect(harness.dependencies.cancel).toHaveBeenCalledTimes(1);
-    expect(harness.dependencies.cancel).toHaveBeenCalledWith("session-1", "abandoned");
+    expect(harness.dependencies.cancel).toHaveBeenCalledWith("session-1", "hangup");
   });
 
   it("keeps failed outcome and real duration when RTC fails after the call became live", async () => {

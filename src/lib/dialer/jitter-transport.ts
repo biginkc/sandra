@@ -311,10 +311,10 @@ export class JitterCallTransport implements CallTransport {
 
   private handleIncomingRinging(call: TelnyxCallLike): void {
     if (!this.expectedIncoming) return;
-    if (!this.currentCallId || this.currentCallId === (call.id ?? this.currentCallId)) {
-      this.currentCall = call;
-      this.currentCallId = call.id ?? "incoming-call";
-    }
+    if (this.currentCallId && call.id && this.currentCallId !== call.id) return;
+    this.currentCall = call;
+    this.currentCallId = call.id ?? "incoming-call";
+    this.expectedIncoming = false;
     this.emit("ringing");
     if (this.answerStarted) return;
     this.answerStarted = true;
@@ -342,7 +342,7 @@ export class JitterCallTransport implements CallTransport {
       this.terminal = "ended";
       this.terminalAt ??= this.dependencies.now();
       this.emit("ended");
-      void this.cancel("abandoned");
+      void this.cancel("hangup");
       return;
     }
     if (mapped === "connecting") this.emit("connecting");
