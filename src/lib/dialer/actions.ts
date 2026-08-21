@@ -239,6 +239,21 @@ export async function completeSoftphoneCall(input: {
     const { data: membership, error: membershipError } = await supabase.from("memberships").select("org_id").eq("user_id", user.id).limit(1).maybeSingle();
     if (membershipError || !membership) return { ok: false, error: membershipError?.message ?? "No organization membership." };
 
+    if (input.target.propertyId) {
+      const { data: property, error: propertyError } = await supabase
+        .from("properties")
+        .select("id, homeowner_contact_id")
+        .eq("id", input.target.propertyId)
+        .eq("org_id", membership.org_id)
+        .maybeSingle();
+      if (propertyError || !property) {
+        return { ok: false, error: propertyError?.message ?? "Lead is not in your organization." };
+      }
+      if (input.target.contactId && property.homeowner_contact_id !== input.target.contactId) {
+        return { ok: false, error: "The call target no longer matches the lead." };
+      }
+    }
+
     let callbackTaskId: string | undefined;
     if (input.callback) {
       if (!input.target.propertyId) return { ok: false, error: "A manual dial cannot schedule a lead callback." };
