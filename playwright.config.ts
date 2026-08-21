@@ -52,6 +52,10 @@ const supabaseServiceRoleKey =
   process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
   env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
   "";
+const softphoneTransport =
+  process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT ??
+  env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT ??
+  "";
 
 if (supabaseUrl) {
   assertSafeE2ESupabaseTarget(supabaseUrl, {
@@ -75,6 +79,7 @@ const webServerEnv: Record<string, string> = {
   // test project so e2e tests never touch dev data.
   NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
   NEXT_PUBLIC_SUPABASE_ANON_KEY: supabaseAnonKey,
+  NEXT_PUBLIC_SOFTPHONE_TRANSPORT: softphoneTransport,
   SUPABASE_SERVICE_ROLE_KEY: supabaseServiceRoleKey,
   NEXT_PUBLIC_HUGO_SSO: "1",
   // The broad golden-path suite seeds a test-project password session only as

@@ -106,6 +106,7 @@ export function SoftphoneProvider({ children }: Props) {
   const [pending, setPending] = useState(false);
   const [startedAt, setStartedAt] = useState<string | null>(null);
   const [callOutcome, setCallOutcome] = useState<"connected_human" | "failed">("connected_human");
+  const [wrapToken, setWrapToken] = useState<string | null>(null);
   const [callingEnabled] = useState(() => isSimulatedTransportEnabled());
   const transportRef = useRef<CallTransport | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -174,6 +175,7 @@ export function SoftphoneProvider({ children }: Props) {
     setError(null);
     setStartedAt(null);
     setCallOutcome("connected_human");
+    setWrapToken(null);
     setPhone("idle");
   }, []);
 
@@ -194,6 +196,7 @@ export function SoftphoneProvider({ children }: Props) {
     setHeld(false);
     setMuted(false);
     setCallOutcome("connected_human");
+    setWrapToken(null);
     const transport = new SimulatedCallTransport();
     transportRef.current = transport;
     transport.onStateChange((status) => {
@@ -202,6 +205,7 @@ export function SoftphoneProvider({ children }: Props) {
       if (status === "failed") {
         setCallOutcome("failed");
         setFinalSeconds(seconds);
+        setWrapToken((value) => value ?? crypto.randomUUID());
         if (result.data.propertyId) void resumeFailedSoftphoneCall(result.data.propertyId);
         transition({ type: "call_failed" });
         setError("The call failed. Add a note to log the outcome.");
@@ -213,6 +217,7 @@ export function SoftphoneProvider({ children }: Props) {
     } catch {
       setCallOutcome("failed");
       setFinalSeconds(seconds);
+      setWrapToken((value) => value ?? crypto.randomUUID());
       if (result.data.propertyId) await resumeFailedSoftphoneCall(result.data.propertyId);
       transition({ type: "call_failed" });
       setError("The call failed. Add a note to log the outcome.");
@@ -241,21 +246,28 @@ export function SoftphoneProvider({ children }: Props) {
     setCallOutcome(result.outcome);
     setFinalSeconds(result.durationSeconds || seconds);
     setCallStatus("ended");
+    setWrapToken((value) => value ?? crypto.randomUUID());
     transition({ type: "hangup" });
   }, [seconds, transition]);
 
   const complete = useCallback(async (disposition: SoftphoneDisposition, callback?: { date: string; time: string; timeZone: string }) => {
-    if (!target || !startedAt) return;
+    if (!target || !startedAt || !wrapToken) return;
     if (!notes.trim()) return;
     setPending(true);
-    const result = await completeSoftphoneCall({ target, startedAt, endedAt: new Date().toISOString(), durationSeconds: finalSeconds, outcome: callOutcome, disposition, notes, callback });
-    setPending(false);
-    if (!result.ok) { setError(result.error); return; }
-    showToast(`Logged "${SOFTPHONE_DISPOSITIONS.find((item) => item.value === disposition)?.label ?? disposition}" + notes for ${target.name} · ${timerText(finalSeconds)}`);
-    transition({ type: "wrap_complete" });
-    resetIdle();
-    setPhone("closed");
-  }, [callOutcome, finalSeconds, notes, resetIdle, showToast, startedAt, target, transition]);
+    setError(null);
+    try {
+      const result = await completeSoftphoneCall({ target, startedAt, endedAt: new Date().toISOString(), durationSeconds: finalSeconds, outcome: callOutcome, disposition, notes, wrapToken, callback });
+      if (!result.ok) { setError(result.error); return; }
+      showToast(`Logged "${SOFTPHONE_DISPOSITIONS.find((item) => item.value === disposition)?.label ?? disposition}" + notes for ${target.name} · ${timerText(finalSeconds)}`);
+      transition({ type: "wrap_complete" });
+      resetIdle();
+      setPhone("closed");
+    } catch {
+      setError("Could not confirm the call was saved. Try again.");
+    } finally {
+      setPending(false);
+    }
+  }, [callOutcome, finalSeconds, notes, resetIdle, showToast, startedAt, target, transition, wrapToken]);
 
   const manualDigits = dialInput.replace(/\D/g, "");
   const visibleSuggestions = phone === "idle" && dialInput.trim() ? suggestions : [];

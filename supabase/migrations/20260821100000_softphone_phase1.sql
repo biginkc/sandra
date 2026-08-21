@@ -5,7 +5,8 @@ alter table public.call_activities
   alter column property_id drop not null,
   alter column contact_id drop not null,
   add column if not exists direction text not null default 'outbound',
-  add column if not exists phone_e164 text;
+  add column if not exists phone_e164 text,
+  add column if not exists wrap_token uuid;
 
 do $$
 begin
@@ -17,6 +18,19 @@ begin
     alter table public.call_activities
       add constraint call_activities_direction_check
       check (direction in ('outbound', 'inbound'));
+  end if;
+end;
+$$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'call_activities_wrap_token_key'
+      and conrelid = 'public.call_activities'::regclass
+  ) then
+    alter table public.call_activities
+      add constraint call_activities_wrap_token_key unique (wrap_token);
   end if;
 end;
 $$;

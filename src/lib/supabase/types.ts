@@ -254,6 +254,7 @@ export type Database = {
           started_at: string | null
           transcript_status: string
           updated_at: string
+          wrap_token: string | null
         }
         Insert: {
           contact_id: string | null
@@ -283,6 +284,7 @@ export type Database = {
           started_at?: string | null
           transcript_status?: string
           updated_at?: string
+          wrap_token?: string | null
         }
         Update: {
           contact_id?: string | null
@@ -312,6 +314,7 @@ export type Database = {
           started_at?: string | null
           transcript_status?: string
           updated_at?: string
+          wrap_token?: string | null
         }
         Relationships: [
           {

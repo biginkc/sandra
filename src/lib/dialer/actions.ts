@@ -292,6 +292,7 @@ export async function completeSoftphoneCall(input: {
   outcome: "connected_human" | "failed";
   disposition: OutreachDispo;
   notes: string;
+  wrapToken: string;
   callback?: CallbackInput;
 }): Promise<SoftphoneActionResult<{ activityId: string; callbackTaskId?: string }>> {
   if (!input.notes.trim()) return { ok: false, error: "Add a note to log the outcome." };
@@ -320,39 +321,74 @@ export async function completeSoftphoneCall(input: {
       return { ok: false, error: "A manual dial cannot schedule a lead callback." };
     }
 
+    const { data: replayActivity, error: replayActivityError } = await supabase
+      .from("call_activities")
+      .select("id")
+      .eq("org_id", membership.org_id)
+      .eq("operator_user_id", user.id)
+      .eq("wrap_token", input.wrapToken)
+      .maybeSingle();
+    if (replayActivityError) return { ok: false, error: replayActivityError.message };
+
+    let activity = replayActivity;
     let callbackTaskId: string | undefined;
     let dispositionSucceeded = false;
     try {
       // This is deliberately first: setOutreachDispo is the authoritative
       // DNC_LOCKED race check. If it rejects, the wrap-up remains open and no
-      // activity or appointment is written.
-      if (input.target.propertyId) {
+      // activity or appointment is written. An exact same-token replay skips
+      // this side effect so a duplicate callback cannot downgrade the
+      // appointment RPC's authoritative booked_appointment disposition.
+      if (!activity && input.target.propertyId) {
         const dispo = await setOutreachDispo(input.target.propertyId, input.disposition);
         if (!dispo.ok) return { ok: false, error: dispo.error };
         dispositionSucceeded = true;
       }
 
-      const { data: activity, error: activityError } = await supabase.from("call_activities").insert({
-        org_id: membership.org_id,
-        property_id: input.target.propertyId,
-        contact_id: input.target.contactId,
-        jitter_attempt_id: `sandra-${crypto.randomUUID()}`,
-        operator_user_id: user.id,
-        started_at: input.startedAt,
-        ended_at: input.endedAt,
-        duration_seconds: Math.max(0, Math.floor(input.durationSeconds)),
-        outcome: input.outcome,
-        disposition: input.disposition,
-        notes: input.notes.trim(),
-        direction: "outbound",
-        provider: "sandra_softphone",
-        phone_e164: input.target.phoneE164,
-        do_not_call_requested: input.disposition === "dnc",
-      }).select("id").single();
-      if (activityError || !activity) return { ok: false, error: activityError?.message ?? "The call activity was not saved." };
+      if (!activity) {
+        const activityValues = {
+          org_id: membership.org_id,
+          property_id: input.target.propertyId,
+          contact_id: input.target.contactId,
+          jitter_attempt_id: `sandra-${crypto.randomUUID()}`,
+          operator_user_id: user.id,
+          started_at: input.startedAt,
+          ended_at: input.endedAt,
+          duration_seconds: Math.max(0, Math.floor(input.durationSeconds)),
+          outcome: input.outcome,
+          disposition: input.disposition,
+          notes: input.notes.trim(),
+          direction: "outbound",
+          provider: "sandra_softphone",
+          phone_e164: input.target.phoneE164,
+          do_not_call_requested: input.disposition === "dnc",
+          wrap_token: input.wrapToken,
+        };
+        const { data: insertedActivity, error: activityError } = await supabase
+          .from("call_activities")
+          .upsert(activityValues, { onConflict: "wrap_token", ignoreDuplicates: true })
+          .select("id")
+          .maybeSingle();
+        if (activityError) return { ok: false, error: activityError.message };
+        activity = insertedActivity;
+
+        if (!activity) {
+          const { data: existingActivity, error: existingActivityError } = await supabase
+            .from("call_activities")
+            .select("id")
+            .eq("org_id", membership.org_id)
+            .eq("operator_user_id", user.id)
+            .eq("wrap_token", input.wrapToken)
+            .maybeSingle();
+          if (existingActivityError || !existingActivity) {
+            return { ok: false, error: existingActivityError?.message ?? "The call activity was not saved." };
+          }
+          activity = existingActivity;
+        }
+      }
 
       // fn_book_appointment owns the booked_appointment write. Supplying the
-      // activity UUID makes a retry after a lost response replay the same
+      // stable wrap token makes a retry after a lost response replay the same
       // booking instead of creating a second appointment.
       if (input.callback) {
         const timezone = await getMemberTimezone(user.id);
@@ -367,10 +403,33 @@ export async function completeSoftphoneCall(input: {
           durationMinutes: 30,
           title: `Call back ${input.target.address ?? "lead"}`,
           note: input.notes.trim(),
-          idempotencyKey: activity.id,
+          idempotencyKey: input.wrapToken,
         });
         if (!booked.ok) return { ok: false, error: booked.error.message };
         callbackTaskId = booked.data.taskId;
+
+        // Two simultaneous same-token submissions can both pass the replay
+        // read before either activity exists. If this request then loses the
+        // activity insert race, its earlier disposition write may have landed
+        // after the winning request booked the appointment. The booking RPC
+        // correctly returns the existing task on the duplicate key, but does
+        // not repeat its booked_appointment write. Repair only the exact stale
+        // disposition this request wrote so a later, unrelated disposition is
+        // never overwritten.
+        if (booked.data.duplicate) {
+          const { error: restoreBookedDispositionError } = await supabase
+            .from("properties")
+            .update({
+              outreach_dispo: "booked_appointment",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", input.target.propertyId!)
+            .eq("org_id", membership.org_id)
+            .eq("outreach_dispo", input.disposition);
+          if (restoreBookedDispositionError) {
+            return { ok: false, error: restoreBookedDispositionError.message };
+          }
+        }
       }
 
       return { ok: true, data: { activityId: activity.id, callbackTaskId } };
