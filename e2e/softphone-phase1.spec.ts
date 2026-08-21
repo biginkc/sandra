@@ -69,6 +69,6 @@ test("manual dialing an exact DNC lead number is refused", async ({ page }) => {
   await page.getByTestId("dialer-input").fill("8165550124");
   await expect(page.getByTestId("dialer-call-manual")).toBeEnabled();
   await page.getByTestId("dialer-call-manual").click();
-  await expect(page.getByRole("alert")).toHaveText("This number belongs to a DNC-locked lead");
+  await expect(page.getByTestId("softphone-popover").getByRole("alert")).toHaveText("This number belongs to a DNC-locked lead");
   await expect(page.getByTestId("softphone-popover")).toBeVisible();
 });
