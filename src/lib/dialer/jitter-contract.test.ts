@@ -6,86 +6,207 @@ import {
   JITTER_SOFTPHONE_PATHS,
   requestJitterCancel,
   requestJitterConnect,
-  requestJitterSoftphone,
   requestJitterStartCall,
   requestJitterToken,
   signJitterSoftphoneBody,
 } from "./jitter-contract";
 
 const SERVICE_TOKEN = "test-service-token";
+const CALL_ID = "00000000-0000-4000-8000-000000000011";
+const IDEMPOTENCY_KEY = "11111111-1111-4111-8111-111111111111";
+
+type SeenRequest = {
+  method: string;
+  path: string;
+  search: string;
+  body: Record<string, unknown> | null;
+  idempotencyKey: string | null;
+};
 
 function contractServer(
-  respond: (path: string, body: Record<string, unknown> | null) => Response,
+  respond: (request: SeenRequest) => Response,
 ) {
   return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     const rawBody = typeof init?.body === "string" ? init.body : "";
     const headers = new Headers(init?.headers);
-    expect(init?.method).toBe("POST");
     expect(init?.cache).toBe("no-store");
     expect(init?.redirect).toBe("error");
     expect(init?.signal).toBeInstanceOf(AbortSignal);
     expect(headers.get("authorization")).toBe(`Bearer ${SERVICE_TOKEN}`);
-    expect(headers.get("x-sandra-signature")).toBe(
+    expect(headers.get("x-jitter-signature")).toBe(
       `sha256=${createHmac("sha256", SERVICE_TOKEN).update(rawBody).digest("hex")}`,
     );
-    return respond(url.pathname, rawBody ? JSON.parse(rawBody) as Record<string, unknown> : null);
+    return respond({
+      method: String(init?.method),
+      path: url.pathname,
+      search: url.search,
+      body: rawBody ? JSON.parse(rawBody) as Record<string, unknown> : null,
+      idempotencyKey: headers.get("idempotency-key"),
+    });
   }) as unknown as typeof fetch;
 }
 
-describe("Sandra -> Jitter softphone contract proxy", () => {
+function cancelResponse() {
+  return {
+    call_id: CALL_ID,
+    session_id: "session-1",
+    status: "ended",
+    teardown: {
+      released_batch_claims: 1,
+      revoked_bindings: 1,
+      revoked_device_leases: 1,
+      ended_shifts: 1,
+      released_worker_leases: 1,
+    },
+  };
+}
+
+describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
-  it("calls all four pinned endpoints with exact bearer, HMAC, and request bodies", async () => {
+  it("calls all four handlers with PR #202's exact methods, snake_case bodies, and response shapes", async () => {
     vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test/");
     vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
-    const seen: Array<{ path: string; body: Record<string, unknown> | null }> = [];
-    const server = contractServer((path, body) => {
-      seen.push({ path, body });
-      if (path === JITTER_SOFTPHONE_PATHS.startCall) {
-        return Response.json({ sessionRef: "session-1", batchId: "batch-1" });
-      }
-      if (path === JITTER_SOFTPHONE_PATHS.token) {
+    const seen: SeenRequest[] = [];
+    const server = contractServer((request) => {
+      seen.push(request);
+      if (request.path === JITTER_SOFTPHONE_PATHS.startCall) {
         return Response.json({
-          rtcToken: "short-lived-token",
-          sipIdentity: "operator-1",
-          expiresAt: "2026-08-21T20:30:00.000Z",
+          call_id: CALL_ID,
+          session_id: "session-1",
+          batch_id: "batch-1",
+          run_id: "run-1",
         });
       }
-      if (path === JITTER_SOFTPHONE_PATHS.connect) return Response.json({ dialing: true });
-      if (path === JITTER_SOFTPHONE_PATHS.cancel) return Response.json({ tornDown: true });
+      if (request.path === JITTER_SOFTPHONE_PATHS.token) {
+        return Response.json({
+          rtc_token: "short-lived-token",
+          sip_identity: "operator-1",
+          expires_at: "2026-08-21T20:30:00.000Z",
+        });
+      }
+      if (request.path === JITTER_SOFTPHONE_PATHS.connect) return Response.json({ dialing: true });
+      if (request.path === JITTER_SOFTPHONE_PATHS.cancel) return Response.json(cancelResponse());
       return Response.json({ error: "not found", error_code: "not_found" }, { status: 404 });
     });
 
     await expect(requestJitterStartCall({
-      operatorEmail: "operator@example.test",
-      phoneE164: "+18165550123",
-      propertyRef: "property-1",
-      contactRef: "contact-1",
-    }, server)).resolves.toEqual({ ok: true, data: { sessionRef: "session-1", batchId: "batch-1" } });
-    await expect(requestJitterToken("session-1", server)).resolves.toMatchObject({ ok: true });
-    await expect(requestJitterConnect("session-1", server)).resolves.toEqual({ ok: true, data: { dialing: true } });
-    await expect(requestJitterCancel("session-1", "hangup", server)).resolves.toEqual({ ok: true, data: { tornDown: true } });
+      operator_id: "operator-1",
+      phone_e164: "+18165550123",
+      timezone: "America/Chicago",
+    }, IDEMPOTENCY_KEY, server)).resolves.toEqual({
+      ok: true,
+      data: {
+        call_id: CALL_ID,
+        session_id: "session-1",
+        batch_id: "batch-1",
+        run_id: "run-1",
+      },
+    });
+    await expect(requestJitterToken(CALL_ID, server)).resolves.toMatchObject({ ok: true });
+    await expect(requestJitterConnect(CALL_ID, "registered", server)).resolves.toEqual({
+      ok: true,
+      data: { dialing: true },
+    });
+    await expect(requestJitterConnect(CALL_ID, "accepted", server)).resolves.toEqual({
+      ok: true,
+      data: { dialing: true },
+    });
+    await expect(requestJitterCancel(CALL_ID, "hangup", server)).resolves.toEqual({
+      ok: true,
+      data: cancelResponse(),
+    });
 
     expect(seen).toEqual([
       {
+        method: "POST",
         path: JITTER_SOFTPHONE_PATHS.startCall,
+        search: "",
         body: {
-          operatorEmail: "operator@example.test",
-          phoneE164: "+18165550123",
-          propertyRef: "property-1",
-          contactRef: "contact-1",
+          operator_id: "operator-1",
+          phone_e164: "+18165550123",
+          timezone: "America/Chicago",
         },
+        idempotencyKey: IDEMPOTENCY_KEY,
       },
-      { path: JITTER_SOFTPHONE_PATHS.token, body: { sessionRef: "session-1" } },
-      { path: JITTER_SOFTPHONE_PATHS.connect, body: { sessionRef: "session-1" } },
-      { path: JITTER_SOFTPHONE_PATHS.cancel, body: { sessionRef: "session-1", reason: "hangup" } },
+      {
+        method: "GET",
+        path: JITTER_SOFTPHONE_PATHS.token,
+        search: `?call_id=${CALL_ID}`,
+        body: null,
+        idempotencyKey: null,
+      },
+      {
+        method: "POST",
+        path: JITTER_SOFTPHONE_PATHS.connect,
+        search: "",
+        body: { call_id: CALL_ID, phase: "registered" },
+        idempotencyKey: null,
+      },
+      {
+        method: "POST",
+        path: JITTER_SOFTPHONE_PATHS.connect,
+        search: "",
+        body: { call_id: CALL_ID, phase: "accepted" },
+        idempotencyKey: null,
+      },
+      {
+        method: "POST",
+        path: JITTER_SOFTPHONE_PATHS.cancel,
+        search: "",
+        body: { call_id: CALL_ID, reason: "hangup" },
+        idempotencyKey: null,
+      },
     ]);
   });
 
-  it("preserves pinned 409 and 422 error envelopes including the callable reason", async () => {
+  it("signs the token GET over the exact empty body", async () => {
+    vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
+    vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
+    const server = contractServer((request) => {
+      expect(request).toMatchObject({ method: "GET", body: null, search: `?call_id=${CALL_ID}` });
+      return Response.json({
+        rtc_token: "short-lived-token",
+        sip_identity: "operator-1",
+        expires_at: "2026-08-21T20:30:00.000Z",
+      });
+    });
+
+    await expect(requestJitterToken(CALL_ID, server)).resolves.toMatchObject({ ok: true });
+    expect(signJitterSoftphoneBody(SERVICE_TOKEN)).toBe(
+      `sha256=${createHmac("sha256", SERVICE_TOKEN).update("").digest("hex")}`,
+    );
+  });
+
+  it("retries start-call with the identical Idempotency-Key and exact body", async () => {
+    vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
+    vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
+    const seen: SeenRequest[] = [];
+    const server = contractServer((request) => {
+      seen.push(request);
+      if (seen.length === 1) throw new Error("connection reset after write");
+      return Response.json({
+        call_id: CALL_ID,
+        session_id: "session-1",
+        batch_id: "batch-1",
+        run_id: "run-1",
+      });
+    });
+
+    await expect(requestJitterStartCall({
+      operator_id: "operator-1",
+      phone_e164: "+18165550123",
+      timezone: "America/Chicago",
+    }, IDEMPOTENCY_KEY, server)).resolves.toMatchObject({ ok: true });
+    expect(seen).toHaveLength(2);
+    expect(seen[0].idempotencyKey).toBe(IDEMPOTENCY_KEY);
+    expect(seen[1]).toEqual(seen[0]);
+  });
+
+  it("preserves v2's distinct operator_busy and not_callable envelopes", async () => {
     vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
     vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
     const busyServer = contractServer(() => Response.json(
@@ -93,47 +214,46 @@ describe("Sandra -> Jitter softphone contract proxy", () => {
       { status: 409 },
     ));
     const blockedServer = contractServer(() => Response.json(
-      { error: "Phone is not callable.", error_code: "not_callable", reason: "dnc" },
+      { error: "Phone is not callable.", error_code: "not_callable" },
       { status: 422 },
     ));
+    const body = {
+      operator_id: "operator-1",
+      phone_e164: "+18165550123",
+      timezone: "America/Chicago",
+    };
 
-    await expect(requestJitterStartCall({
-      operatorEmail: "operator@example.test",
-      phoneE164: "+18165550123",
-    }, busyServer)).resolves.toEqual({
+    await expect(requestJitterStartCall(body, IDEMPOTENCY_KEY, busyServer)).resolves.toEqual({
       ok: false,
       status: 409,
       error: "Operator already has a call.",
       errorCode: "operator_busy",
     });
-    await expect(requestJitterStartCall({
-      operatorEmail: "operator@example.test",
-      phoneE164: "+18165550123",
-    }, blockedServer)).resolves.toEqual({
+    await expect(requestJitterStartCall(body, IDEMPOTENCY_KEY, blockedServer)).resolves.toEqual({
       ok: false,
       status: 422,
       error: "Phone is not callable.",
       errorCode: "not_callable",
-      reason: "dnc",
     });
   });
 
   it("returns a stable error for non-JSON and malformed success envelopes", async () => {
     vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
     vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
-    const nonJson = contractServer(() => new Response("gateway failed", { status: 503 }));
-    const malformed = contractServer(() => Response.json({ sessionRef: "session-1" }));
+    const nonJson = contractServer(() => new Response("gateway failed", { status: 400 }));
+    const malformed = contractServer(() => Response.json({ call_id: CALL_ID }));
 
-    await expect(requestJitterToken("session-1", nonJson)).resolves.toEqual({
+    await expect(requestJitterToken(CALL_ID, nonJson)).resolves.toEqual({
       ok: false,
-      status: 503,
-      error: "Jitter softphone request failed (503).",
+      status: 400,
+      error: "Jitter softphone request failed (400).",
       errorCode: "jitter_request_failed",
     });
     await expect(requestJitterStartCall({
-      operatorEmail: "operator@example.test",
-      phoneE164: "+18165550123",
-    }, malformed)).resolves.toEqual({
+      operator_id: "operator-1",
+      phone_e164: "+18165550123",
+      timezone: "America/Chicago",
+    }, IDEMPOTENCY_KEY, malformed)).resolves.toEqual({
       ok: false,
       status: 502,
       error: "Jitter softphone returned an invalid response.",
@@ -141,31 +261,12 @@ describe("Sandra -> Jitter softphone contract proxy", () => {
     });
   });
 
-  it("signs a bodyless request over the exact empty string", async () => {
-    vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
-    vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
-    const server = contractServer((_path, body) => {
-      expect(body).toBeNull();
-      return Response.json({ tornDown: true });
-    });
-    await expect(requestJitterSoftphone({
-      path: "/api/internal/sandra/softphone/bodyless-proof",
-      validate: (value): value is { tornDown: true } => (
-        Boolean(value && typeof value === "object" && "tornDown" in value && value.tornDown === true)
-      ),
-      fetchImpl: server,
-    })).resolves.toEqual({ ok: true, data: { tornDown: true } });
-    expect(signJitterSoftphoneBody(SERVICE_TOKEN)).toBe(
-      `sha256=${createHmac("sha256", SERVICE_TOKEN).update("").digest("hex")}`,
-    );
-  });
-
   it("refuses to send the service credential over non-loopback HTTP", async () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "http://jitter.example.test");
     vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
     const server = vi.fn();
-    await expect(requestJitterToken("session-1", server)).resolves.toEqual({
+    await expect(requestJitterToken(CALL_ID, server)).resolves.toEqual({
       ok: false,
       status: 503,
       error: "Jitter softphone base URL is invalid.",

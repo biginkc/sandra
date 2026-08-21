@@ -210,7 +210,10 @@ export function SoftphoneProvider({ children }: Props) {
     setHeld(false);
     setMuted(false);
     setCallOutcome("connected_human");
-    setWrapToken(null);
+    // One stable call intent owns both Jitter start retries and Sandra wrap-up
+    // retries, so neither side can duplicate work after a lost response.
+    const callToken = crypto.randomUUID();
+    setWrapToken(callToken);
     const transport = createSoftphoneCallTransport();
     transportRef.current = transport;
     let terminalPromise: Promise<void> | null = null;
@@ -223,7 +226,12 @@ export function SoftphoneProvider({ children }: Props) {
         setFinalSeconds(terminalResult.durationSeconds);
         setWrapToken((value) => value ?? crypto.randomUUID());
         if (kind === "failed" && result.data.propertyId) {
-          await resumeFailedSoftphoneCall(result.data.propertyId);
+          try {
+            await resumeFailedSoftphoneCall(result.data.propertyId);
+          } catch {
+            // Recovery is idempotent and can be reconciled independently; a
+            // lost response must not trap the operator in a dead call screen.
+          }
         }
         transition(kind === "failed" ? { type: "call_failed" } : { type: "hangup" });
         if (kind === "failed") setError("The call failed. Add a note to log the outcome.");
@@ -231,6 +239,31 @@ export function SoftphoneProvider({ children }: Props) {
       return terminalPromise;
     };
     transport.onStateChange((status) => {
+      if (status === "operator_busy" || status === "not_callable") {
+        terminalHandledRef.current = true;
+        void (async () => {
+          try {
+            if (result.data.propertyId) {
+              await resumeFailedSoftphoneCall(result.data.propertyId);
+            }
+          } catch {
+            // The refusal is still terminal locally. The recovery action is
+            // idempotent and can be reconciled without trapping the dialer.
+          } finally {
+            transportRef.current = null;
+            startInFlightRef.current = false;
+            setTarget(null);
+            setStartedAt(null);
+            setWrapToken(null);
+            setCallStatus(null);
+            setPhone("idle");
+            setError(status === "operator_busy"
+              ? "You already have an active Jitter call."
+              : "This number is no longer callable.");
+          }
+        })();
+        return;
+      }
       setCallStatus(status);
       if (status === "connecting" || status === "ringing" || status === "live") {
         transition({ type: "call_live" });
@@ -242,7 +275,12 @@ export function SoftphoneProvider({ children }: Props) {
     });
     transition({ type: "call_started" });
     try {
-      await transport.start({ phoneE164: result.data.phoneE164, propertyId: result.data.propertyId ?? undefined, contactId: result.data.contactId ?? undefined });
+      await transport.start({
+        phoneE164: result.data.phoneE164,
+        propertyId: result.data.propertyId ?? undefined,
+        contactId: result.data.contactId ?? undefined,
+        callToken,
+      });
     } catch {
       if (!terminalHandledRef.current) await finishTerminal("failed");
     }

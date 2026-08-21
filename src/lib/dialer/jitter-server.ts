@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { getCallerMemberships, type Membership } from "@/lib/auth/memberships";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { prepareLeadCall, prepareManualCall } from "@/lib/dialer/actions";
+import { STATE_TO_TZ } from "@/lib/messaging/quiet-hours";
 import { createClient } from "@/lib/supabase/server";
 
 import {
@@ -10,7 +11,9 @@ import {
   requestJitterConnect,
   requestJitterStartCall,
   requestJitterToken,
+  type JitterCancelResponse,
   type JitterCancelReason,
+  type JitterConnectPhase,
   type JitterProxyError,
   type JitterProxyResult,
   type JitterTokenResponse,
@@ -21,13 +24,13 @@ const E164 = /^\+[1-9]\d{7,14}$/;
 const MAX_REF_LENGTH = 200;
 const MAX_CAPABILITY_LENGTH = 1_024;
 
-type AuthenticatedOperator = { ok: true; email: string; userId: string };
-type ClientStartResponse = { sessionRef: string; batchId: string };
+type AuthenticatedOperator = { ok: true; userId: string };
+type ClientStartResponse = { callId: string; batchId: string };
 
 async function authenticatedOperator(): Promise<AuthenticatedOperator | JitterProxyError> {
   const supabase = await createClient();
   const { data: { user }, error } = await supabase.auth.getUser();
-  if (error || !user?.email?.trim()) {
+  if (error || !user) {
     return {
       ok: false,
       status: 401,
@@ -51,7 +54,7 @@ async function authenticatedOperator(): Promise<AuthenticatedOperator | JitterPr
       errorCode: "forbidden",
     };
   }
-  return { ok: true, email: user.email.trim().toLowerCase(), userId: user.id };
+  return { ok: true, userId: user.id };
 }
 
 function validRef(value: unknown, maxLength = MAX_REF_LENGTH): value is string {
@@ -69,6 +72,7 @@ export async function startAuthenticatedJitterCall(
   if (!E164.test(target.phoneE164)) return invalidInput("A valid E.164 phone number is required.");
   if (target.propertyId !== undefined && !validRef(target.propertyId)) return invalidInput("Invalid property reference.");
   if (target.contactId !== undefined && !validRef(target.contactId)) return invalidInput("Invalid contact reference.");
+  if (!validRef(target.callToken, 200)) return invalidInput("A stable call token is required.");
 
   // Server Actions are public mutation boundaries. Authorize before the
   // eligibility path, which can pause a lead's active sequences.
@@ -102,14 +106,39 @@ export async function startAuthenticatedJitterCall(
     };
   }
 
+  // prepareManualCall historically uses Missouri as a quiet-hours fallback
+  // for an unlinked number. CONTRACT v2 requires the prospect's actual IANA
+  // timezone, so that fallback must never cross the Jitter boundary.
+  if (!prepared.data.propertyId) {
+    return {
+      ok: false,
+      status: 422,
+      error: "A verified lead timezone is required before calling this number.",
+      errorCode: "not_callable",
+      reason: "timezone_unverified",
+    };
+  }
+
+  const timezone = prepared.data.state
+    ? STATE_TO_TZ[prepared.data.state.trim().toUpperCase()]
+    : undefined;
+  if (!timezone) {
+    return {
+      ok: false,
+      status: 422,
+      error: "The call target does not have a supported IANA timezone.",
+      errorCode: "not_callable",
+      reason: "timezone_unavailable",
+    };
+  }
+
   const started = await requestJitterStartCall({
-    operatorEmail: operator.email,
-    phoneE164: prepared.data.phoneE164,
-    ...(prepared.data.propertyId ? { propertyRef: prepared.data.propertyId } : {}),
-    ...(prepared.data.contactId ? { contactRef: prepared.data.contactId } : {}),
-  });
+    operator_id: operator.userId,
+    phone_e164: prepared.data.phoneE164,
+    timezone,
+  }, target.callToken);
   if (!started.ok) return started;
-  const capability = sealSessionCapability(started.data.sessionRef, operator.userId);
+  const capability = sealCallCapability(started.data.call_id, operator.userId);
   if (!capability) {
     return {
       ok: false,
@@ -118,41 +147,43 @@ export async function startAuthenticatedJitterCall(
       errorCode: "jitter_not_configured",
     };
   }
-  return { ok: true, data: { sessionRef: capability, batchId: started.data.batchId } };
+  return { ok: true, data: { callId: capability, batchId: started.data.batch_id } };
 }
 
 export async function getAuthenticatedJitterToken(
-  sessionCapability: unknown,
+  callCapability: unknown,
 ): Promise<JitterProxyResult<JitterTokenResponse>> {
   const operator = await authenticatedOperator();
   if (!operator.ok) return operator;
-  const sessionRef = openSessionCapability(sessionCapability, operator.userId);
-  if (!sessionRef) return invalidInput("Invalid Jitter session reference.");
-  return requestJitterToken(sessionRef);
+  const callId = openCallCapability(callCapability, operator.userId);
+  if (!callId) return invalidInput("Invalid Jitter call reference.");
+  return requestJitterToken(callId);
 }
 
 export async function connectAuthenticatedJitterCall(
-  sessionCapability: unknown,
+  callCapability: unknown,
+  phase: unknown,
 ): Promise<JitterProxyResult<{ dialing: true }>> {
+  if (!isConnectPhase(phase)) return invalidInput("Invalid Jitter connect phase.");
   const operator = await authenticatedOperator();
   if (!operator.ok) return operator;
-  const sessionRef = openSessionCapability(sessionCapability, operator.userId);
-  if (!sessionRef) return invalidInput("Invalid Jitter session reference.");
-  return requestJitterConnect(sessionRef);
+  const callId = openCallCapability(callCapability, operator.userId);
+  if (!callId) return invalidInput("Invalid Jitter call reference.");
+  return requestJitterConnect(callId, phase);
 }
 
 export async function cancelAuthenticatedJitterCall(
-  sessionCapability: unknown,
+  callCapability: unknown,
   reason: unknown,
-): Promise<JitterProxyResult<{ tornDown: true }>> {
+): Promise<JitterProxyResult<JitterCancelResponse>> {
   if (!isCancelReason(reason)) {
     return invalidInput("Invalid Jitter cancellation reason.");
   }
   const operator = await authenticatedOperator();
   if (!operator.ok) return operator;
-  const sessionRef = openSessionCapability(sessionCapability, operator.userId);
-  if (!sessionRef) return invalidInput("Invalid Jitter session reference.");
-  return requestJitterCancel(sessionRef, reason);
+  const callId = openCallCapability(callCapability, operator.userId);
+  if (!callId) return invalidInput("Invalid Jitter call reference.");
+  return requestJitterCancel(callId, reason);
 }
 
 function isCallTarget(value: unknown): value is CallTarget {
@@ -160,22 +191,27 @@ function isCallTarget(value: unknown): value is CallTarget {
   const target = value as Partial<Record<keyof CallTarget, unknown>>;
   return typeof target.phoneE164 === "string"
     && (target.propertyId === undefined || typeof target.propertyId === "string")
-    && (target.contactId === undefined || typeof target.contactId === "string");
+    && (target.contactId === undefined || typeof target.contactId === "string")
+    && typeof target.callToken === "string";
+}
+
+function isConnectPhase(value: unknown): value is JitterConnectPhase {
+  return value === "registered" || value === "accepted";
 }
 
 function isCancelReason(value: unknown): value is JitterCancelReason {
   return value === "hangup" || value === "failed" || value === "abandoned";
 }
 
-function sealSessionCapability(sessionRef: string, userId: string): string | null {
+function sealCallCapability(callId: string, userId: string): string | null {
   const token = process.env.JITTER_SOFTPHONE_SERVICE_TOKEN?.trim();
   if (!token) return null;
-  const payload = Buffer.from(JSON.stringify({ sessionRef, userId }), "utf8").toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ callId, userId }), "utf8").toString("base64url");
   const signature = createHmac("sha256", token).update(`sandra-softphone:${payload}`).digest("base64url");
   return `v1.${payload}.${signature}`;
 }
 
-function openSessionCapability(value: unknown, userId: string): string | null {
+function openCallCapability(value: unknown, userId: string): string | null {
   if (!validRef(value, MAX_CAPABILITY_LENGTH)) return null;
   const token = process.env.JITTER_SOFTPHONE_SERVICE_TOKEN?.trim();
   if (!token) return null;
@@ -192,8 +228,8 @@ function openSessionCapability(value: unknown, userId: string): string | null {
   try {
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as unknown;
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return null;
-    const candidate = decoded as { sessionRef?: unknown; userId?: unknown };
-    return candidate.userId === userId && validRef(candidate.sessionRef) ? candidate.sessionRef : null;
+    const candidate = decoded as { callId?: unknown; userId?: unknown };
+    return candidate.userId === userId && validRef(candidate.callId) ? candidate.callId : null;
   } catch {
     return null;
   }

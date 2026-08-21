@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 
 const JITTER_REQUEST_TIMEOUT_MS = 15_000;
+const JITTER_START_ATTEMPTS = 2;
 
 export const JITTER_SOFTPHONE_PATHS = {
   startCall: "/api/internal/sandra/softphone/start-call",
@@ -10,24 +11,39 @@ export const JITTER_SOFTPHONE_PATHS = {
 } as const;
 
 export type JitterStartCallRequest = {
-  operatorEmail: string;
-  phoneE164: string;
-  propertyRef?: string;
-  contactRef?: string;
+  operator_id: string;
+  phone_e164: string;
+  timezone: string;
 };
 
 export type JitterStartCallResponse = {
-  sessionRef: string;
-  batchId: string;
+  call_id: string;
+  session_id: string;
+  batch_id: string;
+  run_id: string;
 };
 
 export type JitterTokenResponse = {
-  rtcToken: string;
-  sipIdentity: string;
-  expiresAt: string;
+  rtc_token: string;
+  sip_identity: string;
+  expires_at: string;
 };
 
+export type JitterConnectPhase = "registered" | "accepted";
 export type JitterCancelReason = "hangup" | "failed" | "abandoned";
+
+export type JitterCancelResponse = {
+  call_id: string;
+  session_id: string;
+  status: "ended" | "failed";
+  teardown: {
+    released_batch_claims: number;
+    revoked_bindings: number;
+    revoked_device_leases: number;
+    ended_shifts: number;
+    released_worker_leases: number;
+  };
+};
 
 export type JitterProxyError = {
   ok: false;
@@ -76,24 +92,28 @@ export function signJitterSoftphoneBody(serviceToken: string, rawBody = ""): str
 
 export async function requestJitterSoftphone<T>(args: {
   path: string;
+  method?: "GET" | "POST";
   body?: JsonObject;
+  idempotencyKey?: string;
   validate: ResponseValidator<T>;
   fetchImpl?: typeof fetch;
 }): Promise<JitterProxyResult<T>> {
   const config = configuredJitter();
   if ("ok" in config) return config;
 
+  const method = args.method ?? "POST";
   const rawBody = args.body === undefined ? "" : JSON.stringify(args.body);
   let response: Response;
   try {
     response = await (args.fetchImpl ?? fetch)(`${config.baseUrl}${args.path}`, {
-      method: "POST",
+      method,
       cache: "no-store",
       redirect: "error",
       signal: AbortSignal.timeout(JITTER_REQUEST_TIMEOUT_MS),
       headers: {
         authorization: `Bearer ${config.serviceToken}`,
-        "x-sandra-signature": signJitterSoftphoneBody(config.serviceToken, rawBody),
+        "X-Jitter-Signature": signJitterSoftphoneBody(config.serviceToken, rawBody),
+        ...(args.idempotencyKey ? { "Idempotency-Key": args.idempotencyKey } : {}),
         ...(rawBody ? { "content-type": "application/json" } : {}),
       },
       ...(rawBody ? { body: rawBody } : {}),
@@ -121,7 +141,6 @@ export async function requestJitterSoftphone<T>(args: {
       status: response.status,
       error: stringValue(envelope.error) ?? `Jitter softphone request failed (${response.status}).`,
       errorCode: stringValue(envelope.error_code) ?? "jitter_request_failed",
-      ...(stringValue(envelope.reason) ? { reason: stringValue(envelope.reason) } : {}),
     };
   }
 
@@ -136,33 +155,63 @@ export async function requestJitterSoftphone<T>(args: {
   return { ok: true, data: payload };
 }
 
-export function requestJitterStartCall(
+export async function requestJitterStartCall(
   body: JitterStartCallRequest,
+  idempotencyKey: string,
   fetchImpl?: typeof fetch,
 ): Promise<JitterProxyResult<JitterStartCallResponse>> {
-  return requestJitterSoftphone({ path: JITTER_SOFTPHONE_PATHS.startCall, body, validate: isStartResponse, fetchImpl });
+  let result: JitterProxyResult<JitterStartCallResponse> | undefined;
+  for (let attempt = 0; attempt < JITTER_START_ATTEMPTS; attempt += 1) {
+    result = await requestJitterSoftphone({
+      path: JITTER_SOFTPHONE_PATHS.startCall,
+      body,
+      idempotencyKey,
+      validate: isStartResponse,
+      fetchImpl,
+    });
+    if (result.ok || !isRetryableStartFailure(result)) return result;
+  }
+  return result!;
 }
 
 export function requestJitterToken(
-  sessionRef: string,
+  callId: string,
   fetchImpl?: typeof fetch,
 ): Promise<JitterProxyResult<JitterTokenResponse>> {
-  return requestJitterSoftphone({ path: JITTER_SOFTPHONE_PATHS.token, body: { sessionRef }, validate: isTokenResponse, fetchImpl });
+  const path = `${JITTER_SOFTPHONE_PATHS.token}?call_id=${encodeURIComponent(callId)}`;
+  return requestJitterSoftphone({ path, method: "GET", validate: isTokenResponse, fetchImpl });
 }
 
 export function requestJitterConnect(
-  sessionRef: string,
+  callId: string,
+  phase: JitterConnectPhase,
   fetchImpl?: typeof fetch,
 ): Promise<JitterProxyResult<{ dialing: true }>> {
-  return requestJitterSoftphone({ path: JITTER_SOFTPHONE_PATHS.connect, body: { sessionRef }, validate: isConnectResponse, fetchImpl });
+  return requestJitterSoftphone({
+    path: JITTER_SOFTPHONE_PATHS.connect,
+    body: { call_id: callId, phase },
+    validate: isConnectResponse,
+    fetchImpl,
+  });
 }
 
 export function requestJitterCancel(
-  sessionRef: string,
+  callId: string,
   reason: JitterCancelReason,
   fetchImpl?: typeof fetch,
-): Promise<JitterProxyResult<{ tornDown: true }>> {
-  return requestJitterSoftphone({ path: JITTER_SOFTPHONE_PATHS.cancel, body: { sessionRef, reason }, validate: isCancelResponse, fetchImpl });
+): Promise<JitterProxyResult<JitterCancelResponse>> {
+  return requestJitterSoftphone({
+    path: JITTER_SOFTPHONE_PATHS.cancel,
+    body: { call_id: callId, reason },
+    validate: isCancelResponse,
+    fetchImpl,
+  });
+}
+
+function isRetryableStartFailure(error: JitterProxyError): boolean {
+  return error.status >= 500
+    && error.errorCode !== "jitter_not_configured"
+    && error.errorCode !== "jitter_invalid_configuration";
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -174,19 +223,34 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function isStartResponse(value: unknown): value is JitterStartCallResponse {
-  return isObject(value) && Boolean(stringValue(value.sessionRef) && stringValue(value.batchId));
+  return isObject(value)
+    && Boolean(
+      stringValue(value.call_id)
+      && stringValue(value.session_id)
+      && stringValue(value.batch_id)
+      && stringValue(value.run_id),
+    );
 }
 
 function isTokenResponse(value: unknown): value is JitterTokenResponse {
   return isObject(value)
-    && Boolean(stringValue(value.rtcToken) && stringValue(value.sipIdentity) && stringValue(value.expiresAt))
-    && Number.isFinite(Date.parse(String(value.expiresAt)));
+    && Boolean(stringValue(value.rtc_token) && stringValue(value.sip_identity) && stringValue(value.expires_at))
+    && Number.isFinite(Date.parse(String(value.expires_at)));
 }
 
 function isConnectResponse(value: unknown): value is { dialing: true } {
   return isObject(value) && value.dialing === true;
 }
 
-function isCancelResponse(value: unknown): value is { tornDown: true } {
-  return isObject(value) && value.tornDown === true;
+function isCancelResponse(value: unknown): value is JitterCancelResponse {
+  if (!isObject(value) || !isObject(value.teardown)) return false;
+  return Boolean(stringValue(value.call_id) && stringValue(value.session_id))
+    && (value.status === "ended" || value.status === "failed")
+    && [
+      value.teardown.released_batch_claims,
+      value.teardown.revoked_bindings,
+      value.teardown.revoked_device_leases,
+      value.teardown.ended_shifts,
+      value.teardown.released_worker_leases,
+    ].every((count) => typeof count === "number" && Number.isInteger(count) && count >= 0);
 }

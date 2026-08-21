@@ -5,9 +5,10 @@ import {
   startJitterSoftphoneCall,
 } from "./jitter-actions";
 import type {
+  JitterCancelResponse,
   JitterCancelReason,
+  JitterConnectPhase,
   JitterProxyResult,
-  JitterStartCallResponse,
   JitterTokenResponse,
 } from "./jitter-contract";
 import type {
@@ -55,14 +56,14 @@ type TelnyxNotificationLike = {
 };
 
 export type JitterTransportDependencies = {
-  startCall(target: CallTarget): Promise<JitterProxyResult<JitterStartCallResponse>>;
-  getToken(sessionRef: string): Promise<JitterProxyResult<JitterTokenResponse>>;
-  connect(sessionRef: string): Promise<JitterProxyResult<{ dialing: true }>>;
-  cancel(sessionRef: string, reason: JitterCancelReason): Promise<JitterProxyResult<{ tornDown: true }>>;
+  startCall(target: CallTarget): Promise<JitterProxyResult<{ callId: string; batchId: string }>>;
+  getToken(callId: string): Promise<JitterProxyResult<JitterTokenResponse>>;
+  connect(callId: string, phase: JitterConnectPhase): Promise<JitterProxyResult<{ dialing: true }>>;
+  cancel(callId: string, reason: JitterCancelReason): Promise<JitterProxyResult<JitterCancelResponse>>;
   createRtcClient(token: string, remoteAudio: HTMLAudioElement | null): Promise<TelnyxRtcLike>;
   createRemoteAudio(): HTMLAudioElement | null;
   subscribePageHide(handler: () => void): () => void;
-  sendCancelBeacon(sessionRef: string, reason: JitterCancelReason): boolean;
+  sendCancelBeacon(callId: string, reason: JitterCancelReason): boolean;
   now(): number;
   registrationTimeoutMs: number;
 };
@@ -79,9 +80,9 @@ const defaultDependencies: JitterTransportDependencies = {
     window.addEventListener("pagehide", handler);
     return () => window.removeEventListener("pagehide", handler);
   },
-  sendCancelBeacon(sessionRef, reason) {
+  sendCancelBeacon(callId, reason) {
     if (typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") return false;
-    const body = JSON.stringify({ sessionRef, reason });
+    const body = JSON.stringify({ callId, reason });
     return navigator.sendBeacon(
       "/api/softphone/jitter/cancel",
       new Blob([body], { type: "application/json" }),
@@ -111,12 +112,13 @@ export function mapTelnyxCallState(
 export class JitterCallTransport implements CallTransport {
   private listener: ((state: CallTransportState) => void) | null = null;
   private currentState: CallTransportState | null = null;
-  private sessionRef: string | null = null;
+  private callId: string | null = null;
   private rtcClient: TelnyxRtcLike | null = null;
   private currentCall: TelnyxCallLike | null = null;
   private currentCallId: string | null = null;
   private expectedIncoming = false;
   private answerStarted = false;
+  private acceptedPromise: Promise<void> | null = null;
   private desiredMute = false;
   private desiredHold = false;
   private liveAt: number | null = null;
@@ -180,14 +182,14 @@ export class JitterCallTransport implements CallTransport {
     try {
       const started = await this.dependencies.startCall(target);
       if (!started.ok) throw proxyError(started);
-      this.sessionRef = started.data.sessionRef;
+      this.callId = started.data.callId;
       this.removePageHideListener = this.dependencies.subscribePageHide(() => this.onPageHide());
       if (this.hangupRequested) {
         await this.cancel("hangup");
         throw new Error("Call start was canceled.");
       }
 
-      const token = await this.dependencies.getToken(this.sessionRef);
+      const token = await this.dependencies.getToken(this.callId);
       if (!token.ok) throw proxyError(token);
       requireUsableToken(token.data, this.dependencies.now());
       if (this.hangupRequested) {
@@ -196,7 +198,7 @@ export class JitterCallTransport implements CallTransport {
       }
 
       this.remoteAudio = this.dependencies.createRemoteAudio();
-      this.rtcClient = await this.dependencies.createRtcClient(token.data.rtcToken, this.remoteAudio);
+      this.rtcClient = await this.dependencies.createRtcClient(token.data.rtc_token, this.remoteAudio);
       this.bindRtcEvents(this.rtcClient);
       await this.registerRtc(this.rtcClient);
       if (this.hangupRequested) {
@@ -206,11 +208,11 @@ export class JitterCallTransport implements CallTransport {
 
       // Arm the incoming handler before triggering Jitter's operator leg.
       this.expectedIncoming = true;
-      const connected = await this.dependencies.connect(this.sessionRef);
+      const connected = await this.dependencies.connect(this.callId, "registered");
       if (!connected.ok) throw proxyError(connected);
-      return { id: this.sessionRef };
+      return { id: this.callId };
     } catch (error) {
-      await this.failAndCancel(error);
+      await this.failAndCancel(error, proxyFailureState(error));
       throw error;
     }
   }
@@ -331,6 +333,7 @@ export class JitterCallTransport implements CallTransport {
       const firstLive = this.liveAt === null;
       if (firstLive) this.liveAt = this.dependencies.now();
       if (firstLive || recovered) this.applyDesiredControls();
+      if (firstLive) void this.acceptActiveCall(call);
       this.emit("live");
       return;
     }
@@ -348,6 +351,45 @@ export class JitterCallTransport implements CallTransport {
     if (mapped === "connecting") this.emit("connecting");
   }
 
+  private async acceptActiveCall(call: TelnyxCallLike): Promise<void> {
+    if (this.acceptedPromise) return this.acceptedPromise;
+    if (
+      !this.callId
+      || this.currentCall !== call
+      || this.terminal
+      || this.hangupRequested
+      || this.cancelPromise
+    ) return;
+    const callId = this.callId;
+    this.acceptedPromise = (async () => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (
+          this.callId !== callId
+          || this.currentCall !== call
+          || this.terminal
+          || this.hangupRequested
+          || this.cancelPromise
+        ) return;
+        let accepted: JitterProxyResult<{ dialing: true }>;
+        try {
+          accepted = await this.dependencies.connect(callId, "accepted");
+        } catch (error) {
+          if (attempt === 2) throw error;
+          continue;
+        }
+        if (accepted.ok) return;
+        if (accepted.status < 500 || attempt === 2) throw proxyError(accepted);
+      }
+    })();
+    try {
+      await this.acceptedPromise;
+    } catch (error) {
+      if (!this.terminal && !this.hangupRequested && !this.cancelPromise) {
+        await this.failAndCancel(error);
+      }
+    }
+  }
+
   private applyDesiredControls(): void {
     const call = this.currentCall;
     if (!call) return;
@@ -362,22 +404,36 @@ export class JitterCallTransport implements CallTransport {
   private async refreshRtcToken(): Promise<void> {
     if (this.refreshPromise) return this.refreshPromise;
     this.refreshPromise = (async () => {
-      if (!this.sessionRef || !this.rtcClient?.login) throw new Error("Telnyx token refresh is unavailable.");
-      const token = await this.dependencies.getToken(this.sessionRef);
+      const callId = this.callId;
+      const client = this.rtcClient;
+      if (!callId || !client?.login) throw new Error("Telnyx token refresh is unavailable.");
+      const token = await this.dependencies.getToken(callId);
       if (!token.ok) throw proxyError(token);
       requireUsableToken(token.data, this.dependencies.now());
-      await Promise.resolve(this.rtcClient.login({ creds: { login_token: token.data.rtcToken } }));
+      if (
+        this.callId !== callId
+        || this.rtcClient !== client
+        || this.terminal
+        || this.hangupRequested
+        || this.cancelPromise
+      ) return;
+      await Promise.resolve(client.login({ creds: { login_token: token.data.rtc_token } }));
     })();
     try {
       await this.refreshPromise;
     } catch (error) {
-      await this.failAndCancel(error);
+      if (!this.terminal && !this.hangupRequested && !this.cancelPromise) {
+        await this.failAndCancel(error);
+      }
     } finally {
       this.refreshPromise = null;
     }
   }
 
-  private async failAndCancel(error: unknown): Promise<void> {
+  private async failAndCancel(
+    error: unknown,
+    failureState: "failed" | "operator_busy" | "not_callable" = "failed",
+  ): Promise<void> {
     if (!this.terminal) {
       this.terminal = "failed";
       this.terminalAt ??= this.dependencies.now();
@@ -385,7 +441,7 @@ export class JitterCallTransport implements CallTransport {
       const reject = this.rejectRegistration;
       this.clearRegistration();
       reject?.(error);
-      this.emit("failed");
+      this.emit(failureState);
     }
     await this.cancel("failed");
   }
@@ -414,14 +470,14 @@ export class JitterCallTransport implements CallTransport {
 
   private cancel(reason: JitterCancelReason): Promise<boolean> {
     if (this.cancelPromise) return this.cancelPromise;
-    if (!this.sessionRef) {
+    if (!this.callId) {
       this.destroyRtc();
       return Promise.resolve(true);
     }
     this.cancelPromise = (async () => {
       let canceled = true;
       try {
-        const result = await this.dependencies.cancel(this.sessionRef!, reason);
+        const result = await this.dependencies.cancel(this.callId!, reason);
         canceled = result.ok;
       } catch {
         canceled = false;
@@ -433,7 +489,7 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private onPageHide(): void {
-    if (!this.sessionRef || this.cancelPromise) return;
+    if (!this.callId || this.cancelPromise) return;
     this.hangupRequested = true;
     this.expectedIncoming = false;
     this.terminalAt ??= this.dependencies.now();
@@ -444,7 +500,7 @@ export class JitterCallTransport implements CallTransport {
     }
     let beaconAccepted = false;
     try {
-      beaconAccepted = this.dependencies.sendCancelBeacon(this.sessionRef, "abandoned");
+      beaconAccepted = this.dependencies.sendCancelBeacon(this.callId, "abandoned");
     } catch {
       // Fall through to the authenticated Server Action path.
     }
@@ -500,8 +556,14 @@ function proxyError(error: { error: string; errorCode: string; reason?: string }
   return result;
 }
 
+function proxyFailureState(error: unknown): "failed" | "operator_busy" | "not_callable" {
+  if (error instanceof Error && error.name === "operator_busy") return "operator_busy";
+  if (error instanceof Error && error.name === "not_callable") return "not_callable";
+  return "failed";
+}
+
 function requireUsableToken(token: JitterTokenResponse, now: number): void {
-  const expiresAt = Date.parse(token.expiresAt);
+  const expiresAt = Date.parse(token.expires_at);
   if (!Number.isFinite(expiresAt) || expiresAt <= now) {
     const error = new Error("Jitter returned an expired browser-audio token.");
     error.name = "rtc_token_expired";

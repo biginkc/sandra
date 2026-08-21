@@ -1,6 +1,6 @@
 "use server";
 
-import type { JitterCancelReason } from "./jitter-contract";
+import type { JitterCancelReason, JitterConnectPhase } from "./jitter-contract";
 import {
   cancelAuthenticatedJitterCall,
   connectAuthenticatedJitterCall,
@@ -13,14 +13,14 @@ export async function startJitterSoftphoneCall(target: CallTarget) {
   return startAuthenticatedJitterCall(target);
 }
 
-export async function getJitterSoftphoneToken(sessionRef: string) {
-  return getAuthenticatedJitterToken(sessionRef);
+export async function getJitterSoftphoneToken(callId: string) {
+  return getAuthenticatedJitterToken(callId);
 }
 
-export async function connectJitterSoftphoneCall(sessionRef: string) {
-  return connectAuthenticatedJitterCall(sessionRef);
+export async function connectJitterSoftphoneCall(callId: string, phase: JitterConnectPhase) {
+  return connectAuthenticatedJitterCall(callId, phase);
 }
 
-export async function cancelJitterSoftphoneCall(sessionRef: string, reason: JitterCancelReason) {
-  return cancelAuthenticatedJitterCall(sessionRef, reason);
+export async function cancelJitterSoftphoneCall(callId: string, reason: JitterCancelReason) {
+  return cancelAuthenticatedJitterCall(callId, reason);
 }
