@@ -227,7 +227,7 @@ export type Database = {
       }
       call_activities: {
         Row: {
-          contact_id: string
+          contact_id: string | null
           created_at: string
           dialer_batch_item_id: string | null
           disposition: string | null
@@ -242,17 +242,22 @@ export type Database = {
           operator_user_id: string | null
           org_id: string
           outcome: string | null
-          property_id: string
+          property_id: string | null
           provider: string
           provider_call_id: string | null
           raw_event_count: number
           recording_status: string
+          direction: string
+          notes: string | null
+          recording_path: string | null
+          phone_e164: string | null
           started_at: string | null
           transcript_status: string
           updated_at: string
+          wrap_token: string | null
         }
         Insert: {
-          contact_id: string
+          contact_id: string | null
           created_at?: string
           dialer_batch_item_id?: string | null
           disposition?: string | null
@@ -267,17 +272,22 @@ export type Database = {
           operator_user_id?: string | null
           org_id: string
           outcome?: string | null
-          property_id: string
+          property_id?: string | null
           provider?: string
           provider_call_id?: string | null
           raw_event_count?: number
           recording_status?: string
+          direction?: string
+          notes?: string | null
+          recording_path?: string | null
+          phone_e164?: string | null
           started_at?: string | null
           transcript_status?: string
           updated_at?: string
+          wrap_token?: string | null
         }
         Update: {
-          contact_id?: string
+          contact_id?: string | null
           created_at?: string
           dialer_batch_item_id?: string | null
           disposition?: string | null
@@ -292,14 +302,19 @@ export type Database = {
           operator_user_id?: string | null
           org_id?: string
           outcome?: string | null
-          property_id?: string
+          property_id?: string | null
           provider?: string
           provider_call_id?: string | null
           raw_event_count?: number
           recording_status?: string
+          direction?: string
+          notes?: string | null
+          recording_path?: string | null
+          phone_e164?: string | null
           started_at?: string | null
           transcript_status?: string
           updated_at?: string
+          wrap_token?: string | null
         }
         Relationships: [
           {

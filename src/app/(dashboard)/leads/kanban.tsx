@@ -19,7 +19,10 @@ import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SoftphoneLeadButton } from "@/components/softphone/softphone-lead-button";
+import type { SoftphoneLead } from "@/components/softphone/softphone-provider";
 import { callAction } from "@/lib/errors/call-action";
+import { canShowCallButton } from "@/lib/dialer/eligibility";
 import type { Database } from "@/lib/supabase/types";
 
 import {
@@ -60,7 +63,10 @@ import {
 type ContactSummary = Pick<
   Database["public"]["Tables"]["contacts"]["Row"],
   "first_name" | "last_name" | "entity_name"
->;
+> & Partial<Pick<
+  Database["public"]["Tables"]["contacts"]["Row"],
+  "id" | "phone_1" | "phone_2" | "phone_3" | "do_not_contact" | "sms_opted_out"
+>>;
 
 export type Lead = LeadBoardLead;
 
@@ -1166,6 +1172,7 @@ function LeadCard({
   const [savingAction, setSavingAction] = useState(false);
   const idempotencyKey = useRef<string | null>(null);
   const nextAction = formatNextAction(lead.next_task_due_at, dayStart, dayEnd);
+  const dialerLead = toSoftphoneLead(lead);
 
   const saveNextAction = async () => {
     if (savingAction) return;
@@ -1244,6 +1251,7 @@ function LeadCard({
           {lead.address}
         </button>
       )}
+      {!overlay ? <div className="absolute top-2 right-2"><SoftphoneLeadButton lead={dialerLead} compact /></div> : null}
       <div className="text-muted-foreground mt-0.5 truncate">
         {owner}
         {location ? ` · ${location}` : ""}
@@ -1473,6 +1481,17 @@ function LeadCard({
       </div>
     </div>
   );
+}
+
+function toSoftphoneLead(lead: Lead): SoftphoneLead {
+  const contact = lead.homeowner;
+  const phones = [contact?.phone_1, contact?.phone_2, contact?.phone_3].filter((phone): phone is string => Boolean(phone));
+  const name = homeownerName(contact);
+  const callable = canShowCallButton({
+    property: { id: lead.id, state: lead.state, is_dnc_locked: lead.is_dnc_locked },
+    contact: contact?.id ? { id: contact.id, phone_1: contact.phone_1 ?? null, phone_2: contact.phone_2 ?? null, phone_3: contact.phone_3 ?? null, do_not_contact: contact.do_not_contact ?? false, sms_opted_out: contact.sms_opted_out ?? false } : null,
+  });
+  return { id: lead.id, contactId: contact?.id ?? null, firstName: contact?.first_name ?? name.split(" ")[0] ?? "homeowner", name, address: lead.address, state: lead.state, phones, dncLocked: lead.is_dnc_locked ?? false, contactDnc: contact?.do_not_contact ?? false, callable };
 }
 
 export function homeownerName(homeowner: ContactSummary | null): string {

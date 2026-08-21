@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyItem, previewBatchEligibility } from "./eligibility";
+import { canShowCallButton, classifyItem, previewBatchEligibility } from "./eligibility";
 
 const property = (
   overrides: Partial<{ id: string; state: string; is_dnc_locked: boolean }> = {},
@@ -228,5 +228,17 @@ describe("classifyItem", () => {
       blocked: { property_dnc_locked: 2 },
       missing: 0,
     });
+  });
+});
+
+describe("canShowCallButton", () => {
+  it("keeps a lead button visible during quiet hours", () => {
+    expect(canShowCallButton({ property: property(), contact: contact() })).toBe(true);
+  });
+
+  it("hides only DNC and no-phone leads", () => {
+    expect(canShowCallButton({ property: property({ is_dnc_locked: true }), contact: contact() })).toBe(false);
+    expect(canShowCallButton({ property: property(), contact: contact({ do_not_contact: true }) })).toBe(false);
+    expect(canShowCallButton({ property: property(), contact: contact({ phone_1: null, phone_2: null, phone_3: null }) })).toBe(false);
   });
 });

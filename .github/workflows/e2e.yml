@@ -33,6 +33,7 @@ jobs:
       TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
       TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
       TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+      NEXT_PUBLIC_SOFTPHONE_TRANSPORT: "simulated"
       # Skip the Haiku intent classifier in e2e — no ANTHROPIC_API_KEY here,
       # and the classifier is already unit-tested in
       # src/lib/leads/classify-reply-intent.test.ts. The webhook reads this

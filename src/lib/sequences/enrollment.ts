@@ -184,6 +184,26 @@ export async function pausePropertyEnrollments(
   return { paused: count ?? 0 };
 }
 
+/** Resume only the enrollments paused by the softphone's active call. */
+export async function resumeByProperty(
+  client: SupabaseClient<Database>,
+  params: { propertyId: string },
+): Promise<{ resumed: number }> {
+  const { error, count } = await client
+    .from("sequence_enrollments")
+    .update({
+      status: "active",
+      pause_reason: null,
+      next_run_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }, { count: "exact" })
+    .eq("property_id", params.propertyId)
+    .eq("status", "paused")
+    .eq("pause_reason", "call_in_progress");
+  if (error) throw new Error(`resumeByProperty: ${error.message}`);
+  return { resumed: count ?? 0 };
+}
+
 /**
  * Pause every active enrollment across ALL properties linked to a
  * contact. Used by the STOP-keyword path in the Dialpad webhook —

@@ -12,6 +12,7 @@ import {
 import { ErrorBoundary } from "@/components/error-boundary";
 import { JobFailureNotifier } from "@/components/job-failure-notifier";
 import { NotificationsBell } from "@/components/notifications-bell";
+import { SoftphoneHeaderButton, SoftphoneProvider } from "@/components/softphone/softphone-provider";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { createClient } from "@/lib/supabase/server";
 
@@ -28,6 +29,7 @@ export default async function DashboardLayout({
   const showAdmin = isAdminEmail(user.email);
 
   return (
+    <SoftphoneProvider>
     <div className="bg-background min-h-screen">
       <ConnectionBanner />
       <JobFailureNotifier />
@@ -51,6 +53,8 @@ export default async function DashboardLayout({
           <DashboardAdminNav showAdmin={showAdmin} />
         </div>
         <div className="flex shrink-0 items-center gap-[14px] text-sm">
+          {/* The provider keeps this client control mounted across route changes. */}
+          <SoftphoneHeaderButton />
           <NotificationsBell userId={user.id} />
           <form action="/auth/signout" method="post" className="border-l border-white/10">
             <Button
@@ -98,5 +102,6 @@ export default async function DashboardLayout({
         </main>
       </div>
     </div>
+    </SoftphoneProvider>
   );
 }

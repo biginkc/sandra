@@ -3,6 +3,8 @@ import { notFound } from "next/navigation";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
 
 import { BookAppointmentPopover } from "@/components/appointments/book-appointment-popover";
+import { SoftphoneLeadButton } from "@/components/softphone/softphone-lead-button";
+import type { SoftphoneLead } from "@/components/softphone/softphone-provider";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +19,7 @@ import {
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getMessagingProvider } from "@/lib/messaging/registry";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
+import { canShowCallButton } from "@/lib/dialer/eligibility";
 import { zillowUrl } from "@/lib/utils/zillow-url";
 
 import {
@@ -157,6 +160,20 @@ export default async function LeadDetailPage({
   const homeownerSmsChoice = selectBestSmsPhone(lead.homeowner);
   const homeownerSmsPhone = homeownerSmsChoice?.phone ?? null;
   const homeownerContactId = lead.homeowner?.id ?? null;
+  const detailSoftphoneLead: SoftphoneLead = {
+    id: lead.id,
+    contactId: homeownerContactId,
+    firstName: lead.homeowner?.first_name ?? "homeowner",
+    name: lead.homeowner?.contact_type === "entity"
+      ? lead.homeowner.entity_name ?? "Unknown homeowner"
+      : [lead.homeowner?.first_name, lead.homeowner?.last_name].filter(Boolean).join(" ") || "Unknown homeowner",
+    address: lead.address,
+    state: lead.state,
+    phones: [lead.homeowner?.phone_1, lead.homeowner?.phone_2, lead.homeowner?.phone_3].filter((phone): phone is string => Boolean(phone)),
+    dncLocked: lead.is_dnc_locked,
+    contactDnc: lead.homeowner?.do_not_contact ?? false,
+    callable: canShowCallButton({ property: { id: lead.id, state: lead.state, is_dnc_locked: lead.is_dnc_locked }, contact: lead.homeowner ? { id: lead.homeowner.id, phone_1: lead.homeowner.phone_1, phone_2: lead.homeowner.phone_2, phone_3: lead.homeowner.phone_3, do_not_contact: lead.homeowner.do_not_contact, sms_opted_out: lead.homeowner.sms_opted_out } : null }),
+  };
 
   // Consent and phone-level suppression are separate existing read models.
   // Load both so the page does not infer "OK to text" from the mere presence
@@ -765,7 +782,7 @@ export default async function LeadDetailPage({
                         .join(" ")
                 }
               />
-              <Row label="Phone 1" value={lead.homeowner.phone_1} mono />
+              <div className="flex items-center justify-between gap-3"><Row label="Phone 1" value={lead.homeowner.phone_1} mono /><SoftphoneLeadButton lead={detailSoftphoneLead} /></div>
               <Row label="Phone 2" value={lead.homeowner.phone_2} mono />
               <Row label="Phone 3" value={lead.homeowner.phone_3} mono />
               <Row label="Email" value={lead.homeowner.email} />
