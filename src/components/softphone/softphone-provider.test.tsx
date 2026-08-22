@@ -129,6 +129,23 @@ describe("SoftphoneProvider transport gate", () => {
     expect(screen.getByTestId("dialer-call-manual")).toBeDisabled();
   });
 
+  it("keeps an exact ten-digit manual call enabled when lead suggestions arrive", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    searchDialerLeads.mockResolvedValue({
+      ok: true,
+      data: [{ propertyId: "property-1", contactId: "contact-1", name: "Unrelated Lead", detail: "1 Main St", address: "1 Main St", state: "MO", phoneE164: "+18165550123" } as never],
+    });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+
+    await user.type(screen.getByTestId("dialer-input"), "3107540662");
+    await waitFor(() => expect(searchDialerLeads).toHaveBeenCalled());
+
+    expect(screen.getByTestId("dialer-call-manual")).toBeEnabled();
+    expect(screen.getByTestId("dialer-call-manual")).toHaveTextContent("Call (310) 754-0662");
+  });
+
   it("clears the keypad source when the dialer is closed and reopened", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     const user = userEvent.setup();
