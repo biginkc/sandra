@@ -344,6 +344,31 @@ describe("JitterCallTransport", () => {
     expect(sendDigit).toHaveBeenCalledTimes(2);
   });
 
+  it("drops queued digits across a completed hold and resume cycle", async () => {
+    let resolveFirst: ((value: { ok: true; data: { sent: true } }) => void) | undefined;
+    const sendDigit = vi.fn(() => new Promise<{ ok: true; data: { sent: true } }>((resolve) => { resolveFirst = resolve; }));
+    const harness = transportHarness({ sendDigit });
+    await harness.transport.start(target());
+    const call = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+
+    const first = harness.transport.sendDigit("1");
+    const stale = harness.transport.sendDigit("2");
+    await flush();
+    expect(sendDigit).toHaveBeenCalledTimes(1);
+    await expect(harness.transport.hold(true)).resolves.toBe(true);
+    await expect(harness.transport.hold(false)).resolves.toBe(true);
+    resolveFirst?.({ ok: true, data: { sent: true } });
+
+    await expect(first).resolves.toBe(true);
+    await expect(stale).resolves.toBe(false);
+    expect(sendDigit).toHaveBeenCalledTimes(1);
+  });
+
   it("fails before provisioning when microphone access is unavailable", async () => {
     const prepareMicrophone = vi.fn(async () => {
       throw new Error("Microphone access is required to place calls.");

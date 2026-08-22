@@ -178,6 +178,7 @@ export class JitterCallTransport implements CallTransport {
   private startPromise: Promise<CallHandle> | null = null;
   private hangupPromise: Promise<CallResult> | null = null;
   private digitQueue: Promise<void> = Promise.resolve();
+  private digitEpoch = 0;
   private cancelPromise: Promise<boolean> | null = null;
   private lastTeardownConfirmed = true;
   private refreshPromise: Promise<void> | null = null;
@@ -225,6 +226,7 @@ export class JitterCallTransport implements CallTransport {
     const call = this.currentCall;
     if (!call) return false;
     this.holdTransition = true;
+    this.digitEpoch += 1;
     try {
       const result = on ? call.hold() : call.unhold();
       await Promise.resolve(result);
@@ -239,8 +241,10 @@ export class JitterCallTransport implements CallTransport {
   }
 
   sendDigit(digit: DtmfDigit): Promise<boolean> {
+    const queuedEpoch = this.digitEpoch;
     const attempt = this.digitQueue.then(async () => {
       if (
+        queuedEpoch !== this.digitEpoch ||
         !this.currentCall ||
         !this.callId ||
         this.currentState !== "live" ||
