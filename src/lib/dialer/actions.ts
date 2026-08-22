@@ -152,8 +152,8 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
       .map((row) => row as unknown as LeadRow)
       .filter((lead) => phones(lead.homeowner).some((value) => toPhoneE164(value) === phoneE164));
 
-    const hasBlockedMatch = [...contacts.values()].some((contact) => contact.do_not_contact || contact.sms_opted_out)
-      || matchingLeads.some((lead) => lead.is_dnc_locked || lead.homeowner?.do_not_contact || lead.homeowner?.sms_opted_out);
+    const hasBlockedMatch = [...contacts.values()].some((contact) => contact.do_not_contact)
+      || matchingLeads.some((lead) => lead.is_dnc_locked || lead.homeowner?.do_not_contact);
     if (hasBlockedMatch) {
       return { ok: false, error: "This number belongs to a DNC-locked lead" };
     }
