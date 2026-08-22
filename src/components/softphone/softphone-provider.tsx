@@ -422,8 +422,7 @@ export function SoftphoneProvider({ children }: Props) {
   const manualDigits = dialInput.replace(/\D/g, "");
   const visibleSuggestions = phone === "idle" && dialInput.trim() ? suggestions : [];
   const manualReady = /^[\d\s()+.-]+$/.test(dialInput)
-    && /^\d{10}$/.test(manualDigits)
-    && visibleSuggestions.length === 0;
+    && /^\d{10}$/.test(manualDigits);
   const callName = target?.name ?? "";
   const isOnCall = phone === "live" || phone === "held";
 
