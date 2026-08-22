@@ -187,7 +187,7 @@ describe("SoftphoneProvider transport gate", () => {
         start: vi.fn(async () => {
           listener?.("connecting");
           listener?.("failed");
-          throw new Error("failed");
+          throw new Error("Microphone access is required to place calls.");
         }),
         mute: vi.fn(),
         hold: vi.fn(),
@@ -215,7 +215,7 @@ describe("SoftphoneProvider transport gate", () => {
     );
     await user.click(screen.getByTestId("call-lead-button"));
     expect(await screen.findByTestId("dispo-notes")).toBeVisible();
-    expect(screen.getByRole("alert")).toHaveTextContent("The call failed. Add a note to log the outcome.");
+    expect(screen.getByRole("alert")).toHaveTextContent("Microphone access is required to place calls.");
   });
 
   it("shows a blocking warning when Jitter teardown is still unconfirmed", async () => {

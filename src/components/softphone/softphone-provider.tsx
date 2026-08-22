@@ -225,6 +225,7 @@ export function SoftphoneProvider({ children }: Props) {
     const transport = createSoftphoneCallTransport();
     transportRef.current = transport;
     let terminalPromise: Promise<void> | null = null;
+    let terminalFailureMessage = "The call failed. Add a note to log the outcome.";
     const finishTerminal = (kind: "ended" | "failed") => {
       if (terminalPromise) return terminalPromise;
       terminalHandledRef.current = true;
@@ -243,7 +244,7 @@ export function SoftphoneProvider({ children }: Props) {
         }
         transition(kind === "failed" ? { type: "call_failed" } : { type: "hangup" });
         if (kind === "failed" && !teardownWarningRef.current) {
-          setError("The call failed. Add a note to log the outcome.");
+          setError(terminalFailureMessage);
         }
       })();
       return terminalPromise;
@@ -303,7 +304,10 @@ export function SoftphoneProvider({ children }: Props) {
         contactId: result.data.contactId ?? undefined,
         callToken,
       });
-    } catch {
+    } catch (error) {
+      terminalFailureMessage = error instanceof Error
+        ? error.message
+        : "The call failed. Add a note to log the outcome.";
       if (!terminalHandledRef.current) await finishTerminal("failed");
     }
   }, [callingEnabled, transition]);
