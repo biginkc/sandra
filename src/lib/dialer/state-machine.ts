@@ -1,4 +1,4 @@
-export type SoftphoneState = "closed" | "idle" | "live" | "held" | "wrap";
+export type SoftphoneState = "closed" | "idle" | "preparing" | "live" | "held" | "wrap";
 
 export type SoftphoneEvent =
   | { type: "open" }
@@ -22,9 +22,9 @@ export function transitionSoftphoneState(
     case "close":
       return state === "idle" ? "closed" : state;
     case "call_started":
-      return state === "idle" ? "idle" : state;
+      return state === "closed" || state === "idle" ? "preparing" : state;
     case "call_live":
-      return state === "idle" ? "live" : state;
+      return state === "closed" || state === "idle" || state === "preparing" ? "live" : state;
     case "hold":
       return state === "live" ? "held" : state;
     case "resume":
@@ -34,6 +34,6 @@ export function transitionSoftphoneState(
     case "wrap_complete":
       return state === "wrap" ? "closed" : state;
     case "call_failed":
-      return state === "live" || state === "held" ? "wrap" : state;
+      return state === "preparing" ? "idle" : state === "live" || state === "held" ? "wrap" : state;
   }
 }

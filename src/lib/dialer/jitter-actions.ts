@@ -10,6 +10,7 @@ import {
   connectAuthenticatedJitterCall,
   getAuthenticatedJitterToken,
   reportAuthenticatedJitterAudioHealth,
+  sendAuthenticatedJitterDigit,
   startAuthenticatedJitterCall,
 } from "./jitter-server";
 import type { CallTarget } from "./transport";
@@ -41,4 +42,8 @@ export async function reportJitterSoftphoneAudioHealth(
   sample: JitterAudioHealthSample,
 ) {
   return reportAuthenticatedJitterAudioHealth(callId, sample);
+}
+
+export async function sendJitterSoftphoneDigit(callId: string, digit: string) {
+  return sendAuthenticatedJitterDigit(callId, digit);
 }

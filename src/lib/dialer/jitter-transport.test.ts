@@ -87,6 +87,7 @@ function transportHarness(
       ok: true as const,
       data: { accepted: true, status: "healthy" as const },
     })),
+    sendDigit: vi.fn(async () => ({ ok: true as const, data: { sent: true as const } })),
     createRtcClient: vi.fn(async () => rtc),
     createRemoteAudio: vi.fn(() => null),
     subscribePageHide: vi.fn((handler) => {
@@ -283,13 +284,18 @@ describe("JitterCallTransport", () => {
     );
     harness.transport.mute(true);
     harness.transport.mute(false);
-    harness.transport.hold(true);
-    harness.transport.hold(false);
+    await expect(harness.transport.sendDigit("5")).resolves.toBe(true);
+    await harness.transport.hold(true);
+    await expect(harness.transport.sendDigit("#")).resolves.toBe(false);
+    await harness.transport.hold(false);
+    await expect(harness.transport.sendDigit("#")).resolves.toBe(true);
     await flush();
     expect(call.muteAudio).toHaveBeenCalledTimes(1);
     expect(call.unmuteAudio).toHaveBeenCalledTimes(1);
     expect(call.hold).toHaveBeenCalledTimes(1);
     expect(call.unhold).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.sendDigit).toHaveBeenNthCalledWith(1, "call-1", "5");
+    expect(harness.dependencies.sendDigit).toHaveBeenNthCalledWith(2, "call-1", "#");
 
     harness.setNow(Date.parse("2026-08-21T20:00:03.900Z"));
     await expect(harness.transport.hangup()).resolves.toEqual({
@@ -303,6 +309,64 @@ describe("JitterCallTransport", () => {
     );
     expect(harness.rtc.disconnect).toHaveBeenCalledTimes(1);
     expect(states).toEqual(["connecting", "ringing", "live", "ended"]);
+  });
+
+  it("serializes rapid digits and drops queued digits after hangup", async () => {
+    const pending: Array<(value: { ok: true; data: { sent: true } }) => void> = [];
+    const sendDigit = vi.fn(() => new Promise<{ ok: true; data: { sent: true } }>((resolve) => pending.push(resolve)));
+    const harness = transportHarness({ sendDigit });
+    await harness.transport.start(target());
+    const call = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+
+    const first = harness.transport.sendDigit("1");
+    const second = harness.transport.sendDigit("2");
+    const third = harness.transport.sendDigit("3");
+    await flush();
+    expect(sendDigit).toHaveBeenCalledTimes(1);
+    expect(sendDigit).toHaveBeenNthCalledWith(1, "call-1", "1");
+
+    pending.shift()?.({ ok: true, data: { sent: true } });
+    await expect(first).resolves.toBe(true);
+    await flush();
+    expect(sendDigit).toHaveBeenCalledTimes(2);
+    expect(sendDigit).toHaveBeenNthCalledWith(2, "call-1", "2");
+
+    const hangup = harness.transport.hangup();
+    pending.shift()?.({ ok: true, data: { sent: true } });
+    await expect(second).resolves.toBe(true);
+    await expect(third).resolves.toBe(false);
+    await hangup;
+    expect(sendDigit).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops queued digits across a completed hold and resume cycle", async () => {
+    let resolveFirst: ((value: { ok: true; data: { sent: true } }) => void) | undefined;
+    const sendDigit = vi.fn(() => new Promise<{ ok: true; data: { sent: true } }>((resolve) => { resolveFirst = resolve; }));
+    const harness = transportHarness({ sendDigit });
+    await harness.transport.start(target());
+    const call = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+
+    const first = harness.transport.sendDigit("1");
+    const stale = harness.transport.sendDigit("2");
+    await flush();
+    expect(sendDigit).toHaveBeenCalledTimes(1);
+    await expect(harness.transport.hold(true)).resolves.toBe(true);
+    await expect(harness.transport.hold(false)).resolves.toBe(true);
+    resolveFirst?.({ ok: true, data: { sent: true } });
+
+    await expect(first).resolves.toBe(true);
+    await expect(stale).resolves.toBe(false);
+    expect(sendDigit).toHaveBeenCalledTimes(1);
   });
 
   it("fails before provisioning when microphone access is unavailable", async () => {

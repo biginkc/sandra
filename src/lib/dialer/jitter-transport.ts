@@ -3,6 +3,7 @@ import {
   connectJitterSoftphoneCall,
   getJitterSoftphoneToken,
   reportJitterSoftphoneAudioHealth,
+  sendJitterSoftphoneDigit,
   startJitterSoftphoneCall,
 } from "./jitter-actions";
 import type {
@@ -20,6 +21,7 @@ import type {
   CallTarget,
   CallTransport,
   CallTransportState,
+  DtmfDigit,
 } from "./transport";
 
 const TELNYX_REGISTER_TIMEOUT_MS = 25_000;
@@ -81,6 +83,7 @@ export type JitterTransportDependencies = {
     callId: string,
     sample: JitterAudioHealthSample,
   ): Promise<JitterProxyResult<JitterAudioHealthResponse>>;
+  sendDigit(callId: string, digit: DtmfDigit): Promise<JitterProxyResult<{ sent: true }>>;
   createRtcClient(
     token: string,
     remoteAudio: HTMLAudioElement | null,
@@ -101,6 +104,7 @@ const defaultDependencies: JitterTransportDependencies = {
   connect: connectJitterSoftphoneCall,
   cancel: cancelJitterSoftphoneCall,
   reportAudioHealth: reportJitterSoftphoneAudioHealth,
+  sendDigit: sendJitterSoftphoneDigit,
   createRtcClient: createTelnyxRtcClient,
   createRemoteAudio,
   subscribePageHide(handler) {
@@ -166,12 +170,15 @@ export class JitterCallTransport implements CallTransport {
   private acceptedPromise: Promise<void> | null = null;
   private desiredMute = false;
   private desiredHold = false;
+  private holdTransition = false;
   private liveAt: number | null = null;
   private terminalAt: number | null = null;
   private terminal: "ended" | "failed" | null = null;
   private hangupRequested = false;
   private startPromise: Promise<CallHandle> | null = null;
   private hangupPromise: Promise<CallResult> | null = null;
+  private digitQueue: Promise<void> = Promise.resolve();
+  private digitEpoch = 0;
   private cancelPromise: Promise<boolean> | null = null;
   private lastTeardownConfirmed = true;
   private refreshPromise: Promise<void> | null = null;
@@ -214,16 +221,44 @@ export class JitterCallTransport implements CallTransport {
     }
   }
 
-  hold(on: boolean): void {
-    this.desiredHold = on;
+  async hold(on: boolean): Promise<boolean> {
+    if (this.holdTransition) return false;
     const call = this.currentCall;
-    if (!call) return;
+    if (!call) return false;
+    this.holdTransition = true;
+    this.digitEpoch += 1;
     try {
       const result = on ? call.hold() : call.unhold();
-      void Promise.resolve(result).catch((error) => this.failAndCancel(error));
+      await Promise.resolve(result);
+      this.desiredHold = on;
+      return true;
     } catch (error) {
-      void this.failAndCancel(error);
+      await this.failAndCancel(error);
+      return false;
+    } finally {
+      this.holdTransition = false;
     }
+  }
+
+  sendDigit(digit: DtmfDigit): Promise<boolean> {
+    const queuedEpoch = this.digitEpoch;
+    const attempt = this.digitQueue.then(async () => {
+      if (
+        queuedEpoch !== this.digitEpoch ||
+        !this.currentCall ||
+        !this.callId ||
+        this.currentState !== "live" ||
+        this.desiredHold ||
+        this.holdTransition ||
+        this.terminal ||
+        this.hangupRequested ||
+        this.cancelPromise
+      ) return false;
+      const result = await this.dependencies.sendDigit(this.callId, digit).catch(() => null);
+      return result?.ok === true;
+    });
+    this.digitQueue = attempt.then(() => undefined, () => undefined);
+    return attempt;
   }
 
   hangup(): Promise<CallResult> {

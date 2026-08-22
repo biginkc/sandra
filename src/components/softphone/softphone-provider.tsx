@@ -26,7 +26,8 @@ import {
 } from "@/lib/dialer/actions";
 import { SOFTPHONE_DISPOSITIONS, type SoftphoneDisposition } from "@/lib/dialer/dispositions";
 import { maskPhone } from "@/lib/phone-format";
-import { type CallTransport } from "@/lib/dialer/transport";
+import { playDtmfTone } from "@/lib/dialer/dtmf-tone";
+import { type CallTransport, type DtmfDigit } from "@/lib/dialer/transport";
 import { createSoftphoneCallTransport, isSoftphoneTransportEnabled } from "@/lib/dialer/transport-selection";
 import { transitionSoftphoneState, type SoftphoneState } from "@/lib/dialer/state-machine";
 
@@ -99,6 +100,8 @@ export function SoftphoneProvider({ children }: Props) {
   const [callStatus, setCallStatus] = useState<"connecting" | "ringing" | "live" | "ended" | "failed" | null>(null);
   const [muted, setMuted] = useState(false);
   const [held, setHeld] = useState(false);
+  const [holdPending, setHoldPending] = useState(false);
+  const [liveKeypadOpen, setLiveKeypadOpen] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [finalSeconds, setFinalSeconds] = useState(0);
   const [notes, setNotes] = useState("");
@@ -118,6 +121,9 @@ export function SoftphoneProvider({ children }: Props) {
   const terminalHandledRef = useRef(false);
   const teardownWarningRef = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dialInputRef = useRef("");
+  const heldRef = useRef(false);
+  const holdPendingRef = useRef(false);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -175,11 +181,16 @@ export function SoftphoneProvider({ children }: Props) {
     teardownWarningRef.current = false;
     setTeardownUnconfirmed(false);
     setTarget(null);
+    dialInputRef.current = "";
     setDialInput("");
     setSuggestions([]);
     setCallStatus(null);
     setMuted(false);
     setHeld(false);
+    heldRef.current = false;
+    holdPendingRef.current = false;
+    setHoldPending(false);
+    setLiveKeypadOpen(false);
     setSeconds(0);
     setFinalSeconds(0);
     setNotes("");
@@ -192,7 +203,10 @@ export function SoftphoneProvider({ children }: Props) {
     setPhone("idle");
   }, []);
 
-  const startTarget = useCallback(async (prepare: Promise<{ ok: true; data: SoftphoneTarget } | { ok: false; error: string }>) => {
+  const startTarget = useCallback(async (
+    prepare: Promise<{ ok: true; data: SoftphoneTarget } | { ok: false; error: string }>,
+    provisionalTarget?: SoftphoneTarget,
+  ) => {
     if (!callingEnabled) {
       setError("Calling not yet enabled");
       return;
@@ -202,13 +216,33 @@ export function SoftphoneProvider({ children }: Props) {
     terminalHandledRef.current = false;
     teardownWarningRef.current = false;
     setTeardownUnconfirmed(false);
-    setPhone("idle");
+    if (provisionalTarget) setTarget(provisionalTarget);
+    transition({ type: "call_started" });
     setPending(true);
     setError(null);
-    const result = await prepare;
+    let result: { ok: true; data: SoftphoneTarget } | { ok: false; error: string };
+    try {
+      result = await prepare;
+    } catch {
+      if (provisionalTarget?.propertyId) {
+        await Promise.resolve(resumeFailedSoftphoneCall(provisionalTarget.propertyId)).catch(() => undefined);
+      }
+      startInFlightRef.current = false;
+      transportRef.current = null;
+      setPending(false);
+      setTarget(null);
+      setStartedAt(null);
+      setWrapToken(null);
+      setCallStatus(null);
+      setPhone("idle");
+      setError("Could not prepare the call. Try again.");
+      return;
+    }
     setPending(false);
     if (!result.ok) {
       startInFlightRef.current = false;
+      setTarget(null);
+      setPhone("idle");
       setError(result.error);
       return;
     }
@@ -216,6 +250,8 @@ export function SoftphoneProvider({ children }: Props) {
     setStartedAt(result.data.startedAt);
     setSeconds(0);
     setHeld(false);
+    heldRef.current = false;
+    setLiveKeypadOpen(false);
     setMuted(false);
     setCallOutcome("connected_human");
     // One stable call intent owns both Jitter start retries and Sandra wrap-up
@@ -296,7 +332,6 @@ export function SoftphoneProvider({ children }: Props) {
       }
       if (status === "failed") void finishTerminal("failed");
     });
-    transition({ type: "call_started" });
     try {
       await transport.start({
         phoneE164: result.data.phoneE164,
@@ -314,8 +349,17 @@ export function SoftphoneProvider({ children }: Props) {
 
   const openLead = useCallback((lead: SoftphoneLead) => {
     if (!callingEnabled || startInFlightRef.current) return;
-    setPhone((state) => state === "closed" ? "idle" : state);
-    void startTarget(prepareLeadCall(lead.id));
+    const phoneE164 = lead.phones[0] ?? "";
+    void startTarget(prepareLeadCall(lead.id), {
+      propertyId: lead.id,
+      contactId: lead.contactId,
+      phoneE164,
+      maskedPhone: phoneE164 ? maskPhone(phoneE164) : "",
+      name: lead.name,
+      address: lead.address,
+      state: lead.state,
+      startedAt: new Date().toISOString(),
+    });
   }, [callingEnabled, startTarget]);
 
   const openIdle = useCallback(() => {
@@ -377,9 +421,48 @@ export function SoftphoneProvider({ children }: Props) {
 
   const manualDigits = dialInput.replace(/\D/g, "");
   const visibleSuggestions = phone === "idle" && dialInput.trim() ? suggestions : [];
-  const manualReady = manualDigits.length === 10 && visibleSuggestions.length === 0;
+  const manualReady = /^[\d\s()+.-]+$/.test(dialInput)
+    && /^\d{10}$/.test(manualDigits)
+    && visibleSuggestions.length === 0;
   const callName = target?.name ?? "";
   const isOnCall = phone === "live" || phone === "held";
+
+  const enterManualDigit = useCallback((digit: DtmfDigit) => {
+    if (digit === "*" || digit === "#") return;
+    const digits = dialInputRef.current.replace(/\D/g, "");
+    if (digits.length >= 10) return;
+    const next = digits + digit;
+    dialInputRef.current = next;
+    setDialInput(next);
+    playDtmfTone(digit);
+  }, []);
+
+  const sendLiveDigit = useCallback((digit: DtmfDigit) => {
+    if (phone !== "live" || heldRef.current || holdPendingRef.current || callStatus !== "live") return;
+    const transport = transportRef.current;
+    if (!transport) return;
+    playDtmfTone(digit);
+    void transport.sendDigit(digit).then((sent) => {
+      if (!sent) showToast("That keypad tone was not sent. Try again.");
+    });
+  }, [callStatus, phone, showToast]);
+
+  const toggleHold = useCallback(async () => {
+    const transport = transportRef.current;
+    if (!transport || holdPendingRef.current) return;
+    const next = !heldRef.current;
+    holdPendingRef.current = true;
+    setHoldPending(true);
+    setLiveKeypadOpen(false);
+    const changed = await transport.hold(next);
+    if (changed) {
+      heldRef.current = next;
+      setHeld(next);
+      transition(next ? { type: "hold" } : { type: "resume" });
+    }
+    holdPendingRef.current = false;
+    setHoldPending(false);
+  }, [transition]);
 
   const contextValue = useMemo(() => ({
     openLead,
@@ -401,7 +484,7 @@ export function SoftphoneProvider({ children }: Props) {
             {phone === "idle" ? (
               <IdleView
                 dialInput={dialInput}
-                setDialInput={setDialInput}
+                setDialInput={(value) => { dialInputRef.current = value; setDialInput(value); }}
                 suggestions={visibleSuggestions}
                 recents={recents}
                 manualReady={manualReady}
@@ -411,12 +494,14 @@ export function SoftphoneProvider({ children }: Props) {
                 onLead={(suggestion) => void startTarget(prepareLeadCall(suggestion.propertyId))}
                 onRecent={(recent) => void startTarget(recent.propertyId ? prepareLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164))}
                 onManual={() => void startTarget(prepareManualCall(manualDigits))}
-                onDigit={(digit) => setDialInput((value) => value + digit)}
-                onBackspace={() => setDialInput((value) => value.slice(0, -1))}
+                onDigit={enterManualDigit}
+                onBackspace={() => { const next = dialInputRef.current.slice(0, -1); dialInputRef.current = next; setDialInput(next); }}
                 error={error}
               />
+            ) : phone === "preparing" ? (
+              <PreparingView target={target} />
             ) : isOnCall ? (
-              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} onMute={() => { setMuted((value) => !value); transportRef.current?.mute(!muted); }} onHold={() => { setHeld((value) => !value); transportRef.current?.hold(!held); transition(held ? { type: "resume" } : { type: "hold" }); }} onHangup={hangup} />
+              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} holdPending={holdPending} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { setMuted((value) => !value); transportRef.current?.mute(!muted); }} onHold={() => { void toggleHold(); }} onHangup={hangup} />
             ) : (
               <WrapView target={target} finalSeconds={finalSeconds} notes={notes} setNotes={setNotes} callbackOpen={callbackOpen} setCallbackOpen={setCallbackOpen} callbackTime={callbackTime} setCallbackTime={setCallbackTime} pending={pending} error={error} teardownUnconfirmed={teardownUnconfirmed} onRetryTeardown={() => { void retryTeardown(); }} onDisposition={(disposition) => {
                 const config = SOFTPHONE_DISPOSITIONS.find((item) => item.value === disposition);
@@ -450,22 +535,41 @@ function formatFull(digits: string): string {
 }
 
 function IdleView({ dialInput, setDialInput, suggestions, recents, manualReady, manualDigits, pending, callingEnabled, onLead, onRecent, onManual, onDigit, onBackspace, error }: {
-  dialInput: string; setDialInput: (value: string) => void; suggestions: DialerSearchResult[]; recents: DialerRecent[]; manualReady: boolean; manualDigits: string; pending: boolean; callingEnabled: boolean; onLead: (suggestion: DialerSearchResult) => void; onRecent: (recent: DialerRecent) => void; onManual: () => void; onDigit: (digit: string) => void; onBackspace: () => void; error: string | null;
+  dialInput: string; setDialInput: (value: string) => void; suggestions: DialerSearchResult[]; recents: DialerRecent[]; manualReady: boolean; manualDigits: string; pending: boolean; callingEnabled: boolean; onLead: (suggestion: DialerSearchResult) => void; onRecent: (recent: DialerRecent) => void; onManual: () => void; onDigit: (digit: DtmfDigit) => void; onBackspace: () => void; error: string | null;
 }) {
   return <div className="p-4 pb-[18px]">
     {!callingEnabled ? <div role="status" className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">Calling not yet enabled</div> : null}
-    <input autoFocus data-testid="dialer-input" value={dialInput} onChange={(event) => setDialInput(event.target.value)} placeholder="Type a name or number…" className="w-full rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-[15px] font-semibold outline-none" />
+    <input autoFocus data-testid="dialer-input" value={/^\d{10}$/.test(dialInput) ? formatFull(dialInput) : dialInput} onKeyDown={(event) => { if (/^[0-9]$/.test(event.key)) { event.preventDefault(); onDigit(event.key as DtmfDigit); } }} onChange={(event) => setDialInput(event.target.value)} placeholder="Type a name or number…" className="w-full rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-[15px] font-semibold outline-none" />
     {suggestions.length > 0 ? <div className="mt-2 flex max-h-42 flex-col gap-0.5 overflow-auto">{suggestions.map((suggestion) => <button type="button" disabled={!callingEnabled} title={!callingEnabled ? "Calling not yet enabled" : undefined} data-testid="dialer-suggestion" key={suggestion.propertyId} onClick={() => onLead(suggestion)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-2 text-left hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#f0eeec] text-[11px] font-extrabold text-[#57534e]">{initials(suggestion.name)}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold">{suggestion.name}</span><span className="block truncate text-[11px] text-[#78716c]">{suggestion.detail}</span></span><PhoneIcon className="size-3.5 shrink-0 text-emerald-600" /></button>)}</div> : null}
     {dialInput.trim().length >= 2 && suggestions.length === 0 && !manualReady ? <div className="px-1 pt-2.5 text-[11.5px] text-[#78716c]">No matching lead — DNC-locked leads never appear here.</div> : null}
     {error ? <div role="alert" className="pt-2 text-xs text-red-700">{error}</div> : null}
-    <div className="mt-3 grid grid-cols-3 gap-1.5">{KEYPAD.map(([digit, letters]) => <button type="button" key={digit} aria-label={`Keypad ${digit}`} onClick={() => onDigit(digit)} className="flex flex-col items-center rounded-[10px] border border-[#e5e1df] bg-white px-0 py-2 hover:border-[#d6d1ce] hover:bg-[#f5f4f2]"><span className="text-[17px] font-bold leading-none">{digit}</span><span className="h-2.5 text-[8px] font-bold tracking-[0.12em] text-[#a8a29e]">{letters}</span></button>)}</div>
+    <PhoneKeypad onDigit={onDigit} disabledDigits={["*", "#"]} />
     <div className="mt-3 flex gap-2"><button type="button" aria-label="Delete digit" onClick={onBackspace} className="flex w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#e5e1df] bg-white text-[#78716c] hover:bg-[#f5f4f2]"><DeleteIcon className="size-[17px]" /></button><button type="button" data-testid="dialer-call-manual" title={!callingEnabled ? "Calling not yet enabled" : undefined} disabled={!manualReady || pending || !callingEnabled} onClick={onManual} className={`flex-1 rounded-[10px] border-0 py-2.5 text-[13px] font-bold ${manualReady && callingEnabled ? "bg-emerald-600 text-white hover:bg-emerald-700" : "cursor-default bg-[#f0eeec] text-[#a8a29e]"}`}>{callingEnabled && manualReady ? `Call ${formatFull(manualDigits)}` : "Call"}</button></div>
     {dialInput.trim() === "" ? <div className="mt-3.5 border-t border-[#e5e1df] pt-3"><div className="mb-1.5 text-[10px] font-extrabold uppercase tracking-[0.1em] text-[#a8a29e]">Recent calls</div>{recents.map((recent) => <button type="button" disabled={!callingEnabled} title={!callingEnabled ? "Calling not yet enabled" : undefined} data-testid="dialer-recent" key={recent.id} onClick={() => onRecent(recent)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-1.5 text-left hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><span className={`flex size-6 shrink-0 items-center justify-center rounded-full ${recent.missed ? "bg-red-50 text-red-600" : "bg-[#f0eeec] text-[#78716c]"}`}>{recent.missed ? <ArrowDownLeftIcon className="size-3 -scale-y-100" /> : <ArrowUpRightIcon className="size-3" />}</span><span className="min-w-0 flex-1"><span className={`block truncate text-xs font-bold ${recent.missed ? "text-red-700" : "text-[#1c1917]"}`}>{recent.name}</span><span className="block truncate text-[11px] text-[#78716c]">{recent.detail}</span></span><span className="shrink-0 text-[11px] font-semibold text-[#a8a29e]">{recent.when}</span></button>)}</div> : null}
   </div>;
 }
 
-function LiveView({ target, callName, callStatus, seconds, muted, held, onMute, onHold, onHangup }: { target: SoftphoneTarget | null; callName: string; callStatus: string | null; seconds: number; muted: boolean; held: boolean; onMute: () => void; onHold: () => void; onHangup: () => void }) {
-  return <div className="p-5 pb-4 text-center"><span data-testid="call-live-pill" className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-emerald-800"><span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />{held ? "On hold" : callStatus === "connecting" ? "Connecting" : callStatus === "ringing" ? "Ringing" : "Live · browser audio"}</span><div className="mt-3.5 text-lg font-extrabold">{callName}</div><div className="mt-0.5 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : ""}</div><div data-testid="call-timer" className={`my-4.5 font-mono text-[34px] font-bold leading-none ${held ? "text-amber-700" : "text-emerald-600"}`}>{timerText(seconds)}</div><div className="flex justify-center gap-2"><button type="button" aria-pressed={muted} data-testid="call-mute" onClick={onMute} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${muted ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{muted ? "Unmute" : "Mute"}</button><button type="button" aria-pressed={held} data-testid="call-hold" onClick={onHold} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${held ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{held ? "Resume" : "Hold"}</button><button type="button" data-testid="call-hangup" onClick={onHangup} className="rounded-[9px] border-0 bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-700">Hang up</button></div></div>;
+function PreparingView({ target }: { target: SoftphoneTarget | null }) {
+  return <div data-testid="call-preparing" className="p-8 text-center"><span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-blue-800">Preparing call</span><div className="mt-4 text-lg font-extrabold">{target?.name || "Connecting…"}</div><div className="mt-1 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : "Checking call details and microphone…"}</div></div>;
+}
+
+function PhoneKeypad({ onDigit, disabled = false, disabledDigits = [] }: { onDigit: (digit: DtmfDigit) => void; disabled?: boolean; disabledDigits?: DtmfDigit[] }) {
+  return <div data-testid="phone-keypad" className="mt-3 grid grid-cols-3 gap-1.5">{KEYPAD.map(([digit, letters]) => { const key = digit as DtmfDigit; const keyDisabled = disabled || disabledDigits.includes(key); return <button type="button" disabled={keyDisabled} key={digit} aria-label={`Keypad ${digit}`} onClick={() => onDigit(key)} className="flex flex-col items-center rounded-[10px] border border-[#e5e1df] bg-white px-0 py-2 hover:border-[#d6d1ce] hover:bg-[#f5f4f2] disabled:cursor-not-allowed disabled:opacity-35"><span className="text-[17px] font-bold leading-none">{digit}</span><span className="h-2.5 text-[8px] font-bold tracking-[0.12em] text-[#a8a29e]">{letters}</span></button>; })}</div>;
+}
+
+function LiveView({ target, callName, callStatus, seconds, muted, held, holdPending, keypadOpen, onToggleKeypad, onDigit, onMute, onHold, onHangup }: { target: SoftphoneTarget | null; callName: string; callStatus: string | null; seconds: number; muted: boolean; held: boolean; holdPending: boolean; keypadOpen: boolean; onToggleKeypad: () => void; onDigit: (digit: DtmfDigit) => void; onMute: () => void; onHold: () => void; onHangup: () => void }) {
+  useEffect(() => {
+    if (!keypadOpen || held || callStatus !== "live") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!/^[0-9*#]$/.test(event.key) || event.repeat) return;
+      event.preventDefault();
+      onDigit(event.key as DtmfDigit);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [callStatus, held, keypadOpen, onDigit]);
+
+  return <div className="p-5 pb-4 text-center"><span data-testid="call-live-pill" className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-emerald-800"><span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />{holdPending ? "Updating hold…" : held ? "On hold" : callStatus === "connecting" ? "Connecting" : callStatus === "ringing" ? "Ringing" : "Live · browser audio"}</span><div className="mt-3.5 text-lg font-extrabold">{callName}</div><div className="mt-0.5 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : ""}</div><div data-testid="call-timer" className={`my-4.5 font-mono text-[34px] font-bold leading-none ${held ? "text-amber-700" : "text-emerald-600"}`}>{timerText(seconds)}</div>{keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={held || holdPending || callStatus !== "live"} /> : null}<div className="mt-3 flex justify-center gap-2"><button type="button" aria-pressed={muted} data-testid="call-mute" onClick={onMute} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${muted ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{muted ? "Unmute" : "Mute"}</button><button type="button" aria-expanded={keypadOpen} data-testid="call-keypad" disabled={held || holdPending || callStatus !== "live"} onClick={onToggleKeypad} className="min-w-16 rounded-[9px] border border-[#e5e1df] bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Keypad</button><button type="button" aria-pressed={held} data-testid="call-hold" disabled={holdPending} onClick={onHold} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold disabled:opacity-40 ${held ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{held ? "Resume" : "Hold"}</button><button type="button" data-testid="call-hangup" onClick={onHangup} className="rounded-[9px] border-0 bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-700">Hang up</button></div></div>;
 }
 
 function WrapView({ target, finalSeconds, notes, setNotes, callbackOpen, setCallbackOpen, callbackTime, setCallbackTime, pending, error, teardownUnconfirmed, onRetryTeardown, onDisposition, onCallback, onCustomCallback }: { target: SoftphoneTarget | null; finalSeconds: number; notes: string; setNotes: (value: string) => void; callbackOpen: boolean; setCallbackOpen: (value: boolean) => void; callbackTime: string; setCallbackTime: (value: string) => void; pending: boolean; error: string | null; teardownUnconfirmed: boolean; onRetryTeardown: () => void; onDisposition: (disposition: SoftphoneDisposition) => void; onCallback: (kind: "today_pm" | "tomorrow_am") => void; onCustomCallback: () => void }) {

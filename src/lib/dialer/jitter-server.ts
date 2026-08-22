@@ -10,6 +10,7 @@ import {
   requestJitterCancel,
   requestJitterAudioHealth,
   requestJitterConnect,
+  requestJitterDigit,
   requestJitterStartCall,
   requestJitterToken,
   type JitterCancelResponse,
@@ -221,6 +222,20 @@ export async function cancelAuthenticatedJitterCall(
   const callId = openCallCapability(callCapability, operator.userId);
   if (!callId) return invalidInput("Invalid Jitter call reference.");
   return requestJitterCancel(callId, reason);
+}
+
+export async function sendAuthenticatedJitterDigit(
+  callCapability: unknown,
+  digit: unknown,
+): Promise<JitterProxyResult<{ sent: true }>> {
+  if (typeof digit !== "string" || !/^[0-9*#]$/.test(digit)) {
+    return invalidInput("Invalid keypad digit.");
+  }
+  const operator = await authenticatedOperator();
+  if (!operator.ok) return operator;
+  const callId = openCallCapability(callCapability, operator.userId);
+  if (!callId) return invalidInput("Invalid Jitter call reference.");
+  return requestJitterDigit(callId, digit);
 }
 
 export async function reportAuthenticatedJitterAudioHealth(
