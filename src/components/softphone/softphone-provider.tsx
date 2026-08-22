@@ -181,6 +181,7 @@ export function SoftphoneProvider({ children }: Props) {
     teardownWarningRef.current = false;
     setTeardownUnconfirmed(false);
     setTarget(null);
+    dialInputRef.current = "";
     setDialInput("");
     setSuggestions([]);
     setCallStatus(null);

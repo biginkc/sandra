@@ -311,6 +311,39 @@ describe("JitterCallTransport", () => {
     expect(states).toEqual(["connecting", "ringing", "live", "ended"]);
   });
 
+  it("serializes rapid digits and drops queued digits after hangup", async () => {
+    const pending: Array<(value: { ok: true; data: { sent: true } }) => void> = [];
+    const sendDigit = vi.fn(() => new Promise<{ ok: true; data: { sent: true } }>((resolve) => pending.push(resolve)));
+    const harness = transportHarness({ sendDigit });
+    await harness.transport.start(target());
+    const call = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+
+    const first = harness.transport.sendDigit("1");
+    const second = harness.transport.sendDigit("2");
+    const third = harness.transport.sendDigit("3");
+    await flush();
+    expect(sendDigit).toHaveBeenCalledTimes(1);
+    expect(sendDigit).toHaveBeenNthCalledWith(1, "call-1", "1");
+
+    pending.shift()?.({ ok: true, data: { sent: true } });
+    await expect(first).resolves.toBe(true);
+    await flush();
+    expect(sendDigit).toHaveBeenCalledTimes(2);
+    expect(sendDigit).toHaveBeenNthCalledWith(2, "call-1", "2");
+
+    const hangup = harness.transport.hangup();
+    pending.shift()?.({ ok: true, data: { sent: true } });
+    await expect(second).resolves.toBe(true);
+    await expect(third).resolves.toBe(false);
+    await hangup;
+    expect(sendDigit).toHaveBeenCalledTimes(2);
+  });
+
   it("fails before provisioning when microphone access is unavailable", async () => {
     const prepareMicrophone = vi.fn(async () => {
       throw new Error("Microphone access is required to place calls.");

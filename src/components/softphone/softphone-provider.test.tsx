@@ -129,6 +129,21 @@ describe("SoftphoneProvider transport gate", () => {
     expect(screen.getByTestId("dialer-call-manual")).toBeDisabled();
   });
 
+  it("clears the keypad source when the dialer is closed and reopened", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+
+    await user.click(screen.getByTestId("header-dialer-button"));
+    await user.click(screen.getByLabelText("Keypad 3"));
+    await user.click(screen.getByLabelText("Keypad 1"));
+    await user.click(screen.getByLabelText("Close dialer"));
+    await user.click(screen.getByTestId("header-dialer-button"));
+    await user.click(screen.getByLabelText("Keypad 7"));
+
+    expect(screen.getByTestId("dialer-input")).toHaveValue("7");
+  });
+
   it("keeps live keypad hidden until requested and sends digits only while live and not held", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
