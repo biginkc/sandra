@@ -29,7 +29,7 @@ export function playDtmfTone(digit: DtmfDigit): void {
       oscillator.start(start);
       oscillator.stop(stop);
     }
-    if (context.state === "suspended") void context.resume();
+    if (context.state === "suspended") void context.resume().catch(() => undefined);
   } catch {
     // Audio feedback must never block dialing on browsers that deny WebAudio.
   }

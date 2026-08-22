@@ -100,6 +100,7 @@ export function SoftphoneProvider({ children }: Props) {
   const [callStatus, setCallStatus] = useState<"connecting" | "ringing" | "live" | "ended" | "failed" | null>(null);
   const [muted, setMuted] = useState(false);
   const [held, setHeld] = useState(false);
+  const [holdPending, setHoldPending] = useState(false);
   const [liveKeypadOpen, setLiveKeypadOpen] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [finalSeconds, setFinalSeconds] = useState(0);
@@ -120,6 +121,9 @@ export function SoftphoneProvider({ children }: Props) {
   const terminalHandledRef = useRef(false);
   const teardownWarningRef = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dialInputRef = useRef("");
+  const heldRef = useRef(false);
+  const holdPendingRef = useRef(false);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -182,6 +186,9 @@ export function SoftphoneProvider({ children }: Props) {
     setCallStatus(null);
     setMuted(false);
     setHeld(false);
+    heldRef.current = false;
+    holdPendingRef.current = false;
+    setHoldPending(false);
     setLiveKeypadOpen(false);
     setSeconds(0);
     setFinalSeconds(0);
@@ -212,7 +219,24 @@ export function SoftphoneProvider({ children }: Props) {
     transition({ type: "call_started" });
     setPending(true);
     setError(null);
-    const result = await prepare;
+    let result: { ok: true; data: SoftphoneTarget } | { ok: false; error: string };
+    try {
+      result = await prepare;
+    } catch {
+      if (provisionalTarget?.propertyId) {
+        await Promise.resolve(resumeFailedSoftphoneCall(provisionalTarget.propertyId)).catch(() => undefined);
+      }
+      startInFlightRef.current = false;
+      transportRef.current = null;
+      setPending(false);
+      setTarget(null);
+      setStartedAt(null);
+      setWrapToken(null);
+      setCallStatus(null);
+      setPhone("idle");
+      setError("Could not prepare the call. Try again.");
+      return;
+    }
     setPending(false);
     if (!result.ok) {
       startInFlightRef.current = false;
@@ -225,6 +249,7 @@ export function SoftphoneProvider({ children }: Props) {
     setStartedAt(result.data.startedAt);
     setSeconds(0);
     setHeld(false);
+    heldRef.current = false;
     setLiveKeypadOpen(false);
     setMuted(false);
     setCallOutcome("connected_human");
@@ -395,26 +420,48 @@ export function SoftphoneProvider({ children }: Props) {
 
   const manualDigits = dialInput.replace(/\D/g, "");
   const visibleSuggestions = phone === "idle" && dialInput.trim() ? suggestions : [];
-  const manualReady = /^\d{10}$/.test(dialInput) && visibleSuggestions.length === 0;
+  const manualReady = /^[\d\s()+.-]+$/.test(dialInput)
+    && /^\d{10}$/.test(manualDigits)
+    && visibleSuggestions.length === 0;
   const callName = target?.name ?? "";
   const isOnCall = phone === "live" || phone === "held";
 
   const enterManualDigit = useCallback((digit: DtmfDigit) => {
     if (digit === "*" || digit === "#") return;
-    setDialInput((value) => {
-      const digits = value.replace(/\D/g, "");
-      if (digits.length >= 10) return value;
-      playDtmfTone(digit);
-      return digits + digit;
-    });
+    const digits = dialInputRef.current.replace(/\D/g, "");
+    if (digits.length >= 10) return;
+    const next = digits + digit;
+    dialInputRef.current = next;
+    setDialInput(next);
+    playDtmfTone(digit);
   }, []);
 
   const sendLiveDigit = useCallback((digit: DtmfDigit) => {
-    if (phone !== "live" || held || callStatus !== "live") return;
-    const sent = transportRef.current?.sendDigit(digit) ?? false;
-    if (sent) playDtmfTone(digit);
-    else showToast("That keypad tone was not sent. Try again.");
-  }, [callStatus, held, phone, showToast]);
+    if (phone !== "live" || heldRef.current || holdPendingRef.current || callStatus !== "live") return;
+    const transport = transportRef.current;
+    if (!transport) return;
+    playDtmfTone(digit);
+    void transport.sendDigit(digit).then((sent) => {
+      if (!sent) showToast("That keypad tone was not sent. Try again.");
+    });
+  }, [callStatus, phone, showToast]);
+
+  const toggleHold = useCallback(async () => {
+    const transport = transportRef.current;
+    if (!transport || holdPendingRef.current) return;
+    const next = !heldRef.current;
+    holdPendingRef.current = true;
+    setHoldPending(true);
+    setLiveKeypadOpen(false);
+    const changed = await transport.hold(next);
+    if (changed) {
+      heldRef.current = next;
+      setHeld(next);
+      transition(next ? { type: "hold" } : { type: "resume" });
+    }
+    holdPendingRef.current = false;
+    setHoldPending(false);
+  }, [transition]);
 
   const contextValue = useMemo(() => ({
     openLead,
@@ -436,7 +483,7 @@ export function SoftphoneProvider({ children }: Props) {
             {phone === "idle" ? (
               <IdleView
                 dialInput={dialInput}
-                setDialInput={setDialInput}
+                setDialInput={(value) => { dialInputRef.current = value; setDialInput(value); }}
                 suggestions={visibleSuggestions}
                 recents={recents}
                 manualReady={manualReady}
@@ -447,13 +494,13 @@ export function SoftphoneProvider({ children }: Props) {
                 onRecent={(recent) => void startTarget(recent.propertyId ? prepareLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164))}
                 onManual={() => void startTarget(prepareManualCall(manualDigits))}
                 onDigit={enterManualDigit}
-                onBackspace={() => setDialInput((value) => value.slice(0, -1))}
+                onBackspace={() => { const next = dialInputRef.current.slice(0, -1); dialInputRef.current = next; setDialInput(next); }}
                 error={error}
               />
             ) : phone === "preparing" ? (
               <PreparingView target={target} />
             ) : isOnCall ? (
-              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { setMuted((value) => !value); transportRef.current?.mute(!muted); }} onHold={() => { setHeld((value) => !value); setLiveKeypadOpen(false); transportRef.current?.hold(!held); transition(held ? { type: "resume" } : { type: "hold" }); }} onHangup={hangup} />
+              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} holdPending={holdPending} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { setMuted((value) => !value); transportRef.current?.mute(!muted); }} onHold={() => { void toggleHold(); }} onHangup={hangup} />
             ) : (
               <WrapView target={target} finalSeconds={finalSeconds} notes={notes} setNotes={setNotes} callbackOpen={callbackOpen} setCallbackOpen={setCallbackOpen} callbackTime={callbackTime} setCallbackTime={setCallbackTime} pending={pending} error={error} teardownUnconfirmed={teardownUnconfirmed} onRetryTeardown={() => { void retryTeardown(); }} onDisposition={(disposition) => {
                 const config = SOFTPHONE_DISPOSITIONS.find((item) => item.value === disposition);
@@ -509,7 +556,7 @@ function PhoneKeypad({ onDigit, disabled = false, disabledDigits = [] }: { onDig
   return <div data-testid="phone-keypad" className="mt-3 grid grid-cols-3 gap-1.5">{KEYPAD.map(([digit, letters]) => { const key = digit as DtmfDigit; const keyDisabled = disabled || disabledDigits.includes(key); return <button type="button" disabled={keyDisabled} key={digit} aria-label={`Keypad ${digit}`} onClick={() => onDigit(key)} className="flex flex-col items-center rounded-[10px] border border-[#e5e1df] bg-white px-0 py-2 hover:border-[#d6d1ce] hover:bg-[#f5f4f2] disabled:cursor-not-allowed disabled:opacity-35"><span className="text-[17px] font-bold leading-none">{digit}</span><span className="h-2.5 text-[8px] font-bold tracking-[0.12em] text-[#a8a29e]">{letters}</span></button>; })}</div>;
 }
 
-function LiveView({ target, callName, callStatus, seconds, muted, held, keypadOpen, onToggleKeypad, onDigit, onMute, onHold, onHangup }: { target: SoftphoneTarget | null; callName: string; callStatus: string | null; seconds: number; muted: boolean; held: boolean; keypadOpen: boolean; onToggleKeypad: () => void; onDigit: (digit: DtmfDigit) => void; onMute: () => void; onHold: () => void; onHangup: () => void }) {
+function LiveView({ target, callName, callStatus, seconds, muted, held, holdPending, keypadOpen, onToggleKeypad, onDigit, onMute, onHold, onHangup }: { target: SoftphoneTarget | null; callName: string; callStatus: string | null; seconds: number; muted: boolean; held: boolean; holdPending: boolean; keypadOpen: boolean; onToggleKeypad: () => void; onDigit: (digit: DtmfDigit) => void; onMute: () => void; onHold: () => void; onHangup: () => void }) {
   useEffect(() => {
     if (!keypadOpen || held || callStatus !== "live") return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -521,7 +568,7 @@ function LiveView({ target, callName, callStatus, seconds, muted, held, keypadOp
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [callStatus, held, keypadOpen, onDigit]);
 
-  return <div className="p-5 pb-4 text-center"><span data-testid="call-live-pill" className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-emerald-800"><span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />{held ? "On hold" : callStatus === "connecting" ? "Connecting" : callStatus === "ringing" ? "Ringing" : "Live · browser audio"}</span><div className="mt-3.5 text-lg font-extrabold">{callName}</div><div className="mt-0.5 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : ""}</div><div data-testid="call-timer" className={`my-4.5 font-mono text-[34px] font-bold leading-none ${held ? "text-amber-700" : "text-emerald-600"}`}>{timerText(seconds)}</div>{keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={held || callStatus !== "live"} /> : null}<div className="mt-3 flex justify-center gap-2"><button type="button" aria-pressed={muted} data-testid="call-mute" onClick={onMute} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${muted ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{muted ? "Unmute" : "Mute"}</button><button type="button" aria-expanded={keypadOpen} data-testid="call-keypad" disabled={held || callStatus !== "live"} onClick={onToggleKeypad} className="min-w-16 rounded-[9px] border border-[#e5e1df] bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Keypad</button><button type="button" aria-pressed={held} data-testid="call-hold" onClick={onHold} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${held ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{held ? "Resume" : "Hold"}</button><button type="button" data-testid="call-hangup" onClick={onHangup} className="rounded-[9px] border-0 bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-700">Hang up</button></div></div>;
+  return <div className="p-5 pb-4 text-center"><span data-testid="call-live-pill" className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-emerald-800"><span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />{holdPending ? "Updating hold…" : held ? "On hold" : callStatus === "connecting" ? "Connecting" : callStatus === "ringing" ? "Ringing" : "Live · browser audio"}</span><div className="mt-3.5 text-lg font-extrabold">{callName}</div><div className="mt-0.5 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : ""}</div><div data-testid="call-timer" className={`my-4.5 font-mono text-[34px] font-bold leading-none ${held ? "text-amber-700" : "text-emerald-600"}`}>{timerText(seconds)}</div>{keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={held || holdPending || callStatus !== "live"} /> : null}<div className="mt-3 flex justify-center gap-2"><button type="button" aria-pressed={muted} data-testid="call-mute" onClick={onMute} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${muted ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{muted ? "Unmute" : "Mute"}</button><button type="button" aria-expanded={keypadOpen} data-testid="call-keypad" disabled={held || holdPending || callStatus !== "live"} onClick={onToggleKeypad} className="min-w-16 rounded-[9px] border border-[#e5e1df] bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Keypad</button><button type="button" aria-pressed={held} data-testid="call-hold" disabled={holdPending} onClick={onHold} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold disabled:opacity-40 ${held ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{held ? "Resume" : "Hold"}</button><button type="button" data-testid="call-hangup" onClick={onHangup} className="rounded-[9px] border-0 bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-700">Hang up</button></div></div>;
 }
 
 function WrapView({ target, finalSeconds, notes, setNotes, callbackOpen, setCallbackOpen, callbackTime, setCallbackTime, pending, error, teardownUnconfirmed, onRetryTeardown, onDisposition, onCallback, onCustomCallback }: { target: SoftphoneTarget | null; finalSeconds: number; notes: string; setNotes: (value: string) => void; callbackOpen: boolean; setCallbackOpen: (value: boolean) => void; callbackTime: string; setCallbackTime: (value: string) => void; pending: boolean; error: string | null; teardownUnconfirmed: boolean; onRetryTeardown: () => void; onDisposition: (disposition: SoftphoneDisposition) => void; onCallback: (kind: "today_pm" | "tomorrow_am") => void; onCustomCallback: () => void }) {

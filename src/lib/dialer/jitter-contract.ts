@@ -8,6 +8,7 @@ export const JITTER_SOFTPHONE_PATHS = {
   token: "/api/internal/sandra/softphone/token",
   connect: "/api/internal/sandra/softphone/connect",
   audioHealth: "/api/internal/sandra/softphone/audio-health",
+  digit: "/api/internal/sandra/softphone/digit",
   cancel: "/api/internal/sandra/softphone/cancel",
 } as const;
 
@@ -262,6 +263,19 @@ export function requestJitterAudioHealth(
     path: JITTER_SOFTPHONE_PATHS.audioHealth,
     body: { call_id: callId, ...sample },
     validate: isAudioHealthResponse,
+    fetchImpl,
+  });
+}
+
+export function requestJitterDigit(
+  callId: string,
+  digit: string,
+  fetchImpl?: typeof fetch,
+): Promise<JitterProxyResult<{ sent: true }>> {
+  return requestJitterSoftphone({
+    path: JITTER_SOFTPHONE_PATHS.digit,
+    body: { call_id: callId, digit },
+    validate: (value): value is { sent: true } => isObject(value) && value.sent === true,
     fetchImpl,
   });
 }

@@ -56,7 +56,6 @@ class FakeCall {
   readonly unmuteAudio = vi.fn();
   readonly hold = vi.fn(async () => undefined);
   readonly unhold = vi.fn(async () => undefined);
-  readonly dtmf = vi.fn();
 }
 
 function transportHarness(
@@ -88,6 +87,7 @@ function transportHarness(
       ok: true as const,
       data: { accepted: true, status: "healthy" as const },
     })),
+    sendDigit: vi.fn(async () => ({ ok: true as const, data: { sent: true as const } })),
     createRtcClient: vi.fn(async () => rtc),
     createRemoteAudio: vi.fn(() => null),
     subscribePageHide: vi.fn((handler) => {
@@ -284,18 +284,18 @@ describe("JitterCallTransport", () => {
     );
     harness.transport.mute(true);
     harness.transport.mute(false);
-    expect(harness.transport.sendDigit("5")).toBe(true);
-    harness.transport.hold(true);
-    expect(harness.transport.sendDigit("#")).toBe(false);
-    harness.transport.hold(false);
-    expect(harness.transport.sendDigit("#")).toBe(true);
+    await expect(harness.transport.sendDigit("5")).resolves.toBe(true);
+    await harness.transport.hold(true);
+    await expect(harness.transport.sendDigit("#")).resolves.toBe(false);
+    await harness.transport.hold(false);
+    await expect(harness.transport.sendDigit("#")).resolves.toBe(true);
     await flush();
     expect(call.muteAudio).toHaveBeenCalledTimes(1);
     expect(call.unmuteAudio).toHaveBeenCalledTimes(1);
     expect(call.hold).toHaveBeenCalledTimes(1);
     expect(call.unhold).toHaveBeenCalledTimes(1);
-    expect(call.dtmf).toHaveBeenNthCalledWith(1, "5");
-    expect(call.dtmf).toHaveBeenNthCalledWith(2, "#");
+    expect(harness.dependencies.sendDigit).toHaveBeenNthCalledWith(1, "call-1", "5");
+    expect(harness.dependencies.sendDigit).toHaveBeenNthCalledWith(2, "call-1", "#");
 
     harness.setNow(Date.parse("2026-08-21T20:00:03.900Z"));
     await expect(harness.transport.hangup()).resolves.toEqual({

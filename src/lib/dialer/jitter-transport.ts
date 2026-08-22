@@ -3,6 +3,7 @@ import {
   connectJitterSoftphoneCall,
   getJitterSoftphoneToken,
   reportJitterSoftphoneAudioHealth,
+  sendJitterSoftphoneDigit,
   startJitterSoftphoneCall,
 } from "./jitter-actions";
 import type {
@@ -48,7 +49,6 @@ type TelnyxCallLike = {
   unmuteAudio(): void;
   hold(): Promise<unknown> | void;
   unhold(): Promise<unknown> | void;
-  dtmf(digit: DtmfDigit): void;
 };
 
 type TelnyxRtcLike = {
@@ -83,6 +83,7 @@ export type JitterTransportDependencies = {
     callId: string,
     sample: JitterAudioHealthSample,
   ): Promise<JitterProxyResult<JitterAudioHealthResponse>>;
+  sendDigit(callId: string, digit: DtmfDigit): Promise<JitterProxyResult<{ sent: true }>>;
   createRtcClient(
     token: string,
     remoteAudio: HTMLAudioElement | null,
@@ -103,6 +104,7 @@ const defaultDependencies: JitterTransportDependencies = {
   connect: connectJitterSoftphoneCall,
   cancel: cancelJitterSoftphoneCall,
   reportAudioHealth: reportJitterSoftphoneAudioHealth,
+  sendDigit: sendJitterSoftphoneDigit,
   createRtcClient: createTelnyxRtcClient,
   createRemoteAudio,
   subscribePageHide(handler) {
@@ -168,6 +170,7 @@ export class JitterCallTransport implements CallTransport {
   private acceptedPromise: Promise<void> | null = null;
   private desiredMute = false;
   private desiredHold = false;
+  private holdTransition = false;
   private liveAt: number | null = null;
   private terminalAt: number | null = null;
   private terminal: "ended" | "failed" | null = null;
@@ -216,29 +219,28 @@ export class JitterCallTransport implements CallTransport {
     }
   }
 
-  hold(on: boolean): void {
-    this.desiredHold = on;
+  async hold(on: boolean): Promise<boolean> {
+    if (this.holdTransition) return false;
     const call = this.currentCall;
-    if (!call) return;
+    if (!call) return false;
+    this.holdTransition = true;
     try {
       const result = on ? call.hold() : call.unhold();
-      void Promise.resolve(result).catch((error) => this.failAndCancel(error));
+      await Promise.resolve(result);
+      this.desiredHold = on;
+      return true;
     } catch (error) {
-      void this.failAndCancel(error);
+      await this.failAndCancel(error);
+      return false;
+    } finally {
+      this.holdTransition = false;
     }
   }
 
-  sendDigit(digit: DtmfDigit): boolean {
-    const call = this.currentCall;
-    if (!call || this.currentState !== "live" || this.desiredHold) return false;
-    try {
-      call.dtmf(digit);
-      return true;
-    } catch {
-      // A single menu digit is recoverable. The operator can retry it without
-      // tearing down an otherwise healthy conversation.
-      return false;
-    }
+  async sendDigit(digit: DtmfDigit): Promise<boolean> {
+    if (!this.currentCall || !this.callId || this.currentState !== "live" || this.desiredHold || this.holdTransition) return false;
+    const result = await this.dependencies.sendDigit(this.callId, digit).catch(() => null);
+    return result?.ok === true;
   }
 
   hangup(): Promise<CallResult> {
