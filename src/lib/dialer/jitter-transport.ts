@@ -20,6 +20,7 @@ import type {
   CallTarget,
   CallTransport,
   CallTransportState,
+  DtmfDigit,
 } from "./transport";
 
 const TELNYX_REGISTER_TIMEOUT_MS = 25_000;
@@ -47,6 +48,7 @@ type TelnyxCallLike = {
   unmuteAudio(): void;
   hold(): Promise<unknown> | void;
   unhold(): Promise<unknown> | void;
+  dtmf(digit: DtmfDigit): void;
 };
 
 type TelnyxRtcLike = {
@@ -223,6 +225,19 @@ export class JitterCallTransport implements CallTransport {
       void Promise.resolve(result).catch((error) => this.failAndCancel(error));
     } catch (error) {
       void this.failAndCancel(error);
+    }
+  }
+
+  sendDigit(digit: DtmfDigit): boolean {
+    const call = this.currentCall;
+    if (!call || this.currentState !== "live" || this.desiredHold) return false;
+    try {
+      call.dtmf(digit);
+      return true;
+    } catch {
+      // A single menu digit is recoverable. The operator can retry it without
+      // tearing down an otherwise healthy conversation.
+      return false;
     }
   }
 

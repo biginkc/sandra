@@ -56,6 +56,7 @@ class FakeCall {
   readonly unmuteAudio = vi.fn();
   readonly hold = vi.fn(async () => undefined);
   readonly unhold = vi.fn(async () => undefined);
+  readonly dtmf = vi.fn();
 }
 
 function transportHarness(
@@ -283,13 +284,18 @@ describe("JitterCallTransport", () => {
     );
     harness.transport.mute(true);
     harness.transport.mute(false);
+    expect(harness.transport.sendDigit("5")).toBe(true);
     harness.transport.hold(true);
+    expect(harness.transport.sendDigit("#")).toBe(false);
     harness.transport.hold(false);
+    expect(harness.transport.sendDigit("#")).toBe(true);
     await flush();
     expect(call.muteAudio).toHaveBeenCalledTimes(1);
     expect(call.unmuteAudio).toHaveBeenCalledTimes(1);
     expect(call.hold).toHaveBeenCalledTimes(1);
     expect(call.unhold).toHaveBeenCalledTimes(1);
+    expect(call.dtmf).toHaveBeenNthCalledWith(1, "5");
+    expect(call.dtmf).toHaveBeenNthCalledWith(2, "#");
 
     harness.setNow(Date.parse("2026-08-21T20:00:03.900Z"));
     await expect(harness.transport.hangup()).resolves.toEqual({

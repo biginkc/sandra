@@ -11,7 +11,9 @@ describe("softphone state machine", () => {
   });
 
   it("models live, held, wrap-up, and completion", () => {
-    let state = transitionSoftphoneState("idle", { type: "call_live" });
+    let state = transitionSoftphoneState("idle", { type: "call_started" });
+    expect(state).toBe("preparing");
+    state = transitionSoftphoneState(state, { type: "call_live" });
     state = transitionSoftphoneState(state, { type: "hold" });
     expect(state).toBe("held");
     state = transitionSoftphoneState(state, { type: "resume" });

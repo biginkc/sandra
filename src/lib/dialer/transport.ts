@@ -8,6 +8,7 @@ export type CallTarget = {
 
 export type CallHandle = { id: string };
 export type CallResult = { durationSeconds: number; outcome: "connected_human" | "failed" };
+export type DtmfDigit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "*" | "#";
 export type CallTransportState =
   | "connecting"
   | "ringing"
@@ -23,6 +24,8 @@ export interface CallTransport {
   start(target: CallTarget): Promise<CallHandle>;
   mute(on: boolean): void;
   hold(on: boolean): void;
+  /** Sends one live in-band menu/extension digit without changing call state. */
+  sendDigit(digit: DtmfDigit): boolean;
   hangup(): Promise<CallResult>;
   onStateChange(cb: (state: CallTransportState) => void): void;
 }
@@ -79,6 +82,11 @@ export class SimulatedCallTransport implements CallTransport {
 
   hold(on: boolean): void {
     void on;
+  }
+
+  sendDigit(digit: DtmfDigit): boolean {
+    void digit;
+    return !this.ended && this.liveAt !== null;
   }
 
   async hangup(): Promise<CallResult> {

@@ -2,23 +2,28 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { completeSoftphoneCall, loadDialerRecents, prepareLeadCall, resumeFailedSoftphoneCall, createTransport, transportEnabled } = vi.hoisted(() => ({
+const { completeSoftphoneCall, loadDialerRecents, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, searchDialerLeads, createTransport, transportEnabled, playDtmfTone } = vi.hoisted(() => ({
   completeSoftphoneCall: vi.fn(),
   loadDialerRecents: vi.fn(async () => ({ ok: true, data: [] })),
   prepareLeadCall: vi.fn(),
+  prepareManualCall: vi.fn(),
   resumeFailedSoftphoneCall: vi.fn(),
   createTransport: vi.fn(),
   transportEnabled: vi.fn(),
+  searchDialerLeads: vi.fn(async () => ({ ok: true, data: [] })),
+  playDtmfTone: vi.fn(),
 }));
 
 vi.mock("@/lib/dialer/actions", () => ({
   completeSoftphoneCall,
   loadDialerRecents,
   prepareLeadCall,
-  prepareManualCall: vi.fn(),
+  prepareManualCall,
   resumeFailedSoftphoneCall,
-  searchDialerLeads: vi.fn(),
+  searchDialerLeads,
 }));
+
+vi.mock("@/lib/dialer/dtmf-tone", () => ({ playDtmfTone }));
 
 vi.mock("@/lib/dialer/transport-selection", () => ({
   createSoftphoneCallTransport: createTransport,
@@ -32,6 +37,9 @@ describe("SoftphoneProvider transport gate", () => {
   beforeEach(() => {
     completeSoftphoneCall.mockReset();
     prepareLeadCall.mockReset();
+    prepareManualCall.mockReset();
+    searchDialerLeads.mockResolvedValue({ ok: true, data: [] });
+    playDtmfTone.mockReset();
     resumeFailedSoftphoneCall.mockReset();
     loadDialerRecents.mockResolvedValue({ ok: true, data: [] });
     transportEnabled.mockImplementation(() => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "simulated");
@@ -46,12 +54,64 @@ describe("SoftphoneProvider transport gate", () => {
         }),
         mute: vi.fn(),
         hold: vi.fn(),
+        sendDigit: vi.fn(() => true),
         hangup: vi.fn(async () => {
           listener?.("ended");
           return { durationSeconds: 1, outcome: "connected_human" as const };
         }),
       };
     });
+  });
+
+  it("shows the selected lead while preparation is pending without flashing the idle keypad", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockImplementation(() => new Promise(() => undefined));
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+
+    await user.click(screen.getByTestId("call-lead-button"));
+
+    expect(screen.getByTestId("call-preparing")).toHaveTextContent("Softphone Lead");
+    expect(screen.queryByTestId("dialer-input")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("phone-keypad")).not.toBeInTheDocument();
+  });
+
+  it("accepts clicked and keyboard digits once, tones only those presses, and keeps paste silent", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+    const input = screen.getByTestId("dialer-input");
+
+    await user.click(screen.getByLabelText("Keypad 3"));
+    await user.type(input, "10");
+    await user.paste("7540662");
+
+    expect(input).toHaveValue("(310) 754-0662");
+    expect(playDtmfTone.mock.calls.map(([digit]) => digit)).toEqual(["3", "1", "0"]);
+    expect(screen.getByTestId("dialer-call-manual")).toHaveTextContent("Call (310) 754-0662");
+  });
+
+  it("keeps live keypad hidden until requested and sends digits only while live and not held", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    const sendDigit = vi.fn(() => true);
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "connecting" | "live" | "ended") => void) | null = null;
+      return { onStateChange: vi.fn((cb) => { listener = cb; }), start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }), mute: vi.fn(), hold: vi.fn(), sendDigit, hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })) };
+    });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+    expect(screen.queryByTestId("phone-keypad")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("call-keypad"));
+    await user.click(screen.getByLabelText("Keypad #"));
+    expect(sendDigit).toHaveBeenCalledWith("#");
+    expect(playDtmfTone).toHaveBeenCalledWith("#");
+    await user.click(screen.getByTestId("call-hold"));
+    expect(screen.queryByTestId("phone-keypad")).not.toBeInTheDocument();
+    expect(screen.getByTestId("call-keypad")).toBeDisabled();
   });
 
   it.each([
