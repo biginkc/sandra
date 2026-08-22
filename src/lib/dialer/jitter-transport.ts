@@ -2,11 +2,14 @@ import {
   cancelJitterSoftphoneCall,
   connectJitterSoftphoneCall,
   getJitterSoftphoneToken,
+  reportJitterSoftphoneAudioHealth,
   startJitterSoftphoneCall,
 } from "./jitter-actions";
 import type {
   JitterCancelResponse,
   JitterCancelReason,
+  JitterAudioHealthResponse,
+  JitterAudioHealthSample,
   JitterConnectPhase,
   JitterProxyResult,
   JitterTokenResponse,
@@ -23,6 +26,7 @@ const TELNYX_REGISTER_TIMEOUT_MS = 25_000;
 const JITTER_START_ACTION_ATTEMPTS = 2;
 const JITTER_CANCEL_ATTEMPTS = 3;
 const JITTER_CANCEL_BACKOFF_MS = [100, 300] as const;
+const JITTER_AUDIO_HEALTH_REPORT_TIMEOUT_MS = 1_500;
 const TELNYX_TOKEN_EXPIRING_SOON = 34_001;
 const TELNYX_HOLD_FAILED = 44_001;
 const TELNYX_BYE_SEND_FAILED = 44_003;
@@ -34,6 +38,7 @@ type TelnyxCallLike = {
   direction?: string;
   state?: string;
   cause?: string;
+  peer?: { instance?: RTCPeerConnection | null };
   sipCode?: number;
   sipReason?: string;
   answer(): Promise<void> | void;
@@ -59,24 +64,43 @@ type TelnyxNotificationLike = {
 };
 
 export type JitterTransportDependencies = {
-  startCall(target: CallTarget): Promise<JitterProxyResult<{ callId: string; batchId: string }>>;
+  prepareMicrophone(): Promise<void>;
+  startCall(
+    target: CallTarget,
+  ): Promise<JitterProxyResult<{ callId: string; batchId: string }>>;
   getToken(callId: string): Promise<JitterProxyResult<JitterTokenResponse>>;
-  connect(callId: string, phase: JitterConnectPhase): Promise<JitterProxyResult<{ dialing: true }>>;
-  cancel(callId: string, reason: JitterCancelReason): Promise<JitterProxyResult<JitterCancelResponse>>;
-  createRtcClient(token: string, remoteAudio: HTMLAudioElement | null): Promise<TelnyxRtcLike>;
+  connect(
+    callId: string,
+    phase: JitterConnectPhase,
+  ): Promise<JitterProxyResult<{ dialing: true }>>;
+  cancel(
+    callId: string,
+    reason: JitterCancelReason,
+  ): Promise<JitterProxyResult<JitterCancelResponse>>;
+  reportAudioHealth(
+    callId: string,
+    sample: JitterAudioHealthSample,
+  ): Promise<JitterProxyResult<JitterAudioHealthResponse>>;
+  createRtcClient(
+    token: string,
+    remoteAudio: HTMLAudioElement | null,
+  ): Promise<TelnyxRtcLike>;
   createRemoteAudio(): HTMLAudioElement | null;
   subscribePageHide(handler: () => void): () => void;
   sendCancelBeacon(callId: string, reason: JitterCancelReason): boolean;
   sleep(delayMs: number): Promise<void>;
+  scheduleAudioHealth(handler: () => void): () => void;
   now(): number;
   registrationTimeoutMs: number;
 };
 
 const defaultDependencies: JitterTransportDependencies = {
+  prepareMicrophone,
   startCall: startJitterSoftphoneCall,
   getToken: getJitterSoftphoneToken,
   connect: connectJitterSoftphoneCall,
   cancel: cancelJitterSoftphoneCall,
+  reportAudioHealth: reportJitterSoftphoneAudioHealth,
   createRtcClient: createTelnyxRtcClient,
   createRemoteAudio,
   subscribePageHide(handler) {
@@ -85,8 +109,16 @@ const defaultDependencies: JitterTransportDependencies = {
     return () => window.removeEventListener("pagehide", handler);
   },
   sleep: (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+  scheduleAudioHealth(handler) {
+    const timer = setInterval(handler, 1_000);
+    return () => clearInterval(timer);
+  },
   sendCancelBeacon(callId, reason) {
-    if (typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") return false;
+    if (
+      typeof navigator === "undefined" ||
+      typeof navigator.sendBeacon !== "function"
+    )
+      return false;
     const body = JSON.stringify({ callId, reason });
     return navigator.sendBeacon(
       "/api/softphone/jitter/cancel",
@@ -98,7 +130,10 @@ const defaultDependencies: JitterTransportDependencies = {
 };
 
 export function mapTelnyxCallState(
-  call: Pick<TelnyxCallLike, "direction" | "state" | "sipCode" | "sipReason" | "cause">,
+  call: Pick<
+    TelnyxCallLike,
+    "direction" | "state" | "sipCode" | "sipReason" | "cause"
+  >,
   wasLive: boolean,
 ): CallTransportState | null {
   const state = call.state?.trim().toLowerCase();
@@ -108,7 +143,12 @@ export function mapTelnyxCallState(
   if ((call.sipCode ?? 0) >= 400) return "failed";
   if (call.direction === "inbound" && state === "ringing") return "ringing";
   if (state === "active" || state === "held") return "live";
-  if (state === "requesting" || state === "trying" || state === "answering" || state === "early") {
+  if (
+    state === "requesting" ||
+    state === "trying" ||
+    state === "answering" ||
+    state === "early"
+  ) {
     return "connecting";
   }
   return null;
@@ -142,8 +182,16 @@ export class JitterCallTransport implements CallTransport {
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private removePageHideListener: (() => void) | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
+  private stopAudioHealth: (() => void) | null = null;
+  private audioHealthControllerId = newControllerId();
+  private audioHealthPeer: RTCPeerConnection | null = null;
+  private audioHealthPeerGeneration = 0;
+  private audioHealthSequence = 0;
+  private audioHealthInFlight = false;
 
-  constructor(private readonly dependencies: JitterTransportDependencies = defaultDependencies) {}
+  constructor(
+    private readonly dependencies: JitterTransportDependencies = defaultDependencies,
+  ) {}
 
   onStateChange(cb: (state: CallTransportState) => void): void {
     this.listener = cb;
@@ -199,10 +247,19 @@ export class JitterCallTransport implements CallTransport {
   private async startInternal(target: CallTarget): Promise<CallHandle> {
     this.emit("connecting");
     try {
+      // Ask for microphone access while the call-button gesture is still the
+      // active browser interaction. Waiting until Telnyx delivers the
+      // operator leg leaves the permission prompt inside the provider's
+      // answer timeout, which can terminate the leg as busy before the user
+      // has a chance to grant access. Do not provision anything until audio
+      // capture is proven available.
+      await this.dependencies.prepareMicrophone();
       const started = await this.startCallWithLostResponseRecovery(target);
       if (!started.ok) throw proxyError(started);
       this.callId = started.data.callId;
-      this.removePageHideListener = this.dependencies.subscribePageHide(() => this.onPageHide());
+      this.removePageHideListener = this.dependencies.subscribePageHide(() =>
+        this.onPageHide(),
+      );
       if (this.hangupRequested) {
         await this.cancel("hangup");
         throw new Error("Call start was canceled.");
@@ -217,7 +274,10 @@ export class JitterCallTransport implements CallTransport {
       }
 
       this.remoteAudio = this.dependencies.createRemoteAudio();
-      this.rtcClient = await this.dependencies.createRtcClient(token.data.rtc_token, this.remoteAudio);
+      this.rtcClient = await this.dependencies.createRtcClient(
+        token.data.rtc_token,
+        this.remoteAudio,
+      );
       this.bindRtcEvents(this.rtcClient);
       await this.registerRtc(this.rtcClient);
       if (this.hangupRequested) {
@@ -227,7 +287,10 @@ export class JitterCallTransport implements CallTransport {
 
       // Arm the incoming handler before triggering Jitter's operator leg.
       this.expectedIncoming = true;
-      const connected = await this.dependencies.connect(this.callId, "registered");
+      const connected = await this.dependencies.connect(
+        this.callId,
+        "registered",
+      );
       if (!connected.ok) throw proxyError(connected);
       return { id: this.callId };
     } catch (error) {
@@ -239,9 +302,14 @@ export class JitterCallTransport implements CallTransport {
   private async startCallWithLostResponseRecovery(
     target: CallTarget,
   ): Promise<JitterProxyResult<{ callId: string; batchId: string }>> {
-    let lastResult: JitterProxyResult<{ callId: string; batchId: string }> | undefined;
+    let lastResult:
+      JitterProxyResult<{ callId: string; batchId: string }> | undefined;
     let lastError: unknown;
-    for (let attempt = 0; attempt < JITTER_START_ACTION_ATTEMPTS; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < JITTER_START_ACTION_ATTEMPTS;
+      attempt += 1
+    ) {
       try {
         lastResult = await this.dependencies.startCall(target);
         if (lastResult.ok || lastResult.status < 500) return lastResult;
@@ -250,7 +318,9 @@ export class JitterCallTransport implements CallTransport {
       }
     }
     if (lastResult) return lastResult;
-    throw lastError instanceof Error ? lastError : new Error("Jitter call start response was lost.");
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("Jitter call start response was lost.");
   }
 
   private bindRtcEvents(client: TelnyxRtcLike): void {
@@ -260,7 +330,8 @@ export class JitterCallTransport implements CallTransport {
         this.finishRegistration();
       })
       .on("telnyx.socket.close", () => {
-        if (!this.terminal && !this.hangupRequested) this.beginRecoveryTimeout();
+        if (!this.terminal && !this.hangupRequested)
+          this.beginRecoveryTimeout();
       })
       .on("telnyx.error", (event) => {
         if (this.terminal || this.hangupRequested) return;
@@ -279,7 +350,8 @@ export class JitterCallTransport implements CallTransport {
         void this.failAndCancel(eventError(event));
       })
       .on("telnyx.warning", (event) => {
-        if (warningCode(event) === TELNYX_TOKEN_EXPIRING_SOON) void this.refreshRtcToken();
+        if (warningCode(event) === TELNYX_TOKEN_EXPIRING_SOON)
+          void this.refreshRtcToken();
       })
       .on("telnyx.notification", (notification) => {
         this.handleNotification(notification as TelnyxNotificationLike);
@@ -291,7 +363,11 @@ export class JitterCallTransport implements CallTransport {
       this.resolveRegistration = resolve;
       this.rejectRegistration = reject;
       this.registrationTimer = setTimeout(() => {
-        reject(new Error(`Telnyx WebRTC registration timed out after ${this.dependencies.registrationTimeoutMs}ms.`));
+        reject(
+          new Error(
+            `Telnyx WebRTC registration timed out after ${this.dependencies.registrationTimeoutMs}ms.`,
+          ),
+        );
         this.clearRegistration();
       }, this.dependencies.registrationTimeoutMs);
     });
@@ -320,7 +396,9 @@ export class JitterCallTransport implements CallTransport {
 
   private handleNotification(notification: TelnyxNotificationLike): void {
     if (notification.type === "userMediaError") {
-      void this.failAndCancel(notification.error ?? new Error("Telnyx microphone access failed."));
+      void this.failAndCancel(
+        notification.error ?? new Error("Telnyx microphone access failed."),
+      );
       return;
     }
     if (notification.type !== "callUpdate" || !notification.call) return;
@@ -356,7 +434,9 @@ export class JitterCallTransport implements CallTransport {
     this.emit("ringing");
     if (this.answerStarted) return;
     this.answerStarted = true;
-    void Promise.resolve(call.answer()).catch((error) => this.failAndCancel(error));
+    void Promise.resolve(call.answer()).catch((error) =>
+      this.failAndCancel(error),
+    );
   }
 
   private handleMappedCallState(
@@ -370,11 +450,18 @@ export class JitterCallTransport implements CallTransport {
       if (firstLive) this.liveAt = this.dependencies.now();
       if (firstLive || recovered) this.applyDesiredControls();
       if (firstLive) void this.acceptActiveCall(call);
+      if (firstLive) this.startAudioHealth();
       this.emit("live");
       return;
     }
     if (mapped === "failed") {
-      void this.failAndCancel(new Error(call.sipReason?.trim() || call.cause?.trim() || "The Telnyx call failed."));
+      void this.failAndCancel(
+        new Error(
+          call.sipReason?.trim() ||
+            call.cause?.trim() ||
+            "The Telnyx call failed.",
+        ),
+      );
       return;
     }
     if (mapped === "ended") {
@@ -390,22 +477,24 @@ export class JitterCallTransport implements CallTransport {
   private async acceptActiveCall(call: TelnyxCallLike): Promise<void> {
     if (this.acceptedPromise) return this.acceptedPromise;
     if (
-      !this.callId
-      || this.currentCall !== call
-      || this.terminal
-      || this.hangupRequested
-      || this.cancelPromise
-    ) return;
+      !this.callId ||
+      this.currentCall !== call ||
+      this.terminal ||
+      this.hangupRequested ||
+      this.cancelPromise
+    )
+      return;
     const callId = this.callId;
     this.acceptedPromise = (async () => {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         if (
-          this.callId !== callId
-          || this.currentCall !== call
-          || this.terminal
-          || this.hangupRequested
-          || this.cancelPromise
-        ) return;
+          this.callId !== callId ||
+          this.currentCall !== call ||
+          this.terminal ||
+          this.hangupRequested ||
+          this.cancelPromise
+        )
+          return;
         let accepted: JitterProxyResult<{ dialing: true }>;
         try {
           accepted = await this.dependencies.connect(callId, "accepted");
@@ -431,7 +520,10 @@ export class JitterCallTransport implements CallTransport {
     if (!call) return;
     try {
       if (this.desiredMute) call.muteAudio();
-      if (this.desiredHold) void Promise.resolve(call.hold()).catch((error) => this.failAndCancel(error));
+      if (this.desiredHold)
+        void Promise.resolve(call.hold()).catch((error) =>
+          this.failAndCancel(error),
+        );
     } catch (error) {
       void this.failAndCancel(error);
     }
@@ -442,18 +534,22 @@ export class JitterCallTransport implements CallTransport {
     this.refreshPromise = (async () => {
       const callId = this.callId;
       const client = this.rtcClient;
-      if (!callId || !client?.login) throw new Error("Telnyx token refresh is unavailable.");
+      if (!callId || !client?.login)
+        throw new Error("Telnyx token refresh is unavailable.");
       const token = await this.dependencies.getToken(callId);
       if (!token.ok) throw proxyError(token);
       requireUsableToken(token.data, this.dependencies.now());
       if (
-        this.callId !== callId
-        || this.rtcClient !== client
-        || this.terminal
-        || this.hangupRequested
-        || this.cancelPromise
-      ) return;
-      await Promise.resolve(client.login({ creds: { login_token: token.data.rtc_token } }));
+        this.callId !== callId ||
+        this.rtcClient !== client ||
+        this.terminal ||
+        this.hangupRequested ||
+        this.cancelPromise
+      )
+        return;
+      await Promise.resolve(
+        client.login({ creds: { login_token: token.data.rtc_token } }),
+      );
     })();
     try {
       await this.refreshPromise;
@@ -499,9 +595,10 @@ export class JitterCallTransport implements CallTransport {
     }
     return {
       durationSeconds: this.duration(),
-      outcome: this.terminal !== "failed" && this.liveAt !== null && canceled
-        ? "connected_human"
-        : "failed",
+      outcome:
+        this.terminal !== "failed" && this.liveAt !== null && canceled
+          ? "connected_human"
+          : "failed",
     };
   }
 
@@ -541,7 +638,8 @@ export class JitterCallTransport implements CallTransport {
     this.cancelPromise = attempt;
     void attempt.then(
       (confirmed) => {
-        if (!confirmed && this.cancelPromise === attempt) this.cancelPromise = null;
+        if (!confirmed && this.cancelPromise === attempt)
+          this.cancelPromise = null;
       },
       () => {
         this.lastTeardownConfirmed = false;
@@ -574,6 +672,9 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private destroyRtc(preservePageHideListener = false): void {
+    this.stopAudioHealth?.();
+    this.stopAudioHealth = null;
+    this.audioHealthPeer = null;
     if (!preservePageHideListener) {
       this.removePageHideListener?.();
       this.removePageHideListener = null;
@@ -582,7 +683,8 @@ export class JitterCallTransport implements CallTransport {
     this.clearRecoveryTimer();
     const client = this.rtcClient;
     this.rtcClient = null;
-    if (client) void Promise.resolve(client.disconnect()).catch(() => undefined);
+    if (client)
+      void Promise.resolve(client.disconnect()).catch(() => undefined);
     this.remoteAudio?.remove();
     this.remoteAudio = null;
   }
@@ -596,7 +698,12 @@ export class JitterCallTransport implements CallTransport {
   private duration(): number {
     return this.liveAt === null
       ? 0
-      : Math.max(0, Math.floor(((this.terminalAt ?? this.dependencies.now()) - this.liveAt) / 1000));
+      : Math.max(
+          0,
+          Math.floor(
+            ((this.terminalAt ?? this.dependencies.now()) - this.liveAt) / 1000,
+          ),
+        );
   }
 
   private beginRecoveryTimeout(): void {
@@ -611,17 +718,142 @@ export class JitterCallTransport implements CallTransport {
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
   }
+
+  private startAudioHealth(): void {
+    if (this.stopAudioHealth) return;
+    const sample = () => void this.sampleAudioHealth();
+    sample();
+    this.stopAudioHealth = this.dependencies.scheduleAudioHealth(sample);
+  }
+
+  private async sampleAudioHealth(): Promise<void> {
+    if (this.audioHealthInFlight) return;
+    const callId = this.callId;
+    const call = this.currentCall;
+    if (!callId || !call || this.terminal || this.hangupRequested) return;
+    this.audioHealthInFlight = true;
+    try {
+      const peer = call.peer?.instance ?? null;
+      if (!peer || peer.connectionState === "closed") return;
+      if (this.audioHealthPeer !== peer) {
+        this.audioHealthPeer = peer;
+        this.audioHealthPeerGeneration += 1;
+        this.audioHealthSequence = 0;
+      }
+      const counters = await inboundAudioCounters(peer).catch(() => undefined);
+      if (
+        !counters ||
+        this.callId !== callId ||
+        this.currentCall !== call ||
+        this.terminal
+      )
+        return;
+      this.audioHealthSequence += 1;
+      await settleBeforeDeadline(
+        Promise.resolve()
+          .then(() =>
+            this.dependencies.reportAudioHealth(callId, {
+              controller_id: this.audioHealthControllerId,
+              peer_connection_generation: this.audioHealthPeerGeneration,
+              sample_sequence: this.audioHealthSequence,
+              packets_received: counters.packetsReceived,
+              bytes_received: counters.bytesReceived,
+            }),
+          )
+          .catch(() => undefined),
+        JITTER_AUDIO_HEALTH_REPORT_TIMEOUT_MS,
+      );
+    } finally {
+      this.audioHealthInFlight = false;
+    }
+  }
 }
 
-function proxyError(error: { error: string; errorCode: string; reason?: string }): Error {
+async function settleBeforeDeadline(
+  operation: Promise<unknown>,
+  timeoutMs: number,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      operation,
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function inboundAudioCounters(peer: RTCPeerConnection): Promise<
+  | {
+      packetsReceived: number;
+      bytesReceived: number;
+    }
+  | undefined
+> {
+  const report = await peer.getStats();
+  let found = false;
+  let packetsReceived = 0;
+  let bytesReceived = 0;
+  report.forEach((stat) => {
+    if (stat.type !== "inbound-rtp" || stat.isRemote === true) return;
+    const kind = stat.kind ?? stat.mediaType;
+    if (kind !== "audio") return;
+    found = true;
+    packetsReceived += safeCounter(stat.packetsReceived);
+    bytesReceived += safeCounter(stat.bytesReceived);
+  });
+  return found ? { packetsReceived, bytesReceived } : undefined;
+}
+
+function safeCounter(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : 0;
+}
+
+function newControllerId(): string {
+  return typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : "00000000-0000-4000-8000-000000000001";
+}
+
+async function prepareMicrophone(): Promise<void> {
+  if (
+    typeof navigator === "undefined" ||
+    !navigator.mediaDevices?.getUserMedia
+  ) {
+    throw new Error("Microphone access is required to place calls.");
+  }
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    throw new Error("Microphone access is required to place calls.");
+  }
+  for (const track of stream.getTracks()) track.stop();
+}
+
+function proxyError(error: {
+  error: string;
+  errorCode: string;
+  reason?: string;
+}): Error {
   const result = new Error(error.reason ?? error.error);
   result.name = error.errorCode;
   return result;
 }
 
-function proxyFailureState(error: unknown): "failed" | "operator_busy" | "not_callable" {
-  if (error instanceof Error && error.name === "operator_busy") return "operator_busy";
-  if (error instanceof Error && error.name === "not_callable") return "not_callable";
+function proxyFailureState(
+  error: unknown,
+): "failed" | "operator_busy" | "not_callable" {
+  if (error instanceof Error && error.name === "operator_busy")
+    return "operator_busy";
+  if (error instanceof Error && error.name === "not_callable")
+    return "not_callable";
   return "failed";
 }
 
@@ -642,18 +874,24 @@ function eventError(event: unknown): unknown {
 
 function eventErrorCode(event: unknown): number | undefined {
   const error = eventError(event);
-  if (!error || typeof error !== "object" || !("code" in error)) return undefined;
+  if (!error || typeof error !== "object" || !("code" in error))
+    return undefined;
   const code = (error as { code?: unknown }).code;
   return typeof code === "number" ? code : undefined;
 }
 
 function isTerminalCallState(state: string | undefined): boolean {
   const normalized = state?.trim().toLowerCase();
-  return normalized === "hangup" || normalized === "destroy" || normalized === "purge";
+  return (
+    normalized === "hangup" ||
+    normalized === "destroy" ||
+    normalized === "purge"
+  );
 }
 
 function warningCode(event: unknown): number | undefined {
-  if (!event || typeof event !== "object" || !("warning" in event)) return undefined;
+  if (!event || typeof event !== "object" || !("warning" in event))
+    return undefined;
   const warning = (event as { warning?: { code?: unknown } }).warning;
   return typeof warning?.code === "number" ? warning.code : undefined;
 }
@@ -662,9 +900,12 @@ async function createTelnyxRtcClient(
   token: string,
   remoteAudio: HTMLAudioElement | null,
 ): Promise<TelnyxRtcLike> {
-  const sdk = await import("@telnyx/webrtc") as unknown as {
+  const sdk = (await import("@telnyx/webrtc")) as unknown as {
     TelnyxRTC: {
-      new(options: { login_token: string; keepConnectionAliveOnSocketClose?: boolean }): TelnyxRtcLike;
+      new (options: {
+        login_token: string;
+        keepConnectionAliveOnSocketClose?: boolean;
+      }): TelnyxRtcLike;
       webRTCInfo?: () => { supportWebRTCAudio?: boolean } | string;
     };
   };

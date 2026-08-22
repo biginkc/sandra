@@ -7,6 +7,7 @@ export const JITTER_SOFTPHONE_PATHS = {
   startCall: "/api/internal/sandra/softphone/start-call",
   token: "/api/internal/sandra/softphone/token",
   connect: "/api/internal/sandra/softphone/connect",
+  audioHealth: "/api/internal/sandra/softphone/audio-health",
   cancel: "/api/internal/sandra/softphone/cancel",
 } as const;
 
@@ -31,6 +32,20 @@ export type JitterTokenResponse = {
 
 export type JitterConnectPhase = "registered" | "accepted";
 export type JitterCancelReason = "hangup" | "failed" | "abandoned";
+
+export type JitterAudioHealthSample = {
+  controller_id: string;
+  peer_connection_generation: number;
+  sample_sequence: number;
+  packets_received: number;
+  bytes_received: number;
+};
+
+export type JitterAudioHealthResponse = {
+  accepted: boolean;
+  pending?: boolean;
+  status?: "monitoring" | "healthy" | "suspect";
+};
 
 export type JitterCancelResponse = {
   call_id: string;
@@ -58,8 +73,10 @@ export type JitterProxyResult<T> = { ok: true; data: T } | JitterProxyError;
 type JsonObject = Record<string, unknown>;
 type ResponseValidator<T> = (value: unknown) => value is T;
 
-function configuredJitter(): { baseUrl: string; serviceToken: string } | JitterProxyError {
-  const baseUrl = process.env.JITTER_SOFTPHONE_BASE_URL?.trim().replace(/\/+$/, "") ?? "";
+function configuredJitter():
+  { baseUrl: string; serviceToken: string } | JitterProxyError {
+  const baseUrl =
+    process.env.JITTER_SOFTPHONE_BASE_URL?.trim().replace(/\/+$/, "") ?? "";
   const serviceToken = process.env.JITTER_SOFTPHONE_SERVICE_TOKEN?.trim() ?? "";
   if (!baseUrl || !serviceToken) {
     return {
@@ -71,8 +88,18 @@ function configuredJitter(): { baseUrl: string; serviceToken: string } | JitterP
   }
   try {
     const parsed = new URL(baseUrl);
-    const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "::1";
-    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback && process.env.NODE_ENV !== "production")) {
+    const loopback =
+      parsed.hostname === "localhost" ||
+      parsed.hostname === "127.0.0.1" ||
+      parsed.hostname === "::1";
+    if (
+      parsed.protocol !== "https:" &&
+      !(
+        parsed.protocol === "http:" &&
+        loopback &&
+        process.env.NODE_ENV !== "production"
+      )
+    ) {
       throw new Error("Jitter softphone requires HTTPS");
     }
   } catch {
@@ -86,7 +113,10 @@ function configuredJitter(): { baseUrl: string; serviceToken: string } | JitterP
   return { baseUrl, serviceToken };
 }
 
-export function signJitterSoftphoneBody(serviceToken: string, rawBody = ""): string {
+export function signJitterSoftphoneBody(
+  serviceToken: string,
+  rawBody = "",
+): string {
   return `sha256=${createHmac("sha256", serviceToken).update(rawBody).digest("hex")}`;
 }
 
@@ -105,19 +135,27 @@ export async function requestJitterSoftphone<T>(args: {
   const rawBody = args.body === undefined ? "" : JSON.stringify(args.body);
   let response: Response;
   try {
-    response = await (args.fetchImpl ?? fetch)(`${config.baseUrl}${args.path}`, {
-      method,
-      cache: "no-store",
-      redirect: "error",
-      signal: AbortSignal.timeout(JITTER_REQUEST_TIMEOUT_MS),
-      headers: {
-        authorization: `Bearer ${config.serviceToken}`,
-        "X-Jitter-Signature": signJitterSoftphoneBody(config.serviceToken, rawBody),
-        ...(args.idempotencyKey ? { "Idempotency-Key": args.idempotencyKey } : {}),
-        ...(rawBody ? { "content-type": "application/json" } : {}),
+    response = await (args.fetchImpl ?? fetch)(
+      `${config.baseUrl}${args.path}`,
+      {
+        method,
+        cache: "no-store",
+        redirect: "error",
+        signal: AbortSignal.timeout(JITTER_REQUEST_TIMEOUT_MS),
+        headers: {
+          authorization: `Bearer ${config.serviceToken}`,
+          "X-Jitter-Signature": signJitterSoftphoneBody(
+            config.serviceToken,
+            rawBody,
+          ),
+          ...(args.idempotencyKey
+            ? { "Idempotency-Key": args.idempotencyKey }
+            : {}),
+          ...(rawBody ? { "content-type": "application/json" } : {}),
+        },
+        ...(rawBody ? { body: rawBody } : {}),
       },
-      ...(rawBody ? { body: rawBody } : {}),
-    });
+    );
   } catch {
     return {
       ok: false,
@@ -139,7 +177,9 @@ export async function requestJitterSoftphone<T>(args: {
     return {
       ok: false,
       status: response.status,
-      error: stringValue(envelope.error) ?? `Jitter softphone request failed (${response.status}).`,
+      error:
+        stringValue(envelope.error) ??
+        `Jitter softphone request failed (${response.status}).`,
       errorCode: stringValue(envelope.error_code) ?? "jitter_request_failed",
     };
   }
@@ -179,7 +219,12 @@ export function requestJitterToken(
   fetchImpl?: typeof fetch,
 ): Promise<JitterProxyResult<JitterTokenResponse>> {
   const path = `${JITTER_SOFTPHONE_PATHS.token}?call_id=${encodeURIComponent(callId)}`;
-  return requestJitterSoftphone({ path, method: "GET", validate: isTokenResponse, fetchImpl });
+  return requestJitterSoftphone({
+    path,
+    method: "GET",
+    validate: isTokenResponse,
+    fetchImpl,
+  });
 }
 
 export function requestJitterConnect(
@@ -208,10 +253,25 @@ export function requestJitterCancel(
   });
 }
 
+export function requestJitterAudioHealth(
+  callId: string,
+  sample: JitterAudioHealthSample,
+  fetchImpl?: typeof fetch,
+): Promise<JitterProxyResult<JitterAudioHealthResponse>> {
+  return requestJitterSoftphone({
+    path: JITTER_SOFTPHONE_PATHS.audioHealth,
+    body: { call_id: callId, ...sample },
+    validate: isAudioHealthResponse,
+    fetchImpl,
+  });
+}
+
 function isRetryableStartFailure(error: JitterProxyError): boolean {
-  return error.status >= 500
-    && error.errorCode !== "jitter_not_configured"
-    && error.errorCode !== "jitter_invalid_configuration";
+  return (
+    error.status >= 500 &&
+    error.errorCode !== "jitter_not_configured" &&
+    error.errorCode !== "jitter_invalid_configuration"
+  );
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -223,34 +283,61 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function isStartResponse(value: unknown): value is JitterStartCallResponse {
-  return isObject(value)
-    && Boolean(
-      stringValue(value.call_id)
-      && stringValue(value.session_id)
-      && stringValue(value.batch_id)
-      && stringValue(value.run_id),
-    );
+  return (
+    isObject(value) &&
+    Boolean(
+      stringValue(value.call_id) &&
+      stringValue(value.session_id) &&
+      stringValue(value.batch_id) &&
+      stringValue(value.run_id),
+    )
+  );
 }
 
 function isTokenResponse(value: unknown): value is JitterTokenResponse {
-  return isObject(value)
-    && Boolean(stringValue(value.rtc_token) && stringValue(value.sip_identity) && stringValue(value.expires_at))
-    && Number.isFinite(Date.parse(String(value.expires_at)));
+  return (
+    isObject(value) &&
+    Boolean(
+      stringValue(value.rtc_token) &&
+      stringValue(value.sip_identity) &&
+      stringValue(value.expires_at),
+    ) &&
+    Number.isFinite(Date.parse(String(value.expires_at)))
+  );
 }
 
 function isConnectResponse(value: unknown): value is { dialing: true } {
   return isObject(value) && value.dialing === true;
 }
 
+function isAudioHealthResponse(
+  value: unknown,
+): value is JitterAudioHealthResponse {
+  if (!isObject(value) || typeof value.accepted !== "boolean") return false;
+  if (value.pending !== undefined && typeof value.pending !== "boolean")
+    return false;
+  return (
+    value.status === undefined ||
+    value.status === "monitoring" ||
+    value.status === "healthy" ||
+    value.status === "suspect"
+  );
+}
+
 function isCancelResponse(value: unknown): value is JitterCancelResponse {
   if (!isObject(value) || !isObject(value.teardown)) return false;
-  return Boolean(stringValue(value.call_id) && stringValue(value.session_id))
-    && (value.status === "ended" || value.status === "failed")
-    && [
+  return (
+    Boolean(stringValue(value.call_id) && stringValue(value.session_id)) &&
+    (value.status === "ended" || value.status === "failed") &&
+    [
       value.teardown.released_batch_claims,
       value.teardown.revoked_bindings,
       value.teardown.revoked_device_leases,
       value.teardown.ended_shifts,
       value.teardown.released_worker_leases,
-    ].every((count) => typeof count === "number" && Number.isInteger(count) && count >= 0);
+    ].every(
+      (count) =>
+        typeof count === "number" && Number.isInteger(count) && count >= 0,
+    )
+  );
 }
