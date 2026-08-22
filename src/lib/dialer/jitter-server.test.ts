@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   requestToken: vi.fn(),
   requestConnect: vi.fn(),
   requestCancel: vi.fn(),
+  requestAudioHealth: vi.fn(),
 }));
 
 vi.mock("@/lib/dialer/actions", () => ({
@@ -25,17 +26,19 @@ vi.mock("@/lib/auth/memberships", () => ({
 }));
 
 vi.mock("./jitter-contract", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./jitter-contract")>(),
+  ...(await importOriginal<typeof import("./jitter-contract")>()),
   requestJitterStartCall: mocks.requestStart,
   requestJitterToken: mocks.requestToken,
   requestJitterConnect: mocks.requestConnect,
   requestJitterCancel: mocks.requestCancel,
+  requestJitterAudioHealth: mocks.requestAudioHealth,
 }));
 
 import {
   cancelAuthenticatedJitterCall,
   connectAuthenticatedJitterCall,
   getAuthenticatedJitterToken,
+  reportAuthenticatedJitterAudioHealth,
   startAuthenticatedJitterCall,
 } from "./jitter-server";
 
@@ -83,46 +86,83 @@ describe("authenticated Jitter softphone server boundary", () => {
       data: { user: { id: "user-1", email: "Operator@Example.Test" } },
       error: null,
     });
-    mocks.getCallerMemberships.mockResolvedValue([{ user_id: "user-1", org_id: SANDRA_ORG_ID, role: "member" }]);
+    mocks.getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: SANDRA_ORG_ID, role: "member" },
+    ]);
     mocks.prepareLeadCall.mockResolvedValue({ ok: true, data: preparedTarget });
-    mocks.prepareManualCall.mockResolvedValue({ ok: true, data: { ...preparedTarget, propertyId: null, contactId: null } });
+    mocks.prepareManualCall.mockResolvedValue({
+      ok: true,
+      data: { ...preparedTarget, propertyId: null, contactId: null },
+    });
     mocks.requestStart.mockResolvedValue({
       ok: true,
-      data: { call_id: CALL_ID, session_id: "session-1", batch_id: "batch-1", run_id: "run-1" },
+      data: {
+        call_id: CALL_ID,
+        session_id: "session-1",
+        batch_id: "batch-1",
+        run_id: "run-1",
+      },
     });
     mocks.requestToken.mockResolvedValue({
       ok: true,
-      data: { rtc_token: "token", sip_identity: "operator-1", expires_at: "2026-08-21T20:05:00.000Z" },
+      data: {
+        rtc_token: "token",
+        sip_identity: "operator-1",
+        expires_at: "2026-08-21T20:05:00.000Z",
+      },
     });
-    mocks.requestConnect.mockResolvedValue({ ok: true, data: { dialing: true } });
+    mocks.requestConnect.mockResolvedValue({
+      ok: true,
+      data: { dialing: true },
+    });
     mocks.requestCancel.mockResolvedValue({ ok: true, data: cancelData });
+    mocks.requestAudioHealth.mockResolvedValue({
+      ok: true,
+      data: { accepted: true, status: "healthy" },
+    });
   });
 
   it("authorizes active Sandra access before eligibility, then sends PR #202's exact start body", async () => {
-    const result = await startAuthenticatedJitterCall(callTarget({
-      propertyId: "property-1",
-      contactId: "contact-1",
-    }));
+    const result = await startAuthenticatedJitterCall(
+      callTarget({
+        propertyId: "property-1",
+        contactId: "contact-1",
+      }),
+    );
     expect(result).toMatchObject({ ok: true, data: { batchId: "batch-1" } });
     if (!result.ok) throw new Error("expected successful start");
     expect(result.data.callId).toMatch(/^v1\./);
 
     expect(mocks.prepareLeadCall).toHaveBeenCalledWith("property-1");
-    expect(mocks.getUser.mock.invocationCallOrder[0]).toBeLessThan(mocks.prepareLeadCall.mock.invocationCallOrder[0]);
-    expect(mocks.getCallerMemberships.mock.invocationCallOrder[0]).toBeLessThan(mocks.prepareLeadCall.mock.invocationCallOrder[0]);
-    expect(mocks.requestStart).toHaveBeenCalledWith({
-      operator_id: "user-1",
-      phone_e164: "+18165550123",
-      timezone: "America/Chicago",
-    }, CALL_TOKEN);
+    expect(mocks.getUser.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.prepareLeadCall.mock.invocationCallOrder[0],
+    );
+    expect(mocks.getCallerMemberships.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.prepareLeadCall.mock.invocationCallOrder[0],
+    );
+    expect(mocks.requestStart).toHaveBeenCalledWith(
+      {
+        operator_id: "user-1",
+        phone_e164: "+18165550123",
+        timezone: "America/Chicago",
+      },
+      CALL_TOKEN,
+    );
   });
 
   it("fails locally with a distinct 422 not_callable result before Jitter provisioning", async () => {
-    mocks.prepareLeadCall.mockResolvedValue({ ok: false, error: "Calling is unavailable during quiet hours." });
-    await expect(startAuthenticatedJitterCall(callTarget({
-      propertyId: "property-1",
-      contactId: "contact-1",
-    }))).resolves.toEqual({
+    mocks.prepareLeadCall.mockResolvedValue({
+      ok: false,
+      error: "Calling is unavailable during quiet hours.",
+    });
+    await expect(
+      startAuthenticatedJitterCall(
+        callTarget({
+          propertyId: "property-1",
+          contactId: "contact-1",
+        }),
+      ),
+    ).resolves.toEqual({
       ok: false,
       status: 422,
       error: "Calling is unavailable during quiet hours.",
@@ -134,7 +174,9 @@ describe("authenticated Jitter softphone server boundary", () => {
   });
 
   it("refuses the fabricated Missouri timezone for an unlinked manual number", async () => {
-    await expect(startAuthenticatedJitterCall(callTarget())).resolves.toMatchObject({
+    await expect(
+      startAuthenticatedJitterCall(callTarget()),
+    ).resolves.toMatchObject({
       ok: false,
       status: 422,
       errorCode: "not_callable",
@@ -144,8 +186,13 @@ describe("authenticated Jitter softphone server boundary", () => {
   });
 
   it("refuses to guess a timezone when a linked lead has no supported state", async () => {
-    mocks.prepareManualCall.mockResolvedValue({ ok: true, data: { ...preparedTarget, state: null } });
-    await expect(startAuthenticatedJitterCall(callTarget())).resolves.toMatchObject({
+    mocks.prepareManualCall.mockResolvedValue({
+      ok: true,
+      data: { ...preparedTarget, state: null },
+    });
+    await expect(
+      startAuthenticatedJitterCall(callTarget()),
+    ).resolves.toMatchObject({
       ok: false,
       status: 422,
       errorCode: "not_callable",
@@ -155,41 +202,89 @@ describe("authenticated Jitter softphone server boundary", () => {
   });
 
   it("rejects a browser-swapped target after the eligibility read", async () => {
-    await expect(startAuthenticatedJitterCall(callTarget({
-      phoneE164: "+18165559999",
-      propertyId: "property-1",
-      contactId: "contact-1",
-    }))).resolves.toMatchObject({ ok: false, status: 422, errorCode: "not_callable", reason: "target_changed" });
+    await expect(
+      startAuthenticatedJitterCall(
+        callTarget({
+          phoneE164: "+18165559999",
+          propertyId: "property-1",
+          contactId: "contact-1",
+        }),
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      status: 422,
+      errorCode: "not_callable",
+      reason: "target_changed",
+    });
     expect(mocks.requestStart).not.toHaveBeenCalled();
   });
 
   it("authenticates every follow-up and opens only the caller-bound call capability", async () => {
-    const started = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    const started = await startAuthenticatedJitterCall(
+      callTarget({ propertyId: "property-1", contactId: "contact-1" }),
+    );
     if (!started.ok) throw new Error("expected successful start");
     const capability = started.data.callId;
     vi.clearAllMocks();
-    mocks.getUser.mockResolvedValue({ data: { user: { id: "user-1" } }, error: null });
-    mocks.getCallerMemberships.mockResolvedValue([{ user_id: "user-1", org_id: SANDRA_ORG_ID, role: "member" }]);
+    mocks.getUser.mockResolvedValue({
+      data: { user: { id: "user-1" } },
+      error: null,
+    });
+    mocks.getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: SANDRA_ORG_ID, role: "member" },
+    ]);
     mocks.requestToken.mockResolvedValue({
       ok: true,
-      data: { rtc_token: "token", sip_identity: "operator-1", expires_at: "2026-08-21T20:05:00.000Z" },
+      data: {
+        rtc_token: "token",
+        sip_identity: "operator-1",
+        expires_at: "2026-08-21T20:05:00.000Z",
+      },
     });
-    mocks.requestConnect.mockResolvedValue({ ok: true, data: { dialing: true } });
+    mocks.requestConnect.mockResolvedValue({
+      ok: true,
+      data: { dialing: true },
+    });
     mocks.requestCancel.mockResolvedValue({ ok: true, data: cancelData });
+    mocks.requestAudioHealth.mockResolvedValue({
+      ok: true,
+      data: { accepted: true, status: "healthy" },
+    });
     await getAuthenticatedJitterToken(capability);
     await connectAuthenticatedJitterCall(capability, "registered");
     await connectAuthenticatedJitterCall(capability, "accepted");
+    await reportAuthenticatedJitterAudioHealth(capability, {
+      controller_id: "00000000-0000-4000-8000-000000000021",
+      peer_connection_generation: 1,
+      sample_sequence: 1,
+      packets_received: 12,
+      bytes_received: 2048,
+    });
     await cancelAuthenticatedJitterCall(capability, "failed");
-    expect(mocks.getUser).toHaveBeenCalledTimes(4);
+    expect(mocks.getUser).toHaveBeenCalledTimes(5);
     expect(mocks.requestToken).toHaveBeenCalledWith(CALL_ID);
-    expect(mocks.requestConnect).toHaveBeenNthCalledWith(1, CALL_ID, "registered");
-    expect(mocks.requestConnect).toHaveBeenNthCalledWith(2, CALL_ID, "accepted");
+    expect(mocks.requestConnect).toHaveBeenNthCalledWith(
+      1,
+      CALL_ID,
+      "registered",
+    );
+    expect(mocks.requestConnect).toHaveBeenNthCalledWith(
+      2,
+      CALL_ID,
+      "accepted",
+    );
+    expect(mocks.requestAudioHealth).toHaveBeenCalledWith(
+      CALL_ID,
+      expect.objectContaining({ bytes_received: 2048 }),
+    );
     expect(mocks.requestCancel).toHaveBeenCalledWith(CALL_ID, "failed");
   });
 
   it("denies users without current Sandra membership before eligibility or provider work", async () => {
     mocks.getCallerMemberships.mockResolvedValue([]);
-    await expect(startAuthenticatedJitterCall(callTarget())).resolves.toMatchObject({
+    await expect(
+      startAuthenticatedJitterCall(callTarget()),
+    ).resolves.toMatchObject({
       ok: false,
       status: 403,
       errorCode: "forbidden",
@@ -199,8 +294,12 @@ describe("authenticated Jitter softphone server boundary", () => {
   });
 
   it("denies a caller whose active membership belongs to a different organization", async () => {
-    mocks.getCallerMemberships.mockResolvedValue([{ user_id: "user-1", org_id: "other-org", role: "member" }]);
-    await expect(startAuthenticatedJitterCall(callTarget())).resolves.toMatchObject({
+    mocks.getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "other-org", role: "member" },
+    ]);
+    await expect(
+      startAuthenticatedJitterCall(callTarget()),
+    ).resolves.toMatchObject({
       ok: false,
       status: 403,
       errorCode: "forbidden",
@@ -210,22 +309,43 @@ describe("authenticated Jitter softphone server boundary", () => {
   });
 
   it("rejects malformed direct Server Action payloads without throwing", async () => {
-    await expect(startAuthenticatedJitterCall(null)).resolves.toMatchObject({ ok: false, status: 400 });
-    await expect(startAuthenticatedJitterCall({ phoneE164: "+18165550123" })).resolves.toMatchObject({
+    await expect(startAuthenticatedJitterCall(null)).resolves.toMatchObject({
       ok: false,
       status: 400,
     });
-    await expect(getAuthenticatedJitterToken(42)).resolves.toMatchObject({ ok: false, status: 400 });
-    await expect(connectAuthenticatedJitterCall("call", "wrong")).resolves.toMatchObject({ ok: false, status: 400 });
-    await expect(cancelAuthenticatedJitterCall({}, "invalid")).resolves.toMatchObject({ ok: false, status: 400 });
+    await expect(
+      startAuthenticatedJitterCall({ phoneE164: "+18165550123" }),
+    ).resolves.toMatchObject({
+      ok: false,
+      status: 400,
+    });
+    await expect(getAuthenticatedJitterToken(42)).resolves.toMatchObject({
+      ok: false,
+      status: 400,
+    });
+    await expect(
+      connectAuthenticatedJitterCall("call", "wrong"),
+    ).resolves.toMatchObject({ ok: false, status: 400 });
+    await expect(
+      cancelAuthenticatedJitterCall({}, "invalid"),
+    ).resolves.toMatchObject({ ok: false, status: 400 });
   });
 
   it("rejects a valid capability when a different Sandra user presents it", async () => {
-    const started = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    const started = await startAuthenticatedJitterCall(
+      callTarget({ propertyId: "property-1", contactId: "contact-1" }),
+    );
     if (!started.ok) throw new Error("expected successful start");
-    mocks.getUser.mockResolvedValue({ data: { user: { id: "user-2" } }, error: null });
-    mocks.getCallerMemberships.mockResolvedValue([{ user_id: "user-2", org_id: SANDRA_ORG_ID, role: "member" }]);
-    await expect(getAuthenticatedJitterToken(started.data.callId)).resolves.toMatchObject({
+    mocks.getUser.mockResolvedValue({
+      data: { user: { id: "user-2" } },
+      error: null,
+    });
+    mocks.getCallerMemberships.mockResolvedValue([
+      { user_id: "user-2", org_id: SANDRA_ORG_ID, role: "member" },
+    ]);
+    await expect(
+      getAuthenticatedJitterToken(started.data.callId),
+    ).resolves.toMatchObject({
       ok: false,
       status: 400,
       errorCode: "invalid_request",
@@ -234,15 +354,19 @@ describe("authenticated Jitter softphone server boundary", () => {
   });
 
   it("accepts an in-flight capability minted under the bounded previous key after rotation", async () => {
-    const started = await startAuthenticatedJitterCall(callTarget({
-      propertyId: "property-1",
-      contactId: "contact-1",
-    }));
+    const started = await startAuthenticatedJitterCall(
+      callTarget({
+        propertyId: "property-1",
+        contactId: "contact-1",
+      }),
+    );
     if (!started.ok) throw new Error("expected successful start");
 
     vi.stubEnv("SOFTPHONE_CAPABILITY_KEY", NEW_CAPABILITY_KEY);
     vi.stubEnv("SOFTPHONE_CAPABILITY_KEY_PREVIOUS", OLD_CAPABILITY_KEY);
-    await expect(cancelAuthenticatedJitterCall(started.data.callId, "abandoned")).resolves.toMatchObject({
+    await expect(
+      cancelAuthenticatedJitterCall(started.data.callId, "abandoned"),
+    ).resolves.toMatchObject({
       ok: true,
     });
     expect(mocks.requestCancel).toHaveBeenCalledWith(CALL_ID, "abandoned");
@@ -253,17 +377,24 @@ describe("authenticated Jitter softphone server boundary", () => {
     ["unversioned", "x".repeat(48)],
     ["too short", `v1:${"x".repeat(31)}`],
     ["too long", `v1:${"x".repeat(513)}`],
-  ])("does not provision when the dedicated capability key is %s", async (_label, key) => {
-    vi.stubEnv("SOFTPHONE_CAPABILITY_KEY", key);
-    await expect(startAuthenticatedJitterCall(callTarget({
-      propertyId: "property-1",
-      contactId: "contact-1",
-    }))).resolves.toMatchObject({
-      ok: false,
-      status: 503,
-      errorCode: "jitter_not_configured",
-    });
-    expect(mocks.requestStart).not.toHaveBeenCalled();
-    expect(mocks.prepareLeadCall).not.toHaveBeenCalled();
-  });
+  ])(
+    "does not provision when the dedicated capability key is %s",
+    async (_label, key) => {
+      vi.stubEnv("SOFTPHONE_CAPABILITY_KEY", key);
+      await expect(
+        startAuthenticatedJitterCall(
+          callTarget({
+            propertyId: "property-1",
+            contactId: "contact-1",
+          }),
+        ),
+      ).resolves.toMatchObject({
+        ok: false,
+        status: 503,
+        errorCode: "jitter_not_configured",
+      });
+      expect(mocks.requestStart).not.toHaveBeenCalled();
+      expect(mocks.prepareLeadCall).not.toHaveBeenCalled();
+    },
+  );
 });
