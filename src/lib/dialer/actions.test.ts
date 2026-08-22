@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { createClient, pausePropertyEnrollments, resumeByProperty, setOutreachDispo, bookAppointment, getMemberTimezone } = vi.hoisted(() => ({
   createClient: vi.fn(),
@@ -23,6 +23,10 @@ vi.mock("@/app/(dashboard)/messages/dispo-actions", () => ({ setOutreachDispo })
 import { completeSoftphoneCall, prepareManualCall } from "./actions";
 
 describe("prepareManualCall", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     createClient.mockReset();
     pausePropertyEnrollments.mockReset();
@@ -77,6 +81,64 @@ describe("prepareManualCall", () => {
       error: "This number belongs to a DNC-locked lead",
     });
     expect(pausePropertyEnrollments).not.toHaveBeenCalled();
+  });
+
+  it("keeps an SMS-opted-out contact callable by voice when no voice DNC applies", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T15:00:00.000Z"));
+    const smsOptedOutContact = {
+      id: "contact-sms-opted-out",
+      first_name: "Voice",
+      last_name: "Allowed",
+      entity_name: null,
+      phone_1: "+18165550123",
+      phone_2: null,
+      phone_3: null,
+      do_not_contact: false,
+      sms_opted_out: true,
+    };
+    const property = {
+      id: "property-voice-allowed",
+      address: "1 Voice Lane",
+      city: "Kansas City",
+      state: "MO",
+      is_dnc_locked: false,
+      homeowner_contact_id: smsOptedOutContact.id,
+      homeowner: smsOptedOutContact,
+    };
+    const responses = [
+      { data: [smsOptedOutContact], error: null },
+      { data: [], error: null },
+      { data: [], error: null },
+      { data: [property], error: null },
+    ];
+    createClient.mockResolvedValue({
+      from: vi.fn(() => {
+        const response = responses.shift() ?? { data: [], error: null };
+        const builder = {
+          select: vi.fn(() => builder),
+          eq: vi.fn(() => builder),
+          in: vi.fn(() => builder),
+          then: (resolve: (value: typeof response) => unknown) => Promise.resolve(response).then(resolve),
+        };
+        return builder;
+      }),
+    });
+
+    const result = await prepareManualCall("+1 (816) 555-0123");
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        propertyId: property.id,
+        contactId: smsOptedOutContact.id,
+        phoneE164: smsOptedOutContact.phone_1,
+      },
+    });
+    expect(pausePropertyEnrollments).toHaveBeenCalledWith(
+      expect.anything(),
+      { propertyId: property.id, reason: "call_in_progress" },
+    );
   });
 
   it("runs disposition, activity, callback booking, then softphone resume in order", async () => {
