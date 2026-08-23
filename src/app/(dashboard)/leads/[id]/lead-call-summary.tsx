@@ -175,7 +175,7 @@ function CallArtifactStates({ row }: { row: CallActivityRollupRow }) {
   const transcript = newest(row.call_transcripts);
 
   return (
-    <div className="mt-3 space-y-3">
+    <div className="mt-3 min-w-0 space-y-3">
       <RecordingState row={row} recording={recording} />
       <SummaryState row={row} transcript={transcript} />
       <TranscriptState row={row} transcript={transcript} />
@@ -206,7 +206,7 @@ function RecordingState({
   }
   if (row.recording_status === "failed") {
     return (
-      <p className="text-destructive text-xs" role="status">
+      <p className="text-destructive break-words text-xs" role="status">
         Recording failed
         {recording?.error_message ? `: ${recording.error_message}` : ""}
       </p>
@@ -226,7 +226,9 @@ function SummaryState({
     return (
       <div aria-label="AI summary">
         <p className="text-muted-foreground text-xs font-medium">AI summary</p>
-        <p className="mt-1 text-sm whitespace-pre-wrap">{transcript.summary}</p>
+        <p className="mt-1 break-words text-sm whitespace-pre-wrap">
+          {transcript.summary}
+        </p>
       </div>
     );
   }
@@ -235,7 +237,7 @@ function SummaryState({
   }
   if (row.summary_status === "failed") {
     return (
-      <p className="text-destructive text-xs" role="status">
+      <p className="text-destructive break-words text-xs" role="status">
         AI summary failed
         {transcript?.summary_error_message
           ? `: ${transcript.summary_error_message}`
@@ -257,7 +259,7 @@ function TranscriptState({
     return (
       <details className="text-sm">
         <summary className="cursor-pointer font-medium">Transcript</summary>
-        <p className="text-muted-foreground mt-2 whitespace-pre-wrap">
+        <p className="text-muted-foreground mt-2 break-words whitespace-pre-wrap">
           {transcript.text}
         </p>
       </details>
@@ -268,7 +270,7 @@ function TranscriptState({
   }
   if (row.transcript_status === "failed") {
     return (
-      <p className="text-destructive text-xs" role="status">
+      <p className="text-destructive break-words text-xs" role="status">
         Transcript failed
         {transcript?.error_message ? `: ${transcript.error_message}` : ""}
       </p>
@@ -514,7 +516,7 @@ export function LeadCallSummary({
   return (
     <section
       aria-label="Calls"
-      className="border-border rounded-md border bg-background p-3"
+      className="border-border min-w-0 rounded-md border bg-background p-3"
     >
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
@@ -528,18 +530,18 @@ export function LeadCallSummary({
         {linkButton("Open in Jitter")}
       </div>
 
-      <div className="space-y-3" data-testid="call-history">
+      <div className="min-w-0 space-y-3" data-testid="call-history">
         {sortedRows.map((row) => {
           const disposition = row.disposition?.trim() || null;
           return (
             <article
-              className="border-border/70 rounded-md border p-3"
+              className="border-border/70 min-w-0 rounded-md border p-3"
               key={row.id}
             >
               <div className="flex flex-wrap items-center gap-2">
                 <Badge
                   className={cn(
-                    "border-transparent",
+                    "max-w-full border-transparent whitespace-normal break-words",
                     outcomeClass(row.outcome),
                   )}
                   data-testid={`outcome-badge-${row.id}`}
@@ -549,7 +551,7 @@ export function LeadCallSummary({
                 {disposition && disposition !== row.outcome ? (
                   <Badge
                     className={cn(
-                      "border-transparent",
+                      "max-w-full border-transparent whitespace-normal break-words",
                       dispositionClass(disposition),
                     )}
                     data-testid={`disposition-badge-${row.id}`}

@@ -262,13 +262,13 @@ describe("<LeadCallSummary />", () => {
     expect(screen.getByText("AI summary pending")).toBeInTheDocument();
     expect(
       screen.getByText("Recording failed: Storage rejected upload"),
-    ).toBeInTheDocument();
+    ).toHaveClass("break-words");
     expect(
       screen.getByText("Transcript failed: Deepgram timed out"),
-    ).toBeInTheDocument();
+    ).toHaveClass("break-words");
     expect(
       screen.getByText("AI summary failed: Claude rejected the response"),
-    ).toBeInTheDocument();
+    ).toHaveClass("break-words");
   });
 
   it("is empty and disables the Jitter CTA when the host is absent", () => {
