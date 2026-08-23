@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   requestConnect: vi.fn(),
   requestCancel: vi.fn(),
   requestAudioHealth: vi.fn(),
+  requestCallerIds: vi.fn(),
 }));
 
 vi.mock("@/lib/dialer/actions", () => ({
@@ -32,6 +33,7 @@ vi.mock("./jitter-contract", async (importOriginal) => ({
   requestJitterConnect: mocks.requestConnect,
   requestJitterCancel: mocks.requestCancel,
   requestJitterAudioHealth: mocks.requestAudioHealth,
+  requestJitterCallerIds: mocks.requestCallerIds,
 }));
 
 import {
@@ -40,6 +42,7 @@ import {
   getAuthenticatedJitterToken,
   reportAuthenticatedJitterAudioHealth,
   startAuthenticatedJitterCall,
+  getAuthenticatedJitterCallerIds,
 } from "./jitter-server";
 
 const SANDRA_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
@@ -73,7 +76,7 @@ const cancelData = {
 };
 
 function callTarget(overrides: Record<string, unknown> = {}) {
-  return { phoneE164: "+18165550123", callToken: CALL_TOKEN, ...overrides };
+  return { phoneE164: "+18165550123", callerIdE164: "+18165550100", callToken: CALL_TOKEN, ...overrides };
 }
 
 describe("authenticated Jitter softphone server boundary", () => {
@@ -120,13 +123,18 @@ describe("authenticated Jitter softphone server boundary", () => {
       ok: true,
       data: { accepted: true, status: "healthy" },
     });
+    mocks.requestCallerIds.mockResolvedValue({
+      ok: true,
+      data: { caller_ids: [{ phone_e164: "+18165550100", label: "Main" }] },
+    });
   });
 
-  it("authorizes active Sandra access before eligibility, then sends PR #202's exact start body", async () => {
+  it("authorizes active Sandra access and sends the selected caller ID", async () => {
     const result = await startAuthenticatedJitterCall(
       callTarget({
         propertyId: "property-1",
         contactId: "contact-1",
+        callerIdE164: "+18165550100",
       }),
     );
     expect(result).toMatchObject({ ok: true, data: { batchId: "batch-1" } });
@@ -145,9 +153,30 @@ describe("authenticated Jitter softphone server boundary", () => {
         operator_id: "user-1",
         phone_e164: "+18165550123",
         timezone: "America/Chicago",
+        caller_id_e164: "+18165550100",
       },
       CALL_TOKEN,
     );
+  });
+
+  it("authenticates caller-ID inventory reads before contacting Jitter", async () => {
+    await expect(getAuthenticatedJitterCallerIds()).resolves.toEqual({
+      ok: true,
+      data: { caller_ids: [{ phone_e164: "+18165550100", label: "Main" }] },
+    });
+    expect(mocks.getUser.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.requestCallerIds.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("requires an E.164 caller ID before eligibility or provisioning", async () => {
+    await expect(startAuthenticatedJitterCall(callTarget({ callerIdE164: undefined }))).resolves.toMatchObject({
+      ok: false,
+      status: 400,
+      errorCode: "invalid_request",
+    });
+    expect(mocks.prepareManualCall).not.toHaveBeenCalled();
+    expect(mocks.requestStart).not.toHaveBeenCalled();
   });
 
   it("fails locally with a distinct 422 not_callable result before Jitter provisioning", async () => {

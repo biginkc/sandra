@@ -4,6 +4,7 @@ const JITTER_REQUEST_TIMEOUT_MS = 15_000;
 const JITTER_START_ATTEMPTS = 2;
 
 export const JITTER_SOFTPHONE_PATHS = {
+  callerIds: "/api/internal/sandra/softphone/caller-ids",
   startCall: "/api/internal/sandra/softphone/start-call",
   token: "/api/internal/sandra/softphone/token",
   connect: "/api/internal/sandra/softphone/connect",
@@ -16,7 +17,15 @@ export type JitterStartCallRequest = {
   operator_id: string;
   phone_e164: string;
   timezone: string;
+  caller_id_e164: string;
 };
+
+export type JitterCallerId = {
+  phone_e164: string;
+  label: string;
+};
+
+export type JitterCallerIdsResponse = { caller_ids: JitterCallerId[] };
 
 export type JitterStartCallResponse = {
   call_id: string;
@@ -215,6 +224,17 @@ export async function requestJitterStartCall(
   return result!;
 }
 
+export function requestJitterCallerIds(
+  fetchImpl?: typeof fetch,
+): Promise<JitterProxyResult<JitterCallerIdsResponse>> {
+  return requestJitterSoftphone({
+    path: JITTER_SOFTPHONE_PATHS.callerIds,
+    method: "GET",
+    validate: isCallerIdsResponse,
+    fetchImpl,
+  });
+}
+
 export function requestJitterToken(
   callId: string,
   fetchImpl?: typeof fetch,
@@ -305,6 +325,21 @@ function isStartResponse(value: unknown): value is JitterStartCallResponse {
       stringValue(value.batch_id) &&
       stringValue(value.run_id),
     )
+  );
+}
+
+function isCallerIdsResponse(value: unknown): value is JitterCallerIdsResponse {
+  if (!isObject(value) || !Array.isArray(value.caller_ids))
+    return false;
+  return value.caller_ids.every(
+    (callerId) =>
+      isObject(callerId) &&
+      typeof callerId.phone_e164 === "string" &&
+      /^\+[1-9]\d{7,14}$/.test(callerId.phone_e164) &&
+      typeof callerId.label === "string" &&
+      Boolean(stringValue(callerId.label)) &&
+      callerId.label.length <= 100 &&
+      Object.keys(callerId).every((key) => key === "phone_e164" || key === "label"),
   );
 }
 

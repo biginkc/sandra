@@ -10,6 +10,7 @@ import {
   requestJitterCancel,
   requestJitterAudioHealth,
   requestJitterConnect,
+  requestJitterCallerIds,
   requestJitterDigit,
   requestJitterStartCall,
   requestJitterToken,
@@ -18,6 +19,7 @@ import {
   type JitterAudioHealthResponse,
   type JitterAudioHealthSample,
   type JitterConnectPhase,
+  type JitterCallerIdsResponse,
   type JitterProxyError,
   type JitterProxyResult,
   type JitterTokenResponse,
@@ -90,6 +92,12 @@ export async function startAuthenticatedJitterCall(
     return invalidInput("A valid call target is required.");
   if (!E164.test(target.phoneE164))
     return invalidInput("A valid E.164 phone number is required.");
+  if (
+    typeof target.callerIdE164 !== "string" ||
+    !E164.test(target.callerIdE164)
+  )
+    return invalidInput("A valid caller ID is required.");
+  const callerIdE164 = target.callerIdE164;
   if (target.propertyId !== undefined && !validRef(target.propertyId))
     return invalidInput("Invalid property reference.");
   if (target.contactId !== undefined && !validRef(target.contactId))
@@ -172,6 +180,7 @@ export async function startAuthenticatedJitterCall(
       operator_id: operator.userId,
       phone_e164: prepared.data.phoneE164,
       timezone,
+      caller_id_e164: callerIdE164,
     },
     target.callToken,
   );
@@ -185,6 +194,14 @@ export async function startAuthenticatedJitterCall(
     ok: true,
     data: { callId: capability, batchId: started.data.batch_id },
   };
+}
+
+export async function getAuthenticatedJitterCallerIds(): Promise<
+  JitterProxyResult<JitterCallerIdsResponse>
+> {
+  const operator = await authenticatedOperator();
+  if (!operator.ok) return operator;
+  return requestJitterCallerIds();
 }
 
 export async function getAuthenticatedJitterToken(
@@ -256,6 +273,7 @@ function isCallTarget(value: unknown): value is CallTarget {
   const target = value as Partial<Record<keyof CallTarget, unknown>>;
   return (
     typeof target.phoneE164 === "string" &&
+    (target.callerIdE164 === undefined || typeof target.callerIdE164 === "string") &&
     (target.propertyId === undefined ||
       typeof target.propertyId === "string") &&
     (target.contactId === undefined || typeof target.contactId === "string") &&
