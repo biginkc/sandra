@@ -599,7 +599,7 @@ export class JitterCallTransport implements CallTransport {
 
   private async failAndCancel(
     error: unknown,
-    failureState: "failed" | "operator_busy" | "not_callable" = "failed",
+    failureState: Extract<CallTransportState, "failed" | "operator_busy" | "not_callable" | "caller_id_unavailable" | "caller_id_inventory_unavailable"> = "failed",
   ): Promise<void> {
     if (!this.terminal) {
       this.terminal = "failed";
@@ -884,11 +884,18 @@ function proxyError(error: {
 
 function proxyFailureState(
   error: unknown,
-): "failed" | "operator_busy" | "not_callable" {
+): Extract<CallTransportState, "failed" | "operator_busy" | "not_callable" | "caller_id_unavailable" | "caller_id_inventory_unavailable"> {
   if (error instanceof Error && error.name === "operator_busy")
     return "operator_busy";
   if (error instanceof Error && error.name === "not_callable")
     return "not_callable";
+  if (error instanceof Error && error.name === "caller_id_unavailable")
+    return "caller_id_unavailable";
+  if (
+    error instanceof Error &&
+    error.name === "caller_id_inventory_unavailable"
+  )
+    return "caller_id_inventory_unavailable";
   return "failed";
 }
 

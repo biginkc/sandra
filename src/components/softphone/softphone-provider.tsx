@@ -392,7 +392,12 @@ export function SoftphoneProvider({ children }: Props) {
         setError((value) => value === TEARDOWN_WARNING ? null : value);
         return;
       }
-      if (status === "operator_busy" || status === "not_callable") {
+      if (
+        status === "operator_busy" ||
+        status === "not_callable" ||
+        status === "caller_id_unavailable" ||
+        status === "caller_id_inventory_unavailable"
+      ) {
         terminalHandledRef.current = true;
         void (async () => {
           try {
@@ -410,9 +415,26 @@ export function SoftphoneProvider({ children }: Props) {
             setWrapToken(null);
             setCallStatus(null);
             setPhone("idle");
-            setError(status === "operator_busy"
-              ? "You already have an active Jitter call."
-              : "This number is no longer callable.");
+            if (
+              status === "caller_id_unavailable" ||
+              status === "caller_id_inventory_unavailable"
+            ) {
+              const message = status === "caller_id_unavailable"
+                ? "That company calling number is no longer available. Refresh company numbers and try again."
+                : "Company calling numbers could not be verified. Retry before placing the call.";
+              callerIdsRef.current = [];
+              selectedCallerIdRef.current = null;
+              setCallerIds([]);
+              setSelectedCallerId(null);
+              setCallerIdState("error");
+              setCallerIdError(message);
+              forgetCallerId();
+              setError(null);
+            } else {
+              setError(status === "operator_busy"
+                ? "You already have an active Jitter call."
+                : "This number is no longer callable.");
+            }
           }
         })();
         return;

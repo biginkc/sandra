@@ -19,6 +19,8 @@ export type CallTransportState =
   | "failed"
   | "operator_busy"
   | "not_callable"
+  | "caller_id_unavailable"
+  | "caller_id_inventory_unavailable"
   | "teardown_unconfirmed"
   | "teardown_confirmed";
 

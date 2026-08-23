@@ -391,6 +391,8 @@ describe("JitterCallTransport", () => {
   it.each([
     [409, "operator_busy"],
     [422, "not_callable"],
+    [422, "caller_id_unavailable"],
+    [503, "caller_id_inventory_unavailable"],
   ] as const)(
     "maps a %s start envelope to the distinct %s state without inventing a call to cancel",
     async (status, errorCode) => {

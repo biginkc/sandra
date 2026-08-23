@@ -317,6 +317,46 @@ describe("SoftphoneProvider transport gate", () => {
     expect(resumeFailedSoftphoneCall).toHaveBeenCalledWith("property-1");
   });
 
+  it.each([
+    ["caller_id_unavailable", "That company calling number is no longer available."],
+    ["caller_id_inventory_unavailable", "Company calling numbers could not be verified."],
+  ] as const)("returns to idle with caller-ID Retry and no wrap-up for %s", async (rejectionState, message) => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({
+      ok: true,
+      data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" },
+    });
+    createTransport.mockImplementation(() => {
+      let listener: ((state: typeof rejectionState) => void) | null = null;
+      return {
+        onStateChange: vi.fn((cb) => { listener = cb; }),
+        start: vi.fn(async () => {
+          listener?.(rejectionState);
+          const failure = new Error(message);
+          failure.name = rejectionState;
+          throw failure;
+        }),
+        mute: vi.fn(),
+        hold: vi.fn(async () => true),
+        sendDigit: vi.fn(async () => false),
+        hangup: vi.fn(),
+      };
+    });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+
+    await user.click(screen.getByTestId("call-lead-button"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(screen.getByTestId("retry-caller-ids")).toBeVisible();
+    expect(screen.queryByTestId("dispo-notes")).not.toBeInTheDocument();
+    expect(completeSoftphoneCall).not.toHaveBeenCalled();
+    expect(resumeFailedSoftphoneCall).toHaveBeenCalledWith("property-1");
+    expect(window.localStorage.getItem("sandra.softphone.caller-id.v1")).toBeNull();
+    await user.click(screen.getByTestId("retry-caller-ids"));
+    expect(await screen.findByTestId("caller-id-readonly")).toHaveTextContent("Main");
+    expect(loadCallerIds).toHaveBeenCalledTimes(2);
+  });
+
   it("still clears a refused start when sequence resume loses its response", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     resumeFailedSoftphoneCall.mockRejectedValueOnce(new Error("response lost"));
