@@ -256,9 +256,9 @@ describe("Migration 20260822220500 — call transcript summary", () => {
     expect(
       createHash("sha256").update(hardeningMigrationSql()).digest("hex"),
     ).toBe("911775b1bfbbd13431630323fdc6bb979f306de8e0c7efb18564a624442f9a92");
-    expect(summaryInvariantMigrationSql()).toContain(
-      "summary status requires available transcript",
-    );
+    expect(
+      createHash("sha256").update(summaryInvariantMigrationSql()).digest("hex"),
+    ).toBe("35cab2360f529fa88e8faef5909e1956f923032b85b01797a4cd90f05b6f634c");
     const { rows } = await pg.query<{
       version: string;
       count: string;
