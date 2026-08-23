@@ -157,17 +157,24 @@ describe("<LeadCallSummary />", () => {
       ],
     });
 
-    const calls = within(screen.getByTestId("call-history")).getAllByRole(
-      "article",
-    );
+    const callsRegion = screen.getByRole("region", { name: "Calls" });
+    const callHistory = screen.getByTestId("call-history");
+    const calls = within(callHistory).getAllByRole("article");
+    expect(callsRegion).toHaveClass("min-w-0");
+    expect(callHistory).toHaveClass("min-w-0");
     expect(calls).toHaveLength(2);
+    expect(calls[0]).toHaveClass("min-w-0");
     expect(
       within(calls[0]).getByText("follow up requested"),
     ).toBeInTheDocument();
     expect(within(calls[0]).getByText("2 days ago")).toBeInTheDocument();
+    const summaryText = within(calls[0]).getByText(
+      "Motivated seller; follow up next week.",
+    );
+    expect(summaryText).toHaveClass("break-words", "whitespace-pre-wrap");
     expect(
-      within(calls[0]).getByText("Motivated seller; follow up next week."),
-    ).toBeInTheDocument();
+      summaryText.closest('[aria-label="AI summary"]')?.parentElement,
+    ).toHaveClass("min-w-0");
     const transcriptToggle = within(calls[0]).getByText("Transcript");
     const transcriptDisclosure = transcriptToggle.closest("details");
     expect(transcriptDisclosure).not.toHaveAttribute("open");
@@ -177,7 +184,7 @@ describe("<LeadCallSummary />", () => {
     expect(transcriptDisclosure).not.toHaveAttribute("open");
     expect(
       within(calls[0]).getByText("The homeowner wants an offer next week."),
-    ).toBeInTheDocument();
+    ).toHaveClass("break-words", "whitespace-pre-wrap");
     expect(
       within(calls[0]).getByRole("button", { name: "Load recording (42s)" }),
     ).toBeInTheDocument();
