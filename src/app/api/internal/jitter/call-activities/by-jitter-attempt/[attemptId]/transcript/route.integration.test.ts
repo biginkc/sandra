@@ -17,8 +17,8 @@ function context(attemptId: string) {
   return { params: Promise.resolve({ attemptId }) };
 }
 
-function url(attemptId: string) {
-  return `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}/transcript`;
+function url(attemptId: string, scopeId = "scope-default") {
+  return `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}/transcript?scopeId=${encodeURIComponent(scopeId)}`;
 }
 
 describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
@@ -48,6 +48,24 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
       error_code: "idempotency_key_required",
+    });
+  });
+
+  it("requires a scope id after authentication", async () => {
+    const attemptId = "missing-scope";
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}/transcript`,
+        "PUT",
+        { status: "pending" },
+        { "idempotency-key": "by-attempt-transcript-missing-scope" },
+      ),
+      context(attemptId),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error_code: "scope_id_required",
     });
   });
 
@@ -206,6 +224,44 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
       transcript_status: "available",
       summary_status: "available",
     });
+  });
+
+  it("resolves duplicate attempt ids only within the requested scope", async () => {
+    const attemptId = `attempt-shared-${crypto.randomUUID()}`;
+    const first = await seedCallActivity(testClient, {
+      attemptId,
+      sessionId: "scope-first",
+    });
+    const second = await seedCallActivity(testClient, {
+      attemptId,
+      sessionId: "scope-second",
+    });
+
+    const response = await PUT(
+      jsonRequest(
+        url(attemptId, second.jitterSessionId),
+        "PUT",
+        {
+          status: "available",
+          text: "Scoped transcript",
+          summary_status: "none",
+        },
+        {
+          "idempotency-key": `${second.jitterSessionId}:${attemptId}:transcript`,
+        },
+      ),
+      context(attemptId),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      transcript: { call_activity_id: second.callActivityId },
+    });
+    const { data: wrongScopeRows } = await testClient
+      .from("call_transcripts")
+      .select("id")
+      .eq("call_activity_id", first.callActivityId);
+    expect(wrongScopeRows).toHaveLength(0);
   });
 
   it("preserves a working transcript when summary generation failed", async () => {

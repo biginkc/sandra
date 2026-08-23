@@ -128,7 +128,7 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       jsonRequest(
         `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
         "PUT",
-        {},
+        { jitter_session_id: "session-activity" },
         { "idempotency-key": "activity-missing" },
       ),
       attemptContext(attemptId),
@@ -139,6 +139,45 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       error_code: "missing_required_field",
     });
   });
+
+  it.each([
+    ["missing", undefined],
+    ["null", null],
+    ["blank", "   "],
+  ])(
+    "rejects a %s jitter_session_id before reserving idempotency",
+    async (_label, jitterSessionId) => {
+      const seeded = await seedDialerBatch(testClient);
+      const attemptId = `attempt-${crypto.randomUUID()}`;
+      const idempotencyKey = `activity-invalid-session-${crypto.randomUUID()}`;
+      const body = {
+        ...writebackBody(seeded),
+        jitter_session_id: jitterSessionId,
+      };
+      if (jitterSessionId === undefined) delete (body as any).jitter_session_id;
+
+      const response = await PUT(
+        jsonRequest(
+          `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+          "PUT",
+          body,
+          { "idempotency-key": idempotencyKey },
+        ),
+        attemptContext(attemptId),
+      );
+
+      expect(response.status).toBe(422);
+      await expect(response.json()).resolves.toMatchObject({
+        error_code: "invalid_jitter_session_id",
+      });
+      const { data: reservations, error } = await (testClient as any)
+        .from("webhook_events")
+        .select("id")
+        .eq("external_id", idempotencyKey);
+      expect(error).toBeNull();
+      expect(reservations).toHaveLength(0);
+    },
+  );
 
   it("inserts a new call_activities row and updates the batch item pointer", async () => {
     const seeded = await seedDialerBatch(testClient);
@@ -157,6 +196,7 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     const json = (await response.json()) as any;
     expect(json.call_activity).toMatchObject({
       jitter_attempt_id: attemptId,
+      jitter_session_id: "session-activity",
       outcome: "connected_human",
       dialer_batch_item_id: seeded.itemId,
     });
@@ -167,6 +207,56 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       .eq("id", seeded.itemId)
       .single();
     expect(item.last_call_activity_id).toBe(json.call_activity.id);
+  });
+
+  it("creates distinct rows when an attempt id is reused in two Jitter sessions", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const requestUrl = `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`;
+
+    const first = await PUT(
+      jsonRequest(
+        requestUrl,
+        "PUT",
+        {
+          ...writebackBody(seeded),
+          jitter_session_id: "session-run-a",
+        },
+        { "idempotency-key": "activity-session-a" },
+      ),
+      attemptContext(attemptId),
+    );
+    const second = await PUT(
+      jsonRequest(
+        requestUrl,
+        "PUT",
+        {
+          ...writebackBody(seeded),
+          jitter_session_id: "session-run-b",
+        },
+        { "idempotency-key": "activity-session-b" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    const firstJson = (await first.json()) as any;
+    const secondJson = (await second.json()) as any;
+    expect(firstJson.call_activity.id).not.toBe(secondJson.call_activity.id);
+
+    const { data: activities, error } = await (testClient as any)
+      .from("call_activities")
+      .select("id, jitter_session_id")
+      .eq("org_id", seeded.orgId)
+      .eq("provider", "jitter")
+      .eq("jitter_attempt_id", attemptId)
+      .order("jitter_session_id");
+    expect(error).toBeNull();
+    expect(activities).toEqual([
+      { id: firstJson.call_activity.id, jitter_session_id: "session-run-a" },
+      { id: secondJson.call_activity.id, jitter_session_id: "session-run-b" },
+    ]);
   });
 
   it("persists notes and recording_path on insert and on update", async () => {
@@ -220,7 +310,9 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     );
     expect(second.status).toBe(200);
     const secondJson = (await second.json()) as any;
-    expect(secondJson.call_activity.notes).toBe("Reached the contact on retry.");
+    expect(secondJson.call_activity.notes).toBe(
+      "Reached the contact on retry.",
+    );
     expect(secondJson.call_activity.recording_path).toBe(
       "recordings/2026/08/20/attempt-2.mp3",
     );
@@ -537,7 +629,9 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     // The seeded webhook consumer belongs to BMH_ORG_ID (webhook_consumers
     // org_id default). Submit internally-consistent org-B ids with that
     // org-A token — the route must refuse to touch org B.
-    const otherOrgLead = await seedDialerLead(testClient, { org_id: TEST_ORG_B_ID });
+    const otherOrgLead = await seedDialerLead(testClient, {
+      org_id: TEST_ORG_B_ID,
+    });
     const attemptId = `attempt-${crypto.randomUUID()}`;
     const response = await PUT(
       jsonRequest(
@@ -612,7 +706,9 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       });
     expect(consumerError).toBeNull();
 
-    const orgBLead = await seedDialerLead(testClient, { org_id: TEST_ORG_B_ID });
+    const orgBLead = await seedDialerLead(testClient, {
+      org_id: TEST_ORG_B_ID,
+    });
     const orgBBody = JSON.stringify({
       org_id: orgBLead.orgId,
       property_id: orgBLead.propertyId,
@@ -628,7 +724,8 @@ describe("internal.jitter.call-activities writeback PUT", () => {
           "content-type": "application/json",
           authorization: `Bearer ${ORG_B_TOKEN}`,
           "x-sandra-signature":
-            "sha256=" + createHmac("sha256", ORG_B_TOKEN).update(orgBBody).digest("hex"),
+            "sha256=" +
+            createHmac("sha256", ORG_B_TOKEN).update(orgBBody).digest("hex"),
           "idempotency-key": "activity-collide-org-b",
         },
         body: orgBBody,
@@ -697,7 +794,7 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       channel: "voice",
       event_type: "opt_out",
       source: "jitter_writeback",
-      source_external_id: attemptId,
+      source_external_id: `session-activity:${attemptId}`,
     });
     expect(events![0].source_detail).toMatchObject({
       disposition: "dnc_request",
@@ -716,11 +813,15 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     };
 
     const first = await PUT(
-      jsonRequest(requestUrl, "PUT", body, { "idempotency-key": "activity-dnc-replay-1" }),
+      jsonRequest(requestUrl, "PUT", body, {
+        "idempotency-key": "activity-dnc-replay-1",
+      }),
       attemptContext(attemptId),
     );
     const replay = await PUT(
-      jsonRequest(requestUrl, "PUT", body, { "idempotency-key": "activity-dnc-replay-2" }),
+      jsonRequest(requestUrl, "PUT", body, {
+        "idempotency-key": "activity-dnc-replay-2",
+      }),
       attemptContext(attemptId),
     );
 
@@ -739,6 +840,82 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       .eq("id", seeded.contactId)
       .single();
     expect(contact?.do_not_contact).toBe(true);
+  });
+
+  it("scopes DNC replay and consent deduplication to the Jitter session", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const requestUrl = `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`;
+    const dncBody = {
+      ...writebackBody(seeded),
+      disposition: "dnc_request",
+      do_not_call_requested: true,
+    };
+
+    const first = await PUT(
+      jsonRequest(
+        requestUrl,
+        "PUT",
+        {
+          ...dncBody,
+          jitter_session_id: "session-dnc-a",
+        },
+        { "idempotency-key": "activity-dnc-session-a" },
+      ),
+      attemptContext(attemptId),
+    );
+    const second = await PUT(
+      jsonRequest(
+        requestUrl,
+        "PUT",
+        {
+          ...dncBody,
+          jitter_session_id: "session-dnc-b",
+        },
+        { "idempotency-key": "activity-dnc-session-b" },
+      ),
+      attemptContext(attemptId),
+    );
+    const replay = await PUT(
+      jsonRequest(
+        requestUrl,
+        "PUT",
+        {
+          ...dncBody,
+          jitter_session_id: "session-dnc-b",
+        },
+        { "idempotency-key": "activity-dnc-session-b-replay" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(replay.status).toBe(200);
+    const firstJson = (await first.json()) as any;
+    const secondJson = (await second.json()) as any;
+    const replayJson = (await replay.json()) as any;
+    expect(firstJson.call_activity.id).not.toBe(secondJson.call_activity.id);
+    expect(replayJson.call_activity.id).toBe(secondJson.call_activity.id);
+
+    const { data: events, error } = await (testClient as any)
+      .from("consent_events")
+      .select("source_external_id")
+      .eq("contact_id", seeded.contactId)
+      .order("source_external_id");
+    expect(error).toBeNull();
+    expect(events).toEqual([
+      { source_external_id: `session-dnc-a:${attemptId}` },
+      { source_external_id: `session-dnc-b:${attemptId}` },
+    ]);
+
+    const { data: item, error: itemError } = await (testClient as any)
+      .from("dialer_batch_items")
+      .select("last_call_activity_id")
+      .eq("id", seeded.itemId)
+      .single();
+    expect(itemError).toBeNull();
+    expect(item.last_call_activity_id).toBe(firstJson.call_activity.id);
   });
 
   it("leaves consent and do_not_contact untouched when do_not_call_requested is false", async () => {
@@ -813,7 +990,10 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       jsonRequest(
         `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
         "PUT",
-        { ...writebackBody(seeded), org_id: "00000000-0000-0000-0000-000000000ccc" },
+        {
+          ...writebackBody(seeded),
+          org_id: "00000000-0000-0000-0000-000000000ccc",
+        },
         { "idempotency-key": "activity-org-mismatch" },
       ),
       attemptContext(attemptId),
@@ -834,11 +1014,15 @@ describe("internal.jitter.call-activities writeback PUT", () => {
 
     const responses = await Promise.all([
       PUT(
-        jsonRequest(requestUrl, "PUT", body, { "idempotency-key": "activity-race-a" }),
+        jsonRequest(requestUrl, "PUT", body, {
+          "idempotency-key": "activity-race-a",
+        }),
         attemptContext(attemptId),
       ),
       PUT(
-        jsonRequest(requestUrl, "PUT", body, { "idempotency-key": "activity-race-b" }),
+        jsonRequest(requestUrl, "PUT", body, {
+          "idempotency-key": "activity-race-b",
+        }),
         attemptContext(attemptId),
       ),
     ]);
@@ -849,8 +1033,63 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       .select("id, org_id, provider, jitter_attempt_id, raw_event_count")
       .eq("org_id", seeded.orgId)
       .eq("provider", "jitter")
+      .eq("jitter_session_id", "session-activity")
       .eq("jitter_attempt_id", attemptId);
     expect(activities).toHaveLength(1);
     expect(activities?.[0]?.raw_event_count).toBe(2);
+  });
+
+  it("atomically rejects conflicting first writes for one session-scoped attempt", async () => {
+    const firstLead = await seedDialerBatch(testClient);
+    const secondLead = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const requestUrl = `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`;
+    const sessionId = "session-conflicting-first-write";
+
+    const responses = await Promise.all([
+      PUT(
+        jsonRequest(
+          requestUrl,
+          "PUT",
+          { ...writebackBody(firstLead), jitter_session_id: sessionId },
+          { "idempotency-key": "activity-conflicting-first-a" },
+        ),
+        attemptContext(attemptId),
+      ),
+      PUT(
+        jsonRequest(
+          requestUrl,
+          "PUT",
+          { ...writebackBody(secondLead), jitter_session_id: sessionId },
+          { "idempotency-key": "activity-conflicting-first-b" },
+        ),
+        attemptContext(attemptId),
+      ),
+    ]);
+
+    expect(responses.filter(({ status }) => status === 200)).toHaveLength(1);
+    expect(responses.filter(({ status }) => status >= 400)).toHaveLength(1);
+
+    const { data: activities, error } = await (testClient as any)
+      .from("call_activities")
+      .select("property_id, contact_id, dialer_batch_item_id")
+      .eq("org_id", firstLead.orgId)
+      .eq("provider", "jitter")
+      .eq("jitter_session_id", sessionId)
+      .eq("jitter_attempt_id", attemptId);
+    expect(error).toBeNull();
+    expect(activities).toHaveLength(1);
+    expect([
+      {
+        property_id: firstLead.propertyId,
+        contact_id: firstLead.contactId,
+        dialer_batch_item_id: firstLead.itemId,
+      },
+      {
+        property_id: secondLead.propertyId,
+        contact_id: secondLead.contactId,
+        dialer_batch_item_id: secondLead.itemId,
+      },
+    ]).toContainEqual(activities![0]);
   });
 });

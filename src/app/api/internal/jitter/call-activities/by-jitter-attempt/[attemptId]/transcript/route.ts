@@ -18,6 +18,21 @@ function parentNotFound() {
   );
 }
 
+function requireScopeId(request: Request): string | NextResponse {
+  const scopeId = new URL(request.url).searchParams.get("scopeId")?.trim();
+  if (!scopeId) {
+    return NextResponse.json(
+      {
+        error: "validation_error",
+        error_code: "scope_id_required",
+        field: "scopeId",
+      },
+      { status: 400 },
+    );
+  }
+  return scopeId;
+}
+
 export async function PUT(
   request: Request,
   context: RouteContext,
@@ -28,6 +43,9 @@ export async function PUT(
   try {
     const auth = await authenticateJitterWriteback(request);
     if (!auth.ok) return auth.response;
+
+    const scopeId = requireScopeId(request);
+    if (scopeId instanceof NextResponse) return scopeId;
 
     const { attemptId } = await context.params;
     const idempotencyKey = request.headers.get("idempotency-key")!.trim();
@@ -45,6 +63,7 @@ export async function PUT(
       .select("id")
       .eq("org_id", auth.orgId)
       .eq("provider", "jitter")
+      .eq("jitter_session_id", scopeId)
       .eq("jitter_attempt_id", attemptId)
       .maybeSingle();
     if (activityError) throw activityError;

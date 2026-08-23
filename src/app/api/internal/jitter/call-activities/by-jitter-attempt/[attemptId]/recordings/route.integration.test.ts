@@ -17,8 +17,8 @@ function context(attemptId: string) {
   return { params: Promise.resolve({ attemptId }) };
 }
 
-function url(attemptId: string) {
-  return `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}/recordings`;
+function url(attemptId: string, scopeId = "scope-default") {
+  return `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}/recordings?scopeId=${encodeURIComponent(scopeId)}`;
 }
 
 describe("internal.jitter.call-activities by-attempt recordings POST", () => {
@@ -48,6 +48,24 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
       error_code: "idempotency_key_required",
+    });
+  });
+
+  it("requires a scope id after authentication", async () => {
+    const attemptId = "missing-scope";
+    const response = await POST(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}/recordings`,
+        "POST",
+        { status: "pending" },
+        { "idempotency-key": "by-attempt-recording-missing-scope" },
+      ),
+      context(attemptId),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error_code: "scope_id_required",
     });
   });
 
@@ -206,6 +224,40 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
         duration_seconds: 45,
       },
     });
+  });
+
+  it("resolves duplicate attempt ids only within the requested scope", async () => {
+    const attemptId = `attempt-shared-${crypto.randomUUID()}`;
+    const first = await seedCallActivity(testClient, {
+      attemptId,
+      sessionId: "scope-first",
+    });
+    const second = await seedCallActivity(testClient, {
+      attemptId,
+      sessionId: "scope-second",
+    });
+
+    const response = await POST(
+      jsonRequest(
+        url(attemptId, first.jitterSessionId),
+        "POST",
+        { status: "available", storage_path: "calls/scoped.wav" },
+        {
+          "idempotency-key": `${first.jitterSessionId}:${attemptId}:recording`,
+        },
+      ),
+      context(attemptId),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      recording: { call_activity_id: first.callActivityId },
+    });
+    const { data: wrongScopeRows } = await testClient
+      .from("call_recordings")
+      .select("id")
+      .eq("call_activity_id", second.callActivityId);
+    expect(wrongScopeRows).toHaveLength(0);
   });
 
   it("returns the cached payload for an identical replay", async () => {

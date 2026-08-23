@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -6,6 +9,7 @@ import { createTestClient } from "@tests/integration/client";
 import {
   resetJitterIntegration,
   seedCallActivity,
+  seedDialerBatch,
 } from "@/app/api/internal/jitter/_lib/test-helpers.integration";
 
 const serviceClient = createTestClient();
@@ -16,6 +20,16 @@ function testDbUrl(): string {
     process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
   if (!value) throw new Error("Missing TEST_SUPABASE_DB_URL");
   return value;
+}
+
+function migrationSql(): string {
+  return fs.readFileSync(
+    path.join(
+      process.cwd(),
+      "supabase/migrations/20260822220500_call_transcript_summary.sql",
+    ),
+    "utf8",
+  );
 }
 
 beforeAll(async () => {
@@ -32,6 +46,132 @@ afterAll(async () => {
 });
 
 describe("Migration 20260822220500 — call transcript summary", () => {
+  it("makes Jitter session part of the durable attempt identity", async () => {
+    const { rows: columns } = await pg.query<{
+      is_nullable: string;
+    }>(
+      `select is_nullable
+       from information_schema.columns
+       where table_schema = 'public'
+         and table_name = 'call_activities'
+         and column_name = 'jitter_session_id'`,
+    );
+    // Sandra softphone activities do not have a Jitter session; the provider-
+    // conditional CHECK below makes it required only for Jitter rows.
+    expect(columns).toEqual([{ is_nullable: "YES" }]);
+
+    const { rows: indexes } = await pg.query<{
+      indexname: string;
+      indexdef: string;
+    }>(
+      `select indexname, indexdef
+       from pg_indexes
+       where schemaname = 'public'
+         and tablename = 'call_activities'
+         and indexname in (
+           'idx_call_activities_org_provider_attempt',
+           'idx_call_activities_org_provider_session_attempt'
+         )
+       order by indexname`,
+    );
+    expect(indexes).toHaveLength(1);
+    expect(indexes[0].indexname).toBe(
+      "idx_call_activities_org_provider_session_attempt",
+    );
+    expect(indexes[0].indexdef).toContain(
+      "(org_id, provider, jitter_session_id, jitter_attempt_id)",
+    );
+
+    const { rows: constraints } = await pg.query<{ definition: string }>(
+      `select pg_get_constraintdef(c.oid) as definition
+       from pg_constraint c
+       join pg_class t on t.oid = c.conrelid
+       join pg_namespace n on n.oid = t.relnamespace
+       where n.nspname = 'public'
+         and t.relname = 'call_activities'
+         and c.conname = 'call_activities_jitter_session_id_trimmed_check'`,
+    );
+    expect(constraints).toHaveLength(1);
+    expect(constraints[0].definition).toContain("provider <> 'jitter'");
+    expect(constraints[0].definition).toContain(
+      "jitter_session_id IS NOT NULL",
+    );
+    expect(constraints[0].definition).toContain("btrim(jitter_session_id)");
+  });
+
+  it("rejects a blank Jitter session at the service-role RPC boundary", async () => {
+    const seeded = await seedDialerBatch(serviceClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const { error } = await (serviceClient as any).rpc(
+      "jitter_writeback_call_activity",
+      {
+        p_attempt_id: attemptId,
+        p_body: {
+          org_id: seeded.orgId,
+          property_id: seeded.propertyId,
+          contact_id: seeded.contactId,
+          dialer_batch_item_id: seeded.itemId,
+          jitter_session_id: "   ",
+          provider: "jitter",
+          outcome: "connected_human",
+        },
+        p_callback_assignee_id: null,
+        p_external_id: `invalid-session-${crypto.randomUUID()}`,
+        p_notes: null,
+        p_org_id: seeded.orgId,
+        p_recording_path: null,
+        p_request_hash: "not-reserved",
+      },
+    );
+
+    expect(error?.message).toContain("jitter coherence check failed");
+  });
+
+  it("migrates legacy Jitter DNC evidence onto the session-scoped replay key", async () => {
+    const seeded = await seedCallActivity(serviceClient, {
+      sessionId: "legacy-consent-session",
+    });
+    const { data: event, error } = await (serviceClient as any)
+      .from("consent_events")
+      .insert({
+        org_id: seeded.orgId,
+        contact_id: seeded.contactId,
+        channel: "voice",
+        event_type: "opt_out",
+        source: "jitter_writeback",
+        source_detail: {
+          externalId: seeded.jitterAttemptId,
+          jitter_session_id: seeded.jitterSessionId,
+        },
+      })
+      .select("id")
+      .single();
+    expect(error).toBeNull();
+
+    const match = migrationSql().match(
+      /-- BEGIN legacy Jitter consent identity correction\.([\s\S]*?)-- END legacy Jitter consent identity correction\./,
+    );
+    expect(match?.[1]).toBeTruthy();
+
+    await pg.query("begin");
+    try {
+      await pg.query(match![1]);
+      const { rows } = await pg.query<{ source_external_id: string }>(
+        `select source_external_id
+         from public.consent_events
+         where id = $1`,
+        [event.id],
+      );
+      expect(rows).toEqual([
+        {
+          source_external_id: `${seeded.jitterSessionId}:${seeded.jitterAttemptId}`,
+        },
+      ]);
+    } finally {
+      await pg.query("rollback");
+    }
+  });
+
   it("adds the transcript summary fields and parent rollup status", async () => {
     const { rows } = await pg.query<{
       table_name: string;
