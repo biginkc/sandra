@@ -157,17 +157,24 @@ describe("<LeadCallSummary />", () => {
       ],
     });
 
-    const calls = within(screen.getByTestId("call-history")).getAllByRole(
-      "article",
-    );
+    const callsRegion = screen.getByRole("region", { name: "Calls" });
+    const callHistory = screen.getByTestId("call-history");
+    const calls = within(callHistory).getAllByRole("article");
+    expect(callsRegion).toHaveClass("min-w-0");
+    expect(callHistory).toHaveClass("min-w-0");
     expect(calls).toHaveLength(2);
+    expect(calls[0]).toHaveClass("min-w-0");
     expect(
       within(calls[0]).getByText("follow up requested"),
     ).toBeInTheDocument();
     expect(within(calls[0]).getByText("2 days ago")).toBeInTheDocument();
+    const summaryText = within(calls[0]).getByText(
+      "Motivated seller; follow up next week.",
+    );
+    expect(summaryText).toHaveClass("break-words", "whitespace-pre-wrap");
     expect(
-      within(calls[0]).getByText("Motivated seller; follow up next week."),
-    ).toBeInTheDocument();
+      summaryText.closest('[aria-label="AI summary"]')?.parentElement,
+    ).toHaveClass("min-w-0");
     const transcriptToggle = within(calls[0]).getByText("Transcript");
     const transcriptDisclosure = transcriptToggle.closest("details");
     expect(transcriptDisclosure).not.toHaveAttribute("open");
@@ -177,7 +184,7 @@ describe("<LeadCallSummary />", () => {
     expect(transcriptDisclosure).not.toHaveAttribute("open");
     expect(
       within(calls[0]).getByText("The homeowner wants an offer next week."),
-    ).toBeInTheDocument();
+    ).toHaveClass("break-words", "whitespace-pre-wrap");
     expect(
       within(calls[0]).getByRole("button", { name: "Load recording (42s)" }),
     ).toBeInTheDocument();
@@ -223,6 +230,35 @@ describe("<LeadCallSummary />", () => {
     );
   });
 
+  it("allows long provider badges to grow without clipping", () => {
+    const longOutcome = "provider_outcome_" + "x".repeat(80);
+    const longDisposition = "provider_disposition_" + "y".repeat(80);
+    renderWidget({
+      initialRows: [
+        row({
+          id: "long-badges",
+          outcome: longOutcome,
+          disposition: longDisposition,
+        }),
+      ],
+    });
+
+    expect(screen.getByTestId("outcome-badge-long-badges")).toHaveClass(
+      "h-auto",
+      "min-h-5",
+      "max-w-full",
+      "whitespace-normal",
+      "break-words",
+    );
+    expect(screen.getByTestId("disposition-badge-long-badges")).toHaveClass(
+      "h-auto",
+      "min-h-5",
+      "max-w-full",
+      "whitespace-normal",
+      "break-words",
+    );
+  });
+
   it("renders explicit pending and child-backed failure states", () => {
     renderWidget({
       initialRows: [
@@ -262,13 +298,13 @@ describe("<LeadCallSummary />", () => {
     expect(screen.getByText("AI summary pending")).toBeInTheDocument();
     expect(
       screen.getByText("Recording failed: Storage rejected upload"),
-    ).toBeInTheDocument();
+    ).toHaveClass("break-words");
     expect(
       screen.getByText("Transcript failed: Deepgram timed out"),
-    ).toBeInTheDocument();
+    ).toHaveClass("break-words");
     expect(
       screen.getByText("AI summary failed: Claude rejected the response"),
-    ).toBeInTheDocument();
+    ).toHaveClass("break-words");
   });
 
   it("is empty and disables the Jitter CTA when the host is absent", () => {
