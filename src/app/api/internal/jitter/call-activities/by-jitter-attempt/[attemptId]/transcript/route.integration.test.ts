@@ -81,6 +81,28 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
     });
   });
 
+  it("rejects invalid metadata before reserving the idempotency key", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const idempotencyKey = "by-attempt-transcript-invalid-metadata";
+    const response = await PUT(
+      jsonRequest(
+        url(seeded.jitterAttemptId),
+        "PUT",
+        { status: "available", summary: { fabricated: true } },
+        { "idempotency-key": idempotencyKey },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({ field: "summary" });
+    const { data: events } = await testClient
+      .from("webhook_events")
+      .select("id")
+      .eq("external_id", idempotencyKey);
+    expect(events).toHaveLength(0);
+  });
+
   it("returns the retryable 404 contract when the parent is missing", async () => {
     const attemptId = `missing-${crypto.randomUUID()}`;
     const response = await PUT(
@@ -110,6 +132,32 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
         "PUT",
         { status: "available", text: "foreign" },
         { "idempotency-key": "by-attempt-transcript-cross-org" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+
+    expect(response.status).toBe(404);
+    const { data } = await testClient
+      .from("call_transcripts")
+      .select("id")
+      .eq("call_activity_id", seeded.callActivityId);
+    expect(data).toHaveLength(0);
+  });
+
+  it("does not resolve a same-org non-Jitter activity", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const { error } = await testClient
+      .from("call_activities")
+      .update({ provider: "twilio" })
+      .eq("id", seeded.callActivityId);
+    expect(error).toBeNull();
+
+    const response = await PUT(
+      jsonRequest(
+        url(seeded.jitterAttemptId),
+        "PUT",
+        { status: "available", text: "wrong provider" },
+        { "idempotency-key": "by-attempt-transcript-wrong-provider" },
       ),
       context(seeded.jitterAttemptId),
     );
@@ -185,8 +233,15 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
         text: "Readable transcript",
         summary_status: "failed",
         summary_error_code: "summary_provider_error",
+        summary_error_message: "Summary unavailable",
       },
     });
+    const { data: transcript } = await testClient
+      .from("call_transcripts")
+      .select("summary_error_message")
+      .eq("call_activity_id", seeded.callActivityId)
+      .single();
+    expect(transcript?.summary_error_message).toBe("Summary unavailable");
   });
 
   it("returns the cached payload for an identical replay", async () => {

@@ -7,11 +7,9 @@ import {
   checkAndRecordIdempotency,
   requireIdempotencyKey,
 } from "../../../_lib/auth";
+import { parseTranscriptWritebackBody } from "../../../_lib/artifact-writeback-payload";
 
 type RouteContext = { params: Promise<{ id: string }> };
-
-const VALID_STATUS = new Set(["pending", "available", "failed"]);
-const VALID_SUMMARY_STATUS = new Set(["none", "pending", "available", "failed"]);
 
 export async function PUT(
   request: Request,
@@ -26,33 +24,14 @@ export async function PUT(
 
     const { id } = await context.params;
     const idempotencyKey = request.headers.get("idempotency-key")!.trim();
-    const body = JSON.parse(auth.rawBody || "{}") as {
-      status?: string;
-      text?: string | null;
-      language?: string | null;
-      error_code?: string | null;
-      error_message?: string | null;
-      summary?: string | null;
-      summary_status?: string;
-      summary_error_code?: string | null;
-      summary_error_message?: string | null;
-    };
-
-    if (!body.status || !VALID_STATUS.has(body.status)) {
+    const parsedBody = parseTranscriptWritebackBody(auth.rawBody);
+    if (!parsedBody.ok) {
       return NextResponse.json(
-        { error: "validation_error", field: "status" },
+        { error: "validation_error", field: parsedBody.field },
         { status: 422 },
       );
     }
-    if (
-      body.summary_status !== undefined &&
-      !VALID_SUMMARY_STATUS.has(body.summary_status)
-    ) {
-      return NextResponse.json(
-        { error: "validation_error", field: "summary_status" },
-        { status: 422 },
-      );
-    }
+    const body = parsedBody.body;
 
     const { data: activity, error: activityError } = await auth.serviceClient
       .from("call_activities")
@@ -85,9 +64,8 @@ export async function PUT(
       );
     }
 
-    const { data: payload, error: mutationError } = await auth.serviceClient.rpc(
-      "jitter_upsert_call_transcript",
-      {
+    const { data: payload, error: mutationError } =
+      await auth.serviceClient.rpc("jitter_upsert_call_transcript", {
         p_call_activity_id: id,
         p_org_id: auth.orgId,
         p_status: body.status,
@@ -101,8 +79,7 @@ export async function PUT(
         p_summary_error_message: body.summary_error_message ?? null,
         p_external_id: idempotencyKey,
         p_request_hash: idempotency.requestHash,
-      },
-    );
+      });
     if (mutationError) throw mutationError;
 
     if ((payload as { outcome?: string } | null)?.outcome === "not_found") {

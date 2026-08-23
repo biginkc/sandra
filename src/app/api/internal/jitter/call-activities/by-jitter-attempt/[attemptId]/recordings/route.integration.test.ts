@@ -66,6 +66,30 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
     await expect(response.json()).resolves.toMatchObject({ field: "status" });
   });
 
+  it("rejects invalid metadata before reserving the idempotency key", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const idempotencyKey = "by-attempt-recording-invalid-metadata";
+    const response = await POST(
+      jsonRequest(
+        url(seeded.jitterAttemptId),
+        "POST",
+        { status: "available", duration_seconds: -1 },
+        { "idempotency-key": idempotencyKey },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      field: "duration_seconds",
+    });
+    const { data: events } = await testClient
+      .from("webhook_events")
+      .select("id")
+      .eq("external_id", idempotencyKey);
+    expect(events).toHaveLength(0);
+  });
+
   it("returns the retryable 404 contract when the parent is missing", async () => {
     const attemptId = `missing-${crypto.randomUUID()}`;
     const response = await POST(
@@ -95,6 +119,32 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
         "POST",
         { status: "available", storage_path: "calls/foreign.wav" },
         { "idempotency-key": "by-attempt-recording-cross-org" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+
+    expect(response.status).toBe(404);
+    const { data } = await testClient
+      .from("call_recordings")
+      .select("id")
+      .eq("call_activity_id", seeded.callActivityId);
+    expect(data).toHaveLength(0);
+  });
+
+  it("does not resolve a same-org non-Jitter activity", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const { error } = await testClient
+      .from("call_activities")
+      .update({ provider: "twilio" })
+      .eq("id", seeded.callActivityId);
+    expect(error).toBeNull();
+
+    const response = await POST(
+      jsonRequest(
+        url(seeded.jitterAttemptId),
+        "POST",
+        { status: "available", storage_path: "calls/wrong-provider.wav" },
+        { "idempotency-key": "by-attempt-recording-wrong-provider" },
       ),
       context(seeded.jitterAttemptId),
     );

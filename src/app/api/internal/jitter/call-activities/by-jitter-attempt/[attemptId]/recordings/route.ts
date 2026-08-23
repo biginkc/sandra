@@ -7,10 +7,9 @@ import {
   checkAndRecordIdempotency,
   requireIdempotencyKey,
 } from "../../../../_lib/auth";
+import { parseRecordingWritebackBody } from "../../../../_lib/artifact-writeback-payload";
 
 type RouteContext = { params: Promise<{ attemptId: string }> };
-
-const VALID_STATUS = new Set(["pending", "available", "failed"]);
 
 function parentNotFound() {
   return NextResponse.json(
@@ -32,20 +31,14 @@ export async function POST(
 
     const { attemptId } = await context.params;
     const idempotencyKey = request.headers.get("idempotency-key")!.trim();
-    const body = JSON.parse(auth.rawBody || "{}") as {
-      status?: string;
-      storage_path?: string | null;
-      duration_seconds?: number | null;
-      error_code?: string | null;
-      error_message?: string | null;
-    };
-
-    if (!body.status || !VALID_STATUS.has(body.status)) {
+    const parsedBody = parseRecordingWritebackBody(auth.rawBody);
+    if (!parsedBody.ok) {
       return NextResponse.json(
-        { error: "validation_error", field: "status" },
+        { error: "validation_error", field: parsedBody.field },
         { status: 422 },
       );
     }
+    const body = parsedBody.body;
 
     const { data: activity, error: activityError } = await auth.serviceClient
       .from("call_activities")
