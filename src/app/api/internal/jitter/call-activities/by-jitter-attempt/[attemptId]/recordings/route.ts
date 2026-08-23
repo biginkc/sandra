@@ -6,13 +6,35 @@ import {
   authenticateJitterWriteback,
   checkAndRecordIdempotency,
   requireIdempotencyKey,
-} from "../../../_lib/auth";
-import { parseTranscriptWritebackBody } from "../../../_lib/artifact-writeback-payload";
-import { responseForWritebackPayload } from "../../../_lib/writeback-response";
+} from "../../../../_lib/auth";
+import { parseRecordingWritebackBody } from "../../../../_lib/artifact-writeback-payload";
+import { responseForWritebackPayload } from "../../../../_lib/writeback-response";
 
-type RouteContext = { params: Promise<{ id: string }> };
+type RouteContext = { params: Promise<{ attemptId: string }> };
 
-export async function PUT(
+function parentNotFound() {
+  return NextResponse.json(
+    { error: "not_found", error_code: "call_activity_not_found" },
+    { status: 404 },
+  );
+}
+
+function requireScopeId(request: Request): string | NextResponse {
+  const scopeId = new URL(request.url).searchParams.get("scopeId")?.trim();
+  if (!scopeId) {
+    return NextResponse.json(
+      {
+        error: "validation_error",
+        error_code: "scope_id_required",
+        field: "scopeId",
+      },
+      { status: 400 },
+    );
+  }
+  return scopeId;
+}
+
+export async function POST(
   request: Request,
   context: RouteContext,
 ): Promise<NextResponse> {
@@ -23,9 +45,12 @@ export async function PUT(
     const auth = await authenticateJitterWriteback(request);
     if (!auth.ok) return auth.response;
 
-    const { id } = await context.params;
+    const scopeId = requireScopeId(request);
+    if (scopeId instanceof NextResponse) return scopeId;
+
+    const { attemptId } = await context.params;
     const idempotencyKey = request.headers.get("idempotency-key")!.trim();
-    const parsedBody = parseTranscriptWritebackBody(auth.rawBody);
+    const parsedBody = parseRecordingWritebackBody(auth.rawBody);
     if (!parsedBody.ok) {
       return NextResponse.json(
         { error: "validation_error", field: parsedBody.field },
@@ -33,27 +58,24 @@ export async function PUT(
       );
     }
     const body = parsedBody.body;
+    const effectiveIdempotencyKey = `${scopeId.length}:${scopeId}:${idempotencyKey}`;
 
     const { data: activity, error: activityError } = await auth.serviceClient
       .from("call_activities")
       .select("id")
-      .eq("id", id)
       .eq("org_id", auth.orgId)
       .eq("provider", "jitter")
+      .eq("jitter_session_id", scopeId)
+      .eq("jitter_attempt_id", attemptId)
       .maybeSingle();
     if (activityError) throw activityError;
-    if (!activity) {
-      return NextResponse.json(
-        { error: "validation_error", field: "call_activity_id" },
-        { status: 422 },
-      );
-    }
+    if (!activity) return parentNotFound();
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       orgId: auth.orgId,
-      eventType: "call_transcript_writeback",
-      resourceId: id,
-      idempotencyKey,
+      eventType: "call_recording_writeback",
+      resourceId: activity.id,
+      idempotencyKey: effectiveIdempotencyKey,
       payload: body,
     });
     if (idempotency.state === "cached") {
@@ -67,33 +89,28 @@ export async function PUT(
     }
 
     const { data: payload, error: mutationError } =
-      await auth.serviceClient.rpc("jitter_upsert_call_transcript", {
-        p_call_activity_id: id,
+      await auth.serviceClient.rpc("jitter_upsert_call_recording", {
+        p_call_activity_id: activity.id,
         p_org_id: auth.orgId,
         p_status: body.status,
-        p_text: body.text ?? null,
-        p_language: body.language ?? null,
+        p_storage_path: body.storage_path ?? null,
+        p_duration_seconds: body.duration_seconds ?? null,
         p_error_code: body.error_code ?? null,
         p_error_message: body.error_message ?? null,
-        p_summary: body.summary ?? null,
-        p_summary_status: body.summary_status ?? "none",
-        p_summary_error_code: body.summary_error_code ?? null,
-        p_summary_error_message: body.summary_error_message ?? null,
-        p_external_id: idempotencyKey,
+        p_external_id: effectiveIdempotencyKey,
         p_request_hash: idempotency.requestHash,
       });
     if (mutationError) throw mutationError;
 
     if ((payload as { outcome?: string } | null)?.outcome === "not_found") {
-      return NextResponse.json(
-        { error: "validation_error", field: "call_activity_id" },
-        { status: 422 },
-      );
+      return parentNotFound();
     }
 
     return responseForWritebackPayload(payload);
   } catch (e) {
-    reportError(e, { tags: { surface: "jitter_call_transcript_writeback" } });
+    reportError(e, {
+      tags: { surface: "jitter_call_recording_by_attempt_writeback" },
+    });
     return NextResponse.json({ error: "internal_error" }, { status: 500 });
   }
 }

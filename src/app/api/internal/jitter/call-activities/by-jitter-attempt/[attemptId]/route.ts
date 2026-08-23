@@ -7,6 +7,7 @@ import {
   checkAndRecordIdempotency,
   requireIdempotencyKey,
 } from "../../../_lib/auth";
+import { responseForWritebackPayload } from "../../../_lib/writeback-response";
 
 type RouteContext = { params: Promise<{ attemptId: string }> };
 
@@ -62,8 +63,17 @@ const UUID_FIELDS = [
   "callback_assignee_id",
 ] as const;
 const TIMESTAMP_FIELDS = ["started_at", "ended_at", "callback_at"] as const;
+const NULLABLE_TEXT_FIELDS = [
+  "disposition",
+  "provider",
+  "provider_call_id",
+  "error_code",
+  "error_message",
+] as const;
 const NOTES_MAX_LENGTH = 10000;
 const RECORDING_PATH_MAX_LENGTH = 2048;
+const JITTER_SESSION_ID_MAX_LENGTH = 512;
+const POSTGRES_INT4_MAX = 2_147_483_647;
 
 function unprocessable(error_code: string, field?: string) {
   return NextResponse.json(
@@ -77,19 +87,30 @@ function forbidden(error_code: string) {
 }
 
 async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
-  if ((!body.org_id || !body.property_id || !body.contact_id) && !body.dialer_batch_item_id) {
-    return { ok: false as const, response: unprocessable("missing_required_field") };
+  if (
+    (!body.org_id || !body.property_id || !body.contact_id) &&
+    !body.dialer_batch_item_id
+  ) {
+    return {
+      ok: false as const,
+      response: unprocessable("missing_required_field"),
+    };
   }
 
-  if (body.dialer_batch_item_id && (!body.org_id || !body.property_id || !body.contact_id)) {
+  if (
+    body.dialer_batch_item_id &&
+    (!body.org_id || !body.property_id || !body.contact_id)
+  ) {
     const { data: item, error: itemError } = await serviceClient
       .from("dialer_batch_items")
-      .select(`
+      .select(
+        `
         id,
         property_id,
         contact_id,
         batch:dialer_batches!dialer_batch_items_batch_id_fkey(org_id)
-      `)
+      `,
+      )
       .eq("id", body.dialer_batch_item_id)
       .maybeSingle();
     if (itemError) throw itemError;
@@ -107,7 +128,10 @@ async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
   }
 
   if (!body.org_id || !body.property_id || !body.contact_id) {
-    return { ok: false as const, response: unprocessable("missing_required_field") };
+    return {
+      ok: false as const,
+      response: unprocessable("missing_required_field"),
+    };
   }
 
   const { data: property, error: propertyError } = await serviceClient
@@ -117,10 +141,16 @@ async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
     .maybeSingle();
   if (propertyError) throw propertyError;
   if (!property || property.deleted_at) {
-    return { ok: false as const, response: unprocessable("property_deleted", "property_id") };
+    return {
+      ok: false as const,
+      response: unprocessable("property_deleted", "property_id"),
+    };
   }
   if (property.org_id !== body.org_id) {
-    return { ok: false as const, response: unprocessable("org_mismatch", "property_id") };
+    return {
+      ok: false as const,
+      response: unprocessable("org_mismatch", "property_id"),
+    };
   }
 
   const { data: contact, error: contactError } = await serviceClient
@@ -130,7 +160,10 @@ async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
     .maybeSingle();
   if (contactError) throw contactError;
   if (!contact || contact.org_id !== body.org_id) {
-    return { ok: false as const, response: unprocessable("org_mismatch", "contact_id") };
+    return {
+      ok: false as const,
+      response: unprocessable("org_mismatch", "contact_id"),
+    };
   }
 
   if (body.dialer_batch_item_id) {
@@ -165,7 +198,10 @@ async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
     }
   }
 
-  return { ok: true as const, property } satisfies { ok: true; property: ValidatedWriteback["property"] };
+  return { ok: true as const, property } satisfies {
+    ok: true;
+    property: ValidatedWriteback["property"];
+  };
 }
 
 function validTimestamp(value: string | null | undefined): string | null {
@@ -176,6 +212,15 @@ function validTimestamp(value: string | null | undefined): string | null {
 }
 
 function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
+  if (
+    typeof body.jitter_session_id !== "string" ||
+    body.jitter_session_id.trim() === "" ||
+    body.jitter_session_id.length > JITTER_SESSION_ID_MAX_LENGTH
+  ) {
+    return unprocessable("invalid_jitter_session_id", "jitter_session_id");
+  }
+  body.jitter_session_id = body.jitter_session_id.trim();
+
   for (const field of UUID_FIELDS) {
     const value = body[field];
     if (
@@ -193,7 +238,8 @@ function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
     body.duration_seconds !== null &&
     (typeof body.duration_seconds !== "number" ||
       !Number.isSafeInteger(body.duration_seconds) ||
-      body.duration_seconds < 0)
+      body.duration_seconds < 0 ||
+      body.duration_seconds > POSTGRES_INT4_MAX)
   ) {
     return unprocessable("invalid_duration", "duration_seconds");
   }
@@ -214,10 +260,18 @@ function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
     return unprocessable("invalid_outcome", "outcome");
   }
 
+  for (const field of NULLABLE_TEXT_FIELDS) {
+    const value = body[field];
+    if (value !== undefined && value !== null && typeof value !== "string") {
+      return unprocessable("invalid_text", field);
+    }
+  }
+
   for (const field of TIMESTAMP_FIELDS) {
     const value = body[field];
     if (value === undefined || value === null || value === "") continue;
-    if (typeof value !== "string") return unprocessable("invalid_timestamp", field);
+    if (typeof value !== "string")
+      return unprocessable("invalid_timestamp", field);
     const normalized = validTimestamp(value);
     if (!normalized) return unprocessable("invalid_timestamp", field);
     body[field] = normalized;
@@ -243,7 +297,10 @@ function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
   return null;
 }
 
-async function resolveCallbackAssignee(serviceClient: any, body: WritebackBody): Promise<string | null> {
+async function resolveCallbackAssignee(
+  serviceClient: any,
+  body: WritebackBody,
+): Promise<string | null> {
   const preferred = body.callback_assignee_id ?? body.operator_user_id ?? null;
   if (preferred && body.org_id) {
     const { data: membership, error } = await serviceClient
@@ -280,8 +337,17 @@ export async function PUT(
 
     const { attemptId } = await context.params;
     const idempotencyKey = request.headers.get("idempotency-key")!.trim();
-    const parsedBody: unknown = JSON.parse(auth.rawBody || "{}");
-    if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+    let parsedBody: unknown;
+    try {
+      parsedBody = JSON.parse(auth.rawBody || "{}");
+    } catch {
+      return unprocessable("invalid_body");
+    }
+    if (
+      !parsedBody ||
+      typeof parsedBody !== "object" ||
+      Array.isArray(parsedBody)
+    ) {
       return unprocessable("invalid_body");
     }
     const body = parsedBody as WritebackBody;
@@ -289,7 +355,10 @@ export async function PUT(
     const initialPayloadValidation = validatePayloadSyntax(body);
     if (initialPayloadValidation) return initialPayloadValidation;
 
-    const validation = await validateOrgConsistency(auth.serviceClient as any, body);
+    const validation = await validateOrgConsistency(
+      auth.serviceClient as any,
+      body,
+    );
     if (!validation.ok) return validation.response;
 
     // validateOrgConsistency may derive the three tenant ids from a batch
@@ -301,6 +370,7 @@ export async function PUT(
     if (body.provider !== "jitter") {
       return unprocessable("provider_mismatch", "provider");
     }
+    const effectiveIdempotencyKey = `${body.jitter_session_id!.length}:${body.jitter_session_id}:${idempotencyKey}`;
 
     // Tenant isolation: validateOrgConsistency only proves the body ids are
     // internally consistent with body.org_id — it never compares against the
@@ -317,9 +387,15 @@ export async function PUT(
       if (!validTimestamp(body.callback_at)) {
         return unprocessable("callback_at_required", "callback_at");
       }
-      callbackAssigneeId = await resolveCallbackAssignee(auth.serviceClient as any, body);
+      callbackAssigneeId = await resolveCallbackAssignee(
+        auth.serviceClient as any,
+        body,
+      );
       if (!callbackAssigneeId) {
-        return unprocessable("callback_assignee_required", "callback_assignee_id");
+        return unprocessable(
+          "callback_assignee_required",
+          "callback_assignee_id",
+        );
       }
     }
 
@@ -327,11 +403,11 @@ export async function PUT(
       orgId: auth.orgId,
       eventType: "call_activity_writeback",
       resourceId: attemptId,
-      idempotencyKey,
+      idempotencyKey: effectiveIdempotencyKey,
       payload: body,
     });
     if (idempotency.state === "cached") {
-      return NextResponse.json(idempotency.cachedPayload);
+      return responseForWritebackPayload(idempotency.cachedPayload);
     }
     if (idempotency.state === "conflict") {
       return NextResponse.json(
@@ -340,19 +416,18 @@ export async function PUT(
       );
     }
 
-    const { data: payload, error: mutationError } = await (auth.serviceClient as any).rpc(
-      "jitter_writeback_call_activity",
-      {
-        p_attempt_id: attemptId,
-        p_body: body,
-        p_callback_assignee_id: callbackAssigneeId,
-        p_external_id: idempotencyKey,
-        p_notes: body.notes ?? null,
-        p_org_id: auth.orgId,
-        p_recording_path: body.recording_path ?? null,
-        p_request_hash: idempotency.requestHash,
-      },
-    );
+    const { data: payload, error: mutationError } = await (
+      auth.serviceClient as any
+    ).rpc("jitter_writeback_call_activity", {
+      p_attempt_id: attemptId,
+      p_body: body,
+      p_callback_assignee_id: callbackAssigneeId,
+      p_external_id: effectiveIdempotencyKey,
+      p_notes: body.notes ?? null,
+      p_org_id: auth.orgId,
+      p_recording_path: body.recording_path ?? null,
+      p_request_hash: idempotency.requestHash,
+    });
     if (mutationError) throw mutationError;
 
     if ((payload as { outcome?: string } | null)?.outcome === "not_found") {
@@ -361,8 +436,7 @@ export async function PUT(
         { status: 422 },
       );
     }
-
-    return NextResponse.json(payload);
+    return responseForWritebackPayload(payload);
   } catch (e) {
     reportError(e, { tags: { surface: "jitter_call_activity_writeback" } });
     return NextResponse.json({ error: "internal_error" }, { status: 500 });

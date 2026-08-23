@@ -104,6 +104,43 @@ describe("internal.jitter.call-activities transcript PUT", () => {
     await expect(response.json()).resolves.toMatchObject({ field: "status" });
   });
 
+  it("rejects invalid metadata before reserving the idempotency key", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const idempotencyKey = "transcript-invalid-metadata";
+    const incoherentKey = "transcript-incoherent-summary";
+    const routeUrl = `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/transcript`;
+    const response = await PUT(
+      jsonRequest(
+        routeUrl,
+        "PUT",
+        { status: "available", text: { invalid: true } },
+        { "idempotency-key": idempotencyKey },
+      ),
+      context(seeded.callActivityId),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({ field: "text" });
+    const incoherentResponse = await PUT(
+      jsonRequest(
+        routeUrl,
+        "PUT",
+        { status: "pending", summary_status: "pending" },
+        { "idempotency-key": incoherentKey },
+      ),
+      context(seeded.callActivityId),
+    );
+    expect(incoherentResponse.status).toBe(422);
+    await expect(incoherentResponse.json()).resolves.toMatchObject({
+      field: "summary_status",
+    });
+    const { data: events } = await testClient
+      .from("webhook_events")
+      .select("id")
+      .in("external_id", [idempotencyKey, incoherentKey]);
+    expect(events).toHaveLength(0);
+  });
+
   it("returns 422 if call_activity_id is not found", async () => {
     const id = crypto.randomUUID();
     const response = await PUT(
@@ -123,7 +160,9 @@ describe("internal.jitter.call-activities transcript PUT", () => {
   });
 
   it("denies an org-A token from reading or mutating an org-B activity", async () => {
-    const seeded = await seedCallActivity(testClient, { org_id: TEST_ORG_B_ID });
+    const seeded = await seedCallActivity(testClient, {
+      org_id: TEST_ORG_B_ID,
+    });
     const response = await PUT(
       jsonRequest(
         `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/transcript`,
@@ -135,7 +174,9 @@ describe("internal.jitter.call-activities transcript PUT", () => {
     );
 
     expect(response.status).toBe(422);
-    await expect(response.json()).resolves.toMatchObject({ field: "call_activity_id" });
+    await expect(response.json()).resolves.toMatchObject({
+      field: "call_activity_id",
+    });
     const { data: transcripts } = await testClient
       .from("call_transcripts")
       .select("id")
@@ -143,21 +184,59 @@ describe("internal.jitter.call-activities transcript PUT", () => {
     expect(transcripts).toHaveLength(0);
   });
 
+  it("rejects a same-org non-Jitter activity before reserving idempotency", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const key = "transcript-non-jitter";
+    const { error } = await testClient
+      .from("call_activities")
+      .update({ provider: "twilio" })
+      .eq("id", seeded.callActivityId);
+    expect(error).toBeNull();
+
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/transcript`,
+        "PUT",
+        { status: "available", text: "must not write" },
+        { "idempotency-key": key },
+      ),
+      context(seeded.callActivityId),
+    );
+    expect(response.status).toBe(422);
+    const { data: events } = await testClient
+      .from("webhook_events")
+      .select("id")
+      .eq("external_id", key);
+    expect(events).toHaveLength(0);
+  });
+
   it("refuses a reused idempotency key with a different transcript body", async () => {
     const seeded = await seedCallActivity(testClient);
     const url = `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/transcript`;
     const first = await PUT(
-      jsonRequest(url, "PUT", { status: "pending" }, { "idempotency-key": "transcript-conflict" }),
+      jsonRequest(
+        url,
+        "PUT",
+        { status: "pending" },
+        { "idempotency-key": "transcript-conflict" },
+      ),
       context(seeded.callActivityId),
     );
     const second = await PUT(
-      jsonRequest(url, "PUT", { status: "failed" }, { "idempotency-key": "transcript-conflict" }),
+      jsonRequest(
+        url,
+        "PUT",
+        { status: "failed" },
+        { "idempotency-key": "transcript-conflict" },
+      ),
       context(seeded.callActivityId),
     );
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(409);
-    await expect(second.json()).resolves.toMatchObject({ error_code: "idempotency_key_reused" });
+    await expect(second.json()).resolves.toMatchObject({
+      error_code: "idempotency_key_reused",
+    });
     const { data: transcript } = await testClient
       .from("call_transcripts")
       .select("status")
@@ -176,6 +255,8 @@ describe("internal.jitter.call-activities transcript PUT", () => {
           status: "available",
           text: "Hello from Jitter.",
           language: "en",
+          summary: "Seller requested a follow-up.",
+          summary_status: "available",
         },
         { "idempotency-key": "transcript-insert" },
       ),
@@ -188,6 +269,8 @@ describe("internal.jitter.call-activities transcript PUT", () => {
         call_activity_id: seeded.callActivityId,
         status: "available",
         text: "Hello from Jitter.",
+        summary: "Seller requested a follow-up.",
+        summary_status: "available",
       },
     });
   });
@@ -199,9 +282,14 @@ describe("internal.jitter.call-activities transcript PUT", () => {
 
     await sleep(20);
     const pending = await PUT(
-      jsonRequest(url, "PUT", { status: "pending" }, {
-        "idempotency-key": "transcript-trigger-pending",
-      }),
+      jsonRequest(
+        url,
+        "PUT",
+        { status: "pending" },
+        {
+          "idempotency-key": "transcript-trigger-pending",
+        },
+      ),
       context(seeded.callActivityId),
     );
     expect(pending.status).toBe(200);
@@ -213,9 +301,14 @@ describe("internal.jitter.call-activities transcript PUT", () => {
 
     await sleep(20);
     const available = await PUT(
-      jsonRequest(url, "PUT", { status: "available", text: "Done." }, {
-        "idempotency-key": "transcript-trigger-available",
-      }),
+      jsonRequest(
+        url,
+        "PUT",
+        { status: "available", text: "Done." },
+        {
+          "idempotency-key": "transcript-trigger-available",
+        },
+      ),
       context(seeded.callActivityId),
     );
     expect(available.status).toBe(200);

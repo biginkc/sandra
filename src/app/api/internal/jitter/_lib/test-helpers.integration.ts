@@ -2,7 +2,10 @@ import { createHash, createHmac } from "node:crypto";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { BMH_ORG_ID, seedTwoOrgs } from "@tests/integration/fixtures/multi-user";
+import {
+  BMH_ORG_ID,
+  seedTwoOrgs,
+} from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 export const JITTER_TOKEN = "jitter-route-integration-token";
@@ -12,7 +15,9 @@ export function hashSecret(value: string): string {
 }
 
 export function sign(body: string): string {
-  return "sha256=" + createHmac("sha256", JITTER_TOKEN).update(body).digest("hex");
+  return (
+    "sha256=" + createHmac("sha256", JITTER_TOKEN).update(body).digest("hex")
+  );
 }
 
 export function authHeaders(body: string, extra: Record<string, string> = {}) {
@@ -112,7 +117,8 @@ export async function seedDialerLead(
     })
     .select("id")
     .single();
-  if (propertyError || !property) throw propertyError ?? new Error("seed property");
+  if (propertyError || !property)
+    throw propertyError ?? new Error("seed property");
 
   return {
     orgId,
@@ -180,9 +186,11 @@ export async function setBatchClaim(
 
 export async function seedCallActivity(
   client: SupabaseClient<any>,
-  opts: { org_id?: string } = {},
+  opts: { org_id?: string; sessionId?: string; attemptId?: string } = {},
 ) {
   const seeded = await seedDialerBatch(client, opts);
+  const jitterAttemptId = opts.attemptId ?? `attempt-${crypto.randomUUID()}`;
+  const jitterSessionId = opts.sessionId ?? "scope-default";
   const { data: activity, error } = await (client as any)
     .from("call_activities")
     .insert({
@@ -190,7 +198,8 @@ export async function seedCallActivity(
       property_id: seeded.propertyId,
       contact_id: seeded.contactId,
       dialer_batch_item_id: seeded.itemId,
-      jitter_attempt_id: `attempt-${crypto.randomUUID()}`,
+      jitter_attempt_id: jitterAttemptId,
+      jitter_session_id: jitterSessionId,
       provider: "jitter",
       outcome: "unknown",
     })
@@ -202,6 +211,8 @@ export async function seedCallActivity(
     ...seeded,
     callActivityId: activity.id as string,
     callActivityUpdatedAt: activity.updated_at as string,
+    jitterAttemptId,
+    jitterSessionId,
   };
 }
 
