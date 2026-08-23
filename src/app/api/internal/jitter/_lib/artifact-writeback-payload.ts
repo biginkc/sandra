@@ -52,6 +52,10 @@ function validateNullableStrings(
   return null;
 }
 
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 export function parseRecordingWritebackBody(
   rawBody: string,
 ): Parsed<RecordingWritebackBody> {
@@ -68,6 +72,9 @@ export function parseRecordingWritebackBody(
     "error_message",
   ]);
   if (invalidString) return { ok: false, field: invalidString };
+  if (body.status === "available" && !isNonBlankString(body.storage_path)) {
+    return { ok: false, field: "storage_path" };
+  }
   if (
     body.duration_seconds !== undefined &&
     body.duration_seconds !== null &&
@@ -109,6 +116,12 @@ export function parseTranscriptWritebackBody(
     "summary_error_message",
   ]);
   if (invalidString) return { ok: false, field: invalidString };
+  if (body.status === "available" && !isNonBlankString(body.text)) {
+    return { ok: false, field: "text" };
+  }
+  if (body.summary_status === "available" && !isNonBlankString(body.summary)) {
+    return { ok: false, field: "summary" };
+  }
 
   return { ok: true, body: body as TranscriptWritebackBody };
 }

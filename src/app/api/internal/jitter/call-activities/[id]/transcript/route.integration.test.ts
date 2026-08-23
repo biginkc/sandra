@@ -170,6 +170,32 @@ describe("internal.jitter.call-activities transcript PUT", () => {
     expect(transcripts).toHaveLength(0);
   });
 
+  it("rejects a same-org non-Jitter activity before reserving idempotency", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const key = "transcript-non-jitter";
+    const { error } = await testClient
+      .from("call_activities")
+      .update({ provider: "twilio" })
+      .eq("id", seeded.callActivityId);
+    expect(error).toBeNull();
+
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/transcript`,
+        "PUT",
+        { status: "available", text: "must not write" },
+        { "idempotency-key": key },
+      ),
+      context(seeded.callActivityId),
+    );
+    expect(response.status).toBe(422);
+    const { data: events } = await testClient
+      .from("webhook_events")
+      .select("id")
+      .eq("external_id", key);
+    expect(events).toHaveLength(0);
+  });
+
   it("refuses a reused idempotency key with a different transcript body", async () => {
     const seeded = await seedCallActivity(testClient);
     const url = `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/transcript`;

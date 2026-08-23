@@ -21,6 +21,10 @@ function url(attemptId: string, scopeId = "scope-default") {
   return `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}/recordings?scopeId=${encodeURIComponent(scopeId)}`;
 }
 
+function effectiveKey(scopeId: string, key: string) {
+  return `${scopeId.length}:${scopeId}:${key}`;
+}
+
 describe("internal.jitter.call-activities by-attempt recordings POST", () => {
   beforeEach(async () => {
     await resetJitterIntegration(testClient);
@@ -91,7 +95,7 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
       jsonRequest(
         url(seeded.jitterAttemptId),
         "POST",
-        { status: "available", duration_seconds: -1 },
+        { status: "available", storage_path: "   " },
         { "idempotency-key": idempotencyKey },
       ),
       context(seeded.jitterAttemptId),
@@ -99,7 +103,7 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
 
     expect(response.status).toBe(422);
     await expect(response.json()).resolves.toMatchObject({
-      field: "duration_seconds",
+      field: "storage_path",
     });
     const { data: events } = await testClient
       .from("webhook_events")
@@ -115,7 +119,11 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
       jsonRequest(
         url(seeded.jitterAttemptId),
         "POST",
-        { status: "available", duration_seconds: 2_147_483_648 },
+        {
+          status: "available",
+          storage_path: "calls/overflow.wav",
+          duration_seconds: 2_147_483_648,
+        },
         { "idempotency-key": idempotencyKey },
       ),
       context(seeded.jitterAttemptId),
@@ -260,6 +268,83 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
     expect(wrongScopeRows).toHaveLength(0);
   });
 
+  it("accepts the same caller key for the same attempt in different scopes", async () => {
+    const attemptId = `attempt-shared-key-${crypto.randomUUID()}`;
+    const first = await seedCallActivity(testClient, {
+      attemptId,
+      sessionId: "scope-key-first",
+    });
+    const second = await seedCallActivity(testClient, {
+      attemptId,
+      sessionId: "scope-key-second",
+    });
+    const key = `${attemptId}:recording`;
+
+    const responses = await Promise.all([
+      POST(
+        jsonRequest(
+          url(attemptId, first.jitterSessionId),
+          "POST",
+          { status: "available", storage_path: "calls/first.wav" },
+          { "idempotency-key": key },
+        ),
+        context(attemptId),
+      ),
+      POST(
+        jsonRequest(
+          url(attemptId, second.jitterSessionId),
+          "POST",
+          { status: "available", storage_path: "calls/second.wav" },
+          { "idempotency-key": key },
+        ),
+        context(attemptId),
+      ),
+    ]);
+    expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+    const { data: events } = await testClient
+      .from("webhook_events")
+      .select("external_id")
+      .in("external_id", [
+        effectiveKey(first.jitterSessionId, key),
+        effectiveKey(second.jitterSessionId, key),
+      ]);
+    expect(events).toHaveLength(2);
+  });
+
+  it("serializes concurrent distinct-key first writes into one recording", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const responses = await Promise.all([
+      POST(
+        jsonRequest(
+          url(seeded.jitterAttemptId, seeded.jitterSessionId),
+          "POST",
+          { status: "available", storage_path: "calls/concurrent-a.wav" },
+          { "idempotency-key": "recording-concurrent-a" },
+        ),
+        context(seeded.jitterAttemptId),
+      ),
+      POST(
+        jsonRequest(
+          url(seeded.jitterAttemptId, seeded.jitterSessionId),
+          "POST",
+          { status: "available", storage_path: "calls/concurrent-b.wav" },
+          { "idempotency-key": "recording-concurrent-b" },
+        ),
+        context(seeded.jitterAttemptId),
+      ),
+    ]);
+    expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+    const { data: rows } = await testClient
+      .from("call_recordings")
+      .select("status, storage_path")
+      .eq("call_activity_id", seeded.callActivityId);
+    expect(rows).toHaveLength(1);
+    expect(rows![0].status).toBe("available");
+    expect(["calls/concurrent-a.wav", "calls/concurrent-b.wav"]).toContain(
+      rows![0].storage_path,
+    );
+  });
+
   it("returns the cached payload for an identical replay", async () => {
     const seeded = await seedCallActivity(testClient);
     const body = { status: "available", storage_path: "calls/cached.wav" };
@@ -292,7 +377,7 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
       org_id: seeded.orgId,
       provider: "jitter",
       event_type: "call_recording_writeback",
-      external_id: idempotencyKey,
+      external_id: effectiveKey(seeded.jitterSessionId, idempotencyKey),
       signature_verified: true,
       payload: body,
       request_hash: requestHash,
@@ -311,7 +396,7 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
     const { data: event } = await testClient
       .from("webhook_events")
       .select("processing_status")
-      .eq("external_id", idempotencyKey)
+      .eq("external_id", effectiveKey(seeded.jitterSessionId, idempotencyKey))
       .single();
     expect(event?.processing_status).toBe("processed");
   });

@@ -123,7 +123,9 @@ describe("internal.jitter.call-activities recordings POST", () => {
   });
 
   it("denies an org-A token from reading or mutating an org-B activity", async () => {
-    const seeded = await seedCallActivity(testClient, { org_id: TEST_ORG_B_ID });
+    const seeded = await seedCallActivity(testClient, {
+      org_id: TEST_ORG_B_ID,
+    });
     const response = await POST(
       jsonRequest(
         `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/recordings`,
@@ -135,7 +137,9 @@ describe("internal.jitter.call-activities recordings POST", () => {
     );
 
     expect(response.status).toBe(422);
-    await expect(response.json()).resolves.toMatchObject({ field: "call_activity_id" });
+    await expect(response.json()).resolves.toMatchObject({
+      field: "call_activity_id",
+    });
     const { data: recordings } = await testClient
       .from("call_recordings")
       .select("id")
@@ -147,17 +151,29 @@ describe("internal.jitter.call-activities recordings POST", () => {
     const seeded = await seedCallActivity(testClient);
     const url = `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/recordings`;
     const first = await POST(
-      jsonRequest(url, "POST", { status: "pending" }, { "idempotency-key": "recording-conflict" }),
+      jsonRequest(
+        url,
+        "POST",
+        { status: "pending" },
+        { "idempotency-key": "recording-conflict" },
+      ),
       context(seeded.callActivityId),
     );
     const second = await POST(
-      jsonRequest(url, "POST", { status: "failed" }, { "idempotency-key": "recording-conflict" }),
+      jsonRequest(
+        url,
+        "POST",
+        { status: "failed" },
+        { "idempotency-key": "recording-conflict" },
+      ),
       context(seeded.callActivityId),
     );
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(409);
-    await expect(second.json()).resolves.toMatchObject({ error_code: "idempotency_key_reused" });
+    await expect(second.json()).resolves.toMatchObject({
+      error_code: "idempotency_key_reused",
+    });
     const { data: recording } = await testClient
       .from("call_recordings")
       .select("status")
@@ -199,9 +215,14 @@ describe("internal.jitter.call-activities recordings POST", () => {
 
     await sleep(20);
     const pending = await POST(
-      jsonRequest(url, "POST", { status: "pending" }, {
-        "idempotency-key": "recording-trigger-pending",
-      }),
+      jsonRequest(
+        url,
+        "POST",
+        { status: "pending" },
+        {
+          "idempotency-key": "recording-trigger-pending",
+        },
+      ),
       context(seeded.callActivityId),
     );
     expect(pending.status).toBe(200);
@@ -213,9 +234,12 @@ describe("internal.jitter.call-activities recordings POST", () => {
 
     await sleep(20);
     const available = await POST(
-      jsonRequest(url, "POST", { status: "available" }, {
-        "idempotency-key": "recording-trigger-available",
-      }),
+      jsonRequest(
+        url,
+        "POST",
+        { status: "available", storage_path: "calls/trigger.wav" },
+        { "idempotency-key": "recording-trigger-available" },
+      ),
       context(seeded.callActivityId),
     );
     expect(available.status).toBe(200);

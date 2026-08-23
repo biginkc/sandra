@@ -24,13 +24,18 @@ describe("artifact writeback payload validation", () => {
   it("rejects corrupt recording metadata", () => {
     expect(
       parseRecordingWritebackBody(
-        JSON.stringify({ status: "available", duration_seconds: -1 }),
+        JSON.stringify({
+          status: "available",
+          storage_path: "calls/invalid.wav",
+          duration_seconds: -1,
+        }),
       ),
     ).toEqual({ ok: false, field: "duration_seconds" });
     expect(
       parseRecordingWritebackBody(
         JSON.stringify({
           status: "available",
+          storage_path: "calls/overflow.wav",
           duration_seconds: 2_147_483_648,
         }),
       ),
@@ -40,6 +45,16 @@ describe("artifact writeback payload validation", () => {
         JSON.stringify({ status: "available", storage_path: 42 }),
       ),
     ).toEqual({ ok: false, field: "storage_path" });
+    for (const storage_path of [undefined, null, "", "   "]) {
+      expect(
+        parseRecordingWritebackBody(
+          JSON.stringify({ status: "available", storage_path }),
+        ),
+      ).toEqual({ ok: false, field: "storage_path" });
+    }
+    expect(
+      parseRecordingWritebackBody(JSON.stringify({ status: "pending" })),
+    ).toMatchObject({ ok: true });
   });
 
   it("rejects corrupt transcript and summary metadata", () => {
@@ -53,5 +68,29 @@ describe("artifact writeback payload validation", () => {
         JSON.stringify({ status: "available", summary_status: 1 }),
       ),
     ).toEqual({ ok: false, field: "summary_status" });
+    for (const text of [undefined, null, "", "   "]) {
+      expect(
+        parseTranscriptWritebackBody(
+          JSON.stringify({ status: "available", text }),
+        ),
+      ).toEqual({ ok: false, field: "text" });
+    }
+    for (const summary of [undefined, null, "", "   "]) {
+      expect(
+        parseTranscriptWritebackBody(
+          JSON.stringify({
+            status: "available",
+            text: "Transcript",
+            summary_status: "available",
+            summary,
+          }),
+        ),
+      ).toEqual({ ok: false, field: "summary" });
+    }
+    expect(
+      parseTranscriptWritebackBody(
+        JSON.stringify({ status: "failed", summary_status: "failed" }),
+      ),
+    ).toMatchObject({ ok: true });
   });
 });

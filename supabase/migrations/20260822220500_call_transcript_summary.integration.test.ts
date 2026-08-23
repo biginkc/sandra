@@ -209,6 +209,90 @@ describe("Migration 20260822220500 — call transcript summary", () => {
     }
   });
 
+  it("enforces one recording and transcript child per call activity", async () => {
+    const { rows } = await pg.query<{ indexname: string; indexdef: string }>(
+      `select indexname, indexdef from pg_indexes
+       where schemaname = 'public'
+         and indexname in (
+           'call_recordings_activity_unique_idx',
+           'call_transcripts_activity_unique_idx'
+         ) order by indexname`,
+    );
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.indexdef).toContain("UNIQUE INDEX");
+      expect(row.indexdef).toContain("(call_activity_id)");
+    }
+    expect(migrationSql()).toContain(
+      "duplicate call artifacts require manual reconciliation",
+    );
+  });
+
+  it("rejects impossible available artifacts at the RPC boundary", async () => {
+    const seeded = await seedCallActivity(serviceClient);
+    const { error: recordingError } = await (serviceClient as any).rpc(
+      "jitter_upsert_call_recording",
+      {
+        p_call_activity_id: seeded.callActivityId,
+        p_org_id: seeded.orgId,
+        p_status: "available",
+        p_storage_path: "   ",
+        p_duration_seconds: null,
+        p_error_code: null,
+        p_error_message: null,
+        p_external_id: "unreserved-recording",
+        p_request_hash: "unreserved",
+      },
+    );
+    expect(recordingError?.message).toContain(
+      "available recording requires storage path",
+    );
+
+    const { error: transcriptError } = await (serviceClient as any).rpc(
+      "jitter_upsert_call_transcript",
+      {
+        p_call_activity_id: seeded.callActivityId,
+        p_org_id: seeded.orgId,
+        p_status: "available",
+        p_text: " ",
+        p_language: null,
+        p_error_code: null,
+        p_error_message: null,
+        p_summary: null,
+        p_summary_status: "none",
+        p_summary_error_code: null,
+        p_summary_error_message: null,
+        p_external_id: "unreserved-transcript",
+        p_request_hash: "unreserved",
+      },
+    );
+    expect(transcriptError?.message).toContain(
+      "available transcript requires text",
+    );
+
+    const { error: summaryError } = await (serviceClient as any).rpc(
+      "jitter_upsert_call_transcript",
+      {
+        p_call_activity_id: seeded.callActivityId,
+        p_org_id: seeded.orgId,
+        p_status: "pending",
+        p_text: null,
+        p_language: null,
+        p_error_code: null,
+        p_error_message: null,
+        p_summary: "",
+        p_summary_status: "available",
+        p_summary_error_code: null,
+        p_summary_error_message: null,
+        p_external_id: "unreserved-summary",
+        p_request_hash: "unreserved",
+      },
+    );
+    expect(summaryError?.message).toContain(
+      "available summary requires summary",
+    );
+  });
+
   it("exposes only the extended service-role transcript RPC", async () => {
     const signature =
       "public.jitter_upsert_call_transcript(uuid,uuid,text,text,text,text,text,text,text,text,text,text,text)";
@@ -261,6 +345,34 @@ describe("Migration 20260822220500 — call transcript summary", () => {
        ) as function_name`,
     );
     expect(old.rows[0].function_name).toBeNull();
+  });
+
+  it("keeps the call activity RPC service-role only with an empty search path", async () => {
+    const signature =
+      "public.jitter_writeback_call_activity(text,jsonb,uuid,text,text,uuid,text,text)";
+    const { rows } = await pg.query<{
+      prosecdef: boolean;
+      proconfig: string[] | null;
+      anon_execute: boolean;
+      authenticated_execute: boolean;
+      service_execute: boolean;
+    }>(
+      `select p.prosecdef, p.proconfig,
+              has_function_privilege('anon', $1, 'execute') as anon_execute,
+              has_function_privilege('authenticated', $1, 'execute') as authenticated_execute,
+              has_function_privilege('service_role', $1, 'execute') as service_execute
+       from pg_catalog.pg_proc p where p.oid = $1::regprocedure`,
+      [signature],
+    );
+    expect(rows).toEqual([
+      {
+        prosecdef: true,
+        proconfig: ['search_path=""'],
+        anon_execute: false,
+        authenticated_execute: false,
+        service_execute: true,
+      },
+    ]);
   });
 
   it("fans child transcript and summary statuses to the Realtime parent", async () => {

@@ -222,7 +222,7 @@ describe("internal.jitter.call-activities writeback PUT", () => {
           ...writebackBody(seeded),
           jitter_session_id: "session-run-a",
         },
-        { "idempotency-key": "activity-session-a" },
+        { "idempotency-key": "activity-session-shared" },
       ),
       attemptContext(attemptId),
     );
@@ -234,7 +234,7 @@ describe("internal.jitter.call-activities writeback PUT", () => {
           ...writebackBody(seeded),
           jitter_session_id: "session-run-b",
         },
-        { "idempotency-key": "activity-session-b" },
+        { "idempotency-key": "activity-session-shared" },
       ),
       attemptContext(attemptId),
     );
@@ -257,6 +257,14 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       { id: firstJson.call_activity.id, jitter_session_id: "session-run-a" },
       { id: secondJson.call_activity.id, jitter_session_id: "session-run-b" },
     ]);
+    const { data: reservations } = await (testClient as any)
+      .from("webhook_events")
+      .select("external_id")
+      .in("external_id", [
+        "13:session-run-a:activity-session-shared",
+        "13:session-run-b:activity-session-shared",
+      ]);
+    expect(reservations).toHaveLength(2);
   });
 
   it("persists notes and recording_path on insert and on update", async () => {
@@ -819,9 +827,20 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       attemptContext(attemptId),
     );
     const replay = await PUT(
-      jsonRequest(requestUrl, "PUT", body, {
-        "idempotency-key": "activity-dnc-replay-2",
-      }),
+      jsonRequest(
+        requestUrl,
+        "PUT",
+        {
+          ...body,
+          ended_at: "2026-08-22T20:30:00.000Z",
+          duration_seconds: 143,
+          provider_call_id: "provider-enriched-dnc",
+          notes: "DNC call completed and enriched",
+        },
+        {
+          "idempotency-key": "activity-dnc-replay-2",
+        },
+      ),
       attemptContext(attemptId),
     );
 
@@ -840,6 +859,25 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       .eq("id", seeded.contactId)
       .single();
     expect(contact?.do_not_contact).toBe(true);
+    const { data: activity } = await (testClient as any)
+      .from("call_activities")
+      .select(
+        "ended_at, duration_seconds, provider_call_id, notes, raw_event_count",
+      )
+      .eq("org_id", seeded.orgId)
+      .eq("provider", "jitter")
+      .eq("jitter_session_id", "session-activity")
+      .eq("jitter_attempt_id", attemptId)
+      .single();
+    expect(activity).toMatchObject({
+      duration_seconds: 143,
+      provider_call_id: "provider-enriched-dnc",
+      notes: "DNC call completed and enriched",
+      raw_event_count: 2,
+    });
+    expect(new Date(activity.ended_at).toISOString()).toBe(
+      "2026-08-22T20:30:00.000Z",
+    );
   });
 
   it("scopes DNC replay and consent deduplication to the Jitter session", async () => {
@@ -1068,7 +1106,12 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     ]);
 
     expect(responses.filter(({ status }) => status === 200)).toHaveLength(1);
-    expect(responses.filter(({ status }) => status >= 400)).toHaveLength(1);
+    const rejected = responses.find(({ status }) => status !== 200)!;
+    expect(rejected.status).toBe(409);
+    await expect(rejected.json()).resolves.toEqual({
+      error: "conflict",
+      error_code: "call_activity_identity_conflict",
+    });
 
     const { data: activities, error } = await (testClient as any)
       .from("call_activities")

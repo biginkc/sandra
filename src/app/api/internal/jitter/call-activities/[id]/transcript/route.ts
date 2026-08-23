@@ -38,6 +38,7 @@ export async function PUT(
       .select("id")
       .eq("id", id)
       .eq("org_id", auth.orgId)
+      .eq("provider", "jitter")
       .maybeSingle();
     if (activityError) throw activityError;
     if (!activity) {

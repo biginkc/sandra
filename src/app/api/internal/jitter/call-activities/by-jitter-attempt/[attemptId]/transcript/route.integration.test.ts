@@ -21,6 +21,10 @@ function url(attemptId: string, scopeId = "scope-default") {
   return `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}/transcript?scopeId=${encodeURIComponent(scopeId)}`;
 }
 
+function effectiveKey(scopeId: string, key: string) {
+  return `${scopeId.length}:${scopeId}:${key}`;
+}
+
 describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
   beforeEach(async () => {
     await resetJitterIntegration(testClient);
@@ -106,7 +110,12 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
       jsonRequest(
         url(seeded.jitterAttemptId),
         "PUT",
-        { status: "available", summary: { fabricated: true } },
+        {
+          status: "available",
+          text: "Transcript exists",
+          summary_status: "available",
+          summary: "   ",
+        },
         { "idempotency-key": idempotencyKey },
       ),
       context(seeded.jitterAttemptId),
@@ -264,6 +273,82 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
     expect(wrongScopeRows).toHaveLength(0);
   });
 
+  it("accepts the same caller key for the same attempt in different scopes", async () => {
+    const attemptId = `attempt-shared-key-${crypto.randomUUID()}`;
+    const first = await seedCallActivity(testClient, {
+      attemptId,
+      sessionId: "scope-key-first",
+    });
+    const second = await seedCallActivity(testClient, {
+      attemptId,
+      sessionId: "scope-key-second",
+    });
+    const key = `${attemptId}:transcript`;
+    const responses = await Promise.all([
+      PUT(
+        jsonRequest(
+          url(attemptId, first.jitterSessionId),
+          "PUT",
+          { status: "available", text: "First scope" },
+          { "idempotency-key": key },
+        ),
+        context(attemptId),
+      ),
+      PUT(
+        jsonRequest(
+          url(attemptId, second.jitterSessionId),
+          "PUT",
+          { status: "available", text: "Second scope" },
+          { "idempotency-key": key },
+        ),
+        context(attemptId),
+      ),
+    ]);
+    expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+    const { data: events } = await testClient
+      .from("webhook_events")
+      .select("external_id")
+      .in("external_id", [
+        effectiveKey(first.jitterSessionId, key),
+        effectiveKey(second.jitterSessionId, key),
+      ]);
+    expect(events).toHaveLength(2);
+  });
+
+  it("serializes concurrent distinct-key first writes into one transcript", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const responses = await Promise.all([
+      PUT(
+        jsonRequest(
+          url(seeded.jitterAttemptId, seeded.jitterSessionId),
+          "PUT",
+          { status: "available", text: "Concurrent transcript A" },
+          { "idempotency-key": "transcript-concurrent-a" },
+        ),
+        context(seeded.jitterAttemptId),
+      ),
+      PUT(
+        jsonRequest(
+          url(seeded.jitterAttemptId, seeded.jitterSessionId),
+          "PUT",
+          { status: "available", text: "Concurrent transcript B" },
+          { "idempotency-key": "transcript-concurrent-b" },
+        ),
+        context(seeded.jitterAttemptId),
+      ),
+    ]);
+    expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+    const { data: rows } = await testClient
+      .from("call_transcripts")
+      .select("status, text")
+      .eq("call_activity_id", seeded.callActivityId);
+    expect(rows).toHaveLength(1);
+    expect(rows![0].status).toBe("available");
+    expect(["Concurrent transcript A", "Concurrent transcript B"]).toContain(
+      rows![0].text,
+    );
+  });
+
   it("preserves a working transcript when summary generation failed", async () => {
     const seeded = await seedCallActivity(testClient);
     const response = await PUT(
@@ -341,7 +426,7 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
       org_id: seeded.orgId,
       provider: "jitter",
       event_type: "call_transcript_writeback",
-      external_id: idempotencyKey,
+      external_id: effectiveKey(seeded.jitterSessionId, idempotencyKey),
       signature_verified: true,
       payload: body,
       request_hash: requestHash,
@@ -360,7 +445,7 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
     const { data: event } = await testClient
       .from("webhook_events")
       .select("processing_status")
-      .eq("external_id", idempotencyKey)
+      .eq("external_id", effectiveKey(seeded.jitterSessionId, idempotencyKey))
       .single();
     expect(event?.processing_status).toBe("processed");
   });

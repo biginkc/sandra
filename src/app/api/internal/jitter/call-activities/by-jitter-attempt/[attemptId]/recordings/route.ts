@@ -57,6 +57,7 @@ export async function POST(
       );
     }
     const body = parsedBody.body;
+    const effectiveIdempotencyKey = `${scopeId.length}:${scopeId}:${idempotencyKey}`;
 
     const { data: activity, error: activityError } = await auth.serviceClient
       .from("call_activities")
@@ -73,7 +74,7 @@ export async function POST(
       orgId: auth.orgId,
       eventType: "call_recording_writeback",
       resourceId: activity.id,
-      idempotencyKey,
+      idempotencyKey: effectiveIdempotencyKey,
       payload: body,
     });
     if (idempotency.state === "cached") {
@@ -95,7 +96,7 @@ export async function POST(
         p_duration_seconds: body.duration_seconds ?? null,
         p_error_code: body.error_code ?? null,
         p_error_message: body.error_message ?? null,
-        p_external_id: idempotencyKey,
+        p_external_id: effectiveIdempotencyKey,
         p_request_hash: idempotency.requestHash,
       });
     if (mutationError) throw mutationError;

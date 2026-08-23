@@ -348,6 +348,7 @@ export async function PUT(
     if (body.provider !== "jitter") {
       return unprocessable("provider_mismatch", "provider");
     }
+    const effectiveIdempotencyKey = `${body.jitter_session_id!.length}:${body.jitter_session_id}:${idempotencyKey}`;
 
     // Tenant isolation: validateOrgConsistency only proves the body ids are
     // internally consistent with body.org_id — it never compares against the
@@ -380,7 +381,7 @@ export async function PUT(
       orgId: auth.orgId,
       eventType: "call_activity_writeback",
       resourceId: attemptId,
-      idempotencyKey,
+      idempotencyKey: effectiveIdempotencyKey,
       payload: body,
     });
     if (idempotency.state === "cached") {
@@ -399,7 +400,7 @@ export async function PUT(
       p_attempt_id: attemptId,
       p_body: body,
       p_callback_assignee_id: callbackAssigneeId,
-      p_external_id: idempotencyKey,
+      p_external_id: effectiveIdempotencyKey,
       p_notes: body.notes ?? null,
       p_org_id: auth.orgId,
       p_recording_path: body.recording_path ?? null,
@@ -411,6 +412,14 @@ export async function PUT(
       return NextResponse.json(
         { error: "validation_error", field: "call_activity_id" },
         { status: 422 },
+      );
+    }
+    if (
+      (payload as { outcome?: string } | null)?.outcome === "identity_conflict"
+    ) {
+      return NextResponse.json(
+        { error: "conflict", error_code: "call_activity_identity_conflict" },
+        { status: 409 },
       );
     }
 

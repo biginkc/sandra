@@ -48,7 +48,7 @@ alter table public.call_activities
 
 -- Build the replacement before removing the old three-column index so there
 -- is never a write window without a usable uniqueness fence.
-create unique index idx_call_activities_org_provider_session_attempt
+create unique index if not exists idx_call_activities_org_provider_session_attempt
   on public.call_activities (
     org_id,
     provider,
@@ -57,6 +57,28 @@ create unique index idx_call_activities_org_provider_session_attempt
   );
 
 drop index if exists public.idx_call_activities_org_provider_attempt;
+
+-- One durable recording and transcript row belongs to each call. Fail closed
+-- if legacy data violates that invariant so an operator can audit it instead
+-- of silently deleting potentially meaningful artifacts during deployment.
+do $audit$
+begin
+  if exists (
+    select 1 from public.call_recordings
+    group by call_activity_id having count(*) > 1
+  ) or exists (
+    select 1 from public.call_transcripts
+    group by call_activity_id having count(*) > 1
+  ) then
+    raise exception 'duplicate call artifacts require manual reconciliation';
+  end if;
+end;
+$audit$;
+
+create unique index if not exists call_recordings_activity_unique_idx
+  on public.call_recordings (call_activity_id);
+create unique index if not exists call_transcripts_activity_unique_idx
+  on public.call_transcripts (call_activity_id);
 
 -- BEGIN legacy Jitter consent identity correction.
 -- Existing DNC evidence already carries the session in source_detail. Bring
@@ -102,7 +124,6 @@ declare
   v_jitter_session_id text := nullif(btrim(p_body ->> 'jitter_session_id'), '');
   v_activity public.call_activities%rowtype;
   v_existing public.call_activities%rowtype;
-  v_existing_id uuid;
   v_item record;
   v_contact_dnc boolean;
   v_callback_task_id uuid;
@@ -168,46 +189,24 @@ begin
     or v_existing.contact_id is distinct from v_contact_id
     or v_existing.dialer_batch_item_id is distinct from v_item_id
   ) then
-    raise exception 'jitter coherence check failed';
+    v_payload := jsonb_build_object('outcome', 'identity_conflict');
+    update public.webhook_events
+    set payload = v_payload,
+        processing_status = 'processed',
+        processed_at = statement_timestamp()
+    where org_id = p_org_id
+      and provider = 'jitter'
+      and event_type = 'call_activity_writeback'
+      and external_id = p_external_id
+      and processing_status = 'pending'
+      and request_hash = p_request_hash;
+    if not found then
+      raise exception 'idempotency reservation missing or hash mismatch';
+    end if;
+    return v_payload;
   end if;
 
   v_existing := null;
-
-  if p_body ->> 'disposition' = 'callback_requested' then
-    v_callback_at := (p_body ->> 'callback_at')::timestamptz;
-
-    update public.properties
-    set outreach_dispo = 'callback_requested',
-        follow_up_at = v_callback_at,
-        updated_at = statement_timestamp()
-    where id = v_property_id
-      and org_id = p_org_id
-      and deleted_at is null;
-
-    select t.id into v_callback_task_id
-    from public.tasks as t
-    where t.related_property_id = v_property_id
-      and t.org_id = p_org_id
-      and t.type = 'callback'
-      and t.status = 'open'
-      and t.due_at = v_callback_at
-    limit 1;
-
-    if v_callback_task_id is null then
-      insert into public.tasks (
-        org_id, assignee_id, related_property_id, type, title,
-        due_at, created_by
-      ) values (
-        p_org_id,
-        p_callback_assignee_id,
-        v_property_id,
-        'callback',
-        'Callback ' || coalesce((select address from public.properties where id = v_property_id), 'property'),
-        v_callback_at,
-        p_callback_assignee_id
-      ) returning id into v_callback_task_id;
-    end if;
-  end if;
 
   select c.do_not_contact into v_contact_dnc
   from public.contacts as c
@@ -218,19 +217,7 @@ begin
     raise exception 'jitter coherence check failed';
   end if;
 
-  if coalesce((p_body ->> 'do_not_call_requested')::boolean, false)
-     and v_contact_dnc then
-    select a.id into v_existing_id
-    from public.call_activities as a
-    where a.org_id = p_org_id
-      and a.provider = 'jitter'
-      and a.jitter_session_id = v_jitter_session_id
-      and a.jitter_attempt_id = p_attempt_id
-    limit 1;
-  end if;
-
-  if v_existing_id is null then
-    insert into public.call_activities (
+  insert into public.call_activities (
       org_id, property_id, contact_id, dialer_batch_item_id,
       jitter_attempt_id, jitter_session_id, operator_user_id,
       started_at, ended_at, duration_seconds, outcome, disposition,
@@ -275,21 +262,69 @@ begin
     where call_activities.property_id is not distinct from excluded.property_id
       and call_activities.contact_id is not distinct from excluded.contact_id
       and call_activities.dialer_batch_item_id is not distinct from excluded.dialer_batch_item_id
-    returning * into v_activity;
+  returning * into v_activity;
 
+  if not found then
+    v_payload := jsonb_build_object('outcome', 'identity_conflict');
+    update public.webhook_events
+    set payload = v_payload,
+        processing_status = 'processed',
+        processed_at = statement_timestamp()
+    where org_id = p_org_id
+      and provider = 'jitter'
+      and event_type = 'call_activity_writeback'
+      and external_id = p_external_id
+      and processing_status = 'pending'
+      and request_hash = p_request_hash;
     if not found then
-      raise exception 'jitter coherence check failed';
+      raise exception 'idempotency reservation missing or hash mismatch';
     end if;
-  else
-    select * into v_activity
-    from public.call_activities
-    where id = v_existing_id;
+    return v_payload;
+  end if;
+
+  -- Sidecars are written only after the durable identity upsert succeeds. A
+  -- losing concurrent request must not mutate another lead before returning
+  -- its permanent identity-conflict result.
+  if p_body ->> 'disposition' = 'callback_requested' then
+    v_callback_at := (p_body ->> 'callback_at')::timestamptz;
+
+    update public.properties
+    set outreach_dispo = 'callback_requested',
+        follow_up_at = v_callback_at,
+        updated_at = statement_timestamp()
+    where id = v_property_id
+      and org_id = p_org_id
+      and deleted_at is null;
+
+    select t.id into v_callback_task_id
+    from public.tasks as t
+    where t.related_property_id = v_property_id
+      and t.org_id = p_org_id
+      and t.type = 'callback'
+      and t.status = 'open'
+      and t.due_at = v_callback_at
+    limit 1;
+
+    if v_callback_task_id is null then
+      insert into public.tasks (
+        org_id, assignee_id, related_property_id, type, title,
+        due_at, created_by
+      ) values (
+        p_org_id,
+        p_callback_assignee_id,
+        v_property_id,
+        'callback',
+        'Callback ' || coalesce((select address from public.properties where id = v_property_id), 'property'),
+        v_callback_at,
+        p_callback_assignee_id
+      ) returning id into v_callback_task_id;
+    end if;
   end if;
 
   -- A prior-session DNC locks related lead sidecars. The new session still
   -- needs its own immutable activity/consent evidence, but must not repoint
   -- the locked batch item away from the activity that established the lock.
-  if v_item_id is not null and v_existing_id is null and not v_contact_dnc then
+  if v_item_id is not null and not v_contact_dnc then
     update public.dialer_batch_items as i
     set last_call_activity_id = v_activity.id
     where i.id = v_item_id
@@ -368,7 +403,110 @@ revoke all on function public.jitter_writeback_call_activity(text, jsonb, uuid, 
   from public, anon, authenticated;
 grant execute on function public.jitter_writeback_call_activity(text, jsonb, uuid, text, text, uuid, text, text)
   to service_role;
--- END call activity session identity correction.
+create or replace function public.jitter_upsert_call_recording(
+  p_call_activity_id uuid, p_org_id uuid, p_status text,
+  p_storage_path text, p_duration_seconds integer, p_error_code text,
+  p_error_message text, p_external_id text, p_request_hash text
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_activity public.call_activities%rowtype;
+  v_item record;
+  v_recording public.call_recordings%rowtype;
+  v_payload jsonb;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'jitter RPC is service-role only';
+  end if;
+  if p_status = 'available' and nullif(btrim(p_storage_path), '') is null then
+    raise exception 'available recording requires storage path';
+  end if;
+
+  select a.* into v_activity from public.call_activities as a
+  where a.id = p_call_activity_id;
+  if not found then
+    return jsonb_build_object('outcome', 'not_found');
+  end if;
+  if v_activity.org_id is distinct from p_org_id
+     or v_activity.provider is distinct from 'jitter' then
+    raise exception 'jitter coherence check failed';
+  end if;
+
+  if v_activity.dialer_batch_item_id is not null then
+    select i.id, i.batch_id, i.property_id as item_property_id,
+           i.contact_id as item_contact_id, b.org_id as batch_org_id,
+           p.org_id as property_org_id, c.org_id as contact_org_id
+      into v_item
+    from public.dialer_batch_items as i
+    join public.dialer_batches as b on b.id = i.batch_id
+    left join public.properties as p on p.id = i.property_id
+    left join public.contacts as c on c.id = i.contact_id
+    where i.id = v_activity.dialer_batch_item_id;
+    if not found
+       or v_item.batch_org_id is distinct from p_org_id
+       or v_item.property_org_id is distinct from p_org_id
+       or v_item.contact_org_id is distinct from p_org_id
+       or v_item.item_property_id is distinct from v_activity.property_id
+       or v_item.item_contact_id is distinct from v_activity.contact_id then
+      raise exception 'jitter coherence check failed';
+    end if;
+  end if;
+  if not exists (
+    select 1 from public.properties as p
+    where p.id = v_activity.property_id and p.org_id = p_org_id
+  ) or not exists (
+    select 1 from public.contacts as c
+    where c.id = v_activity.contact_id and c.org_id = p_org_id
+  ) then
+    raise exception 'jitter coherence check failed';
+  end if;
+
+  insert into public.call_recordings (
+    call_activity_id, status, storage_path, duration_seconds,
+    error_code, error_message
+  ) values (
+    v_activity.id, p_status, p_storage_path, p_duration_seconds,
+    p_error_code, p_error_message
+  )
+  on conflict (call_activity_id) do update
+  set status = excluded.status,
+      storage_path = excluded.storage_path,
+      duration_seconds = excluded.duration_seconds,
+      error_code = excluded.error_code,
+      error_message = excluded.error_message
+  returning * into v_recording;
+
+  v_payload := jsonb_build_object('recording', jsonb_build_object(
+    'id', v_recording.id,
+    'call_activity_id', v_recording.call_activity_id,
+    'status', v_recording.status,
+    'storage_path', v_recording.storage_path,
+    'duration_seconds', v_recording.duration_seconds,
+    'error_code', v_recording.error_code,
+    'error_message', v_recording.error_message
+  ));
+
+  update public.webhook_events
+  set payload = v_payload, processing_status = 'processed',
+      processed_at = statement_timestamp()
+  where org_id = p_org_id and provider = 'jitter'
+    and event_type = 'call_recording_writeback'
+    and external_id = p_external_id and processing_status = 'pending'
+    and request_hash = p_request_hash;
+  if not found then
+    raise exception 'idempotency reservation missing or hash mismatch';
+  end if;
+  return v_payload;
+end;
+$$;
+
+revoke all on function public.jitter_upsert_call_recording(uuid, uuid, text, text, integer, text, text, text, text)
+  from public, anon, authenticated;
+grant execute on function public.jitter_upsert_call_recording(uuid, uuid, text, text, integer, text, text, text, text)
+  to service_role;
 
 create or replace function public.bump_call_activities_on_child_change()
 returns trigger
@@ -397,6 +535,9 @@ $fn$;
 drop function if exists public.jitter_upsert_call_transcript(
   uuid, uuid, text, text, text, text, text, text, text
 );
+drop function if exists public.jitter_upsert_call_transcript(
+  uuid, uuid, text, text, text, text, text, text, text, text, text, text, text
+);
 
 create function public.jitter_upsert_call_transcript(
   p_call_activity_id uuid,
@@ -420,12 +561,18 @@ as $$
 declare
   v_activity public.call_activities%rowtype;
   v_item record;
-  v_transcript_id uuid;
   v_transcript public.call_transcripts%rowtype;
   v_payload jsonb;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'jitter RPC is service-role only';
+  end if;
+  if p_status = 'available' and nullif(btrim(p_text), '') is null then
+    raise exception 'available transcript requires text';
+  end if;
+  if p_summary_status = 'available'
+     and nullif(btrim(p_summary), '') is null then
+    raise exception 'available summary requires summary';
   end if;
 
   select a.* into v_activity
@@ -475,15 +622,7 @@ begin
     raise exception 'jitter coherence check failed';
   end if;
 
-  select t.id into v_transcript_id
-  from public.call_transcripts as t
-  where t.call_activity_id = v_activity.id
-  order by t.created_at desc
-  limit 1
-  for update;
-
-  if v_transcript_id is null then
-    insert into public.call_transcripts (
+  insert into public.call_transcripts (
       call_activity_id,
       status,
       text,
@@ -505,22 +644,18 @@ begin
       p_summary_status,
       p_summary_error_code,
       p_summary_error_message
-    ) returning * into v_transcript;
-  else
-    update public.call_transcripts
-    set status = p_status,
-        text = p_text,
-        language = p_language,
-        error_code = p_error_code,
-        error_message = p_error_message,
-        summary = p_summary,
-        summary_status = p_summary_status,
-        summary_error_code = p_summary_error_code,
-        summary_error_message = p_summary_error_message
-    where id = v_transcript_id
-      and call_activity_id = v_activity.id
-    returning * into v_transcript;
-  end if;
+  )
+  on conflict (call_activity_id) do update
+  set status = excluded.status,
+      text = excluded.text,
+      language = excluded.language,
+      error_code = excluded.error_code,
+      error_message = excluded.error_message,
+      summary = excluded.summary,
+      summary_status = excluded.summary_status,
+      summary_error_code = excluded.summary_error_code,
+      summary_error_message = excluded.summary_error_message
+  returning * into v_transcript;
 
   v_payload := jsonb_build_object(
     'transcript', jsonb_build_object(
@@ -562,5 +697,7 @@ revoke all on function public.jitter_upsert_call_transcript(
 grant execute on function public.jitter_upsert_call_transcript(
   uuid, uuid, text, text, text, text, text, text, text, text, text, text, text
 ) to service_role;
+
+-- END call activity session identity correction.
 
 commit;

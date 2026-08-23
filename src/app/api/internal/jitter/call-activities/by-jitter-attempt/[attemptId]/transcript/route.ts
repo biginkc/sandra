@@ -57,6 +57,7 @@ export async function PUT(
       );
     }
     const body = parsedBody.body;
+    const effectiveIdempotencyKey = `${scopeId.length}:${scopeId}:${idempotencyKey}`;
 
     const { data: activity, error: activityError } = await auth.serviceClient
       .from("call_activities")
@@ -73,7 +74,7 @@ export async function PUT(
       orgId: auth.orgId,
       eventType: "call_transcript_writeback",
       resourceId: activity.id,
-      idempotencyKey,
+      idempotencyKey: effectiveIdempotencyKey,
       payload: body,
     });
     if (idempotency.state === "cached") {
@@ -99,7 +100,7 @@ export async function PUT(
         p_summary_status: body.summary_status ?? "none",
         p_summary_error_code: body.summary_error_code ?? null,
         p_summary_error_message: body.summary_error_message ?? null,
-        p_external_id: idempotencyKey,
+        p_external_id: effectiveIdempotencyKey,
         p_request_hash: idempotency.requestHash,
       });
     if (mutationError) throw mutationError;
