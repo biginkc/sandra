@@ -73,10 +73,13 @@ function outcomeLabel(outcome: string | null): string {
     busy: "Busy",
     canceled: "Canceled",
     connected_human: "Connected",
+    dnc: "Do not call",
+    do_not_call: "Do not call",
     failed: "Failed",
     no_answer: "No answer",
     unknown: "Unknown",
     voicemail: "Voicemail",
+    wrong_number: "Wrong number",
   };
   return labels[outcome] ?? outcome.replaceAll("_", " ");
 }
@@ -85,6 +88,13 @@ function outcomeClass(outcome: string | null): string {
   if (outcome === "connected_human") return "bg-emerald-100 text-emerald-900";
   if (outcome === "voicemail") return "bg-amber-100 text-amber-900";
   if (outcome === "failed" || outcome === "canceled") {
+    return "bg-destructive/10 text-destructive";
+  }
+  return "bg-muted text-muted-foreground";
+}
+
+function dispositionClass(disposition: string): string {
+  if (["dnc", "do_not_call", "wrong_number"].includes(disposition)) {
     return "bg-destructive/10 text-destructive";
   }
   return "bg-muted text-muted-foreground";
@@ -114,6 +124,20 @@ function statusChanged(
 ): boolean {
   if (!previous) return true;
   return CHILD_STATUS_FIELDS.some((field) => previous[field] !== next[field]);
+}
+
+function artifactsIncomplete(row: CallActivityRollupRow | undefined): boolean {
+  if (!row) return true;
+  const terminalRecording = row.recording_status === "available" || row.recording_status === "failed";
+  const terminalTranscript = row.transcript_status === "available" || row.transcript_status === "failed";
+  const terminalSummary = row.summary_status === "available" || row.summary_status === "failed";
+  const recordingMissing =
+    terminalRecording && !row.call_recordings.some((child) => child.status === row.recording_status);
+  const transcriptMissing =
+    terminalTranscript && !row.call_transcripts.some((child) => child.status === row.transcript_status);
+  const summaryMissing =
+    terminalSummary && !row.call_transcripts.some((child) => child.summary_status === row.summary_status);
+  return recordingMissing || transcriptMissing || summaryMissing;
 }
 
 function CallArtifactStates({ row }: { row: CallActivityRollupRow }) {
@@ -255,7 +279,7 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
       const generation = (refetchGenerationRef.current.get(next.id) ?? 0) + 1;
       refetchGenerationRef.current.set(next.id, generation);
       const previous = rowsRef.current.find((row) => row.id === next.id);
-      if (statusChanged(previous, next)) {
+      if (statusChanged(previous, next) || artifactsIncomplete(previous)) {
         for (let attempt = 0; attempt <= ARTIFACT_REFETCH_RETRY_DELAYS_MS.length; attempt += 1) {
           if (!mounted) return;
           const { data, error } = await supabase
@@ -372,13 +396,24 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
 
       <div className="space-y-3" data-testid="call-history">
         {sortedRows.map((row) => {
-          const badgeValue = row.disposition?.trim() || row.outcome;
+          const disposition = row.disposition?.trim() || null;
           return (
             <article className="border-border/70 rounded-md border p-3" key={row.id}>
               <div className="flex flex-wrap items-center gap-2">
-                <Badge className={cn("border-transparent", outcomeClass(row.outcome))}>
-                  {outcomeLabel(badgeValue)}
+                <Badge
+                  className={cn("border-transparent", outcomeClass(row.outcome))}
+                  data-testid={`outcome-badge-${row.id}`}
+                >
+                  {outcomeLabel(row.outcome)}
                 </Badge>
+                {disposition && disposition !== row.outcome ? (
+                  <Badge
+                    className={cn("border-transparent", dispositionClass(disposition))}
+                    data-testid={`disposition-badge-${row.id}`}
+                  >
+                    {outcomeLabel(disposition)}
+                  </Badge>
+                ) : null}
                 {row.started_at ? (
                   <time className="text-muted-foreground text-xs" dateTime={row.started_at}>
                     {formatDistanceToNow(new Date(row.started_at), { addSuffix: true })}

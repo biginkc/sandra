@@ -96,8 +96,11 @@ describe("<SandraRecordingPlayer />", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load recording" }));
     await act(async () => Promise.resolve());
     const playingAudio = screen.getByTestId("sandra-recording-audio") as HTMLAudioElement;
+    const play = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(playingAudio, "play", { configurable: true, value: play });
     Object.defineProperty(playingAudio, "paused", { configurable: true, value: false });
     Object.defineProperty(playingAudio, "ended", { configurable: true, value: false });
+    fireEvent.play(playingAudio);
     playingAudio.currentTime = 17;
 
     await act(async () => {
@@ -110,9 +113,13 @@ describe("<SandraRecordingPlayer />", () => {
     expect(playingAudio).toHaveAttribute("src", "https://storage.example.test/playing.wav");
     expect(playingAudio.currentTime).toBe(17);
 
-    fireEvent.ended(playingAudio);
+    fireEvent.error(playingAudio);
     expect(screen.getByTestId("sandra-recording-audio")).toBe(playingAudio);
     expect(playingAudio).toHaveAttribute("src", "https://storage.example.test/renewed.wav");
+    playingAudio.currentTime = 0;
+    fireEvent.loadedMetadata(playingAudio);
+    expect(playingAudio.currentTime).toBe(17);
+    expect(play).toHaveBeenCalledTimes(1);
   });
 
   it("stops on a media error and reloads only after an explicit user action", async () => {
@@ -171,7 +178,7 @@ describe("<SandraRecordingPlayer />", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps active playback mounted when background TTL renewal fails", async () => {
+  it("keeps a deliberately paused media session mounted when background renewal fails", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-23T12:00:00.000Z"));
     fetchMock
@@ -188,6 +195,9 @@ describe("<SandraRecordingPlayer />", () => {
     const playingAudio = screen.getByTestId("sandra-recording-audio") as HTMLAudioElement;
     Object.defineProperty(playingAudio, "paused", { configurable: true, value: false });
     Object.defineProperty(playingAudio, "ended", { configurable: true, value: false });
+    fireEvent.play(playingAudio);
+    Object.defineProperty(playingAudio, "paused", { configurable: true, value: true });
+    fireEvent.pause(playingAudio);
     playingAudio.currentTime = 23;
 
     await act(async () => {
@@ -200,6 +210,112 @@ describe("<SandraRecordingPlayer />", () => {
     expect(playingAudio).toHaveAttribute("src", "https://storage.example.test/playing.wav");
     expect(playingAudio.currentTime).toBe(23);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps a paused session stable, then consumes its cached renewal without auto-playing", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-23T12:00:00.000Z"));
+    fetchMock
+      .mockResolvedValueOnce(
+        recordingResponse(
+          "https://storage.example.test/paused.wav",
+          "2026-08-23T12:00:10.000Z",
+        ),
+      )
+      .mockResolvedValueOnce(
+        recordingResponse(
+          "https://storage.example.test/paused-renewed.wav",
+          "2026-08-23T12:01:00.000Z",
+        ),
+      );
+    render(<SandraRecordingPlayer callActivityId="call-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Load recording" }));
+    await act(async () => Promise.resolve());
+    const pausedAudio = screen.getByTestId("sandra-recording-audio") as HTMLAudioElement;
+    const play = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(pausedAudio, "play", { configurable: true, value: play });
+    Object.defineProperty(pausedAudio, "paused", { configurable: true, value: false });
+    Object.defineProperty(pausedAudio, "ended", { configurable: true, value: false });
+    fireEvent.play(pausedAudio);
+    Object.defineProperty(pausedAudio, "paused", { configurable: true, value: true });
+    fireEvent.pause(pausedAudio);
+    pausedAudio.currentTime = 29;
+
+    await act(async () => {
+      vi.advanceTimersByTime(9_000);
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("sandra-recording-audio")).toBe(pausedAudio);
+    expect(pausedAudio).toHaveAttribute("src", "https://storage.example.test/paused.wav");
+    expect(pausedAudio.currentTime).toBe(29);
+
+    fireEvent.error(pausedAudio);
+    expect(pausedAudio).toHaveAttribute(
+      "src",
+      "https://storage.example.test/paused-renewed.wav",
+    );
+    pausedAudio.currentTime = 0;
+    fireEvent.loadedMetadata(pausedAudio);
+    expect(pausedAudio.currentTime).toBe(29);
+    expect(play).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("fences a late background renewal after media failure until manual reload", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-23T12:00:00.000Z"));
+    let resolveRenewal!: (response: Response) => void;
+    let renewalSignal: AbortSignal | undefined;
+    fetchMock
+      .mockResolvedValueOnce(
+        recordingResponse(
+          "https://storage.example.test/first.wav",
+          "2026-08-23T12:00:10.000Z",
+        ),
+      )
+      .mockImplementationOnce(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((resolve) => {
+            renewalSignal = init.signal as AbortSignal;
+            resolveRenewal = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(
+        recordingResponse(
+          "https://storage.example.test/manual.wav",
+          "2026-08-23T12:01:00.000Z",
+        ),
+      );
+    render(<SandraRecordingPlayer callActivityId="call-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Load recording" }));
+    await act(async () => Promise.resolve());
+    const audio = screen.getByTestId("sandra-recording-audio") as HTMLAudioElement;
+    Object.defineProperty(audio, "paused", { configurable: true, value: false });
+    Object.defineProperty(audio, "ended", { configurable: true, value: false });
+    fireEvent.play(audio);
+    await act(async () => vi.advanceTimersByTime(9_000));
+    expect(renewalSignal?.aborted).toBe(false);
+
+    fireEvent.error(audio);
+    expect(renewalSignal?.aborted).toBe(true);
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    await act(async () =>
+      resolveRenewal(
+        recordingResponse(
+          "https://storage.example.test/late.wav",
+          "2026-08-23T12:01:00.000Z",
+        ),
+      ),
+    );
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.queryByTestId("sandra-recording-audio")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload recording" }));
+    await act(async () => Promise.resolve());
+    expect(screen.getByTestId("sandra-recording-audio")).toHaveAttribute(
+      "src",
+      "https://storage.example.test/manual.wav",
+    );
   });
 
   it("shows a recoverable error when playback lookup fails", async () => {

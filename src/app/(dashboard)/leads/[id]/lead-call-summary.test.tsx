@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { callbacks, channelOn, eq, maybeSingle, removeChannel, setAuth } = vi.hoisted(() => ({
@@ -145,10 +145,33 @@ describe("<LeadCallSummary />", () => {
     expect(within(calls[0]).getByText("follow up requested")).toBeInTheDocument();
     expect(within(calls[0]).getByText("2 days ago")).toBeInTheDocument();
     expect(within(calls[0]).getByText("Motivated seller; follow up next week.")).toBeInTheDocument();
-    expect(within(calls[0]).getByText("Transcript")).toBeInTheDocument();
+    const transcriptToggle = within(calls[0]).getByText("Transcript");
+    const transcriptDisclosure = transcriptToggle.closest("details");
+    expect(transcriptDisclosure).not.toHaveAttribute("open");
+    fireEvent.click(transcriptToggle);
+    expect(transcriptDisclosure).toHaveAttribute("open");
+    fireEvent.click(transcriptToggle);
+    expect(transcriptDisclosure).not.toHaveAttribute("open");
     expect(within(calls[0]).getByText("The homeowner wants an offer next week.")).toBeInTheDocument();
     expect(within(calls[0]).getByRole("button", { name: "Load recording (42s)" })).toBeInTheDocument();
     vi.useRealTimers();
+  });
+
+  it("keeps connected outcomes distinct from DNC and wrong-number dispositions", () => {
+    renderWidget({
+      initialRows: [
+        row({ id: "dnc-call", outcome: "connected_human", disposition: "do_not_call" }),
+        row({ id: "wrong-call", outcome: "connected_human", disposition: "wrong_number" }),
+      ],
+    });
+
+    expect(screen.getByTestId("outcome-badge-dnc-call")).toHaveTextContent("Connected");
+    expect(screen.getByTestId("outcome-badge-dnc-call")).toHaveClass("bg-emerald-100");
+    expect(screen.getByTestId("disposition-badge-dnc-call")).toHaveTextContent("Do not call");
+    expect(screen.getByTestId("disposition-badge-dnc-call")).toHaveClass("text-destructive");
+    expect(screen.getByTestId("outcome-badge-wrong-call")).toHaveTextContent("Connected");
+    expect(screen.getByTestId("disposition-badge-wrong-call")).toHaveTextContent("Wrong number");
+    expect(screen.getByTestId("disposition-badge-wrong-call")).toHaveClass("text-destructive");
   });
 
   it("renders explicit pending and child-backed failure states", () => {
@@ -266,6 +289,52 @@ describe("<LeadCallSummary />", () => {
 
     await waitFor(() => expect(screen.getByText("Recovered summary")).toBeInTheDocument());
     expect(maybeSingle).toHaveBeenCalledTimes(2);
+  });
+
+  it("remains recoverable after all retries fail and an identical status event arrives", async () => {
+    const refreshed = row({
+      id: "call-1",
+      recording_status: "available",
+      transcript_status: "available",
+      summary_status: "available",
+      call_recordings: [recording()],
+      call_transcripts: [transcript({ summary: "Recovered after reconnect" })],
+    });
+    const parentEvent = {
+      id: refreshed.id,
+      started_at: refreshed.started_at,
+      outcome: refreshed.outcome,
+      disposition: refreshed.disposition,
+      recording_status: refreshed.recording_status,
+      transcript_status: refreshed.transcript_status,
+      summary_status: refreshed.summary_status,
+      jitter_attempt_id: refreshed.jitter_attempt_id,
+      jitter_session_id: refreshed.jitter_session_id,
+    };
+    maybeSingle
+      .mockResolvedValueOnce({ data: null, error: { message: "offline-1" } })
+      .mockResolvedValueOnce({ data: null, error: { message: "offline-2" } })
+      .mockResolvedValueOnce({ data: null, error: { message: "offline-3" } })
+      .mockResolvedValueOnce({ data: refreshed, error: null });
+    renderWidget({
+      initialRows: [
+        row({
+          id: "call-1",
+          recording_status: "pending",
+          transcript_status: "pending",
+          summary_status: "pending",
+        }),
+      ],
+    });
+    await waitFor(() => expect(callbacks.UPDATE).toBeDefined());
+
+    act(() => callbacks.UPDATE({ new: parentEvent }));
+    await waitFor(() => expect(maybeSingle).toHaveBeenCalledTimes(3), { timeout: 1_500 });
+    expect(screen.queryByText("Recovered after reconnect")).not.toBeInTheDocument();
+
+    act(() => callbacks.UPDATE({ new: parentEvent }));
+    await waitFor(() => expect(screen.getByText("Recovered after reconnect")).toBeInTheDocument());
+    expect(maybeSingle).toHaveBeenCalledTimes(4);
   });
 
   it("merges a non-status Realtime update without discarding nested artifacts or refetching", async () => {

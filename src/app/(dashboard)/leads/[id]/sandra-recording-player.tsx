@@ -21,6 +21,11 @@ type SignedRecording = {
   expiresAt: string;
 };
 
+type SourceResume = {
+  positionSeconds: number;
+  shouldPlay: boolean;
+};
+
 export type SandraRecordingPlayerProps = {
   callActivityId: string;
   durationSeconds?: number;
@@ -32,6 +37,9 @@ export function SandraRecordingPlayer({ callActivityId, durationSeconds }: Sandr
   const requestAbortRef = useRef<AbortController | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingRenewalRef = useRef<SignedRecording | null>(null);
+  const hasStartedPlaybackRef = useRef(false);
+  const playbackIntentRef = useRef(false);
+  const sourceResumeRef = useRef<SourceResume | null>(null);
 
   const loadRecording = useCallback(async (background = false) => {
     requestAbortRef.current?.abort();
@@ -40,13 +48,16 @@ export function SandraRecordingPlayer({ callActivityId, durationSeconds }: Sandr
     const requestId = ++requestIdRef.current;
     if (!background) {
       pendingRenewalRef.current = null;
+      sourceResumeRef.current = null;
+      hasStartedPlaybackRef.current = false;
+      playbackIntentRef.current = false;
       setState({ status: "loading" });
     }
     try {
       const renewed = await requestSignedRecording(callActivityId, controller.signal);
       if (requestId === requestIdRef.current) {
         const audio = audioRef.current;
-        if (background && isActivePlayback(audio)) {
+        if (background && isActiveMediaSession(audio, hasStartedPlaybackRef.current)) {
           pendingRenewalRef.current = renewed;
         } else {
           pendingRenewalRef.current = null;
@@ -56,7 +67,9 @@ export function SandraRecordingPlayer({ callActivityId, durationSeconds }: Sandr
     } catch (error) {
       if (isAbortError(error)) return;
       if (requestId === requestIdRef.current) {
-        if (background && isActivePlayback(audioRef.current)) return;
+        if (background && isActiveMediaSession(audioRef.current, hasStartedPlaybackRef.current)) {
+          return;
+        }
         setState({
           status: "error",
           message: error instanceof Error ? error.message : "Unable to load recording",
@@ -77,6 +90,42 @@ export function SandraRecordingPlayer({ callActivityId, durationSeconds }: Sandr
     }
     setState({ status: "ready", ...renewed });
   }, [loadRecording]);
+
+  const recoverMediaError = useCallback(() => {
+    const renewed = pendingRenewalRef.current;
+    pendingRenewalRef.current = null;
+    const audio = audioRef.current;
+    if (renewed && Date.parse(renewed.expiresAt) - Date.now() >= 2_000 && audio) {
+      sourceResumeRef.current = {
+        positionSeconds: audio.currentTime,
+        shouldPlay: playbackIntentRef.current,
+      };
+      setState({ status: "ready", ...renewed });
+      return;
+    }
+
+    requestIdRef.current += 1;
+    requestAbortRef.current?.abort();
+    requestAbortRef.current = null;
+    sourceResumeRef.current = null;
+    setState({
+      status: "error",
+      message: "Recording could not be played. Reload to request a fresh link.",
+    });
+  }, []);
+
+  const restoreSourcePosition = useCallback(() => {
+    const resume = sourceResumeRef.current;
+    const audio = audioRef.current;
+    if (!resume || !audio) return;
+    sourceResumeRef.current = null;
+    try {
+      audio.currentTime = resume.positionSeconds;
+    } catch {
+      // Browsers can reject seeking before duration metadata is available.
+    }
+    if (resume.shouldPlay) void audio.play().catch(() => undefined);
+  }, []);
 
   useEffect(
     () => () => {
@@ -104,13 +153,20 @@ export function SandraRecordingPlayer({ callActivityId, durationSeconds }: Sandr
           aria-label="Call recording"
           controls
           data-testid="sandra-recording-audio"
-          onEnded={applyPendingRenewal}
-          onError={() =>
-            setState({
-              status: "error",
-              message: "Recording could not be played. Reload to request a fresh link.",
-            })
-          }
+          onEnded={() => {
+            hasStartedPlaybackRef.current = false;
+            playbackIntentRef.current = false;
+            applyPendingRenewal();
+          }}
+          onError={recoverMediaError}
+          onLoadedMetadata={restoreSourcePosition}
+          onPause={() => {
+            if (!sourceResumeRef.current) playbackIntentRef.current = false;
+          }}
+          onPlay={() => {
+            hasStartedPlaybackRef.current = true;
+            playbackIntentRef.current = true;
+          }}
           preload="metadata"
           ref={audioRef}
           src={state.signedUrl}
@@ -186,8 +242,11 @@ async function requestSignedRecording(
   return { signedUrl: body.signedUrl, expiresAt: body.expiresAt };
 }
 
-function isActivePlayback(audio: HTMLAudioElement | null): boolean {
-  return Boolean(audio && !audio.paused && !audio.ended);
+function isActiveMediaSession(
+  audio: HTMLAudioElement | null,
+  hasStartedPlayback: boolean,
+): boolean {
+  return Boolean(audio && hasStartedPlayback && !audio.ended);
 }
 
 function isAbortError(error: unknown): boolean {
