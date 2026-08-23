@@ -7,16 +7,18 @@ const source = fs.readFileSync(path.join(__dirname, "page.tsx"), "utf8");
 
 describe("lead detail record summary layout", () => {
   it("places the four compact record panels before Working state", () => {
-    const summaryClass =
-      'className="grid grid-cols-1 gap-4 md:grid-cols-2 min-[1440px]:grid-cols-4"';
-    const summaryStart = source.indexOf(summaryClass);
+    const summaryTestIdStart = source.indexOf(
+      'data-testid="lead-record-summary"',
+    );
+    const summaryStart = source.lastIndexOf("<div", summaryTestIdStart);
     const workingStateStart = source.indexOf("<LeadIdentityActions");
     const summarySource = source.slice(summaryStart, workingStateStart);
 
     expect(summaryStart).toBeGreaterThan(-1);
     expect(workingStateStart).toBeGreaterThan(summaryStart);
-    expect(summarySource).toContain(summaryClass);
-    expect(summarySource).toContain('data-testid="lead-record-summary"');
+    expect(summarySource).toMatch(
+      /className=["'][^"']*\bgrid-cols-1\b[^"']*\bmd:grid-cols-2\b[^"']*\bmin-\[1440px\]:grid-cols-4\b[^"']*["']/,
+    );
     expect(summarySource.match(/<Section title=/g)).toHaveLength(4);
     const orderedTitles = [
       '<Section title="Property">',
@@ -29,20 +31,23 @@ describe("lead detail record summary layout", () => {
     );
     expect(titleOffsets.every((offset) => offset >= 0)).toBe(true);
     expect(titleOffsets).toEqual([...titleOffsets].sort((a, b) => a - b));
-    expect(summarySource).toContain(
-      "<SoftphoneLeadButton lead={detailSoftphoneLead} />",
+    expect(summarySource).toMatch(
+      /<SoftphoneLeadButton\s+lead=\{detailSoftphoneLead\}\s*\/>/,
     );
   });
 
   it("keeps imported notes out of the four-column summary", () => {
-    const summaryStart = source.indexOf(
-      'className="grid grid-cols-1 gap-4 md:grid-cols-2 min-[1440px]:grid-cols-4"',
+    const summaryTestIdStart = source.indexOf(
+      'data-testid="lead-record-summary"',
     );
+    const summaryStart = source.lastIndexOf("<div", summaryTestIdStart);
     const workingStateStart = source.indexOf("<LeadIdentityActions");
     const importedNotesStart = source.indexOf(
       '<Section title="Imported notes (legacy)">',
     );
 
+    expect(summaryStart).toBeGreaterThan(-1);
+    expect(workingStateStart).toBeGreaterThan(summaryStart);
     expect(importedNotesStart).toBeGreaterThan(workingStateStart);
     expect(source.slice(summaryStart, workingStateStart)).not.toContain(
       "Imported notes (legacy)",
