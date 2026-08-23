@@ -176,6 +176,8 @@ describe("internal.jitter.call-activities transcript PUT", () => {
           status: "available",
           text: "Hello from Jitter.",
           language: "en",
+          summary: "Seller requested a follow-up.",
+          summary_status: "available",
         },
         { "idempotency-key": "transcript-insert" },
       ),
@@ -188,6 +190,8 @@ describe("internal.jitter.call-activities transcript PUT", () => {
         call_activity_id: seeded.callActivityId,
         status: "available",
         text: "Hello from Jitter.",
+        summary: "Seller requested a follow-up.",
+        summary_status: "available",
       },
     });
   });

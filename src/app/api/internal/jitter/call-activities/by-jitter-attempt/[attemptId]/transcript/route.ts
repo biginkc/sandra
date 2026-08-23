@@ -6,12 +6,24 @@ import {
   authenticateJitterWriteback,
   checkAndRecordIdempotency,
   requireIdempotencyKey,
-} from "../../../_lib/auth";
+} from "../../../../_lib/auth";
 
-type RouteContext = { params: Promise<{ id: string }> };
+type RouteContext = { params: Promise<{ attemptId: string }> };
 
 const VALID_STATUS = new Set(["pending", "available", "failed"]);
-const VALID_SUMMARY_STATUS = new Set(["none", "pending", "available", "failed"]);
+const VALID_SUMMARY_STATUS = new Set([
+  "none",
+  "pending",
+  "available",
+  "failed",
+]);
+
+function parentNotFound() {
+  return NextResponse.json(
+    { error: "not_found", error_code: "call_activity_not_found" },
+    { status: 404 },
+  );
+}
 
 export async function PUT(
   request: Request,
@@ -24,7 +36,7 @@ export async function PUT(
     const auth = await authenticateJitterWriteback(request);
     if (!auth.ok) return auth.response;
 
-    const { id } = await context.params;
+    const { attemptId } = await context.params;
     const idempotencyKey = request.headers.get("idempotency-key")!.trim();
     const body = JSON.parse(auth.rawBody || "{}") as {
       status?: string;
@@ -57,21 +69,17 @@ export async function PUT(
     const { data: activity, error: activityError } = await auth.serviceClient
       .from("call_activities")
       .select("id")
-      .eq("id", id)
       .eq("org_id", auth.orgId)
+      .eq("provider", "jitter")
+      .eq("jitter_attempt_id", attemptId)
       .maybeSingle();
     if (activityError) throw activityError;
-    if (!activity) {
-      return NextResponse.json(
-        { error: "validation_error", field: "call_activity_id" },
-        { status: 422 },
-      );
-    }
+    if (!activity) return parentNotFound();
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       orgId: auth.orgId,
       eventType: "call_transcript_writeback",
-      resourceId: id,
+      resourceId: activity.id,
       idempotencyKey,
       payload: body,
     });
@@ -85,10 +93,9 @@ export async function PUT(
       );
     }
 
-    const { data: payload, error: mutationError } = await auth.serviceClient.rpc(
-      "jitter_upsert_call_transcript",
-      {
-        p_call_activity_id: id,
+    const { data: payload, error: mutationError } =
+      await auth.serviceClient.rpc("jitter_upsert_call_transcript", {
+        p_call_activity_id: activity.id,
         p_org_id: auth.orgId,
         p_status: body.status,
         p_text: body.text ?? null,
@@ -101,20 +108,18 @@ export async function PUT(
         p_summary_error_message: body.summary_error_message ?? null,
         p_external_id: idempotencyKey,
         p_request_hash: idempotency.requestHash,
-      },
-    );
+      });
     if (mutationError) throw mutationError;
 
     if ((payload as { outcome?: string } | null)?.outcome === "not_found") {
-      return NextResponse.json(
-        { error: "validation_error", field: "call_activity_id" },
-        { status: 422 },
-      );
+      return parentNotFound();
     }
 
     return NextResponse.json(payload);
   } catch (e) {
-    reportError(e, { tags: { surface: "jitter_call_transcript_writeback" } });
+    reportError(e, {
+      tags: { surface: "jitter_call_transcript_by_attempt_writeback" },
+    });
     return NextResponse.json({ error: "internal_error" }, { status: 500 });
   }
 }

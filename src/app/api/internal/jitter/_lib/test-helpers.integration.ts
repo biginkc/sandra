@@ -183,6 +183,7 @@ export async function seedCallActivity(
   opts: { org_id?: string } = {},
 ) {
   const seeded = await seedDialerBatch(client, opts);
+  const jitterAttemptId = `attempt-${crypto.randomUUID()}`;
   const { data: activity, error } = await (client as any)
     .from("call_activities")
     .insert({
@@ -190,7 +191,7 @@ export async function seedCallActivity(
       property_id: seeded.propertyId,
       contact_id: seeded.contactId,
       dialer_batch_item_id: seeded.itemId,
-      jitter_attempt_id: `attempt-${crypto.randomUUID()}`,
+      jitter_attempt_id: jitterAttemptId,
       provider: "jitter",
       outcome: "unknown",
     })
@@ -202,6 +203,7 @@ export async function seedCallActivity(
     ...seeded,
     callActivityId: activity.id as string,
     callActivityUpdatedAt: activity.updated_at as string,
+    jitterAttemptId,
   };
 }
 

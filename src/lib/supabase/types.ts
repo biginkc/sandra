@@ -252,6 +252,7 @@ export type Database = {
           recording_path: string | null
           phone_e164: string | null
           started_at: string | null
+          summary_status: string
           transcript_status: string
           updated_at: string
           wrap_token: string | null
@@ -282,6 +283,7 @@ export type Database = {
           recording_path?: string | null
           phone_e164?: string | null
           started_at?: string | null
+          summary_status?: string
           transcript_status?: string
           updated_at?: string
           wrap_token?: string | null
@@ -312,6 +314,7 @@ export type Database = {
           recording_path?: string | null
           phone_e164?: string | null
           started_at?: string | null
+          summary_status?: string
           transcript_status?: string
           updated_at?: string
           wrap_token?: string | null
@@ -400,6 +403,10 @@ export type Database = {
           id: string
           language: string | null
           status: string
+          summary: string | null
+          summary_error_code: string | null
+          summary_error_message: string | null
+          summary_status: string
           text: string | null
           updated_at: string
         }
@@ -411,6 +418,10 @@ export type Database = {
           id?: string
           language?: string | null
           status?: string
+          summary?: string | null
+          summary_error_code?: string | null
+          summary_error_message?: string | null
+          summary_status?: string
           text?: string | null
           updated_at?: string
         }
@@ -422,6 +433,10 @@ export type Database = {
           id?: string
           language?: string | null
           status?: string
+          summary?: string | null
+          summary_error_code?: string | null
+          summary_error_message?: string | null
+          summary_status?: string
           text?: string | null
           updated_at?: string
         }
@@ -3844,6 +3859,10 @@ export type Database = {
           p_org_id: string
           p_request_hash: string
           p_status: string
+          p_summary: string | null
+          p_summary_error_code: string | null
+          p_summary_error_message: string | null
+          p_summary_status: string
           p_text: string | null
         }
         Returns: Json
