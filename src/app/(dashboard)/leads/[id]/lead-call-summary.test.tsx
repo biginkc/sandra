@@ -223,6 +223,35 @@ describe("<LeadCallSummary />", () => {
     );
   });
 
+  it("allows long provider badges to grow without clipping", () => {
+    const longOutcome = "provider_outcome_" + "x".repeat(80);
+    const longDisposition = "provider_disposition_" + "y".repeat(80);
+    renderWidget({
+      initialRows: [
+        row({
+          id: "long-badges",
+          outcome: longOutcome,
+          disposition: longDisposition,
+        }),
+      ],
+    });
+
+    expect(screen.getByTestId("outcome-badge-long-badges")).toHaveClass(
+      "h-auto",
+      "min-h-5",
+      "max-w-full",
+      "whitespace-normal",
+      "break-words",
+    );
+    expect(screen.getByTestId("disposition-badge-long-badges")).toHaveClass(
+      "h-auto",
+      "min-h-5",
+      "max-w-full",
+      "whitespace-normal",
+      "break-words",
+    );
+  });
+
   it("renders explicit pending and child-backed failure states", () => {
     renderWidget({
       initialRows: [

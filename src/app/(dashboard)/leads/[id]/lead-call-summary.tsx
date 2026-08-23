@@ -541,7 +541,7 @@ export function LeadCallSummary({
               <div className="flex flex-wrap items-center gap-2">
                 <Badge
                   className={cn(
-                    "max-w-full border-transparent whitespace-normal break-words",
+                    "h-auto min-h-5 max-w-full border-transparent whitespace-normal break-words",
                     outcomeClass(row.outcome),
                   )}
                   data-testid={`outcome-badge-${row.id}`}
@@ -551,7 +551,7 @@ export function LeadCallSummary({
                 {disposition && disposition !== row.outcome ? (
                   <Badge
                     className={cn(
-                      "max-w-full border-transparent whitespace-normal break-words",
+                      "h-auto min-h-5 max-w-full border-transparent whitespace-normal break-words",
                       dispositionClass(disposition),
                     )}
                     data-testid={`disposition-badge-${row.id}`}
