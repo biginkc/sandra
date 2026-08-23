@@ -1,5 +1,7 @@
 export type CallTarget = {
   phoneE164: string;
+  /** Telnyx-owned caller ID selected from Jitter's authenticated inventory. */
+  callerIdE164?: string;
   propertyId?: string;
   contactId?: string;
   /** Stable per-call intent shared with wrap-up and Jitter idempotency. */

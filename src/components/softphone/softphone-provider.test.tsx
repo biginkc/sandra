@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { completeSoftphoneCall, loadDialerRecents, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, searchDialerLeads, createTransport, transportEnabled, playDtmfTone } = vi.hoisted(() => ({
+const { completeSoftphoneCall, loadCallerIds, loadDialerRecents, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, searchDialerLeads, createTransport, transportEnabled, playDtmfTone } = vi.hoisted(() => ({
   completeSoftphoneCall: vi.fn(),
   loadDialerRecents: vi.fn(async () => ({ ok: true, data: [] })),
   prepareLeadCall: vi.fn(),
@@ -12,6 +12,7 @@ const { completeSoftphoneCall, loadDialerRecents, prepareLeadCall, prepareManual
   transportEnabled: vi.fn(),
   searchDialerLeads: vi.fn(async () => ({ ok: true, data: [] })),
   playDtmfTone: vi.fn(),
+  loadCallerIds: vi.fn(),
 }));
 
 vi.mock("@/lib/dialer/actions", () => ({
@@ -21,6 +22,10 @@ vi.mock("@/lib/dialer/actions", () => ({
   prepareManualCall,
   resumeFailedSoftphoneCall,
   searchDialerLeads,
+}));
+
+vi.mock("@/lib/dialer/jitter-actions", () => ({
+  loadJitterSoftphoneCallerIds: loadCallerIds,
 }));
 
 vi.mock("@/lib/dialer/dtmf-tone", () => ({ playDtmfTone }));
@@ -61,6 +66,78 @@ describe("SoftphoneProvider transport gate", () => {
         }),
       };
     });
+    loadCallerIds.mockResolvedValue({
+      ok: true,
+      data: { caller_ids: [{ phone_e164: "+18165550100", label: "Main" }] },
+    });
+    window.localStorage.clear();
+  });
+
+  it("shows one company caller ID read-only and sends it with the call", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+    await waitFor(() => expect(screen.getByTestId("caller-id-readonly")).toHaveTextContent("Main"));
+    await user.click(screen.getByLabelText("Close dialer"));
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalledWith(
+      expect.objectContaining({ callerIdE164: "+18165550100" }),
+    ));
+  });
+
+  it("persists a valid selection and discards it when inventory changes", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    loadCallerIds.mockResolvedValueOnce({ ok: true, data: { caller_ids: [
+      { phone_e164: "+18165550100", label: "Main" },
+      { phone_e164: "+18165550101", label: "Sales" },
+    ] } });
+    const user = userEvent.setup();
+    const rendered = render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+    const selector = await screen.findByLabelText("Call from");
+    await user.selectOptions(selector, "+18165550101");
+    expect(window.localStorage.getItem("sandra.softphone.caller-id.v1")).toBe("+18165550101");
+    rendered.unmount();
+
+    loadCallerIds.mockResolvedValueOnce({ ok: true, data: { caller_ids: [
+      { phone_e164: "+18165550100", label: "Main" },
+    ] } });
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await waitFor(() => expect(window.localStorage.getItem("sandra.softphone.caller-id.v1")).toBe("+18165550100"));
+  });
+
+  it("fails closed on inventory errors and retries without preparing a lead", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    let resolveInventory!: (value: unknown) => void;
+    loadCallerIds.mockReturnValueOnce(new Promise((resolve) => { resolveInventory = resolve; }));
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    expect(screen.getByTestId("call-preparing")).toHaveTextContent("Softphone Lead");
+    expect(prepareLeadCall).not.toHaveBeenCalled();
+    resolveInventory({ ok: false, error: "Inventory unavailable" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Inventory unavailable");
+    expect(prepareLeadCall).not.toHaveBeenCalled();
+    expect(screen.getByTestId("retry-caller-ids")).toBeVisible();
+  });
+
+  it("disables manual dialing while inventory loads and explains an empty inventory", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    let resolveInventory!: (value: unknown) => void;
+    loadCallerIds.mockReturnValueOnce(new Promise((resolve) => { resolveInventory = resolve; }));
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+    await user.type(screen.getByTestId("dialer-input"), "8165550123");
+    expect(screen.getByTestId("dialer-call-manual")).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Loading company numbers");
+
+    resolveInventory({ ok: true, data: { caller_ids: [] } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("No company calling numbers are available");
+    expect(screen.getByTestId("dialer-call-manual")).toBeDisabled();
+    expect(window.localStorage.getItem("sandra.softphone.caller-id.v1")).toBeNull();
   });
 
   it("shows the selected lead while preparation is pending without flashing the idle keypad", async () => {

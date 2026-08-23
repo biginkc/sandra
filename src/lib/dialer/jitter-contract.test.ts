@@ -8,6 +8,7 @@ import {
   requestJitterAudioHealth,
   requestJitterConnect,
   requestJitterStartCall,
+  requestJitterCallerIds,
   requestJitterToken,
   signJitterSoftphoneBody,
 } from "./jitter-contract";
@@ -62,6 +63,45 @@ function cancelResponse() {
 }
 
 describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
+  it("loads caller IDs through the signed owned-number inventory route", async () => {
+    vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
+    vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
+    const server = contractServer((request) => {
+      expect(request).toMatchObject({
+        method: "GET",
+        path: JITTER_SOFTPHONE_PATHS.callerIds,
+        body: null,
+      });
+      return Response.json({
+        caller_ids: [
+          { phone_e164: "+18165550123", label: "Kansas City Main" },
+        ],
+      });
+    });
+
+    await expect(requestJitterCallerIds(server)).resolves.toEqual({
+      ok: true,
+      data: {
+        caller_ids: [
+          { phone_e164: "+18165550123", label: "Kansas City Main" },
+        ],
+      },
+    });
+  });
+
+  it("accepts an empty inventory but rejects malformed caller IDs", async () => {
+    vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
+    vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
+
+    await expect(
+      requestJitterCallerIds(contractServer(() => Response.json({ caller_ids: [] }))),
+    ).resolves.toEqual({ ok: true, data: { caller_ids: [] } });
+    await expect(
+      requestJitterCallerIds(contractServer(() => Response.json({
+        caller_ids: [{ phone_e164: "3107540662", label: "Unsafe" }],
+      }))),
+    ).resolves.toMatchObject({ ok: false, errorCode: "jitter_contract_violation" });
+  });
   afterEach(() => {
     vi.unstubAllEnvs();
   });
@@ -105,6 +145,7 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
           operator_id: "operator-1",
           phone_e164: "+18165550123",
           timezone: "America/Chicago",
+          caller_id_e164: "+18165550100",
         },
         IDEMPOTENCY_KEY,
         server,
@@ -165,6 +206,7 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
           operator_id: "operator-1",
           phone_e164: "+18165550123",
           timezone: "America/Chicago",
+          caller_id_e164: "+18165550100",
         },
         idempotencyKey: IDEMPOTENCY_KEY,
       },
@@ -258,6 +300,7 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
           operator_id: "operator-1",
           phone_e164: "+18165550123",
           timezone: "America/Chicago",
+          caller_id_e164: "+18165550100",
         },
         IDEMPOTENCY_KEY,
         server,
@@ -287,6 +330,7 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
       operator_id: "operator-1",
       phone_e164: "+18165550123",
       timezone: "America/Chicago",
+      caller_id_e164: "+18165550100",
     };
 
     await expect(
@@ -327,6 +371,7 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
           operator_id: "operator-1",
           phone_e164: "+18165550123",
           timezone: "America/Chicago",
+          caller_id_e164: "+18165550100",
         },
         IDEMPOTENCY_KEY,
         malformed,

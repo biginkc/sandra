@@ -25,6 +25,8 @@ import {
   type SoftphoneTarget,
 } from "@/lib/dialer/actions";
 import { SOFTPHONE_DISPOSITIONS, type SoftphoneDisposition } from "@/lib/dialer/dispositions";
+import { loadJitterSoftphoneCallerIds } from "@/lib/dialer/jitter-actions";
+import type { JitterCallerId } from "@/lib/dialer/jitter-contract";
 import { maskPhone } from "@/lib/phone-format";
 import { playDtmfTone } from "@/lib/dialer/dtmf-tone";
 import { type CallTransport, type DtmfDigit } from "@/lib/dialer/transport";
@@ -73,6 +75,9 @@ const KEYPAD = [
 ] as const;
 
 const TEARDOWN_WARNING = "Jitter could not confirm that the call ended. Do not start another call yet; automatic cleanup is still pending.";
+const CALLER_ID_STORAGE_KEY = "sandra.softphone.caller-id.v1";
+const E164 = /^\+[1-9]\d{7,14}$/;
+type CallerIdState = "loading" | "ready" | "empty" | "error";
 
 function timerText(seconds: number): string {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
@@ -80,6 +85,18 @@ function timerText(seconds: number): string {
 
 function initials(name: string): string {
   return name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
+}
+
+function readRememberedCallerId(): string | null {
+  try { return window.localStorage.getItem(CALLER_ID_STORAGE_KEY); } catch { return null; }
+}
+
+function rememberCallerId(phoneE164: string): void {
+  try { window.localStorage.setItem(CALLER_ID_STORAGE_KEY, phoneE164); } catch { /* Calling still works without persistence. */ }
+}
+
+function forgetCallerId(): void {
+  try { window.localStorage.removeItem(CALLER_ID_STORAGE_KEY); } catch { /* Storage can be unavailable in hardened browsers. */ }
 }
 
 function callbackWallTime(kind: "today_pm" | "tomorrow_am"): { date: string; time: string; timeZone: string } {
@@ -114,6 +131,10 @@ export function SoftphoneProvider({ children }: Props) {
   const [callOutcome, setCallOutcome] = useState<"connected_human" | "failed">("connected_human");
   const [teardownUnconfirmed, setTeardownUnconfirmed] = useState(false);
   const [wrapToken, setWrapToken] = useState<string | null>(null);
+  const [callerIds, setCallerIds] = useState<JitterCallerId[]>([]);
+  const [callerIdState, setCallerIdState] = useState<CallerIdState>("loading");
+  const [selectedCallerId, setSelectedCallerId] = useState<string | null>(null);
+  const [callerIdError, setCallerIdError] = useState<string | null>(null);
   const [callingEnabled] = useState(() => isSoftphoneTransportEnabled());
   const transportRef = useRef<CallTransport | null>(null);
   const manualHangupRef = useRef(false);
@@ -124,6 +145,67 @@ export function SoftphoneProvider({ children }: Props) {
   const dialInputRef = useRef("");
   const heldRef = useRef(false);
   const holdPendingRef = useRef(false);
+  const callerIdsRef = useRef<JitterCallerId[]>([]);
+  const selectedCallerIdRef = useRef<string | null>(null);
+  const callerIdLoadRef = useRef<Promise<string | null> | null>(null);
+
+  const loadCallerIds = useCallback((): Promise<string | null> => {
+    if (callerIdLoadRef.current) return callerIdLoadRef.current;
+    setCallerIdState("loading");
+    setCallerIdError(null);
+    const request = loadJitterSoftphoneCallerIds()
+      .then((result) => {
+        if (!result.ok) {
+          callerIdsRef.current = [];
+          selectedCallerIdRef.current = null;
+          setCallerIds([]);
+          setSelectedCallerId(null);
+          setCallerIdState("error");
+          setCallerIdError(result.error);
+          return null;
+        }
+        const inventory = result.data.caller_ids;
+        if (inventory.length === 0) {
+          callerIdsRef.current = [];
+          selectedCallerIdRef.current = null;
+          setCallerIds([]);
+          setSelectedCallerId(null);
+          setCallerIdState("empty");
+          setCallerIdError("No company calling numbers are available.");
+          forgetCallerId();
+          return null;
+        }
+        const stored = readRememberedCallerId();
+        const remembered = E164.test(stored ?? "") && inventory.some((item) => item.phone_e164 === stored)
+          ? stored
+          : null;
+        const selected = remembered ?? inventory[0].phone_e164;
+        callerIdsRef.current = inventory;
+        selectedCallerIdRef.current = selected;
+        setCallerIds(inventory);
+        setSelectedCallerId(selected);
+        setCallerIdState("ready");
+        setCallerIdError(null);
+        rememberCallerId(selected);
+        return selected;
+      })
+      .catch(() => {
+        callerIdsRef.current = [];
+        selectedCallerIdRef.current = null;
+        setCallerIds([]);
+        setSelectedCallerId(null);
+        setCallerIdState("error");
+        setCallerIdError("Could not load company calling numbers. Try again.");
+        return null;
+      })
+      .finally(() => { callerIdLoadRef.current = null; });
+    callerIdLoadRef.current = request;
+    return request;
+  }, []);
+
+  useEffect(() => {
+    if (callingEnabled) void loadCallerIds();
+  }, [callingEnabled, loadCallerIds]);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -204,7 +286,7 @@ export function SoftphoneProvider({ children }: Props) {
   }, []);
 
   const startTarget = useCallback(async (
-    prepare: Promise<{ ok: true; data: SoftphoneTarget } | { ok: false; error: string }>,
+    prepare: () => Promise<{ ok: true; data: SoftphoneTarget } | { ok: false; error: string }>,
     provisionalTarget?: SoftphoneTarget,
   ) => {
     if (!callingEnabled) {
@@ -220,9 +302,21 @@ export function SoftphoneProvider({ children }: Props) {
     transition({ type: "call_started" });
     setPending(true);
     setError(null);
+    const callerIdE164 = selectedCallerIdRef.current &&
+      callerIdsRef.current.some((item) => item.phone_e164 === selectedCallerIdRef.current)
+      ? selectedCallerIdRef.current
+      : await loadCallerIds();
+    if (!callerIdE164) {
+      startInFlightRef.current = false;
+      setPending(false);
+      setTarget(null);
+      setPhone("idle");
+      setError(null);
+      return;
+    }
     let result: { ok: true; data: SoftphoneTarget } | { ok: false; error: string };
     try {
-      result = await prepare;
+      result = await prepare();
     } catch {
       if (provisionalTarget?.propertyId) {
         await Promise.resolve(resumeFailedSoftphoneCall(provisionalTarget.propertyId)).catch(() => undefined);
@@ -338,6 +432,7 @@ export function SoftphoneProvider({ children }: Props) {
         propertyId: result.data.propertyId ?? undefined,
         contactId: result.data.contactId ?? undefined,
         callToken,
+        callerIdE164,
       });
     } catch (error) {
       terminalFailureMessage = error instanceof Error
@@ -345,12 +440,12 @@ export function SoftphoneProvider({ children }: Props) {
         : "The call failed. Add a note to log the outcome.";
       if (!terminalHandledRef.current) await finishTerminal("failed");
     }
-  }, [callingEnabled, transition]);
+  }, [callingEnabled, loadCallerIds, transition]);
 
   const openLead = useCallback((lead: SoftphoneLead) => {
     if (!callingEnabled || startInFlightRef.current) return;
     const phoneE164 = lead.phones[0] ?? "";
-    void startTarget(prepareLeadCall(lead.id), {
+    void startTarget(() => prepareLeadCall(lead.id), {
       propertyId: lead.id,
       contactId: lead.contactId,
       phoneE164,
@@ -425,6 +520,15 @@ export function SoftphoneProvider({ children }: Props) {
     && /^\d{10}$/.test(manualDigits);
   const callName = target?.name ?? "";
   const isOnCall = phone === "live" || phone === "held";
+  const callerIdReady = callerIdState === "ready" && Boolean(selectedCallerId);
+
+  const selectCallerId = useCallback((phoneE164: string) => {
+    if (!E164.test(phoneE164) || !callerIdsRef.current.some((item) => item.phone_e164 === phoneE164))
+      return;
+    selectedCallerIdRef.current = phoneE164;
+    setSelectedCallerId(phoneE164);
+    rememberCallerId(phoneE164);
+  }, []);
 
   const enterManualDigit = useCallback((digit: DtmfDigit) => {
     if (digit === "*" || digit === "#") return;
@@ -490,9 +594,16 @@ export function SoftphoneProvider({ children }: Props) {
                 manualDigits={manualDigits}
                 pending={pending}
                 callingEnabled={callingEnabled}
-                onLead={(suggestion) => void startTarget(prepareLeadCall(suggestion.propertyId))}
-                onRecent={(recent) => void startTarget(recent.propertyId ? prepareLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164))}
-                onManual={() => void startTarget(prepareManualCall(manualDigits))}
+                callerIds={callerIds}
+                callerIdState={callerIdState}
+                callerIdError={callerIdError}
+                selectedCallerId={selectedCallerId}
+                callerIdReady={callerIdReady}
+                onCallerIdChange={selectCallerId}
+                onRetryCallerIds={() => { void loadCallerIds(); }}
+                onLead={(suggestion) => void startTarget(() => prepareLeadCall(suggestion.propertyId))}
+                onRecent={(recent) => void startTarget(() => recent.propertyId ? prepareLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164))}
+                onManual={() => void startTarget(() => prepareManualCall(manualDigits))}
                 onDigit={enterManualDigit}
                 onBackspace={() => { const next = dialInputRef.current.slice(0, -1); dialInputRef.current = next; setDialInput(next); }}
                 error={error}
@@ -533,18 +644,29 @@ function formatFull(digits: string): string {
   return digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : digits;
 }
 
-function IdleView({ dialInput, setDialInput, suggestions, recents, manualReady, manualDigits, pending, callingEnabled, onLead, onRecent, onManual, onDigit, onBackspace, error }: {
-  dialInput: string; setDialInput: (value: string) => void; suggestions: DialerSearchResult[]; recents: DialerRecent[]; manualReady: boolean; manualDigits: string; pending: boolean; callingEnabled: boolean; onLead: (suggestion: DialerSearchResult) => void; onRecent: (recent: DialerRecent) => void; onManual: () => void; onDigit: (digit: DtmfDigit) => void; onBackspace: () => void; error: string | null;
+function IdleView({ dialInput, setDialInput, suggestions, recents, manualReady, manualDigits, pending, callingEnabled, callerIds, callerIdState, callerIdError, selectedCallerId, callerIdReady, onCallerIdChange, onRetryCallerIds, onLead, onRecent, onManual, onDigit, onBackspace, error }: {
+  dialInput: string; setDialInput: (value: string) => void; suggestions: DialerSearchResult[]; recents: DialerRecent[]; manualReady: boolean; manualDigits: string; pending: boolean; callingEnabled: boolean; callerIds: JitterCallerId[]; callerIdState: CallerIdState; callerIdError: string | null; selectedCallerId: string | null; callerIdReady: boolean; onCallerIdChange: (phoneE164: string) => void; onRetryCallerIds: () => void; onLead: (suggestion: DialerSearchResult) => void; onRecent: (recent: DialerRecent) => void; onManual: () => void; onDigit: (digit: DtmfDigit) => void; onBackspace: () => void; error: string | null;
 }) {
   return <div className="p-4 pb-[18px]">
     {!callingEnabled ? <div role="status" className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">Calling not yet enabled</div> : null}
+    {callingEnabled ? <CallerIdControl callerIds={callerIds} state={callerIdState} error={callerIdError} selected={selectedCallerId} onChange={onCallerIdChange} onRetry={onRetryCallerIds} /> : null}
     <input autoFocus data-testid="dialer-input" value={/^\d{10}$/.test(dialInput) ? formatFull(dialInput) : dialInput} onKeyDown={(event) => { if (/^[0-9]$/.test(event.key)) { event.preventDefault(); onDigit(event.key as DtmfDigit); } }} onChange={(event) => setDialInput(event.target.value)} placeholder="Type a name or number…" className="w-full rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-[15px] font-semibold outline-none" />
-    {suggestions.length > 0 ? <div className="mt-2 flex max-h-42 flex-col gap-0.5 overflow-auto">{suggestions.map((suggestion) => <button type="button" disabled={!callingEnabled} title={!callingEnabled ? "Calling not yet enabled" : undefined} data-testid="dialer-suggestion" key={suggestion.propertyId} onClick={() => onLead(suggestion)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-2 text-left hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#f0eeec] text-[11px] font-extrabold text-[#57534e]">{initials(suggestion.name)}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold">{suggestion.name}</span><span className="block truncate text-[11px] text-[#78716c]">{suggestion.detail}</span></span><PhoneIcon className="size-3.5 shrink-0 text-emerald-600" /></button>)}</div> : null}
+    {suggestions.length > 0 ? <div className="mt-2 flex max-h-42 flex-col gap-0.5 overflow-auto">{suggestions.map((suggestion) => <button type="button" disabled={!callingEnabled || !callerIdReady} title={!callingEnabled ? "Calling not yet enabled" : !callerIdReady ? "Choose an available company number" : undefined} data-testid="dialer-suggestion" key={suggestion.propertyId} onClick={() => onLead(suggestion)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-2 text-left hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#f0eeec] text-[11px] font-extrabold text-[#57534e]">{initials(suggestion.name)}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold">{suggestion.name}</span><span className="block truncate text-[11px] text-[#78716c]">{suggestion.detail}</span></span><PhoneIcon className="size-3.5 shrink-0 text-emerald-600" /></button>)}</div> : null}
     {dialInput.trim().length >= 2 && suggestions.length === 0 && !manualReady ? <div className="px-1 pt-2.5 text-[11.5px] text-[#78716c]">No matching lead — DNC-locked leads never appear here.</div> : null}
     {error ? <div role="alert" className="pt-2 text-xs text-red-700">{error}</div> : null}
     <PhoneKeypad onDigit={onDigit} disabledDigits={["*", "#"]} />
-    <div className="mt-3 flex gap-2"><button type="button" aria-label="Delete digit" onClick={onBackspace} className="flex w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#e5e1df] bg-white text-[#78716c] hover:bg-[#f5f4f2]"><DeleteIcon className="size-[17px]" /></button><button type="button" data-testid="dialer-call-manual" title={!callingEnabled ? "Calling not yet enabled" : undefined} disabled={!manualReady || pending || !callingEnabled} onClick={onManual} className={`flex-1 rounded-[10px] border-0 py-2.5 text-[13px] font-bold ${manualReady && callingEnabled ? "bg-emerald-600 text-white hover:bg-emerald-700" : "cursor-default bg-[#f0eeec] text-[#a8a29e]"}`}>{callingEnabled && manualReady ? `Call ${formatFull(manualDigits)}` : "Call"}</button></div>
-    {dialInput.trim() === "" ? <div className="mt-3.5 border-t border-[#e5e1df] pt-3"><div className="mb-1.5 text-[10px] font-extrabold uppercase tracking-[0.1em] text-[#a8a29e]">Recent calls</div>{recents.map((recent) => <button type="button" disabled={!callingEnabled} title={!callingEnabled ? "Calling not yet enabled" : undefined} data-testid="dialer-recent" key={recent.id} onClick={() => onRecent(recent)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-1.5 text-left hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><span className={`flex size-6 shrink-0 items-center justify-center rounded-full ${recent.missed ? "bg-red-50 text-red-600" : "bg-[#f0eeec] text-[#78716c]"}`}>{recent.missed ? <ArrowDownLeftIcon className="size-3 -scale-y-100" /> : <ArrowUpRightIcon className="size-3" />}</span><span className="min-w-0 flex-1"><span className={`block truncate text-xs font-bold ${recent.missed ? "text-red-700" : "text-[#1c1917]"}`}>{recent.name}</span><span className="block truncate text-[11px] text-[#78716c]">{recent.detail}</span></span><span className="shrink-0 text-[11px] font-semibold text-[#a8a29e]">{recent.when}</span></button>)}</div> : null}
+    <div className="mt-3 flex gap-2"><button type="button" aria-label="Delete digit" onClick={onBackspace} className="flex w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#e5e1df] bg-white text-[#78716c] hover:bg-[#f5f4f2]"><DeleteIcon className="size-[17px]" /></button><button type="button" data-testid="dialer-call-manual" title={!callingEnabled ? "Calling not yet enabled" : !callerIdReady ? "Choose an available company number" : undefined} disabled={!manualReady || pending || !callingEnabled || !callerIdReady} onClick={onManual} className={`flex-1 rounded-[10px] border-0 py-2.5 text-[13px] font-bold ${manualReady && callingEnabled && callerIdReady ? "bg-emerald-600 text-white hover:bg-emerald-700" : "cursor-default bg-[#f0eeec] text-[#a8a29e]"}`}>{callingEnabled && manualReady ? `Call ${formatFull(manualDigits)}` : "Call"}</button></div>
+    {dialInput.trim() === "" ? <div className="mt-3.5 border-t border-[#e5e1df] pt-3"><div className="mb-1.5 text-[10px] font-extrabold uppercase tracking-[0.1em] text-[#a8a29e]">Recent calls</div>{recents.map((recent) => <button type="button" disabled={!callingEnabled || !callerIdReady} title={!callingEnabled ? "Calling not yet enabled" : !callerIdReady ? "Choose an available company number" : undefined} data-testid="dialer-recent" key={recent.id} onClick={() => onRecent(recent)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-1.5 text-left hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><span className={`flex size-6 shrink-0 items-center justify-center rounded-full ${recent.missed ? "bg-red-50 text-red-600" : "bg-[#f0eeec] text-[#78716c]"}`}>{recent.missed ? <ArrowDownLeftIcon className="size-3 -scale-y-100" /> : <ArrowUpRightIcon className="size-3" />}</span><span className="min-w-0 flex-1"><span className={`block truncate text-xs font-bold ${recent.missed ? "text-red-700" : "text-[#1c1917]"}`}>{recent.name}</span><span className="block truncate text-[11px] text-[#78716c]">{recent.detail}</span></span><span className="shrink-0 text-[11px] font-semibold text-[#a8a29e]">{recent.when}</span></button>)}</div> : null}
+  </div>;
+}
+
+function CallerIdControl({ callerIds, state, error, selected, onChange, onRetry }: { callerIds: JitterCallerId[]; state: CallerIdState; error: string | null; selected: string | null; onChange: (phoneE164: string) => void; onRetry: () => void }) {
+  return <div className="mb-3 rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-left">
+    <div className="mb-1 text-[10px] font-extrabold uppercase tracking-[0.1em] text-[#78716c]">Call from</div>
+    {state === "loading" ? <div role="status" className="text-xs font-semibold text-[#78716c]">Loading company numbers…</div> : null}
+    {state === "ready" && callerIds.length === 1 ? <div data-testid="caller-id-readonly" className="text-sm font-bold">{callerIds[0].label} · {maskPhone(callerIds[0].phone_e164)}</div> : null}
+    {state === "ready" && callerIds.length > 1 ? <select aria-label="Call from" value={selected ?? ""} onChange={(event) => onChange(event.target.value)} className="w-full rounded-md border border-[#d6d1ce] bg-white px-2 py-1.5 text-sm font-semibold outline-none">{callerIds.map((callerId) => <option key={callerId.phone_e164} value={callerId.phone_e164}>{callerId.label} · {maskPhone(callerId.phone_e164)}</option>)}</select> : null}
+    {state === "error" || state === "empty" ? <div><div role="alert" className="text-xs font-semibold text-red-700">{error ?? "No company calling numbers are available."}</div><button type="button" data-testid="retry-caller-ids" onClick={onRetry} className="mt-1.5 rounded-md border border-red-200 bg-white px-2 py-1 text-xs font-bold text-red-700">Retry</button></div> : null}
   </div>;
 }
 

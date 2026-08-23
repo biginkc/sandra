@@ -9,6 +9,7 @@ import {
   cancelAuthenticatedJitterCall,
   connectAuthenticatedJitterCall,
   getAuthenticatedJitterToken,
+  getAuthenticatedJitterCallerIds,
   reportAuthenticatedJitterAudioHealth,
   sendAuthenticatedJitterDigit,
   startAuthenticatedJitterCall,
@@ -17,6 +18,10 @@ import type { CallTarget } from "./transport";
 
 export async function startJitterSoftphoneCall(target: CallTarget) {
   return startAuthenticatedJitterCall(target);
+}
+
+export async function loadJitterSoftphoneCallerIds() {
+  return getAuthenticatedJitterCallerIds();
 }
 
 export async function getJitterSoftphoneToken(callId: string) {
