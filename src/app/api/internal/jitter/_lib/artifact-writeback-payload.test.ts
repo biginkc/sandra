@@ -29,6 +29,14 @@ describe("artifact writeback payload validation", () => {
     ).toEqual({ ok: false, field: "duration_seconds" });
     expect(
       parseRecordingWritebackBody(
+        JSON.stringify({
+          status: "available",
+          duration_seconds: 2_147_483_648,
+        }),
+      ),
+    ).toEqual({ ok: false, field: "duration_seconds" });
+    expect(
+      parseRecordingWritebackBody(
         JSON.stringify({ status: "available", storage_path: 42 }),
       ),
     ).toEqual({ ok: false, field: "storage_path" });

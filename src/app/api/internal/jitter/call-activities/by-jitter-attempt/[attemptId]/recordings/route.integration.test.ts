@@ -90,6 +90,30 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
     expect(events).toHaveLength(0);
   });
 
+  it("rejects durations outside PostgreSQL integer range without a reservation", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const idempotencyKey = "by-attempt-recording-duration-overflow";
+    const response = await POST(
+      jsonRequest(
+        url(seeded.jitterAttemptId),
+        "POST",
+        { status: "available", duration_seconds: 2_147_483_648 },
+        { "idempotency-key": idempotencyKey },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      field: "duration_seconds",
+    });
+    const { data: events } = await testClient
+      .from("webhook_events")
+      .select("id")
+      .eq("external_id", idempotencyKey);
+    expect(events).toHaveLength(0);
+  });
+
   it("returns the retryable 404 contract when the parent is missing", async () => {
     const attemptId = `missing-${crypto.randomUUID()}`;
     const response = await POST(

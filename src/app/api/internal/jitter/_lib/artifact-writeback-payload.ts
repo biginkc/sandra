@@ -1,5 +1,6 @@
 const ARTIFACT_STATUSES = new Set(["pending", "available", "failed"]);
 const SUMMARY_STATUSES = new Set(["none", "pending", "available", "failed"]);
+const POSTGRES_INT4_MAX = 2_147_483_647;
 
 export type RecordingWritebackBody = {
   status: string;
@@ -72,7 +73,8 @@ export function parseRecordingWritebackBody(
     body.duration_seconds !== null &&
     (typeof body.duration_seconds !== "number" ||
       !Number.isSafeInteger(body.duration_seconds) ||
-      body.duration_seconds < 0)
+      body.duration_seconds < 0 ||
+      body.duration_seconds > POSTGRES_INT4_MAX)
   ) {
     return { ok: false, field: "duration_seconds" };
   }
