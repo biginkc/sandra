@@ -529,6 +529,7 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       { operator_user_id: "not-a-uuid" },
       { started_at: "not-a-timestamp" },
       { duration_seconds: 1.5 },
+      { duration_seconds: 2_147_483_648 },
     ];
 
     for (const [index, invalidBody] of invalidBodies.entries()) {
@@ -546,14 +547,19 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       expect(response.status).toBe(422);
     }
 
+    const invalidKeys = [
+      "activity-invalid-cast-0",
+      "activity-invalid-cast-1",
+      "activity-invalid-cast-2",
+      "activity-invalid-cast-3",
+    ];
     const { data: reservations } = await (testClient as any)
       .from("webhook_events")
       .select("external_id")
-      .in("external_id", [
-        "activity-invalid-cast-0",
-        "activity-invalid-cast-1",
-        "activity-invalid-cast-2",
-      ]);
+      .in(
+        "external_id",
+        invalidKeys.map((key) => `16:session-activity:${key}`),
+      );
     expect(reservations).toHaveLength(0);
   });
 
@@ -1107,8 +1113,28 @@ describe("internal.jitter.call-activities writeback PUT", () => {
 
     expect(responses.filter(({ status }) => status === 200)).toHaveLength(1);
     const rejected = responses.find(({ status }) => status !== 200)!;
+    const rejectedIndex = responses.findIndex(({ status }) => status !== 200);
     expect(rejected.status).toBe(409);
     await expect(rejected.json()).resolves.toEqual({
+      error: "conflict",
+      error_code: "call_activity_identity_conflict",
+    });
+    const rejectedLead = rejectedIndex === 0 ? firstLead : secondLead;
+    const rejectedKey =
+      rejectedIndex === 0
+        ? "activity-conflicting-first-a"
+        : "activity-conflicting-first-b";
+    const replay = await PUT(
+      jsonRequest(
+        requestUrl,
+        "PUT",
+        { ...writebackBody(rejectedLead), jitter_session_id: sessionId },
+        { "idempotency-key": rejectedKey },
+      ),
+      attemptContext(attemptId),
+    );
+    expect(replay.status).toBe(409);
+    await expect(replay.json()).resolves.toEqual({
       error: "conflict",
       error_code: "call_activity_identity_conflict",
     });

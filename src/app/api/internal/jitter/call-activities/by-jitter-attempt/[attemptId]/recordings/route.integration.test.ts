@@ -108,7 +108,7 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
     const { data: events } = await testClient
       .from("webhook_events")
       .select("id")
-      .eq("external_id", idempotencyKey);
+      .eq("external_id", effectiveKey(seeded.jitterSessionId, idempotencyKey));
     expect(events).toHaveLength(0);
   });
 
@@ -136,7 +136,7 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
     const { data: events } = await testClient
       .from("webhook_events")
       .select("id")
-      .eq("external_id", idempotencyKey);
+      .eq("external_id", effectiveKey(seeded.jitterSessionId, idempotencyKey));
     expect(events).toHaveLength(0);
   });
 
@@ -313,13 +313,18 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
 
   it("serializes concurrent distinct-key first writes into one recording", async () => {
     const seeded = await seedCallActivity(testClient);
+    const bodies = [
+      { status: "available", storage_path: "calls/concurrent-a.wav" },
+      { status: "available", storage_path: "calls/concurrent-b.wav" },
+    ];
+    const keys = ["recording-concurrent-a", "recording-concurrent-b"];
     const responses = await Promise.all([
       POST(
         jsonRequest(
           url(seeded.jitterAttemptId, seeded.jitterSessionId),
           "POST",
-          { status: "available", storage_path: "calls/concurrent-a.wav" },
-          { "idempotency-key": "recording-concurrent-a" },
+          bodies[0],
+          { "idempotency-key": keys[0] },
         ),
         context(seeded.jitterAttemptId),
       ),
@@ -327,13 +332,32 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
         jsonRequest(
           url(seeded.jitterAttemptId, seeded.jitterSessionId),
           "POST",
-          { status: "available", storage_path: "calls/concurrent-b.wav" },
-          { "idempotency-key": "recording-concurrent-b" },
+          bodies[1],
+          { "idempotency-key": keys[1] },
         ),
         context(seeded.jitterAttemptId),
       ),
     ]);
-    expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+    expect(responses.filter(({ status }) => status === 200)).toHaveLength(1);
+    const loserIndex = responses.findIndex(({ status }) => status === 409);
+    expect(loserIndex).toBeGreaterThanOrEqual(0);
+    await expect(responses[loserIndex].json()).resolves.toEqual({
+      error: "conflict",
+      error_code: "call_artifact_conflict",
+    });
+    const replay = await POST(
+      jsonRequest(
+        url(seeded.jitterAttemptId, seeded.jitterSessionId),
+        "POST",
+        bodies[loserIndex],
+        { "idempotency-key": keys[loserIndex] },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+    expect(replay.status).toBe(409);
+    await expect(replay.json()).resolves.toMatchObject({
+      error_code: "call_artifact_conflict",
+    });
     const { data: rows } = await testClient
       .from("call_recordings")
       .select("status, storage_path")
@@ -343,6 +367,75 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
     expect(["calls/concurrent-a.wav", "calls/concurrent-b.wav"]).toContain(
       rows![0].storage_path,
     );
+  });
+
+  it("rejects a distinct-key downgrade and preserves an available recording", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const routeUrl = url(seeded.jitterAttemptId, seeded.jitterSessionId);
+    const available = await POST(
+      jsonRequest(
+        routeUrl,
+        "POST",
+        { status: "available", storage_path: "calls/durable.wav" },
+        { "idempotency-key": "recording-durable" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+    const downgrade = await POST(
+      jsonRequest(
+        routeUrl,
+        "POST",
+        { status: "failed", error_code: "late_failure" },
+        { "idempotency-key": "recording-late-failure" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+    expect(available.status).toBe(200);
+    expect(downgrade.status).toBe(409);
+    const { data: row } = await testClient
+      .from("call_recordings")
+      .select("status, storage_path, error_code")
+      .eq("call_activity_id", seeded.callActivityId)
+      .single();
+    expect(row).toMatchObject({
+      status: "available",
+      storage_path: "calls/durable.wav",
+      error_code: null,
+    });
+  });
+
+  it("allows a failed recording to recover to available", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const routeUrl = url(seeded.jitterAttemptId, seeded.jitterSessionId);
+    const failed = await POST(
+      jsonRequest(
+        routeUrl,
+        "POST",
+        { status: "failed", error_code: "temporary" },
+        { "idempotency-key": "recording-temporary-failure" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+    const recovered = await POST(
+      jsonRequest(
+        routeUrl,
+        "POST",
+        { status: "available", storage_path: "calls/recovered.wav" },
+        { "idempotency-key": "recording-recovered" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+    expect(failed.status).toBe(200);
+    expect(recovered.status).toBe(200);
+    const { data: row } = await testClient
+      .from("call_recordings")
+      .select("status, storage_path")
+      .eq("call_activity_id", seeded.callActivityId)
+      .single();
+    expect(row).toMatchObject({
+      status: "available",
+      storage_path: "calls/recovered.wav",
+    });
   });
 
   it("returns the cached payload for an identical replay", async () => {

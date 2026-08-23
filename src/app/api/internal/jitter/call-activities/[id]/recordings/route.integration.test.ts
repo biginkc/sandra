@@ -104,6 +104,63 @@ describe("internal.jitter.call-activities recordings POST", () => {
     await expect(response.json()).resolves.toMatchObject({ field: "status" });
   });
 
+  it("rejects malformed and impossible recording payloads before reservation", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const routeUrl = `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/recordings`;
+    const malformedKey = "recording-malformed";
+    const malformedBody = "{";
+    const malformed = await POST(
+      new Request(routeUrl, {
+        method: "POST",
+        headers: authHeaders(malformedBody, {
+          "content-type": "application/json",
+          "idempotency-key": malformedKey,
+        }),
+        body: malformedBody,
+      }),
+      context(seeded.callActivityId),
+    );
+    const missingPathKey = "recording-available-missing-path";
+    const missingPath = await POST(
+      jsonRequest(
+        routeUrl,
+        "POST",
+        { status: "available" },
+        { "idempotency-key": missingPathKey },
+      ),
+      context(seeded.callActivityId),
+    );
+    const overflowKey = "recording-duration-overflow";
+    const overflow = await POST(
+      jsonRequest(
+        routeUrl,
+        "POST",
+        {
+          status: "available",
+          storage_path: "calls/overflow.wav",
+          duration_seconds: 2_147_483_648,
+        },
+        { "idempotency-key": overflowKey },
+      ),
+      context(seeded.callActivityId),
+    );
+
+    expect(malformed.status).toBe(422);
+    expect(missingPath.status).toBe(422);
+    await expect(missingPath.json()).resolves.toMatchObject({
+      field: "storage_path",
+    });
+    expect(overflow.status).toBe(422);
+    await expect(overflow.json()).resolves.toMatchObject({
+      field: "duration_seconds",
+    });
+    const { data: events } = await testClient
+      .from("webhook_events")
+      .select("id")
+      .in("external_id", [malformedKey, missingPathKey, overflowKey]);
+    expect(events).toHaveLength(0);
+  });
+
   it("returns 422 if call_activity_id is not found", async () => {
     const id = crypto.randomUUID();
     const response = await POST(
@@ -145,6 +202,31 @@ describe("internal.jitter.call-activities recordings POST", () => {
       .select("id")
       .eq("call_activity_id", seeded.callActivityId);
     expect(recordings).toHaveLength(0);
+  });
+
+  it("rejects a same-org non-Jitter activity before reserving idempotency", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const key = "recording-non-jitter";
+    const { error } = await testClient
+      .from("call_activities")
+      .update({ provider: "twilio" })
+      .eq("id", seeded.callActivityId);
+    expect(error).toBeNull();
+    const response = await POST(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/recordings`,
+        "POST",
+        { status: "pending" },
+        { "idempotency-key": key },
+      ),
+      context(seeded.callActivityId),
+    );
+    expect(response.status).toBe(422);
+    const { data: events } = await testClient
+      .from("webhook_events")
+      .select("id")
+      .eq("external_id", key);
+    expect(events).toHaveLength(0);
   });
 
   it("refuses a reused idempotency key with a different recording body", async () => {

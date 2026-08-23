@@ -126,7 +126,7 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
     const { data: events } = await testClient
       .from("webhook_events")
       .select("id")
-      .eq("external_id", idempotencyKey);
+      .eq("external_id", effectiveKey(seeded.jitterSessionId, idempotencyKey));
     expect(events).toHaveLength(0);
   });
 
@@ -317,13 +317,18 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
 
   it("serializes concurrent distinct-key first writes into one transcript", async () => {
     const seeded = await seedCallActivity(testClient);
+    const bodies = [
+      { status: "available", text: "Concurrent transcript A" },
+      { status: "available", text: "Concurrent transcript B" },
+    ];
+    const keys = ["transcript-concurrent-a", "transcript-concurrent-b"];
     const responses = await Promise.all([
       PUT(
         jsonRequest(
           url(seeded.jitterAttemptId, seeded.jitterSessionId),
           "PUT",
-          { status: "available", text: "Concurrent transcript A" },
-          { "idempotency-key": "transcript-concurrent-a" },
+          bodies[0],
+          { "idempotency-key": keys[0] },
         ),
         context(seeded.jitterAttemptId),
       ),
@@ -331,13 +336,29 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
         jsonRequest(
           url(seeded.jitterAttemptId, seeded.jitterSessionId),
           "PUT",
-          { status: "available", text: "Concurrent transcript B" },
-          { "idempotency-key": "transcript-concurrent-b" },
+          bodies[1],
+          { "idempotency-key": keys[1] },
         ),
         context(seeded.jitterAttemptId),
       ),
     ]);
-    expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+    expect(responses.filter(({ status }) => status === 200)).toHaveLength(1);
+    const loserIndex = responses.findIndex(({ status }) => status === 409);
+    expect(loserIndex).toBeGreaterThanOrEqual(0);
+    await expect(responses[loserIndex].json()).resolves.toEqual({
+      error: "conflict",
+      error_code: "call_artifact_conflict",
+    });
+    const replay = await PUT(
+      jsonRequest(
+        url(seeded.jitterAttemptId, seeded.jitterSessionId),
+        "PUT",
+        bodies[loserIndex],
+        { "idempotency-key": keys[loserIndex] },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+    expect(replay.status).toBe(409);
     const { data: rows } = await testClient
       .from("call_transcripts")
       .select("status, text")
@@ -347,6 +368,82 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
     expect(["Concurrent transcript A", "Concurrent transcript B"]).toContain(
       rows![0].text,
     );
+  });
+
+  it("rejects a distinct-key downgrade and preserves an available transcript", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const routeUrl = url(seeded.jitterAttemptId, seeded.jitterSessionId);
+    const available = await PUT(
+      jsonRequest(
+        routeUrl,
+        "PUT",
+        {
+          status: "available",
+          text: "Durable transcript",
+          summary: "Durable summary",
+          summary_status: "available",
+        },
+        { "idempotency-key": "transcript-durable" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+    const downgrade = await PUT(
+      jsonRequest(
+        routeUrl,
+        "PUT",
+        { status: "failed", error_code: "late_failure" },
+        { "idempotency-key": "transcript-late-failure" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+    expect(available.status).toBe(200);
+    expect(downgrade.status).toBe(409);
+    const { data: row } = await testClient
+      .from("call_transcripts")
+      .select("status, text, summary_status, summary, error_code")
+      .eq("call_activity_id", seeded.callActivityId)
+      .single();
+    expect(row).toMatchObject({
+      status: "available",
+      text: "Durable transcript",
+      summary_status: "available",
+      summary: "Durable summary",
+      error_code: null,
+    });
+  });
+
+  it("allows a failed transcript to recover to available", async () => {
+    const seeded = await seedCallActivity(testClient);
+    const routeUrl = url(seeded.jitterAttemptId, seeded.jitterSessionId);
+    const failed = await PUT(
+      jsonRequest(
+        routeUrl,
+        "PUT",
+        { status: "failed", error_code: "temporary" },
+        { "idempotency-key": "transcript-temporary-failure" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+    const recovered = await PUT(
+      jsonRequest(
+        routeUrl,
+        "PUT",
+        { status: "available", text: "Recovered transcript" },
+        { "idempotency-key": "transcript-recovered" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+    expect(failed.status).toBe(200);
+    expect(recovered.status).toBe(200);
+    const { data: row } = await testClient
+      .from("call_transcripts")
+      .select("status, text")
+      .eq("call_activity_id", seeded.callActivityId)
+      .single();
+    expect(row).toMatchObject({
+      status: "available",
+      text: "Recovered transcript",
+    });
   });
 
   it("preserves a working transcript when summary generation failed", async () => {

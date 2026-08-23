@@ -8,6 +8,7 @@ import {
   requireIdempotencyKey,
 } from "../../../../_lib/auth";
 import { parseRecordingWritebackBody } from "../../../../_lib/artifact-writeback-payload";
+import { responseForWritebackPayload } from "../../../../_lib/writeback-response";
 
 type RouteContext = { params: Promise<{ attemptId: string }> };
 
@@ -78,7 +79,7 @@ export async function POST(
       payload: body,
     });
     if (idempotency.state === "cached") {
-      return NextResponse.json(idempotency.cachedPayload);
+      return responseForWritebackPayload(idempotency.cachedPayload);
     }
     if (idempotency.state === "conflict") {
       return NextResponse.json(
@@ -105,7 +106,7 @@ export async function POST(
       return parentNotFound();
     }
 
-    return NextResponse.json(payload);
+    return responseForWritebackPayload(payload);
   } catch (e) {
     reportError(e, {
       tags: { surface: "jitter_call_recording_by_attempt_writeback" },

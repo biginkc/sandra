@@ -7,6 +7,7 @@ import {
   checkAndRecordIdempotency,
   requireIdempotencyKey,
 } from "../../../_lib/auth";
+import { responseForWritebackPayload } from "../../../_lib/writeback-response";
 
 type RouteContext = { params: Promise<{ attemptId: string }> };
 
@@ -65,6 +66,7 @@ const TIMESTAMP_FIELDS = ["started_at", "ended_at", "callback_at"] as const;
 const NOTES_MAX_LENGTH = 10000;
 const RECORDING_PATH_MAX_LENGTH = 2048;
 const JITTER_SESSION_ID_MAX_LENGTH = 512;
+const POSTGRES_INT4_MAX = 2_147_483_647;
 
 function unprocessable(error_code: string, field?: string) {
   return NextResponse.json(
@@ -229,7 +231,8 @@ function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
     body.duration_seconds !== null &&
     (typeof body.duration_seconds !== "number" ||
       !Number.isSafeInteger(body.duration_seconds) ||
-      body.duration_seconds < 0)
+      body.duration_seconds < 0 ||
+      body.duration_seconds > POSTGRES_INT4_MAX)
   ) {
     return unprocessable("invalid_duration", "duration_seconds");
   }
@@ -385,7 +388,7 @@ export async function PUT(
       payload: body,
     });
     if (idempotency.state === "cached") {
-      return NextResponse.json(idempotency.cachedPayload);
+      return responseForWritebackPayload(idempotency.cachedPayload);
     }
     if (idempotency.state === "conflict") {
       return NextResponse.json(
@@ -414,16 +417,7 @@ export async function PUT(
         { status: 422 },
       );
     }
-    if (
-      (payload as { outcome?: string } | null)?.outcome === "identity_conflict"
-    ) {
-      return NextResponse.json(
-        { error: "conflict", error_code: "call_activity_identity_conflict" },
-        { status: 409 },
-      );
-    }
-
-    return NextResponse.json(payload);
+    return responseForWritebackPayload(payload);
   } catch (e) {
     reportError(e, { tags: { surface: "jitter_call_activity_writeback" } });
     return NextResponse.json({ error: "internal_error" }, { status: 500 });

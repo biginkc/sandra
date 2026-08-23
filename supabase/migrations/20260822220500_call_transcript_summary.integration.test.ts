@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -27,6 +28,16 @@ function migrationSql(): string {
     path.join(
       process.cwd(),
       "supabase/migrations/20260822220500_call_transcript_summary.sql",
+    ),
+    "utf8",
+  );
+}
+
+function hardeningMigrationSql(): string {
+  return fs.readFileSync(
+    path.join(
+      process.cwd(),
+      "supabase/migrations/20260823010000_jitter_call_artifact_writeback_hardening.sql",
     ),
     "utf8",
   );
@@ -148,7 +159,7 @@ describe("Migration 20260822220500 — call transcript summary", () => {
       .single();
     expect(error).toBeNull();
 
-    const match = migrationSql().match(
+    const match = hardeningMigrationSql().match(
       /-- BEGIN legacy Jitter consent identity correction\.([\s\S]*?)-- END legacy Jitter consent identity correction\./,
     );
     expect(match?.[1]).toBeTruthy();
@@ -223,9 +234,30 @@ describe("Migration 20260822220500 — call transcript summary", () => {
       expect(row.indexdef).toContain("UNIQUE INDEX");
       expect(row.indexdef).toContain("(call_activity_id)");
     }
-    expect(migrationSql()).toContain(
+    expect(hardeningMigrationSql()).toContain(
       "duplicate call artifacts require manual reconciliation",
     );
+  });
+
+  it("preserves historical migration bytes and records both ledger entries once", async () => {
+    expect(createHash("sha256").update(migrationSql()).digest("hex")).toBe(
+      "77682382a07f831fc86725bea6af0b134f784baad67b43bb4069c89bb170fefd",
+    );
+    const { rows } = await pg.query<{
+      version: string;
+      count: string;
+      statement_count: number;
+    }>(
+      `select version, count(*)::text as count,
+              max(coalesce(array_length(statements, 1), 0))::integer as statement_count
+       from supabase_migrations.schema_migrations
+       where version in ('20260822220500', '20260823010000')
+       group by version order by version`,
+    );
+    expect(rows).toEqual([
+      { version: "20260822220500", count: "1", statement_count: 7 },
+      { version: "20260823010000", count: "1", statement_count: 23 },
+    ]);
   });
 
   it("rejects impossible available artifacts at the RPC boundary", async () => {

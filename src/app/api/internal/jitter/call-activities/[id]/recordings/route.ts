@@ -7,10 +7,10 @@ import {
   checkAndRecordIdempotency,
   requireIdempotencyKey,
 } from "../../../_lib/auth";
+import { parseRecordingWritebackBody } from "../../../_lib/artifact-writeback-payload";
+import { responseForWritebackPayload } from "../../../_lib/writeback-response";
 
 type RouteContext = { params: Promise<{ id: string }> };
-
-const VALID_STATUS = new Set(["pending", "available", "failed"]);
 
 export async function POST(
   request: Request,
@@ -25,26 +25,23 @@ export async function POST(
 
     const { id } = await context.params;
     const idempotencyKey = request.headers.get("idempotency-key")!.trim();
-    const body = JSON.parse(auth.rawBody || "{}") as {
-      status?: string;
-      storage_path?: string | null;
-      duration_seconds?: number | null;
-      error_code?: string | null;
-      error_message?: string | null;
-    };
-
-    if (!body.status || !VALID_STATUS.has(body.status)) {
+    const parsedBody = parseRecordingWritebackBody(auth.rawBody);
+    if (!parsedBody.ok) {
       return NextResponse.json(
-        { error: "validation_error", field: "status" },
+        { error: "validation_error", field: parsedBody.field },
         { status: 422 },
       );
     }
+    const body = parsedBody.body;
 
-    const { data: activity, error: activityError } = await (auth.serviceClient as any)
+    const { data: activity, error: activityError } = await (
+      auth.serviceClient as any
+    )
       .from("call_activities")
       .select("id")
       .eq("id", id)
       .eq("org_id", auth.orgId)
+      .eq("provider", "jitter")
       .maybeSingle();
     if (activityError) throw activityError;
     if (!activity) {
@@ -62,7 +59,7 @@ export async function POST(
       payload: body,
     });
     if (idempotency.state === "cached") {
-      return NextResponse.json(idempotency.cachedPayload);
+      return responseForWritebackPayload(idempotency.cachedPayload);
     }
     if (idempotency.state === "conflict") {
       return NextResponse.json(
@@ -71,20 +68,19 @@ export async function POST(
       );
     }
 
-    const { data: payload, error: mutationError } = await (auth.serviceClient as any).rpc(
-      "jitter_upsert_call_recording",
-      {
-        p_call_activity_id: id,
-        p_org_id: auth.orgId,
-        p_status: body.status,
-        p_storage_path: body.storage_path ?? null,
-        p_duration_seconds: body.duration_seconds ?? null,
-        p_error_code: body.error_code ?? null,
-        p_error_message: body.error_message ?? null,
-        p_external_id: idempotencyKey,
-        p_request_hash: idempotency.requestHash,
-      },
-    );
+    const { data: payload, error: mutationError } = await (
+      auth.serviceClient as any
+    ).rpc("jitter_upsert_call_recording", {
+      p_call_activity_id: id,
+      p_org_id: auth.orgId,
+      p_status: body.status,
+      p_storage_path: body.storage_path ?? null,
+      p_duration_seconds: body.duration_seconds ?? null,
+      p_error_code: body.error_code ?? null,
+      p_error_message: body.error_message ?? null,
+      p_external_id: idempotencyKey,
+      p_request_hash: idempotency.requestHash,
+    });
     if (mutationError) throw mutationError;
 
     if ((payload as { outcome?: string } | null)?.outcome === "not_found") {
@@ -94,7 +90,7 @@ export async function POST(
       );
     }
 
-    return NextResponse.json(payload);
+    return responseForWritebackPayload(payload);
   } catch (e) {
     reportError(e, { tags: { surface: "jitter_call_recording_writeback" } });
     return NextResponse.json({ error: "internal_error" }, { status: 500 });
