@@ -320,7 +320,7 @@ export default async function LeadDetailPage({
   const { data: callRollupRaw, error: callRollupError } = await supabase
     .from("call_activities")
     .select(
-      "id, started_at, outcome, disposition, recording_status, transcript_status",
+      "id, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)",
     )
     .eq("property_id", lead.id)
     .order("started_at", { ascending: false, nullsFirst: false })

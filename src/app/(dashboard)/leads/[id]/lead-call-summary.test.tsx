@@ -1,15 +1,22 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { callbacks, channelOn, removeChannel, setAuth } = vi.hoisted(() => ({
+const { callbacks, channelOn, eq, maybeSingle, removeChannel, setAuth } = vi.hoisted(() => ({
   callbacks: {} as Record<string, (payload: { new: unknown }) => void>,
   channelOn: vi.fn(),
+  eq: vi.fn(),
+  maybeSingle: vi.fn(),
   removeChannel: vi.fn(),
   setAuth: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => {
+    const query = {
+      select: vi.fn(() => query),
+      eq: eq.mockImplementation(() => query),
+      maybeSingle,
+    };
     const channel = {
       on: channelOn.mockImplementation(
         (
@@ -23,36 +30,71 @@ vi.mock("@/lib/supabase/client", () => ({
       ),
       subscribe: vi.fn(() => channel),
     };
-
     return {
       auth: {
-        getSession: vi.fn(async () => ({
-          data: { session: { access_token: "test-token" } },
-        })),
+        getSession: vi.fn(async () => ({ data: { session: { access_token: "test-token" } } })),
       },
       channel: vi.fn(() => channel),
+      from: vi.fn(() => query),
       realtime: { setAuth },
       removeChannel,
     };
   },
 }));
 
-// eslint-disable-next-line import/first
-import {
-  LeadCallSummary,
-  type CallActivityRollupRow,
-} from "./lead-call-summary";
+import { LeadCallSummary, type CallActivityRollupRow } from "./lead-call-summary";
+
+const timestamp = "2026-05-06T15:00:00.000Z";
+
+function recording(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "recording-1",
+    call_activity_id: "call-1",
+    status: "available",
+    storage_path: "calls/session/call-1.wav",
+    duration_seconds: 42,
+    error_code: null,
+    error_message: null,
+    created_at: timestamp,
+    updated_at: timestamp,
+    ...overrides,
+  };
+}
+
+function transcript(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "transcript-1",
+    call_activity_id: "call-1",
+    status: "available",
+    text: "The homeowner wants an offer next week.",
+    language: "en",
+    error_code: null,
+    error_message: null,
+    summary: "Motivated seller; follow up next week.",
+    summary_status: "available",
+    summary_error_code: null,
+    summary_error_message: null,
+    created_at: timestamp,
+    updated_at: timestamp,
+    ...overrides,
+  };
+}
 
 function row(
   overrides: Partial<CallActivityRollupRow> & { id: string },
 ): CallActivityRollupRow {
   return {
     id: overrides.id,
-    started_at: overrides.started_at ?? "2026-05-06T15:00:00.000Z",
+    started_at: overrides.started_at ?? timestamp,
     outcome: overrides.outcome ?? "connected_human",
     disposition: overrides.disposition ?? null,
     recording_status: overrides.recording_status ?? "none",
     transcript_status: overrides.transcript_status ?? "none",
+    summary_status: overrides.summary_status ?? "none",
+    jitter_attempt_id: overrides.jitter_attempt_id ?? `attempt-${overrides.id}`,
+    jitter_session_id: overrides.jitter_session_id ?? "session-1",
+    call_recordings: overrides.call_recordings ?? [],
+    call_transcripts: overrides.call_transcripts ?? [],
   };
 }
 
@@ -65,7 +107,7 @@ function renderWidget(
 ) {
   return render(
     <LeadCallSummary
-      propertyId={overrides.propertyId ?? "abc-123"}
+      propertyId={overrides.propertyId ?? "property-123"}
       initialRows={overrides.initialRows ?? [row({ id: "call-1" })]}
       jitterHost={overrides.jitterHost}
     />,
@@ -74,172 +116,212 @@ function renderWidget(
 
 beforeEach(() => {
   for (const key of Object.keys(callbacks)) delete callbacks[key];
-  channelOn.mockClear();
-  removeChannel.mockClear();
-  setAuth.mockClear();
+  vi.clearAllMocks();
+  maybeSingle.mockResolvedValue({ data: null, error: null });
 });
 
 describe("<LeadCallSummary />", () => {
-  it("renders attempt count from server-fetched rows", () => {
-    renderWidget({
-      initialRows: Array.from({ length: 5 }, (_, index) =>
-        row({ id: `call-${index}` }),
-      ),
-    });
-
-    expect(screen.getByText("5 calls")).toBeInTheDocument();
-  });
-
-  it("renders latest outcome badge from most recent row", () => {
-    renderWidget({
-      initialRows: [
-        row({ id: "old", started_at: "2026-05-01T15:00:00.000Z", outcome: "no_answer" }),
-        row({ id: "new", started_at: "2026-05-07T15:00:00.000Z", outcome: "voicemail" }),
-      ],
-    });
-
-    expect(screen.getByTestId("latest-outcome-badge")).toHaveTextContent(
-      "Voicemail",
-    );
-  });
-
-  it("renders latest call timestamp using a relative formatter", () => {
+  it("renders a newest-first per-call log with disposition badges and artifact content", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-08T15:00:00.000Z"));
     renderWidget({
-      initialRows: [row({ id: "call-1", started_at: "2026-05-06T15:00:00.000Z" })],
-    });
-
-    expect(screen.getByTestId("latest-call-timestamp")).toHaveTextContent(
-      "2 days ago",
-    );
-    vi.useRealTimers();
-  });
-
-  it("renders availability indicators for recordings, transcripts, and pending states", () => {
-    renderWidget({
       initialRows: [
-        row({ id: "call-1", recording_status: "available", transcript_status: "available" }),
-        row({ id: "call-2", recording_status: "available", transcript_status: "pending" }),
-        row({ id: "call-3", recording_status: "pending", transcript_status: "available" }),
+        row({ id: "older", started_at: "2026-05-01T15:00:00.000Z", outcome: "no_answer" }),
+        row({
+          id: "newer",
+          started_at: "2026-05-06T15:00:00.000Z",
+          disposition: "follow_up_requested",
+          recording_status: "available",
+          transcript_status: "available",
+          summary_status: "available",
+          call_recordings: [recording({ call_activity_id: "newer" })],
+          call_transcripts: [transcript({ call_activity_id: "newer" })],
+        }),
       ],
     });
 
-    const availability = screen.getByLabelText(
-      "Recording and transcript availability",
-    );
-    expect(within(availability).getByText(/Recording/i)).toBeInTheDocument();
-    expect(within(availability).getAllByText(/2 available/)).toHaveLength(2);
-    expect(within(availability).getAllByText(/1 pending/)).toHaveLength(2);
-    expect(within(availability).getByText(/Transcript/i)).toBeInTheDocument();
+    const calls = within(screen.getByTestId("call-history")).getAllByRole("article");
+    expect(calls).toHaveLength(2);
+    expect(within(calls[0]).getByText("follow up requested")).toBeInTheDocument();
+    expect(within(calls[0]).getByText("2 days ago")).toBeInTheDocument();
+    expect(within(calls[0]).getByText("Motivated seller; follow up next week.")).toBeInTheDocument();
+    expect(within(calls[0]).getByText("Transcript")).toBeInTheDocument();
+    expect(within(calls[0]).getByText("The homeowner wants an offer next week.")).toBeInTheDocument();
+    expect(within(calls[0]).getByRole("button", { name: "Load recording (42s)" })).toBeInTheDocument();
+    vi.useRealTimers();
   });
 
-  it("renders empty state when initialRows is empty", () => {
-    renderWidget({ initialRows: [] });
-
-    expect(screen.getByText("No calls yet")).toBeInTheDocument();
-    expect(
-      screen.getByText("This lead hasn't been called yet."),
-    ).toBeInTheDocument();
-  });
-
-  it("does not render any per-attempt row", () => {
-    renderWidget({ initialRows: [row({ id: "call-1" }), row({ id: "call-2" })] });
-
-    expect(screen.queryByRole("table")).not.toBeInTheDocument();
-    expect(screen.queryByText(/call-1/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/attempt/i)).not.toBeInTheDocument();
-  });
-
-  it("does not render any recording playback element", () => {
-    const { container } = renderWidget({
-      initialRows: [row({ id: "call-1", recording_status: "available" })],
-    });
-
-    expect(container.querySelector("audio")).toBeNull();
-    expect(container.querySelector("video")).toBeNull();
-    expect(screen.queryByRole("button", { name: /play/i })).toBeNull();
-  });
-
-  it("does not render transcript text", () => {
+  it("renders explicit pending and child-backed failure states", () => {
     renderWidget({
-      initialRows: [row({ id: "call-1", transcript_status: "available" })],
+      initialRows: [
+        row({
+          id: "pending",
+          recording_status: "pending",
+          transcript_status: "pending",
+          summary_status: "pending",
+        }),
+        row({
+          id: "failed",
+          recording_status: "failed",
+          transcript_status: "failed",
+          summary_status: "failed",
+          call_recordings: [recording({ status: "failed", error_message: "Storage rejected upload" })],
+          call_transcripts: [
+            transcript({
+              status: "failed",
+              text: null,
+              summary: null,
+              summary_status: "failed",
+              error_message: "Deepgram timed out",
+              summary_error_message: "Claude rejected the response",
+            }),
+          ],
+        }),
+      ],
     });
 
-    expect(screen.queryByText(/full transcript/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/hello from the homeowner/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Recording pending")).toBeInTheDocument();
+    expect(screen.getByText("Transcript pending")).toBeInTheDocument();
+    expect(screen.getByText("AI summary pending")).toBeInTheDocument();
+    expect(screen.getByText("Recording failed: Storage rejected upload")).toBeInTheDocument();
+    expect(screen.getByText("Transcript failed: Deepgram timed out")).toBeInTheDocument();
+    expect(screen.getByText("AI summary failed: Claude rejected the response")).toBeInTheDocument();
   });
 
-  it("renders deep-link button as enabled with prospect_id when jitterHost is non-empty", () => {
-    renderWidget({ jitterHost: "http://localhost:3001" });
-
-    const link = screen.getByRole("link", { name: /Open in Jitter/i });
-    expect(link).toHaveAttribute(
-      "href",
-      "http://localhost:3001/history?prospect_id=abc-123",
-    );
-  });
-
-  it("renders deep-link button as disabled with tooltip when jitterHost is empty string", () => {
-    renderWidget({ jitterHost: "" });
-
-    const button = screen.getByRole("button", { name: /Open in Jitter/i });
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute("title", "Jitter host not configured");
-    expect(screen.queryByRole("link", { name: /Open in Jitter/i })).toBeNull();
-  });
-
-  it("renders deep-link button as disabled with tooltip when jitterHost is undefined", () => {
-    renderWidget({ jitterHost: undefined });
-
-    const button = screen.getByRole("button", { name: /Open in Jitter/i });
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute("title", "Jitter host not configured");
-  });
-
-  it("when jitterHost is empty, the empty-state Call this lead CTA is disabled with the same tooltip", () => {
+  it("is empty and disables the Jitter CTA when the host is absent", () => {
     renderWidget({ initialRows: [], jitterHost: "" });
-
-    const button = screen.getByRole("button", { name: /Call this lead/i });
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute("title", "Jitter host not configured");
-    expect(screen.queryByRole("link", { name: /Call this lead/i })).toBeNull();
+    expect(screen.getByText("No calls yet")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Call this lead/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Call this lead/i })).toHaveAttribute(
+      "title",
+      "Jitter host not configured",
+    );
   });
 
-  it("when jitterHost is non-empty, the empty-state Call this lead CTA is enabled and href contains prospect_id", () => {
-    renderWidget({ initialRows: [], jitterHost: "http://localhost:3001/" });
-
-    expect(screen.getByRole("link", { name: /Call this lead/i })).toHaveAttribute(
+  it("preserves the lead-scoped Jitter history link", () => {
+    renderWidget({ jitterHost: "https://jitter.example.test/" });
+    expect(screen.getByRole("link", { name: /Open in Jitter/i })).toHaveAttribute(
       "href",
-      "http://localhost:3001/history?prospect_id=abc-123",
+      "https://jitter.example.test/history?prospect_id=property-123",
     );
   });
 
-  it("subscribes to Realtime channel and re-renders on INSERT", async () => {
-    renderWidget({ initialRows: [] });
-
-    await waitFor(() => expect(callbacks.INSERT).toBeDefined());
-    await act(async () => {
-      callbacks.INSERT({ new: row({ id: "inserted", outcome: "connected_human" }) });
+  it("refetches nested artifacts on a Realtime status change and renders the result", async () => {
+    const refreshed = row({
+      id: "call-1",
+      recording_status: "available",
+      transcript_status: "available",
+      summary_status: "available",
+      call_recordings: [recording()],
+      call_transcripts: [transcript()],
     });
-
-    expect(screen.getByText("1 call")).toBeInTheDocument();
-    expect(screen.getByTestId("latest-outcome-badge")).toHaveTextContent(
-      "Connected",
-    );
-  });
-
-  it("subscribes to Realtime channel and re-renders on UPDATE", async () => {
-    renderWidget({ initialRows: [row({ id: "call-1", outcome: "no_answer" })] });
+    maybeSingle.mockResolvedValueOnce({ data: refreshed, error: null });
+    renderWidget({
+      initialRows: [
+        row({
+          id: "call-1",
+          recording_status: "pending",
+          transcript_status: "pending",
+          summary_status: "pending",
+        }),
+      ],
+    });
 
     await waitFor(() => expect(callbacks.UPDATE).toBeDefined());
     await act(async () => {
-      callbacks.UPDATE({ new: row({ id: "call-1", outcome: "voicemail" }) });
+      callbacks.UPDATE({ new: refreshed });
     });
 
-    expect(screen.getByText("1 call")).toBeInTheDocument();
-    expect(screen.getByTestId("latest-outcome-badge")).toHaveTextContent(
-      "Voicemail",
-    );
+    await waitFor(() => expect(screen.getByText("Motivated seller; follow up next week.")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Load recording (42s)" })).toBeInTheDocument();
+    expect(eq).toHaveBeenCalledWith("id", "call-1");
+    expect(eq).toHaveBeenCalledWith("property_id", "property-123");
+  });
+
+  it("merges a non-status Realtime update without discarding nested artifacts or refetching", async () => {
+    const available = row({
+      id: "call-1",
+      outcome: "connected_human",
+      recording_status: "available",
+      transcript_status: "available",
+      summary_status: "available",
+      call_recordings: [recording()],
+      call_transcripts: [transcript()],
+    });
+    renderWidget({ initialRows: [available] });
+
+    await waitFor(() => expect(callbacks.UPDATE).toBeDefined());
+    await act(async () => {
+      callbacks.UPDATE({ new: { ...available, outcome: "voicemail" } });
+    });
+
+    expect(screen.getByText("Voicemail")).toBeInTheDocument();
+    expect(screen.getByText("Motivated seller; follow up next week.")).toBeInTheDocument();
+    expect(maybeSingle).not.toHaveBeenCalled();
+  });
+
+  it("ignores an older status refetch that resolves after a newer artifact snapshot", async () => {
+    let resolveOlder!: (value: { data: CallActivityRollupRow; error: null }) => void;
+    let resolveNewer!: (value: { data: CallActivityRollupRow; error: null }) => void;
+    const olderResult = new Promise<{ data: CallActivityRollupRow; error: null }>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const newerResult = new Promise<{ data: CallActivityRollupRow; error: null }>((resolve) => {
+      resolveNewer = resolve;
+    });
+    maybeSingle.mockImplementationOnce(() => olderResult).mockImplementationOnce(() => newerResult);
+    renderWidget({
+      initialRows: [
+        row({
+          id: "call-1",
+          recording_status: "pending",
+          transcript_status: "pending",
+          summary_status: "pending",
+        }),
+      ],
+    });
+    await waitFor(() => expect(callbacks.UPDATE).toBeDefined());
+
+    const older = row({
+      id: "call-1",
+      recording_status: "available",
+      transcript_status: "available",
+      summary_status: "available",
+      call_recordings: [recording()],
+      call_transcripts: [transcript({ summary: "Stale summary" })],
+    });
+    const newer = row({
+      id: "call-1",
+      recording_status: "failed",
+      transcript_status: "failed",
+      summary_status: "failed",
+      call_recordings: [recording({ status: "failed", error_message: "Latest recording failure" })],
+      call_transcripts: [
+        transcript({
+          status: "failed",
+          text: null,
+          summary: null,
+          summary_status: "failed",
+          error_message: "Latest transcript failure",
+          summary_error_message: "Latest summary failure",
+        }),
+      ],
+    });
+
+    act(() => callbacks.UPDATE({ new: older }));
+    act(() => callbacks.UPDATE({ new: newer }));
+    await act(async () => resolveNewer({ data: newer, error: null }));
+    await waitFor(() => expect(screen.getByText("Transcript failed: Latest transcript failure")).toBeInTheDocument());
+
+    await act(async () => resolveOlder({ data: older, error: null }));
+    expect(screen.queryByText("Stale summary")).not.toBeInTheDocument();
+    expect(screen.getByText("AI summary failed: Latest summary failure")).toBeInTheDocument();
+  });
+
+  it("authenticates Realtime and removes its channel on unmount", async () => {
+    const view = renderWidget();
+    await waitFor(() => expect(setAuth).toHaveBeenCalledWith("test-token"));
+    view.unmount();
+    expect(removeChannel).toHaveBeenCalledTimes(1);
   });
 });
