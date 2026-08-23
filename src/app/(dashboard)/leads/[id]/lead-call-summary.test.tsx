@@ -365,7 +365,7 @@ describe("<LeadCallSummary />", () => {
     expect(maybeSingle).toHaveBeenCalledTimes(2);
   });
 
-  it("autonomously reconciles nested artifacts when connectivity returns after all scheduled reads exhaust", async () => {
+  it("autonomously reconciles nested artifacts on the capped slow timer after the first six reads fail", async () => {
     vi.useFakeTimers();
     const refreshed = row({
       id: "call-1",
@@ -420,7 +420,9 @@ describe("<LeadCallSummary />", () => {
       screen.queryByText("Recovered after reconnect"),
     ).not.toBeInTheDocument();
 
-    await act(async () => window.dispatchEvent(new Event("online")));
+    await act(async () => vi.advanceTimersByTimeAsync(29_999));
+    expect(maybeSingle).toHaveBeenCalledTimes(6);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
     expect(screen.getByText("Recovered after reconnect")).toBeInTheDocument();
     expect(maybeSingle).toHaveBeenCalledTimes(7);
     vi.useRealTimers();
@@ -453,9 +455,11 @@ describe("<LeadCallSummary />", () => {
     act(() => callbacks.UPDATE({ new: parentEvent }));
     await act(async () => vi.advanceTimersByTimeAsync(500));
     expect(maybeSingle).toHaveBeenCalledTimes(3);
+    await act(async () => vi.advanceTimersByTimeAsync(22_000));
+    expect(maybeSingle).toHaveBeenCalledTimes(6);
     view.unmount();
-    await act(async () => vi.advanceTimersByTimeAsync(30_000));
-    expect(maybeSingle).toHaveBeenCalledTimes(3);
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(maybeSingle).toHaveBeenCalledTimes(6);
     vi.useRealTimers();
   });
 

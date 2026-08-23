@@ -60,6 +60,7 @@ const CHILD_STATUS_FIELDS = [
 
 const ARTIFACT_REFETCH_RETRY_DELAYS_MS = [150, 350] as const;
 const ARTIFACT_RECOVERY_DELAYS_MS = [2_000, 5_000, 15_000] as const;
+const ARTIFACT_RECOVERY_INTERVAL_MS = 30_000;
 
 function sortRows(rows: CallActivityRollupRow[]): CallActivityRollupRow[] {
   return [...rows].sort((a, b) => {
@@ -353,8 +354,8 @@ export function LeadCallSummary({
       if (!mounted || refetchGenerationRef.current.get(next.id) !== generation)
         return;
       const attempt = recoveryAttempts.get(next.id) ?? 0;
-      const delay = ARTIFACT_RECOVERY_DELAYS_MS[attempt];
-      if (delay === undefined) return;
+      const delay =
+        ARTIFACT_RECOVERY_DELAYS_MS[attempt] ?? ARTIFACT_RECOVERY_INTERVAL_MS;
       recoveryAttempts.set(next.id, attempt + 1);
       const timer = window.setTimeout(async () => {
         recoveryTimers.delete(next.id);
