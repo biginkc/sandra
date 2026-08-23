@@ -34,6 +34,7 @@ describe("lead detail record summary layout", () => {
     )?.[1];
     expect(className).toBeDefined();
     const classTokens = new Set(className?.split(/\s+/).filter(Boolean));
+    expect(classTokens.has("grid")).toBe(true);
     expect(classTokens.has("grid-cols-1")).toBe(true);
     expect(classTokens.has("md:grid-cols-2")).toBe(true);
     expect(classTokens.has("min-[1440px]:grid-cols-4")).toBe(true);
@@ -61,9 +62,9 @@ describe("lead detail record summary layout", () => {
       openingTagEnd: summaryOpeningTagEnd,
     } = locateLeadRecordSummary();
     const workingStateStart = source.indexOf("<LeadIdentityActions");
-    const importedNotesStart = source.indexOf(
-      '<Section title="Imported notes (legacy)">',
-    );
+    const importedNotesStart =
+      source.match(/<Section\s+title=["']Imported notes \(legacy\)["']/)
+        ?.index ?? -1;
 
     expect(summaryTestIdStart).toBeGreaterThan(-1);
     expect(summaryStart).toBeGreaterThan(-1);
