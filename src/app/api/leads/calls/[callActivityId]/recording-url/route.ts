@@ -22,6 +22,20 @@ function recordingStatuses(value: RecordingLookup["call_recordings"]): string[] 
   return (Array.isArray(value) ? value : [value]).map((recording) => recording.status);
 }
 
+function isDeadlineError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === "TimeoutError" || error.name === "AbortError")
+  );
+}
+
+function timeoutResponse(): Response {
+  return json(
+    { error: "Recording service timed out", error_code: "jitter_timeout" },
+    504,
+  );
+}
+
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ callActivityId: string }> },
@@ -112,18 +126,11 @@ export async function GET(
     upstream = await fetch(playbackUrl, {
       cache: "no-store",
       headers: { authorization: `Bearer ${playbackToken}` },
+      redirect: "error",
       signal: AbortSignal.timeout(10_000),
     });
   } catch (error) {
-    if (
-      error instanceof Error &&
-      (error.name === "TimeoutError" || error.name === "AbortError")
-    ) {
-      return json(
-        { error: "Recording service timed out", error_code: "jitter_timeout" },
-        504,
-      );
-    }
+    if (isDeadlineError(error)) return timeoutResponse();
     return json(
       { error: "Recording service is unavailable", error_code: "jitter_unavailable" },
       502,
@@ -133,7 +140,8 @@ export async function GET(
   let body: unknown;
   try {
     body = await upstream.json();
-  } catch {
+  } catch (error) {
+    if (isDeadlineError(error)) return timeoutResponse();
     return json(
       { error: "Recording service returned an invalid response", error_code: "invalid_jitter_response" },
       502,

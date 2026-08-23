@@ -57,6 +57,8 @@ const CHILD_STATUS_FIELDS = [
   "summary_status",
 ] as const;
 
+const ARTIFACT_REFETCH_RETRY_DELAYS_MS = [150, 350] as const;
+
 function sortRows(rows: CallActivityRollupRow[]): CallActivityRollupRow[] {
   return [...rows].sort((a, b) => {
     const aTime = a.started_at ?? "";
@@ -254,16 +256,23 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
       refetchGenerationRef.current.set(next.id, generation);
       const previous = rowsRef.current.find((row) => row.id === next.id);
       if (statusChanged(previous, next)) {
-        const { data } = await supabase
-          .from("call_activities")
-          .select(CALL_ACTIVITY_WITH_ARTIFACTS)
-          .eq("id", next.id)
-          .eq("property_id", propertyId)
-          .maybeSingle();
-        if (refetchGenerationRef.current.get(next.id) !== generation) return;
-        if (data) {
-          upsert(data as unknown as CallActivityRollupRow);
-          return;
+        for (let attempt = 0; attempt <= ARTIFACT_REFETCH_RETRY_DELAYS_MS.length; attempt += 1) {
+          if (!mounted) return;
+          const { data, error } = await supabase
+            .from("call_activities")
+            .select(CALL_ACTIVITY_WITH_ARTIFACTS)
+            .eq("id", next.id)
+            .eq("property_id", propertyId)
+            .maybeSingle();
+          if (!mounted || refetchGenerationRef.current.get(next.id) !== generation) return;
+          if (!error && data) {
+            upsert(data as unknown as CallActivityRollupRow);
+            return;
+          }
+          const retryDelay = ARTIFACT_REFETCH_RETRY_DELAYS_MS[attempt];
+          if (retryDelay === undefined) break;
+          await new Promise((resolve) => window.setTimeout(resolve, retryDelay));
+          if (!mounted || refetchGenerationRef.current.get(next.id) !== generation) return;
         }
       }
       upsert(mergeRealtimeRow(previous, next));

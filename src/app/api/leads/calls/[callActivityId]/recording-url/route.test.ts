@@ -136,6 +136,7 @@ describe("GET /api/leads/calls/[callActivityId]/recording-url", () => {
     expect(init).toMatchObject({
       cache: "no-store",
       headers: { authorization: "Bearer playback-secret" },
+      redirect: "error",
     });
     expect(init.signal).toBeInstanceOf(AbortSignal);
     expect(response.headers.get("cache-control")).toBe("no-store");
@@ -173,6 +174,31 @@ describe("GET /api/leads/calls/[callActivityId]/recording-url", () => {
     fetchMock.mockRejectedValueOnce(
       Object.assign(new Error("request timed out"), { name: "TimeoutError" }),
     );
+    const response = await request();
+
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toMatchObject({ error_code: "jitter_timeout" });
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("does not follow an upstream redirect that could receive the bearer token", async () => {
+    fetchMock.mockImplementationOnce((_url: URL, init: RequestInit) => {
+      expect(init.redirect).toBe("error");
+      throw new TypeError("redirect mode is set to error");
+    });
+    const response = await request();
+
+    expect(response.status).toBe(502);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps a timeout while consuming Jitter JSON to the same stable 504", async () => {
+    fetchMock.mockResolvedValueOnce({
+      status: 200,
+      json: vi.fn().mockRejectedValue(
+        Object.assign(new Error("body timed out"), { name: "TimeoutError" }),
+      ),
+    } as unknown as Response);
     const response = await request();
 
     expect(response.status).toBe(504);

@@ -238,6 +238,36 @@ describe("<LeadCallSummary />", () => {
     expect(eq).toHaveBeenCalledWith("property_id", "property-123");
   });
 
+  it("recovers nested artifacts after a transient Realtime refetch error", async () => {
+    const refreshed = row({
+      id: "call-1",
+      recording_status: "available",
+      transcript_status: "available",
+      summary_status: "available",
+      call_recordings: [recording()],
+      call_transcripts: [transcript({ summary: "Recovered summary" })],
+    });
+    maybeSingle
+      .mockResolvedValueOnce({ data: null, error: { message: "temporary network error" } })
+      .mockResolvedValueOnce({ data: refreshed, error: null });
+    renderWidget({
+      initialRows: [
+        row({
+          id: "call-1",
+          recording_status: "pending",
+          transcript_status: "pending",
+          summary_status: "pending",
+        }),
+      ],
+    });
+
+    await waitFor(() => expect(callbacks.UPDATE).toBeDefined());
+    await act(async () => callbacks.UPDATE({ new: refreshed }));
+
+    await waitFor(() => expect(screen.getByText("Recovered summary")).toBeInTheDocument());
+    expect(maybeSingle).toHaveBeenCalledTimes(2);
+  });
+
   it("merges a non-status Realtime update without discarding nested artifacts or refetching", async () => {
     const available = row({
       id: "call-1",
