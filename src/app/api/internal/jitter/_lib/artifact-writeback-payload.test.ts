@@ -87,9 +87,22 @@ describe("artifact writeback payload validation", () => {
         ),
       ).toEqual({ ok: false, field: "summary" });
     }
+    for (const status of ["pending", "failed"]) {
+      for (const summaryStatus of ["pending", "failed", "available"]) {
+        expect(
+          parseTranscriptWritebackBody(
+            JSON.stringify({
+              status,
+              summary_status: summaryStatus,
+              summary: summaryStatus === "available" ? "Summary" : undefined,
+            }),
+          ),
+        ).toEqual({ ok: false, field: "summary_status" });
+      }
+    }
     expect(
       parseTranscriptWritebackBody(
-        JSON.stringify({ status: "failed", summary_status: "failed" }),
+        JSON.stringify({ status: "failed", summary_status: "none" }),
       ),
     ).toMatchObject({ ok: true });
   });

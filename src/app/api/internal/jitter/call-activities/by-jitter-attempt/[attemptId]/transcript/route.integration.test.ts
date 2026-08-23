@@ -106,6 +106,7 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
   it("rejects invalid metadata before reserving the idempotency key", async () => {
     const seeded = await seedCallActivity(testClient);
     const idempotencyKey = "by-attempt-transcript-invalid-metadata";
+    const incoherentKey = "by-attempt-transcript-incoherent-summary";
     const response = await PUT(
       jsonRequest(
         url(seeded.jitterAttemptId),
@@ -123,10 +124,26 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
 
     expect(response.status).toBe(422);
     await expect(response.json()).resolves.toMatchObject({ field: "summary" });
+    const incoherentResponse = await PUT(
+      jsonRequest(
+        url(seeded.jitterAttemptId),
+        "PUT",
+        { status: "failed", summary_status: "failed" },
+        { "idempotency-key": incoherentKey },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+    expect(incoherentResponse.status).toBe(422);
+    await expect(incoherentResponse.json()).resolves.toMatchObject({
+      field: "summary_status",
+    });
     const { data: events } = await testClient
       .from("webhook_events")
       .select("id")
-      .eq("external_id", effectiveKey(seeded.jitterSessionId, idempotencyKey));
+      .in("external_id", [
+        effectiveKey(seeded.jitterSessionId, idempotencyKey),
+        effectiveKey(seeded.jitterSessionId, incoherentKey),
+      ]);
     expect(events).toHaveLength(0);
   });
 
@@ -396,8 +413,22 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
       ),
       context(seeded.jitterAttemptId),
     );
+    const eraseSummary = await PUT(
+      jsonRequest(
+        routeUrl,
+        "PUT",
+        {
+          status: "available",
+          text: "Durable transcript",
+          summary_status: "none",
+        },
+        { "idempotency-key": "transcript-erase-summary" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
     expect(available.status).toBe(200);
     expect(downgrade.status).toBe(409);
+    expect(eraseSummary.status).toBe(409);
     const { data: row } = await testClient
       .from("call_transcripts")
       .select("status, text, summary_status, summary, error_code")
@@ -563,7 +594,7 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
       jsonRequest(
         url(seeded.jitterAttemptId),
         "PUT",
-        { status: "pending", summary_status: "failed" },
+        { status: "failed", summary_status: "none" },
         headers,
       ),
       context(seeded.jitterAttemptId),

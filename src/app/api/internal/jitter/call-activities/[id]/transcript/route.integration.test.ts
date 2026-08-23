@@ -107,6 +107,7 @@ describe("internal.jitter.call-activities transcript PUT", () => {
   it("rejects invalid metadata before reserving the idempotency key", async () => {
     const seeded = await seedCallActivity(testClient);
     const idempotencyKey = "transcript-invalid-metadata";
+    const incoherentKey = "transcript-incoherent-summary";
     const routeUrl = `https://sandra.test/api/internal/jitter/call-activities/${seeded.callActivityId}/transcript`;
     const response = await PUT(
       jsonRequest(
@@ -120,10 +121,23 @@ describe("internal.jitter.call-activities transcript PUT", () => {
 
     expect(response.status).toBe(422);
     await expect(response.json()).resolves.toMatchObject({ field: "text" });
+    const incoherentResponse = await PUT(
+      jsonRequest(
+        routeUrl,
+        "PUT",
+        { status: "pending", summary_status: "pending" },
+        { "idempotency-key": incoherentKey },
+      ),
+      context(seeded.callActivityId),
+    );
+    expect(incoherentResponse.status).toBe(422);
+    await expect(incoherentResponse.json()).resolves.toMatchObject({
+      field: "summary_status",
+    });
     const { data: events } = await testClient
       .from("webhook_events")
       .select("id")
-      .eq("external_id", idempotencyKey);
+      .in("external_id", [idempotencyKey, incoherentKey]);
     expect(events).toHaveLength(0);
   });
 

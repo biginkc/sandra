@@ -43,6 +43,16 @@ function hardeningMigrationSql(): string {
   );
 }
 
+function summaryInvariantMigrationSql(): string {
+  return fs.readFileSync(
+    path.join(
+      process.cwd(),
+      "supabase/migrations/20260823020000_jitter_transcript_summary_state_invariant.sql",
+    ),
+    "utf8",
+  );
+}
+
 beforeAll(async () => {
   pg = new Client({ connectionString: testDbUrl() });
   await pg.connect();
@@ -239,9 +249,15 @@ describe("Migration 20260822220500 — call transcript summary", () => {
     );
   });
 
-  it("preserves historical migration bytes and records both ledger entries once", async () => {
+  it("preserves applied migration bytes and records all ledger entries once", async () => {
     expect(createHash("sha256").update(migrationSql()).digest("hex")).toBe(
       "77682382a07f831fc86725bea6af0b134f784baad67b43bb4069c89bb170fefd",
+    );
+    expect(
+      createHash("sha256").update(hardeningMigrationSql()).digest("hex"),
+    ).toBe("911775b1bfbbd13431630323fdc6bb979f306de8e0c7efb18564a624442f9a92");
+    expect(summaryInvariantMigrationSql()).toContain(
+      "summary status requires available transcript",
     );
     const { rows } = await pg.query<{
       version: string;
@@ -251,12 +267,13 @@ describe("Migration 20260822220500 — call transcript summary", () => {
       `select version, count(*)::text as count,
               max(coalesce(array_length(statements, 1), 0))::integer as statement_count
        from supabase_migrations.schema_migrations
-       where version in ('20260822220500', '20260823010000')
+       where version in ('20260822220500', '20260823010000', '20260823020000')
        group by version order by version`,
     );
     expect(rows).toEqual([
       { version: "20260822220500", count: "1", statement_count: 7 },
       { version: "20260823010000", count: "1", statement_count: 23 },
+      { version: "20260823020000", count: "1", statement_count: 5 },
     ]);
   });
 
@@ -302,7 +319,7 @@ describe("Migration 20260822220500 — call transcript summary", () => {
       "available transcript requires text",
     );
 
-    const { error: summaryError } = await (serviceClient as any).rpc(
+    const { error: summaryStateError } = await (serviceClient as any).rpc(
       "jitter_upsert_call_transcript",
       {
         p_call_activity_id: seeded.callActivityId,
@@ -312,11 +329,33 @@ describe("Migration 20260822220500 — call transcript summary", () => {
         p_language: null,
         p_error_code: null,
         p_error_message: null,
+        p_summary: null,
+        p_summary_status: "failed",
+        p_summary_error_code: null,
+        p_summary_error_message: null,
+        p_external_id: "unreserved-summary",
+        p_request_hash: "unreserved",
+      },
+    );
+    expect(summaryStateError?.message).toContain(
+      "summary status requires available transcript",
+    );
+
+    const { error: summaryError } = await (serviceClient as any).rpc(
+      "jitter_upsert_call_transcript",
+      {
+        p_call_activity_id: seeded.callActivityId,
+        p_org_id: seeded.orgId,
+        p_status: "available",
+        p_text: "Transcript",
+        p_language: null,
+        p_error_code: null,
+        p_error_message: null,
         p_summary: "",
         p_summary_status: "available",
         p_summary_error_code: null,
         p_summary_error_message: null,
-        p_external_id: "unreserved-summary",
+        p_external_id: "unreserved-summary-content",
         p_request_hash: "unreserved",
       },
     );

@@ -103,6 +103,38 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     });
   });
 
+  it("returns 422 for malformed signed JSON without reserving idempotency", async () => {
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const idempotencyKey = `activity-malformed-${crypto.randomUUID()}`;
+    const raw = '{"org_id":';
+    const response = await PUT(
+      new Request(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        {
+          method: "PUT",
+          headers: {
+            "content-type": "application/json",
+            ...authHeaders(raw, { "idempotency-key": idempotencyKey }),
+          },
+          body: raw,
+        },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual({
+      error: "validation_error",
+      error_code: "invalid_body",
+    });
+    const { data: reservations, error } = await (testClient as any)
+      .from("webhook_events")
+      .select("id")
+      .like("external_id", `%${idempotencyKey}%`);
+    expect(error).toBeNull();
+    expect(reservations).toHaveLength(0);
+  });
+
   it("returns 400 with error_code='idempotency_key_required' when Idempotency-Key is empty", async () => {
     const seeded = await seedDialerBatch(testClient);
     const attemptId = `attempt-${crypto.randomUUID()}`;
@@ -562,6 +594,42 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       );
     expect(reservations).toHaveLength(0);
   });
+
+  it.each([
+    ["disposition", { unexpected: true }],
+    ["provider", ["jitter"]],
+    ["provider_call_id", 123],
+    ["error_code", false],
+    ["error_message", ["failure"]],
+  ])(
+    "rejects a non-text %s before reserving idempotency",
+    async (field, value) => {
+      const seeded = await seedDialerBatch(testClient);
+      const attemptId = `attempt-${crypto.randomUUID()}`;
+      const key = `activity-invalid-text-${field}`;
+      const response = await PUT(
+        jsonRequest(
+          `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+          "PUT",
+          { ...writebackBody(seeded), [field]: value },
+          { "idempotency-key": key },
+        ),
+        attemptContext(attemptId),
+      );
+
+      expect(response.status).toBe(422);
+      await expect(response.json()).resolves.toMatchObject({
+        error_code: "invalid_text",
+        field,
+      });
+      const { data: reservations, error } = await (testClient as any)
+        .from("webhook_events")
+        .select("id")
+        .eq("external_id", `16:session-activity:${key}`);
+      expect(error).toBeNull();
+      expect(reservations).toHaveLength(0);
+    },
+  );
 
   it("updates an existing row for the same provider and jitter_attempt_id", async () => {
     const seeded = await seedDialerBatch(testClient);

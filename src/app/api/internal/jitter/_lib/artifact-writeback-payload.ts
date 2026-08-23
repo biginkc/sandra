@@ -119,6 +119,13 @@ export function parseTranscriptWritebackBody(
   if (body.status === "available" && !isNonBlankString(body.text)) {
     return { ok: false, field: "text" };
   }
+  if (
+    body.summary_status !== undefined &&
+    body.summary_status !== "none" &&
+    body.status !== "available"
+  ) {
+    return { ok: false, field: "summary_status" };
+  }
   if (body.summary_status === "available" && !isNonBlankString(body.summary)) {
     return { ok: false, field: "summary" };
   }

@@ -63,6 +63,13 @@ const UUID_FIELDS = [
   "callback_assignee_id",
 ] as const;
 const TIMESTAMP_FIELDS = ["started_at", "ended_at", "callback_at"] as const;
+const NULLABLE_TEXT_FIELDS = [
+  "disposition",
+  "provider",
+  "provider_call_id",
+  "error_code",
+  "error_message",
+] as const;
 const NOTES_MAX_LENGTH = 10000;
 const RECORDING_PATH_MAX_LENGTH = 2048;
 const JITTER_SESSION_ID_MAX_LENGTH = 512;
@@ -253,6 +260,13 @@ function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
     return unprocessable("invalid_outcome", "outcome");
   }
 
+  for (const field of NULLABLE_TEXT_FIELDS) {
+    const value = body[field];
+    if (value !== undefined && value !== null && typeof value !== "string") {
+      return unprocessable("invalid_text", field);
+    }
+  }
+
   for (const field of TIMESTAMP_FIELDS) {
     const value = body[field];
     if (value === undefined || value === null || value === "") continue;
@@ -323,7 +337,12 @@ export async function PUT(
 
     const { attemptId } = await context.params;
     const idempotencyKey = request.headers.get("idempotency-key")!.trim();
-    const parsedBody: unknown = JSON.parse(auth.rawBody || "{}");
+    let parsedBody: unknown;
+    try {
+      parsedBody = JSON.parse(auth.rawBody || "{}");
+    } catch {
+      return unprocessable("invalid_body");
+    }
     if (
       !parsedBody ||
       typeof parsedBody !== "object" ||
