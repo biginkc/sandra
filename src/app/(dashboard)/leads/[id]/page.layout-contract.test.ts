@@ -11,23 +11,32 @@ describe("lead detail record summary layout", () => {
       'data-testid="lead-record-summary"',
     );
     const summaryStart = source.lastIndexOf("<div", summaryTestIdStart);
+    const summaryOpeningTagEnd = source.indexOf(">", summaryTestIdStart);
+    const summaryOpeningTag = source.slice(summaryStart, summaryOpeningTagEnd);
     const workingStateStart = source.indexOf("<LeadIdentityActions");
     const summarySource = source.slice(summaryStart, workingStateStart);
 
+    expect(summaryTestIdStart).toBeGreaterThan(-1);
     expect(summaryStart).toBeGreaterThan(-1);
+    expect(summaryOpeningTagEnd).toBeGreaterThan(summaryTestIdStart);
     expect(workingStateStart).toBeGreaterThan(summaryStart);
-    expect(summarySource).toMatch(
-      /className=["'][^"']*\bgrid-cols-1\b[^"']*\bmd:grid-cols-2\b[^"']*\bmin-\[1440px\]:grid-cols-4\b[^"']*["']/,
-    );
-    expect(summarySource.match(/<Section title=/g)).toHaveLength(4);
-    const orderedTitles = [
-      '<Section title="Property">',
-      '<Section title="Address quality (USPS)">',
-      '<Section title="Homeowner">',
-      '<Section title="Listing agent">',
+    const className = summaryOpeningTag.match(
+      /className=["']([^"']*)["']/,
+    )?.[1];
+    expect(className).toBeDefined();
+    const classTokens = new Set(className?.split(/\s+/).filter(Boolean));
+    expect(classTokens.has("grid-cols-1")).toBe(true);
+    expect(classTokens.has("md:grid-cols-2")).toBe(true);
+    expect(classTokens.has("min-[1440px]:grid-cols-4")).toBe(true);
+    expect(summarySource.match(/<Section\s+title=/g)).toHaveLength(4);
+    const orderedTitlePatterns = [
+      /<Section\s+title=["']Property["']/,
+      /<Section\s+title=["']Address quality \(USPS\)["']/,
+      /<Section\s+title=["']Homeowner["']/,
+      /<Section\s+title=["']Listing agent["']/,
     ];
-    const titleOffsets = orderedTitles.map((title) =>
-      summarySource.indexOf(title),
+    const titleOffsets = orderedTitlePatterns.map(
+      (pattern) => summarySource.match(pattern)?.index ?? -1,
     );
     expect(titleOffsets.every((offset) => offset >= 0)).toBe(true);
     expect(titleOffsets).toEqual([...titleOffsets].sort((a, b) => a - b));
