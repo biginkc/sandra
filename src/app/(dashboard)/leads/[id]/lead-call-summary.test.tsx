@@ -1,14 +1,22 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { callbacks, channelOn, eq, maybeSingle, removeChannel, setAuth } = vi.hoisted(() => ({
-  callbacks: {} as Record<string, (payload: { new: unknown }) => void>,
-  channelOn: vi.fn(),
-  eq: vi.fn(),
-  maybeSingle: vi.fn(),
-  removeChannel: vi.fn(),
-  setAuth: vi.fn(),
-}));
+const { callbacks, channelOn, eq, maybeSingle, removeChannel, setAuth } =
+  vi.hoisted(() => ({
+    callbacks: {} as Record<string, (payload: { new: unknown }) => void>,
+    channelOn: vi.fn(),
+    eq: vi.fn(),
+    maybeSingle: vi.fn(),
+    removeChannel: vi.fn(),
+    setAuth: vi.fn(),
+  }));
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => {
@@ -32,7 +40,9 @@ vi.mock("@/lib/supabase/client", () => ({
     };
     return {
       auth: {
-        getSession: vi.fn(async () => ({ data: { session: { access_token: "test-token" } } })),
+        getSession: vi.fn(async () => ({
+          data: { session: { access_token: "test-token" } },
+        })),
       },
       channel: vi.fn(() => channel),
       from: vi.fn(() => query),
@@ -42,7 +52,10 @@ vi.mock("@/lib/supabase/client", () => ({
   },
 }));
 
-import { LeadCallSummary, type CallActivityRollupRow } from "./lead-call-summary";
+import {
+  LeadCallSummary,
+  type CallActivityRollupRow,
+} from "./lead-call-summary";
 
 const timestamp = "2026-05-06T15:00:00.000Z";
 
@@ -126,7 +139,11 @@ describe("<LeadCallSummary />", () => {
     vi.setSystemTime(new Date("2026-05-08T15:00:00.000Z"));
     renderWidget({
       initialRows: [
-        row({ id: "older", started_at: "2026-05-01T15:00:00.000Z", outcome: "no_answer" }),
+        row({
+          id: "older",
+          started_at: "2026-05-01T15:00:00.000Z",
+          outcome: "no_answer",
+        }),
         row({
           id: "newer",
           started_at: "2026-05-06T15:00:00.000Z",
@@ -140,11 +157,17 @@ describe("<LeadCallSummary />", () => {
       ],
     });
 
-    const calls = within(screen.getByTestId("call-history")).getAllByRole("article");
+    const calls = within(screen.getByTestId("call-history")).getAllByRole(
+      "article",
+    );
     expect(calls).toHaveLength(2);
-    expect(within(calls[0]).getByText("follow up requested")).toBeInTheDocument();
+    expect(
+      within(calls[0]).getByText("follow up requested"),
+    ).toBeInTheDocument();
     expect(within(calls[0]).getByText("2 days ago")).toBeInTheDocument();
-    expect(within(calls[0]).getByText("Motivated seller; follow up next week.")).toBeInTheDocument();
+    expect(
+      within(calls[0]).getByText("Motivated seller; follow up next week."),
+    ).toBeInTheDocument();
     const transcriptToggle = within(calls[0]).getByText("Transcript");
     const transcriptDisclosure = transcriptToggle.closest("details");
     expect(transcriptDisclosure).not.toHaveAttribute("open");
@@ -152,26 +175,52 @@ describe("<LeadCallSummary />", () => {
     expect(transcriptDisclosure).toHaveAttribute("open");
     fireEvent.click(transcriptToggle);
     expect(transcriptDisclosure).not.toHaveAttribute("open");
-    expect(within(calls[0]).getByText("The homeowner wants an offer next week.")).toBeInTheDocument();
-    expect(within(calls[0]).getByRole("button", { name: "Load recording (42s)" })).toBeInTheDocument();
+    expect(
+      within(calls[0]).getByText("The homeowner wants an offer next week."),
+    ).toBeInTheDocument();
+    expect(
+      within(calls[0]).getByRole("button", { name: "Load recording (42s)" }),
+    ).toBeInTheDocument();
     vi.useRealTimers();
   });
 
   it("keeps connected outcomes distinct from DNC and wrong-number dispositions", () => {
     renderWidget({
       initialRows: [
-        row({ id: "dnc-call", outcome: "connected_human", disposition: "do_not_call" }),
-        row({ id: "wrong-call", outcome: "connected_human", disposition: "wrong_number" }),
+        row({
+          id: "dnc-call",
+          outcome: "connected_human",
+          disposition: "do_not_call",
+        }),
+        row({
+          id: "wrong-call",
+          outcome: "connected_human",
+          disposition: "wrong_number",
+        }),
       ],
     });
 
-    expect(screen.getByTestId("outcome-badge-dnc-call")).toHaveTextContent("Connected");
-    expect(screen.getByTestId("outcome-badge-dnc-call")).toHaveClass("bg-emerald-100");
-    expect(screen.getByTestId("disposition-badge-dnc-call")).toHaveTextContent("Do not call");
-    expect(screen.getByTestId("disposition-badge-dnc-call")).toHaveClass("text-destructive");
-    expect(screen.getByTestId("outcome-badge-wrong-call")).toHaveTextContent("Connected");
-    expect(screen.getByTestId("disposition-badge-wrong-call")).toHaveTextContent("Wrong number");
-    expect(screen.getByTestId("disposition-badge-wrong-call")).toHaveClass("text-destructive");
+    expect(screen.getByTestId("outcome-badge-dnc-call")).toHaveTextContent(
+      "Connected",
+    );
+    expect(screen.getByTestId("outcome-badge-dnc-call")).toHaveClass(
+      "bg-emerald-100",
+    );
+    expect(screen.getByTestId("disposition-badge-dnc-call")).toHaveTextContent(
+      "Do not call",
+    );
+    expect(screen.getByTestId("disposition-badge-dnc-call")).toHaveClass(
+      "text-destructive",
+    );
+    expect(screen.getByTestId("outcome-badge-wrong-call")).toHaveTextContent(
+      "Connected",
+    );
+    expect(
+      screen.getByTestId("disposition-badge-wrong-call"),
+    ).toHaveTextContent("Wrong number");
+    expect(screen.getByTestId("disposition-badge-wrong-call")).toHaveClass(
+      "text-destructive",
+    );
   });
 
   it("renders explicit pending and child-backed failure states", () => {
@@ -188,7 +237,12 @@ describe("<LeadCallSummary />", () => {
           recording_status: "failed",
           transcript_status: "failed",
           summary_status: "failed",
-          call_recordings: [recording({ status: "failed", error_message: "Storage rejected upload" })],
+          call_recordings: [
+            recording({
+              status: "failed",
+              error_message: "Storage rejected upload",
+            }),
+          ],
           call_transcripts: [
             transcript({
               status: "failed",
@@ -206,24 +260,33 @@ describe("<LeadCallSummary />", () => {
     expect(screen.getByText("Recording pending")).toBeInTheDocument();
     expect(screen.getByText("Transcript pending")).toBeInTheDocument();
     expect(screen.getByText("AI summary pending")).toBeInTheDocument();
-    expect(screen.getByText("Recording failed: Storage rejected upload")).toBeInTheDocument();
-    expect(screen.getByText("Transcript failed: Deepgram timed out")).toBeInTheDocument();
-    expect(screen.getByText("AI summary failed: Claude rejected the response")).toBeInTheDocument();
+    expect(
+      screen.getByText("Recording failed: Storage rejected upload"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Transcript failed: Deepgram timed out"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("AI summary failed: Claude rejected the response"),
+    ).toBeInTheDocument();
   });
 
   it("is empty and disables the Jitter CTA when the host is absent", () => {
     renderWidget({ initialRows: [], jitterHost: "" });
     expect(screen.getByText("No calls yet")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Call this lead/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /Call this lead/i })).toHaveAttribute(
-      "title",
-      "Jitter host not configured",
-    );
+    expect(
+      screen.getByRole("button", { name: /Call this lead/i }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /Call this lead/i }),
+    ).toHaveAttribute("title", "Jitter host not configured");
   });
 
   it("preserves the lead-scoped Jitter history link", () => {
     renderWidget({ jitterHost: "https://jitter.example.test/" });
-    expect(screen.getByRole("link", { name: /Open in Jitter/i })).toHaveAttribute(
+    expect(
+      screen.getByRole("link", { name: /Open in Jitter/i }),
+    ).toHaveAttribute(
       "href",
       "https://jitter.example.test/history?prospect_id=property-123",
     );
@@ -255,8 +318,14 @@ describe("<LeadCallSummary />", () => {
       callbacks.UPDATE({ new: refreshed });
     });
 
-    await waitFor(() => expect(screen.getByText("Motivated seller; follow up next week.")).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Load recording (42s)" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByText("Motivated seller; follow up next week."),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("button", { name: "Load recording (42s)" }),
+    ).toBeInTheDocument();
     expect(eq).toHaveBeenCalledWith("id", "call-1");
     expect(eq).toHaveBeenCalledWith("property_id", "property-123");
   });
@@ -271,7 +340,10 @@ describe("<LeadCallSummary />", () => {
       call_transcripts: [transcript({ summary: "Recovered summary" })],
     });
     maybeSingle
-      .mockResolvedValueOnce({ data: null, error: { message: "temporary network error" } })
+      .mockResolvedValueOnce({
+        data: null,
+        error: { message: "temporary network error" },
+      })
       .mockResolvedValueOnce({ data: refreshed, error: null });
     renderWidget({
       initialRows: [
@@ -287,11 +359,14 @@ describe("<LeadCallSummary />", () => {
     await waitFor(() => expect(callbacks.UPDATE).toBeDefined());
     await act(async () => callbacks.UPDATE({ new: refreshed }));
 
-    await waitFor(() => expect(screen.getByText("Recovered summary")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText("Recovered summary")).toBeInTheDocument(),
+    );
     expect(maybeSingle).toHaveBeenCalledTimes(2);
   });
 
-  it("remains recoverable after all retries fail and an identical status event arrives", async () => {
+  it("autonomously reconciles nested artifacts when connectivity returns after all scheduled reads exhaust", async () => {
+    vi.useFakeTimers();
     const refreshed = row({
       id: "call-1",
       recording_status: "available",
@@ -315,6 +390,9 @@ describe("<LeadCallSummary />", () => {
       .mockResolvedValueOnce({ data: null, error: { message: "offline-1" } })
       .mockResolvedValueOnce({ data: null, error: { message: "offline-2" } })
       .mockResolvedValueOnce({ data: null, error: { message: "offline-3" } })
+      .mockResolvedValueOnce({ data: null, error: { message: "offline-4" } })
+      .mockResolvedValueOnce({ data: null, error: { message: "offline-5" } })
+      .mockResolvedValueOnce({ data: null, error: { message: "offline-6" } })
       .mockResolvedValueOnce({ data: refreshed, error: null });
     renderWidget({
       initialRows: [
@@ -326,15 +404,59 @@ describe("<LeadCallSummary />", () => {
         }),
       ],
     });
-    await waitFor(() => expect(callbacks.UPDATE).toBeDefined());
+    await act(async () => Promise.resolve());
+    expect(callbacks.UPDATE).toBeDefined();
 
     act(() => callbacks.UPDATE({ new: parentEvent }));
-    await waitFor(() => expect(maybeSingle).toHaveBeenCalledTimes(3), { timeout: 1_500 });
-    expect(screen.queryByText("Recovered after reconnect")).not.toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(maybeSingle).toHaveBeenCalledTimes(3);
+    expect(
+      screen.queryByText("Recovered after reconnect"),
+    ).not.toBeInTheDocument();
+
+    await act(async () => vi.advanceTimersByTimeAsync(22_000));
+    expect(maybeSingle).toHaveBeenCalledTimes(6);
+    expect(
+      screen.queryByText("Recovered after reconnect"),
+    ).not.toBeInTheDocument();
+
+    await act(async () => window.dispatchEvent(new Event("online")));
+    expect(screen.getByText("Recovered after reconnect")).toBeInTheDocument();
+    expect(maybeSingle).toHaveBeenCalledTimes(7);
+    vi.useRealTimers();
+  });
+
+  it("cancels scheduled artifact reconciliation when the widget unmounts", async () => {
+    vi.useFakeTimers();
+    maybeSingle.mockResolvedValue({
+      data: null,
+      error: { message: "offline" },
+    });
+    const view = renderWidget({
+      initialRows: [
+        row({
+          id: "call-1",
+          recording_status: "pending",
+          transcript_status: "pending",
+          summary_status: "pending",
+        }),
+      ],
+    });
+    await act(async () => Promise.resolve());
+    const parentEvent = row({
+      id: "call-1",
+      recording_status: "available",
+      transcript_status: "available",
+      summary_status: "available",
+    });
 
     act(() => callbacks.UPDATE({ new: parentEvent }));
-    await waitFor(() => expect(screen.getByText("Recovered after reconnect")).toBeInTheDocument());
-    expect(maybeSingle).toHaveBeenCalledTimes(4);
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(maybeSingle).toHaveBeenCalledTimes(3);
+    view.unmount();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(maybeSingle).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
   });
 
   it("merges a non-status Realtime update without discarding nested artifacts or refetching", async () => {
@@ -355,20 +477,36 @@ describe("<LeadCallSummary />", () => {
     });
 
     expect(screen.getByText("Voicemail")).toBeInTheDocument();
-    expect(screen.getByText("Motivated seller; follow up next week.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Motivated seller; follow up next week."),
+    ).toBeInTheDocument();
     expect(maybeSingle).not.toHaveBeenCalled();
   });
 
   it("ignores an older status refetch that resolves after a newer artifact snapshot", async () => {
-    let resolveOlder!: (value: { data: CallActivityRollupRow; error: null }) => void;
-    let resolveNewer!: (value: { data: CallActivityRollupRow; error: null }) => void;
-    const olderResult = new Promise<{ data: CallActivityRollupRow; error: null }>((resolve) => {
+    let resolveOlder!: (value: {
+      data: CallActivityRollupRow;
+      error: null;
+    }) => void;
+    let resolveNewer!: (value: {
+      data: CallActivityRollupRow;
+      error: null;
+    }) => void;
+    const olderResult = new Promise<{
+      data: CallActivityRollupRow;
+      error: null;
+    }>((resolve) => {
       resolveOlder = resolve;
     });
-    const newerResult = new Promise<{ data: CallActivityRollupRow; error: null }>((resolve) => {
+    const newerResult = new Promise<{
+      data: CallActivityRollupRow;
+      error: null;
+    }>((resolve) => {
       resolveNewer = resolve;
     });
-    maybeSingle.mockImplementationOnce(() => olderResult).mockImplementationOnce(() => newerResult);
+    maybeSingle
+      .mockImplementationOnce(() => olderResult)
+      .mockImplementationOnce(() => newerResult);
     renderWidget({
       initialRows: [
         row({
@@ -394,7 +532,12 @@ describe("<LeadCallSummary />", () => {
       recording_status: "failed",
       transcript_status: "failed",
       summary_status: "failed",
-      call_recordings: [recording({ status: "failed", error_message: "Latest recording failure" })],
+      call_recordings: [
+        recording({
+          status: "failed",
+          error_message: "Latest recording failure",
+        }),
+      ],
       call_transcripts: [
         transcript({
           status: "failed",
@@ -410,11 +553,17 @@ describe("<LeadCallSummary />", () => {
     act(() => callbacks.UPDATE({ new: older }));
     act(() => callbacks.UPDATE({ new: newer }));
     await act(async () => resolveNewer({ data: newer, error: null }));
-    await waitFor(() => expect(screen.getByText("Transcript failed: Latest transcript failure")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        screen.getByText("Transcript failed: Latest transcript failure"),
+      ).toBeInTheDocument(),
+    );
 
     await act(async () => resolveOlder({ data: older, error: null }));
     expect(screen.queryByText("Stale summary")).not.toBeInTheDocument();
-    expect(screen.getByText("AI summary failed: Latest summary failure")).toBeInTheDocument();
+    expect(
+      screen.getByText("AI summary failed: Latest summary failure"),
+    ).toBeInTheDocument();
   });
 
   it("authenticates Realtime and removes its channel on unmount", async () => {

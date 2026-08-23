@@ -13,7 +13,8 @@ import { cn } from "@/lib/utils";
 import { SandraRecordingPlayer } from "./sandra-recording-player";
 
 type CallRecordingRow = Database["public"]["Tables"]["call_recordings"]["Row"];
-type CallTranscriptRow = Database["public"]["Tables"]["call_transcripts"]["Row"];
+type CallTranscriptRow =
+  Database["public"]["Tables"]["call_transcripts"]["Row"];
 
 export type CallActivityRollupRow = {
   id: string;
@@ -58,6 +59,7 @@ const CHILD_STATUS_FIELDS = [
 ] as const;
 
 const ARTIFACT_REFETCH_RETRY_DELAYS_MS = [150, 350] as const;
+const ARTIFACT_RECOVERY_DELAYS_MS = [2_000, 5_000, 15_000] as const;
 
 function sortRows(rows: CallActivityRollupRow[]): CallActivityRollupRow[] {
   return [...rows].sort((a, b) => {
@@ -100,10 +102,14 @@ function dispositionClass(disposition: string): string {
   return "bg-muted text-muted-foreground";
 }
 
-function newest<T extends { updated_at: string; created_at: string }>(rows: T[]): T | null {
+function newest<T extends { updated_at: string; created_at: string }>(
+  rows: T[],
+): T | null {
   return (
     [...rows].sort((a, b) =>
-      (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at),
+      (b.updated_at || b.created_at).localeCompare(
+        a.updated_at || a.created_at,
+      ),
     )[0] ?? null
   );
 }
@@ -128,16 +134,39 @@ function statusChanged(
 
 function artifactsIncomplete(row: CallActivityRollupRow | undefined): boolean {
   if (!row) return true;
-  const terminalRecording = row.recording_status === "available" || row.recording_status === "failed";
-  const terminalTranscript = row.transcript_status === "available" || row.transcript_status === "failed";
-  const terminalSummary = row.summary_status === "available" || row.summary_status === "failed";
+  const terminalRecording =
+    row.recording_status === "available" || row.recording_status === "failed";
+  const terminalTranscript =
+    row.transcript_status === "available" || row.transcript_status === "failed";
+  const terminalSummary =
+    row.summary_status === "available" || row.summary_status === "failed";
   const recordingMissing =
-    terminalRecording && !row.call_recordings.some((child) => child.status === row.recording_status);
+    terminalRecording &&
+    !row.call_recordings.some((child) => child.status === row.recording_status);
   const transcriptMissing =
-    terminalTranscript && !row.call_transcripts.some((child) => child.status === row.transcript_status);
+    terminalTranscript &&
+    !row.call_transcripts.some(
+      (child) => child.status === row.transcript_status,
+    );
   const summaryMissing =
-    terminalSummary && !row.call_transcripts.some((child) => child.summary_status === row.summary_status);
+    terminalSummary &&
+    !row.call_transcripts.some(
+      (child) => child.summary_status === row.summary_status,
+    );
   return recordingMissing || transcriptMissing || summaryMissing;
+}
+
+function artifactSnapshotReady(
+  expected: RealtimeCallActivityRow,
+  snapshot: CallActivityRollupRow,
+): boolean {
+  if (artifactsIncomplete(snapshot)) return false;
+  return CHILD_STATUS_FIELDS.every((field) => {
+    const expectedStatus = expected[field];
+    return expectedStatus === "none" || expectedStatus === "pending"
+      ? true
+      : snapshot[field] === expectedStatus;
+  });
 }
 
 function CallArtifactStates({ row }: { row: CallActivityRollupRow }) {
@@ -177,7 +206,8 @@ function RecordingState({
   if (row.recording_status === "failed") {
     return (
       <p className="text-destructive text-xs" role="status">
-        Recording failed{recording?.error_message ? `: ${recording.error_message}` : ""}
+        Recording failed
+        {recording?.error_message ? `: ${recording.error_message}` : ""}
       </p>
     );
   }
@@ -206,7 +236,9 @@ function SummaryState({
     return (
       <p className="text-destructive text-xs" role="status">
         AI summary failed
-        {transcript?.summary_error_message ? `: ${transcript.summary_error_message}` : ""}
+        {transcript?.summary_error_message
+          ? `: ${transcript.summary_error_message}`
+          : ""}
       </p>
     );
   }
@@ -224,7 +256,9 @@ function TranscriptState({
     return (
       <details className="text-sm">
         <summary className="cursor-pointer font-medium">Transcript</summary>
-        <p className="text-muted-foreground mt-2 whitespace-pre-wrap">{transcript.text}</p>
+        <p className="text-muted-foreground mt-2 whitespace-pre-wrap">
+          {transcript.text}
+        </p>
       </details>
     );
   }
@@ -234,7 +268,8 @@ function TranscriptState({
   if (row.transcript_status === "failed") {
     return (
       <p className="text-destructive text-xs" role="status">
-        Transcript failed{transcript?.error_message ? `: ${transcript.error_message}` : ""}
+        Transcript failed
+        {transcript?.error_message ? `: ${transcript.error_message}` : ""}
       </p>
     );
   }
@@ -247,12 +282,19 @@ function TranscriptState({
   );
 }
 
-export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCallSummaryProps) {
-  const [rows, setRows] = useState<CallActivityRollupRow[]>(() => sortRows(initialRows));
+export function LeadCallSummary({
+  propertyId,
+  initialRows,
+  jitterHost,
+}: LeadCallSummaryProps) {
+  const [rows, setRows] = useState<CallActivityRollupRow[]>(() =>
+    sortRows(initialRows),
+  );
   const rowsRef = useRef(rows);
   const refetchGenerationRef = useRef(new Map<string, number>());
 
-  const hasJitterHost = typeof jitterHost === "string" && jitterHost.trim().length > 0;
+  const hasJitterHost =
+    typeof jitterHost === "string" && jitterHost.trim().length > 0;
   const deepLink = hasJitterHost
     ? `${jitterHost!.replace(/\/$/, "")}/history?prospect_id=${propertyId}`
     : null;
@@ -262,6 +304,8 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
     const supabase = createClient();
     let mounted = true;
     let channel: ReturnType<typeof supabase.channel> | null = null;
+    const recoveryTimers = new Map<string, number>();
+    const recoveryAttempts = new Map<string, number>();
 
     const upsert = (next: CallActivityRollupRow) => {
       if (!mounted) return;
@@ -275,31 +319,99 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
       });
     };
 
+    const clearRecovery = (callActivityId: string) => {
+      const timer = recoveryTimers.get(callActivityId);
+      if (timer !== undefined) window.clearTimeout(timer);
+      recoveryTimers.delete(callActivityId);
+      recoveryAttempts.delete(callActivityId);
+    };
+
+    const fetchArtifacts = async (
+      next: RealtimeCallActivityRow,
+      generation: number,
+    ): Promise<boolean> => {
+      const { data, error } = await supabase
+        .from("call_activities")
+        .select(CALL_ACTIVITY_WITH_ARTIFACTS)
+        .eq("id", next.id)
+        .eq("property_id", propertyId)
+        .maybeSingle();
+      if (!mounted || refetchGenerationRef.current.get(next.id) !== generation)
+        return true;
+      if (error || !data) return false;
+      const snapshot = data as unknown as CallActivityRollupRow;
+      if (!artifactSnapshotReady(next, snapshot)) return false;
+      clearRecovery(next.id);
+      upsert(snapshot);
+      return true;
+    };
+
+    const scheduleRecovery = (
+      next: RealtimeCallActivityRow,
+      generation: number,
+    ) => {
+      if (!mounted || refetchGenerationRef.current.get(next.id) !== generation)
+        return;
+      const attempt = recoveryAttempts.get(next.id) ?? 0;
+      const delay = ARTIFACT_RECOVERY_DELAYS_MS[attempt];
+      if (delay === undefined) return;
+      recoveryAttempts.set(next.id, attempt + 1);
+      const timer = window.setTimeout(async () => {
+        recoveryTimers.delete(next.id);
+        if (
+          !mounted ||
+          refetchGenerationRef.current.get(next.id) !== generation
+        )
+          return;
+        if (!(await fetchArtifacts(next, generation)))
+          scheduleRecovery(next, generation);
+      }, delay);
+      recoveryTimers.set(next.id, timer);
+    };
+
     const handleChange = async (next: RealtimeCallActivityRow) => {
+      clearRecovery(next.id);
       const generation = (refetchGenerationRef.current.get(next.id) ?? 0) + 1;
       refetchGenerationRef.current.set(next.id, generation);
       const previous = rowsRef.current.find((row) => row.id === next.id);
       if (statusChanged(previous, next) || artifactsIncomplete(previous)) {
-        for (let attempt = 0; attempt <= ARTIFACT_REFETCH_RETRY_DELAYS_MS.length; attempt += 1) {
+        for (
+          let attempt = 0;
+          attempt <= ARTIFACT_REFETCH_RETRY_DELAYS_MS.length;
+          attempt += 1
+        ) {
           if (!mounted) return;
-          const { data, error } = await supabase
-            .from("call_activities")
-            .select(CALL_ACTIVITY_WITH_ARTIFACTS)
-            .eq("id", next.id)
-            .eq("property_id", propertyId)
-            .maybeSingle();
-          if (!mounted || refetchGenerationRef.current.get(next.id) !== generation) return;
-          if (!error && data) {
-            upsert(data as unknown as CallActivityRollupRow);
+          if (await fetchArtifacts(next, generation)) return;
+          if (
+            !mounted ||
+            refetchGenerationRef.current.get(next.id) !== generation
+          )
             return;
-          }
           const retryDelay = ARTIFACT_REFETCH_RETRY_DELAYS_MS[attempt];
           if (retryDelay === undefined) break;
-          await new Promise((resolve) => window.setTimeout(resolve, retryDelay));
-          if (!mounted || refetchGenerationRef.current.get(next.id) !== generation) return;
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, retryDelay),
+          );
+          if (
+            !mounted ||
+            refetchGenerationRef.current.get(next.id) !== generation
+          )
+            return;
         }
+        scheduleRecovery(next, generation);
       }
       upsert(mergeRealtimeRow(previous, next));
+    };
+
+    const reconcileIncompleteRows = () => {
+      if (!mounted) return;
+      for (const row of rowsRef.current) {
+        if (artifactsIncomplete(row)) void handleChange(row);
+      }
+    };
+
+    const reconcileWhenVisible = () => {
+      if (document.visibilityState === "visible") reconcileIncompleteRows();
     };
 
     const start = async () => {
@@ -318,7 +430,8 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
             table: "call_activities",
             filter: `property_id=eq.${propertyId}`,
           },
-          (payload) => void handleChange(payload.new as RealtimeCallActivityRow),
+          (payload) =>
+            void handleChange(payload.new as RealtimeCallActivityRow),
         )
         .on(
           "postgres_changes",
@@ -328,14 +441,21 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
             table: "call_activities",
             filter: `property_id=eq.${propertyId}`,
           },
-          (payload) => void handleChange(payload.new as RealtimeCallActivityRow),
+          (payload) =>
+            void handleChange(payload.new as RealtimeCallActivityRow),
         )
         .subscribe();
     };
 
     void start();
+    window.addEventListener("online", reconcileIncompleteRows);
+    document.addEventListener("visibilitychange", reconcileWhenVisible);
     return () => {
       mounted = false;
+      for (const timer of recoveryTimers.values()) window.clearTimeout(timer);
+      recoveryTimers.clear();
+      window.removeEventListener("online", reconcileIncompleteRows);
+      document.removeEventListener("visibilitychange", reconcileWhenVisible);
       if (channel) void supabase.removeChannel(channel);
     };
   }, [propertyId]);
@@ -345,7 +465,10 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
   const linkButton = (label: "Open in Jitter" | "Call this lead") =>
     deepLink ? (
       <a href={deepLink} aria-label={`${label} in Jitter`}>
-        <Button size="sm" variant={label === "Open in Jitter" ? "outline" : "default"}>
+        <Button
+          size="sm"
+          variant={label === "Open in Jitter" ? "outline" : "default"}
+        >
           {label}
           <ExternalLink className="ml-1 size-3.5" aria-hidden />
         </Button>
@@ -366,7 +489,10 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
 
   if (sortedRows.length === 0) {
     return (
-      <section aria-label="Calls" className="border-border rounded-md border bg-background p-3">
+      <section
+        aria-label="Calls"
+        className="border-border rounded-md border bg-background p-3"
+      >
         <div className="text-muted-foreground mb-3 text-xs font-semibold tracking-wide uppercase">
           Calls
         </div>
@@ -375,7 +501,9 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
             <Phone className="text-muted-foreground size-5" aria-hidden />
           </div>
           <p className="text-sm font-medium">No calls yet</p>
-          <p className="text-muted-foreground mt-1 text-xs">This lead hasn&apos;t been called yet.</p>
+          <p className="text-muted-foreground mt-1 text-xs">
+            This lead hasn&apos;t been called yet.
+          </p>
           <div className="mt-4">{linkButton("Call this lead")}</div>
         </div>
       </section>
@@ -383,10 +511,15 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
   }
 
   return (
-    <section aria-label="Calls" className="border-border rounded-md border bg-background p-3">
+    <section
+      aria-label="Calls"
+      className="border-border rounded-md border bg-background p-3"
+    >
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">Calls</div>
+          <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
+            Calls
+          </div>
           <div className="mt-1 text-2xl font-semibold">
             {sortedRows.length} {sortedRows.length === 1 ? "call" : "calls"}
           </div>
@@ -398,28 +531,44 @@ export function LeadCallSummary({ propertyId, initialRows, jitterHost }: LeadCal
         {sortedRows.map((row) => {
           const disposition = row.disposition?.trim() || null;
           return (
-            <article className="border-border/70 rounded-md border p-3" key={row.id}>
+            <article
+              className="border-border/70 rounded-md border p-3"
+              key={row.id}
+            >
               <div className="flex flex-wrap items-center gap-2">
                 <Badge
-                  className={cn("border-transparent", outcomeClass(row.outcome))}
+                  className={cn(
+                    "border-transparent",
+                    outcomeClass(row.outcome),
+                  )}
                   data-testid={`outcome-badge-${row.id}`}
                 >
                   {outcomeLabel(row.outcome)}
                 </Badge>
                 {disposition && disposition !== row.outcome ? (
                   <Badge
-                    className={cn("border-transparent", dispositionClass(disposition))}
+                    className={cn(
+                      "border-transparent",
+                      dispositionClass(disposition),
+                    )}
                     data-testid={`disposition-badge-${row.id}`}
                   >
                     {outcomeLabel(disposition)}
                   </Badge>
                 ) : null}
                 {row.started_at ? (
-                  <time className="text-muted-foreground text-xs" dateTime={row.started_at}>
-                    {formatDistanceToNow(new Date(row.started_at), { addSuffix: true })}
+                  <time
+                    className="text-muted-foreground text-xs"
+                    dateTime={row.started_at}
+                  >
+                    {formatDistanceToNow(new Date(row.started_at), {
+                      addSuffix: true,
+                    })}
                   </time>
                 ) : (
-                  <span className="text-muted-foreground text-xs">Time unavailable</span>
+                  <span className="text-muted-foreground text-xs">
+                    Time unavailable
+                  </span>
                 )}
               </div>
               <CallArtifactStates row={row} />
