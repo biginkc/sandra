@@ -507,7 +507,7 @@ export default async function LeadDetailPage({
       />
 
       <div
-        className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4"
+        className="grid grid-cols-1 gap-4 md:grid-cols-2 min-[1440px]:grid-cols-4"
         data-testid="lead-record-summary"
       >
         <Section title="Property">
@@ -584,7 +584,7 @@ export default async function LeadDetailPage({
                         .join(" ")
                 }
               />
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center justify-between gap-3">
                 <Row label="Phone 1" value={lead.homeowner.phone_1} mono />
                 <SoftphoneLeadButton lead={detailSoftphoneLead} />
               </div>
@@ -1132,11 +1132,11 @@ function Section({
   id?: string;
 }) {
   return (
-    <div className="flex flex-col gap-2" id={id}>
+    <div className="flex min-w-0 flex-col gap-2" id={id}>
       <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
         {title}
       </div>
-      <div className="border-border flex flex-col rounded-md border">
+      <div className="border-border flex min-w-0 flex-col rounded-md border">
         {children}
       </div>
     </div>
@@ -1167,9 +1167,13 @@ function Row({
       className="border-border/60 flex flex-col gap-1 border-b px-3 py-2 text-sm last:border-b-0 sm:flex-row sm:justify-between sm:gap-3"
       data-testid={testId}
     >
-      <span className="text-muted-foreground">{label}</span>
+      <span className="text-muted-foreground min-w-0">{label}</span>
       <span
-        className={mono ? "break-all font-mono sm:text-right" : "sm:text-right"}
+        className={
+          mono
+            ? "min-w-0 break-all font-mono sm:text-right"
+            : "min-w-0 break-words sm:text-right"
+        }
         title={display}
       >
         {display}

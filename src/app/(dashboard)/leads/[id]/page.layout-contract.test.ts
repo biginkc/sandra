@@ -8,7 +8,7 @@ const source = fs.readFileSync(path.join(__dirname, "page.tsx"), "utf8");
 describe("lead detail record summary layout", () => {
   it("places the four compact record panels before Working state", () => {
     const summaryClass =
-      'className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4"';
+      'className="grid grid-cols-1 gap-4 md:grid-cols-2 min-[1440px]:grid-cols-4"';
     const summaryStart = source.indexOf(summaryClass);
     const workingStateStart = source.indexOf("<LeadIdentityActions");
     const summarySource = source.slice(summaryStart, workingStateStart);
@@ -18,15 +18,25 @@ describe("lead detail record summary layout", () => {
     expect(summarySource).toContain(summaryClass);
     expect(summarySource).toContain('data-testid="lead-record-summary"');
     expect(summarySource.match(/<Section title=/g)).toHaveLength(4);
-    expect(summarySource).toContain('<Section title="Property">');
-    expect(summarySource).toContain('<Section title="Address quality (USPS)">');
-    expect(summarySource).toContain('<Section title="Homeowner">');
-    expect(summarySource).toContain('<Section title="Listing agent">');
+    const orderedTitles = [
+      '<Section title="Property">',
+      '<Section title="Address quality (USPS)">',
+      '<Section title="Homeowner">',
+      '<Section title="Listing agent">',
+    ];
+    const titleOffsets = orderedTitles.map((title) =>
+      summarySource.indexOf(title),
+    );
+    expect(titleOffsets.every((offset) => offset >= 0)).toBe(true);
+    expect(titleOffsets).toEqual([...titleOffsets].sort((a, b) => a - b));
+    expect(summarySource).toContain(
+      "<SoftphoneLeadButton lead={detailSoftphoneLead} />",
+    );
   });
 
   it("keeps imported notes out of the four-column summary", () => {
     const summaryStart = source.indexOf(
-      'className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4"',
+      'className="grid grid-cols-1 gap-4 md:grid-cols-2 min-[1440px]:grid-cols-4"',
     );
     const workingStateStart = source.indexOf("<LeadIdentityActions");
     const importedNotesStart = source.indexOf(
