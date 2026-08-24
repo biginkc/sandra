@@ -146,6 +146,11 @@ export function LeadMediaHero({
         data-testid="lead-media-scrim"
       />
       <div
+        className="pointer-events-none absolute bottom-0 left-36 right-36 hidden h-12 bg-slate-950/90 xl:block min-[1440px]:left-40 min-[1440px]:right-40 min-[1440px]:h-14 min-[1536px]:left-44 min-[1536px]:right-44 min-[1536px]:h-[60px] min-[1792px]:left-56 min-[1792px]:right-56 min-[1792px]:h-16"
+        aria-hidden
+        data-testid="lead-media-bottom-scrim"
+      />
+      <div
         className="pointer-events-none relative z-10 flex min-h-[210px] flex-col justify-end gap-4 px-4 pt-20 pb-9 text-white sm:min-h-[230px] sm:px-6 lg:min-h-[250px] lg:flex-row lg:items-end lg:justify-between min-[1024px]:pb-12 min-[1440px]:pb-14 min-[1536px]:pb-[60px] min-[1792px]:pb-16"
         data-testid="lead-media-overlay"
       >
@@ -173,7 +178,7 @@ export function LeadMediaHero({
           </p>
         </div>
         <div
-          className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9 [&_button]:border-white/80 [&_button]:bg-white/95 [&_button]:text-slate-950 [&_button]:shadow-sm [&_button]:hover:bg-white"
+          className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 xl:absolute xl:bottom-0 xl:items-end min-[1280px]:right-36 min-[1280px]:h-12 min-[1440px]:right-40 min-[1440px]:h-14 min-[1536px]:right-44 min-[1536px]:h-[60px] min-[1792px]:right-56 min-[1792px]:h-16 [&_button]:min-h-9 [&_button]:border-white/80 [&_button]:bg-white/95 [&_button]:text-slate-950 [&_button]:shadow-sm [&_button]:hover:bg-white"
           data-testid="lead-media-actions"
         >
           {actions}

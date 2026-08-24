@@ -108,11 +108,27 @@ describe("<LeadMediaHero />", () => {
       "min-[1792px]:bg-[linear-gradient(to_top,transparent_0px,transparent_64px,rgba(2,6,23,0.9)_65px,rgba(2,6,23,0.65)_58%,transparent_100%)]",
     );
     expect(screen.getByTestId("lead-media-scrim")).not.toHaveClass("bottom-9");
+    expect(screen.getByTestId("lead-media-bottom-scrim")).toHaveClass(
+      "bottom-0",
+      "left-36",
+      "right-36",
+      "xl:block",
+      "min-[1792px]:left-56",
+      "min-[1792px]:right-56",
+    );
     expect(screen.getByTestId("lead-media-actions").className).toContain(
       "[&_button]:text-slate-950",
     );
     expect(screen.getByTestId("lead-media-actions").className).toContain(
       "[&_button]:bg-white/95",
+    );
+    expect(screen.getByTestId("lead-media-actions")).toHaveClass(
+      "xl:absolute",
+      "xl:bottom-0",
+      "xl:items-end",
+      "min-[1280px]:right-36",
+      "min-[1280px]:h-12",
+      "min-[1792px]:right-56",
     );
     expect(
       screen.getByRole("button", { name: "Book appointment" }).parentElement,
