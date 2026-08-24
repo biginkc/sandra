@@ -166,6 +166,7 @@ export function TagsSection({ propertyId, initial }: Props) {
           <div
             key={cat}
             className="border-border/60 flex flex-wrap items-center gap-1.5 border-b px-3 py-2 last:border-b-0"
+            data-slot="lead-tags-row"
           >
             <span className="text-muted-foreground mr-2 w-20 shrink-0 text-xs font-semibold tracking-wide uppercase">
               {CATEGORY_LABELS[cat]}

@@ -219,6 +219,7 @@ describe("<LeadMediaHero />", () => {
     }).parentElement;
     expect(actions).toHaveClass("flex-wrap", "min-w-0");
     expect(actions?.className).toContain("[&_button]:min-h-9");
+    expect(screen.getByText(/Street View unavailable/)).toBeVisible();
   });
 
   it("resets a prior image failure when the resolved lead media changes", () => {

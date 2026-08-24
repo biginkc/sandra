@@ -86,7 +86,13 @@ export function useLeadNotes({
   return { notes, authorEmails };
 }
 
-export function AddNoteComposer({ propertyId }: { propertyId: string }) {
+export function AddNoteComposer({
+  propertyId,
+  compact = false,
+}: {
+  propertyId: string;
+  compact?: boolean;
+}) {
   const [body, setBody] = useState("");
   const [pending, startTransition] = useTransition();
 
@@ -113,10 +119,20 @@ export function AddNoteComposer({ propertyId }: { propertyId: string }) {
 
   return (
     <details
-      className="border-border rounded-lg border bg-background p-3"
+      className={
+        compact
+          ? "open:bg-amber-50 open:border-amber-200 min-w-0 open:col-span-2 open:col-start-1 open:w-full open:rounded-xl open:border open:p-2.5"
+          : "border-border rounded-lg border bg-background p-3"
+      }
       data-testid="lead-add-note-composer"
     >
-      <summary className="cursor-pointer text-sm font-semibold">
+      <summary
+        className={
+          compact
+            ? "text-muted-foreground cursor-pointer whitespace-nowrap text-[11px] font-bold underline underline-offset-2"
+            : "cursor-pointer text-sm font-semibold"
+        }
+      >
         + Add note
       </summary>
       <div className="mt-3 flex flex-col items-stretch gap-2 sm:flex-row sm:items-end">
@@ -149,32 +165,58 @@ export function NoteEventCard({
   note,
   authorEmail,
   isMine,
+  presentation = "card",
 }: {
   note: Note;
   authorEmail: string | null;
   isMine: boolean;
+  presentation?: "card" | "timeline";
 }) {
+  const author = isMine
+    ? "you"
+    : authorEmail
+      ? shortenEmail(authorEmail)
+      : note.author_user_id
+        ? "unknown teammate"
+        : "system";
   return (
     <article
-      className="border-border/60 rounded-lg border bg-background p-3 text-sm"
+      className={
+        presentation === "timeline"
+          ? "max-w-[560px] text-sm"
+          : "border-border/60 rounded-lg border bg-background p-3 text-sm"
+      }
       data-testid="lead-activity-note"
     >
-      <div className="whitespace-pre-wrap break-words">{note.body}</div>
-      <div className="text-muted-foreground mt-1.5 flex flex-wrap items-center gap-1.5 text-xs">
-        <span>
-          {isMine
-            ? "you"
-            : authorEmail
-              ? shortenEmail(authorEmail)
-              : note.author_user_id
-                ? "unknown teammate"
-                : "system"}
-        </span>
-        <span>·</span>
-        <span>
-          {formatDistanceToNow(new Date(note.created_at), { addSuffix: true })}
-        </span>
+      {presentation === "timeline" ? (
+        <div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
+          <span className="font-bold">Note · {author}</span>
+          <time
+            className="text-muted-foreground text-[11px]"
+            dateTime={note.created_at}
+          >
+            {formatDistanceToNow(new Date(note.created_at), { addSuffix: true })}
+          </time>
+        </div>
+      ) : null}
+      <div
+        className={
+          presentation === "timeline"
+            ? "border-amber-300 bg-amber-50 whitespace-pre-wrap break-words rounded-xl border px-3.5 py-2.5 text-amber-950"
+            : "whitespace-pre-wrap break-words"
+        }
+      >
+        {note.body}
       </div>
+      {presentation === "card" ? (
+        <div className="text-muted-foreground mt-1.5 flex flex-wrap items-center gap-1.5 text-xs">
+          <span>{author}</span>
+          <span>·</span>
+          <span>
+          {formatDistanceToNow(new Date(note.created_at), { addSuffix: true })}
+          </span>
+        </div>
+      ) : null}
     </article>
   );
 }

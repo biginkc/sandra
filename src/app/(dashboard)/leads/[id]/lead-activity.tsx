@@ -1,6 +1,12 @@
 "use client";
 
-import { AlertTriangleIcon, RotateCcwIcon } from "lucide-react";
+import {
+  AlertTriangleIcon,
+  MessageSquareIcon,
+  NotebookPenIcon,
+  PhoneCallIcon,
+  RotateCcwIcon,
+} from "lucide-react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -183,24 +189,26 @@ export function LeadActivityTimeline(props: Props) {
 
   return (
     <div className="min-w-0" data-testid="lead-activity-timeline">
-      <div className="mb-4 space-y-2">
-        {activity.failures.map(({ source, detail }) => (
-          <ActivitySourceFailure
-            key={source}
-            source={source}
-            detail={detail}
-            pending={retrying === source}
-            onRetry={retry}
-          />
-        ))}
-      </div>
+      {activity.failures.length > 0 ? (
+        <div className="mb-3 space-y-2">
+          {activity.failures.map(({ source, detail }) => (
+            <ActivitySourceFailure
+              key={source}
+              source={source}
+              detail={detail}
+              pending={retrying === source}
+              onRetry={retry}
+            />
+          ))}
+        </div>
+      ) : null}
 
       {events.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed px-4 py-10 text-center text-sm">
           No messages, notes, or calls yet.
         </div>
       ) : (
-        <div className="relative space-y-3 before:absolute before:top-2 before:bottom-2 before:left-3 before:w-px before:bg-border/70">
+        <div className="relative before:absolute before:top-3 before:bottom-3 before:left-[15px] before:w-px before:bg-border/70">
           {events.map((event, index) => {
             const boundary =
               index === activity.trustBoundaryIndex && activity.trustFloor ? (
@@ -222,13 +230,14 @@ export function LeadActivityTimeline(props: Props) {
               return (
                 <Fragment key={`message:${event.id}`}>
                   {boundary}
-                  <div className={`relative pl-8${muted}`}>
-                    <TimelineDot label="SMS" />
+                  <div className={`relative pb-4 pl-12${muted}`}>
+                    <TimelineDot source="message" />
                     <MessageBubble
                       message={event.row}
                       isContinuation={isContinuation}
                       isLastInGroup={isLastInGroup}
                       isMostRecentOutbound={event.id === mostRecentOutboundId}
+                      presentation="timeline"
                     />
                   </div>
                 </Fragment>
@@ -238,8 +247,8 @@ export function LeadActivityTimeline(props: Props) {
               return (
                 <Fragment key={`note:${event.id}`}>
                   {boundary}
-                  <div className={`relative pl-8${muted}`}>
-                    <TimelineDot label="Note" />
+                  <div className={`relative pb-4 pl-12${muted}`}>
+                    <TimelineDot source="note" />
                     <NoteEventCard
                       note={event.row}
                       authorEmail={
@@ -248,6 +257,7 @@ export function LeadActivityTimeline(props: Props) {
                           : null
                       }
                       isMine={event.row.author_user_id === currentUserId}
+                      presentation="timeline"
                     />
                   </div>
                 </Fragment>
@@ -256,8 +266,8 @@ export function LeadActivityTimeline(props: Props) {
             return (
               <Fragment key={`call:${event.id}`}>
                 {boundary}
-                <div className={`relative pl-8${muted}`}>
-                  <TimelineDot label="Call" />
+                <div className={`relative pb-4 pl-12${muted}`}>
+                  <TimelineDot source="call" />
                   <CallEventCard row={event.row} jitterHref={jitterHref} />
                 </div>
               </Fragment>
@@ -359,13 +369,21 @@ export function buildLeadActivitySnapshot(
   };
 }
 
-function TimelineDot({ label }: { label: string }) {
+function TimelineDot({ source }: { source: SourceName }) {
+  const icon =
+    source === "message" ? (
+      <MessageSquareIcon className="size-3.5" />
+    ) : source === "note" ? (
+      <NotebookPenIcon className="size-3.5" />
+    ) : (
+      <PhoneCallIcon className="size-3.5" />
+    );
   return (
     <span
-      className="absolute top-2 left-0 z-10 flex size-6 items-center justify-center rounded-full border border-border bg-background text-[8px] font-black tracking-tight uppercase"
+      className="border-border bg-background absolute top-0 left-0 z-10 flex size-[30px] items-center justify-center rounded-full border"
       aria-hidden
     >
-      {label.slice(0, 1)}
+      {icon}
     </span>
   );
 }

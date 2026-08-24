@@ -317,4 +317,79 @@ test.describe("Messages cockpit — design fidelity", () => {
       }),
     ).toBe(true);
   });
+
+  test("lead detail keeps the approved two-column boundary and mobile fit", async ({
+    page,
+  }, testInfo) => {
+    const admin = adminClient();
+    await resetTenantTables(admin);
+    await ensureTestUser(admin);
+    const { propertyId } = await seedDesignThread(admin);
+
+    const viewports = [
+      { width: 1280, height: 900, dossierBeside: true },
+      { width: 1024, height: 900, dossierBeside: false },
+      { width: 390, height: 844, dossierBeside: false },
+      { width: 320, height: 800, dossierBeside: false },
+    ] as const;
+
+    for (const viewport of viewports) {
+      await page.setViewportSize(viewport);
+      await page.goto(`/leads/${propertyId}`);
+      const timeline = page.getByTestId("lead-activity-timeline");
+      const dossier = page.locator('aside[aria-label="Lead dossier"]');
+      await expect(timeline).toBeVisible();
+      await expect(dossier).toBeVisible();
+
+      const layout = await page.evaluate(() => {
+        const timelineNode = document.querySelector(
+          '[data-testid="lead-activity-timeline"]',
+        );
+        const dossierNode = document.querySelector(
+          'aside[aria-label="Lead dossier"]',
+        );
+        if (!timelineNode || !dossierNode) return null;
+        const timelineRect = timelineNode.getBoundingClientRect();
+        const dossierRect = dossierNode.getBoundingClientRect();
+        return {
+          overflow: document.documentElement.scrollWidth - window.innerWidth,
+          timelineTop: timelineRect.top,
+          dossierTop: dossierRect.top,
+          timelineRight: timelineRect.right,
+          dossierLeft: dossierRect.left,
+        };
+      });
+      expect(layout).not.toBeNull();
+      expect(layout!.overflow).toBeLessThanOrEqual(1);
+      if (viewport.dossierBeside) {
+        expect(Math.abs(layout!.timelineTop - layout!.dossierTop)).toBeLessThan(
+          8,
+        );
+        expect(layout!.dossierLeft).toBeGreaterThan(layout!.timelineRight);
+      } else {
+        expect(layout!.dossierTop).toBeGreaterThan(layout!.timelineTop);
+      }
+
+      if (viewport.width <= 390) {
+        const undersized = await page.locator("main button:visible").evaluateAll(
+          (buttons) =>
+            buttons
+              .map((button) => ({
+                label:
+                  button.getAttribute("aria-label") ??
+                  button.textContent?.trim() ??
+                  "button",
+                height: button.getBoundingClientRect().height,
+              }))
+              .filter(({ height }) => height > 0 && height < 35.5),
+        );
+        expect(undersized).toEqual([]);
+      }
+
+      await page.screenshot({
+        path: testInfo.outputPath(`lead-detail-${viewport.width}.png`),
+        fullPage: false,
+      });
+    }
+  });
 });

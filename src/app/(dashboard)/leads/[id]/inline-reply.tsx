@@ -25,6 +25,8 @@ type Props = {
   phoneUnavailableMessage?: string;
   /** Persisted thread rows retire the temporary receipt after refresh. */
   persistedMessageIds?: readonly string[];
+  /** Compact adjacent action rendered with the Outbox explanation. */
+  footerAction?: React.ReactNode;
 };
 
 type QueuedReceipt = { messageId: string; body: string };
@@ -44,6 +46,7 @@ export function InlineReply({
   preferredFromNumber = null,
   phoneUnavailableMessage,
   persistedMessageIds = [],
+  footerAction,
 }: Props) {
   const router = useRouter();
   const [body, setBody] = useState("");
@@ -207,7 +210,7 @@ export function InlineReply({
           </p>
         </div>
       ) : null}
-      <div className="bg-[#fdfcfb] border border-[#e5e1df] rounded-xl p-4 transition-colors focus-within:border-[#111827]">
+      <div className="rounded-[14px] border border-[#e5e1df] bg-[#fdfcfb] px-3.5 py-3 transition-colors focus-within:border-[#111827]">
         <textarea
           value={body}
           onChange={(e) => setBody(e.target.value)}
@@ -217,7 +220,7 @@ export function InlineReply({
           disabled={pending}
           maxLength={2000}
           rows={2}
-          className="w-full bg-transparent border-none focus:ring-0 focus:outline-none text-[14px] resize-none min-h-[60px] placeholder:text-[#a8a29e]"
+          className="min-h-[52px] w-full resize-none border-none bg-transparent text-[14px] focus:ring-0 focus:outline-none placeholder:text-[#a8a29e]"
         />
         <div className="mt-2 flex flex-col gap-3 border-t border-[#e5e1df]/60 pt-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 flex-wrap items-center gap-3 text-[#78716c]">
@@ -248,17 +251,20 @@ export function InlineReply({
             disabled={!canSend}
             aria-label="Queue reply in Outbox"
             data-testid="inline-reply-send"
-            className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-full bg-primary px-5 py-2 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+            className="inline-flex min-h-9 w-full shrink-0 items-center justify-center gap-2 rounded-full bg-primary px-5 py-2 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
           >
             {pending ? "Queueing…" : "Queue SMS"}
             <SendIcon className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
-      <p className="text-[10px] text-center text-[#a8a29e] px-2">
-        This adds the message to Outbox. Delivery happens only after the queue
-        re-checks consent, suppression, and release timing.
-      </p>
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2 px-2">
+        <p className="text-[10px] leading-relaxed text-[#a8a29e]">
+          This adds the message to Outbox. Delivery happens only after the queue
+          re-checks consent, suppression, and release timing.
+        </p>
+        {footerAction}
+      </div>
     </div>
   );
 }

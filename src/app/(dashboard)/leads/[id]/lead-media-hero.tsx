@@ -3,8 +3,6 @@
 import { useState } from "react";
 import Link from "next/link";
 
-import { PageHeader } from "@/components/page-header";
-
 import type { LeadMediaPresentation } from "./lead-media";
 
 export function LeadMediaHero({
@@ -43,22 +41,36 @@ export function LeadMediaHero({
 
   if (renderedKind === "flat") {
     return (
-      <div className="px-4 pt-6 md:px-6 md:pt-8" data-testid="lead-media-flat">
-        <PageHeader
-          breadcrumb={[
-            { label: "Workspace" },
-            { label: "Leads", href: "/leads" },
-            { label: address },
-          ]}
-          title={address}
-          description={description || "—"}
-          actions={
-            <div className="flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9">
-              {actions}
-            </div>
-          }
-        />
-      </div>
+      <section
+        className="border-border bg-card border-b px-4 py-3.5 md:px-6"
+        data-testid="lead-media-flat"
+      >
+        <nav
+          aria-label="Breadcrumb"
+          className="text-muted-foreground mb-2 flex flex-wrap items-center gap-2 text-[10px] font-bold tracking-[0.16em] uppercase"
+        >
+          <span>Workspace</span>
+          <span aria-hidden>/</span>
+          <Link href="/leads" className="hover:text-foreground">
+            Leads
+          </Link>
+          <span aria-hidden>/</span>
+          <span className="text-foreground break-words">{address}</span>
+        </nav>
+        <div className="flex min-w-0 flex-wrap items-end justify-between gap-3.5">
+          <div className="min-w-0">
+            <h1 className="text-2xl leading-tight font-bold tracking-[-0.02em] break-words">
+              {address}
+            </h1>
+            <p className="text-muted-foreground mt-1 text-[13px] break-words">
+              {description || "—"} · Street View unavailable
+            </p>
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-2 [&_[data-testid=call-lead-button]]:border-slate-900 [&_[data-testid=call-lead-button]]:bg-slate-900 [&_[data-testid=call-lead-button]]:text-white [&_button]:min-h-9">
+            {actions}
+          </div>
+        </div>
+      </section>
     );
   }
 
@@ -81,7 +93,7 @@ export function LeadMediaHero({
 
   return (
     <section
-      className="relative isolate min-h-[210px] overflow-hidden bg-slate-900 sm:min-h-[230px] lg:min-h-[250px]"
+      className="relative isolate min-h-[210px] overflow-hidden border-b border-white/10 bg-slate-900 sm:min-h-[230px] lg:min-h-[250px]"
       data-testid={`lead-media-${renderedKind === "streetView" ? "street-view" : "aerial"}`}
       data-media-fallback-reason={
         renderedKind === "aerial"

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 
 import { Badge } from "@/components/ui/badge";
 import { OPERATOR_TIME_ZONE } from "@/lib/messages/message-metrics";
@@ -385,13 +386,16 @@ export function MessageBubble({
   isContinuation,
   isLastInGroup,
   isMostRecentOutbound,
+  presentation = "thread",
 }: {
   message: Message;
   isContinuation: boolean;
   isLastInGroup: boolean;
   isMostRecentOutbound: boolean;
+  presentation?: "thread" | "timeline";
 }) {
   const outbound = message.direction === "outbound";
+  const timeline = presentation === "timeline";
   const time = TIME_FORMATTER.format(new Date(message.created_at));
   const outboundStatusBadge = getOutboundStatusBadge(message);
   const deliveryStatusLabel = getDeliveryStatusLabel(
@@ -407,25 +411,37 @@ export function MessageBubble({
   // post-separator bubble gets `mt-3` to clearly delimit the boundary.
   // The very first message in the thread has no top margin (no `mt-0`
   // ambiguity — Tailwind ignores `mt-0`-equivalent absence).
-  const wrapperSpacing = isContinuation ? "mt-1" : "mt-3 first:mt-0";
+  const wrapperSpacing = timeline
+    ? ""
+    : isContinuation
+      ? "mt-1"
+      : "mt-3 first:mt-0";
 
   // Drop the "tail" notch on continuation bubbles so each burst reads
   // as a stack with one tail. Outbound's tail is top-right; inbound's
   // top-left. Continuations get a fully-rounded top.
-  const bubbleShape = outbound
-    ? `bg-primary text-primary-foreground p-3 rounded-2xl${
-        isContinuation ? "" : " rounded-tr-none"
-      }`
-    : `bg-muted text-foreground p-3 rounded-2xl border border-border${
-        isContinuation ? "" : " rounded-tl-none"
-      }`;
+  const bubbleShape = timeline
+    ? outbound
+      ? "bg-primary text-primary-foreground px-3.5 py-2.5 rounded-xl"
+      : "bg-card text-foreground px-3.5 py-2.5 rounded-xl border border-border"
+    : outbound
+      ? `bg-primary text-primary-foreground p-3 rounded-2xl${
+          isContinuation ? "" : " rounded-tr-none"
+        }`
+      : `bg-muted text-foreground p-3 rounded-2xl border border-border${
+          isContinuation ? "" : " rounded-tl-none"
+        }`;
 
   return (
     <div
       className={cn(
         outbound
-          ? "flex flex-col items-end ml-auto max-w-[80%]"
-          : "flex flex-col items-start max-w-[80%]",
+          ? timeline
+            ? "flex max-w-[560px] flex-col items-start"
+            : "flex flex-col items-end ml-auto max-w-[80%]"
+          : timeline
+            ? "flex max-w-[560px] flex-col items-start"
+            : "flex flex-col items-start max-w-[80%]",
         wrapperSpacing,
         !outbound && message.read_at === null
           ? "rounded-2xl ring-2 ring-amber-300/70 ring-offset-2"
@@ -435,12 +451,32 @@ export function MessageBubble({
       data-continuation={isContinuation ? "true" : "false"}
       data-testid="messages-thread-msg"
     >
+      {timeline ? (
+        <div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
+          <span className="font-bold">
+            {outbound ? "You → Seller" : "Seller"}
+          </span>
+          {message.read_at === null && !outbound ? (
+            <span className="rounded-full bg-red-50 px-2 py-0.5 text-[9px] font-bold text-red-700">
+              UNREAD
+            </span>
+          ) : null}
+          <time
+            className="text-muted-foreground text-[11px]"
+            dateTime={message.created_at}
+          >
+            {formatDistanceToNow(new Date(message.created_at), {
+              addSuffix: true,
+            })}
+          </time>
+        </div>
+      ) : null}
       <div className={bubbleShape}>
         <div className="whitespace-pre-wrap break-words text-[14px] leading-relaxed">
           {message.body}
         </div>
       </div>
-      {showMetadataFooter ? (
+      {!timeline && showMetadataFooter ? (
         <div
           className={`mt-1 flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground ${
             outbound ? "mr-1" : "ml-1"

@@ -1,0 +1,32 @@
+# Sandra lead-detail v2 visual-fidelity fix
+
+- Goal ID: `sandra-lead-detail-v2-fidelity-fix-20260824`
+- Goal: Make the implemented lead-detail page visually match the contained ZIP prototype without adding, removing, or changing lead-page behavior.
+- ZIP contract: `docs/Sandra Leads page redesign.zip` (`PROMPT.md`, `PARITY.md`, and `Sandra Lead Detail v2.dc.html`).
+- Implementation baseline: `origin/main` at `cb9b779dba7c47b9c556a1b07d92511ed93cf19a` (PR #393).
+- Branch: `codex/sandra-lead-detail-v2-fidelity-fix` in an isolated worktree.
+- Scope: presentation and responsive layout only. Existing DNC, consent, communications, task, appointment, enrichment, activity-source, and load-failure behavior remains authoritative.
+
+## Acceptance gates
+
+- The ZIP is treated as the visual contract only; its demo state and sample data do not authorize new functionality.
+- Header/hero, deal strip, compact working-state bar, open timeline, compact composer, and dossier match the prototype's visual hierarchy at 1440px.
+- The extra visible Back action is removed because the existing Leads breadcrumb is the prototype's Back-to-Leads control.
+- The next action is a compact inline chip rather than a standalone card.
+- Activity rows render directly on the workspace surface rather than inside a second large card.
+- Add note remains the same shipped action but collapses to the prototype's compact affordance.
+- Dossier sections use compact cards rather than table panels, while every field and control remains present.
+- 1280px retains the two-column activity/dossier layout; 1024px stacks it; 390px and 320px have no horizontal page overflow.
+- Flat-media and imagery headers carry the same controls and wrap safely.
+- Permanent-DNC early return, SMS restrictions, queue-only inline reply, Send-now modal, isolated activity failures, and load-failure states remain unchanged.
+- Focused unit/RTL tests, typecheck, lint, production build, responsive browser checks, adversarial review, and fresh visible-Chrome proof pass without placing a real call or message.
+
+## Evidence log
+
+- 2026-08-24: refreshed `origin/main`; confirmed PR #393 is the merged implementation at the baseline above.
+- 2026-08-24: rendered the contained standalone prototype at 1440x900 and 390x844.
+- 2026-08-24: seeded the existing safe E2E test tenant and captured the merged page at 1440px. The structural E2E passed, but visual comparison rejected the oversized working-state card, boxed activity workspace, side-by-side Add-note panel, table-like dossier, and extra Back button.
+
+## Status
+
+`IMPLEMENTING`

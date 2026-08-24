@@ -9,23 +9,23 @@ export function LeadIdentityActions({
 }) {
   return (
     <section
-      className="order-2 border-border bg-card border-y px-4 py-3 shadow-sm md:px-6 [&_button]:min-h-9"
+      className="border-border bg-card border-b px-4 py-2.5 md:px-6 [&_button]:min-h-9 sm:[&_button]:min-h-8"
       aria-labelledby="lead-working-state-heading"
       data-testid="lead-working-state-bar"
     >
       <h2 id="lead-working-state-heading" className="sr-only">
         Working state
       </h2>
-      <div className="flex flex-col gap-3 min-[1180px]:flex-row min-[1180px]:items-center">
+      <div className="flex flex-wrap items-center gap-2">
         <div
           className="flex min-w-0 flex-wrap items-center gap-2"
           data-testid="lead-working-state-controls"
         >
           {workingState}
         </div>
-        {nextAction ? <div className="min-w-0 flex-1">{nextAction}</div> : null}
+        {nextAction ? <div className="min-w-0">{nextAction}</div> : null}
         <div
-          className="flex flex-wrap items-center gap-2 min-[1180px]:justify-end"
+          className="flex min-w-0 flex-wrap items-center gap-2 min-[1180px]:ml-auto min-[1180px]:justify-end"
           data-testid="lead-record-signals"
         >
           {recordSignals}

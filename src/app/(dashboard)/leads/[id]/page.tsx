@@ -562,12 +562,6 @@ export default async function LeadDetailPage({
 
   const heroActions = (
     <>
-      <Link href="/leads">
-        <Button variant="outline" size="sm" aria-label="Back to leads">
-          <ChevronLeft className="mr-1 h-4 w-4" />
-          Back
-        </Button>
-      </Link>
       <SoftphoneLeadButton lead={detailSoftphoneLead} />
       <SmsEntryPointGate
         restricted={smsPresentation.smsRestricted}
@@ -605,28 +599,31 @@ export default async function LeadDetailPage({
           </Button>
         </a>
       ) : null}
-      {prevId ? (
-        <Link href={`/leads/${prevId}`}>
-          <Button variant="outline" size="icon" aria-label="Previous">
+      <span className="border-border inline-flex overflow-hidden rounded-full border [&_[data-slot=button]]:rounded-none [&_[data-slot=button]]:border-0">
+        {prevId ? (
+          <Link href={`/leads/${prevId}`}>
+            <Button variant="ghost" size="icon-sm" aria-label="Previous">
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+          </Link>
+        ) : (
+          <Button variant="ghost" size="icon-sm" disabled aria-label="No previous">
             <ChevronLeft className="h-4 w-4" />
           </Button>
-        </Link>
-      ) : (
-        <Button variant="outline" size="icon" disabled aria-label="No previous">
-          <ChevronLeft className="h-4 w-4" />
-        </Button>
-      )}
-      {nextId ? (
-        <Link href={`/leads/${nextId}`}>
-          <Button variant="outline" size="icon" aria-label="Next">
+        )}
+        <span className="bg-border w-px" aria-hidden />
+        {nextId ? (
+          <Link href={`/leads/${nextId}`}>
+            <Button variant="ghost" size="icon-sm" aria-label="Next">
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </Link>
+        ) : (
+          <Button variant="ghost" size="icon-sm" disabled aria-label="No next">
             <ChevronRight className="h-4 w-4" />
           </Button>
-        </Link>
-      ) : (
-        <Button variant="outline" size="icon" disabled aria-label="No next">
-          <ChevronRight className="h-4 w-4" />
-        </Button>
-      )}
+        )}
+      </span>
     </>
   );
 
@@ -726,41 +723,28 @@ export default async function LeadDetailPage({
       <section
         aria-labelledby="lead-workspace-heading"
         data-testid="lead-workspace-primary"
-        className="@container/lead-workspace order-4 px-4 py-5 md:px-6 md:py-6 [&_button]:min-h-9"
+        className="@container/lead-workspace px-4 pt-3.5 pb-7 md:px-6 [&_button]:min-h-9"
       >
-        <div className="mb-4">
-          <h2
-            id="lead-workspace-heading"
-            className="text-lg font-black tracking-tight"
-          >
-            Activity
-          </h2>
-          <p className="text-muted-foreground text-sm">
-            Messages, notes, and calls in one oldest-to-newest history.
-          </p>
-        </div>
-        <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
-          <div className="min-w-0">
-            <div className="border-border bg-card rounded-xl border p-3 shadow-sm sm:p-4">
-              <LeadActivityTimeline
-                propertyId={lead.id}
-                contactId={lead.homeowner?.id ?? null}
-                initialMessages={initialMessages}
-                initialNotes={initialNotes}
-                initialCalls={initialCallRows}
-                messageError={threadError?.message ?? null}
-                noteError={notesError?.message ?? null}
-                callError={callRollupError?.message ?? null}
-                authorEmails={authorEmails}
-                currentUserId={sessionUser?.id ?? null}
-                currentUserEmail={sessionUser?.email ?? null}
-                jitterHost={process.env.NEXT_PUBLIC_JITTER_HOST ?? ""}
-              />
-            </div>
-            <div
-              className="mt-4 grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(240px,0.65fr)]"
-              data-testid="lead-activity-composers"
-            >
+        <h2 id="lead-workspace-heading" className="sr-only">
+          Activity
+        </h2>
+        <div className="grid min-w-0 items-start gap-[14px] xl:grid-cols-[minmax(0,1fr)_340px]">
+          <div className="min-w-0 space-y-3">
+            <LeadActivityTimeline
+              propertyId={lead.id}
+              contactId={lead.homeowner?.id ?? null}
+              initialMessages={initialMessages}
+              initialNotes={initialNotes}
+              initialCalls={initialCallRows}
+              messageError={threadError?.message ?? null}
+              noteError={notesError?.message ?? null}
+              callError={callRollupError?.message ?? null}
+              authorEmails={authorEmails}
+              currentUserId={sessionUser?.id ?? null}
+              currentUserEmail={sessionUser?.email ?? null}
+              jitterHost={process.env.NEXT_PUBLIC_JITTER_HOST ?? ""}
+            />
+            <div className="min-w-0" data-testid="lead-activity-composers">
               <SmsEntryPointGate
                 restricted={smsPresentation.smsRestricted}
                 placement="inline"
@@ -776,18 +760,30 @@ export default async function LeadDetailPage({
                   persistedMessageIds={initialMessages.map(
                     (message) => message.id,
                   )}
+                  footerAction={
+                    !smsPresentation.smsRestricted ? (
+                      <AddNoteComposer propertyId={lead.id} compact />
+                    ) : null
+                  }
                 />
               </SmsEntryPointGate>
-              <AddNoteComposer propertyId={lead.id} />
+              {smsPresentation.smsRestricted ? (
+                <div className="mt-2 flex justify-end">
+                  <AddNoteComposer propertyId={lead.id} compact />
+                </div>
+              ) : null}
             </div>
           </div>
 
-          <aside className="min-w-0 space-y-4" aria-label="Lead dossier">
-            <Section title="Homeowner">
+          <aside className="min-w-0 space-y-3" aria-label="Lead dossier">
+            <Section title="Homeowner" compact>
               {lead.homeowner ? (
                 <>
                   <Row label="Name" value={homeownerName} />
-                  <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border/60 px-3 py-2">
+                  <div
+                    className="flex min-w-0 items-center justify-between gap-3 border-b border-border/60 px-3 py-2"
+                    data-slot="lead-detail-row"
+                  >
                     <span className="min-w-0 break-all font-mono text-sm">
                       {lead.homeowner.phone_1 || "No phone"}
                     </span>
@@ -838,7 +834,7 @@ export default async function LeadDetailPage({
               ) : null}
             </Section>
 
-            <Section title="Tasks & appointments" id="set-next-action">
+            <Section title="Tasks & appointments" id="set-next-action" compact>
               <div className="flex justify-end border-b border-border/60 p-3">
                 <BookAppointmentPopover
                   propertyId={lead.id}
@@ -873,7 +869,7 @@ export default async function LeadDetailPage({
               />
             </Section>
 
-            <Section title="Tags">
+            <Section title="Tags" compact>
               {tagRowsError ? (
                 <div className="p-3">
                   <LeadLoadFailure
@@ -887,8 +883,8 @@ export default async function LeadDetailPage({
               )}
             </Section>
 
-            <Section title="Automation & enrichment">
-              <div className="flex flex-col items-stretch gap-2 p-3 [&_button]:w-full">
+            <Section title="Automation & enrichment" compact>
+              <div className="flex flex-col items-stretch gap-2 text-xs [&_label]:justify-between [&_label]:border-0 [&_label]:px-0 [&_button]:w-auto [&_button]:self-start">
                 <AiResponderToggle
                   propertyId={lead.id}
                   initialDisabled={lead.ai_responder_disabled}
@@ -897,20 +893,29 @@ export default async function LeadDetailPage({
                   propertyId={lead.id}
                   initialDisabled={lead.skip_trace_disabled}
                 />
-                <CassWidget
-                  propertyId={lead.id}
-                  cassStatus={lead.cass_status}
-                />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-muted-foreground">
+                    Address (CASS: {lead.cass_status})
+                  </span>
+                  <CassWidget
+                    propertyId={lead.id}
+                    cassStatus={lead.cass_status}
+                  />
+                </div>
+                <div className="bg-border/60 h-px" />
                 <EnrollInSequenceWidget propertyId={lead.id} />
               </div>
             </Section>
 
             <details
-              className="border-border bg-card rounded-lg border"
+              className="border-border bg-card rounded-xl border"
               data-testid="lead-full-record"
             >
-              <summary className="cursor-pointer px-3 py-3 text-xs font-black tracking-wide uppercase">
-                Full record
+              <summary className="flex cursor-pointer flex-wrap items-center justify-between gap-2 px-3.5 py-3 text-xs font-bold">
+                <span>Full record</span>
+                <span className="text-muted-foreground text-[11px] font-normal">
+                  property · USPS · contacts · identifiers · admin
+                </span>
               </summary>
               <div className="border-t border-border">
                 {zillowHref ? (
@@ -1079,16 +1084,16 @@ function DealSnapshotStrip({ lead }: { lead: DetailedLead }) {
   ];
   return (
     <section
-      className="border-border bg-background grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2 border-b px-4 py-3 md:px-6"
+      className="bg-background grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2.5 px-4 pt-3 md:px-6"
       data-testid="lead-deal-snapshot"
       aria-label="Deal snapshot"
     >
       {stats.map((stat) => (
         <div
           key={stat.label}
-          className={`min-w-0 rounded-xl border px-4 py-3 ${
+          className={`min-w-0 rounded-[14px] border px-4 py-3 ${
             stat.accent
-              ? "border-emerald-600 bg-emerald-50 text-emerald-950"
+              ? "border-border border-l-[3px] border-l-emerald-700 bg-card text-emerald-950"
               : "border-border bg-card"
           }`}
         >
@@ -1279,11 +1284,26 @@ function Section({
   title,
   children,
   id,
+  compact = false,
 }: {
   title: string;
   children: React.ReactNode;
   id?: string;
+  compact?: boolean;
 }) {
+  if (compact) {
+    return (
+      <div
+        className="border-border bg-card flex min-w-0 flex-col gap-2 rounded-[14px] border p-3.5 [&_[data-slot=lead-detail-row]]:border-0 [&_[data-slot=lead-detail-row]]:px-0 [&_[data-slot=lead-detail-row]]:py-1 [&_[data-slot=lead-tags-row]]:border-0 [&_[data-slot=lead-tags-row]]:px-0 [&_[data-slot=lead-tags-row]]:py-1"
+        id={id}
+      >
+        <div className="text-muted-foreground font-mono text-[10px] font-bold tracking-[0.1em] uppercase">
+          {title}
+        </div>
+        <div className="flex min-w-0 flex-col">{children}</div>
+      </div>
+    );
+  }
   return (
     <div className="flex min-w-0 flex-col gap-2" id={id}>
       <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
@@ -1319,6 +1339,7 @@ function Row({
     <div
       className="border-border/60 flex flex-col gap-1 border-b px-3 py-2 text-sm last:border-b-0 sm:flex-row sm:justify-between sm:gap-3"
       data-testid={testId}
+      data-slot="lead-detail-row"
     >
       <span className="text-muted-foreground min-w-0">{label}</span>
       <span
