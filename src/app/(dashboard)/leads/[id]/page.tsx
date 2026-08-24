@@ -334,40 +334,66 @@ export default async function LeadDetailPage({
   const activeMembershipAt = new Date(requestNowMs).toISOString();
   const usersPromise = (async () => {
     try {
-      const [membershipResult, authUsersResult] = await Promise.all([
-        admin
-          .from("memberships")
-          .select("user_id")
-          .eq("org_id", lead.org_id)
-          .eq("access_status", "active")
-          .is("deletion_prepared_at", null)
-          .or(
-            `access_expires_at.is.null,access_expires_at.gt.${activeMembershipAt}`,
-          )
-          .order("user_id", { ascending: true })
-          .limit(orgAuthorCap + 1),
-        admin.auth.admin.listUsers({ perPage: 1000 }),
-      ]);
+      const membershipResult = await admin
+        .from("memberships")
+        .select("user_id")
+        .eq("org_id", lead.org_id)
+        .eq("access_status", "active")
+        .is("deletion_prepared_at", null)
+        .or(
+          `access_expires_at.is.null,access_expires_at.gt.${activeMembershipAt}`,
+        )
+        .order("user_id", { ascending: true })
+        .limit(orgAuthorCap + 1);
       if (
         membershipResult.error ||
         !membershipResult.data ||
-        membershipResult.data.length > orgAuthorCap ||
-        authUsersResult.error
+        membershipResult.data.length > orgAuthorCap
       ) {
         console.error("[leads] org author identity lookup failed", {
           membershipCode: membershipResult.error?.code ?? null,
           membershipCapExceeded:
             (membershipResult.data?.length ?? 0) > orgAuthorCap,
-          authLookupFailed: Boolean(authUsersResult.error),
         });
         return [];
       }
       const orgMemberIds = new Set(
         membershipResult.data.map((membership) => membership.user_id),
       );
-      return (authUsersResult.data?.users ?? []).filter((user) =>
-        orgMemberIds.has(user.id),
-      );
+      if (orgMemberIds.size === 0) return [];
+
+      const authUsersById = new Map<
+        string,
+        { id: string; email?: string | null }
+      >();
+      const authUsersPerPage = 200;
+      // Advance page numbers locally: auth-js can mis-parse multi-digit
+      // nextPage values. Terminate on complete resolution, a short page, or
+      // this hard 5,000-user project bound.
+      const maxAuthUserPages = 25;
+      for (let page = 1; page <= maxAuthUserPages; page += 1) {
+        const authUsersResult = await admin.auth.admin.listUsers({
+          page,
+          perPage: authUsersPerPage,
+        });
+        if (authUsersResult.error) {
+          console.error("[leads] org author auth lookup failed", {
+            page,
+          });
+          return [];
+        }
+        const authUsers = authUsersResult.data?.users ?? [];
+        for (const user of authUsers) {
+          if (orgMemberIds.has(user.id)) authUsersById.set(user.id, user);
+        }
+        if (
+          authUsersById.size >= orgMemberIds.size ||
+          authUsers.length < authUsersPerPage
+        ) {
+          break;
+        }
+      }
+      return [...authUsersById.values()];
     } catch {
       return [];
     }

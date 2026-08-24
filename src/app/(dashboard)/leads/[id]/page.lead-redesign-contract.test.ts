@@ -35,13 +35,22 @@ describe("Lead Detail v2 integration contract", () => {
       "access_expires_at.is.null,access_expires_at.gt.${activeMembershipAt}",
       ".limit(orgAuthorCap + 1)",
       "membershipResult.data.length > orgAuthorCap",
+      "const authUsersPerPage = 200",
+      "const maxAuthUserPages = 25",
+      "page <= maxAuthUserPages",
+      "page += 1",
+      "admin.auth.admin.listUsers",
+      "perPage: authUsersPerPage",
+      "authUsersById.size >= orgMemberIds.size",
+      "authUsers.length < authUsersPerPage",
       "orgMemberIds.has(user.id)",
     ]) {
       expect(source).toContain(token);
     }
-    expect(
-      source.match(/admin\.auth\.admin\.listUsers\(\{ perPage: 1000 \}\)/g),
-    ).toHaveLength(1);
+    expect(source).not.toContain("data.nextPage");
+    const authError = source.indexOf("if (authUsersResult.error)");
+    expect(authError).toBeGreaterThan(-1);
+    expect(source.indexOf("return []", authError)).toBeGreaterThan(authError);
     const orgFilter = source.indexOf("orgMemberIds.has(user.id)");
     const clientAuthorMap = source.indexOf(
       "if (u.email) authorEmails[u.id] = u.email",
