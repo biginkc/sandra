@@ -93,6 +93,11 @@ export function LeadMediaHero({
       aria-label={mediaLabel}
     >
       <picture>
+        <source media="(min-width: 1792px)" srcSet={renderedImages.ultra} />
+        <source
+          media="(min-width: 1536px)"
+          srcSet={renderedImages.extraLarge}
+        />
         <source media="(min-width: 1440px)" srcSet={renderedImages.large} />
         <source media="(min-width: 1280px)" srcSet={renderedImages.wide} />
         <source media="(min-width: 1024px)" srcSet={renderedImages.desktop} />

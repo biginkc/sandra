@@ -18,6 +18,8 @@ const streetImages = {
   desktop: "https://maps.googleapis.com/maps/api/streetview?size=640x208",
   wide: "https://maps.googleapis.com/maps/api/streetview?size=640x156",
   large: "https://maps.googleapis.com/maps/api/streetview?size=640x135",
+  extraLarge: "https://maps.googleapis.com/maps/api/streetview?size=640x125",
+  ultra: "https://maps.googleapis.com/maps/api/streetview?size=640x104",
 };
 const aerialImages = {
   small:
@@ -34,6 +36,10 @@ const aerialImages = {
     "https://maps.googleapis.com/maps/api/staticmap?size=640x156&maptype=satellite",
   large:
     "https://maps.googleapis.com/maps/api/staticmap?size=640x135&maptype=satellite",
+  extraLarge:
+    "https://maps.googleapis.com/maps/api/staticmap?size=640x125&maptype=satellite",
+  ultra:
+    "https://maps.googleapis.com/maps/api/staticmap?size=640x104&maptype=satellite",
 };
 
 describe("<LeadMediaHero />", () => {
@@ -69,10 +75,12 @@ describe("<LeadMediaHero />", () => {
       "strict-origin-when-cross-origin",
     );
     const sources = Array.from(document.querySelectorAll("source"));
-    expect(sources).toHaveLength(6);
+    expect(sources).toHaveLength(8);
     expect(
       sources.map((source) => [source.media, source.getAttribute("srcset")]),
     ).toEqual([
+      ["(min-width: 1792px)", streetImages.ultra],
+      ["(min-width: 1536px)", streetImages.extraLarge],
       ["(min-width: 1440px)", streetImages.large],
       ["(min-width: 1280px)", streetImages.wide],
       ["(min-width: 1024px)", streetImages.desktop],

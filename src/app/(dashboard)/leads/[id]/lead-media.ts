@@ -30,6 +30,8 @@ export type LeadMediaImages = {
   desktop: string;
   wide: string;
   large: string;
+  extraLarge: string;
+  ultra: string;
 };
 
 export type LeadMediaLocation = {
@@ -82,6 +84,8 @@ const STATIC_IMAGE_SIZES = {
   desktop: "640x208",
   wide: "640x156",
   large: "640x135",
+  extraLarge: "640x125",
+  ultra: "640x104",
 } as const;
 const metadataCache = new Map<
   string,
@@ -261,6 +265,8 @@ function mapStaticImageSizes(
     desktop: build(STATIC_IMAGE_SIZES.desktop),
     wide: build(STATIC_IMAGE_SIZES.wide),
     large: build(STATIC_IMAGE_SIZES.large),
+    extraLarge: build(STATIC_IMAGE_SIZES.extraLarge),
+    ultra: build(STATIC_IMAGE_SIZES.ultra),
   };
 }
 
