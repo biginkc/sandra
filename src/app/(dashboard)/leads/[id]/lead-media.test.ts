@@ -32,6 +32,8 @@ const expectedSizes = {
   desktop: "640x208",
   wide: "640x156",
   large: "640x135",
+  extraLarge: "640x125",
+  ultra: "640x104",
 } as const;
 
 function metadataResponse(
