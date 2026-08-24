@@ -60,7 +60,7 @@ async function seedCallableProspect(state: string) {
 }
 
 test.describe("Dialer batch create", () => {
-  test("batch create end-to-end: selected prospect creates batch and lead widget shows call count", async ({
+  test("batch create end-to-end: selected prospect creates batch and lead timeline shows the call", async ({
     page,
   }) => {
     const admin = adminClient();
@@ -135,6 +135,7 @@ test.describe("Dialer batch create", () => {
         contact_id: prospect.contactId,
         dialer_batch_item_id: item.id,
         jitter_attempt_id: `e2e-${Date.now()}`,
+        jitter_session_id: `e2e-session-${item.id}`,
         started_at: new Date().toISOString(),
         outcome: "connected_human",
         recording_status: "available",
@@ -143,13 +144,11 @@ test.describe("Dialer batch create", () => {
     if (activityError) throw activityError;
 
     await page.goto(`/leads/${prospect.propertyId}`);
-    await expect(page.getByRole("region", { name: "Calls" })).toContainText(
-      "1 call",
-      { timeout: 15_000 },
-    );
-    await expect(page.getByTestId("latest-outcome-badge")).toHaveText(
-      "Connected",
-    );
-    await expect(page.getByText("1 available").first()).toBeVisible();
+    const callEvent = page.getByTestId("lead-activity-call");
+    await expect(callEvent).toHaveCount(1, { timeout: 15_000 });
+    await expect(callEvent).toContainText("Connected");
+    await expect(
+      callEvent.getByRole("button", { name: "Load recording" }),
+    ).toBeVisible();
   });
 });

@@ -98,6 +98,7 @@ function row(
 ): CallActivityRollupRow {
   return {
     id: overrides.id,
+    created_at: overrides.created_at ?? timestamp,
     started_at: overrides.started_at ?? timestamp,
     outcome: overrides.outcome ?? "connected_human",
     disposition: overrides.disposition ?? null,

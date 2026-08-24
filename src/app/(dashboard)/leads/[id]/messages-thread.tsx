@@ -8,7 +8,7 @@ import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
 import { cn } from "@/lib/utils";
 
-type Message = Database["public"]["Tables"]["messages"]["Row"];
+export type Message = Database["public"]["Tables"]["messages"]["Row"];
 
 const DAY_KEY_FORMATTER = new Intl.DateTimeFormat("en-CA", {
   timeZone: OPERATOR_TIME_ZONE,
@@ -34,20 +34,30 @@ type Props = {
   nowMs?: number;
 };
 
+export type LeadMessageScope = {
+  contactId: string | null;
+  conversationId: string | null;
+  propertyId: string | null;
+  matchMode?: "thread" | "lead";
+};
+
 export function messageBelongsToThread(
   row: Message,
-  scope: {
-    contactId: string | null;
-    conversationId: string | null;
-    propertyId: string | null;
-  },
+  scope: LeadMessageScope,
 ): boolean {
   if (scope.conversationId !== null) {
     return row.conversation_id === scope.conversationId;
   }
-  const normalizedPropertyId = scope.propertyId && scope.propertyId.length > 0
-    ? scope.propertyId
-    : null;
+  const normalizedPropertyId =
+    scope.propertyId && scope.propertyId.length > 0 ? scope.propertyId : null;
+  if (scope.matchMode === "lead") {
+    if (row.property_id === normalizedPropertyId) return true;
+    return (
+      row.property_id === null &&
+      scope.contactId !== null &&
+      row.contact_id === scope.contactId
+    );
+  }
   return (
     row.contact_id === scope.contactId &&
     row.property_id === normalizedPropertyId
@@ -75,81 +85,12 @@ export function MessagesThread({
 }: Props) {
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = useLiveNow(nowMs ?? fallbackNowMs);
-  const [messages, setMessages] = useState<Message[]>(() =>
-    filterThreadMessages(initial, {
-      contactId,
-      conversationId,
-      propertyId,
-    }),
-  );
+  const messages = useLeadMessages({
+    initial,
+    scope: { contactId, conversationId, propertyId },
+    onLiveMessage,
+  });
   const endRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Thread props can change underneath the live subscription; reset the local realtime buffer to the new server-rendered thread snapshot.
-    setMessages(
-      filterThreadMessages(initial, {
-        contactId,
-        conversationId,
-        propertyId,
-      }),
-    );
-  }, [contactId, conversationId, initial, propertyId]);
-
-  useEffect(() => {
-    const supabase = createClient();
-    let mounted = true;
-    let channel: ReturnType<typeof supabase.channel> | null = null;
-
-    const start = async () => {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token = sessionData.session?.access_token ?? null;
-      if (token) supabase.realtime.setAuth(token);
-
-      if (!mounted) return;
-
-      channel = supabase
-        .channel(`messages:${propertyId ?? "none"}`)
-        .on(
-          "postgres_changes",
-          { event: "INSERT", schema: "public", table: "messages" },
-          (payload) => {
-            const row = payload.new as Message;
-            if (
-              messageBelongsToThread(row, {
-                contactId,
-                conversationId,
-                propertyId,
-              })
-            ) {
-              setMessages((prev) => {
-                if (prev.some((m) => m.id === row.id)) return prev;
-                return [...prev, row].sort((a, b) =>
-                  a.created_at.localeCompare(b.created_at),
-                );
-              });
-              onLiveMessage?.(row);
-            }
-          },
-        )
-        .on(
-          "postgres_changes",
-          { event: "UPDATE", schema: "public", table: "messages" },
-          (payload) => {
-            const row = payload.new as Message;
-            setMessages((prev) =>
-              prev.map((m) => (m.id === row.id ? row : m)),
-            );
-          },
-        )
-        .subscribe();
-    };
-    start();
-
-    return () => {
-      mounted = false;
-      if (channel) supabase.removeChannel(channel);
-    };
-  }, [contactId, conversationId, onLiveMessage, propertyId]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -198,7 +139,8 @@ export function MessagesThread({
       // Day boundary always breaks the group — next bubble starts fresh.
       prevDirection = null;
     }
-    const isContinuation = prevDirection !== null && prevDirection === m.direction;
+    const isContinuation =
+      prevDirection !== null && prevDirection === m.direction;
     items.push({
       kind: "msg",
       msg: m,
@@ -254,6 +196,112 @@ export function MessagesThread({
   );
 }
 
+export function useLeadMessages({
+  initial,
+  scope,
+  onLiveMessage,
+}: {
+  initial: Message[];
+  scope: LeadMessageScope;
+  onLiveMessage?: (message: Message) => void;
+}): Message[] {
+  const { contactId, conversationId, matchMode, propertyId } = scope;
+  const [messages, setMessages] = useState<Message[]>(() =>
+    sortMessages(
+      filterThreadMessages(initial, {
+        contactId,
+        conversationId,
+        matchMode,
+        propertyId,
+      }),
+    ),
+  );
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- A route transition can replace the thread underneath the live subscription.
+    setMessages(
+      sortMessages(
+        filterThreadMessages(initial, {
+          contactId,
+          conversationId,
+          matchMode,
+          propertyId,
+        }),
+      ),
+    );
+  }, [contactId, conversationId, initial, matchMode, propertyId]);
+
+  useEffect(() => {
+    const supabase = createClient();
+    let mounted = true;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
+    const start = async () => {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token ?? null;
+      if (token) supabase.realtime.setAuth(token);
+      if (!mounted) return;
+
+      channel = supabase
+        .channel(`messages:${propertyId ?? "none"}`)
+        .on(
+          "postgres_changes",
+          { event: "INSERT", schema: "public", table: "messages" },
+          (payload) => {
+            const row = payload.new as Message;
+            if (
+              !messageBelongsToThread(row, {
+                contactId,
+                conversationId,
+                matchMode,
+                propertyId,
+              })
+            )
+              return;
+            setMessages((previous) =>
+              sortMessages([
+                row,
+                ...previous.filter((message) => message.id !== row.id),
+              ]).slice(-200),
+            );
+            onLiveMessage?.(row);
+          },
+        )
+        .on(
+          "postgres_changes",
+          { event: "UPDATE", schema: "public", table: "messages" },
+          (payload) => {
+            const row = payload.new as Message;
+            setMessages((previous) => {
+              const belongs = messageBelongsToThread(row, {
+                contactId,
+                conversationId,
+                matchMode,
+                propertyId,
+              });
+              if (!belongs) {
+                return previous.filter((message) => message.id !== row.id);
+              }
+              return sortMessages([
+                row,
+                ...previous.filter((message) => message.id !== row.id),
+              ]).slice(-200);
+            });
+          },
+        )
+        .subscribe();
+    };
+    void start();
+
+    return () => {
+      mounted = false;
+      if (channel) void supabase.removeChannel(channel);
+    };
+  }, [contactId, conversationId, matchMode, onLiveMessage, propertyId]);
+
+  return messages;
+}
+
 function useLiveNow(seedNowMs: number): number {
   const [clock, setClock] = useState({ seedNowMs, value: seedNowMs });
   if (clock.seedNowMs !== seedNowMs) {
@@ -286,13 +334,16 @@ function useLiveNow(seedNowMs: number): number {
 
 function filterThreadMessages(
   rows: Message[],
-  scope: {
-    contactId: string | null;
-    conversationId: string | null;
-    propertyId: string | null;
-  },
+  scope: LeadMessageScope,
 ): Message[] {
   return rows.filter((row) => messageBelongsToThread(row, scope));
+}
+
+function sortMessages(rows: Message[]): Message[] {
+  return [...rows].sort(
+    (a, b) =>
+      a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+  );
 }
 
 function formatDayLabel(iso: string, nowMs: number): string {
@@ -329,7 +380,7 @@ function previousDateKey(dateKey: string): string {
   return new Date(noonUtc - 86_400_000).toISOString().slice(0, 10);
 }
 
-function MessageBubble({
+export function MessageBubble({
   message,
   isContinuation,
   isLastInGroup,
@@ -371,11 +422,15 @@ function MessageBubble({
 
   return (
     <div
-      className={
-        (outbound
+      className={cn(
+        outbound
           ? "flex flex-col items-end ml-auto max-w-[80%]"
-          : "flex flex-col items-start max-w-[80%]") + ` ${wrapperSpacing}`
-      }
+          : "flex flex-col items-start max-w-[80%]",
+        wrapperSpacing,
+        !outbound && message.read_at === null
+          ? "rounded-2xl ring-2 ring-amber-300/70 ring-offset-2"
+          : undefined,
+      )}
       data-direction={outbound ? "outbound" : "inbound"}
       data-continuation={isContinuation ? "true" : "false"}
       data-testid="messages-thread-msg"
@@ -406,7 +461,10 @@ function MessageBubble({
             </span>
           ) : null}
           {outboundStatusBadge ? (
-            <Badge variant={outboundStatusBadge.variant} className="text-[10px]">
+            <Badge
+              variant={outboundStatusBadge.variant}
+              className="text-[10px]"
+            >
               {outboundStatusBadge.label}
             </Badge>
           ) : null}
@@ -473,8 +531,7 @@ function isAiGeneratedMessage(message: Message): boolean {
     metadata !== null &&
     typeof metadata === "object" &&
     !Array.isArray(metadata) &&
-    (metadata as { generated_by?: unknown }).generated_by ===
-      "ai_responder_v1"
+    (metadata as { generated_by?: unknown }).generated_by === "ai_responder_v1"
   );
 }
 

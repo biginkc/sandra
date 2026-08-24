@@ -336,24 +336,40 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     await seedStarterLibrary(admin, await seedOrgId());
 
     await page.goto("/sequences");
-    // Click through each visible primary nav item and assert the URL changes
-    // (we can't easily assert the active-link class from Playwright without
-    // more selectors, but landing on the page is the load-bearing check).
-    const targets: Array<{ label: RegExp; path: RegExp }> = [
-      { label: /^Leads$/, path: /\/leads/ },
-      { label: /^Prospects$/, path: /\/properties/ },
-      { label: /^Lists$/, path: /\/lists/ },
-      { label: /^Sequences$/, path: /\/sequences/ },
-      { label: /^Import$/, path: /\/import/ },
-      { label: /^Messages$/, path: /\/messages/ },
-      { label: /^Jobs$/, path: /\/jobs/ },
+    // Preserve a real sidebar client-navigation assertion while keeping the
+    // full route matrix independent from a long-lived dev server's RSC state.
+    const overviewLink = page
+      .getByRole("navigation", { name: "Primary" })
+      .getByRole("link", { name: /^Overview$/ });
+    await overviewLink.click();
+    await expect(page).toHaveURL((url) => url.pathname === "/dashboard");
+    await page.goto("/sequences");
+
+    // Assert every primary link's exact mapping and clickability, then require
+    // its destination to return a successful response at the exact pathname.
+    const targets: Array<{ label: RegExp; href: string }> = [
+      { label: /^Overview$/, href: "/dashboard" },
+      { label: /^Calendar$/, href: "/calendar" },
+      { label: /^Leads$/, href: "/leads" },
+      { label: /^Prospects$/, href: "/properties" },
+      { label: /^Lists$/, href: "/lists" },
+      { label: /^Campaigns$/, href: "/campaigns" },
+      { label: /^Sequences$/, href: "/sequences" },
+      { label: /^Templates$/, href: "/templates" },
+      { label: /^Import$/, href: "/import" },
+      { label: /^Messages$/, href: "/messages" },
+      { label: /^Jobs$/, href: "/jobs" },
     ];
     for (const t of targets) {
       // Sidebar is semantic <nav aria-label="Primary">; target that to avoid
       // matching stray links in page content.
       const nav = page.getByRole("navigation", { name: "Primary" });
-      await nav.getByRole("link", { name: t.label }).click();
-      await expect(page).toHaveURL(t.path);
+      const link = nav.getByRole("link", { name: t.label });
+      await expect(link).toHaveAttribute("href", t.href);
+      await link.click({ trial: true });
+      const response = await page.goto(t.href);
+      expect(response?.ok()).toBe(true);
+      await expect(page).toHaveURL((url) => url.pathname === t.href);
     }
   });
 });

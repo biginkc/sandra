@@ -73,7 +73,22 @@ jobs:
           NODE
 
       - name: Run Playwright E2E suite
-        run: npm run test:e2e
+        run: |
+          # Bound each serial group to a fresh Next dev server. Beyond roughly
+          # six minutes the CI server has emitted ECONNRESET and stopped
+          # committing otherwise-valid RSC interactions. Three disjoint broad
+          # shards keep all assertions while preventing that lifecycle leak.
+          npm run test:e2e -- --grep-invert 'Leads board v2 foundation is usable at desktop and narrow widths|switching tabs preserves URL state|sidebar nav links all route correctly' --shard=1/3
+          npm run test:e2e -- --grep-invert 'Leads board v2 foundation is usable at desktop and narrow widths|switching tabs preserves URL state|sidebar nav links all route correctly' --shard=2/3
+          npm run test:e2e -- --grep-invert 'Leads board v2 foundation is usable at desktop and narrow widths|switching tabs preserves URL state|sidebar nav links all route correctly' --shard=3/3
+          # Keep the navigation-heavy Leads board contract on its own fresh
+          # Turbopack server. Run the two client-navigation contracts against
+          # Webpack: GitHub's Turbopack dev runtime returns valid RSC payloads
+          # for these clicks but intermittently never commits them in Chrome.
+          # The larger timeout covers Webpack's cold compilation of 11 routes;
+          # the click and URL assertions remain unchanged.
+          npm run test:e2e -- --grep 'Leads board v2 foundation is usable at desktop and narrow widths'
+          PLAYWRIGHT_WEBPACK_DEV_SERVER=1 npm run test:e2e -- --grep 'switching tabs preserves URL state|sidebar nav links all route correctly' --timeout=120000
 
       - name: Upload HTML report on failure
         if: failure()

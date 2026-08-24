@@ -111,8 +111,8 @@ export function LeadTaskWidget({
         ))}
       </div>
 
-      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
-        <label className="flex flex-col gap-1 text-xs font-medium text-[#78716c]">
+      <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+        <label className="flex min-w-0 flex-col gap-1 text-xs font-medium text-[#78716c]">
           Due
           <input
             type="datetime-local"
@@ -120,17 +120,17 @@ export function LeadTaskWidget({
             onChange={(e) => setDueAt(e.target.value)}
             disabled={pending}
             data-testid="lead-task-due-at"
-            className="h-9 rounded-md border border-input bg-transparent px-2 text-sm text-[#1c1917] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
+            className="h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-2 text-sm text-[#1c1917] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
           />
         </label>
-        <label className="flex flex-col gap-1 text-xs font-medium text-[#78716c]">
+        <label className="flex min-w-0 flex-col gap-1 text-xs font-medium text-[#78716c]">
           Owner
           <select
             value={assigneeId}
             onChange={(e) => setAssigneeId(e.target.value)}
             disabled={pending || loadingMembers}
             data-testid="lead-task-assignee"
-            className="h-9 rounded-md border border-input bg-transparent px-2 text-sm text-[#1c1917] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
+            className="h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-2 text-sm text-[#1c1917] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
           >
             <option value="" disabled>
               Choose owner

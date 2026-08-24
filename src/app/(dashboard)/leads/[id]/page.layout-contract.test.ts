@@ -4,76 +4,58 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const source = fs.readFileSync(path.join(__dirname, "page.tsx"), "utf8");
+const tagsSource = fs.readFileSync(
+  path.join(__dirname, "tags-section.tsx"),
+  "utf8",
+);
 
-function locateLeadRecordSummary() {
-  const testIdStart = source.indexOf('data-testid="lead-record-summary"');
-  const openingTagStart = source.lastIndexOf("<div", testIdStart);
-  const openingTagEnd = source.indexOf(">", openingTagStart);
-
-  return { testIdStart, openingTagStart, openingTagEnd };
-}
-
-describe("lead detail record summary layout", () => {
-  it("places the four compact record panels before Working state", () => {
-    const {
-      testIdStart: summaryTestIdStart,
-      openingTagStart: summaryStart,
-      openingTagEnd: summaryOpeningTagEnd,
-    } = locateLeadRecordSummary();
-    const summaryOpeningTag = source.slice(summaryStart, summaryOpeningTagEnd);
-    const workingStateStart = source.indexOf("<LeadIdentityActions");
-    const summarySource = source.slice(summaryStart, workingStateStart);
-
-    expect(summaryTestIdStart).toBeGreaterThan(-1);
-    expect(summaryStart).toBeGreaterThan(-1);
-    expect(summaryOpeningTagEnd).toBeGreaterThan(summaryStart);
-    expect(summaryTestIdStart).toBeLessThan(summaryOpeningTagEnd);
-    expect(workingStateStart).toBeGreaterThan(summaryStart);
-    const className = summaryOpeningTag.match(
-      /className=["']([^"']*)["']/,
-    )?.[1];
-    expect(className).toBeDefined();
-    const classTokens = new Set(className?.split(/\s+/).filter(Boolean));
-    expect(classTokens.has("grid")).toBe(true);
-    expect(classTokens.has("grid-cols-1")).toBe(true);
-    expect(classTokens.has("md:grid-cols-2")).toBe(true);
-    expect(classTokens.has("min-[1440px]:grid-cols-4")).toBe(true);
-    expect(summarySource.match(/<Section\s+title=/g)).toHaveLength(4);
-    const orderedTitlePatterns = [
-      /<Section\s+title=["']Property["']/,
-      /<Section\s+title=["']Address quality \(USPS\)["']/,
-      /<Section\s+title=["']Homeowner["']/,
-      /<Section\s+title=["']Listing agent["']/,
+describe("lead detail v2 layout contract", () => {
+  it("renders the final hero-to-workspace order", () => {
+    const orderedTokens = [
+      "<LeadMediaHero",
+      "<DealSnapshotStrip",
+      "<LeadIdentityActions",
+      'data-testid="lead-save-warning"',
+      "<AiAttentionBanner",
+      'data-testid="lead-workspace-primary"',
     ];
-    const titleOffsets = orderedTitlePatterns.map(
-      (pattern) => summarySource.match(pattern)?.index ?? -1,
-    );
-    expect(titleOffsets.every((offset) => offset >= 0)).toBe(true);
-    expect(titleOffsets).toEqual([...titleOffsets].sort((a, b) => a - b));
-    expect(summarySource).toMatch(
-      /<SoftphoneLeadButton\s+lead=\{detailSoftphoneLead\}\s*\/>/,
-    );
+    const offsets = orderedTokens.map((token) => source.indexOf(token));
+    expect(offsets.every((offset) => offset >= 0)).toBe(true);
+    expect(offsets).toEqual([...offsets].sort((a, b) => a - b));
   });
 
-  it("keeps imported notes out of the four-column summary", () => {
-    const {
-      testIdStart: summaryTestIdStart,
-      openingTagStart: summaryStart,
-      openingTagEnd: summaryOpeningTagEnd,
-    } = locateLeadRecordSummary();
-    const workingStateStart = source.indexOf("<LeadIdentityActions");
-    const importedNotesStart =
-      source.match(/<Section\s+title=["']Imported notes \(legacy\)["']/)
-        ?.index ?? -1;
+  it("removes the normal Page gutter and uses the 1280px two-column boundary", () => {
+    expect(source).toContain('<Page className="gap-0 p-0">');
+    expect(source).toContain("@container/lead-workspace");
+    expect(source).toContain("xl:grid-cols-[minmax(0,1fr)_340px]");
+    expect(source).toContain('aria-label="Lead dossier"');
+  });
 
-    expect(summaryTestIdStart).toBeGreaterThan(-1);
-    expect(summaryStart).toBeGreaterThan(-1);
-    expect(summaryOpeningTagEnd).toBeGreaterThan(summaryStart);
-    expect(summaryTestIdStart).toBeLessThan(summaryOpeningTagEnd);
-    expect(workingStateStart).toBeGreaterThan(summaryStart);
-    expect(importedNotesStart).toBeGreaterThan(workingStateStart);
-    expect(source.slice(summaryStart, workingStateStart)).not.toContain(
-      "Imported notes (legacy)",
-    );
+  it("places the reply and note composer after the unified timeline", () => {
+    const timeline = source.indexOf("<LeadActivityTimeline");
+    const composers = source.indexOf('data-testid="lead-activity-composers"');
+    const reply = source.indexOf("<InlineReply", composers);
+    const note = source.indexOf("<AddNoteComposer", composers);
+    expect(timeline).toBeGreaterThan(-1);
+    expect(composers).toBeGreaterThan(timeline);
+    expect(reply).toBeGreaterThan(composers);
+    expect(note).toBeGreaterThan(composers);
+  });
+
+  it("promotes the five approved snapshot groups and retains Full record", () => {
+    for (const token of [
+      "Equity (est.)",
+      '"ARV"',
+      "Repair est.",
+      "Mortgage bal.",
+      '"Property"',
+      'data-testid="lead-full-record"',
+    ]) {
+      expect(source).toContain(token);
+    }
+  });
+
+  it("keeps the expanded custom-tag input at the 36px route target", () => {
+    expect(tagsSource).toContain('className="h-9 w-48 max-w-full text-xs"');
   });
 });

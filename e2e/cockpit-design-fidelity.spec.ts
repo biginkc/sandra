@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import {
   adminClient,
+  DEFAULT_ORG_ID,
   ensureTestUser,
   resetTenantTables,
   seedProspects,
@@ -23,7 +24,9 @@ import {
  * "Assigned:" line, FAB presence.
  */
 
-async function seedDesignThread(admin: ReturnType<typeof adminClient>): Promise<{
+async function seedDesignThread(
+  admin: ReturnType<typeof adminClient>,
+): Promise<{
   contactId: string;
   propertyId: string;
   threadId: string;
@@ -107,8 +110,7 @@ async function seedDesignThread(admin: ReturnType<typeof adminClient>): Promise<
         property_id: prop.id,
         from_address:
           m.direction === "inbound" ? "+12105550192" : "+18162804181",
-        to_address:
-          m.direction === "inbound" ? "+18162804181" : "+12105550192",
+        to_address: m.direction === "inbound" ? "+18162804181" : "+12105550192",
         body: m.body,
         created_at: new Date(baseTime + m.offsetMin * 60_000).toISOString(),
         read_at: m.direction === "inbound" ? new Date().toISOString() : null,
@@ -121,10 +123,34 @@ async function seedDesignThread(admin: ReturnType<typeof adminClient>): Promise<
       );
     }
     if (threadId && threadId !== inserted.conversation_id) {
-      throw new Error("design messages were assigned to different conversations");
+      throw new Error(
+        "design messages were assigned to different conversations",
+      );
     }
     threadId = inserted.conversation_id;
   }
+
+  const { error: noteError } = await admin.from("lead_notes").insert({
+    org_id: DEFAULT_ORG_ID,
+    property_id: prop.id,
+    body: "Seller mentioned the roof was replaced last year.",
+    created_at: new Date(baseTime - 179 * 60_000).toISOString(),
+  });
+  if (noteError) throw new Error(`note seed failed: ${noteError.message}`);
+
+  const callTime = new Date(baseTime - 119 * 60_000).toISOString();
+  const { error: callError } = await admin.from("call_activities").insert({
+    org_id: DEFAULT_ORG_ID,
+    property_id: prop.id,
+    contact_id: contact.id,
+    provider: "jitter",
+    jitter_session_id: "design-fidelity",
+    jitter_attempt_id: `design-fidelity-${Date.now()}`,
+    created_at: callTime,
+    started_at: callTime,
+    outcome: "connected_human",
+  });
+  if (callError) throw new Error(`call seed failed: ${callError.message}`);
 
   if (!threadId) throw new Error("design thread seed returned no conversation");
   return { contactId: contact.id, propertyId: prop.id, threadId };
@@ -212,7 +238,9 @@ test.describe("Messages cockpit — design fidelity", () => {
     await expect(reply).toContainText(/adds the message to Outbox/i);
 
     // Day separator pill in the thread
-    await expect(page.getByTestId("messages-thread-day-sep").first()).toBeVisible();
+    await expect(
+      page.getByTestId("messages-thread-day-sep").first(),
+    ).toBeVisible();
 
     // Capture screenshot for visual review
     await page.screenshot({
@@ -221,7 +249,7 @@ test.describe("Messages cockpit — design fidelity", () => {
     });
   });
 
-  test("lead detail (/leads/[id]) inherits the new bubble + composer", async ({
+  test("lead detail (/leads/[id]) renders the unified timeline before the composer", async ({
     page,
   }) => {
     const admin = adminClient();
@@ -238,9 +266,31 @@ test.describe("Messages cockpit — design fidelity", () => {
       fullPage: true,
     });
 
-    // Same MessagesThread → day separator + bubbles render
-    await expect(page.getByTestId("messages-thread")).toBeVisible();
-    await expect(page.getByTestId("messages-thread-day-sep").first()).toBeVisible();
+    // Lead detail now normalizes messages, notes, and calls into one timeline.
+    const timeline = page.getByTestId("lead-activity-timeline");
+    await expect(timeline).toBeVisible();
+    const events = timeline.locator(
+      '[data-testid="messages-thread-msg"], [data-testid="lead-activity-note"], [data-testid="lead-activity-call"]',
+    );
+    await expect(events).toHaveCount(6);
+    expect(
+      await events.evaluateAll((rows) =>
+        rows.map((row) => row.getAttribute("data-testid")),
+      ),
+    ).toEqual([
+      "messages-thread-msg",
+      "lead-activity-note",
+      "messages-thread-msg",
+      "messages-thread-msg",
+      "lead-activity-call",
+      "messages-thread-msg",
+    ]);
+    await expect(timeline.getByTestId("lead-activity-note")).toContainText(
+      "roof was replaced",
+    );
+    await expect(timeline.getByTestId("lead-activity-call")).toContainText(
+      "Connected",
+    );
 
     // Same InlineReply → From: line + queue-only button + disclaimer
     const reply = page.getByTestId("inline-reply");
@@ -250,5 +300,21 @@ test.describe("Messages cockpit — design fidelity", () => {
       "Queue SMS",
     );
     await expect(reply).toContainText(/adds the message to Outbox/i);
+
+    // The approved chat order keeps reply controls after all timeline rows.
+    expect(
+      await page.evaluate(() => {
+        const activity = document.querySelector(
+          '[data-testid="lead-activity-timeline"]',
+        );
+        const composer = document.querySelector('[data-testid="inline-reply"]');
+        return Boolean(
+          activity &&
+          composer &&
+          activity.compareDocumentPosition(composer) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+        );
+      }),
+    ).toBe(true);
   });
 });

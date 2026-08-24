@@ -18,6 +18,7 @@ type CallTranscriptRow =
 
 export type CallActivityRollupRow = {
   id: string;
+  created_at: string;
   started_at: string | null;
   outcome: string | null;
   disposition: string | null;
@@ -33,6 +34,7 @@ export type CallActivityRollupRow = {
 type RealtimeCallActivityRow = Pick<
   CallActivityRollupRow,
   | "id"
+  | "created_at"
   | "started_at"
   | "outcome"
   | "disposition"
@@ -50,7 +52,7 @@ export type LeadCallSummaryProps = {
 };
 
 const CALL_ACTIVITY_WITH_ARTIFACTS =
-  "id, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)";
+  "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)";
 
 const CHILD_STATUS_FIELDS = [
   "recording_status",
@@ -64,9 +66,9 @@ const ARTIFACT_RECOVERY_INTERVAL_MS = 30_000;
 
 function sortRows(rows: CallActivityRollupRow[]): CallActivityRollupRow[] {
   return [...rows].sort((a, b) => {
-    const aTime = a.started_at ?? "";
-    const bTime = b.started_at ?? "";
-    return bTime.localeCompare(aTime);
+    const aTime = a.started_at ?? a.created_at;
+    const bTime = b.started_at ?? b.created_at;
+    return bTime.localeCompare(aTime) || b.id.localeCompare(a.id);
   });
 }
 
@@ -285,23 +287,22 @@ function TranscriptState({
   );
 }
 
-export function LeadCallSummary({
+export function useLeadCallRows({
   propertyId,
   initialRows,
-  jitterHost,
-}: LeadCallSummaryProps) {
+}: Pick<LeadCallSummaryProps, "propertyId" | "initialRows">) {
   const [rows, setRows] = useState<CallActivityRollupRow[]>(() =>
     sortRows(initialRows),
   );
   const rowsRef = useRef(rows);
   const refetchGenerationRef = useRef(new Map<string, number>());
 
-  const hasJitterHost =
-    typeof jitterHost === "string" && jitterHost.trim().length > 0;
-  const deepLink = hasJitterHost
-    ? `${jitterHost!.replace(/\/$/, "")}/history?prospect_id=${propertyId}`
-    : null;
-  const hostMissingTooltip = "Jitter host not configured";
+  useEffect(() => {
+    const sorted = sortRows(initialRows);
+    rowsRef.current = sorted;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- A route refresh replaces the bounded server snapshot.
+    setRows(sorted);
+  }, [initialRows, propertyId]);
 
   useEffect(() => {
     const supabase = createClient();
@@ -465,6 +466,22 @@ export function LeadCallSummary({
 
   const sortedRows = useMemo(() => sortRows(rows), [rows]);
 
+  return sortedRows;
+}
+
+export function LeadCallSummary({
+  propertyId,
+  initialRows,
+  jitterHost,
+}: LeadCallSummaryProps) {
+  const sortedRows = useLeadCallRows({ propertyId, initialRows });
+  const hasJitterHost =
+    typeof jitterHost === "string" && jitterHost.trim().length > 0;
+  const deepLink = hasJitterHost
+    ? `${jitterHost!.replace(/\/$/, "")}/history?prospect_id=${propertyId}`
+    : null;
+  const hostMissingTooltip = "Jitter host not configured";
+
   const linkButton = (label: "Open in Jitter" | "Call this lead") =>
     deepLink ? (
       <a href={deepLink} aria-label={`${label} in Jitter`}>
@@ -531,54 +548,77 @@ export function LeadCallSummary({
       </div>
 
       <div className="min-w-0 space-y-3" data-testid="call-history">
-        {sortedRows.map((row) => {
-          const disposition = row.disposition?.trim() || null;
-          return (
-            <article
-              className="border-border/70 min-w-0 rounded-md border p-3"
-              key={row.id}
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge
-                  className={cn(
-                    "h-auto min-h-5 max-w-full border-transparent whitespace-normal break-words",
-                    outcomeClass(row.outcome),
-                  )}
-                  data-testid={`outcome-badge-${row.id}`}
-                >
-                  {outcomeLabel(row.outcome)}
-                </Badge>
-                {disposition && disposition !== row.outcome ? (
-                  <Badge
-                    className={cn(
-                      "h-auto min-h-5 max-w-full border-transparent whitespace-normal break-words",
-                      dispositionClass(disposition),
-                    )}
-                    data-testid={`disposition-badge-${row.id}`}
-                  >
-                    {outcomeLabel(disposition)}
-                  </Badge>
-                ) : null}
-                {row.started_at ? (
-                  <time
-                    className="text-muted-foreground text-xs"
-                    dateTime={row.started_at}
-                  >
-                    {formatDistanceToNow(new Date(row.started_at), {
-                      addSuffix: true,
-                    })}
-                  </time>
-                ) : (
-                  <span className="text-muted-foreground text-xs">
-                    Time unavailable
-                  </span>
-                )}
-              </div>
-              <CallArtifactStates row={row} />
-            </article>
-          );
-        })}
+        {sortedRows.map((row) => (
+          <CallEventCard key={row.id} row={row} />
+        ))}
       </div>
     </section>
+  );
+}
+
+export function CallEventCard({
+  row,
+  jitterHref,
+}: {
+  row: CallActivityRollupRow;
+  jitterHref?: string | null;
+}) {
+  const disposition = row.disposition?.trim() || null;
+  const timestamp = row.started_at ?? row.created_at;
+  return (
+    <article
+      className="border-border/70 min-w-0 rounded-lg border bg-background p-3"
+      data-testid="lead-activity-call"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge
+          className={cn(
+            "h-auto min-h-5 max-w-full border-transparent whitespace-normal break-words",
+            outcomeClass(row.outcome),
+          )}
+          data-testid={`outcome-badge-${row.id}`}
+        >
+          {outcomeLabel(row.outcome)}
+        </Badge>
+        {disposition && disposition !== row.outcome ? (
+          <Badge
+            className={cn(
+              "h-auto min-h-5 max-w-full border-transparent whitespace-normal break-words",
+              dispositionClass(disposition),
+            )}
+            data-testid={`disposition-badge-${row.id}`}
+          >
+            {outcomeLabel(disposition)}
+          </Badge>
+        ) : null}
+        <time className="text-muted-foreground text-xs" dateTime={timestamp}>
+          {formatDistanceToNow(new Date(timestamp), { addSuffix: true })}
+        </time>
+        {jitterHref === undefined ? null : jitterHref ? (
+          <a
+            href={jitterHref}
+            aria-label="Open call in Jitter"
+            className="ml-auto inline-flex min-h-9 items-center gap-1 rounded-md border border-input px-2 text-xs font-semibold hover:bg-muted"
+          >
+            Open in Jitter
+            <ExternalLink className="size-3" aria-hidden />
+          </a>
+        ) : (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled
+            aria-disabled="true"
+            title="Jitter host not configured"
+            className="ml-auto min-h-9"
+          >
+            Open in Jitter
+            <ExternalLink className="size-3" aria-hidden />
+          </Button>
+        )}
+      </div>
+      <CallArtifactStates row={row} />
+    </article>
   );
 }

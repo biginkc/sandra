@@ -73,6 +73,8 @@ process.env.E2E_QUIET_HOURS_NOW =
 
 const browserChannel =
   process.env.PLAYWRIGHT_BROWSER_CHANNEL === "chrome" ? "chrome" : undefined;
+const useWebpackDevServer =
+  process.env.PLAYWRIGHT_WEBPACK_DEV_SERVER === "1";
 
 const webServerEnv: Record<string, string> = {
   // The Next app reads these for its Supabase clients. Point them at the
@@ -151,7 +153,9 @@ export default defineConfig({
   ],
   webServer: {
     // Dedicated port so e2e runs don't collide with a human-run `npm run dev`.
-    command: "npx next dev -p 3456",
+    command: useWebpackDevServer
+      ? "npx next dev --webpack -p 3456"
+      : "npx next dev -p 3456",
     url: "http://localhost:3456/login",
     // This suite resets tenant tables and exercises background work. Never
     // attach to an arbitrary process already listening on the port: it may
