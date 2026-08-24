@@ -27,6 +27,20 @@ describe("<InlineReply /> disabled explanations", () => {
     );
   });
 
+  it("renders an adjacent compact action with the Outbox explanation", () => {
+    render(
+      <InlineReply
+        propertyId="property-1"
+        homeownerContactId="contact-1"
+        homeownerPhone="+18165550123"
+        footerAction={<button type="button">Add note</button>}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Add note" })).toBeVisible();
+    expect(screen.getByText(/adds the message to Outbox/i)).toBeVisible();
+  });
+
   it("explains that a missing contact prevents a reply", () => {
     render(
       <InlineReply

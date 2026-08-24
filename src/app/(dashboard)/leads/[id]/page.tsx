@@ -559,6 +559,8 @@ export default async function LeadDetailPage({
         .join(", ") || null
     );
   })();
+  const inlineReplyUnavailable =
+    !lead.homeowner?.id || !homeownerSmsPhone;
 
   const heroActions = (
     <>
@@ -602,24 +604,46 @@ export default async function LeadDetailPage({
       <span className="border-border inline-flex overflow-hidden rounded-full border [&_[data-slot=button]]:rounded-none [&_[data-slot=button]]:border-0">
         {prevId ? (
           <Link href={`/leads/${prevId}`}>
-            <Button variant="ghost" size="icon-sm" aria-label="Previous">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="min-w-9"
+              aria-label="Previous"
+            >
               <ChevronLeft className="h-4 w-4" />
             </Button>
           </Link>
         ) : (
-          <Button variant="ghost" size="icon-sm" disabled aria-label="No previous">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="min-w-9"
+            disabled
+            aria-label="No previous"
+          >
             <ChevronLeft className="h-4 w-4" />
           </Button>
         )}
         <span className="bg-border w-px" aria-hidden />
         {nextId ? (
           <Link href={`/leads/${nextId}`}>
-            <Button variant="ghost" size="icon-sm" aria-label="Next">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="min-w-9"
+              aria-label="Next"
+            >
               <ChevronRight className="h-4 w-4" />
             </Button>
           </Link>
         ) : (
-          <Button variant="ghost" size="icon-sm" disabled aria-label="No next">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="min-w-9"
+            disabled
+            aria-label="No next"
+          >
             <ChevronRight className="h-4 w-4" />
           </Button>
         )}
@@ -761,13 +785,14 @@ export default async function LeadDetailPage({
                     (message) => message.id,
                   )}
                   footerAction={
-                    !smsPresentation.smsRestricted ? (
+                    !smsPresentation.smsRestricted &&
+                    !inlineReplyUnavailable ? (
                       <AddNoteComposer propertyId={lead.id} compact />
                     ) : null
                   }
                 />
               </SmsEntryPointGate>
-              {smsPresentation.smsRestricted ? (
+              {smsPresentation.smsRestricted || inlineReplyUnavailable ? (
                 <div className="mt-2 flex justify-end">
                   <AddNoteComposer propertyId={lead.id} compact />
                 </div>
@@ -884,7 +909,7 @@ export default async function LeadDetailPage({
             </Section>
 
             <Section title="Automation & enrichment" compact>
-              <div className="flex flex-col items-stretch gap-2 text-xs [&_label]:justify-between [&_label]:border-0 [&_label]:px-0 [&_button]:w-auto [&_button]:self-start">
+              <div className="flex flex-col items-stretch gap-2 text-xs [&_label]:min-h-9 [&_label]:justify-between [&_label]:border-0 [&_label]:px-0 sm:[&_label]:min-h-0 [&_button]:w-auto [&_button]:self-start">
                 <AiResponderToggle
                   propertyId={lead.id}
                   initialDisabled={lead.ai_responder_disabled}

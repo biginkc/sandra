@@ -3,7 +3,8 @@
 - Goal ID: `sandra-lead-detail-v2-fidelity-fix-20260824`
 - Goal: Make the implemented lead-detail page visually match the contained ZIP prototype without adding, removing, or changing lead-page behavior.
 - ZIP contract: `docs/Sandra Leads page redesign.zip` (`PROMPT.md`, `PARITY.md`, and `Sandra Lead Detail v2.dc.html`).
-- Implementation baseline: `origin/main` at `cb9b779dba7c47b9c556a1b07d92511ed93cf19a` (PR #393).
+- Initial implementation baseline: `origin/main` at `cb9b779dba7c47b9c556a1b07d92511ed93cf19a` (PR #393).
+- Refreshed implementation baseline: `origin/main` at `c7fe232` (PR #395, Street View address-resolution fix).
 - Branch: `codex/sandra-lead-detail-v2-fidelity-fix` in an isolated worktree.
 - Scope: presentation and responsive layout only. Existing DNC, consent, communications, task, appointment, enrichment, activity-source, and load-failure behavior remains authoritative.
 
@@ -26,6 +27,8 @@
 - 2026-08-24: refreshed `origin/main`; confirmed PR #393 is the merged implementation at the baseline above.
 - 2026-08-24: rendered the contained standalone prototype at 1440x900 and 390x844.
 - 2026-08-24: seeded the existing safe E2E test tenant and captured the merged page at 1440px. The structural E2E passed, but visual comparison rejected the oversized working-state card, boxed activity workspace, side-by-side Add-note panel, table-like dossier, and extra Back button.
+- 2026-08-24: implemented the first fidelity pass and rebased it cleanly onto PR #395. The newer main commit only changes the media resolver and its tests; no visual file or behavior in this fix conflicted.
+- 2026-08-24: focused typecheck, unit/RTL contracts, the seeded unified-timeline E2E, and a new 1280/1024/390/320 responsive E2E pass. The responsive pass proves the 1280 dossier is beside activity, the smaller widths stack, mobile route controls remain at least 36px tall, and document overflow is zero.
 
 ## Status
 

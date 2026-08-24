@@ -54,6 +54,31 @@ describe("<NextActionCard />", () => {
     );
   });
 
+  it("uses the compact inline-chip treatment in the working-state bar", () => {
+    const { rerender } = render(
+      <NextActionCard task={null} timezone="America/Chicago" compact />,
+    );
+    expect(screen.getByTestId("lead-no-next-action")).toHaveClass(
+      "inline-flex",
+      "rounded-full",
+    );
+    expect(screen.getByRole("link", { name: "Set one" })).toHaveClass(
+      "min-h-9",
+      "sm:min-h-6",
+    );
+
+    rerender(
+      <NextActionCard task={task} timezone="America/Chicago" compact />,
+    );
+    expect(screen.getByTestId("lead-next-action")).toHaveClass(
+      "inline-flex",
+      "rounded-full",
+    );
+    expect(screen.getByTestId("lead-next-action")).toHaveTextContent(
+      "Next: Call homeowner",
+    );
+  });
+
   it("shows the nearest appointment with its time and links to appointment controls", () => {
     render(
       <NextActionCard

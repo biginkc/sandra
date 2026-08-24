@@ -40,6 +40,10 @@ describe("lead detail v2 layout contract", () => {
     expect(composers).toBeGreaterThan(timeline);
     expect(reply).toBeGreaterThan(composers);
     expect(note).toBeGreaterThan(composers);
+    expect(source).toContain("inlineReplyUnavailable");
+    expect(source).toContain(
+      "smsPresentation.smsRestricted || inlineReplyUnavailable",
+    );
   });
 
   it("promotes the five approved snapshot groups and retains Full record", () => {

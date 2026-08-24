@@ -92,7 +92,7 @@ export function NextActionCard({
           <span>No next action</span>
           <a
             href="#set-next-action"
-            className="inline-flex min-h-6 items-center rounded-full bg-amber-950 px-3 text-[11px] font-bold text-white"
+            className="inline-flex min-h-9 items-center rounded-full bg-amber-950 px-3 text-[11px] font-bold text-white sm:min-h-6"
           >
             Set one
           </a>
@@ -148,7 +148,7 @@ export function NextActionCard({
           {isAppointment ? (
             <a
               href="#lead-appointments"
-              className="border-input bg-background hover:bg-accent inline-flex min-h-6 items-center rounded-full border px-3 text-[11px] font-bold"
+              className="border-input bg-background hover:bg-accent inline-flex min-h-9 items-center rounded-full border px-3 text-[11px] font-bold sm:min-h-6"
             >
               View appointment
             </a>
