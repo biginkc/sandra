@@ -4,6 +4,10 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const source = fs.readFileSync(path.join(__dirname, "page.tsx"), "utf8");
+const tagsSource = fs.readFileSync(
+  path.join(__dirname, "tags-section.tsx"),
+  "utf8",
+);
 
 describe("lead detail v2 layout contract", () => {
   it("renders the final hero-to-workspace order", () => {
@@ -49,5 +53,9 @@ describe("lead detail v2 layout contract", () => {
     ]) {
       expect(source).toContain(token);
     }
+  });
+
+  it("keeps the expanded custom-tag input at the 36px route target", () => {
+    expect(tagsSource).toContain('className="h-9 w-48 max-w-full text-xs"');
   });
 });

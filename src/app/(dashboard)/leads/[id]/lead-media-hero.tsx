@@ -30,7 +30,11 @@ export function LeadMediaHero({
           ]}
           title={address}
           description={description || "—"}
-          actions={actions}
+          actions={
+            <div className="flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9">
+              {actions}
+            </div>
+          }
         />
       </div>
     );

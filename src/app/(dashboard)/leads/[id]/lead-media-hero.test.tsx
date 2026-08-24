@@ -81,5 +81,10 @@ describe("<LeadMediaHero />", () => {
     expect(screen.getByTestId("lead-media-flat")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "123 Main St" })).toBeVisible();
     expect(screen.queryByTitle(/view of/i)).toBeNull();
+    const actions = screen.getByRole("button", {
+      name: "Book appointment",
+    }).parentElement;
+    expect(actions).toHaveClass("flex-wrap", "min-w-0");
+    expect(actions?.className).toContain("[&_button]:min-h-9");
   });
 });

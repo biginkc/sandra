@@ -284,7 +284,7 @@ function AddForm({
             onCancel();
           }
         }}
-        className="h-7 w-48 text-xs"
+        className="h-9 w-48 max-w-full text-xs"
       />
       {(suggestions.length > 0 || (query.trim() && !exactMatch)) && (
         <div className="bg-popover border-border absolute top-full left-0 z-10 mt-1 flex max-h-52 w-48 flex-col overflow-auto rounded-md border p-1 text-xs shadow-md">
