@@ -4,7 +4,7 @@ export type LeadMediaPresentation =
   | {
       kind: "streetView";
       embedUrl: string;
-      heading: number;
+      heading: number | null;
       panoramaId: string;
     }
   | {
@@ -15,8 +15,7 @@ export type LeadMediaPresentation =
         | "no-coverage"
         | "metadata-failure"
         | "missing-metadata-key"
-        | "missing-signing-secret"
-        | "missing-coordinates";
+        | "missing-signing-secret";
     }
   | {
       kind: "flat";
@@ -74,6 +73,7 @@ export async function resolveLeadMediaPresentation(
   if (!embedKey) return { kind: "flat", reason: "missing-embed-key" };
 
   const coordinates = normalizeCoordinates(location.lat, location.lon);
+  const completeAddress = formatCompleteAddress(location);
   const metadataKey =
     options.metadataKey ?? process.env.GOOGLE_STREET_VIEW_METADATA_KEY;
   const signingSecret =
@@ -90,36 +90,43 @@ export async function resolveLeadMediaPresentation(
       ? "missing-signing-secret"
       : "metadata-failure";
 
-  if (coordinates && metadataKey && signingSecret) {
-    const metadata = await loadStreetViewMetadata(coordinates, {
+  const streetViewLookup = coordinates
+    ? `${coordinates.lat},${coordinates.lon}`
+    : completeAddress;
+
+  if (streetViewLookup && metadataKey && signingSecret) {
+    const metadata = await loadStreetViewMetadata(streetViewLookup, {
       metadataKey,
       signingSecret,
       fetcher: options.fetcher ?? fetch,
       cacheEnabled: options.fetcher === undefined,
     });
     if (metadata.kind === "found") {
-      const panoramaDistance = calculateDistanceMeters(
-        metadata.location.lat,
-        metadata.location.lng,
-        coordinates.lat,
-        coordinates.lon,
-      );
-      const heading =
-        panoramaDistance < UNSTABLE_HEADING_DISTANCE_METERS
+      const panoramaDistance = coordinates
+        ? calculateDistanceMeters(
+            metadata.location.lat,
+            metadata.location.lng,
+            coordinates.lat,
+            coordinates.lon,
+          )
+        : null;
+      const heading = coordinates
+        ? panoramaDistance! < UNSTABLE_HEADING_DISTANCE_METERS
           ? 0
           : calculateHeading(
               metadata.location.lat,
               metadata.location.lng,
               coordinates.lat,
               coordinates.lon,
-            );
+            )
+        : null;
       const params = new URLSearchParams({
         key: embedKey,
         pano: metadata.pano_id,
-        heading: heading.toFixed(1),
         pitch: "0",
         fov: "80",
       });
+      if (heading !== null) params.set("heading", heading.toFixed(1));
       return {
         kind: "streetView",
         embedUrl: `${EMBED_BASE}/streetview?${params.toString()}`,
@@ -146,7 +153,6 @@ export async function resolveLeadMediaPresentation(
     };
   }
 
-  const completeAddress = formatCompleteAddress(location);
   if (completeAddress) {
     const params = new URLSearchParams({
       key: embedKey,
@@ -158,7 +164,7 @@ export async function resolveLeadMediaPresentation(
       kind: "aerial",
       embedUrl: `${EMBED_BASE}/place?${params.toString()}`,
       resolvedBy: "address",
-      fallbackReason: "missing-coordinates",
+      fallbackReason: aerialFallbackReason,
     };
   }
 
@@ -205,7 +211,7 @@ export function calculateDistanceMeters(
 }
 
 async function loadStreetViewMetadata(
-  coordinates: { lat: number; lon: number },
+  locationQuery: string,
   options: {
     metadataKey: string;
     signingSecret: string;
@@ -213,13 +219,13 @@ async function loadStreetViewMetadata(
     cacheEnabled: boolean;
   },
 ): Promise<StreetViewMetadataResult> {
-  const cacheKey = `${coordinates.lat.toFixed(5)},${coordinates.lon.toFixed(5)}`;
+  const cacheKey = locationQuery.trim().toLowerCase();
   const cached = options.cacheEnabled ? metadataCache.get(cacheKey) : undefined;
   if (cached && cached.expiresAt > Date.now()) return cached.result;
   if (cached) metadataCache.delete(cacheKey);
 
   const url = new URL(STREET_VIEW_METADATA_BASE);
-  url.searchParams.set("location", `${coordinates.lat},${coordinates.lon}`);
+  url.searchParams.set("location", locationQuery);
   url.searchParams.set("radius", String(STREET_VIEW_METADATA_RADIUS_METERS));
   url.searchParams.set("source", "outdoor");
   url.searchParams.set("key", options.metadataKey);
