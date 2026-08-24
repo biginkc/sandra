@@ -331,28 +331,33 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     }).toPass({ timeout: 5_000 });
   });
 
-  test("8. sidebar nav links all route correctly", async ({ page }) => {
+  test("8. sidebar nav destinations are correctly mapped and load", async ({ page }) => {
     const admin = adminClient();
     await seedStarterLibrary(admin, await seedOrgId());
 
     await page.goto("/sequences");
-    // Click through each visible primary nav item and assert the URL changes
-    // (we can't easily assert the active-link class from Playwright without
-    // more selectors, but landing on the page is the load-bearing check).
-    const targets: Array<{ label: RegExp; path: RegExp }> = [
-      { label: /^Leads$/, path: /\/leads/ },
-      { label: /^Prospects$/, path: /\/properties/ },
-      { label: /^Lists$/, path: /\/lists/ },
-      { label: /^Sequences$/, path: /\/sequences/ },
-      { label: /^Import$/, path: /\/import/ },
-      { label: /^Messages$/, path: /\/messages/ },
-      { label: /^Jobs$/, path: /\/jobs/ },
+    // Assert the sidebar's exact route mapping, then load every destination.
+    // Client-side navigation remains covered by cockpit-inbox-shell.spec.ts;
+    // direct loading here avoids conflating a dev-server RSC abort with an
+    // incorrect Sandra link or an unavailable destination.
+    const targets: Array<{ label: RegExp; href: string; path: RegExp }> = [
+      { label: /^Leads$/, href: "/leads", path: /\/leads/ },
+      { label: /^Prospects$/, href: "/properties", path: /\/properties/ },
+      { label: /^Lists$/, href: "/lists", path: /\/lists/ },
+      { label: /^Sequences$/, href: "/sequences", path: /\/sequences/ },
+      { label: /^Import$/, href: "/import", path: /\/import/ },
+      { label: /^Messages$/, href: "/messages", path: /\/messages/ },
+      { label: /^Jobs$/, href: "/jobs", path: /\/jobs/ },
     ];
     for (const t of targets) {
       // Sidebar is semantic <nav aria-label="Primary">; target that to avoid
       // matching stray links in page content.
       const nav = page.getByRole("navigation", { name: "Primary" });
-      await nav.getByRole("link", { name: t.label }).click();
+      await expect(nav.getByRole("link", { name: t.label })).toHaveAttribute(
+        "href",
+        t.href,
+      );
+      await page.goto(t.href);
       await expect(page).toHaveURL(t.path);
     }
   });
