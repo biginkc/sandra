@@ -567,7 +567,7 @@ export function CallEventCard({
   const timestamp = row.started_at ?? row.created_at;
   return (
     <article
-      className="border-border/70 min-w-0 rounded-lg border bg-background p-3"
+      className="border-border/70 min-w-0 max-w-[560px] rounded-xl border bg-background p-3"
       data-testid="lead-activity-call"
     >
       <div className="flex flex-wrap items-center gap-2">

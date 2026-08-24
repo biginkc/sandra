@@ -82,6 +82,24 @@ export function NextActionCard({
   };
 
   if (!task) {
+    if (compact) {
+      return (
+        <div
+          className="inline-flex min-h-8 max-w-full flex-wrap items-center gap-2 rounded-full border border-amber-300 bg-amber-50 py-1 pr-1 pl-3 text-xs font-bold text-amber-950"
+          data-testid="lead-no-next-action"
+          data-variant="compact"
+        >
+          <CalendarClockIcon className="size-3.5 shrink-0" />
+          <span>No next action</span>
+          <a
+            href="#set-next-action"
+            className="inline-flex min-h-9 items-center rounded-full bg-amber-950 px-3 text-[11px] font-bold text-white sm:min-h-6"
+          >
+            Set one
+          </a>
+        </div>
+      );
+    }
     return (
       <div
         className={cn(
@@ -117,6 +135,93 @@ export function NextActionCard({
   }
 
   const isAppointment = task.type === "appointment";
+
+  if (compact) {
+    return (
+      <div className="flex min-w-0 flex-col gap-1.5">
+        <div
+          className="border-border bg-card inline-flex min-h-8 max-w-full flex-wrap items-center gap-2 rounded-full border py-1 pr-1 pl-3 text-xs"
+          data-testid="lead-next-action"
+          data-variant="compact"
+        >
+          <span className="min-w-0 font-bold break-words">
+            Next: {task.title} · {formatDueAt(task.due_at, timezone)}
+          </span>
+          {isAppointment ? (
+            <a
+              href="#lead-appointments"
+              className="border-input bg-background hover:bg-accent inline-flex min-h-9 items-center rounded-full border px-3 text-[11px] font-bold sm:min-h-6"
+            >
+              View appointment
+            </a>
+          ) : (
+            <>
+              <Button
+                size="xs"
+                variant="default"
+                disabled={pending}
+                onClick={complete}
+                data-testid={`lead-task-done-${task.id}`}
+                className="min-h-9 rounded-full px-3 sm:min-h-6"
+              >
+                <CheckIcon className="size-3" />
+                Done
+              </Button>
+              <Popover>
+                <PopoverTrigger
+                  render={
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      disabled={pending}
+                      data-testid={`lead-task-snooze-${task.id}`}
+                      className="min-h-9 rounded-full px-3 sm:min-h-6"
+                    >
+                      Snooze
+                      <ChevronDownIcon className="size-3" />
+                    </Button>
+                  }
+                />
+                <PopoverContent className="w-36 p-1" align="end">
+                  {SNOOZE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => snooze(preset.days)}
+                      disabled={pending}
+                      className="hover:bg-muted flex min-h-9 w-full items-center rounded-md px-2 py-1.5 text-left text-xs font-medium disabled:opacity-50"
+                      data-testid={`lead-task-snooze-${preset.days}d-${task.id}`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </PopoverContent>
+              </Popover>
+            </>
+          )}
+        </div>
+        {!isAppointment && failure?.operation.taskId === task.id ? (
+          <div
+            className="border-destructive/30 bg-destructive/5 text-destructive flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs"
+            role="alert"
+            data-testid="lead-next-action-failure"
+          >
+            <span>Task update failed: {failure.message}</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              onClick={() => run(failure.operation)}
+              className="min-h-9 sm:min-h-6"
+            >
+              <RotateCcwIcon className="size-3" />
+              Retry
+            </Button>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div

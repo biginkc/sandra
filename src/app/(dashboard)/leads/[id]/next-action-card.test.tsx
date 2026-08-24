@@ -54,6 +54,29 @@ describe("<NextActionCard />", () => {
     );
   });
 
+  it("uses the compact inline-chip treatment in the working-state bar", () => {
+    const { rerender } = render(
+      <NextActionCard task={null} timezone="America/Chicago" compact />,
+    );
+    expect(screen.getByTestId("lead-no-next-action")).toHaveClass(
+      "inline-flex",
+      "rounded-full",
+    );
+    expect(screen.getByRole("link", { name: "Set one" })).toHaveClass(
+      "min-h-9",
+      "sm:min-h-6",
+    );
+
+    rerender(<NextActionCard task={task} timezone="America/Chicago" compact />);
+    expect(screen.getByTestId("lead-next-action")).toHaveClass(
+      "inline-flex",
+      "rounded-full",
+    );
+    expect(screen.getByTestId("lead-next-action")).toHaveTextContent(
+      "Next: Call homeowner",
+    );
+  });
+
   it("shows the nearest appointment with its time and links to appointment controls", () => {
     render(
       <NextActionCard
@@ -75,6 +98,47 @@ describe("<NextActionCard />", () => {
     ).toHaveAttribute("href", "#lead-appointments");
     expect(screen.queryByRole("button", { name: /Done/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Snooze/ })).toBeNull();
+  });
+
+  it("keeps the compact appointment link touch-sized on mobile", () => {
+    render(
+      <NextActionCard
+        task={{
+          id: "appointment-compact",
+          title: "Property walkthrough",
+          due_at: "2026-08-19T14:00:00.000Z",
+          type: "appointment",
+        }}
+        timezone="America/Chicago"
+        compact
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "View appointment" })).toHaveClass(
+      "min-h-9",
+      "sm:min-h-6",
+    );
+  });
+
+  it("keeps compact task and retry controls touch-sized on mobile", async () => {
+    const user = userEvent.setup();
+    completeTaskAction.mockResolvedValueOnce({
+      ok: false,
+      error: { message: "network unavailable" },
+    });
+
+    render(<NextActionCard task={task} timezone="America/Chicago" compact />);
+
+    const done = screen.getByRole("button", { name: /Done/ });
+    const snooze = screen.getByRole("button", { name: /Snooze/ });
+    expect(done).toHaveClass("min-h-9", "sm:min-h-6");
+    expect(snooze).toHaveClass("min-h-9", "sm:min-h-6");
+
+    await user.click(done);
+    expect(await screen.findByRole("button", { name: "Retry" })).toHaveClass(
+      "min-h-9",
+      "sm:min-h-6",
+    );
   });
 
   it("keeps a failed task mutation visible and safely retryable", async () => {

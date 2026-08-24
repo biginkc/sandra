@@ -46,6 +46,7 @@ vi.mock("@/lib/supabase/client", () => ({
 }));
 
 import {
+  MessageBubble,
   MessagesThread,
   messageBelongsToThread,
   useLeadMessages,
@@ -188,6 +189,82 @@ describe("messageBelongsToThread", () => {
         scope,
       ),
     ).toBe(false);
+  });
+});
+
+describe("<MessageBubble presentation=timeline />", () => {
+  it.each([
+    ["queued", "Queued · in Outbox"],
+    ["failed", "Not delivered"],
+  ])("keeps %s delivery state visible", (status, label) => {
+    render(
+      <MessageBubble
+        message={makeMessage({
+          id: `timeline-${status}`,
+          direction: "outbound",
+          status,
+        })}
+        isContinuation={false}
+        isLastInGroup
+        isMostRecentOutbound
+        presentation="timeline"
+      />,
+    );
+
+    expect(screen.getByTestId("messages-thread-msg")).toHaveAttribute(
+      "data-presentation",
+      "timeline",
+    );
+    expect(
+      screen.getByTestId("messages-thread-delivery-status"),
+    ).toHaveTextContent(label);
+    expect(screen.getByText("Outbound → Seller")).toBeVisible();
+    expect(screen.queryByText("You → Seller")).not.toBeInTheDocument();
+  });
+
+  it("keeps Sandra provenance and identifies the automated sender", () => {
+    render(
+      <MessageBubble
+        message={makeMessage({
+          id: "timeline-sandra",
+          direction: "outbound",
+          status: "delivered",
+          metadata: {
+            generated_by: "ai_responder_v1",
+            confidence: 0.92,
+          },
+        })}
+        isContinuation={false}
+        isLastInGroup
+        isMostRecentOutbound
+        presentation="timeline"
+      />,
+    );
+
+    expect(screen.getByText("Sandra → Seller")).toBeVisible();
+    expect(
+      screen.getByTestId("messages-thread-sandra-reply-icon"),
+    ).toHaveAttribute("title", "Sandra replied · confidence 92%");
+    expect(screen.getByText("Delivered")).toBeVisible();
+  });
+
+  it("keeps inbound compliance keywords visible", () => {
+    render(
+      <MessageBubble
+        message={makeMessage({
+          id: "timeline-stop",
+          direction: "inbound",
+          body: "stop",
+          metadata: { keyword: "stop" },
+        })}
+        isContinuation={false}
+        isLastInGroup
+        isMostRecentOutbound={false}
+        presentation="timeline"
+      />,
+    );
+
+    expect(screen.getByText("STOP")).toBeVisible();
   });
 });
 

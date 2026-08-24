@@ -91,9 +91,15 @@ describe("<LeadMediaHero />", () => {
     expect(image).toHaveAttribute("src", streetImages.small);
     expect(document.querySelector("iframe")).toBeNull();
     expect(screen.queryByTitle("Street View of 123 Main St")).toBeNull();
+    expect(screen.getByTestId("lead-media-street-view")).toHaveClass(
+      "overflow-hidden",
+      "sm:min-h-[230px]",
+      "lg:min-h-[250px]",
+    );
     expect(screen.getByTestId("lead-media-overlay")).toHaveClass(
       "pointer-events-none",
       "pb-9",
+      "lg:flex-row",
       "min-[1024px]:pb-12",
       "min-[1440px]:pb-14",
       "min-[1536px]:pb-[60px]",
@@ -132,7 +138,7 @@ describe("<LeadMediaHero />", () => {
     );
     expect(
       screen.getByRole("button", { name: "Book appointment" }).parentElement,
-    ).toHaveClass("pointer-events-auto");
+    ).toHaveClass("pointer-events-auto", "flex-wrap", "min-w-0");
   });
 
   it("renders the automatic aerial fallback without a view selector", () => {
@@ -219,6 +225,7 @@ describe("<LeadMediaHero />", () => {
     }).parentElement;
     expect(actions).toHaveClass("flex-wrap", "min-w-0");
     expect(actions?.className).toContain("[&_button]:min-h-9");
+    expect(screen.getByText(/Street View unavailable/)).toBeVisible();
   });
 
   it("resets a prior image failure when the resolved lead media changes", () => {

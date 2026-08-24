@@ -26,6 +26,7 @@ import {
 
 async function seedDesignThread(
   admin: ReturnType<typeof adminClient>,
+  testUserId: string,
 ): Promise<{
   contactId: string;
   propertyId: string;
@@ -58,7 +59,7 @@ async function seedDesignThread(
       status: "contacted",
     })
     .eq("id", prop.id)
-    .select("id, homeowner_contact_id, address");
+    .select("id, org_id, homeowner_contact_id, address");
   if (updateError) {
     throw new Error(`property update failed: ${updateError.message}`);
   }
@@ -68,6 +69,11 @@ async function seedDesignThread(
   if (updated[0].homeowner_contact_id !== contact.id) {
     throw new Error(
       `property update didn't persist homeowner_contact_id (got=${updated[0].homeowner_contact_id})`,
+    );
+  }
+  if (updated[0].org_id !== DEFAULT_ORG_ID) {
+    throw new Error(
+      `property update used unexpected org (got=${updated[0].org_id})`,
     );
   }
 
@@ -152,6 +158,18 @@ async function seedDesignThread(
   });
   if (callError) throw new Error(`call seed failed: ${callError.message}`);
 
+  const { error: taskError } = await admin.from("tasks").insert({
+    org_id: DEFAULT_ORG_ID,
+    assignee_id: testUserId,
+    related_property_id: prop.id,
+    type: "follow_up",
+    status: "open",
+    title: "Call homeowner",
+    due_at: new Date(baseTime + 86_400_000).toISOString(),
+    created_by: testUserId,
+  });
+  if (taskError) throw new Error(`task seed failed: ${taskError.message}`);
+
   if (!threadId) throw new Error("design thread seed returned no conversation");
   return { contactId: contact.id, propertyId: prop.id, threadId };
 }
@@ -160,8 +178,8 @@ test.describe("Messages cockpit — design fidelity", () => {
   test("structural design contract holds at 1440px", async ({ page }) => {
     const admin = adminClient();
     await resetTenantTables(admin);
-    await ensureTestUser(admin);
-    const { threadId } = await seedDesignThread(admin);
+    const testUserId = await ensureTestUser(admin);
+    const { threadId } = await seedDesignThread(admin, testUserId);
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`/messages?thread=${threadId}`);
@@ -249,13 +267,13 @@ test.describe("Messages cockpit — design fidelity", () => {
     });
   });
 
-  test("lead detail (/leads/[id]) renders the unified timeline before the composer", async ({
+  test("lead detail (/leads/[id]) matches the compact responsive contract", async ({
     page,
-  }) => {
+  }, testInfo) => {
     const admin = adminClient();
     await resetTenantTables(admin);
-    await ensureTestUser(admin);
-    const { propertyId } = await seedDesignThread(admin);
+    const testUserId = await ensureTestUser(admin);
+    const { propertyId } = await seedDesignThread(admin, testUserId);
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`/leads/${propertyId}`);
@@ -300,6 +318,30 @@ test.describe("Messages cockpit — design fidelity", () => {
       "Queue SMS",
     );
     await expect(reply).toContainText(/adds the message to Outbox/i);
+    await expect(reply.getByTestId("lead-add-note-composer")).toBeVisible();
+
+    // These stable landmarks distinguish the approved compact redesign from
+    // the oversized card layout it replaced.
+    await expect(page.getByRole("link", { name: /^Back\b/i })).toHaveCount(0);
+    await expect(page.getByTestId("lead-working-state-bar")).toBeVisible();
+    await expect(page.getByTestId("lead-next-action")).toHaveAttribute(
+      "data-variant",
+      "compact",
+    );
+    await expect(page.getByRole("button", { name: /Done/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Snooze/ })).toBeVisible();
+    await expect(timeline).toHaveAttribute(
+      "data-presentation",
+      "open-timeline",
+    );
+    await expect(
+      timeline.locator('[data-presentation="timeline"]').first(),
+    ).toBeVisible();
+    await expect(
+      page.locator(
+        'aside[aria-label="Lead dossier"] [data-lead-section="compact"]',
+      ),
+    ).not.toHaveCount(0);
 
     // The approved chat order keeps reply controls after all timeline rows.
     expect(
@@ -316,5 +358,115 @@ test.describe("Messages cockpit — design fidelity", () => {
         );
       }),
     ).toBe(true);
+
+    const viewports = [
+      { width: 1280, height: 900, dossierBeside: true },
+      { width: 1024, height: 900, dossierBeside: false },
+      { width: 390, height: 844, dossierBeside: false },
+      { width: 320, height: 800, dossierBeside: false },
+    ] as const;
+
+    for (const viewport of viewports) {
+      await page.setViewportSize(viewport);
+      // Responsive CSS updates in-place. Keep the already-verified lead DOM
+      // mounted so another shared-tenant suite cannot delete the fixture
+      // between viewport checks and turn a layout test into a database race.
+      await page.waitForTimeout(100);
+      const timeline = page.getByTestId("lead-activity-timeline");
+      const dossier = page.locator('aside[aria-label="Lead dossier"]');
+      await expect(timeline).toBeVisible();
+      await expect(dossier).toBeVisible();
+
+      const layout = await page.evaluate(() => {
+        const timelineNode = document.querySelector(
+          '[data-testid="lead-activity-timeline"]',
+        );
+        const dossierNode = document.querySelector(
+          'aside[aria-label="Lead dossier"]',
+        );
+        if (!timelineNode || !dossierNode) return null;
+        const timelineRect = timelineNode.getBoundingClientRect();
+        const dossierRect = dossierNode.getBoundingClientRect();
+        return {
+          overflow: document.documentElement.scrollWidth - window.innerWidth,
+          timelineTop: timelineRect.top,
+          dossierTop: dossierRect.top,
+          timelineRight: timelineRect.right,
+          dossierLeft: dossierRect.left,
+        };
+      });
+      expect(layout).not.toBeNull();
+      expect(layout!.overflow).toBeLessThanOrEqual(1);
+      if (viewport.dossierBeside) {
+        expect(Math.abs(layout!.timelineTop - layout!.dossierTop)).toBeLessThan(
+          8,
+        );
+        expect(layout!.dossierLeft).toBeGreaterThan(layout!.timelineRight);
+      } else {
+        expect(layout!.dossierTop).toBeGreaterThan(layout!.timelineTop);
+      }
+
+      if (viewport.width <= 390) {
+        const undersized = await page
+          .locator('main button:visible, [data-variant="compact"] a:visible')
+          .evaluateAll((buttons) =>
+            buttons
+              .map((button) => ({
+                label:
+                  button.getAttribute("aria-label") ??
+                  button.textContent?.trim() ??
+                  "button",
+                height: button.getBoundingClientRect().height,
+              }))
+              .filter(({ height }) => height > 0 && height < 35.5),
+          );
+        expect(undersized).toEqual([]);
+      }
+
+      const mediaHero = page.locator(
+        '[data-testid="lead-media-street-view"], [data-testid="lead-media-aerial"]',
+      );
+      if ((await mediaHero.count()) > 0) {
+        const mediaLayout = await page.evaluate(() => {
+          const hero = document.querySelector(
+            '[data-testid="lead-media-street-view"], [data-testid="lead-media-aerial"]',
+          );
+          const overlay = document.querySelector(
+            '[data-testid="lead-media-overlay"]',
+          );
+          if (!hero || !overlay) return null;
+          const heroRect = hero.getBoundingClientRect();
+          const overlayRect = overlay.getBoundingClientRect();
+          return {
+            heroLeft: heroRect.left,
+            heroRight: heroRect.right,
+            heroTop: heroRect.top,
+            heroBottom: heroRect.bottom,
+            overlayLeft: overlayRect.left,
+            overlayRight: overlayRect.right,
+            overlayTop: overlayRect.top,
+            overlayBottom: overlayRect.bottom,
+          };
+        });
+        expect(mediaLayout).not.toBeNull();
+        expect(mediaLayout!.overlayLeft).toBeGreaterThanOrEqual(
+          mediaLayout!.heroLeft,
+        );
+        expect(mediaLayout!.overlayRight).toBeLessThanOrEqual(
+          mediaLayout!.heroRight,
+        );
+        expect(mediaLayout!.overlayTop).toBeGreaterThanOrEqual(
+          mediaLayout!.heroTop,
+        );
+        expect(mediaLayout!.overlayBottom).toBeLessThanOrEqual(
+          mediaLayout!.heroBottom + 1,
+        );
+      }
+
+      await page.screenshot({
+        path: testInfo.outputPath(`lead-detail-${viewport.width}.png`),
+        fullPage: false,
+      });
+    }
   });
 });
