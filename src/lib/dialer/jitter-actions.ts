@@ -14,13 +14,26 @@ import {
   sendAuthenticatedJitterDigit,
   startAuthenticatedJitterCall,
 } from "./jitter-server";
-import type { CallTarget } from "./transport";
+import {
+  isSimulatedTransportEnabled,
+  type CallTarget,
+} from "./transport";
 
 export async function startJitterSoftphoneCall(target: CallTarget) {
   return startAuthenticatedJitterCall(target);
 }
 
 export async function loadJitterSoftphoneCallerIds() {
+  if (isSimulatedTransportEnabled()) {
+    return {
+      ok: true as const,
+      data: {
+        caller_ids: [
+          { phone_e164: "+18165550100", label: "Simulated company number" },
+        ],
+      },
+    };
+  }
   return getAuthenticatedJitterCallerIds();
 }
 
