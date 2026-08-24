@@ -141,11 +141,12 @@ export function LeadMediaHero({
         </p>
       ) : null}
       <div
-        className="pointer-events-none absolute inset-x-0 bottom-9 h-44 bg-gradient-to-t from-slate-950/90 via-slate-950/65 to-transparent"
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-44 bg-[linear-gradient(to_top,transparent_0px,transparent_36px,rgba(2,6,23,0.9)_37px,rgba(2,6,23,0.65)_58%,transparent_100%)] min-[1024px]:bg-[linear-gradient(to_top,transparent_0px,transparent_48px,rgba(2,6,23,0.9)_49px,rgba(2,6,23,0.65)_58%,transparent_100%)] min-[1440px]:bg-[linear-gradient(to_top,transparent_0px,transparent_56px,rgba(2,6,23,0.9)_57px,rgba(2,6,23,0.65)_58%,transparent_100%)] min-[1536px]:bg-[linear-gradient(to_top,transparent_0px,transparent_60px,rgba(2,6,23,0.9)_61px,rgba(2,6,23,0.65)_58%,transparent_100%)] min-[1792px]:bg-[linear-gradient(to_top,transparent_0px,transparent_64px,rgba(2,6,23,0.9)_65px,rgba(2,6,23,0.65)_58%,transparent_100%)]"
         aria-hidden
+        data-testid="lead-media-scrim"
       />
       <div
-        className="pointer-events-none relative z-10 flex min-h-[210px] flex-col justify-end gap-4 px-4 pt-20 pb-12 text-white sm:min-h-[230px] sm:px-6 lg:min-h-[250px] lg:flex-row lg:items-end lg:justify-between"
+        className="pointer-events-none relative z-10 flex min-h-[210px] flex-col justify-end gap-4 px-4 pt-20 pb-9 text-white sm:min-h-[230px] sm:px-6 lg:min-h-[250px] lg:flex-row lg:items-end lg:justify-between min-[1024px]:pb-12 min-[1440px]:pb-14 min-[1536px]:pb-[60px] min-[1792px]:pb-16"
         data-testid="lead-media-overlay"
       >
         <div className="min-w-0 max-w-3xl">
@@ -171,7 +172,10 @@ export function LeadMediaHero({
             {description || "—"}
           </p>
         </div>
-        <div className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9 [&_button]:shadow-sm">
+        <div
+          className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9 [&_button]:border-white/80 [&_button]:bg-white/95 [&_button]:text-slate-950 [&_button]:shadow-sm [&_button]:hover:bg-white"
+          data-testid="lead-media-actions"
+        >
           {actions}
         </div>
       </div>
