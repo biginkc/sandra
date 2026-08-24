@@ -75,17 +75,18 @@ const STREET_VIEW_METADATA_TIMEOUT_MS = 4_000;
 const STREET_VIEW_METADATA_CACHE_TTL_MS = 15 * 60 * 1_000;
 const UNSTABLE_HEADING_DISTANCE_METERS = 3;
 const STATIC_IMAGE_SIZES = {
-  // Mobile hero height is content-driven because the full action set wraps.
-  // These ratios match the measured 320px and 390px production layouts.
+  // Each source is at least as tall as its reserved frame at the applicable
+  // shell width. The browser can therefore fill the frame by trimming only
+  // the top of the scene while keeping both bottom attribution edges intact.
   small: "320x341",
   mobile: "390x289",
   smallTablet: "640x230",
   tablet: "512x230",
-  desktop: "640x208",
-  wide: "640x156",
-  large: "640x135",
-  extraLarge: "640x125",
-  ultra: "640x104",
+  desktop: "640x230",
+  wide: "640x170",
+  large: "640x145",
+  extraLarge: "640x135",
+  ultra: "640x110",
 } as const;
 const metadataCache = new Map<
   string,

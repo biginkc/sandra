@@ -29,11 +29,11 @@ const expectedSizes = {
   mobile: "390x289",
   smallTablet: "640x230",
   tablet: "512x230",
-  desktop: "640x208",
-  wide: "640x156",
-  large: "640x135",
-  extraLarge: "640x125",
-  ultra: "640x104",
+  desktop: "640x230",
+  wide: "640x170",
+  large: "640x145",
+  extraLarge: "640x135",
+  ultra: "640x110",
 } as const;
 
 function metadataResponse(
