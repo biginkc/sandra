@@ -7,6 +7,8 @@
 - Refreshed implementation baseline: `origin/main` at `c7fe232` (PR #395, Street View address-resolution fix).
 - Final refreshed baseline: `origin/main` at `16e5618` (PR #397, signed static Street View plus deterministic image fallback).
 - Latest refreshed baseline: `origin/main` at `216bbd6` (PR #398, ultrawide static-hero sizing).
+- Merge refreshed baseline: `origin/main` at `a83dbca` (PRs #399/#400 plus the assignment-label update).
+- Final merge baseline: `origin/main` at `9573dbf` (PR #401, final hero bottom-edge anchor).
 - Branch: `codex/sandra-lead-detail-v2-fidelity-fix` in an isolated worktree.
 - Scope: presentation and responsive layout only. Existing DNC, consent, communications, task, appointment, enrichment, activity-source, and load-failure behavior remains authoritative.
 
@@ -39,6 +41,9 @@
 - 2026-08-24: rebased onto PR #397 and resolved the media-hero conflict by retaining its signed static images, responsive source set, Street View→aerial→flat failure chain, uncropped Google attribution, and 210px mobile attribution clearance while preserving the prototype-aligned header/actions treatment.
 - 2026-08-24: clean Chrome-channel `cockpit-design-fidelity` pass after rebase: 1440 structural contract plus 1280/1024/390/320 responsive resize checks, compact action links included, zero document overflow, and all screenshots captured. The responsive loop now resizes the already-rendered page instead of reloading the shared fixture at every breakpoint, eliminating an unrelated database-reset race.
 - 2026-08-24: rebased cleanly onto PR #398. Its wider static-image source is retained; the redesign continues to preserve the signed Street View→aerial→flat fallback and Google attribution clearance.
+- 2026-08-24: final merge refresh rebased onto `a83dbca`. The only conflict was the media action treatment; resolved in favor of main's newer bottom-edge alignment and white-control treatment while retaining the redesign's responsive layout and flat fallback.
+- 2026-08-24: post-refresh unit 2,397/2,397, RTL 812/812, typecheck, focused lint, and diff checks pass. A local responsive retry authenticated successfully but was invalidated by the shared E2E tenant deleting the just-seeded property before navigation (captured page is an authenticated 404); the branch's GitHub Playwright check is the final serialized browser gate for this head.
+- 2026-08-24: rebased cleanly onto PR #401 with no conflict; its final hero action anchoring remains authoritative.
 
 ## Status
 
