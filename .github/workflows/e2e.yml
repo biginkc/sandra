@@ -73,7 +73,14 @@ jobs:
           NODE
 
       - name: Run Playwright E2E suite
-        run: npm run test:e2e
+        run: |
+          # Keep the broad serial suite on one shared server, then restart a
+          # fresh server for the two client-navigation contracts. In long runs
+          # Next dev can return valid RSC responses without committing them;
+          # isolation preserves the real click assertions without weakening or
+          # retrying around that server-lifecycle failure.
+          npm run test:e2e -- --grep-invert 'switching tabs preserves URL state|sidebar nav links all route correctly'
+          npm run test:e2e -- --grep 'switching tabs preserves URL state|sidebar nav links all route correctly'
 
       - name: Upload HTML report on failure
         if: failure()
