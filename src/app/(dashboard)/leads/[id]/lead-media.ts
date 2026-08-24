@@ -3,24 +3,34 @@ import { createHmac } from "node:crypto";
 export type LeadMediaPresentation =
   | {
       kind: "streetView";
-      embedUrl: string;
+      images: LeadMediaImages;
+      aerialImages: LeadMediaImages;
+      aerialResolvedBy: "coordinates" | "address";
       heading: number | null;
       panoramaId: string;
     }
   | {
       kind: "aerial";
-      embedUrl: string;
+      images: LeadMediaImages;
       resolvedBy: "coordinates" | "address";
       fallbackReason:
-        | "no-coverage"
-        | "metadata-failure"
-        | "missing-metadata-key"
-        | "missing-signing-secret";
+        "no-coverage" | "metadata-failure" | "missing-metadata-key";
     }
   | {
       kind: "flat";
-      reason: "missing-embed-key" | "missing-location";
+      reason:
+        "missing-static-key" | "missing-signing-secret" | "missing-location";
     };
+
+export type LeadMediaImages = {
+  small: string;
+  mobile: string;
+  smallTablet: string;
+  tablet: string;
+  desktop: string;
+  wide: string;
+  large: string;
+};
 
 export type LeadMediaLocation = {
   lat: number | null;
@@ -47,19 +57,32 @@ type StreetViewMetadataResult =
   | { kind: "failure"; status: string };
 
 type LeadMediaResolverOptions = {
-  embedKey?: string;
+  staticKey?: string;
   metadataKey?: string;
   signingSecret?: string;
   fetcher?: typeof fetch;
 };
 
-const EMBED_BASE = "https://www.google.com/maps/embed/v1";
+const STREET_VIEW_STATIC_BASE =
+  "https://maps.googleapis.com/maps/api/streetview";
+const STATIC_MAP_BASE = "https://maps.googleapis.com/maps/api/staticmap";
 const STREET_VIEW_METADATA_BASE =
   "https://maps.googleapis.com/maps/api/streetview/metadata";
 const STREET_VIEW_METADATA_RADIUS_METERS = 50;
 const STREET_VIEW_METADATA_TIMEOUT_MS = 4_000;
 const STREET_VIEW_METADATA_CACHE_TTL_MS = 15 * 60 * 1_000;
 const UNSTABLE_HEADING_DISTANCE_METERS = 3;
+const STATIC_IMAGE_SIZES = {
+  // Mobile hero height is content-driven because the full action set wraps.
+  // These ratios match the measured 320px and 390px production layouts.
+  small: "320x341",
+  mobile: "390x289",
+  smallTablet: "640x230",
+  tablet: "512x230",
+  desktop: "640x208",
+  wide: "640x156",
+  large: "640x135",
+} as const;
 const metadataCache = new Map<
   string,
   { expiresAt: number; result: StreetViewMetadataResult }
@@ -69,32 +92,37 @@ export async function resolveLeadMediaPresentation(
   location: LeadMediaLocation,
   options: LeadMediaResolverOptions = {},
 ): Promise<LeadMediaPresentation> {
-  const embedKey = options.embedKey ?? process.env.GOOGLE_MAPS_EMBED_KEY;
-  if (!embedKey) return { kind: "flat", reason: "missing-embed-key" };
+  const staticKey = options.staticKey ?? process.env.GOOGLE_MAPS_STATIC_KEY;
+  if (!staticKey) return { kind: "flat", reason: "missing-static-key" };
 
   const coordinates = normalizeCoordinates(location.lat, location.lon);
   const completeAddress = formatCompleteAddress(location);
+  if (!coordinates && !completeAddress) {
+    return { kind: "flat", reason: "missing-location" };
+  }
+
   const metadataKey =
     options.metadataKey ?? process.env.GOOGLE_STREET_VIEW_METADATA_KEY;
   const signingSecret =
     options.signingSecret ??
     process.env.GOOGLE_MAPS_URL_SIGNING_SECRET ??
     undefined;
+  if (!signingSecret) {
+    return { kind: "flat", reason: "missing-signing-secret" };
+  }
 
   let aerialFallbackReason: Extract<
     LeadMediaPresentation,
     { kind: "aerial" }
   >["fallbackReason"] = !metadataKey
     ? "missing-metadata-key"
-    : !signingSecret
-      ? "missing-signing-secret"
-      : "metadata-failure";
+    : "metadata-failure";
 
   const streetViewLookup = coordinates
     ? `${coordinates.lat},${coordinates.lon}`
     : completeAddress;
 
-  if (streetViewLookup && metadataKey && signingSecret) {
+  if (streetViewLookup && metadataKey) {
     const metadata = await loadStreetViewMetadata(streetViewLookup, {
       metadataKey,
       signingSecret,
@@ -120,16 +148,23 @@ export async function resolveLeadMediaPresentation(
               coordinates.lon,
             )
         : null;
-      const params = new URLSearchParams({
-        key: embedKey,
-        pano: metadata.pano_id,
-        pitch: "0",
-        fov: "80",
+      const images = buildStreetViewImages({
+        coordinates,
+        completeAddress,
+        staticKey,
+        signingSecret,
       });
-      if (heading !== null) params.set("heading", heading.toFixed(1));
+      const aerial = buildAerialImages({
+        coordinates,
+        completeAddress,
+        staticKey,
+        signingSecret,
+      });
       return {
         kind: "streetView",
-        embedUrl: `${EMBED_BASE}/streetview?${params.toString()}`,
+        images,
+        aerialImages: aerial.images,
+        aerialResolvedBy: aerial.resolvedBy,
         heading,
         panoramaId: metadata.pano_id,
       };
@@ -138,37 +173,108 @@ export async function resolveLeadMediaPresentation(
       metadata.kind === "no-coverage" ? "no-coverage" : "metadata-failure";
   }
 
-  if (coordinates) {
-    const params = new URLSearchParams({
-      key: embedKey,
-      center: `${coordinates.lat},${coordinates.lon}`,
-      zoom: "19",
-      maptype: "satellite",
-    });
-    return {
-      kind: "aerial",
-      embedUrl: `${EMBED_BASE}/view?${params.toString()}`,
-      resolvedBy: "coordinates",
-      fallbackReason: aerialFallbackReason,
-    };
-  }
+  const aerial = buildAerialImages({
+    coordinates,
+    completeAddress,
+    staticKey,
+    signingSecret,
+  });
+  return {
+    kind: "aerial",
+    images: aerial.images,
+    resolvedBy: aerial.resolvedBy,
+    fallbackReason: aerialFallbackReason,
+  };
+}
 
-  if (completeAddress) {
+function buildStreetViewImages(options: {
+  coordinates: { lat: number; lon: number } | null;
+  completeAddress: string | null;
+  staticKey: string;
+  signingSecret: string;
+}): LeadMediaImages {
+  return mapStaticImageSizes((size) => {
     const params = new URLSearchParams({
-      key: embedKey,
-      q: completeAddress,
-      zoom: "19",
-      maptype: "satellite",
+      size,
+      pitch: "0",
+      fov: "80",
+      return_error_code: "true",
     });
-    return {
-      kind: "aerial",
-      embedUrl: `${EMBED_BASE}/place?${params.toString()}`,
-      resolvedBy: "address",
-      fallbackReason: aerialFallbackReason,
-    };
-  }
+    // Supplying the requested property location without pano or heading lets
+    // Google select nearby coverage and auto-aim its camera at the property.
+    params.set(
+      "location",
+      options.coordinates
+        ? `${options.coordinates.lat},${options.coordinates.lon}`
+        : options.completeAddress!,
+    );
+    params.set("radius", String(STREET_VIEW_METADATA_RADIUS_METERS));
+    params.set("source", "outdoor");
+    return buildSignedGoogleMapsUrl(
+      STREET_VIEW_STATIC_BASE,
+      params,
+      options.staticKey,
+      options.signingSecret,
+    );
+  });
+}
 
-  return { kind: "flat", reason: "missing-location" };
+function buildAerialImages(options: {
+  coordinates: { lat: number; lon: number } | null;
+  completeAddress: string | null;
+  staticKey: string;
+  signingSecret: string;
+}): { images: LeadMediaImages; resolvedBy: "coordinates" | "address" } {
+  const center = options.coordinates
+    ? `${options.coordinates.lat},${options.coordinates.lon}`
+    : options.completeAddress!;
+  return {
+    resolvedBy: options.coordinates ? "coordinates" : "address",
+    images: mapStaticImageSizes((size) => {
+      const params = new URLSearchParams({
+        center,
+        zoom: "19",
+        size,
+        scale: "2",
+        maptype: "satellite",
+      });
+      return buildSignedGoogleMapsUrl(
+        STATIC_MAP_BASE,
+        params,
+        options.staticKey,
+        options.signingSecret,
+      );
+    }),
+  };
+}
+
+function mapStaticImageSizes(
+  build: (
+    size: (typeof STATIC_IMAGE_SIZES)[keyof typeof STATIC_IMAGE_SIZES],
+  ) => string,
+): LeadMediaImages {
+  return {
+    small: build(STATIC_IMAGE_SIZES.small),
+    mobile: build(STATIC_IMAGE_SIZES.mobile),
+    smallTablet: build(STATIC_IMAGE_SIZES.smallTablet),
+    tablet: build(STATIC_IMAGE_SIZES.tablet),
+    desktop: build(STATIC_IMAGE_SIZES.desktop),
+    wide: build(STATIC_IMAGE_SIZES.wide),
+    large: build(STATIC_IMAGE_SIZES.large),
+  };
+}
+
+function buildSignedGoogleMapsUrl(
+  base: string,
+  params: URLSearchParams,
+  staticKey: string,
+  signingSecret: string,
+): string {
+  const url = new URL(base);
+  for (const [name, value] of params) url.searchParams.append(name, value);
+  url.searchParams.set("key", staticKey);
+  url.searchParams.set("signature", signGoogleMapsUrl(url, signingSecret));
+  return url.toString();
 }
 
 export function calculateHeading(

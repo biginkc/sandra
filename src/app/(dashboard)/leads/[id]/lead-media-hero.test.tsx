@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { LeadMediaHero } from "./lead-media-hero";
@@ -10,15 +10,42 @@ const shared = {
   actions: <button type="button">Book appointment</button>,
 };
 
+const streetImages = {
+  small: "https://maps.googleapis.com/maps/api/streetview?size=320x341",
+  mobile: "https://maps.googleapis.com/maps/api/streetview?size=390x289",
+  smallTablet: "https://maps.googleapis.com/maps/api/streetview?size=640x230",
+  tablet: "https://maps.googleapis.com/maps/api/streetview?size=512x230",
+  desktop: "https://maps.googleapis.com/maps/api/streetview?size=640x208",
+  wide: "https://maps.googleapis.com/maps/api/streetview?size=640x156",
+  large: "https://maps.googleapis.com/maps/api/streetview?size=640x135",
+};
+const aerialImages = {
+  small:
+    "https://maps.googleapis.com/maps/api/staticmap?size=320x341&maptype=satellite",
+  mobile:
+    "https://maps.googleapis.com/maps/api/staticmap?size=390x289&maptype=satellite",
+  smallTablet:
+    "https://maps.googleapis.com/maps/api/staticmap?size=640x230&maptype=satellite",
+  tablet:
+    "https://maps.googleapis.com/maps/api/staticmap?size=512x230&maptype=satellite",
+  desktop:
+    "https://maps.googleapis.com/maps/api/staticmap?size=640x208&maptype=satellite",
+  wide:
+    "https://maps.googleapis.com/maps/api/staticmap?size=640x156&maptype=satellite",
+  large:
+    "https://maps.googleapis.com/maps/api/staticmap?size=640x135&maptype=satellite",
+};
+
 describe("<LeadMediaHero />", () => {
-  it("renders the official interactive Street View presentation", () => {
+  it("renders the official static Street View presentation", () => {
     render(
       <LeadMediaHero
         {...shared}
         media={{
           kind: "streetView",
-          embedUrl:
-            "https://www.google.com/maps/embed/v1/streetview?key=test&pano=pano-1",
+          images: streetImages,
+          aerialImages,
+          aerialResolvedBy: "address",
           heading: 173,
           panoramaId: "pano-1",
         }}
@@ -26,20 +53,36 @@ describe("<LeadMediaHero />", () => {
     );
 
     expect(screen.getByTestId("lead-media-street-view")).toBeInTheDocument();
-    const frame = screen.getByTitle("Street View of 123 Main St");
-    expect(frame).toHaveAttribute("allowfullscreen");
-    expect(frame).toHaveAttribute(
+    const image = screen.getByTestId("lead-media-image");
+    expect(image).toHaveAttribute(
+      "src",
+      expect.stringContaining("/maps/api/streetview"),
+    );
+    expect(image).toHaveAttribute("draggable", "false");
+    expect(image).toHaveClass(
+      "object-contain",
+      "object-bottom",
+      "pointer-events-none",
+    );
+    expect(image).toHaveAttribute(
       "referrerpolicy",
       "strict-origin-when-cross-origin",
     );
-    expect(frame).toHaveAttribute(
-      "allow",
-      "accelerometer; gyroscope; fullscreen",
-    );
-    expect(frame).toHaveAttribute(
-      "src",
-      expect.stringContaining("/maps/embed/v1/streetview"),
-    );
+    const sources = Array.from(document.querySelectorAll("source"));
+    expect(sources).toHaveLength(6);
+    expect(
+      sources.map((source) => [source.media, source.getAttribute("srcset")]),
+    ).toEqual([
+      ["(min-width: 1440px)", streetImages.large],
+      ["(min-width: 1280px)", streetImages.wide],
+      ["(min-width: 1024px)", streetImages.desktop],
+      ["(min-width: 768px)", streetImages.tablet],
+      ["(min-width: 640px)", streetImages.smallTablet],
+      ["(min-width: 390px)", streetImages.mobile],
+    ]);
+    expect(image).toHaveAttribute("src", streetImages.small);
+    expect(document.querySelector("iframe")).toBeNull();
+    expect(screen.queryByTitle("Street View of 123 Main St")).toBeNull();
     expect(screen.getByTestId("lead-media-overlay")).toHaveClass(
       "pointer-events-none",
     );
@@ -54,8 +97,7 @@ describe("<LeadMediaHero />", () => {
         {...shared}
         media={{
           kind: "aerial",
-          embedUrl:
-            "https://www.google.com/maps/embed/v1/view?key=test&maptype=satellite",
+          images: aerialImages,
           resolvedBy: "coordinates",
           fallbackReason: "no-coverage",
         }}
@@ -63,11 +105,58 @@ describe("<LeadMediaHero />", () => {
     );
 
     expect(screen.getByTestId("lead-media-aerial")).toBeInTheDocument();
-    expect(screen.getByTitle("Aerial view of 123 Main St")).toHaveAttribute(
+    expect(screen.getByTestId("lead-media-image")).toHaveAttribute(
       "src",
       expect.stringContaining("maptype=satellite"),
     );
     expect(screen.queryByRole("button", { name: /street|aerial/i })).toBeNull();
+  });
+
+  it("falls back from an initial aerial image failure to the flat header", () => {
+    render(
+      <LeadMediaHero
+        {...shared}
+        media={{
+          kind: "aerial",
+          images: aerialImages,
+          resolvedBy: "address",
+          fallbackReason: "no-coverage",
+        }}
+      />,
+    );
+
+    fireEvent.error(screen.getByTestId("lead-media-image"));
+    expect(screen.getByTestId("lead-media-flat")).toBeInTheDocument();
+  });
+
+  it("falls back from a failed Street View image to aerial and then flat", () => {
+    render(
+      <LeadMediaHero
+        {...shared}
+        media={{
+          kind: "streetView",
+          images: streetImages,
+          aerialImages,
+          aerialResolvedBy: "address",
+          heading: null,
+          panoramaId: "pano-1",
+        }}
+      />,
+    );
+
+    fireEvent.error(screen.getByTestId("lead-media-image"));
+    expect(screen.getByTestId("lead-media-aerial")).toHaveAttribute(
+      "data-media-fallback-reason",
+      "street-image-error",
+    );
+    expect(screen.getByTestId("lead-media-image")).toHaveAttribute(
+      "src",
+      expect.stringContaining("/maps/api/staticmap"),
+    );
+
+    fireEvent.error(screen.getByTestId("lead-media-image"));
+    expect(screen.getByTestId("lead-media-flat")).toBeInTheDocument();
+    expect(screen.queryByTestId("lead-media-image")).toBeNull();
   });
 
   it("uses the flat header only when neither media view resolves", () => {
@@ -80,11 +169,44 @@ describe("<LeadMediaHero />", () => {
 
     expect(screen.getByTestId("lead-media-flat")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "123 Main St" })).toBeVisible();
-    expect(screen.queryByTitle(/view of/i)).toBeNull();
+    expect(screen.queryByTestId("lead-media-image")).toBeNull();
     const actions = screen.getByRole("button", {
       name: "Book appointment",
     }).parentElement;
     expect(actions).toHaveClass("flex-wrap", "min-w-0");
     expect(actions?.className).toContain("[&_button]:min-h-9");
+  });
+
+  it("resets a prior image failure when the resolved lead media changes", () => {
+    const { rerender } = render(
+      <LeadMediaHero
+        {...shared}
+        media={{
+          kind: "aerial",
+          images: aerialImages,
+          resolvedBy: "address",
+          fallbackReason: "no-coverage",
+        }}
+      />,
+    );
+
+    fireEvent.error(screen.getByTestId("lead-media-image"));
+    expect(screen.getByTestId("lead-media-flat")).toBeInTheDocument();
+
+    rerender(
+      <LeadMediaHero
+        {...shared}
+        media={{
+          kind: "streetView",
+          images: streetImages,
+          aerialImages,
+          aerialResolvedBy: "address",
+          heading: null,
+          panoramaId: "pano-2",
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("lead-media-street-view")).toBeInTheDocument();
   });
 });
