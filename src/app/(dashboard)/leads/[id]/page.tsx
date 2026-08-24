@@ -43,12 +43,7 @@ import { LeadAssigneeWidget } from "./assignee-widget";
 import { EnrollInSequenceWidget } from "./enroll-widget";
 import { LeadMotivationWidget } from "./motivation-widget";
 import { LeadStatusWidget } from "./status-widget";
-import { MessagesThread } from "./messages-thread";
-import { NotesFeed } from "./notes-feed";
-import {
-  LeadCallSummary,
-  type CallActivityRollupRow,
-} from "./lead-call-summary";
+import type { CallActivityRollupRow } from "./lead-call-summary";
 import { LeadAppointmentsSection } from "./lead-appointments-section";
 import { deriveLeadSmsPresentation } from "./lead-detail-state";
 import { LeadIdentityActions } from "./lead-identity-actions";
@@ -61,6 +56,10 @@ import { TagsSection } from "./tags-section";
 import type { MotivationLevel } from "../actions";
 import type { TagRow } from "../tags-actions";
 import type { Database } from "@/lib/supabase/types";
+import { LeadMediaHero } from "./lead-media-hero";
+import { resolveLeadMediaPresentation } from "./lead-media";
+import { LeadActivityTimeline } from "./lead-activity";
+import { AddNoteComposer } from "./notes-feed";
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 type LeadNoteRow = Database["public"]["Tables"]["lead_notes"]["Row"];
@@ -164,15 +163,38 @@ export default async function LeadDetailPage({
     id: lead.id,
     contactId: homeownerContactId,
     firstName: lead.homeowner?.first_name ?? "homeowner",
-    name: lead.homeowner?.contact_type === "entity"
-      ? lead.homeowner.entity_name ?? "Unknown homeowner"
-      : [lead.homeowner?.first_name, lead.homeowner?.last_name].filter(Boolean).join(" ") || "Unknown homeowner",
+    name:
+      lead.homeowner?.contact_type === "entity"
+        ? (lead.homeowner.entity_name ?? "Unknown homeowner")
+        : [lead.homeowner?.first_name, lead.homeowner?.last_name]
+            .filter(Boolean)
+            .join(" ") || "Unknown homeowner",
     address: lead.address,
     state: lead.state,
-    phones: [lead.homeowner?.phone_1, lead.homeowner?.phone_2, lead.homeowner?.phone_3].filter((phone): phone is string => Boolean(phone)),
+    phones: [
+      lead.homeowner?.phone_1,
+      lead.homeowner?.phone_2,
+      lead.homeowner?.phone_3,
+    ].filter((phone): phone is string => Boolean(phone)),
     dncLocked: lead.is_dnc_locked,
     contactDnc: lead.homeowner?.do_not_contact ?? false,
-    callable: canShowCallButton({ property: { id: lead.id, state: lead.state, is_dnc_locked: lead.is_dnc_locked }, contact: lead.homeowner ? { id: lead.homeowner.id, phone_1: lead.homeowner.phone_1, phone_2: lead.homeowner.phone_2, phone_3: lead.homeowner.phone_3, do_not_contact: lead.homeowner.do_not_contact, sms_opted_out: lead.homeowner.sms_opted_out } : null }),
+    callable: canShowCallButton({
+      property: {
+        id: lead.id,
+        state: lead.state,
+        is_dnc_locked: lead.is_dnc_locked,
+      },
+      contact: lead.homeowner
+        ? {
+            id: lead.homeowner.id,
+            phone_1: lead.homeowner.phone_1,
+            phone_2: lead.homeowner.phone_2,
+            phone_3: lead.homeowner.phone_3,
+            do_not_contact: lead.homeowner.do_not_contact,
+            sms_opted_out: lead.homeowner.sms_opted_out,
+          }
+        : null,
+    }),
   };
 
   // Consent and phone-level suppression are separate existing read models.
@@ -320,10 +342,10 @@ export default async function LeadDetailPage({
   const { data: callRollupRaw, error: callRollupError } = await supabase
     .from("call_activities")
     .select(
-      "id, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)",
+      "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)",
     )
     .eq("property_id", lead.id)
-    .order("started_at", { ascending: false, nullsFirst: false })
+    .order("created_at", { ascending: false })
     .limit(20);
   const initialCallRows = (callRollupRaw ??
     []) as unknown as CallActivityRollupRow[];
@@ -422,256 +444,119 @@ export default async function LeadDetailPage({
     state: lead.state,
     zip: lead.zip,
   });
+  const mediaPresentation = await resolveLeadMediaPresentation({
+    lat: lead.lat,
+    lon: lead.lon,
+    address: lead.address,
+    city: lead.city,
+    state: lead.state,
+    zip: lead.zip,
+  });
+  const homeownerName = lead.homeowner
+    ? lead.homeowner.contact_type === "entity"
+      ? lead.homeowner.entity_name
+      : [lead.homeowner.first_name, lead.homeowner.last_name]
+          .filter(Boolean)
+          .join(" ") || null
+    : null;
+  const locationLine =
+    [lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—";
+  const homeownerMailingAddress = (() => {
+    const details = lead.homeowner?.homeowner_details;
+    if (!details) return null;
+    if (details.mailing_address?.includes(",")) return details.mailing_address;
+    return (
+      [
+        details.mailing_address,
+        details.mailing_city,
+        details.mailing_state,
+        details.mailing_zip,
+      ]
+        .filter(Boolean)
+        .join(", ") || null
+    );
+  })();
+
+  const heroActions = (
+    <>
+      <Link href="/leads">
+        <Button variant="outline" size="sm" aria-label="Back to leads">
+          <ChevronLeft className="mr-1 h-4 w-4" />
+          Back
+        </Button>
+      </Link>
+      <SoftphoneLeadButton lead={detailSoftphoneLead} />
+      <SmsEntryPointGate
+        restricted={smsPresentation.smsRestricted}
+        placement="header"
+        restrictionLabel={smsPresentation.consentLabel}
+        restrictionDetail={smsPresentation.consentDetail}
+      >
+        <SmsComposer
+          propertyId={lead.id}
+          homeownerContactId={lead.homeowner?.id ?? null}
+          homeownerPhone={homeownerSmsPhone}
+          homeownerName={homeownerName}
+          preferredFromNumber={preferredFromNumber}
+          templates={templateOptions}
+        />
+      </SmsEntryPointGate>
+      <BookAppointmentPopover
+        propertyId={lead.id}
+        contactId={lead.homeowner?.id ?? undefined}
+        subjectLabel={lead.address}
+        currentUserId={sessionUser?.id ?? null}
+        triggerLabel="Book appt"
+      />
+      {zillowHref ? (
+        <a
+          href={zillowHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="View on Zillow"
+          data-testid="zillow-link-header"
+        >
+          <Button variant="outline" size="sm">
+            Zillow
+            <ExternalLink className="ml-1 h-4 w-4" />
+          </Button>
+        </a>
+      ) : null}
+      {prevId ? (
+        <Link href={`/leads/${prevId}`}>
+          <Button variant="outline" size="icon" aria-label="Previous">
+            <ChevronLeft className="h-4 w-4" />
+          </Button>
+        </Link>
+      ) : (
+        <Button variant="outline" size="icon" disabled aria-label="No previous">
+          <ChevronLeft className="h-4 w-4" />
+        </Button>
+      )}
+      {nextId ? (
+        <Link href={`/leads/${nextId}`}>
+          <Button variant="outline" size="icon" aria-label="Next">
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+        </Link>
+      ) : (
+        <Button variant="outline" size="icon" disabled aria-label="No next">
+          <ChevronRight className="h-4 w-4" />
+        </Button>
+      )}
+    </>
+  );
 
   return (
-    <Page>
-      <PageHeader
-        breadcrumb={[
-          { label: "Workspace" },
-          { label: "Leads", href: "/leads" },
-          { label: lead.address },
-        ]}
-        title={lead.address}
-        description={
-          [lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"
-        }
-        actions={
-          <div className="grid w-full grid-cols-2 gap-2 [&_button]:min-h-11 sm:flex sm:w-auto sm:items-center sm:[&_button]:min-h-8">
-            <Link href="/leads">
-              <Button variant="outline" size="sm" aria-label="Back to leads">
-                <ChevronLeft className="mr-1 h-4 w-4" />
-                Back to leads
-              </Button>
-            </Link>
-            {zillowHref ? (
-              <a
-                href={zillowHref}
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label="View on Zillow"
-                data-testid="zillow-link-header"
-              >
-                <Button variant="outline" size="sm">
-                  <ExternalLink className="mr-1 h-4 w-4" />
-                  Zillow
-                </Button>
-              </a>
-            ) : null}
-            {prevId ? (
-              <Link href={`/leads/${prevId}`}>
-                <Button variant="ghost" size="icon" aria-label="Previous">
-                  <ChevronLeft className="h-4 w-4" />
-                </Button>
-              </Link>
-            ) : (
-              <Button
-                variant="ghost"
-                size="icon"
-                disabled
-                aria-label="No previous"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-            )}
-            {nextId ? (
-              <Link href={`/leads/${nextId}`}>
-                <Button variant="ghost" size="icon" aria-label="Next">
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
-              </Link>
-            ) : (
-              <Button variant="ghost" size="icon" disabled aria-label="No next">
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-            )}
-          </div>
-        }
+    <Page className="gap-0 p-0">
+      <LeadMediaHero
+        media={mediaPresentation}
+        address={lead.address}
+        locationLine={locationLine}
+        homeownerName={homeownerName}
+        actions={heroActions}
       />
-
-      {warning ? (
-        <div
-          className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-500/40 dark:bg-amber-500/10"
-          role="alert"
-          data-testid="lead-save-warning"
-        >
-          {warning}
-        </div>
-      ) : null}
-
-      <AiAttentionBanner
-        propertyId={lead.id}
-        initialVisible={lead.needs_human_attention}
-        reason={lead.last_ai_escalation_reason}
-        escalatedAt={lead.last_ai_escalation_at}
-        nowMs={requestNowMs}
-      />
-
-      <div
-        className="grid grid-cols-1 gap-4 md:grid-cols-2 min-[1440px]:grid-cols-4"
-        data-testid="lead-record-summary"
-      >
-        <Section title="Property">
-          {zillowHref ? (
-            <a
-              href={zillowHref}
-              target="_blank"
-              rel="noopener noreferrer"
-              data-testid="zillow-link-panel"
-              className="border-border flex items-center justify-between gap-2 border-b px-4 py-2 text-xs font-medium text-[#1c1917] transition-colors hover:bg-[#f5f5f4]"
-            >
-              <span>View on Zillow</span>
-              <ExternalLink
-                className="h-3.5 w-3.5 text-[#78716c]"
-                aria-hidden
-              />
-            </a>
-          ) : null}
-          <Row label="Beds" value={lead.beds} />
-          <Row label="Baths" value={lead.baths} />
-          <Row label="Square feet" value={lead.sqft} />
-          <Row label="Year built" value={lead.year_built} />
-          <Row
-            label="Listing price"
-            value={lead.listing_price}
-            format="currency"
-          />
-          <Row label="ARV" value={lead.arv} format="currency" />
-          <Row
-            label="Repair estimate"
-            value={lead.repair_estimate}
-            format="currency"
-          />
-          <Row
-            label="Mortgage balance"
-            value={lead.mortgage_balance}
-            format="currency"
-          />
-          <Row
-            label="Equity (est.)"
-            value={lead.equity_estimate}
-            format="currency"
-          />
-          <Row label="Source" value={lead.source} />
-        </Section>
-
-        <Section title="Address quality (USPS)">
-          <Row label="CASS status" value={lead.cass_status} />
-          <Row
-            label="Last verified"
-            value={formatDate(lead.cass_verified_at)}
-          />
-          <Row label="Vacant" value={formatBool(lead.is_vacant)} />
-          <Row label="Vacant since" value={formatDate(lead.vacant_since)} />
-          <Row label="Seasonal" value={formatBool(lead.is_seasonal)} />
-          <Row label="Residential" value={formatBool(lead.is_residential)} />
-          <Row label="Owner moved" value={formatDate(lead.owner_moved_at)} />
-          <Row
-            label="NCOA verified"
-            value={formatDate(lead.ncoa_verified_at)}
-          />
-        </Section>
-
-        <Section title="Homeowner">
-          {lead.homeowner ? (
-            <>
-              <Row
-                label="Name"
-                value={
-                  lead.homeowner.contact_type === "entity"
-                    ? lead.homeowner.entity_name
-                    : [lead.homeowner.first_name, lead.homeowner.last_name]
-                        .filter(Boolean)
-                        .join(" ")
-                }
-              />
-              <div className="flex min-w-0 items-center justify-between gap-3">
-                <Row label="Phone 1" value={lead.homeowner.phone_1} mono />
-                <SoftphoneLeadButton lead={detailSoftphoneLead} />
-              </div>
-              <Row label="Phone 2" value={lead.homeowner.phone_2} mono />
-              <Row label="Phone 3" value={lead.homeowner.phone_3} mono />
-              <Row label="Email" value={lead.homeowner.email} />
-              <Row
-                label="Mailing address"
-                value={(() => {
-                  const d = lead.homeowner.homeowner_details;
-                  if (!d) return null;
-                  // If mailing_address already contains commas it's a full
-                  // combined string (e.g. DealMachine "Primary Mailing Address").
-                  // Show it alone to avoid duplicating city/state/zip.
-                  if (d.mailing_address?.includes(","))
-                    return d.mailing_address;
-                  return (
-                    [
-                      d.mailing_address,
-                      d.mailing_city,
-                      d.mailing_state,
-                      d.mailing_zip,
-                    ]
-                      .filter(Boolean)
-                      .join(", ") || null
-                  );
-                })()}
-              />
-              <Row
-                label="SMS consent"
-                value={`${smsPresentation.consentLabel} — ${smsPresentation.consentDetail}`}
-                testId="lead-sms-consent-row"
-              />
-              <Row
-                label="SMS restriction"
-                value={
-                  smsPresentation.smsRestricted
-                    ? `SMS disabled — ${smsPresentation.consentLabel}`
-                    : "No SMS opt-out recorded"
-                }
-                testId="lead-sms-restriction-row"
-              />
-              {smsPresentation.readFailed ? (
-                <div className="p-3">
-                  <LeadLoadFailure
-                    title="SMS consent status is incomplete"
-                    detail="One or more consent sources failed to load. Retry before relying on this status."
-                    testId="lead-sms-consent-load-failure"
-                  />
-                </div>
-              ) : null}
-              <Row
-                label="Contact do-not-contact flag"
-                value={formatBool(lead.homeowner.do_not_contact)}
-              />
-            </>
-          ) : (
-            <EmptyRow text="No homeowner linked yet" />
-          )}
-        </Section>
-
-        <Section title="Listing agent">
-          {lead.agent ? (
-            <>
-              <Row
-                label="Name"
-                value={[lead.agent.first_name, lead.agent.last_name]
-                  .filter(Boolean)
-                  .join(" ")}
-              />
-              <Row label="Phone" value={lead.agent.phone_1} mono />
-              <Row label="Email" value={lead.agent.email} />
-              <Row
-                label="Brokerage"
-                value={lead.agent.agent_details?.brokerage}
-              />
-              <Row
-                label="License #"
-                value={lead.agent.agent_details?.license_number}
-                mono
-              />
-            </>
-          ) : (
-            <EmptyRow text="No agent linked. Trigger agent enrichment from this page (coming soon)." />
-          )}
-        </Section>
-      </div>
+      <DealSnapshotStrip lead={lead} />
 
       <LeadIdentityActions
         workingState={
@@ -695,39 +580,19 @@ export default async function LeadDetailPage({
             />
           </>
         }
-        primaryActions={
-          <>
-            <BookAppointmentPopover
-              propertyId={lead.id}
-              contactId={lead.homeowner?.id ?? undefined}
-              subjectLabel={lead.address}
-              currentUserId={sessionUser?.id ?? null}
-              triggerLabel="Book appt"
-            />
-            <SmsEntryPointGate
-              restricted={smsPresentation.smsRestricted}
-              placement="header"
-              restrictionLabel={smsPresentation.consentLabel}
-              restrictionDetail={smsPresentation.consentDetail}
+        nextAction={
+          openWorkError ? (
+            <div
+              className="border-destructive/40 bg-destructive/5 text-destructive rounded-lg border px-3 py-2 text-sm font-semibold"
+              role="alert"
+              data-testid="lead-next-action-load-failure"
             >
-              <SmsComposer
-                propertyId={lead.id}
-                homeownerContactId={lead.homeowner?.id ?? null}
-                homeownerPhone={homeownerSmsPhone}
-                homeownerName={
-                  lead.homeowner?.contact_type === "entity"
-                    ? lead.homeowner.entity_name
-                    : lead.homeowner
-                      ? [lead.homeowner.first_name, lead.homeowner.last_name]
-                          .filter(Boolean)
-                          .join(" ") || null
-                      : null
-                }
-                preferredFromNumber={preferredFromNumber}
-                templates={templateOptions}
-              />
-            </SmsEntryPointGate>
-          </>
+              Next action did not load. Task data is unavailable. This is not
+              the same as having no next action.
+            </div>
+          ) : (
+            <NextActionCard task={nextTask} timezone={viewerTimezone} compact />
+          )
         }
         recordSignals={
           <>
@@ -753,106 +618,145 @@ export default async function LeadDetailPage({
             </Badge>
           </>
         }
-        automationActions={
-          <>
-            <EnrollInSequenceWidget propertyId={lead.id} />
-            <AiResponderToggle
-              propertyId={lead.id}
-              initialDisabled={lead.ai_responder_disabled}
-            />
-            <SkipTraceToggle
-              propertyId={lead.id}
-              initialDisabled={lead.skip_trace_disabled}
-            />
-            {!lead.homeowner?.phone_1 ? (
-              <SkipTraceButton propertyId={lead.id} />
-            ) : null}
-            <CassWidget propertyId={lead.id} cassStatus={lead.cass_status} />
-          </>
-        }
       />
+
+      {warning ? (
+        <div
+          className="mx-4 mt-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm md:mx-6 dark:border-amber-500/40 dark:bg-amber-500/10"
+          role="alert"
+          data-testid="lead-save-warning"
+        >
+          {warning}
+        </div>
+      ) : null}
+
+      <div className="mx-4 mt-4 md:mx-6">
+        <AiAttentionBanner
+          propertyId={lead.id}
+          initialVisible={lead.needs_human_attention}
+          reason={lead.last_ai_escalation_reason}
+          escalatedAt={lead.last_ai_escalation_at}
+          nowMs={requestNowMs}
+        />
+      </div>
 
       <section
         aria-labelledby="lead-workspace-heading"
         data-testid="lead-workspace-primary"
-        className="[&_button]:min-h-11 sm:[&_button]:min-h-8"
+        className="@container/lead-workspace order-4 px-4 py-5 md:px-6 md:py-6 [&_button]:min-h-9"
       >
-        <div className="mb-3">
+        <div className="mb-4">
           <h2
             id="lead-workspace-heading"
-            className="text-lg font-bold tracking-tight"
+            className="text-lg font-black tracking-tight"
           >
-            Work this lead
+            Activity
           </h2>
           <p className="text-muted-foreground text-sm">
-            Start with the next dated commitment, then review the conversation
-            and appointment state.
+            Messages, notes, and calls in one oldest-to-newest history.
           </p>
         </div>
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,7fr)_minmax(320px,5fr)]">
-          <div className="flex min-w-0 flex-col gap-5">
-            {openWorkError ? (
-              <LeadLoadFailure
-                title="Next action did not load"
-                detail="Task data is unavailable. This is not the same as having no next action."
-                testId="lead-next-action-load-failure"
+        <div className="grid min-w-0 gap-6 @min-[1040px]/lead-workspace:grid-cols-[minmax(0,1fr)_340px]">
+          <div className="min-w-0">
+            <div className="border-border bg-card rounded-xl border p-3 shadow-sm sm:p-4">
+              <LeadActivityTimeline
+                propertyId={lead.id}
+                contactId={lead.homeowner?.id ?? null}
+                initialMessages={initialMessages}
+                initialNotes={initialNotes}
+                initialCalls={initialCallRows}
+                messageError={threadError?.message ?? null}
+                noteError={notesError?.message ?? null}
+                callError={callRollupError?.message ?? null}
+                authorEmails={authorEmails}
+                currentUserId={sessionUser?.id ?? null}
+                currentUserEmail={sessionUser?.email ?? null}
+                jitterHost={process.env.NEXT_PUBLIC_JITTER_HOST ?? ""}
               />
-            ) : (
-              <NextActionCard task={nextTask} timezone={viewerTimezone} />
-            )}
-
-            <div className="flex min-w-0 flex-col gap-2">
-              <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
-                Conversation
-              </div>
-              <div className="border-border bg-card flex min-w-0 flex-col rounded-lg border p-3">
-                {threadError ? (
-                  <LeadLoadFailure
-                    title="Conversation did not load"
-                    detail="Message history is unavailable. This is a load failure, not an empty thread."
-                    testId="lead-conversation-load-failure"
-                  />
-                ) : (
-                  <MessagesThread
-                    initial={initialMessages}
-                    contactId={lead.homeowner?.id ?? null}
-                    propertyId={lead.id}
-                    nowMs={requestNowMs}
-                  />
-                )}
-                <SmsEntryPointGate
-                  restricted={smsPresentation.smsRestricted}
-                  placement="inline"
-                  restrictionLabel={smsPresentation.consentLabel}
-                  restrictionDetail={smsPresentation.consentDetail}
-                >
-                  <InlineReply
-                    propertyId={lead.id}
-                    homeownerContactId={lead.homeowner?.id ?? null}
-                    homeownerPhone={homeownerSmsPhone}
-                    replyToPhone={homeownerSmsPhone}
-                    preferredFromNumber={preferredFromNumber}
-                    persistedMessageIds={initialMessages.map(
-                      (message) => message.id,
-                    )}
-                  />
-                </SmsEntryPointGate>
-              </div>
+            </div>
+            <div
+              className="mt-4 grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(240px,0.65fr)]"
+              data-testid="lead-activity-composers"
+            >
+              <SmsEntryPointGate
+                restricted={smsPresentation.smsRestricted}
+                placement="inline"
+                restrictionLabel={smsPresentation.consentLabel}
+                restrictionDetail={smsPresentation.consentDetail}
+              >
+                <InlineReply
+                  propertyId={lead.id}
+                  homeownerContactId={lead.homeowner?.id ?? null}
+                  homeownerPhone={homeownerSmsPhone}
+                  replyToPhone={homeownerSmsPhone}
+                  preferredFromNumber={preferredFromNumber}
+                  persistedMessageIds={initialMessages.map(
+                    (message) => message.id,
+                  )}
+                />
+              </SmsEntryPointGate>
+              <AddNoteComposer propertyId={lead.id} />
             </div>
           </div>
 
-          <div className="flex min-w-0 flex-col gap-5">
-            <Section title="Set or change dated task" id="set-next-action">
-              <LeadTaskWidget
-                propertyId={lead.id}
-                address={lead.address}
-                currentUserId={sessionUser?.id ?? null}
-                initialAssigneeId={lead.assigned_user_id}
-              />
+          <aside className="min-w-0 space-y-4" aria-label="Lead dossier">
+            <Section title="Homeowner">
+              {lead.homeowner ? (
+                <>
+                  <Row label="Name" value={homeownerName} />
+                  <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border/60 px-3 py-2">
+                    <span className="min-w-0 break-all font-mono text-sm">
+                      {lead.homeowner.phone_1 || "No phone"}
+                    </span>
+                    <SoftphoneLeadButton lead={detailSoftphoneLead} compact />
+                  </div>
+                  <Row label="Phone 2" value={lead.homeowner.phone_2} mono />
+                  <Row label="Phone 3" value={lead.homeowner.phone_3} mono />
+                  <Row label="Email" value={lead.homeowner.email} />
+                  <Row label="Mailing" value={homeownerMailingAddress} />
+                  <Row
+                    label="SMS consent"
+                    value={`${smsPresentation.consentLabel} — ${smsPresentation.consentDetail}`}
+                    testId="lead-sms-consent-row"
+                  />
+                  <Row
+                    label="SMS restriction"
+                    value={
+                      smsPresentation.smsRestricted
+                        ? `SMS disabled — ${smsPresentation.consentLabel}`
+                        : "No SMS opt-out recorded"
+                    }
+                    testId="lead-sms-restriction-row"
+                  />
+                  <Row
+                    label="Contact DNC flag"
+                    value={formatBool(lead.homeowner.do_not_contact)}
+                  />
+                  {!lead.homeowner.phone_1 ? (
+                    <div className="p-3">
+                      <SkipTraceButton propertyId={lead.id} />
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <div className="space-y-3 p-3">
+                  <EmptyRow text="No homeowner linked yet" />
+                  <SkipTraceButton propertyId={lead.id} />
+                </div>
+              )}
+              {smsPresentation.readFailed ? (
+                <div className="p-3">
+                  <LeadLoadFailure
+                    title="SMS consent status is incomplete"
+                    detail="One or more consent sources failed to load. Retry before relying on this status."
+                    testId="lead-sms-consent-load-failure"
+                  />
+                </div>
+              ) : null}
             </Section>
 
-            <div id="lead-appointments">
-              <Section title="Appointments">
+            <Section title="Tasks & appointments" id="set-next-action">
+              <div id="lead-appointments" className="border-b border-border/60">
                 {openWorkError ? (
                   <div className="p-3">
                     <LeadLoadFailure
@@ -868,102 +772,243 @@ export default async function LeadDetailPage({
                     nowMs={requestNowMs}
                   />
                 )}
-              </Section>
-            </div>
-          </div>
+              </div>
+              <LeadTaskWidget
+                propertyId={lead.id}
+                address={lead.address}
+                currentUserId={sessionUser?.id ?? null}
+                initialAssigneeId={lead.assigned_user_id}
+              />
+            </Section>
+
+            <Section title="Tags">
+              {tagRowsError ? (
+                <div className="p-3">
+                  <LeadLoadFailure
+                    title="Tags did not load"
+                    detail="Tag data is unavailable. Retry instead of treating this as an untagged lead."
+                    testId="lead-tags-load-failure"
+                  />
+                </div>
+              ) : (
+                <TagsSection propertyId={lead.id} initial={initialTags} />
+              )}
+            </Section>
+
+            <Section title="Automation & enrichment">
+              <div className="flex flex-col items-stretch gap-2 p-3 [&_button]:w-full">
+                <AiResponderToggle
+                  propertyId={lead.id}
+                  initialDisabled={lead.ai_responder_disabled}
+                />
+                <SkipTraceToggle
+                  propertyId={lead.id}
+                  initialDisabled={lead.skip_trace_disabled}
+                />
+                <CassWidget
+                  propertyId={lead.id}
+                  cassStatus={lead.cass_status}
+                />
+                <EnrollInSequenceWidget propertyId={lead.id} />
+              </div>
+            </Section>
+
+            <details
+              className="border-border bg-card rounded-lg border"
+              data-testid="lead-full-record"
+            >
+              <summary className="cursor-pointer px-3 py-3 text-xs font-black tracking-wide uppercase">
+                Full record
+              </summary>
+              <div className="border-t border-border">
+                {zillowHref ? (
+                  <a
+                    href={zillowHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid="zillow-link-panel"
+                    className="flex min-h-9 items-center justify-between gap-2 border-b border-border/60 px-3 py-2 text-xs font-semibold hover:bg-muted"
+                  >
+                    View on Zillow
+                    <ExternalLink className="size-3.5" aria-hidden />
+                  </a>
+                ) : null}
+                <Row label="Beds" value={lead.beds} />
+                <Row label="Baths" value={lead.baths} />
+                <Row label="Square feet" value={lead.sqft} />
+                <Row label="Year built" value={lead.year_built} />
+                <Row
+                  label="Listing price"
+                  value={lead.listing_price}
+                  format="currency"
+                />
+                <Row label="ARV" value={lead.arv} format="currency" />
+                <Row
+                  label="Repair estimate"
+                  value={lead.repair_estimate}
+                  format="currency"
+                />
+                <Row
+                  label="Mortgage balance"
+                  value={lead.mortgage_balance}
+                  format="currency"
+                />
+                <Row
+                  label="Equity (est.)"
+                  value={lead.equity_estimate}
+                  format="currency"
+                />
+                <Row label="Source" value={lead.source} />
+                <Row label="CASS status" value={lead.cass_status} />
+                <Row
+                  label="Last verified"
+                  value={formatDate(lead.cass_verified_at)}
+                />
+                <Row label="Vacant" value={formatBool(lead.is_vacant)} />
+                <Row
+                  label="Vacant since"
+                  value={formatDate(lead.vacant_since)}
+                />
+                <Row label="Seasonal" value={formatBool(lead.is_seasonal)} />
+                <Row
+                  label="Residential"
+                  value={formatBool(lead.is_residential)}
+                />
+                <Row
+                  label="Owner moved"
+                  value={formatDate(lead.owner_moved_at)}
+                />
+                <Row
+                  label="NCOA verified"
+                  value={formatDate(lead.ncoa_verified_at)}
+                />
+                <Row label="Homeowner" value={homeownerName} />
+                <Row label="Phone 1" value={lead.homeowner?.phone_1} mono />
+                <Row label="Phone 2" value={lead.homeowner?.phone_2} mono />
+                <Row label="Phone 3" value={lead.homeowner?.phone_3} mono />
+                <Row label="Homeowner email" value={lead.homeowner?.email} />
+                <Row label="Mailing address" value={homeownerMailingAddress} />
+                <Row
+                  label="Listing agent"
+                  value={
+                    lead.agent
+                      ? [lead.agent.first_name, lead.agent.last_name]
+                          .filter(Boolean)
+                          .join(" ")
+                      : "No listing agent linked"
+                  }
+                />
+                <Row label="Agent phone" value={lead.agent?.phone_1} mono />
+                <Row label="Agent email" value={lead.agent?.email} />
+                <Row
+                  label="Brokerage"
+                  value={lead.agent?.agent_details?.brokerage}
+                />
+                <Row
+                  label="License #"
+                  value={lead.agent?.agent_details?.license_number}
+                  mono
+                />
+                {lead.notes ? (
+                  <div className="border-b border-border/60 px-3 py-3">
+                    <p className="text-muted-foreground text-xs">
+                      Imported notes (legacy)
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap break-words text-sm">
+                      {lead.notes}
+                    </p>
+                  </div>
+                ) : null}
+                <Row label="APN" value={lead.apn} mono />
+                <Row label="ZPID" value={lead.zpid} mono />
+                <Row label="MLS #" value={lead.mls_number} mono />
+                <Row label="FIPS" value={lead.fips_code} mono />
+                <Row label="Regrid" value={lead.regrid_id} mono />
+                <Row label="ATTOM" value={lead.attom_id} mono />
+                <div className="space-y-3 p-3">
+                  <p className="text-muted-foreground text-xs">
+                    Destructive record actions are kept separate from daily lead
+                    work.
+                  </p>
+                  <DeleteLeadButton
+                    propertyId={lead.id}
+                    address={lead.address}
+                  />
+                </div>
+              </div>
+            </details>
+          </aside>
         </div>
       </section>
-
-      {lead.notes ? (
-        <Section title="Imported notes (legacy)">
-          <div className="whitespace-pre-wrap p-3 text-sm">{lead.notes}</div>
-        </Section>
-      ) : null}
-
-      <div>
-        <div className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
-          Tags
-        </div>
-        <div className="border-border rounded-md border">
-          {tagRowsError ? (
-            <div className="p-3">
-              <LeadLoadFailure
-                title="Tags did not load"
-                detail="Tag data is unavailable. Retry instead of treating this as an untagged lead."
-                testId="lead-tags-load-failure"
-              />
-            </div>
-          ) : (
-            <TagsSection propertyId={lead.id} initial={initialTags} />
-          )}
-        </div>
-      </div>
-
-      <div>
-        <div className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
-          Notes
-        </div>
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
-          <div className="border-border rounded-md border p-3">
-            {notesError ? (
-              <LeadLoadFailure
-                title="Notes did not load"
-                detail="Note history is unavailable. This is not an empty notes feed."
-                testId="lead-notes-load-failure"
-              />
-            ) : (
-              <NotesFeed
-                propertyId={lead.id}
-                initial={initialNotes}
-                authorEmails={authorEmails}
-                currentUserId={sessionUser?.id ?? null}
-                currentUserEmail={sessionUser?.email ?? null}
-              />
-            )}
-          </div>
-          {callRollupError ? (
-            <LeadLoadFailure
-              title="Call history did not load"
-              detail="Call activity is unavailable. Retry instead of treating this as no call history."
-              testId="lead-calls-load-failure"
-            />
-          ) : (
-            <LeadCallSummary
-              propertyId={lead.id}
-              initialRows={initialCallRows}
-              jitterHost={process.env.NEXT_PUBLIC_JITTER_HOST ?? ""}
-            />
-          )}
-        </div>
-      </div>
-
-      <div>
-        <div className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
-          Identifiers
-        </div>
-        <div className="border-border rounded-md border">
-          <Row label="APN" value={lead.apn} mono />
-          <Row label="ZPID" value={lead.zpid} mono />
-          <Row label="MLS #" value={lead.mls_number} mono />
-          <Row label="FIPS" value={lead.fips_code} mono />
-          <Row label="Regrid" value={lead.regrid_id} mono />
-          <Row label="ATTOM" value={lead.attom_id} mono />
-        </div>
-      </div>
-
-      <div>
-        <div className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
-          Record administration
-        </div>
-        <div className="border-border bg-card flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-muted-foreground text-sm">
-            Destructive record actions are kept separate from daily lead work.
-          </p>
-          <DeleteLeadButton propertyId={lead.id} address={lead.address} />
-        </div>
-      </div>
     </Page>
   );
+}
+
+function DealSnapshotStrip({ lead }: { lead: DetailedLead }) {
+  const propertyFacts = [
+    lead.beds != null ? `${lead.beds}bd` : null,
+    lead.baths != null ? `${lead.baths}ba` : null,
+    lead.sqft != null ? `${Number(lead.sqft).toLocaleString()} sqft` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const stats = [
+    {
+      label: "Equity (est.)",
+      value: formatCurrency(lead.equity_estimate),
+      accent: true,
+    },
+    { label: "ARV", value: formatCurrency(lead.arv) },
+    { label: "Repair est.", value: formatCurrency(lead.repair_estimate) },
+    { label: "Mortgage bal.", value: formatCurrency(lead.mortgage_balance) },
+    {
+      label: "Property",
+      value: propertyFacts || "—",
+      detail: [lead.year_built ? `Built ${lead.year_built}` : null, lead.source]
+        .filter(Boolean)
+        .join(" · "),
+    },
+  ];
+  return (
+    <section
+      className="border-border bg-background grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2 border-b px-4 py-3 md:px-6"
+      data-testid="lead-deal-snapshot"
+      aria-label="Deal snapshot"
+    >
+      {stats.map((stat) => (
+        <div
+          key={stat.label}
+          className={`min-w-0 rounded-xl border px-4 py-3 ${
+            stat.accent
+              ? "border-emerald-600 bg-emerald-50 text-emerald-950"
+              : "border-border bg-card"
+          }`}
+        >
+          <p className="text-muted-foreground text-[10px] font-black tracking-[0.14em] uppercase">
+            {stat.label}
+          </p>
+          <p className="mt-1 text-lg font-black break-words tabular-nums">
+            {stat.value}
+          </p>
+          {stat.detail ? (
+            <p className="text-muted-foreground mt-0.5 text-[11px] break-words">
+              {stat.detail}
+            </p>
+          ) : null}
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function formatCurrency(value: number | null | undefined): string {
+  return value == null
+    ? "—"
+    : new Intl.NumberFormat("en-US", {
+        style: "currency",
+        currency: "USD",
+        maximumFractionDigits: 0,
+      }).format(value);
 }
 
 function LockedDncPropertyDetail({

@@ -11,6 +11,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import {
   Popover,
   PopoverContent,
@@ -44,9 +45,11 @@ const SNOOZE_PRESETS: ReadonlyArray<{ label: string; days: number }> = [
 export function NextActionCard({
   task,
   timezone,
+  compact = false,
 }: {
   task: LeadNextTask | null;
   timezone: string;
+  compact?: boolean;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -81,19 +84,29 @@ export function NextActionCard({
   if (!task) {
     return (
       <div
-        className="border-amber-300 bg-amber-50 rounded-lg border p-4 text-amber-950"
+        className={cn(
+          "border-amber-300 bg-amber-50 rounded-lg border text-amber-950",
+          compact ? "px-3 py-2" : "p-4",
+        )}
         data-testid="lead-no-next-action"
       >
         <div className="flex items-start gap-3">
-          <CalendarClockIcon className="mt-0.5 size-5 shrink-0" />
+          <CalendarClockIcon
+            className={
+              compact ? "mt-0.5 size-4 shrink-0" : "mt-0.5 size-5 shrink-0"
+            }
+          />
           <div className="min-w-0 flex-1">
             <div className="font-bold">No next action</div>
-            <p className="mt-1 text-sm">
+            <p className={compact ? "sr-only" : "mt-1 text-sm"}>
               This active lead has no open dated task or appointment.
             </p>
             <a
               href="#set-next-action"
-              className="mt-3 inline-flex min-h-11 items-center rounded-md bg-amber-950 px-4 text-sm font-semibold text-white sm:min-h-8"
+              className={cn(
+                "inline-flex items-center rounded-md bg-amber-950 px-4 text-sm font-semibold text-white",
+                compact ? "ml-2 min-h-9" : "mt-3 min-h-11 sm:min-h-8",
+              )}
             >
               Set one
             </a>
@@ -107,7 +120,10 @@ export function NextActionCard({
 
   return (
     <div
-      className="border-border bg-card rounded-lg border p-4"
+      className={cn(
+        "border-border bg-card rounded-lg border",
+        compact ? "px-3 py-2" : "p-4",
+      )}
       data-testid="lead-next-action"
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
