@@ -12,6 +12,21 @@ vi.mock("../actions", () => ({
 import { InlineReply } from "./inline-reply";
 
 describe("<InlineReply /> disabled explanations", () => {
+  it("stacks the queue control at narrow widths instead of forcing overflow", () => {
+    render(
+      <InlineReply
+        propertyId="property-1"
+        homeownerContactId="contact-1"
+        homeownerPhone="+18165550123"
+      />,
+    );
+
+    expect(screen.getByTestId("inline-reply-send")).toHaveClass(
+      "w-full",
+      "sm:w-auto",
+    );
+  });
+
   it("explains that a missing contact prevents a reply", () => {
     render(
       <InlineReply

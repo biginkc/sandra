@@ -245,6 +245,16 @@ export default async function LeadDetailPage({
     : null;
   const viewerTimezone = viewerPrefs?.timezone ?? "America/Chicago";
 
+  // Opening a lead acknowledges unread inbound SMS before the bounded thread
+  // snapshot is read. Awaiting prevents the client from missing a fast
+  // Realtime UPDATE and indefinitely rendering an already-read row as unread.
+  const markReadResult = await markMessagesReadForProperty(lead.id);
+  if (!markReadResult.ok) {
+    console.error("[leads] mark messages read failed", {
+      code: markReadResult.error.code,
+    });
+  }
+
   // Fetch existing SMS thread — messages linked either to the property
   // directly or to the homeowner (catches inbound that lands pre-linkage).
   const orFilter = homeownerContactId
@@ -307,11 +317,6 @@ export default async function LeadDetailPage({
     providerDefaultFromNumber ??
     null;
 
-  // Opening a lead acknowledges any unread inbound SMS on it. Fire-and-forget
-  // so the page renders fast; the kanban card's red dot will clear on next
-  // nav or Realtime UPDATE.
-  void markMessagesReadForProperty(lead.id);
-
   // Notes — newest first for the feed component.
   const { data: notesRaw, error: notesError } = await supabase
     .from("lead_notes")
@@ -345,6 +350,7 @@ export default async function LeadDetailPage({
       "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)",
     )
     .eq("property_id", lead.id)
+    .order("started_at", { ascending: false, nullsFirst: false })
     .order("created_at", { ascending: false })
     .limit(20);
   const initialCallRows = (callRollupRaw ??
@@ -656,7 +662,7 @@ export default async function LeadDetailPage({
             Messages, notes, and calls in one oldest-to-newest history.
           </p>
         </div>
-        <div className="grid min-w-0 gap-6 @min-[1040px]/lead-workspace:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="min-w-0">
             <div className="border-border bg-card rounded-xl border p-3 shadow-sm sm:p-4">
               <LeadActivityTimeline
@@ -756,6 +762,15 @@ export default async function LeadDetailPage({
             </Section>
 
             <Section title="Tasks & appointments" id="set-next-action">
+              <div className="flex justify-end border-b border-border/60 p-3">
+                <BookAppointmentPopover
+                  propertyId={lead.id}
+                  contactId={lead.homeowner?.id ?? undefined}
+                  subjectLabel={lead.address}
+                  currentUserId={sessionUser?.id ?? null}
+                  triggerLabel="Book appointment"
+                />
+              </div>
               <div id="lead-appointments" className="border-b border-border/60">
                 {openWorkError ? (
                   <div className="p-3">
@@ -888,6 +903,22 @@ export default async function LeadDetailPage({
                 <Row label="Phone 3" value={lead.homeowner?.phone_3} mono />
                 <Row label="Homeowner email" value={lead.homeowner?.email} />
                 <Row label="Mailing address" value={homeownerMailingAddress} />
+                <Row
+                  label="SMS consent"
+                  value={`${smsPresentation.consentLabel} — ${smsPresentation.consentDetail}`}
+                />
+                <Row
+                  label="SMS restriction"
+                  value={
+                    smsPresentation.smsRestricted
+                      ? `SMS disabled — ${smsPresentation.consentLabel}`
+                      : "No SMS opt-out recorded"
+                  }
+                />
+                <Row
+                  label="Contact DNC flag"
+                  value={formatBool(lead.homeowner?.do_not_contact)}
+                />
                 <Row
                   label="Listing agent"
                   value={

@@ -19,11 +19,17 @@ export function SoftphoneLeadButton({ lead, compact = false }: Props) {
       type="button"
       data-testid="call-lead-button"
       aria-label={`Call ${lead.firstName} now — 1 click`}
-      title={callingEnabled ? `Call ${lead.firstName} now — 1 click` : "Calling not yet enabled"}
+      title={
+        callingEnabled
+          ? `Call ${lead.firstName} now — 1 click`
+          : "Calling not yet enabled"
+      }
       disabled={!callingEnabled}
-      className={compact
-        ? "border-border text-muted-foreground hover:border-emerald-600 hover:bg-emerald-600 hover:text-white flex size-7 shrink-0 items-center justify-center rounded-full border bg-white transition-colors"
-        : "border-border text-muted-foreground hover:border-emerald-600 hover:bg-emerald-600 hover:text-white inline-flex items-center gap-1.5 rounded-full border bg-white px-3 py-1.5 text-xs font-bold transition-colors"}
+      className={
+        compact
+          ? "border-border text-muted-foreground hover:border-emerald-600 hover:bg-emerald-600 hover:text-white flex size-9 shrink-0 items-center justify-center rounded-full border bg-white transition-colors"
+          : "border-border text-muted-foreground hover:border-emerald-600 hover:bg-emerald-600 hover:text-white inline-flex items-center gap-1.5 rounded-full border bg-white px-3 py-1.5 text-xs font-bold transition-colors"
+      }
       onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => {
         event.stopPropagation();

@@ -1,30 +1,61 @@
-import { act, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import {
+  act,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
 
-const { createClient } = vi.hoisted(() => ({
-  createClient: vi.fn(() => {
-    const channel = {
-      on: vi.fn(() => channel),
-      subscribe: vi.fn(() => channel),
-    };
-    return {
-      auth: {
-        getSession: vi.fn().mockResolvedValue({ data: { session: null } }),
-      },
-      realtime: { setAuth: vi.fn() },
-      channel: vi.fn(() => channel),
-      removeChannel: vi.fn(),
-    };
-  }),
-}));
+const { callbacks, createClient } = vi.hoisted(() => {
+  const callbacks = {} as Partial<
+    Record<"INSERT" | "UPDATE", (payload: { new: unknown }) => void>
+  >;
+  return {
+    callbacks,
+    createClient: vi.fn(() => {
+      const channel = {
+        on: vi.fn(
+          (
+            _kind: string,
+            config: { event: "INSERT" | "UPDATE" },
+            callback: (payload: { new: unknown }) => void,
+          ) => {
+            callbacks[config.event] = callback;
+            return channel;
+          },
+        ),
+        subscribe: vi.fn(() => channel),
+      };
+      return {
+        auth: {
+          getSession: vi.fn().mockResolvedValue({ data: { session: null } }),
+        },
+        realtime: { setAuth: vi.fn() },
+        channel: vi.fn(() => channel),
+        removeChannel: vi.fn(),
+      };
+    }),
+  };
+});
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient,
 }));
 
-import { MessagesThread, messageBelongsToThread } from "./messages-thread";
+import {
+  MessagesThread,
+  messageBelongsToThread,
+  useLeadMessages,
+} from "./messages-thread";
+
+beforeEach(() => {
+  delete callbacks.INSERT;
+  delete callbacks.UPDATE;
+  createClient.mockClear();
+});
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 
@@ -36,8 +67,12 @@ function makeMessage(
     channel: "sms",
     direction: overrides.direction ?? "inbound",
     status: overrides.status ?? "received",
-    contact_id: overrides.contact_id ?? "contact-1",
-    property_id: overrides.property_id ?? "property-1",
+    contact_id:
+      overrides.contact_id !== undefined ? overrides.contact_id : "contact-1",
+    property_id:
+      overrides.property_id !== undefined
+        ? overrides.property_id
+        : "property-1",
     conversation_id: overrides.conversation_id ?? null,
     body: overrides.body ?? "hello",
     from_address: overrides.from_address ?? "+15551234567",
@@ -114,6 +149,92 @@ describe("messageBelongsToThread", () => {
         conversationId: null,
       }),
     ).toBe(false);
+  });
+
+  it("keeps property-linked and unassigned homeowner messages in lead mode", () => {
+    const scope = {
+      contactId: "contact-9",
+      propertyId: "property-9",
+      conversationId: null,
+      matchMode: "lead" as const,
+    };
+    expect(
+      messageBelongsToThread(
+        makeMessage({
+          id: "property-only",
+          contact_id: null,
+          property_id: "property-9",
+        }),
+        scope,
+      ),
+    ).toBe(true);
+    expect(
+      messageBelongsToThread(
+        makeMessage({
+          id: "contact-before-linkage",
+          contact_id: "contact-9",
+          property_id: null,
+        }),
+        scope,
+      ),
+    ).toBe(true);
+    expect(
+      messageBelongsToThread(
+        makeMessage({
+          id: "sibling-property",
+          contact_id: "contact-9",
+          property_id: "property-10",
+        }),
+        scope,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("useLeadMessages", () => {
+  it("applies realtime inserts and updates to the bounded lead window", async () => {
+    const initial = Array.from({ length: 200 }, (_, index) =>
+      makeMessage({
+        id: `message-${index}`,
+        contact_id: null,
+        property_id: "property-1",
+        created_at: `2026-06-09T12:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+      }),
+    );
+    const { result } = renderHook(() =>
+      useLeadMessages({
+        initial,
+        scope: {
+          contactId: "contact-1",
+          conversationId: null,
+          matchMode: "lead",
+          propertyId: "property-1",
+        },
+      }),
+    );
+    await waitFor(() => expect(callbacks.INSERT).toBeDefined());
+
+    const inserted = makeMessage({
+      id: "message-new",
+      contact_id: null,
+      property_id: "property-1",
+      created_at: "2026-06-09T16:00:00.000Z",
+      body: "new realtime message",
+    });
+    act(() => callbacks.INSERT!({ new: inserted }));
+    expect(result.current).toHaveLength(200);
+    expect(result.current.at(-1)?.id).toBe("message-new");
+    expect(result.current.some((row) => row.id === "message-0")).toBe(false);
+
+    act(() =>
+      callbacks.UPDATE!({
+        new: { ...inserted, read_at: "2026-06-09T16:01:00.000Z" },
+      }),
+    );
+    expect(result.current.at(-1)?.read_at).toBe("2026-06-09T16:01:00.000Z");
+    expect(result.current.filter((row) => row.id === inserted.id)).toHaveLength(
+      1,
+    );
   });
 });
 
@@ -405,10 +526,7 @@ describe("<MessagesThread />", () => {
       screen.getByRole("img", { name: "Sandra replied" }),
     ).toBeInTheDocument();
     expect(icon).toHaveAccessibleName("Sandra replied");
-    expect(icon).toHaveAttribute(
-      "title",
-      "Sandra replied · confidence 92%",
-    );
+    expect(icon).toHaveAttribute("title", "Sandra replied · confidence 92%");
     expect(screen.queryByText("AI")).not.toBeInTheDocument();
   });
 
@@ -504,8 +622,8 @@ describe("<MessagesThread />", () => {
       />,
     );
 
-    expect(screen.getAllByTestId("messages-thread-sandra-reply-icon")).toHaveLength(
-      2,
-    );
+    expect(
+      screen.getAllByTestId("messages-thread-sandra-reply-icon"),
+    ).toHaveLength(2);
   });
 });

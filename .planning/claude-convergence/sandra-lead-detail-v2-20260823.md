@@ -40,6 +40,10 @@
 - 2026-08-23: Google official documentation confirmed Maps Embed uses `strict-origin-when-cross-origin`, Street View metadata is free and consumes no image quota, and URL signing is recommended server-side.
 - 2026-08-23: refreshed `origin/main` advanced by the dynamic-company-caller-ID softphone merge (#392). It changes only shared softphone/provider code, not the lead-detail route or parity surface. The branch is rebased onto it and the guarded `SoftphoneLeadButton` remains the single call action.
 - 2026-08-23: full local verification before the refresh: 228 unit files / 2,381 tests, 85 RTL files / 790 tests, typecheck, focused ESLint, diff check, and Next production build passed. The build emitted the repository's pre-existing dynamic `/templates` diagnostics but completed successfully.
+- 2026-08-23: PR #393 opened at `564e8f459aff3ee6b64fefe37495075bf58569e7`; Vercel preview reached Ready. GitHub Actions did not start because the GitHub account is locked by a billing issue; every failed job has zero steps and the provider annotation states the billing lock.
+- 2026-08-23: exhaustive read-only review lanes covered Google Maps/security/config, activity/realtime/data correctness, and ZIP parity/responsive/accessibility/safety. Accepted findings were fixed: iframe pointer access, mandatory signed metadata, malformed-address validation, exact referrer documentation, lead-mode SMS association, truthful unknown-note authorship, mark-read/query ordering, production-hook realtime tests, call-window ordering, 1280/1024 grid behavior, 320px reply wrapping, 36px compact call target, Full Record homeowner status rows, and the dossier booking entry point.
+- 2026-08-23: post-review verification passed: 228 unit files / 2,388 tests, 86 RTL files / 802 tests, typecheck, focused ESLint, diff check, hardcoded-secret pattern scan, and Next production build. Fallow has no changed-file unused exports; remaining leads are inherited dependencies, deliberate subscription similarity, and complexity in tested route/resolver/rendering functions.
+- 2026-08-23: approved 1Password service-account read returned `403 Forbidden`; storage/category verification remains a residual review gap. No GUI or biometric 1Password path was attempted.
 
 ## Claude challenge resolution contract
 
@@ -56,7 +60,7 @@
 11. **Metadata resilience:** 50-meter radius, outdoor source, four-second timeout, 15-minute best-effort in-memory cache keyed by rounded coordinates, and aerial fallthrough. No table or migration.
 12. **Misconfiguration vs coverage:** `ZERO_RESULTS`/`NOT_FOUND` are no coverage; `REQUEST_DENIED`, non-OK HTTP, malformed response, timeout, and fetch errors are metadata failures. Log only the status, never credentials. Preview renders a configuration diagnostic for metadata failure so an all-aerial broken deployment cannot pass.
 13. **Heading:** calculate pano-to-property bearing. If pano and property are within three meters, use stable north (`0`) because the bearing is undefined at effectively the same point.
-14. **Dossier stacking:** named content container switches to `minmax(0,1fr) + 340px` at 1040px available workspace width and stacks below it. Contract tests assert the named threshold.
+14. **Dossier stacking:** the ZIP's viewport contract is authoritative: `minmax(0,1fr) + 340px` begins at 1280px and stacks at 1024px. A viewport breakpoint is required because Sandra's sidebar makes the route content width effectively equal at those two global navigation states.
 15. **Attribution:** overlays are allowed but the gradient ends 36px above the bottom and content has 48px bottom clearance. Five-width visible acceptance must still prove the Google logo and terms are unobstructed.
 16. **No-live-contact verification:** preview inspection is read-only. Do not click Call, Queue SMS, Send now, or submit an appointment. Focused automation must fail if it observes a calling or messaging mutation request; manual acceptance inspects presence/disabled/gated states without invoking them.
 
@@ -64,4 +68,4 @@ Items 5 and 7 deliberately preserve Jarrad's explicit limits and no-auto-jump in
 
 ## Status
 
-`IMPLEMENTING`
+`REVIEW_FIXES_VERIFIED_PENDING_MAPS_CREDENTIALS_AND_BROWSER`

@@ -60,7 +60,8 @@ export function LeadMediaHero({
       />
       {process.env.VERCEL_ENV === "preview" &&
       media.kind === "aerial" &&
-      media.fallbackReason === "metadata-failure" ? (
+      (media.fallbackReason === "metadata-failure" ||
+        media.fallbackReason === "missing-signing-secret") ? (
         <p
           className="absolute top-2 left-2 z-20 max-w-[calc(100%-1rem)] rounded-md bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-950 shadow"
           role="status"
@@ -73,7 +74,10 @@ export function LeadMediaHero({
         className="pointer-events-none absolute inset-x-0 bottom-9 h-44 bg-gradient-to-t from-slate-950/90 via-slate-950/65 to-transparent"
         aria-hidden
       />
-      <div className="relative z-10 flex min-h-[210px] flex-col justify-end gap-4 px-4 pt-20 pb-12 text-white sm:min-h-[230px] sm:px-6 lg:min-h-[250px] lg:flex-row lg:items-end lg:justify-between">
+      <div
+        className="pointer-events-none relative z-10 flex min-h-[210px] flex-col justify-end gap-4 px-4 pt-20 pb-12 text-white sm:min-h-[230px] sm:px-6 lg:min-h-[250px] lg:flex-row lg:items-end lg:justify-between"
+        data-testid="lead-media-overlay"
+      >
         <div className="min-w-0 max-w-3xl">
           <nav
             aria-label="Breadcrumb"
@@ -81,7 +85,10 @@ export function LeadMediaHero({
           >
             <span>Workspace</span>
             <span aria-hidden>/</span>
-            <Link href="/leads" className="transition-colors hover:text-white">
+            <Link
+              href="/leads"
+              className="pointer-events-auto transition-colors hover:text-white"
+            >
               Leads
             </Link>
             <span aria-hidden>/</span>
@@ -94,7 +101,7 @@ export function LeadMediaHero({
             {description || "—"}
           </p>
         </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9 [&_button]:shadow-sm">
+        <div className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9 [&_button]:shadow-sm">
           {actions}
         </div>
       </div>

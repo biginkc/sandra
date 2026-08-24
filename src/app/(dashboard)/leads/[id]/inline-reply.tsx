@@ -47,7 +47,9 @@ export function InlineReply({
 }: Props) {
   const router = useRouter();
   const [body, setBody] = useState("");
-  const [queuedReceipt, setQueuedReceipt] = useState<QueuedReceipt | null>(null);
+  const [queuedReceipt, setQueuedReceipt] = useState<QueuedReceipt | null>(
+    null,
+  );
   const [pending, startTransition] = useTransition();
   // Tracks the most recent template selection so a slower in-flight
   // `loadLeadVars` for an earlier click can't overwrite the body the user
@@ -217,8 +219,8 @@ export function InlineReply({
           rows={2}
           className="w-full bg-transparent border-none focus:ring-0 focus:outline-none text-[14px] resize-none min-h-[60px] placeholder:text-[#a8a29e]"
         />
-        <div className="flex items-center justify-between gap-3 mt-2 pt-2 border-t border-[#e5e1df]/60">
-          <div className="flex items-center gap-3 text-[#78716c] min-w-0">
+        <div className="mt-2 flex flex-col gap-3 border-t border-[#e5e1df]/60 pt-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 flex-wrap items-center gap-3 text-[#78716c]">
             <span className="text-[11px] font-medium flex items-center gap-1.5 min-w-0">
               <span className="shrink-0">From:</span>
               <span className="text-[#1c1917] font-bold tabular-nums truncate">
@@ -246,7 +248,7 @@ export function InlineReply({
             disabled={!canSend}
             aria-label="Queue reply in Outbox"
             data-testid="inline-reply-send"
-            className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-full bg-primary px-5 py-2 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-full bg-primary px-5 py-2 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
           >
             {pending ? "Queueing…" : "Queue SMS"}
             <SendIcon className="h-3.5 w-3.5" />

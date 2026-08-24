@@ -21,40 +21,6 @@ type Props = {
   currentUserEmail: string | null;
 };
 
-export function NotesFeed(props: Props) {
-  const { propertyId, currentUserId } = props;
-  const { notes, authorEmails } = useLeadNotes(props);
-
-  return (
-    <div className="flex flex-col gap-3">
-      <AddNoteComposer propertyId={propertyId} />
-      {notes.length === 0 ? (
-        <div className="text-muted-foreground border-border/60 rounded-md border border-dashed p-4 text-center text-xs">
-          No notes yet. Add one so teammates can pick up the context.
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {notes.map((note) => (
-            <NoteEventCard
-              key={note.id}
-              note={note}
-              authorEmail={
-                note.author_user_id
-                  ? (authorEmails[note.author_user_id] ?? null)
-                  : null
-              }
-              isMine={
-                note.author_user_id !== null &&
-                note.author_user_id === currentUserId
-              }
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function useLeadNotes({
   propertyId,
   initial,
@@ -196,7 +162,13 @@ export function NoteEventCard({
       <div className="whitespace-pre-wrap break-words">{note.body}</div>
       <div className="text-muted-foreground mt-1.5 flex flex-wrap items-center gap-1.5 text-xs">
         <span>
-          {isMine ? "you" : authorEmail ? shortenEmail(authorEmail) : "system"}
+          {isMine
+            ? "you"
+            : authorEmail
+              ? shortenEmail(authorEmail)
+              : note.author_user_id
+                ? "unknown teammate"
+                : "system"}
         </span>
         <span>·</span>
         <span>

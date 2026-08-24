@@ -6,7 +6,6 @@ import type { Note } from "./notes-feed";
 import {
   buildLeadActivitySnapshot,
   normalizeLeadActivityEvents,
-  upsertBoundedActivityRow,
 } from "./lead-activity";
 
 const message = {
@@ -124,23 +123,5 @@ describe("buildLeadActivitySnapshot", () => {
 
     expect(snapshot.trustFloor).toBe(messages[0].created_at);
     expect(snapshot.trustBoundaryIndex).toBeGreaterThanOrEqual(0);
-  });
-});
-
-describe("upsertBoundedActivityRow", () => {
-  it("handles realtime inserts, updates, deduplication, and limits", () => {
-    expect(
-      upsertBoundedActivityRow(
-        [
-          { id: "a", value: 1 },
-          { id: "b", value: 2 },
-        ],
-        { id: "a", value: 3 },
-        2,
-      ),
-    ).toEqual([
-      { id: "a", value: 3 },
-      { id: "b", value: 2 },
-    ]);
   });
 });

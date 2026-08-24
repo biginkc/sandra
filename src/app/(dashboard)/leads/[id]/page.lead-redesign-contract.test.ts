@@ -33,7 +33,10 @@ describe("Lead Detail v2 integration contract", () => {
   });
 
   it("marks lead messages read on open and includes call fallback time", () => {
-    expect(source).toContain("void markMessagesReadForProperty(lead.id)");
+    expect(source).toContain("await markMessagesReadForProperty(lead.id)");
+    expect(
+      source.indexOf("await markMessagesReadForProperty(lead.id)"),
+    ).toBeLessThan(source.indexOf('.from("messages")'));
     expect(source).toContain(
       '"id, created_at, started_at, outcome, disposition',
     );
@@ -66,6 +69,16 @@ describe("Lead Detail v2 integration contract", () => {
       'aria-label="Next"',
     ]) {
       expect(source).toContain(token);
+    }
+    expect(source.match(/<BookAppointmentPopover/g)).toHaveLength(2);
+    for (const label of [
+      "SMS consent",
+      "SMS restriction",
+      "Contact DNC flag",
+    ]) {
+      expect(
+        source.match(new RegExp(label, "g"))?.length,
+      ).toBeGreaterThanOrEqual(2);
     }
   });
 });

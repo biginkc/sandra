@@ -15,6 +15,7 @@ const location: LeadMediaLocation = {
   state: "MO",
   zip: "64106",
 };
+const signingSecret = "dGVzdC1zaWduaW5nLXNlY3JldA==";
 
 describe("resolveLeadMediaPresentation", () => {
   it("uses Street View metadata and calculates the panorama heading", async () => {
@@ -32,6 +33,7 @@ describe("resolveLeadMediaPresentation", () => {
     const result = await resolveLeadMediaPresentation(location, {
       embedKey: "embed-key",
       metadataKey: "metadata-key",
+      signingSecret,
       fetcher,
     });
 
@@ -44,6 +46,10 @@ describe("resolveLeadMediaPresentation", () => {
     expect(result.kind === "streetView" ? result.embedUrl : "").toContain(
       "/streetview?",
     );
+    const metadataUrl = new URL(String(fetcher.mock.calls[0]?.[0]));
+    expect(metadataUrl.searchParams.get("signature")).toBe(
+      "S2Rac3e8Nl5-u1l2jXT8yF5Sfuo=",
+    );
   });
 
   it("computes a normalized northbound heading", () => {
@@ -51,16 +57,15 @@ describe("resolveLeadMediaPresentation", () => {
   });
 
   it("falls back to coordinate aerial imagery when coverage is unavailable", async () => {
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        new Response(JSON.stringify({ status: "ZERO_RESULTS" }), {
-          status: 200,
-        }),
-      );
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ status: "ZERO_RESULTS" }), {
+        status: 200,
+      }),
+    );
     const result = await resolveLeadMediaPresentation(location, {
       embedKey: "embed-key",
       metadataKey: "metadata-key",
+      signingSecret,
       fetcher,
     });
     expect(result).toMatchObject({
@@ -108,6 +113,21 @@ describe("resolveLeadMediaPresentation", () => {
     expect(result).toEqual({ kind: "flat", reason: "missing-location" });
   });
 
+  it("uses the flat fallback for a structurally malformed address", async () => {
+    const result = await resolveLeadMediaPresentation(
+      {
+        ...location,
+        lat: null,
+        lon: null,
+        address: "Unknown",
+        state: "Missouri",
+        zip: "not-a-zip",
+      },
+      { embedKey: "embed-key", metadataKey: "metadata-key", signingSecret },
+    );
+    expect(result).toEqual({ kind: "flat", reason: "missing-location" });
+  });
+
   it("uses the flat fallback when the browser embed key is absent", async () => {
     const result = await resolveLeadMediaPresentation(location, {
       embedKey: "",
@@ -131,17 +151,32 @@ describe("resolveLeadMediaPresentation", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it("distinguishes metadata misconfiguration from real zero coverage", async () => {
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        new Response(JSON.stringify({ status: "REQUEST_DENIED" }), {
-          status: 200,
-        }),
-      );
+  it("does not make an unsigned metadata request when the signing secret is absent", async () => {
+    const fetcher = vi.fn<typeof fetch>();
     const result = await resolveLeadMediaPresentation(location, {
       embedKey: "embed-key",
       metadataKey: "metadata-key",
+      signingSecret: "",
+      fetcher,
+    });
+    expect(result).toMatchObject({
+      kind: "aerial",
+      resolvedBy: "coordinates",
+      fallbackReason: "missing-signing-secret",
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes metadata misconfiguration from real zero coverage", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ status: "REQUEST_DENIED" }), {
+        status: 200,
+      }),
+    );
+    const result = await resolveLeadMediaPresentation(location, {
+      embedKey: "embed-key",
+      metadataKey: "metadata-key",
+      signingSecret,
       fetcher,
     });
     expect(result).toMatchObject({
@@ -164,6 +199,7 @@ describe("resolveLeadMediaPresentation", () => {
     const result = await resolveLeadMediaPresentation(location, {
       embedKey: "embed-key",
       metadataKey: "metadata-key",
+      signingSecret,
       fetcher,
     });
     expect(result).toMatchObject({ kind: "streetView", heading: 0 });

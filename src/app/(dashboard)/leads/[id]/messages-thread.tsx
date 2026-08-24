@@ -38,6 +38,7 @@ export type LeadMessageScope = {
   contactId: string | null;
   conversationId: string | null;
   propertyId: string | null;
+  matchMode?: "thread" | "lead";
 };
 
 export function messageBelongsToThread(
@@ -49,6 +50,14 @@ export function messageBelongsToThread(
   }
   const normalizedPropertyId =
     scope.propertyId && scope.propertyId.length > 0 ? scope.propertyId : null;
+  if (scope.matchMode === "lead") {
+    if (row.property_id === normalizedPropertyId) return true;
+    return (
+      row.property_id === null &&
+      scope.contactId !== null &&
+      row.contact_id === scope.contactId
+    );
+  }
   return (
     row.contact_id === scope.contactId &&
     row.property_id === normalizedPropertyId
@@ -196,10 +205,15 @@ export function useLeadMessages({
   scope: LeadMessageScope;
   onLiveMessage?: (message: Message) => void;
 }): Message[] {
-  const { contactId, conversationId, propertyId } = scope;
+  const { contactId, conversationId, matchMode, propertyId } = scope;
   const [messages, setMessages] = useState<Message[]>(() =>
     sortMessages(
-      filterThreadMessages(initial, { contactId, conversationId, propertyId }),
+      filterThreadMessages(initial, {
+        contactId,
+        conversationId,
+        matchMode,
+        propertyId,
+      }),
     ),
   );
 
@@ -210,11 +224,12 @@ export function useLeadMessages({
         filterThreadMessages(initial, {
           contactId,
           conversationId,
+          matchMode,
           propertyId,
         }),
       ),
     );
-  }, [contactId, conversationId, initial, propertyId]);
+  }, [contactId, conversationId, initial, matchMode, propertyId]);
 
   useEffect(() => {
     const supabase = createClient();
@@ -238,6 +253,7 @@ export function useLeadMessages({
               !messageBelongsToThread(row, {
                 contactId,
                 conversationId,
+                matchMode,
                 propertyId,
               })
             )
@@ -265,6 +281,7 @@ export function useLeadMessages({
                 !messageBelongsToThread(row, {
                   contactId,
                   conversationId,
+                  matchMode,
                   propertyId,
                 })
               ) {
@@ -285,7 +302,7 @@ export function useLeadMessages({
       mounted = false;
       if (channel) void supabase.removeChannel(channel);
     };
-  }, [contactId, conversationId, onLiveMessage, propertyId]);
+  }, [contactId, conversationId, matchMode, onLiveMessage, propertyId]);
 
   return messages;
 }

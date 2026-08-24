@@ -88,7 +88,12 @@ export function LeadActivityTimeline(props: Props) {
 
   const messages = useLeadMessages({
     initial: messageSnapshot,
-    scope: { contactId, conversationId: null, propertyId },
+    scope: {
+      contactId,
+      conversationId: null,
+      matchMode: "lead",
+      propertyId,
+    },
   });
   const { notes, authorEmails: liveAuthorEmails } = useLeadNotes({
     propertyId,
@@ -140,6 +145,7 @@ export function LeadActivityTimeline(props: Props) {
           .from("call_activities")
           .select(CALL_ACTIVITY_WITH_ARTIFACTS)
           .eq("property_id", propertyId)
+          .order("started_at", { ascending: false, nullsFirst: false })
           .order("created_at", { ascending: false })
           .limit(20);
         if (result.error) throw result.error;
@@ -320,14 +326,6 @@ export function buildLeadActivitySnapshot(
       return detail ? [{ source, detail }] : [];
     }),
   };
-}
-
-export function upsertBoundedActivityRow<T extends { id: string }>(
-  rows: T[],
-  next: T,
-  limit: number,
-): T[] {
-  return [next, ...rows.filter((row) => row.id !== next.id)].slice(0, limit);
 }
 
 function TimelineDot({ label }: { label: string }) {

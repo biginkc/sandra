@@ -15,6 +15,7 @@ export type LeadMediaPresentation =
         | "no-coverage"
         | "metadata-failure"
         | "missing-metadata-key"
+        | "missing-signing-secret"
         | "missing-coordinates";
     }
   | {
@@ -75,21 +76,24 @@ export async function resolveLeadMediaPresentation(
   const coordinates = normalizeCoordinates(location.lat, location.lon);
   const metadataKey =
     options.metadataKey ?? process.env.GOOGLE_STREET_VIEW_METADATA_KEY;
+  const signingSecret =
+    options.signingSecret ??
+    process.env.GOOGLE_MAPS_URL_SIGNING_SECRET ??
+    undefined;
 
   let aerialFallbackReason: Extract<
     LeadMediaPresentation,
     { kind: "aerial" }
-  >["fallbackReason"] = metadataKey
-    ? "metadata-failure"
-    : "missing-metadata-key";
+  >["fallbackReason"] = !metadataKey
+    ? "missing-metadata-key"
+    : !signingSecret
+      ? "missing-signing-secret"
+      : "metadata-failure";
 
-  if (coordinates && metadataKey) {
+  if (coordinates && metadataKey && signingSecret) {
     const metadata = await loadStreetViewMetadata(coordinates, {
       metadataKey,
-      signingSecret:
-        options.signingSecret ??
-        process.env.GOOGLE_MAPS_URL_SIGNING_SECRET ??
-        undefined,
+      signingSecret,
       fetcher: options.fetcher ?? fetch,
       cacheEnabled: options.fetcher === undefined,
     });
@@ -204,7 +208,7 @@ async function loadStreetViewMetadata(
   coordinates: { lat: number; lon: number },
   options: {
     metadataKey: string;
-    signingSecret?: string;
+    signingSecret: string;
     fetcher: typeof fetch;
     cacheEnabled: boolean;
   },
@@ -219,12 +223,10 @@ async function loadStreetViewMetadata(
   url.searchParams.set("radius", String(STREET_VIEW_METADATA_RADIUS_METERS));
   url.searchParams.set("source", "outdoor");
   url.searchParams.set("key", options.metadataKey);
-  if (options.signingSecret) {
-    url.searchParams.set(
-      "signature",
-      signGoogleMapsUrl(url, options.signingSecret),
-    );
-  }
+  url.searchParams.set(
+    "signature",
+    signGoogleMapsUrl(url, options.signingSecret),
+  );
 
   try {
     const response = await options.fetcher(url, {
@@ -324,10 +326,20 @@ function normalizeCoordinates(
 }
 
 function formatCompleteAddress(location: LeadMediaLocation): string | null {
-  const parts = [location.address, location.city, location.state, location.zip]
-    .map((part) => part?.trim() ?? "")
-    .filter(Boolean);
-  if (parts.length !== 4 || parts.some((part) => part.length > 160))
-    return null;
-  return `${parts[0]}, ${parts[1]}, ${parts[2]} ${parts[3]}`;
+  const address = location.address?.trim() ?? "";
+  const city = location.city?.trim() ?? "";
+  const state = location.state?.trim().toUpperCase() ?? "";
+  const zip = location.zip?.trim() ?? "";
+  const structurallyValid =
+    address.length > 0 &&
+    address.length <= 160 &&
+    /\d/.test(address) &&
+    /\p{L}/u.test(address) &&
+    city.length > 0 &&
+    city.length <= 80 &&
+    /\p{L}/u.test(city) &&
+    /^[A-Z]{2}$/.test(state) &&
+    /^\d{5}(?:-\d{4})?$/.test(zip);
+  if (!structurallyValid) return null;
+  return `${address}, ${city}, ${state} ${zip}`;
 }

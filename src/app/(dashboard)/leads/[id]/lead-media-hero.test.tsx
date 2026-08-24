@@ -36,9 +36,12 @@ describe("<LeadMediaHero />", () => {
       "src",
       expect.stringContaining("/maps/embed/v1/streetview"),
     );
+    expect(screen.getByTestId("lead-media-overlay")).toHaveClass(
+      "pointer-events-none",
+    );
     expect(
-      screen.getByRole("button", { name: "Book appointment" }),
-    ).toBeInTheDocument();
+      screen.getByRole("button", { name: "Book appointment" }).parentElement,
+    ).toHaveClass("pointer-events-auto");
   });
 
   it("renders the automatic aerial fallback without a view selector", () => {

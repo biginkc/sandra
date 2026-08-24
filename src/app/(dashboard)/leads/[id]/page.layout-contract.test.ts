@@ -20,12 +20,10 @@ describe("lead detail v2 layout contract", () => {
     expect(offsets).toEqual([...offsets].sort((a, b) => a - b));
   });
 
-  it("removes the normal Page gutter and uses a 340px container-aware dossier", () => {
+  it("removes the normal Page gutter and uses the 1280px two-column boundary", () => {
     expect(source).toContain('<Page className="gap-0 p-0">');
     expect(source).toContain("@container/lead-workspace");
-    expect(source).toContain(
-      "@min-[1040px]/lead-workspace:grid-cols-[minmax(0,1fr)_340px]",
-    );
+    expect(source).toContain("xl:grid-cols-[minmax(0,1fr)_340px]");
     expect(source).toContain('aria-label="Lead dossier"');
   });
 
