@@ -221,7 +221,7 @@ test.describe("Messages cockpit — design fidelity", () => {
     });
   });
 
-  test("lead detail (/leads/[id]) inherits the new bubble + composer", async ({
+  test("lead detail (/leads/[id]) renders the unified timeline before the composer", async ({
     page,
   }) => {
     const admin = adminClient();
@@ -238,9 +238,10 @@ test.describe("Messages cockpit — design fidelity", () => {
       fullPage: true,
     });
 
-    // Same MessagesThread → day separator + bubbles render
-    await expect(page.getByTestId("messages-thread")).toBeVisible();
-    await expect(page.getByTestId("messages-thread-day-sep").first()).toBeVisible();
+    // Lead detail now normalizes messages, notes, and calls into one timeline.
+    const timeline = page.getByTestId("lead-activity-timeline");
+    await expect(timeline).toBeVisible();
+    await expect(timeline.getByTestId("messages-thread-msg")).toHaveCount(4);
 
     // Same InlineReply → From: line + queue-only button + disclaimer
     const reply = page.getByTestId("inline-reply");
@@ -250,5 +251,21 @@ test.describe("Messages cockpit — design fidelity", () => {
       "Queue SMS",
     );
     await expect(reply).toContainText(/adds the message to Outbox/i);
+
+    // The approved chat order keeps reply controls after all timeline rows.
+    expect(
+      await page.evaluate(() => {
+        const activity = document.querySelector(
+          '[data-testid="lead-activity-timeline"]',
+        );
+        const composer = document.querySelector('[data-testid="inline-reply"]');
+        return Boolean(
+          activity &&
+            composer &&
+            activity.compareDocumentPosition(composer) &
+              Node.DOCUMENT_POSITION_FOLLOWING,
+        );
+      }),
+    ).toBe(true);
   });
 });

@@ -49,6 +49,8 @@
 - 2026-08-24: rotated the URL-signing secret after visual inspection exposed the retired value, installed the replacement in Vercel Production/Preview as Sensitive and Development as encrypted, cleared the clipboard, and permanently removed every temporary screenshot that displayed the retired secret.
 - 2026-08-24: verified a replacement-secret signed Street View metadata request returns HTTP 200 / `OK`. Added a zero daily consumer quota override for unsigned Street View requests; an unsigned Static Street View image probe now returns HTTP 403 while signed metadata remains healthy.
 - 2026-08-24: Vercel now reports all three required Google variables in Production, Preview, and Development without reading their values. A fresh full RTL run passes 87 files / 802 tests.
+- 2026-08-24: added the exact stable branch-preview callback to the Sandra Supabase authentication allowlist through the Management API. A temporary branch-only Hugo flag proved that Hugo still returns preview sign-in to the production callback, so the flag was removed; the final preview retains Sandra's existing password/magic-link path.
+- 2026-08-24: a focused Chrome-channel E2E run found one stale test assertion for the removed standalone `MessagesThread` wrapper. The acceptance test now targets the unified activity timeline, verifies four message rows, preserves the queue-only reply assertions, and proves the timeline precedes the composer. Setup plus both design-fidelity scenarios pass (3/3).
 
 ## Claude challenge resolution contract
 
@@ -73,4 +75,4 @@ Items 5 and 7 deliberately preserve Jarrad's explicit limits and no-auto-jump in
 
 ## Status
 
-`PROVIDER_CONFIGURED_PENDING_FRESH_PREVIEW_AND_BROWSER`
+`PROVIDER_CONFIGURED_PENDING_FINAL_PREVIEW_AND_BROWSER`
