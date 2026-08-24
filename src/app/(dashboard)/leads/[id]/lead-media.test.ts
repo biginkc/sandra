@@ -78,30 +78,89 @@ describe("resolveLeadMediaPresentation", () => {
     );
   });
 
-  it("resolves missing coordinates through a complete address", async () => {
+  it("resolves Street View through a complete address when coordinates are missing", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "OK",
+          pano_id: "address-pano",
+          location: { lat: 39.0999, lng: -94.5787 },
+        }),
+        { status: 200 },
+      ),
+    );
     const result = await resolveLeadMediaPresentation(
       { ...location, lat: null, lon: null },
-      { embedKey: "embed-key", metadataKey: "metadata-key" },
+      {
+        embedKey: "embed-key",
+        metadataKey: "metadata-key",
+        signingSecret,
+        fetcher,
+      },
+    );
+    expect(result).toMatchObject({
+      kind: "streetView",
+      panoramaId: "address-pano",
+      heading: null,
+    });
+    const metadataUrl = new URL(String(fetcher.mock.calls[0]?.[0]));
+    expect(metadataUrl.searchParams.get("location")).toBe(
+      "100 Sample St, Kansas City, MO 64106",
+    );
+    expect(metadataUrl.searchParams.get("radius")).toBe("50");
+    expect(metadataUrl.searchParams.get("source")).toBe("outdoor");
+    expect(metadataUrl.searchParams.get("key")).toBe("metadata-key");
+    expect(metadataUrl.searchParams.get("signature")).toBe(
+      "BeyM6ThVlEUdAXcxVZakP9XGHIE=",
+    );
+    expect(result.kind === "streetView" ? result.embedUrl : "").toContain(
+      "pano=address-pano",
+    );
+    expect(result.kind === "streetView" ? result.embedUrl : "").not.toContain(
+      "heading=",
+    );
+  });
+
+  it("falls back to address aerial imagery when address Street View coverage is unavailable", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ status: "ZERO_RESULTS" }), { status: 200 }),
+    );
+    const result = await resolveLeadMediaPresentation(
+      { ...location, lat: null, lon: null },
+      {
+        embedKey: "embed-key",
+        metadataKey: "metadata-key",
+        signingSecret,
+        fetcher,
+      },
     );
     expect(result).toMatchObject({
       kind: "aerial",
       resolvedBy: "address",
-      fallbackReason: "missing-coordinates",
+      fallbackReason: "no-coverage",
     });
     expect(result.kind === "aerial" ? result.embedUrl : "").toContain(
       "100+Sample+St%2C+Kansas+City%2C+MO+64106",
     );
   });
 
-  it("treats the placeholder coordinate 0,0 as missing and resolves by address", async () => {
+  it("treats the placeholder coordinate 0,0 as missing and tries the address", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ status: "ZERO_RESULTS" }), { status: 200 }),
+    );
     const result = await resolveLeadMediaPresentation(
       { ...location, lat: 0, lon: 0 },
-      { embedKey: "embed-key", metadataKey: "metadata-key" },
+      {
+        embedKey: "embed-key",
+        metadataKey: "metadata-key",
+        signingSecret,
+        fetcher,
+      },
     );
     expect(result).toMatchObject({
       kind: "aerial",
       resolvedBy: "address",
-      fallbackReason: "missing-coordinates",
+      fallbackReason: "no-coverage",
     });
   });
 
@@ -114,6 +173,7 @@ describe("resolveLeadMediaPresentation", () => {
   });
 
   it("uses the flat fallback for a structurally malformed address", async () => {
+    const fetcher = vi.fn<typeof fetch>();
     const result = await resolveLeadMediaPresentation(
       {
         ...location,
@@ -123,9 +183,75 @@ describe("resolveLeadMediaPresentation", () => {
         state: "Missouri",
         zip: "not-a-zip",
       },
-      { embedKey: "embed-key", metadataKey: "metadata-key", signingSecret },
+      {
+        embedKey: "embed-key",
+        metadataKey: "metadata-key",
+        signingSecret,
+        fetcher,
+      },
     );
     expect(result).toEqual({ kind: "flat", reason: "missing-location" });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("classifies address metadata failures before using aerial imagery", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ status: "REQUEST_DENIED" }), {
+        status: 200,
+      }),
+    );
+    const result = await resolveLeadMediaPresentation(
+      { ...location, lat: null, lon: null },
+      {
+        embedKey: "embed-key",
+        metadataKey: "metadata-key",
+        signingSecret,
+        fetcher,
+      },
+    );
+    expect(result).toMatchObject({
+      kind: "aerial",
+      resolvedBy: "address",
+      fallbackReason: "metadata-failure",
+    });
+  });
+
+  it("does not make an unsigned address metadata request", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const result = await resolveLeadMediaPresentation(
+      { ...location, lat: null, lon: null },
+      {
+        embedKey: "embed-key",
+        metadataKey: "metadata-key",
+        signingSecret: "",
+        fetcher,
+      },
+    );
+    expect(result).toMatchObject({
+      kind: "aerial",
+      resolvedBy: "address",
+      fallbackReason: "missing-signing-secret",
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("classifies a missing address metadata key without calling Google", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const result = await resolveLeadMediaPresentation(
+      { ...location, lat: null, lon: null },
+      {
+        embedKey: "embed-key",
+        metadataKey: "",
+        signingSecret,
+        fetcher,
+      },
+    );
+    expect(result).toMatchObject({
+      kind: "aerial",
+      resolvedBy: "address",
+      fallbackReason: "missing-metadata-key",
+    });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("uses the flat fallback when the browser embed key is absent", async () => {
