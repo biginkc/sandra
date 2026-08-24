@@ -188,7 +188,7 @@ test("Each assigned thread row tags itself with the viewer's assignment state", 
   await expect(row).toHaveAttribute("data-assignee-mine", "true");
 });
 
-test('Side panel shows "Unassigned" picker on an unassigned thread; choosing Me assigns', async ({
+test('Side panel shows "No owner" picker on an unassigned thread; choosing Me assigns', async ({
   page,
 }) => {
   const admin = adminClient();
@@ -207,7 +207,7 @@ test('Side panel shows "Unassigned" picker on an unassigned thread; choosing Me 
   await expect(page.getByTestId("assign-to-me")).toHaveCount(0);
   const trigger = page.getByTestId("assign-dropdown-trigger");
   await expect(trigger).toBeVisible();
-  await expect(trigger).toContainText("Unassigned");
+  await expect(trigger).toContainText("No owner");
   await trigger.click();
 
   const selfOption = page.getByTestId("assign-dropdown-me");
@@ -250,7 +250,7 @@ test("Assignee dropdown can assign a teammate directly from an unassigned thread
 
   const trigger = page.getByTestId("assign-dropdown-trigger");
   await expect(trigger).toBeVisible();
-  await expect(trigger).toContainText("Unassigned");
+  await expect(trigger).toContainText("No owner");
   await trigger.click();
 
   const teammateOption = page.getByTestId(
@@ -303,7 +303,7 @@ test("Assignee dropdown can unassign and reassign via the picker", async ({
 
   await expect(page.getByTestId("assign-to-me")).toHaveCount(0);
   await expect(trigger).toBeVisible();
-  await expect(trigger).toContainText("Unassigned");
+  await expect(trigger).toContainText("No owner");
 
   await trigger.click();
   await expect(page.getByTestId("assign-dropdown-me")).toBeVisible();

@@ -83,7 +83,7 @@ describe("<AssignDropdown />", () => {
 
     expect(screen.queryByTestId("assign-to-me")).not.toBeInTheDocument();
     const trigger = screen.getByTestId("assign-dropdown-trigger");
-    expect(trigger).toHaveTextContent("Unassigned");
+    expect(trigger).toHaveTextContent("No owner");
 
     await user.click(trigger);
 
@@ -172,8 +172,6 @@ describe("<AssignDropdown />", () => {
       />,
     );
 
-    expect(screen.getByTestId("assign-dropdown-trigger")).toHaveTextContent(
-      "Unassigned",
-    );
+    expect(screen.getByTestId("assign-dropdown-trigger")).toHaveTextContent("No owner");
   });
 });

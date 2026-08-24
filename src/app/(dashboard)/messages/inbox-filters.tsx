@@ -128,7 +128,7 @@ export function InboxFilters({
       />
       {showAssignmentChips && (
         <FilterChip
-          label="Unassigned"
+          label="No owner"
           active={active === "unassigned"}
           count={filterCounts.unassigned}
           onClick={() => setFilter("unassigned")}

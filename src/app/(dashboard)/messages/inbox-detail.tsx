@@ -352,7 +352,7 @@ export function InboxDetail({
     : null;
   const isMine = data.assigneeId !== null && data.assigneeId === currentUserId;
   const assignedLabel = !data.assigneeId
-    ? "Unassigned"
+    ? "No owner"
     : isMine
       ? "Me"
       : (assigneeEmail ?? "Teammate");

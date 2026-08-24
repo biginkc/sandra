@@ -34,7 +34,7 @@ export function NeedsAttentionStrip({ needs }: Props) {
     },
     {
       count: needs.unassigned,
-      label: "Unassigned leads",
+      label: "Leads with no owner",
       href: "/leads?unassigned=true",
       dotClass: "bg-stone-400",
     },

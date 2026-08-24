@@ -109,7 +109,7 @@ function AssignDropdownContent({
       const result = await callAction(updateLeadAssignee(propertyId, nextId), {
         successMessage: nextId
           ? `Assigned to ${nextEmail ?? "user"}`
-          : "Unassigned",
+          : "Owner removed",
         fallbackMessage: "Could not update assignee",
       });
       if (!result.ok) {
@@ -122,7 +122,7 @@ function AssignDropdownContent({
   };
 
   const label = !assigneeId
-    ? "Unassigned"
+    ? "No owner"
     : assigneeId === currentUserId
       ? "Assigned: me"
       : `Assigned: ${assigneeEmail ? shortenEmail(assigneeEmail) : "Teammate"}`;
