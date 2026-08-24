@@ -238,7 +238,7 @@ function TagChip({
           type="button"
           aria-label={`Remove ${tag.name}`}
           onClick={onRemove}
-          className="hover:opacity-70"
+          className="-my-2 -mr-2 inline-flex size-9 items-center justify-center rounded-full hover:opacity-70"
         >
           <XIcon className="size-3" />
         </button>

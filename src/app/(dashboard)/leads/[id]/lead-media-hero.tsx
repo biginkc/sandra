@@ -56,6 +56,7 @@ export function LeadMediaHero({
         className="absolute inset-0 h-full w-full border-0"
         loading="eager"
         referrerPolicy="strict-origin-when-cross-origin"
+        allow="accelerometer; gyroscope; fullscreen"
         allowFullScreen
       />
       {process.env.VERCEL_ENV === "preview" &&

@@ -55,6 +55,14 @@ describe("<LeadTaskWidget />", () => {
     await waitFor(() => {
       expect(screen.getByTestId("lead-task-assignee")).not.toBeDisabled();
     });
+    expect(screen.getByTestId("lead-task-due-at")).toHaveClass(
+      "w-full",
+      "min-w-0",
+    );
+    expect(screen.getByTestId("lead-task-assignee")).toHaveClass(
+      "w-full",
+      "min-w-0",
+    );
 
     await user.type(screen.getByTestId("lead-task-due-at"), "2026-06-20T09:30");
     await user.selectOptions(screen.getByTestId("lead-task-assignee"), "user-2");

@@ -33,6 +33,10 @@ describe("<LeadMediaHero />", () => {
       "strict-origin-when-cross-origin",
     );
     expect(frame).toHaveAttribute(
+      "allow",
+      "accelerometer; gyroscope; fullscreen",
+    );
+    expect(frame).toHaveAttribute(
       "src",
       expect.stringContaining("/maps/embed/v1/streetview"),
     );
