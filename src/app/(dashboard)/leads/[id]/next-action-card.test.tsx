@@ -67,9 +67,7 @@ describe("<NextActionCard />", () => {
       "sm:min-h-6",
     );
 
-    rerender(
-      <NextActionCard task={task} timezone="America/Chicago" compact />,
-    );
+    rerender(<NextActionCard task={task} timezone="America/Chicago" compact />);
     expect(screen.getByTestId("lead-next-action")).toHaveClass(
       "inline-flex",
       "rounded-full",
@@ -100,6 +98,26 @@ describe("<NextActionCard />", () => {
     ).toHaveAttribute("href", "#lead-appointments");
     expect(screen.queryByRole("button", { name: /Done/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Snooze/ })).toBeNull();
+  });
+
+  it("keeps the compact appointment link touch-sized on mobile", () => {
+    render(
+      <NextActionCard
+        task={{
+          id: "appointment-compact",
+          title: "Property walkthrough",
+          due_at: "2026-08-19T14:00:00.000Z",
+          type: "appointment",
+        }}
+        timezone="America/Chicago"
+        compact
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "View appointment" })).toHaveClass(
+      "min-h-9",
+      "sm:min-h-6",
+    );
   });
 
   it("keeps a failed task mutation visible and safely retryable", async () => {

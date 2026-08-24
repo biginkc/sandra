@@ -560,6 +560,9 @@ export default async function LeadDetailPage({
     );
   })();
   const inlineReplyUnavailable = !lead.homeowner?.id || !homeownerSmsPhone;
+  const cassStatusLabel = lead.cass_status
+    .replace(/_/g, " ")
+    .replace(/^./, (character) => character.toUpperCase());
 
   const heroActions = (
     <>
@@ -919,7 +922,7 @@ export default async function LeadDetailPage({
                 />
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-muted-foreground">
-                    Address (CASS: {lead.cass_status})
+                    Address (CASS: {cassStatusLabel})
                   </span>
                   <CassWidget
                     propertyId={lead.id}

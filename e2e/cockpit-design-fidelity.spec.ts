@@ -390,7 +390,7 @@ test.describe("Messages cockpit — design fidelity", () => {
 
       if (viewport.width <= 390) {
         const undersized = await page
-          .locator("main button:visible")
+          .locator('main button:visible, [data-variant="compact"] a:visible')
           .evaluateAll((buttons) =>
             buttons
               .map((button) => ({
