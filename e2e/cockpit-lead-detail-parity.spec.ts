@@ -10,9 +10,9 @@ import {
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
 /**
- * Feature 8 Phase 1 — the cockpit and the lead detail page share the
- * same MessagesThread + InlineReply components. A reply written from
- * either surface must appear on the other after a refresh.
+ * Feature 8 Phase 1 — the cockpit message thread and the lead detail unified
+ * activity timeline share message rows and InlineReply behavior. A reply
+ * written from either surface must appear on the other after a refresh.
  */
 
 let phoneCounter = 0;
@@ -200,7 +200,7 @@ test("Realtime cross-surface: both surfaces update from the other (test 31)", as
       expect(page.getByTestId("messages-thread")).toContainText(
         "starting the thread",
       ),
-      expect(leadPage.getByTestId("messages-thread")).toContainText(
+      expect(leadPage.getByTestId("lead-activity-timeline")).toContainText(
         "starting the thread",
       ),
     ]);
@@ -239,9 +239,10 @@ test("Realtime cross-surface: both surfaces update from the other (test 31)", as
       expect(page.getByTestId("messages-thread")).toContainText(inboundBody, {
         timeout: 20_000,
       }),
-      expect(leadPage.getByTestId("messages-thread")).toContainText(inboundBody, {
-        timeout: 20_000,
-      }),
+      expect(leadPage.getByTestId("lead-activity-timeline")).toContainText(
+        inboundBody,
+        { timeout: 20_000 },
+      ),
     ]);
   } finally {
     await leadContext.close();
