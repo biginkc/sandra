@@ -559,8 +559,7 @@ export default async function LeadDetailPage({
         .join(", ") || null
     );
   })();
-  const inlineReplyUnavailable =
-    !lead.homeowner?.id || !homeownerSmsPhone;
+  const inlineReplyUnavailable = !lead.homeowner?.id || !homeownerSmsPhone;
 
   const heroActions = (
     <>
@@ -1321,6 +1320,7 @@ function Section({
       <div
         className="border-border bg-card flex min-w-0 flex-col gap-2 rounded-[14px] border p-3.5 [&_[data-slot=lead-detail-row]]:border-0 [&_[data-slot=lead-detail-row]]:px-0 [&_[data-slot=lead-detail-row]]:py-1 [&_[data-slot=lead-tags-row]]:border-0 [&_[data-slot=lead-tags-row]]:px-0 [&_[data-slot=lead-tags-row]]:py-1"
         id={id}
+        data-lead-section="compact"
       >
         <div className="text-muted-foreground font-mono text-[10px] font-bold tracking-[0.1em] uppercase">
           {title}

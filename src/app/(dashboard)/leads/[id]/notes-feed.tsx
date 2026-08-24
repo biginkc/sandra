@@ -195,7 +195,9 @@ export function NoteEventCard({
             className="text-muted-foreground text-[11px]"
             dateTime={note.created_at}
           >
-            {formatDistanceToNow(new Date(note.created_at), { addSuffix: true })}
+            {formatDistanceToNow(new Date(note.created_at), {
+              addSuffix: true,
+            })}
           </time>
         </div>
       ) : null}
@@ -213,7 +215,9 @@ export function NoteEventCard({
           <span>{author}</span>
           <span>·</span>
           <span>
-          {formatDistanceToNow(new Date(note.created_at), { addSuffix: true })}
+            {formatDistanceToNow(new Date(note.created_at), {
+              addSuffix: true,
+            })}
           </span>
         </div>
       ) : null}

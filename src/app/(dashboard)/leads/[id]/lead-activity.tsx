@@ -188,7 +188,11 @@ export function LeadActivityTimeline(props: Props) {
   };
 
   return (
-    <div className="min-w-0" data-testid="lead-activity-timeline">
+    <div
+      className="min-w-0"
+      data-presentation="open-timeline"
+      data-testid="lead-activity-timeline"
+    >
       {activity.failures.length > 0 ? (
         <div className="mb-3 space-y-2">
           {activity.failures.map(({ source, detail }) => (

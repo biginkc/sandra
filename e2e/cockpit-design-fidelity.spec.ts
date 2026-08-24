@@ -58,7 +58,7 @@ async function seedDesignThread(
       status: "contacted",
     })
     .eq("id", prop.id)
-    .select("id, homeowner_contact_id, address");
+    .select("id, org_id, homeowner_contact_id, address");
   if (updateError) {
     throw new Error(`property update failed: ${updateError.message}`);
   }
@@ -68,6 +68,11 @@ async function seedDesignThread(
   if (updated[0].homeowner_contact_id !== contact.id) {
     throw new Error(
       `property update didn't persist homeowner_contact_id (got=${updated[0].homeowner_contact_id})`,
+    );
+  }
+  if (updated[0].org_id !== DEFAULT_ORG_ID) {
+    throw new Error(
+      `property update used unexpected org (got=${updated[0].org_id})`,
     );
   }
 
@@ -249,9 +254,9 @@ test.describe("Messages cockpit — design fidelity", () => {
     });
   });
 
-  test("lead detail (/leads/[id]) renders the unified timeline before the composer", async ({
+  test("lead detail (/leads/[id]) matches the compact responsive contract", async ({
     page,
-  }) => {
+  }, testInfo) => {
     const admin = adminClient();
     await resetTenantTables(admin);
     await ensureTestUser(admin);
@@ -300,6 +305,28 @@ test.describe("Messages cockpit — design fidelity", () => {
       "Queue SMS",
     );
     await expect(reply).toContainText(/adds the message to Outbox/i);
+    await expect(reply.getByTestId("lead-add-note-composer")).toBeVisible();
+
+    // These stable landmarks distinguish the approved compact redesign from
+    // the oversized card layout it replaced.
+    await expect(page.getByRole("link", { name: /^Back\b/i })).toHaveCount(0);
+    await expect(page.getByTestId("lead-working-state-bar")).toBeVisible();
+    await expect(page.getByTestId("lead-no-next-action")).toHaveAttribute(
+      "data-variant",
+      "compact",
+    );
+    await expect(timeline).toHaveAttribute(
+      "data-presentation",
+      "open-timeline",
+    );
+    await expect(
+      timeline.locator('[data-presentation="timeline"]').first(),
+    ).toBeVisible();
+    await expect(
+      page.locator(
+        'aside[aria-label="Lead dossier"] [data-lead-section="compact"]',
+      ),
+    ).not.toHaveCount(0);
 
     // The approved chat order keeps reply controls after all timeline rows.
     expect(
@@ -316,15 +343,6 @@ test.describe("Messages cockpit — design fidelity", () => {
         );
       }),
     ).toBe(true);
-  });
-
-  test("lead detail keeps the approved two-column boundary and mobile fit", async ({
-    page,
-  }, testInfo) => {
-    const admin = adminClient();
-    await resetTenantTables(admin);
-    await ensureTestUser(admin);
-    const { propertyId } = await seedDesignThread(admin);
 
     const viewports = [
       { width: 1280, height: 900, dossierBeside: true },
@@ -371,8 +389,9 @@ test.describe("Messages cockpit — design fidelity", () => {
       }
 
       if (viewport.width <= 390) {
-        const undersized = await page.locator("main button:visible").evaluateAll(
-          (buttons) =>
+        const undersized = await page
+          .locator("main button:visible")
+          .evaluateAll((buttons) =>
             buttons
               .map((button) => ({
                 label:
@@ -382,8 +401,48 @@ test.describe("Messages cockpit — design fidelity", () => {
                 height: button.getBoundingClientRect().height,
               }))
               .filter(({ height }) => height > 0 && height < 35.5),
-        );
+          );
         expect(undersized).toEqual([]);
+      }
+
+      const mediaHero = page.locator(
+        '[data-testid="lead-media-street-view"], [data-testid="lead-media-aerial"]',
+      );
+      if ((await mediaHero.count()) > 0) {
+        const mediaLayout = await page.evaluate(() => {
+          const hero = document.querySelector(
+            '[data-testid="lead-media-street-view"], [data-testid="lead-media-aerial"]',
+          );
+          const overlay = document.querySelector(
+            '[data-testid="lead-media-overlay"]',
+          );
+          if (!hero || !overlay) return null;
+          const heroRect = hero.getBoundingClientRect();
+          const overlayRect = overlay.getBoundingClientRect();
+          return {
+            heroLeft: heroRect.left,
+            heroRight: heroRect.right,
+            heroTop: heroRect.top,
+            heroBottom: heroRect.bottom,
+            overlayLeft: overlayRect.left,
+            overlayRight: overlayRect.right,
+            overlayTop: overlayRect.top,
+            overlayBottom: overlayRect.bottom,
+          };
+        });
+        expect(mediaLayout).not.toBeNull();
+        expect(mediaLayout!.overlayLeft).toBeGreaterThanOrEqual(
+          mediaLayout!.heroLeft,
+        );
+        expect(mediaLayout!.overlayRight).toBeLessThanOrEqual(
+          mediaLayout!.heroRight,
+        );
+        expect(mediaLayout!.overlayTop).toBeGreaterThanOrEqual(
+          mediaLayout!.heroTop,
+        );
+        expect(mediaLayout!.overlayBottom).toBeLessThanOrEqual(
+          mediaLayout!.heroBottom + 1,
+        );
       }
 
       await page.screenshot({

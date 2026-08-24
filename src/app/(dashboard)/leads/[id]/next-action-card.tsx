@@ -87,6 +87,7 @@ export function NextActionCard({
         <div
           className="inline-flex min-h-8 max-w-full flex-wrap items-center gap-2 rounded-full border border-amber-300 bg-amber-50 py-1 pr-1 pl-3 text-xs font-bold text-amber-950"
           data-testid="lead-no-next-action"
+          data-variant="compact"
         >
           <CalendarClockIcon className="size-3.5 shrink-0" />
           <span>No next action</span>
@@ -141,6 +142,7 @@ export function NextActionCard({
         <div
           className="border-border bg-card inline-flex min-h-8 max-w-full flex-wrap items-center gap-2 rounded-full border py-1 pr-1 pl-3 text-xs"
           data-testid="lead-next-action"
+          data-variant="compact"
         >
           <span className="min-w-0 font-bold break-words">
             Next: {task.title} · {formatDueAt(task.due_at, timezone)}

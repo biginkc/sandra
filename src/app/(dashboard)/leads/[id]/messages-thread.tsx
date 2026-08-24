@@ -449,12 +449,17 @@ export function MessageBubble({
       )}
       data-direction={outbound ? "outbound" : "inbound"}
       data-continuation={isContinuation ? "true" : "false"}
+      data-presentation={presentation}
       data-testid="messages-thread-msg"
     >
       {timeline ? (
         <div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
           <span className="font-bold">
-            {outbound ? "You → Seller" : "Seller"}
+            {aiGenerated
+              ? "Sandra → Seller"
+              : outbound
+                ? "Outbound → Seller"
+                : "Seller"}
           </span>
           {message.read_at === null && !outbound ? (
             <span className="rounded-full bg-red-50 px-2 py-0.5 text-[9px] font-bold text-red-700">
@@ -476,11 +481,12 @@ export function MessageBubble({
           {message.body}
         </div>
       </div>
-      {!timeline && showMetadataFooter ? (
+      {showMetadataFooter ? (
         <div
           className={`mt-1 flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground ${
-            outbound ? "mr-1" : "ml-1"
+            timeline ? "ml-1 flex-wrap" : outbound ? "mr-1" : "ml-1"
           }`}
+          data-testid="messages-thread-metadata"
         >
           <span>{time}</span>
           {deliveryStatusLabel ? (
