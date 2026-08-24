@@ -1,3 +1,6 @@
+"use client";
+
+import { useState } from "react";
 import Link from "next/link";
 
 import { PageHeader } from "@/components/page-header";
@@ -18,8 +21,27 @@ export function LeadMediaHero({
   actions: React.ReactNode;
 }) {
   const description = [locationLine, homeownerName].filter(Boolean).join(" · ");
+  const mediaIdentity =
+    media.kind === "flat" ? `flat:${media.reason}` : media.images.small;
+  const [failureState, setFailureState] = useState<{
+    mediaIdentity: string;
+    failedImage: "streetView" | "aerial" | null;
+  }>({ mediaIdentity, failedImage: null });
+  const failedImage =
+    failureState.mediaIdentity === mediaIdentity
+      ? failureState.failedImage
+      : null;
 
-  if (media.kind === "flat") {
+  const renderedKind =
+    media.kind === "flat"
+      ? "flat"
+      : media.kind === "streetView" && failedImage === null
+        ? "streetView"
+        : failedImage === "aerial"
+          ? "flat"
+          : "aerial";
+
+  if (renderedKind === "flat") {
     return (
       <div className="px-4 pt-6 md:px-6 md:pt-8" data-testid="lead-media-flat">
         <PageHeader
@@ -40,33 +62,71 @@ export function LeadMediaHero({
     );
   }
 
+  const renderedImages =
+    renderedKind === "streetView"
+      ? media.kind === "streetView"
+        ? media.images
+        : null
+      : media.kind === "streetView"
+        ? media.aerialImages
+        : media.kind === "aerial"
+          ? media.images
+          : null;
+  if (!renderedImages) return null;
+
   const mediaLabel =
-    media.kind === "streetView"
+    renderedKind === "streetView"
       ? `Street View of ${address}`
       : `Aerial view of ${address}`;
 
   return (
     <section
       className="relative isolate min-h-[210px] overflow-hidden bg-slate-900 sm:min-h-[230px] lg:min-h-[250px]"
-      data-testid={`lead-media-${media.kind === "streetView" ? "street-view" : "aerial"}`}
+      data-testid={`lead-media-${renderedKind === "streetView" ? "street-view" : "aerial"}`}
       data-media-fallback-reason={
-        media.kind === "aerial" ? media.fallbackReason : undefined
+        renderedKind === "aerial"
+          ? media.kind === "aerial"
+            ? media.fallbackReason
+            : "street-image-error"
+          : undefined
       }
       aria-label={mediaLabel}
     >
-      <iframe
-        title={mediaLabel}
-        src={media.embedUrl}
-        className="absolute inset-0 h-full w-full border-0"
-        loading="eager"
-        referrerPolicy="strict-origin-when-cross-origin"
-        allow="accelerometer; gyroscope; fullscreen"
-        allowFullScreen
-      />
+      <picture>
+        <source media="(min-width: 1440px)" srcSet={renderedImages.large} />
+        <source media="(min-width: 1280px)" srcSet={renderedImages.wide} />
+        <source media="(min-width: 1024px)" srcSet={renderedImages.desktop} />
+        <source media="(min-width: 768px)" srcSet={renderedImages.tablet} />
+        <source
+          media="(min-width: 640px)"
+          srcSet={renderedImages.smallTablet}
+        />
+        <source media="(min-width: 390px)" srcSet={renderedImages.mobile} />
+        {/* Google returns a complete, attributed image. Keep it unproxied and
+            uncropped so the signed URL and baked attribution remain intact. */}
+        <img
+          src={renderedImages.small}
+          alt=""
+          className="pointer-events-none absolute inset-0 h-full w-full bg-slate-900 object-contain object-bottom"
+          loading="eager"
+          fetchPriority="high"
+          referrerPolicy="strict-origin-when-cross-origin"
+          draggable={false}
+          data-testid="lead-media-image"
+          onError={() =>
+            setFailureState({
+              mediaIdentity,
+              failedImage:
+                renderedKind === "streetView" && failedImage === null
+                  ? "streetView"
+                  : "aerial",
+            })
+          }
+        />
+      </picture>
       {process.env.VERCEL_ENV === "preview" &&
       media.kind === "aerial" &&
-      (media.fallbackReason === "metadata-failure" ||
-        media.fallbackReason === "missing-signing-secret") ? (
+      media.fallbackReason === "metadata-failure" ? (
         <p
           className="absolute top-2 left-2 z-20 max-w-[calc(100%-1rem)] rounded-md bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-950 shadow"
           role="status"
