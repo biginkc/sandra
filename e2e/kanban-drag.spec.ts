@@ -22,7 +22,7 @@ test("dragging a card from New Lead to Contacted persists status change", async 
     .eq("id", prop.id);
 
   await page.goto("/leads");
-  // The address itself is an inner button that intentionally stops pointer
+  // The address itself is an inner link that intentionally stops pointer
   // propagation so clicking it opens detail without starting a drag. Target
   // the draggable card group instead.
   const card = page.getByRole("group", { name: `Lead at ${prop.address}` });

@@ -13,6 +13,7 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import { CalendarClockIcon, ChevronDownIcon, ChevronRightIcon, SearchIcon, XIcon } from "lucide-react";
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -1241,15 +1242,16 @@ function LeadCard({
       {overlay || !onClick ? (
         <div className={`truncate font-semibold ${hasUnread ? "pr-4" : ""}`}>{lead.address}</div>
       ) : (
-        <button
-          type="button"
+        <Link
+          href={`/leads/${lead.id}`}
+          prefetch={false}
           aria-label={`Open lead at ${lead.address}`}
           className={`block w-full truncate text-left font-semibold ${hasUnread ? "pr-4" : ""}`}
           onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => { event.stopPropagation(); onClick(); }}
+          onClick={(event) => event.stopPropagation()}
         >
           {lead.address}
-        </button>
+        </Link>
       )}
       {!overlay ? <div className="absolute top-2 right-2"><SoftphoneLeadButton lead={dialerLead} compact /></div> : null}
       <div className="text-muted-foreground mt-0.5 truncate">

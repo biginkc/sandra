@@ -100,7 +100,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
       homeowner_contact_id: contact.id,
       assigned_user_id: currentUserId,
     })
-    .select("id, org_id")
+    .select("id, org_id, address")
     .single();
   if (propertyError || !property) {
     throw propertyError ?? new Error("property seed failed");
@@ -202,6 +202,41 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
     "Them: Can you call me tomorrow? · 3d",
   );
 
+  const addressLink = page.getByRole("link", {
+    name: `Open lead at ${property.address}`,
+  });
+  const boardUrl = page.url();
+  const detailUrl = new URL(`/leads/${property.id}`, boardUrl).href;
+  await expect(addressLink).toHaveAttribute("href", `/leads/${property.id}`);
+  expect(await addressLink.evaluate((element) => element.tagName)).toBe("A");
+
+  const newTabPromise = page.context().waitForEvent("page");
+  await addressLink.click({ modifiers: ["ControlOrMeta"] });
+  const detailTab = await newTabPromise;
+  await expect(page).toHaveURL(boardUrl);
+  await expect(detailTab).toHaveURL(detailUrl);
+  await expect(
+    detailTab.getByRole("heading", { name: property.address }),
+  ).toBeVisible();
+  await detailTab.close();
+
+  const leadCard = page.getByRole("group", {
+    name: `Lead at ${property.address}`,
+  });
+  await leadCard.getByRole("button", { name: "Set" }).click();
+  await expect(page).toHaveURL(boardUrl);
+  await expect(leadCard.getByLabel("Due date and time")).toBeVisible();
+  await leadCard.getByRole("button", { name: "Cancel" }).click();
+
+  await addressLink.click();
+  await expect(page).toHaveURL(detailUrl);
+  await expect(
+    page.getByRole("heading", { name: property.address }),
+  ).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(boardUrl);
+  await expect(addressLink).toBeVisible();
+
   await expect
     .poll(async () =>
       page
@@ -225,13 +260,14 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
     "aria-pressed",
     "true",
   );
-  await expect(page.getByRole("button", { name: "My leads" })).toHaveAttribute(
+  const ownershipControls = page.getByRole("group", { name: "Lead ownership" });
+  await expect(ownershipControls.getByRole("button", { name: "My leads" })).toHaveAttribute(
     "aria-pressed",
     "false",
   );
 
   await page.goto("/leads?assignee=me");
-  await expect(page.getByRole("button", { name: "My leads" })).toHaveAttribute(
+  await expect(ownershipControls.getByRole("button", { name: "My leads" })).toHaveAttribute(
     "aria-pressed",
     "true",
   );
@@ -255,7 +291,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await expect(page.getByRole("button", { name: "Unassigned", exact: true })).toBeVisible();
   await expect(page.getByText("789 Unassigned Lead Rd")).toBeVisible();
   await expect(page.getByText("123 Foundation Ave")).toHaveCount(0);
-  await page.getByRole("button", { name: "My leads" }).click();
+  await ownershipControls.getByRole("button", { name: "My leads" }).click();
   await expect(page).toHaveURL(/\/leads\?assignee=me$/);
   await expect(page.getByText("123 Foundation Ave")).toBeVisible();
   await expect(page.getByText("789 Unassigned Lead Rd")).toHaveCount(0);
