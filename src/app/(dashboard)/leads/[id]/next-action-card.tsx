@@ -162,7 +162,7 @@ export function NextActionCard({
                 disabled={pending}
                 onClick={complete}
                 data-testid={`lead-task-done-${task.id}`}
-                className="min-h-6 rounded-full px-3"
+                className="min-h-9 rounded-full px-3 sm:min-h-6"
               >
                 <CheckIcon className="size-3" />
                 Done
@@ -175,7 +175,7 @@ export function NextActionCard({
                       variant="outline"
                       disabled={pending}
                       data-testid={`lead-task-snooze-${task.id}`}
-                      className="min-h-6 rounded-full px-3"
+                      className="min-h-9 rounded-full px-3 sm:min-h-6"
                     >
                       Snooze
                       <ChevronDownIcon className="size-3" />
@@ -212,6 +212,7 @@ export function NextActionCard({
               variant="outline"
               size="xs"
               onClick={() => run(failure.operation)}
+              className="min-h-9 sm:min-h-6"
             >
               <RotateCcwIcon className="size-3" />
               Retry

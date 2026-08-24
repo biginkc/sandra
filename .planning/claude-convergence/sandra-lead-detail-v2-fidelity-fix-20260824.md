@@ -44,6 +44,7 @@
 - 2026-08-24: final merge refresh rebased onto `a83dbca`. The only conflict was the media action treatment; resolved in favor of main's newer bottom-edge alignment and white-control treatment while retaining the redesign's responsive layout and flat fallback.
 - 2026-08-24: post-refresh unit 2,397/2,397, RTL 812/812, typecheck, focused lint, and diff checks pass. A local responsive retry authenticated successfully but was invalidated by the shared E2E tenant deleting the just-seeded property before navigation (captured page is an authenticated 404); the branch's GitHub Playwright check is the final serialized browser gate for this head.
 - 2026-08-24: rebased cleanly onto PR #401 with no conflict; its final hero action anchoring remains authoritative.
+- 2026-08-24: exact-head Claude review found one merge blocker: compact open-task Done/Snooze/Retry controls were 24px tall on mobile, and the responsive fixture only exercised the no-task branch. Raised all three to the 36px mobile floor, added direct compact-task/retry sizing coverage, and seeded an open task into the browser contract so mobile control measurement exercises the real task branch.
 
 ## Status
 

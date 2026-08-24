@@ -120,6 +120,27 @@ describe("<NextActionCard />", () => {
     );
   });
 
+  it("keeps compact task and retry controls touch-sized on mobile", async () => {
+    const user = userEvent.setup();
+    completeTaskAction.mockResolvedValueOnce({
+      ok: false,
+      error: { message: "network unavailable" },
+    });
+
+    render(<NextActionCard task={task} timezone="America/Chicago" compact />);
+
+    const done = screen.getByRole("button", { name: /Done/ });
+    const snooze = screen.getByRole("button", { name: /Snooze/ });
+    expect(done).toHaveClass("min-h-9", "sm:min-h-6");
+    expect(snooze).toHaveClass("min-h-9", "sm:min-h-6");
+
+    await user.click(done);
+    expect(await screen.findByRole("button", { name: "Retry" })).toHaveClass(
+      "min-h-9",
+      "sm:min-h-6",
+    );
+  });
+
   it("keeps a failed task mutation visible and safely retryable", async () => {
     const user = userEvent.setup();
     completeTaskAction

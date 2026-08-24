@@ -26,6 +26,7 @@ import {
 
 async function seedDesignThread(
   admin: ReturnType<typeof adminClient>,
+  testUserId: string,
 ): Promise<{
   contactId: string;
   propertyId: string;
@@ -157,6 +158,18 @@ async function seedDesignThread(
   });
   if (callError) throw new Error(`call seed failed: ${callError.message}`);
 
+  const { error: taskError } = await admin.from("tasks").insert({
+    org_id: DEFAULT_ORG_ID,
+    assignee_id: testUserId,
+    related_property_id: prop.id,
+    type: "follow_up",
+    status: "open",
+    title: "Call homeowner",
+    due_at: new Date(baseTime + 86_400_000).toISOString(),
+    created_by: testUserId,
+  });
+  if (taskError) throw new Error(`task seed failed: ${taskError.message}`);
+
   if (!threadId) throw new Error("design thread seed returned no conversation");
   return { contactId: contact.id, propertyId: prop.id, threadId };
 }
@@ -165,8 +178,8 @@ test.describe("Messages cockpit — design fidelity", () => {
   test("structural design contract holds at 1440px", async ({ page }) => {
     const admin = adminClient();
     await resetTenantTables(admin);
-    await ensureTestUser(admin);
-    const { threadId } = await seedDesignThread(admin);
+    const testUserId = await ensureTestUser(admin);
+    const { threadId } = await seedDesignThread(admin, testUserId);
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`/messages?thread=${threadId}`);
@@ -259,8 +272,8 @@ test.describe("Messages cockpit — design fidelity", () => {
   }, testInfo) => {
     const admin = adminClient();
     await resetTenantTables(admin);
-    await ensureTestUser(admin);
-    const { propertyId } = await seedDesignThread(admin);
+    const testUserId = await ensureTestUser(admin);
+    const { propertyId } = await seedDesignThread(admin, testUserId);
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`/leads/${propertyId}`);
@@ -311,10 +324,12 @@ test.describe("Messages cockpit — design fidelity", () => {
     // the oversized card layout it replaced.
     await expect(page.getByRole("link", { name: /^Back\b/i })).toHaveCount(0);
     await expect(page.getByTestId("lead-working-state-bar")).toBeVisible();
-    await expect(page.getByTestId("lead-no-next-action")).toHaveAttribute(
+    await expect(page.getByTestId("lead-next-action")).toHaveAttribute(
       "data-variant",
       "compact",
     );
+    await expect(page.getByRole("button", { name: /Done/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Snooze/ })).toBeVisible();
     await expect(timeline).toHaveAttribute(
       "data-presentation",
       "open-timeline",
