@@ -93,6 +93,26 @@ describe("<LeadMediaHero />", () => {
     expect(screen.queryByTitle("Street View of 123 Main St")).toBeNull();
     expect(screen.getByTestId("lead-media-overlay")).toHaveClass(
       "pointer-events-none",
+      "pb-9",
+      "min-[1024px]:pb-12",
+      "min-[1440px]:pb-14",
+      "min-[1536px]:pb-[60px]",
+      "min-[1792px]:pb-16",
+    );
+    expect(screen.getByTestId("lead-media-scrim")).toHaveClass(
+      "bottom-0",
+      "bg-[linear-gradient(to_top,transparent_0px,transparent_36px,rgba(2,6,23,0.9)_37px,rgba(2,6,23,0.65)_58%,transparent_100%)]",
+      "min-[1024px]:bg-[linear-gradient(to_top,transparent_0px,transparent_48px,rgba(2,6,23,0.9)_49px,rgba(2,6,23,0.65)_58%,transparent_100%)]",
+      "min-[1440px]:bg-[linear-gradient(to_top,transparent_0px,transparent_56px,rgba(2,6,23,0.9)_57px,rgba(2,6,23,0.65)_58%,transparent_100%)]",
+      "min-[1536px]:bg-[linear-gradient(to_top,transparent_0px,transparent_60px,rgba(2,6,23,0.9)_61px,rgba(2,6,23,0.65)_58%,transparent_100%)]",
+      "min-[1792px]:bg-[linear-gradient(to_top,transparent_0px,transparent_64px,rgba(2,6,23,0.9)_65px,rgba(2,6,23,0.65)_58%,transparent_100%)]",
+    );
+    expect(screen.getByTestId("lead-media-scrim")).not.toHaveClass("bottom-9");
+    expect(screen.getByTestId("lead-media-actions").className).toContain(
+      "[&_button]:text-slate-950",
+    );
+    expect(screen.getByTestId("lead-media-actions").className).toContain(
+      "[&_button]:bg-white/95",
     );
     expect(
       screen.getByRole("button", { name: "Book appointment" }).parentElement,
