@@ -59,6 +59,9 @@
 - 2026-08-24: independent security review also identified an inherited `main` behavior in the untouched assignee dropdown: its existing roster action can include inactive or multi-workspace memberships. This branch has no diff in the widget or action and the approved redesign preserves existing assignment behavior, so the finding is recorded as a separate follow-up rather than silently expanding this PR's public behavior.
 - 2026-08-24: the first exact-width visible Chrome pass rejected the mobile result: native date/select intrinsic sizing expanded the 390px and 320px pages to 428px, and three tag-removal controls were only 12px wide. The task grid/labels/fields now shrink within their column and the removal controls have 36px targets. The Street View iframe explicitly permits the sensor features it requests, eliminating the browser permissions-policy console error without changing Google origin or attribution behavior.
 - 2026-08-24: Street View diagnostics confirmed the final Google document returns HTTP 200 and its live frame exposes the expected property label, rotation control, Google attribution, Terms, and report link. Recorded `ERR_ABORTED` entries are superseded Next prefetches and intermediate Google frame navigations; they are treated as cancellations only when a final same-route document succeeds. Genuine transport, HTTP, and console failures remain acceptance blockers.
+- 2026-08-24: fresh visible Google Chrome acceptance on the final preview passes exact 1440, 1280, 1024, 390, and 320 viewports. Every width has zero document overflow, zero route controls below 36px, and 48px media-overlay bottom clearance. The 340px dossier is beside activity at 1280 and stacked at 1024. Hero, snapshot, working state, and workspace DOM order plus timeline-before-composer order pass.
+- 2026-08-24: the target lead's final Street View frame is interactive and visibly shows the expected property panorama; a macOS-level Chrome capture proves the rendered GPU surface while preserving unobstructed Google attribution and Terms. A complete-address lead with missing coordinates automatically renders the satellite aerial embed with `missing-coordinates` fallback. Console errors, genuine network failures, and communication/calling/appointment requests are all zero. The short-lived acceptance session was revoked after capture.
+- 2026-08-24: final-head full verification remains green: 228 unit files / 2,392 tests, 87 RTL files / 802 tests, typecheck, build, focused E2E 3/3, ESLint, diff check, and secret scan. GitHub-hosted jobs remain zero-step failures with the provider annotation that the account is locked by a billing issue; local and Vercel verification are unaffected, but merge remains gated.
 
 ## Claude challenge resolution contract
 
@@ -83,4 +86,4 @@ Items 5 and 7 deliberately preserve Jarrad's explicit limits and no-auto-jump in
 
 ## Status
 
-`PROVIDER_CONFIGURED_PENDING_FINAL_PREVIEW_AND_BROWSER`
+`IMPLEMENTED_VERIFIED_PENDING_CLAUDE_AND_GITHUB_CI`
