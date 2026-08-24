@@ -5,6 +5,7 @@
 - ZIP contract: `docs/Sandra Leads page redesign.zip` (`PROMPT.md`, `PARITY.md`, and `Sandra Lead Detail v2.dc.html`).
 - Initial implementation baseline: `origin/main` at `cb9b779dba7c47b9c556a1b07d92511ed93cf19a` (PR #393).
 - Refreshed implementation baseline: `origin/main` at `c7fe232` (PR #395, Street View address-resolution fix).
+- Final refreshed baseline: `origin/main` at `16e5618` (PR #397, signed static Street View plus deterministic image fallback).
 - Branch: `codex/sandra-lead-detail-v2-fidelity-fix` in an isolated worktree.
 - Scope: presentation and responsive layout only. Existing DNC, consent, communications, task, appointment, enrichment, activity-source, and load-failure behavior remains authoritative.
 
@@ -34,6 +35,8 @@
 - 2026-08-24: `npm run typecheck` passes from a clean generated-type state; the full unit suite passes 2,399/2,399 and the full RTL suite passes 808/808. A production bundle compiles but inherits Next route-export validation failures from unchanged main files (first reported at `campaigns/page.tsx`).
 - 2026-08-24: a later responsive rerun was invalidated by a concurrently running Playwright suite from another Sandra worktree resetting the same shared E2E tenant. The seeded property was verified deleted during the failing run. No retry workaround was retained; rerun after the shared tenant is free.
 - 2026-08-24: independent Claude review at `d980594` returned `BLOCKING: NO` and verified the timeline safety fix plus parity-critical DNC, consent, load-failure, and Add-note paths. Merge approval remains withheld only for a clean current-head browser rerun. Its two low polish findings were addressed: CASS enum text is humanized, and the mobile touch-target check now includes compact action links (with a direct compact-appointment test).
+- 2026-08-24: rebased onto PR #397 and resolved the media-hero conflict by retaining its signed static images, responsive source set, Street View→aerial→flat failure chain, uncropped Google attribution, and 210px mobile attribution clearance while preserving the prototype-aligned header/actions treatment.
+- 2026-08-24: clean Chrome-channel `cockpit-design-fidelity` pass after rebase: 1440 structural contract plus 1280/1024/390/320 responsive resize checks, compact action links included, zero document overflow, and all screenshots captured. The responsive loop now resizes the already-rendered page instead of reloading the shared fixture at every breakpoint, eliminating an unrelated database-reset race.
 
 ## Status
 

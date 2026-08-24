@@ -353,7 +353,10 @@ test.describe("Messages cockpit — design fidelity", () => {
 
     for (const viewport of viewports) {
       await page.setViewportSize(viewport);
-      await page.goto(`/leads/${propertyId}`);
+      // Responsive CSS updates in-place. Keep the already-verified lead DOM
+      // mounted so another shared-tenant suite cannot delete the fixture
+      // between viewport checks and turn a layout test into a database race.
+      await page.waitForTimeout(100);
       const timeline = page.getByTestId("lead-activity-timeline");
       const dossier = page.locator('aside[aria-label="Lead dossier"]');
       await expect(timeline).toBeVisible();
