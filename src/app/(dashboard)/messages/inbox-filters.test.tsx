@@ -490,7 +490,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     expect(escalated).toHaveTextContent("4");
     expect(dispo).toHaveTextContent("Dispo");
     expect(dispo).toHaveTextContent("5");
-    expect(unassigned).toHaveTextContent("Unassigned");
+    expect(unassigned).toHaveTextContent("No owner");
     expect(unassigned).toHaveTextContent("1");
     expect(all).toHaveTextContent("All");
     expect(all).toHaveTextContent("9");
