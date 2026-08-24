@@ -2,11 +2,12 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { dndHandlers, routerPush, routerRefresh, updatePropertyStatus, loadLeadBoardAction, setLeadNextActionAction } = vi.hoisted(() => ({
+const { dndHandlers, dragPointerDown, routerPush, routerRefresh, updatePropertyStatus, loadLeadBoardAction, setLeadNextActionAction } = vi.hoisted(() => ({
   dndHandlers: {
     onDragStart: null as null | ((event: unknown) => void),
     onDragEnd: null as null | ((event: unknown) => Promise<void>),
   },
+  dragPointerDown: vi.fn(),
   routerPush: vi.fn(),
   routerRefresh: vi.fn(),
   updatePropertyStatus: vi.fn(),
@@ -52,7 +53,7 @@ vi.mock("@dnd-kit/core", () => ({
   useSensors: () => [],
   useDraggable: () => ({
     attributes: {},
-    listeners: {},
+    listeners: { onPointerDown: dragPointerDown },
     setNodeRef: vi.fn(),
     transform: null,
     isDragging: false,
@@ -187,6 +188,7 @@ beforeEach(() => {
   setLeadNextActionAction.mockReset();
   routerPush.mockReset();
   routerRefresh.mockReset();
+  dragPointerDown.mockReset();
   dndHandlers.onDragStart = null;
   dndHandlers.onDragEnd = null;
 });
@@ -224,7 +226,7 @@ describe("Leads Kanban foundation", () => {
       makeLead({ id: "overdue", address: "Overdue St", next_task_id: "task-o", next_task_title: "Follow up on Overdue St", next_task_due_at: "2026-08-13T15:00:00.000Z" }),
     ]);
 
-    const cards = within(column("new_lead")).getAllByRole("button", { name: /Open lead at/ }).map((card) => card.getAttribute("aria-label"));
+    const cards = within(column("new_lead")).getAllByRole("link", { name: /Open lead at/ }).map((card) => card.getAttribute("aria-label"));
     expect(cards).toEqual([
       "Open lead at Overdue St",
       "Open lead at Today St",
@@ -919,14 +921,31 @@ describe("Leads Kanban foundation", () => {
     );
   });
 
-  it("opens a lead from the card with the keyboard", async () => {
-    const user = userEvent.setup();
+  it("renders a native lead link without handing link gestures to card navigation or dragging", () => {
     renderBoard([makeLead()]);
 
-    const card = screen.getByRole("button", { name: "Open lead at 123 Main St" });
-    card.focus();
-    await user.keyboard("{Enter}");
+    const link = screen.getByRole("link", { name: "Open lead at 123 Main St" });
+    const card = screen.getByRole("group", { name: "Lead at 123 Main St" });
+    const setButton = screen.getByRole("button", { name: "Set" });
 
+    expect(link.tagName).toBe("A");
+    expect(link).toHaveAttribute("href", "/leads/lead-a");
+    expect(link).not.toHaveAttribute("target", "_blank");
+    link.focus();
+    expect(link).toHaveFocus();
+
+    link.addEventListener("click", (event) => event.preventDefault(), { once: true });
+    fireEvent.click(link, { metaKey: true });
+    expect(routerPush).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(link);
+    fireEvent.pointerDown(setButton);
+    expect(dragPointerDown).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(card);
+    expect(dragPointerDown).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByText("Taylor Seller · Kansas City, MO"));
     expect(routerPush).toHaveBeenCalledWith("/leads/lead-a");
   });
 
