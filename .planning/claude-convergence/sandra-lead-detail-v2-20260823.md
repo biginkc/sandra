@@ -28,7 +28,7 @@
 - Claude CLI: installed and authenticated; fallback only.
 - Chrome: running and available for final visible acceptance.
 - GitHub CLI, Vercel CLI, and Google Cloud CLI: installed.
-- Google Cloud account: configured as `jarrad@bmhgroupkc.com`, but reauthentication is currently required before project/key setup.
+- Google Cloud account: authenticated as `jarrad@bmhgroupkc.com`; dedicated project `sandra-crm-maps` is active with billing enabled.
 - Existing dirty checkout: preserved; implementation worktree created from refreshed baseline.
 
 ## Evidence log
@@ -44,6 +44,11 @@
 - 2026-08-23: exhaustive read-only review lanes covered Google Maps/security/config, activity/realtime/data correctness, and ZIP parity/responsive/accessibility/safety. Accepted findings were fixed: iframe pointer access, mandatory signed metadata, malformed-address validation, exact referrer documentation, lead-mode SMS association, truthful unknown-note authorship, mark-read/query ordering, production-hook realtime tests, call-window ordering, 1280/1024 grid behavior, 320px reply wrapping, 36px compact call target, Full Record homeowner status rows, and the dossier booking entry point.
 - 2026-08-23: post-review verification passed: 228 unit files / 2,388 tests, 86 RTL files / 802 tests, typecheck, focused ESLint, diff check, hardcoded-secret pattern scan, and Next production build. Fallow has no changed-file unused exports; remaining leads are inherited dependencies, deliberate subscription similarity, and complexity in tested route/resolver/rendering functions.
 - 2026-08-23: approved 1Password service-account read returned `403 Forbidden`; storage/category verification remains a residual review gap. No GUI or biometric 1Password path was attempted.
+- 2026-08-24: created the organization-owned `sandra-crm-maps` project, linked the existing BMH billing account, and enabled only API Keys API, Maps Embed API, and Street View Static API. Billing and a live metadata probe are healthy.
+- 2026-08-24: created separate browser Embed and server metadata keys. The browser key is restricted to Maps Embed API plus exact production, branch-preview, localhost, and loopback referrers; the server key is restricted to Street View Static API. Google unexpectedly printed the first key pair during creation, so both were immediately revoked and replaced before use.
+- 2026-08-24: rotated the URL-signing secret after visual inspection exposed the retired value, installed the replacement in Vercel Production/Preview as Sensitive and Development as encrypted, cleared the clipboard, and permanently removed every temporary screenshot that displayed the retired secret.
+- 2026-08-24: verified a replacement-secret signed Street View metadata request returns HTTP 200 / `OK`. Added a zero daily consumer quota override for unsigned Street View requests; an unsigned Static Street View image probe now returns HTTP 403 while signed metadata remains healthy.
+- 2026-08-24: Vercel now reports all three required Google variables in Production, Preview, and Development without reading their values. A fresh full RTL run passes 87 files / 802 tests.
 
 ## Claude challenge resolution contract
 
@@ -68,4 +73,4 @@ Items 5 and 7 deliberately preserve Jarrad's explicit limits and no-auto-jump in
 
 ## Status
 
-`REVIEW_FIXES_VERIFIED_PENDING_MAPS_CREDENTIALS_AND_BROWSER`
+`PROVIDER_CONFIGURED_PENDING_FRESH_PREVIEW_AND_BROWSER`
