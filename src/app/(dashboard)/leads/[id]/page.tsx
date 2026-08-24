@@ -258,7 +258,7 @@ export default async function LeadDetailPage({
   // Fetch existing SMS thread — messages linked either to the property
   // directly or to the homeowner (catches inbound that lands pre-linkage).
   const orFilter = homeownerContactId
-    ? `property_id.eq.${lead.id},contact_id.eq.${homeownerContactId}`
+    ? `property_id.eq.${lead.id},and(contact_id.eq.${homeownerContactId},property_id.is.null)`
     : `property_id.eq.${lead.id}`;
   const { data: threadRaw, error: threadError } = await supabase
     .from("messages")
@@ -326,35 +326,87 @@ export default async function LeadDetailPage({
     .limit(200);
   const initialNotes = (notesRaw ?? []) as LeadNoteRow[];
 
-  // listUsers() always fetches the whole team; it has no user-id filter.
-  // Start it as soon as the note-derived IDs are known and consume it after
-  // the other independent lead-detail work completes.
-  const userIdsNeeded = new Set<string>();
-  if (lead.assigned_user_id) userIdsNeeded.add(lead.assigned_user_id);
-  for (const n of initialNotes) {
-    if (n.author_user_id) userIdsNeeded.add(n.author_user_id);
-  }
+  // auth.admin.listUsers() spans the entire Auth project, not this lead's
+  // organization. Build an active-org membership allowlist first, fail closed
+  // if it cannot be trusted, and only then retain matching auth identities.
   const admin = createAdminClient();
+  const orgAuthorCap = 400;
+  const activeMembershipAt = new Date(requestNowMs).toISOString();
   const usersPromise = (async () => {
     try {
-      const { data } = await admin.auth.admin.listUsers({ perPage: 200 });
-      return data?.users ?? [];
+      const [membershipResult, authUsersResult] = await Promise.all([
+        admin
+          .from("memberships")
+          .select("user_id")
+          .eq("org_id", lead.org_id)
+          .eq("access_status", "active")
+          .is("deletion_prepared_at", null)
+          .or(
+            `access_expires_at.is.null,access_expires_at.gt.${activeMembershipAt}`,
+          )
+          .order("user_id", { ascending: true })
+          .limit(orgAuthorCap + 1),
+        admin.auth.admin.listUsers({ perPage: 1000 }),
+      ]);
+      if (
+        membershipResult.error ||
+        !membershipResult.data ||
+        membershipResult.data.length > orgAuthorCap ||
+        authUsersResult.error
+      ) {
+        console.error("[leads] org author identity lookup failed", {
+          membershipCode: membershipResult.error?.code ?? null,
+          membershipCapExceeded:
+            (membershipResult.data?.length ?? 0) > orgAuthorCap,
+          authLookupFailed: Boolean(authUsersResult.error),
+        });
+        return [];
+      }
+      const orgMemberIds = new Set(
+        membershipResult.data.map((membership) => membership.user_id),
+      );
+      return (authUsersResult.data?.users ?? []).filter((user) =>
+        orgMemberIds.has(user.id),
+      );
     } catch {
       return [];
     }
   })();
 
-  const { data: callRollupRaw, error: callRollupError } = await supabase
-    .from("call_activities")
-    .select(
-      "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)",
-    )
-    .eq("property_id", lead.id)
-    .order("started_at", { ascending: false, nullsFirst: false })
-    .order("created_at", { ascending: false })
-    .limit(20);
-  const initialCallRows = (callRollupRaw ??
-    []) as unknown as CallActivityRollupRow[];
+  // PostgREST cannot order by COALESCE(started_at, created_at). Fetch the top
+  // 20 from each disjoint subgroup, then deterministically merge to the
+  // logical top 20. A row below rank 20 in either subgroup cannot enter the
+  // combined top 20, so this remains exact without an unbounded read.
+  const callSelection =
+    "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)";
+  const [startedCallsResult, unstartedCallsResult] = await Promise.all([
+    supabase
+      .from("call_activities")
+      .select(callSelection)
+      .eq("property_id", lead.id)
+      .not("started_at", "is", null)
+      .order("started_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(20),
+    supabase
+      .from("call_activities")
+      .select(callSelection)
+      .eq("property_id", lead.id)
+      .is("started_at", null)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(20),
+  ]);
+  const callRollupError =
+    startedCallsResult.error ?? unstartedCallsResult.error;
+  const initialCallRows = callRollupError
+    ? []
+    : selectLatestCallActivityRows([
+        ...((startedCallsResult.data ??
+          []) as unknown as CallActivityRollupRow[]),
+        ...((unstartedCallsResult.data ??
+          []) as unknown as CallActivityRollupRow[]),
+      ]);
 
   const { data: openWorkRaw, error: openWorkError } = await openWorkPromise;
   if (openWorkError) {
@@ -431,14 +483,13 @@ export default async function LeadDetailPage({
   }
 
   // Resolve author + assignee emails via the admin client (auth.users isn't
-  // RLS-accessible to end-users). Batched into a single listUsers() call.
+  // RLS-accessible to end-users). The identities are already filtered through
+  // this lead's active-org membership allowlist above.
   const authorEmails: Record<string, string> = {};
   let assigneeEmail: string | null = null;
   const assigneeUsers = await usersPromise;
   for (const u of assigneeUsers) {
-    if (u.email && userIdsNeeded.has(u.id)) {
-      authorEmails[u.id] = u.email;
-    }
+    if (u.email) authorEmails[u.id] = u.email;
   }
   if (lead.assigned_user_id) {
     assigneeEmail = authorEmails[lead.assigned_user_id] ?? null;
@@ -572,17 +623,17 @@ export default async function LeadDetailPage({
               initialStatus={lead.status as PropertyStatus}
               address={lead.address}
             />
+            <LeadMotivationWidget
+              propertyId={lead.id}
+              address={lead.address}
+              initial={lead.motivation_level as MotivationLevel | null}
+            />
             <LeadAssigneeWidget
               propertyId={lead.id}
               address={lead.address}
               initialAssigneeId={lead.assigned_user_id}
               initialAssigneeEmail={assigneeEmail}
               currentUserId={sessionUser?.id ?? null}
-            />
-            <LeadMotivationWidget
-              propertyId={lead.id}
-              address={lead.address}
-              initial={lead.motivation_level as MotivationLevel | null}
             />
           </>
         }
@@ -1260,6 +1311,18 @@ function Row({
 
 function EmptyRow({ text }: { text: string }) {
   return <div className="text-muted-foreground px-3 py-2 text-sm">{text}</div>;
+}
+
+function selectLatestCallActivityRows(
+  rows: CallActivityRollupRow[],
+): CallActivityRollupRow[] {
+  return [...rows]
+    .sort((a, b) => {
+      const aTime = a.started_at ?? a.created_at;
+      const bTime = b.started_at ?? b.created_at;
+      return bTime.localeCompare(aTime) || b.id.localeCompare(a.id);
+    })
+    .slice(0, 20);
 }
 
 function formatDate(iso: string | null | undefined): string | null {

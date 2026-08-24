@@ -6,6 +6,7 @@ import type { Note } from "./notes-feed";
 import {
   buildLeadActivitySnapshot,
   normalizeLeadActivityEvents,
+  selectLatestCallActivityRows,
 } from "./lead-activity";
 
 const message = {
@@ -123,5 +124,43 @@ describe("buildLeadActivitySnapshot", () => {
 
     expect(snapshot.trustFloor).toBe(messages[0].created_at);
     expect(snapshot.trustBoundaryIndex).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("selectLatestCallActivityRows", () => {
+  it("merges started and created-at fallback windows into the canonical top 20", () => {
+    const started = Array.from(
+      { length: 20 },
+      (_, index) =>
+        ({
+          ...call,
+          id: `started-${String(index).padStart(2, "0")}`,
+          created_at: "2026-08-01T00:00:00.000Z",
+          started_at: `2026-08-01T00:${String(index).padStart(2, "0")}:00.000Z`,
+        }) as CallActivityRollupRow,
+    );
+    const recentFallback = {
+      ...call,
+      id: "recent-fallback",
+      created_at: "2026-08-23T12:00:00.000Z",
+      started_at: null,
+    } as CallActivityRollupRow;
+
+    const selected = selectLatestCallActivityRows([...started, recentFallback]);
+
+    expect(selected).toHaveLength(20);
+    expect(selected[0]?.id).toBe("recent-fallback");
+    expect(selected.some((row) => row.id === "started-00")).toBe(false);
+  });
+
+  it("breaks canonical timestamp ties by descending id", () => {
+    const tied = ["call-a", "call-c", "call-b"].map(
+      (id) => ({ ...call, id }) as CallActivityRollupRow,
+    );
+    expect(selectLatestCallActivityRows(tied).map((row) => row.id)).toEqual([
+      "call-c",
+      "call-b",
+      "call-a",
+    ]);
   });
 });

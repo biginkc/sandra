@@ -235,6 +235,13 @@ describe("useLeadMessages", () => {
     expect(result.current.filter((row) => row.id === inserted.id)).toHaveLength(
       1,
     );
+
+    act(() =>
+      callbacks.UPDATE!({
+        new: { ...inserted, property_id: "property-2" },
+      }),
+    );
+    expect(result.current.some((row) => row.id === inserted.id)).toBe(false);
   });
 });
 

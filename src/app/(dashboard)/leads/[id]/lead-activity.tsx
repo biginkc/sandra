@@ -121,7 +121,7 @@ export function LeadActivityTimeline(props: Props) {
     try {
       if (source === "message") {
         const orFilter = contactId
-          ? `property_id.eq.${propertyId},contact_id.eq.${contactId}`
+          ? `property_id.eq.${propertyId},and(contact_id.eq.${contactId},property_id.is.null)`
           : `property_id.eq.${propertyId}`;
         const result = await supabase
           .from("messages")
@@ -141,15 +141,34 @@ export function LeadActivityTimeline(props: Props) {
         if (result.error) throw result.error;
         setNoteSnapshot(result.data as Note[]);
       } else {
-        const result = await supabase
-          .from("call_activities")
-          .select(CALL_ACTIVITY_WITH_ARTIFACTS)
-          .eq("property_id", propertyId)
-          .order("started_at", { ascending: false, nullsFirst: false })
-          .order("created_at", { ascending: false })
-          .limit(20);
-        if (result.error) throw result.error;
-        setCallSnapshot(result.data as unknown as CallActivityRollupRow[]);
+        const [startedResult, unstartedResult] = await Promise.all([
+          supabase
+            .from("call_activities")
+            .select(CALL_ACTIVITY_WITH_ARTIFACTS)
+            .eq("property_id", propertyId)
+            .not("started_at", "is", null)
+            .order("started_at", { ascending: false })
+            .order("id", { ascending: false })
+            .limit(20),
+          supabase
+            .from("call_activities")
+            .select(CALL_ACTIVITY_WITH_ARTIFACTS)
+            .eq("property_id", propertyId)
+            .is("started_at", null)
+            .order("created_at", { ascending: false })
+            .order("id", { ascending: false })
+            .limit(20),
+        ]);
+        if (startedResult.error) throw startedResult.error;
+        if (unstartedResult.error) throw unstartedResult.error;
+        setCallSnapshot(
+          selectLatestCallActivityRows([
+            ...((startedResult.data ??
+              []) as unknown as CallActivityRollupRow[]),
+            ...((unstartedResult.data ??
+              []) as unknown as CallActivityRollupRow[]),
+          ]),
+        );
       }
       setErrors((previous) => ({ ...previous, [source]: null }));
     } catch (error) {
@@ -292,6 +311,18 @@ export function normalizeLeadActivityEvents(
       sourceOrder[a.source] - sourceOrder[b.source] ||
       a.id.localeCompare(b.id),
   );
+}
+
+export function selectLatestCallActivityRows(
+  rows: CallActivityRollupRow[],
+): CallActivityRollupRow[] {
+  return [...rows]
+    .sort((a, b) => {
+      const aTime = a.started_at ?? a.created_at;
+      const bTime = b.started_at ?? b.created_at;
+      return bTime.localeCompare(aTime) || b.id.localeCompare(a.id);
+    })
+    .slice(0, 20);
 }
 
 export function buildLeadActivitySnapshot(

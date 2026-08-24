@@ -273,19 +273,14 @@ export function useLeadMessages({
           (payload) => {
             const row = payload.new as Message;
             setMessages((previous) => {
-              const alreadyPresent = previous.some(
-                (message) => message.id === row.id,
-              );
-              if (
-                !alreadyPresent &&
-                !messageBelongsToThread(row, {
-                  contactId,
-                  conversationId,
-                  matchMode,
-                  propertyId,
-                })
-              ) {
-                return previous;
+              const belongs = messageBelongsToThread(row, {
+                contactId,
+                conversationId,
+                matchMode,
+                propertyId,
+              });
+              if (!belongs) {
+                return previous.filter((message) => message.id !== row.id);
               }
               return sortMessages([
                 row,
