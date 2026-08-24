@@ -93,7 +93,7 @@ export function LeadMediaHero({
 
   return (
     <section
-      className="relative isolate min-h-[210px] overflow-hidden border-b border-white/10 bg-slate-900 sm:min-h-[230px] lg:min-h-[250px]"
+      className="relative isolate overflow-hidden border-b border-white/10 bg-slate-900"
       data-testid={`lead-media-${renderedKind === "streetView" ? "street-view" : "aerial"}`}
       data-media-fallback-reason={
         renderedKind === "aerial"
@@ -104,7 +104,11 @@ export function LeadMediaHero({
       }
       aria-label={mediaLabel}
     >
-      <picture>
+      <div
+        className="relative h-[210px] overflow-hidden bg-slate-900 sm:h-[230px] lg:h-[250px]"
+        data-testid="lead-media-image-frame"
+      >
+        <picture className="block h-full bg-slate-900" data-testid="lead-media-picture">
         <source media="(min-width: 1792px)" srcSet={renderedImages.ultra} />
         <source
           media="(min-width: 1536px)"
@@ -119,12 +123,13 @@ export function LeadMediaHero({
           srcSet={renderedImages.smallTablet}
         />
         <source media="(min-width: 390px)" srcSet={renderedImages.mobile} />
-        {/* Google returns a complete, attributed image. Keep it unproxied and
-            uncropped so the signed URL and baked attribution remain intact. */}
+        {/* Responsive sources are intentionally taller than this frame. Keep
+            the image bottom-aligned so full-bleed trimming affects only the
+            top of the scene, never Google's bottom attribution edges. */}
         <img
           src={renderedImages.small}
           alt=""
-          className="pointer-events-none absolute inset-0 h-full w-full bg-slate-900 object-contain object-bottom"
+          className="pointer-events-none absolute inset-0 h-full w-full bg-slate-900 object-cover object-bottom"
           loading="eager"
           fetchPriority="high"
           referrerPolicy="strict-origin-when-cross-origin"
@@ -140,7 +145,8 @@ export function LeadMediaHero({
             })
           }
         />
-      </picture>
+        </picture>
+      </div>
       {process.env.VERCEL_ENV === "preview" &&
       media.kind === "aerial" &&
       media.fallbackReason === "metadata-failure" ? (
@@ -153,17 +159,7 @@ export function LeadMediaHero({
         </p>
       ) : null}
       <div
-        className="pointer-events-none absolute inset-x-0 bottom-0 h-44 bg-[linear-gradient(to_top,transparent_0px,transparent_36px,rgba(2,6,23,0.9)_37px,rgba(2,6,23,0.65)_58%,transparent_100%)] min-[1024px]:bg-[linear-gradient(to_top,transparent_0px,transparent_48px,rgba(2,6,23,0.9)_49px,rgba(2,6,23,0.65)_58%,transparent_100%)] min-[1440px]:bg-[linear-gradient(to_top,transparent_0px,transparent_56px,rgba(2,6,23,0.9)_57px,rgba(2,6,23,0.65)_58%,transparent_100%)] min-[1536px]:bg-[linear-gradient(to_top,transparent_0px,transparent_60px,rgba(2,6,23,0.9)_61px,rgba(2,6,23,0.65)_58%,transparent_100%)] min-[1792px]:bg-[linear-gradient(to_top,transparent_0px,transparent_64px,rgba(2,6,23,0.9)_65px,rgba(2,6,23,0.65)_58%,transparent_100%)]"
-        aria-hidden
-        data-testid="lead-media-scrim"
-      />
-      <div
-        className="pointer-events-none absolute bottom-0 left-36 right-36 hidden h-12 bg-slate-950/90 xl:block min-[1440px]:left-40 min-[1440px]:right-40 min-[1440px]:h-14 min-[1536px]:left-44 min-[1536px]:right-44 min-[1536px]:h-[60px] min-[1792px]:left-56 min-[1792px]:right-56 min-[1792px]:h-16"
-        aria-hidden
-        data-testid="lead-media-bottom-scrim"
-      />
-      <div
-        className="pointer-events-none relative z-10 flex min-h-[210px] flex-col justify-end gap-4 px-4 pt-20 pb-9 text-white sm:min-h-[230px] sm:px-6 lg:min-h-[250px] lg:flex-row lg:items-end lg:justify-between min-[1024px]:pb-12 min-[1440px]:pb-14 min-[1536px]:pb-[60px] min-[1792px]:pb-16"
+        className="relative z-10 flex flex-col gap-3 bg-gradient-to-b from-slate-900 to-slate-950 px-4 py-3.5 text-white sm:px-6 lg:flex-row lg:items-end lg:justify-between"
         data-testid="lead-media-overlay"
       >
         <div className="min-w-0 max-w-3xl">
@@ -175,7 +171,7 @@ export function LeadMediaHero({
             <span aria-hidden>/</span>
             <Link
               href="/leads"
-              className="pointer-events-auto transition-colors hover:text-white"
+              className="transition-colors hover:text-white"
             >
               Leads
             </Link>
@@ -190,7 +186,7 @@ export function LeadMediaHero({
           </p>
         </div>
         <div
-          className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 xl:absolute xl:bottom-0 xl:items-end min-[1280px]:right-36 min-[1280px]:h-12 min-[1440px]:right-40 min-[1440px]:h-14 min-[1536px]:right-44 min-[1536px]:h-[60px] min-[1792px]:right-56 min-[1792px]:h-16 [&_button]:min-h-9 [&_button]:border-white/80 [&_button]:bg-white/95 [&_button]:text-slate-950 [&_button]:shadow-sm [&_button]:hover:bg-white"
+          className="flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9 [&_button]:border-white/80 [&_button]:bg-white/95 [&_button]:text-slate-950 [&_button]:shadow-sm [&_button]:hover:bg-white"
           data-testid="lead-media-actions"
         >
           {actions}

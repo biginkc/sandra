@@ -15,11 +15,11 @@ const streetImages = {
   mobile: "https://maps.googleapis.com/maps/api/streetview?size=390x289",
   smallTablet: "https://maps.googleapis.com/maps/api/streetview?size=640x230",
   tablet: "https://maps.googleapis.com/maps/api/streetview?size=512x230",
-  desktop: "https://maps.googleapis.com/maps/api/streetview?size=640x208",
-  wide: "https://maps.googleapis.com/maps/api/streetview?size=640x156",
-  large: "https://maps.googleapis.com/maps/api/streetview?size=640x135",
-  extraLarge: "https://maps.googleapis.com/maps/api/streetview?size=640x125",
-  ultra: "https://maps.googleapis.com/maps/api/streetview?size=640x104",
+  desktop: "https://maps.googleapis.com/maps/api/streetview?size=640x230",
+  wide: "https://maps.googleapis.com/maps/api/streetview?size=640x170",
+  large: "https://maps.googleapis.com/maps/api/streetview?size=640x145",
+  extraLarge: "https://maps.googleapis.com/maps/api/streetview?size=640x135",
+  ultra: "https://maps.googleapis.com/maps/api/streetview?size=640x110",
 };
 const aerialImages = {
   small:
@@ -31,15 +31,15 @@ const aerialImages = {
   tablet:
     "https://maps.googleapis.com/maps/api/staticmap?size=512x230&maptype=satellite",
   desktop:
-    "https://maps.googleapis.com/maps/api/staticmap?size=640x208&maptype=satellite",
+    "https://maps.googleapis.com/maps/api/staticmap?size=640x230&maptype=satellite",
   wide:
-    "https://maps.googleapis.com/maps/api/staticmap?size=640x156&maptype=satellite",
+    "https://maps.googleapis.com/maps/api/staticmap?size=640x170&maptype=satellite",
   large:
-    "https://maps.googleapis.com/maps/api/staticmap?size=640x135&maptype=satellite",
+    "https://maps.googleapis.com/maps/api/staticmap?size=640x145&maptype=satellite",
   extraLarge:
-    "https://maps.googleapis.com/maps/api/staticmap?size=640x125&maptype=satellite",
+    "https://maps.googleapis.com/maps/api/staticmap?size=640x135&maptype=satellite",
   ultra:
-    "https://maps.googleapis.com/maps/api/staticmap?size=640x104&maptype=satellite",
+    "https://maps.googleapis.com/maps/api/staticmap?size=640x110&maptype=satellite",
 };
 
 describe("<LeadMediaHero />", () => {
@@ -66,7 +66,10 @@ describe("<LeadMediaHero />", () => {
     );
     expect(image).toHaveAttribute("draggable", "false");
     expect(image).toHaveClass(
-      "object-contain",
+      "absolute",
+      "h-full",
+      "w-full",
+      "object-cover",
       "object-bottom",
       "pointer-events-none",
     );
@@ -93,52 +96,41 @@ describe("<LeadMediaHero />", () => {
     expect(screen.queryByTitle("Street View of 123 Main St")).toBeNull();
     expect(screen.getByTestId("lead-media-street-view")).toHaveClass(
       "overflow-hidden",
-      "sm:min-h-[230px]",
-      "lg:min-h-[250px]",
+      "bg-slate-900",
+    );
+    expect(screen.getByTestId("lead-media-picture")).toHaveClass(
+      "block",
+      "h-full",
+      "bg-slate-900",
+    );
+    expect(screen.getByTestId("lead-media-image-frame")).toHaveClass(
+      "h-[210px]",
+      "sm:h-[230px]",
+      "lg:h-[250px]",
+      "overflow-hidden",
     );
     expect(screen.getByTestId("lead-media-overlay")).toHaveClass(
-      "pointer-events-none",
-      "pb-9",
+      "bg-gradient-to-b",
+      "from-slate-900",
+      "to-slate-950",
+      "py-3.5",
       "lg:flex-row",
-      "min-[1024px]:pb-12",
-      "min-[1440px]:pb-14",
-      "min-[1536px]:pb-[60px]",
-      "min-[1792px]:pb-16",
     );
-    expect(screen.getByTestId("lead-media-scrim")).toHaveClass(
-      "bottom-0",
-      "bg-[linear-gradient(to_top,transparent_0px,transparent_36px,rgba(2,6,23,0.9)_37px,rgba(2,6,23,0.65)_58%,transparent_100%)]",
-      "min-[1024px]:bg-[linear-gradient(to_top,transparent_0px,transparent_48px,rgba(2,6,23,0.9)_49px,rgba(2,6,23,0.65)_58%,transparent_100%)]",
-      "min-[1440px]:bg-[linear-gradient(to_top,transparent_0px,transparent_56px,rgba(2,6,23,0.9)_57px,rgba(2,6,23,0.65)_58%,transparent_100%)]",
-      "min-[1536px]:bg-[linear-gradient(to_top,transparent_0px,transparent_60px,rgba(2,6,23,0.9)_61px,rgba(2,6,23,0.65)_58%,transparent_100%)]",
-      "min-[1792px]:bg-[linear-gradient(to_top,transparent_0px,transparent_64px,rgba(2,6,23,0.9)_65px,rgba(2,6,23,0.65)_58%,transparent_100%)]",
-    );
-    expect(screen.getByTestId("lead-media-scrim")).not.toHaveClass("bottom-9");
-    expect(screen.getByTestId("lead-media-bottom-scrim")).toHaveClass(
-      "bottom-0",
-      "left-36",
-      "right-36",
-      "xl:block",
-      "min-[1792px]:left-56",
-      "min-[1792px]:right-56",
-    );
+    expect(screen.queryByTestId("lead-media-scrim")).toBeNull();
+    expect(screen.queryByTestId("lead-media-bottom-scrim")).toBeNull();
     expect(screen.getByTestId("lead-media-actions").className).toContain(
       "[&_button]:text-slate-950",
     );
     expect(screen.getByTestId("lead-media-actions").className).toContain(
       "[&_button]:bg-white/95",
     );
-    expect(screen.getByTestId("lead-media-actions")).toHaveClass(
+    expect(screen.getByTestId("lead-media-actions")).not.toHaveClass(
+      "absolute",
       "xl:absolute",
-      "xl:bottom-0",
-      "xl:items-end",
-      "min-[1280px]:right-36",
-      "min-[1280px]:h-12",
-      "min-[1792px]:right-56",
     );
     expect(
       screen.getByRole("button", { name: "Book appointment" }).parentElement,
-    ).toHaveClass("pointer-events-auto", "flex-wrap", "min-w-0");
+    ).toHaveClass("flex-wrap", "min-w-0");
   });
 
   it("renders the automatic aerial fallback without a view selector", () => {
@@ -159,6 +151,13 @@ describe("<LeadMediaHero />", () => {
       "src",
       expect.stringContaining("maptype=satellite"),
     );
+    const aerialSources = Array.from(document.querySelectorAll("source"));
+    expect(
+      aerialSources.find((source) => source.media === "(min-width: 640px)"),
+    ).toHaveAttribute("srcset", aerialImages.smallTablet);
+    expect(
+      aerialSources.find((source) => source.media === "(min-width: 768px)"),
+    ).toHaveAttribute("srcset", aerialImages.tablet);
     expect(screen.queryByRole("button", { name: /street|aerial/i })).toBeNull();
   });
 
