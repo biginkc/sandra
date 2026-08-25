@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -156,5 +156,62 @@ describe("<InlineReply /> disabled explanations", () => {
       description: "Provider rejected the message.",
     });
     expect(routerRefreshMock).not.toHaveBeenCalled();
+  });
+
+  it("sends once from the keyboard shortcut and exposes the pending state", async () => {
+    const user = userEvent.setup();
+    let resolveSend:
+      | ((value: Awaited<ReturnType<typeof sendSmsFromLead>>) => void)
+      | undefined;
+    vi.mocked(sendSmsFromLead).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+
+    render(
+      <InlineReply
+        propertyId="property-1"
+        homeownerContactId="contact-1"
+        homeownerPhone="+18165550123"
+      />,
+    );
+
+    const composer = screen.getByLabelText("Reply to this lead");
+    const sendButton = screen.getByRole("button", { name: "Send reply" });
+    await user.type(composer, "Keyboard send");
+    await user.keyboard("{Control>}{Enter}{/Control}");
+
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    expect(sendSmsFromLead).toHaveBeenCalledWith(
+      "property-1",
+      "Keyboard send",
+      null,
+      false,
+      "+18165550123",
+    );
+    expect(composer).toBeDisabled();
+    expect(sendButton).toBeDisabled();
+    expect(sendButton).toHaveTextContent("Sending…");
+
+    await user.click(sendButton);
+    expect(sendSmsFromLead).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      resolveSend?.({
+        ok: true,
+        data: {
+          outcome: {
+            status: "sent",
+            messageId: "keyboard-message",
+            externalId: "keyboard-provider",
+          },
+        },
+      } as Awaited<ReturnType<typeof sendSmsFromLead>>);
+    });
+
+    await waitFor(() => expect(composer).toHaveValue(""));
+    expect(routerRefreshMock).toHaveBeenCalledOnce();
   });
 });

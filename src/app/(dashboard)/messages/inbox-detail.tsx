@@ -416,7 +416,12 @@ export function InboxDetail({
   const replyRefreshPending =
     replyRefreshGate?.threadId === data.threadId &&
     replyRefreshGate.initialMessages === data.initialMessages;
-  const handleLiveMessage = () => {
+  const handleLiveMessage = (message: MessageRow) => {
+    // Only inbound messages can change which customer phone this thread
+    // should reply to. Outbound pending rows are created before the provider
+    // responds; refreshing for those rows would unmount InlineReply and lose
+    // the operator's draft if delivery fails.
+    if (message.direction !== "inbound") return;
     setReplyRefreshGate({
       threadId: data.threadId,
       initialMessages: data.initialMessages,
@@ -693,6 +698,7 @@ export function InboxDetail({
                 homeownerContactId={data.homeownerContactId}
                 homeownerPhone={data.replyToPhone}
                 replyToPhone={data.replyToPhone}
+                preferredFromNumber={data.threadBusinessPhone}
                 phoneUnavailableMessage="This thread number is not saved on the homeowner contact — save or resolve it before replying."
               />
             ) : (
