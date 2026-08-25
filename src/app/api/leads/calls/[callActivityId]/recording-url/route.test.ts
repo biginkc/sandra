@@ -90,6 +90,14 @@ describe("GET /api/leads/calls/[callActivityId]/recording-url", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("resolves softphone-provider calls through the same Jitter playback path", async () => {
+    maybeSingle.mockResolvedValueOnce({ data: call({ provider: "sandra_softphone" }), error: null });
+    const response = await request();
+
+    expect(response.status).not.toBe(409);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
   it("rejects non-Jitter calls before contacting Jitter", async () => {
     maybeSingle.mockResolvedValueOnce({ data: call({ provider: "twilio" }), error: null });
     const response = await request();
