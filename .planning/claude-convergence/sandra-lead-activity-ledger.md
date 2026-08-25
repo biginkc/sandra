@@ -166,3 +166,36 @@ This product serves 100 users or fewer. Reject enterprise architecture and scope
 - Scope review: no retries, wrapping transaction, generic framework, or other enterprise machinery is warranted for fewer than 100 users.
 - Verification boundary: hosted tag/list assertions are written but remain intentionally unrun while PR #409 owns the shared Sandra test database.
 - Next bounded step: task lifecycle events.
+
+### Round 16 — task lifecycle pre-Fable manual review
+
+- Review surface: uncommitted task lifecycle slice on `3864c17`; hosted integration intentionally paused while Sandra PR #409 reruns against the shared test database.
+- Manual lanes: mutation/concurrency correctness, server/auth/Slack boundary, and tests/static analysis. All three final re-reviews returned no findings.
+- Fixed P2: generic snooze now requires `open`, compares both prior status and due time atomically, and refuses reconciliation after completion. This prevents a completion race from creating a later `task_snoozed` event or moving its Calendar entry.
+- Fixed P2: Slack completion passes an expected assignee; completion compares the prior assignee atomically and refuses stale attribution after reassignment.
+- Fixed test-proof gaps: exact update payloads, queue exhaustion, exact Calendar payload, property-linked appointment exclusion, direct actor/auth forwarding, same-target concurrency reconciliation, initial/post-race completion guards, failed writes, and private-title/body exclusion.
+- Corrected invalid fixture: the live schema permits propertyless appointments but forbids propertyless non-appointment tasks. The hosted exclusion test now uses a propertyless appointment and expects no generic task event.
+- Rejected scope expansion: no outbox, retry worker, transaction RPC, generic lifecycle framework, or policy abstraction. An ambiguous update response can still leave a missing best-effort event; blindly retrying could create duplicates and is not justified for fewer than 100 users.
+- Static analysis: Fallow completed. New duplication leads are intentional explicit compare-and-set paths/tests; inherited unused exports/dependencies remain out of scope. Slack formatting-only churn was removed.
+- Local verification: typecheck passed; focused task/action/Slack suites passed 59/59; scoped lint passed; production build passed. The build continues to log the existing handled `/templates` dynamic-render warning.
+- Human browser review at this slice: no. This is server-side mutation behavior with no UI change; final timeline UI will receive browser review and production Chrome acceptance later.
+- Next review: Fable must independently inspect the current uncommitted slice, explicitly challenge sub-100-user scope/bloat, and return the next bounded step. Hosted integration remains unrun until PR #409 releases the shared database again.
+
+### Round 17 — task timestamp-format re-review
+
+- Fable verdict: `REJECT_STEP` — confidence 0.85.
+- Blocking finding: browser snooze sends ISO `Z` while PostgREST can return the same instant as `+00:00`; raw string equality could miss a no-op and append a false `task_snoozed` event.
+- Fix: both initial and reconciliation no-op guards compare epoch milliseconds. Unit tests cover both `Z`/`+00:00` formats on the initial guard and same-target reconciliation; hosted assertions normalize event timestamps before comparison.
+- Fable non-blockers accepted without code expansion: ambiguous committed writes remain best-effort, lifecycle event source identity is creation-only, and pre-existing completed-task reassignment remains unchanged.
+- Post-fix manual re-review: correctness and test lanes both returned no findings; explicit epoch comparison is appropriate for fewer than 100 users and no normalization framework is warranted.
+- Post-fix local verification: typecheck passed; focused suites passed 59/59; scoped lint passed; production build passed with only the existing handled `/templates` dynamic-render log.
+- Hosted integration remains paused at PR #409's explicit request.
+
+### Round 18 — task lifecycle hosted integration proof
+
+- Shared-database coordination: the PR #409 owner released its exact-head E2E window; this task announced its scoped run before starting and released the window immediately after completion.
+- Test guard: the run used the repository's validated Sandra TEST configuration and PostgreSQL advisory lock. No production project or unlocked fixture reset was used.
+- Hosted verification passed: `tags.integration.test.ts` 10/10, `bulk-actions.integration.test.ts` 26/26, and `tasks/index.integration.test.ts` 2/2; total 38/38.
+- Task proof: one truthful event is persisted for create, snooze, reassign, and complete; immediate retries/no-ops, failed transitions, post-completion snooze, and propertyless appointments do not create generic task events; payloads exclude private task title/body text.
+- Fable's round-17 implementation approval remains current because no implementation or test code changed after that review; this round records only the subsequently completed hosted evidence.
+- Next bounded step: commit and push the approved task slice, then instrument appointment lifecycle events without broadening into a generic lifecycle framework.
