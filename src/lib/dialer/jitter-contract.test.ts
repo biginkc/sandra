@@ -311,7 +311,10 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
     expect(seen[1]).toEqual(seen[0]);
   });
 
-  it("preserves v2's distinct operator_busy and not_callable envelopes", async () => {
+  // Sandra preserves this envelope defensively if ever received; Jitter's
+  // start route never originates 422 not_callable (its 422s are caller-ID
+  // validation errors such as invalid_caller_id_e164 and caller_id_unavailable).
+  it("defensively preserves distinct operator_busy and not_callable envelopes if received", async () => {
     vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
     vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
     const busyServer = contractServer(() =>
