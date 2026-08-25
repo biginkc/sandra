@@ -125,6 +125,10 @@ describe("<BatchCreateModal />", () => {
       screen.getByRole("button", { name: /Create batch/i }),
     ).toBeDisabled();
     expect(screen.getByText(/Checking callability/i)).toBeInTheDocument();
+    expect(document.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(3);
+    expect(screen.queryByText("0 callable")).not.toBeInTheDocument();
+    expect(screen.queryByText("0 blocked")).not.toBeInTheDocument();
+    expect(screen.queryByText("0 missing phone")).not.toBeInTheDocument();
   });
 
   it("disables Create batch button while submission is in flight", async () => {
