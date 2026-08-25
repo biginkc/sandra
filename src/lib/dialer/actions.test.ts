@@ -31,6 +31,7 @@ type MockActivityRow = {
   propertyId?: string | null;
   contactId?: string | null;
   jitterSessionId?: string | null;
+  operatorUserId?: string | null;
 };
 
 function softphoneCompletionInput(wrapToken: string) {
@@ -225,7 +226,7 @@ describe("prepareManualCall", () => {
       wrapToken: "11111111-1111-4111-8111-111111111111",
       callback: { date: "2026-08-22", time: "09:00", timeZone: "America/Chicago" },
     })).resolves.toMatchObject({ ok: true, data: { activityId: "activity-1", callbackTaskId: "task-1" } });
-    expect(order).toEqual(["disposition", "activity", "booking", "resume"]);
+    expect(order).toEqual(["activity", "disposition", "booking", "resume"]);
     expect(activityUpserts[0]).toMatchObject({
       jitter_attempt_id: "sandra-11111111-1111-4111-8111-111111111111",
       wrap_token: "11111111-1111-4111-8111-111111111111",
@@ -312,6 +313,84 @@ describe("prepareManualCall", () => {
       id: "activity-writeback",
       wrapToken,
       jitterSessionId: "sandra-softphone-session-scope:run-1",
+    });
+  });
+
+  it("does not adopt a matching attempt owned by another operator", async () => {
+    const attemptId = `sandra-${RAW_JITTER_CALL_ID}`;
+    const rows = new Map<string, MockActivityRow>([
+      ["foreign-row", {
+        id: "activity-foreign",
+        wrapToken: null,
+        jitterAttemptId: attemptId,
+        propertyId: "property-1",
+        contactId: "contact-1",
+        operatorUserId: "user-2",
+      }],
+    ]);
+    setOutreachDispo.mockResolvedValue({ ok: true });
+    resumeByProperty.mockResolvedValue({ resumed: 1 });
+    createClient.mockResolvedValue(makeActionClient([], rows));
+
+    await expect(completeSoftphoneCall({
+      ...softphoneCompletionInput("44444444-4444-4444-8444-444444444444"),
+      callCapability: sealCallCapability(RAW_JITTER_CALL_ID),
+    })).resolves.toEqual({ ok: false, error: "The call activity was not saved." });
+    expect(findMockActivityByAttempt(rows, attemptId)).toMatchObject({ operatorUserId: "user-2" });
+  });
+
+  it("does not overwrite a same-operator attempt with a different wrap token", async () => {
+    const attemptId = `sandra-${RAW_JITTER_CALL_ID}`;
+    const rows = new Map<string, MockActivityRow>([
+      ["completed-row", {
+        id: "activity-completed",
+        wrapToken: "66666666-6666-4666-8666-666666666666",
+        jitterAttemptId: attemptId,
+        propertyId: "property-1",
+        contactId: "contact-1",
+        operatorUserId: "user-1",
+      }],
+    ]);
+    createClient.mockResolvedValue(makeActionClient([], rows));
+
+    await expect(completeSoftphoneCall({
+      ...softphoneCompletionInput("77777777-7777-4777-8777-777777777777"),
+      callCapability: sealCallCapability(RAW_JITTER_CALL_ID),
+    })).resolves.toEqual({ ok: false, error: "The call activity was not saved." });
+    expect(setOutreachDispo).not.toHaveBeenCalled();
+    expect(findMockActivityByAttempt(rows, attemptId)).toMatchObject({
+      wrapToken: "66666666-6666-4666-8666-666666666666",
+    });
+  });
+
+  it("keeps writeback-first lead links when the wrap-up omits them", async () => {
+    const attemptId = `sandra-${RAW_JITTER_CALL_ID}`;
+    const rows = new Map<string, MockActivityRow>([
+      ["writeback-row", {
+        id: "activity-writeback",
+        wrapToken: null,
+        jitterAttemptId: attemptId,
+        propertyId: "property-1",
+        contactId: "contact-1",
+        operatorUserId: null,
+      }],
+    ]);
+    setOutreachDispo.mockResolvedValue({ ok: true });
+    resumeByProperty.mockResolvedValue({ resumed: 1 });
+    createClient.mockResolvedValue(makeActionClient([], rows));
+
+    await expect(completeSoftphoneCall({
+      ...softphoneCompletionInput("55555555-5555-4555-8555-555555555555"),
+      target: {
+        ...softphoneCompletionInput("unused").target,
+        propertyId: null,
+        contactId: null,
+      },
+      callCapability: sealCallCapability(RAW_JITTER_CALL_ID),
+    })).resolves.toMatchObject({ ok: true, data: { activityId: "activity-writeback" } });
+    expect(findMockActivityByAttempt(rows, attemptId)).toMatchObject({
+      propertyId: "property-1",
+      contactId: "contact-1",
     });
   });
 
@@ -546,6 +625,7 @@ function makeActionClient(
       jitterAttemptId: row.jitterAttemptId ?? `sandra-${wrapToken ?? key}`,
       propertyId: row.propertyId ?? "property-1",
       contactId: row.contactId ?? "contact-1",
+      operatorUserId: row.operatorUserId === undefined ? (wrapToken ? "user-1" : null) : row.operatorUserId,
     });
   }
   const syncActivityRows = () => {
@@ -560,24 +640,70 @@ function makeActionClient(
     auth: { getUser: vi.fn(async () => ({ data: { user: { id: "user-1" } } })) },
     from: vi.fn((table: string) => {
       let insertedActivity: { id: string } | null = null;
+      let insertError: { code: string; message: string } | null = null;
       let updateError: { message: string } | null = null;
       let pendingActivityUpdate: Record<string, unknown> | null = null;
       const filters = new Map<string, unknown>();
+      let operatorScope: string | null = null;
+      let activityMatch: { operatorUserId: string; wrapToken: string } | null = null;
       const findActivity = () => [...storedRows.values()].find((row) => {
         const id = filters.get("id");
         const wrapToken = filters.get("wrap_token");
         const attemptId = filters.get("jitter_attempt_id");
+        const operatorUserId = filters.get("operator_user_id");
         return (
           (typeof id !== "string" || row.id === id) &&
           (typeof wrapToken !== "string" || row.wrapToken === wrapToken) &&
-          (typeof attemptId !== "string" || row.jitterAttemptId === attemptId)
+          (typeof attemptId !== "string" || row.jitterAttemptId === attemptId) &&
+          (typeof operatorUserId !== "string" || row.operatorUserId === operatorUserId) &&
+          (!operatorScope || row.operatorUserId === operatorScope || row.operatorUserId === null) &&
+          (!activityMatch ||
+            (row.operatorUserId === activityMatch.operatorUserId && row.wrapToken === activityMatch.wrapToken) ||
+            (row.operatorUserId === null && row.wrapToken === null))
         );
       });
       const builder = {
         select: vi.fn(() => builder),
         eq: vi.fn((column: string, value: unknown) => { filters.set(column, value); return builder; }),
+        or: vi.fn((expression: string) => {
+          const match = expression.match(/^operator_user_id\.eq\.([^,]+),operator_user_id\.is\.null$/);
+          operatorScope = match?.[1] ?? null;
+          const activityMatchExpression = expression.match(
+            /^and\(operator_user_id\.eq\.([^,]+),wrap_token\.eq\.([^\)]+)\),and\(operator_user_id\.is\.null,wrap_token\.is\.null\)$/,
+          );
+          activityMatch = activityMatchExpression
+            ? {
+                operatorUserId: activityMatchExpression[1],
+                wrapToken: activityMatchExpression[2],
+              }
+            : null;
+          return builder;
+        }),
+        delete: vi.fn(() => builder),
         limit: vi.fn(() => builder),
-        insert: vi.fn(() => { if (table === "call_activities") order.push("activity"); return builder; }),
+        insert: vi.fn((values: Record<string, unknown>) => {
+          if (table !== "call_activities") return builder;
+          activityUpserts.push(values);
+          const existing = [...storedRows.values()].find((row) =>
+            row.jitterAttemptId === values.jitter_attempt_id,
+          );
+          if (existing) {
+            insertError = { code: "23505", message: "duplicate softphone attempt" };
+            return builder;
+          }
+          insertedActivity = { id: `activity-${storedRows.size + 1}` };
+          storedRows.set(insertedActivity.id, {
+            id: insertedActivity.id,
+            wrapToken: values.wrap_token as string,
+            jitterAttemptId: String(values.jitter_attempt_id),
+            propertyId: typeof values.property_id === "string" ? values.property_id : null,
+            contactId: typeof values.contact_id === "string" ? values.contact_id : null,
+            operatorUserId: typeof values.operator_user_id === "string" ? values.operator_user_id : null,
+          });
+          syncActivityRows();
+          order.push("activity");
+          return builder;
+        }),
         update: vi.fn((values: Record<string, unknown>) => {
           if (table === "properties") {
             propertyUpdates.push(values);
@@ -623,19 +749,21 @@ function makeActionClient(
                 jitterAttemptId: String(pendingActivityUpdate.jitter_attempt_id ?? existing.jitterAttemptId),
                 propertyId: pendingActivityUpdate.property_id as string | null | undefined,
                 contactId: pendingActivityUpdate.contact_id as string | null | undefined,
+                operatorUserId: pendingActivityUpdate.operator_user_id as string | null | undefined,
                 jitterSessionId: existing.jitterSessionId,
               });
               if (previousWrapToken !== existing.wrapToken) syncActivityRows();
               pendingActivityUpdate = null;
               return { data: { id: existing.id }, error: null };
             }
+            if (insertError) return { data: null, error: insertError };
             return {
               data: insertedActivity ?? (findActivity() ? {
                 id: findActivity()!.id,
                 property_id: findActivity()!.propertyId,
                 contact_id: findActivity()!.contactId,
               } : null),
-              error: null,
+              error: insertError,
             };
           }
           return { data: null, error: null };

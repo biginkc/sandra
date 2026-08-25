@@ -36,14 +36,6 @@ type WritebackBody = {
   recording_path?: string | null;
 };
 
-type ValidatedWriteback = {
-  property: {
-    id: string;
-    org_id: string;
-    address: string | null;
-  };
-};
-
 type JitterServiceClient = SupabaseClient<Database>;
 
 export const JITTER_WRITEBACK_PROVIDERS = [
@@ -93,6 +85,10 @@ const RECORDING_PATH_MAX_LENGTH = 2048;
 const JITTER_SESSION_ID_MAX_LENGTH = 512;
 const POSTGRES_INT4_MAX = 2_147_483_647;
 
+function quotePostgrestFilterValue(value: string): string {
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
 function unprocessable(error_code: string, field?: string) {
   return NextResponse.json(
     { error: "validation_error", error_code, ...(field ? { field } : {}) },
@@ -107,9 +103,23 @@ function forbidden(error_code: string) {
 async function validateOrgConsistency(
   serviceClient: JitterServiceClient,
   body: WritebackBody,
+  attemptId: string,
 ) {
+  const isSoftphone = body.provider === "sandra_softphone";
+
+  // Sandra must always send its tenant identity. Lead ids are optional only
+  // for a softphone artifact that may match a writeback-first row; the RPC
+  // requires both ids before inserting a new row.
+  if (isSoftphone && !body.org_id) {
+    return {
+      ok: false as const,
+      response: unprocessable("missing_required_field"),
+    };
+  }
+
   if (
-    (!body.org_id || !body.property_id || !body.contact_id) &&
+    !isSoftphone &&
+    (!body.property_id || !body.contact_id) &&
     !body.dialer_batch_item_id
   ) {
     return {
@@ -148,43 +158,85 @@ async function validateOrgConsistency(
     body.contact_id ??= item.contact_id;
   }
 
-  if (!body.org_id || !body.property_id || !body.contact_id) {
+  if (
+    isSoftphone &&
+    !body.dialer_batch_item_id &&
+    (!body.property_id || !body.contact_id)
+  ) {
+    const { data: existingActivity, error: existingActivityError } =
+      await serviceClient
+        .from("call_activities")
+        .select("property_id, contact_id")
+        .eq("org_id", body.org_id!)
+        .eq("provider", "sandra_softphone")
+        .eq("jitter_attempt_id", attemptId)
+        .or(
+          `jitter_session_id.is.null,jitter_session_id.eq.${quotePostgrestFilterValue(body.jitter_session_id!)}`,
+        )
+        .limit(1)
+        .maybeSingle();
+    if (existingActivityError) throw existingActivityError;
+    if (!existingActivity) {
+      return {
+        ok: false as const,
+        response: unprocessable("missing_required_field"),
+      };
+    }
+
+    if (
+      (body.property_id && existingActivity.property_id !== body.property_id) ||
+      (body.contact_id && existingActivity.contact_id !== body.contact_id)
+    ) {
+      return {
+        ok: false as const,
+        response: unprocessable("identity_conflict"),
+      };
+    }
+    body.property_id ??= existingActivity.property_id ?? undefined;
+    body.contact_id ??= existingActivity.contact_id ?? undefined;
+  }
+
+  if (!body.org_id || (!isSoftphone && (!body.property_id || !body.contact_id))) {
     return {
       ok: false as const,
       response: unprocessable("missing_required_field"),
     };
   }
 
-  const { data: property, error: propertyError } = await serviceClient
-    .from("properties")
-    .select("id, org_id, address, deleted_at")
-    .eq("id", body.property_id)
-    .maybeSingle();
-  if (propertyError) throw propertyError;
-  if (!property || property.deleted_at) {
-    return {
-      ok: false as const,
-      response: unprocessable("property_deleted", "property_id"),
-    };
-  }
-  if (property.org_id !== body.org_id) {
-    return {
-      ok: false as const,
-      response: unprocessable("org_mismatch", "property_id"),
-    };
+  if (body.property_id) {
+    const { data: property, error: propertyError } = await serviceClient
+      .from("properties")
+      .select("id, org_id, address, deleted_at")
+      .eq("id", body.property_id)
+      .maybeSingle();
+    if (propertyError) throw propertyError;
+    if (!property || property.deleted_at) {
+      return {
+        ok: false as const,
+        response: unprocessable("property_deleted", "property_id"),
+      };
+    }
+    if (property.org_id !== body.org_id) {
+      return {
+        ok: false as const,
+        response: unprocessable("org_mismatch", "property_id"),
+      };
+    }
   }
 
-  const { data: contact, error: contactError } = await serviceClient
-    .from("contacts")
-    .select("id, org_id")
-    .eq("id", body.contact_id)
-    .maybeSingle();
-  if (contactError) throw contactError;
-  if (!contact || contact.org_id !== body.org_id) {
-    return {
-      ok: false as const,
-      response: unprocessable("org_mismatch", "contact_id"),
-    };
+  if (body.contact_id) {
+    const { data: contact, error: contactError } = await serviceClient
+      .from("contacts")
+      .select("id, org_id")
+      .eq("id", body.contact_id)
+      .maybeSingle();
+    if (contactError) throw contactError;
+    if (!contact || contact.org_id !== body.org_id) {
+      return {
+        ok: false as const,
+        response: unprocessable("org_mismatch", "contact_id"),
+      };
+    }
   }
 
   if (body.dialer_batch_item_id) {
@@ -219,10 +271,7 @@ async function validateOrgConsistency(
     }
   }
 
-  return { ok: true as const, property } satisfies {
-    ok: true;
-    property: ValidatedWriteback["property"];
-  };
+  return { ok: true as const };
 }
 
 function validTimestamp(value: string | null | undefined): string | null {
@@ -376,9 +425,17 @@ export async function PUT(
     const initialPayloadValidation = validatePayloadSyntax(body);
     if (initialPayloadValidation) return initialPayloadValidation;
 
+    // Reject an explicitly cross-tenant Sandra payload before the
+    // service-role validator performs any identity lookup. Batch payloads
+    // may still derive org_id from their batch item below.
+    if (body.org_id && body.org_id !== auth.orgId) {
+      return forbidden("org_consumer_mismatch");
+    }
+
     const validation = await validateOrgConsistency(
       auth.serviceClient,
       body,
+      attemptId,
     );
     if (!validation.ok) return validation.response;
 

@@ -30,6 +30,8 @@ const missingKeyMock = vi.mocked(requireIdempotencyKey);
 type TestBuilder = {
   select: () => TestBuilder;
   eq: (_column: string, _value: unknown) => TestBuilder;
+  or: (_expression: string) => TestBuilder;
+  limit: (_count: number) => TestBuilder;
   maybeSingle: () => Promise<{
     data: Record<string, unknown> | null;
     error: null;
@@ -40,7 +42,10 @@ function context(attemptId: string) {
   return { params: Promise.resolve({ attemptId }) };
 }
 
-function body(provider: string | null | undefined): Record<string, unknown> {
+function body(
+  provider: string | null | undefined,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     org_id: ORG_ID,
     property_id: PROPERTY_ID,
@@ -48,6 +53,7 @@ function body(provider: string | null | undefined): Record<string, unknown> {
     jitter_session_id: "sandra-softphone-scope",
     provider,
     outcome: "connected_human",
+    ...overrides,
   };
 }
 
@@ -65,7 +71,7 @@ function request(payload: Record<string, unknown>) {
   );
 }
 
-function serviceClient() {
+function serviceClient(existingActivity: Record<string, unknown> | null = null) {
   const rpc = vi.fn().mockResolvedValue({
     data: {
       call_activity: {
@@ -81,6 +87,8 @@ function serviceClient() {
       const builder: TestBuilder = {
         select: () => builder,
         eq: () => builder,
+        or: () => builder,
+        limit: () => builder,
         maybeSingle: async () => {
           if (table === "properties") {
             return {
@@ -90,6 +98,9 @@ function serviceClient() {
           }
           if (table === "contacts") {
             return { data: { id: CONTACT_ID, org_id: ORG_ID }, error: null };
+          }
+          if (table === "call_activities") {
+            return { data: existingActivity, error: null };
           }
           return { data: null, error: null };
         },
@@ -167,6 +178,115 @@ describe("Jitter attempt call-activity provider boundary", () => {
       expect(client.rpc).not.toHaveBeenCalled();
     },
   );
+
+  it("allows a softphone artifact to omit lead ids for an existing-row match", async () => {
+    const client = serviceClient({
+      property_id: PROPERTY_ID,
+      contact_id: CONTACT_ID,
+    });
+    const payload = body("sandra_softphone");
+    delete payload.property_id;
+    delete payload.contact_id;
+    authMock.mockResolvedValue({
+      ok: true,
+      consumerId: "consumer-1",
+      orgId: ORG_ID,
+      serviceClient: client as unknown as JitterAuthOk["serviceClient"],
+      rawBody: JSON.stringify(payload),
+    });
+
+    const response = await PUT(
+      request(payload),
+      context("sandra-00000000-0000-4000-8000-000000000003"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(client.rpc).toHaveBeenCalledWith(
+      "jitter_writeback_call_activity",
+      expect.objectContaining({
+        p_body: expect.objectContaining({
+          property_id: PROPERTY_ID,
+          contact_id: CONTACT_ID,
+        }),
+      }),
+    );
+  });
+
+  it("keeps lead ids required for a batch Jitter payload", async () => {
+    const client = serviceClient();
+    const payload = body("jitter");
+    delete payload.property_id;
+    delete payload.contact_id;
+    authMock.mockResolvedValue({
+      ok: true,
+      consumerId: "consumer-1",
+      orgId: ORG_ID,
+      serviceClient: client as unknown as JitterAuthOk["serviceClient"],
+      rawBody: JSON.stringify(payload),
+    });
+
+    const response = await PUT(
+      request(payload),
+      context("attempt-1"),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error_code: "missing_required_field",
+    });
+    expect(idempotencyMock).not.toHaveBeenCalled();
+  });
+
+  it("still requires org_id for a softphone payload", async () => {
+    const client = serviceClient();
+    const payload = body("sandra_softphone");
+    delete payload.org_id;
+    delete payload.property_id;
+    delete payload.contact_id;
+    authMock.mockResolvedValue({
+      ok: true,
+      consumerId: "consumer-1",
+      orgId: ORG_ID,
+      serviceClient: client as unknown as JitterAuthOk["serviceClient"],
+      rawBody: JSON.stringify(payload),
+    });
+
+    const response = await PUT(
+      request(payload),
+      context("sandra-00000000-0000-4000-8000-000000000003"),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error_code: "missing_required_field",
+    });
+  });
+
+  it("rejects a cross-tenant softphone payload before matching its activity", async () => {
+    const client = serviceClient({
+      property_id: PROPERTY_ID,
+      contact_id: CONTACT_ID,
+    });
+    const payload = body("sandra_softphone", { org_id: "00000000-0000-4000-8000-000000000099" });
+    authMock.mockResolvedValue({
+      ok: true,
+      consumerId: "consumer-1",
+      orgId: ORG_ID,
+      serviceClient: client as unknown as JitterAuthOk["serviceClient"],
+      rawBody: JSON.stringify(payload),
+    });
+
+    const response = await PUT(
+      request(payload),
+      context("sandra-00000000-0000-4000-8000-000000000003"),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error_code: "org_consumer_mismatch",
+    });
+    expect(client.rpc).not.toHaveBeenCalled();
+  });
 
   it("keeps the provider predicate exact rather than accepting arbitrary strings", () => {
     expect(isSupportedJitterWritebackProvider("jitter")).toBe(true);

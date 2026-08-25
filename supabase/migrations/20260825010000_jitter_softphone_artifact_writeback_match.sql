@@ -5,6 +5,31 @@ begin;
 -- DNC decision, and notes. Jitter may enrich that row with call/artifact
 -- metadata after the call, but must not create a second call_activities row
 -- or replace the wrap-up fields.
+-- Softphone rows do not require a Jitter session, so the session-scoped index
+-- from the prior migration cannot prevent a wrap-up-first and writeback-first
+-- pair from both using the same attempt id. Existing Sandra rows normally have
+-- random unique attempt ids. If an older environment already contains a
+-- duplicate, leave the index out for an operator to reconcile rather than
+-- failing the whole forward migration; the action's match-first path remains
+-- the safe fallback.
+do $softphone_attempt_key$
+begin
+  if exists (
+    select 1
+    from public.call_activities
+    where provider = 'sandra_softphone'
+    group by org_id, provider, jitter_attempt_id
+    having count(*) > 1
+  ) then
+    raise notice 'skipping softphone attempt uniqueness index: duplicate rows require reconciliation';
+  else
+    create unique index if not exists idx_call_activities_org_provider_softphone_attempt
+      on public.call_activities (org_id, provider, jitter_attempt_id)
+      where provider = 'sandra_softphone';
+  end if;
+end;
+$softphone_attempt_key$;
+
 create or replace function public.jitter_writeback_call_activity(
   p_attempt_id text,
   p_body jsonb,
@@ -69,7 +94,7 @@ begin
        or v_item.item_contact_id is distinct from v_contact_id then
       raise exception 'jitter coherence check failed';
     end if;
-  else
+  elsif not v_softphone_payload then
     if v_property_id is null or v_contact_id is null then
       raise exception 'jitter coherence check failed';
     end if;
@@ -86,9 +111,9 @@ begin
   end if;
 
   -- A softphone payload is an artifact enrichment for Sandra's row, so it
-  -- must select that provider's row first. Preserve the existing Jitter-first
-  -- lookup order for batch payloads byte-for-byte, including the softphone
-  -- fallback used after a Jitter row is absent.
+  -- must select that provider's row first. The batch branch below stays
+  -- session+attempt scoped; softphone matching lives only in its provider
+  -- branch and is never a fallback for a Jitter payload.
   if v_softphone_payload then
     select a.* into v_existing
     from public.call_activities as a
@@ -112,26 +137,11 @@ begin
       and a.jitter_attempt_id = p_attempt_id
     for update;
 
-    if not found then
-      select a.* into v_existing
-      from public.call_activities as a
-      where a.org_id = p_org_id
-        and a.provider = 'sandra_softphone'
-        and a.jitter_attempt_id = p_attempt_id
-        and (
-          a.jitter_session_id is null
-          or a.jitter_session_id = v_jitter_session_id
-        )
-      for update;
-      if found then
-        v_softphone_match := true;
-      end if;
-    end if;
   end if;
 
   if found and (
-    v_existing.property_id is distinct from v_property_id
-    or v_existing.contact_id is distinct from v_contact_id
+    (v_property_id is not null and v_existing.property_id is distinct from v_property_id)
+    or (v_contact_id is not null and v_existing.contact_id is distinct from v_contact_id)
     or v_existing.dialer_batch_item_id is distinct from v_item_id
   ) then
     v_payload := jsonb_build_object('outcome', 'identity_conflict');
@@ -149,6 +159,49 @@ begin
       raise exception 'idempotency reservation missing or hash mismatch';
     end if;
     return v_payload;
+  end if;
+
+  if v_softphone_payload then
+    if v_softphone_match then
+      -- A writeback-first row already carries the authoritative lead links.
+      -- Validate only ids supplied by Jitter; omitted ids are filled by the
+      -- matched row and must not turn an enrichment into an identity conflict.
+      if v_property_id is not null and not exists (
+        select 1
+        from public.properties as p
+        where p.id = v_property_id
+          and p.org_id = p_org_id
+      ) then
+        raise exception 'jitter coherence check failed';
+      end if;
+      if v_contact_id is not null and not exists (
+        select 1
+        from public.contacts as c
+        where c.id = v_contact_id
+          and c.org_id = p_org_id
+      ) then
+        raise exception 'jitter coherence check failed';
+      end if;
+    else
+      -- A writeback-first insert still needs the lead context that the row
+      -- cannot inherit from an existing softphone activity.
+      if v_property_id is null or v_contact_id is null then
+        raise exception 'jitter coherence check failed';
+      end if;
+      if not exists (
+        select 1
+        from public.properties as p
+        where p.id = v_property_id
+          and p.org_id = p_org_id
+      ) or not exists (
+        select 1
+        from public.contacts as c
+        where c.id = v_contact_id
+          and c.org_id = p_org_id
+      ) then
+        raise exception 'jitter coherence check failed';
+      end if;
+    end if;
   end if;
 
   if v_softphone_match then
@@ -198,53 +251,116 @@ begin
       raise exception 'jitter coherence check failed';
     end if;
 
-    insert into public.call_activities (
-        org_id, property_id, contact_id, dialer_batch_item_id,
-        jitter_attempt_id, jitter_session_id, operator_user_id,
-        started_at, ended_at, duration_seconds, outcome, disposition,
-        do_not_call_requested, provider, provider_call_id, error_code,
-        error_message, notes, recording_path, raw_event_count, wrap_token
-      ) values (
-        p_org_id,
-        v_property_id,
-        v_contact_id,
-        v_item_id,
-        p_attempt_id,
-        v_jitter_session_id,
-        nullif(p_body ->> 'operator_user_id', '')::uuid,
-        nullif(p_body ->> 'started_at', '')::timestamptz,
-        nullif(p_body ->> 'ended_at', '')::timestamptz,
-        nullif(p_body ->> 'duration_seconds', '')::integer,
-        coalesce(nullif(p_body ->> 'outcome', ''), 'unknown'),
-        nullif(p_body ->> 'disposition', ''),
-        coalesce((p_body ->> 'do_not_call_requested')::boolean, false),
-        p_body ->> 'provider',
-        nullif(p_body ->> 'provider_call_id', ''),
-        nullif(p_body ->> 'error_code', ''),
-        nullif(p_body ->> 'error_message', ''),
-        p_notes,
-        p_recording_path,
-        1,
-        v_wrap_token
-      )
-      on conflict (org_id, provider, jitter_session_id, jitter_attempt_id) do update
-      set operator_user_id = excluded.operator_user_id,
-          started_at = excluded.started_at,
-          ended_at = excluded.ended_at,
-          duration_seconds = excluded.duration_seconds,
-          outcome = excluded.outcome,
-          disposition = excluded.disposition,
-          do_not_call_requested = excluded.do_not_call_requested,
-          provider_call_id = excluded.provider_call_id,
-          error_code = excluded.error_code,
-          error_message = excluded.error_message,
-          notes = excluded.notes,
-          recording_path = excluded.recording_path,
-          raw_event_count = call_activities.raw_event_count + 1
-      where call_activities.property_id is not distinct from excluded.property_id
-        and call_activities.contact_id is not distinct from excluded.contact_id
-        and call_activities.dialer_batch_item_id is not distinct from excluded.dialer_batch_item_id
-    returning * into v_activity;
+    if v_softphone_payload then
+      -- The partial attempt index is the race backstop for a wrap-up-first
+      -- row. Its predicate must be included in the conflict target; the
+      -- Jitter session-scoped target below cannot arbitrate this conflict.
+      -- Keep the wrap-up-owned fields untouched when the race is won here.
+      insert into public.call_activities (
+          org_id, property_id, contact_id, dialer_batch_item_id,
+          jitter_attempt_id, jitter_session_id, operator_user_id,
+          started_at, ended_at, duration_seconds, outcome, disposition,
+          do_not_call_requested, provider, provider_call_id, error_code,
+          error_message, notes, recording_path, raw_event_count, wrap_token
+        ) values (
+          p_org_id,
+          v_property_id,
+          v_contact_id,
+          v_item_id,
+          p_attempt_id,
+          v_jitter_session_id,
+          nullif(p_body ->> 'operator_user_id', '')::uuid,
+          nullif(p_body ->> 'started_at', '')::timestamptz,
+          nullif(p_body ->> 'ended_at', '')::timestamptz,
+          nullif(p_body ->> 'duration_seconds', '')::integer,
+          coalesce(nullif(p_body ->> 'outcome', ''), 'unknown'),
+          nullif(p_body ->> 'disposition', ''),
+          coalesce((p_body ->> 'do_not_call_requested')::boolean, false),
+          p_body ->> 'provider',
+          nullif(p_body ->> 'provider_call_id', ''),
+          nullif(p_body ->> 'error_code', ''),
+          nullif(p_body ->> 'error_message', ''),
+          p_notes,
+          p_recording_path,
+          1,
+          v_wrap_token
+        )
+        on conflict (org_id, provider, jitter_attempt_id)
+          where provider = 'sandra_softphone' do update
+        set jitter_session_id = excluded.jitter_session_id,
+            started_at = coalesce(excluded.started_at, call_activities.started_at),
+            ended_at = coalesce(excluded.ended_at, call_activities.ended_at),
+            duration_seconds = coalesce(
+              excluded.duration_seconds,
+              call_activities.duration_seconds
+            ),
+            provider_call_id = coalesce(
+              excluded.provider_call_id,
+              call_activities.provider_call_id
+            ),
+            error_code = coalesce(excluded.error_code, call_activities.error_code),
+            error_message = coalesce(
+              excluded.error_message,
+              call_activities.error_message
+            ),
+            recording_path = coalesce(
+              excluded.recording_path,
+              call_activities.recording_path
+            ),
+            raw_event_count = call_activities.raw_event_count + 1
+        where call_activities.property_id is not distinct from excluded.property_id
+          and call_activities.contact_id is not distinct from excluded.contact_id
+          and call_activities.dialer_batch_item_id is not distinct from excluded.dialer_batch_item_id
+      returning * into v_activity;
+    else
+      insert into public.call_activities (
+          org_id, property_id, contact_id, dialer_batch_item_id,
+          jitter_attempt_id, jitter_session_id, operator_user_id,
+          started_at, ended_at, duration_seconds, outcome, disposition,
+          do_not_call_requested, provider, provider_call_id, error_code,
+          error_message, notes, recording_path, raw_event_count, wrap_token
+        ) values (
+          p_org_id,
+          v_property_id,
+          v_contact_id,
+          v_item_id,
+          p_attempt_id,
+          v_jitter_session_id,
+          nullif(p_body ->> 'operator_user_id', '')::uuid,
+          nullif(p_body ->> 'started_at', '')::timestamptz,
+          nullif(p_body ->> 'ended_at', '')::timestamptz,
+          nullif(p_body ->> 'duration_seconds', '')::integer,
+          coalesce(nullif(p_body ->> 'outcome', ''), 'unknown'),
+          nullif(p_body ->> 'disposition', ''),
+          coalesce((p_body ->> 'do_not_call_requested')::boolean, false),
+          p_body ->> 'provider',
+          nullif(p_body ->> 'provider_call_id', ''),
+          nullif(p_body ->> 'error_code', ''),
+          nullif(p_body ->> 'error_message', ''),
+          p_notes,
+          p_recording_path,
+          1,
+          v_wrap_token
+        )
+        on conflict (org_id, provider, jitter_session_id, jitter_attempt_id) do update
+        set operator_user_id = excluded.operator_user_id,
+            started_at = excluded.started_at,
+            ended_at = excluded.ended_at,
+            duration_seconds = excluded.duration_seconds,
+            outcome = excluded.outcome,
+            disposition = excluded.disposition,
+            do_not_call_requested = excluded.do_not_call_requested,
+            provider_call_id = excluded.provider_call_id,
+            error_code = excluded.error_code,
+            error_message = excluded.error_message,
+            notes = excluded.notes,
+            recording_path = excluded.recording_path,
+            raw_event_count = call_activities.raw_event_count + 1
+        where call_activities.property_id is not distinct from excluded.property_id
+          and call_activities.contact_id is not distinct from excluded.contact_id
+          and call_activities.dialer_batch_item_id is not distinct from excluded.dialer_batch_item_id
+      returning * into v_activity;
+    end if;
 
     if not found then
       v_payload := jsonb_build_object('outcome', 'identity_conflict');
@@ -442,13 +558,13 @@ begin
       raise exception 'jitter coherence check failed';
     end if;
   end if;
-  if not exists (
+  if v_activity.provider = 'jitter' and (not exists (
     select 1 from public.properties as p
     where p.id = v_activity.property_id and p.org_id = p_org_id
   ) or not exists (
     select 1 from public.contacts as c
     where c.id = v_activity.contact_id and c.org_id = p_org_id
-  ) then
+  )) then
     raise exception 'jitter coherence check failed';
   end if;
 
@@ -596,7 +712,7 @@ begin
     end if;
   end if;
 
-  if not exists (
+  if v_activity.provider = 'jitter' and (not exists (
     select 1
     from public.properties as p
     where p.id = v_activity.property_id
@@ -606,7 +722,7 @@ begin
     from public.contacts as c
     where c.id = v_activity.contact_id
       and c.org_id = p_org_id
-  ) then
+  )) then
     raise exception 'jitter coherence check failed';
   end if;
 
