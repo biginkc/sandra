@@ -546,6 +546,25 @@ describe("JitterCallTransport", () => {
     expect(states).toContain("teardown_confirmed");
   });
 
+  it("treats an explicit non-ambiguous 503 as authoritative: no retry, no fallback, no unconfirmed banner", async () => {
+    const startCall = vi.fn(async () => ({
+      ok: false as const,
+      status: 503,
+      error: "Jitter softphone is misconfigured.",
+      errorCode: "jitter_invalid_configuration",
+      ambiguous: false,
+    }));
+    const harness = transportHarness({ startCall });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await expect(harness.transport.start(target())).rejects.toMatchObject({
+      name: "jitter_invalid_configuration",
+    });
+    expect(startCall).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.cancelByStartIntent).not.toHaveBeenCalled();
+    expect(states).not.toContain("teardown_unconfirmed");
+  });
+
   it("fails closed to teardown_unconfirmed when ambiguous and no cancelByStartIntent dependency exists", async () => {
     const startCall = vi.fn(async () => ({
       ok: false as const,

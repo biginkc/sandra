@@ -368,9 +368,11 @@ export class JitterCallTransport implements CallTransport {
         const result = await this.dependencies.startCall(target);
         lastResult = result;
         if (result.ok) return result;
+        // An explicit ambiguous:false is authoritative regardless of status —
+        // delivered 4xx and deterministic config 5xx never retry and never
+        // trigger cancel-by-key fallback.
+        if (result.ambiguous === false) return result;
         if (result.ambiguous === true || result.status >= 500) continue;
-        // Every delivered 4xx is authoritative. It is safe to stop retrying
-        // and must not trigger cancel-by-key fallback.
         return { ...result, ambiguous: false };
       } catch (error) {
         lastError = error;
