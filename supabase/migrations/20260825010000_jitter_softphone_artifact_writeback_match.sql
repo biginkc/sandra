@@ -5,219 +5,28 @@ begin;
 -- DNC decision, and notes. Jitter may enrich that row with call/artifact
 -- metadata after the call, but must not create a second call_activities row
 -- or replace the wrap-up fields.
--- Softphone rows do not require a Jitter session, so the session-scoped index
--- from the prior migration cannot prevent a wrap-up-first and writeback-first
--- pair from both using the same attempt id. Reconcile those historical pairs
--- before creating the arbiter that the RPC below names in ON CONFLICT. The
--- keeper is deterministic: prefer the only row carrying wrap/operator data,
--- then the oldest row, then the lowest UUID. Artifact fields are merged from
--- the loser; two operator rows, conflicting scalar artifacts, or two child
--- artifacts are not safely resolvable and must abort the migration loudly.
+-- Every existing softphone row keys jitter_attempt_id from a fresh random
+-- UUID ('sandra-' || crypto.randomUUID()), so duplicate (org, attempt) pairs
+-- cannot exist in production data. Verify that invariant and fail loudly if
+-- it is ever false rather than guessing at a merge; the arbiter index below
+-- must always be created because the RPC names it in ON CONFLICT.
 do $softphone_attempt_key$
 declare
-  v_group record;
-  v_keeper public.call_activities%rowtype;
-  v_loser public.call_activities%rowtype;
-  v_operator_rows integer;
+  v_dupes integer;
 begin
-  for v_group in
-    select org_id, jitter_attempt_id
+  select count(*) into v_dupes from (
+    select 1
     from public.call_activities
     where provider = 'sandra_softphone'
       and jitter_attempt_id is not null
     group by org_id, jitter_attempt_id
     having count(*) > 1
-    order by org_id, jitter_attempt_id
-  loop
-    select count(*)
-      into v_operator_rows
-    from public.call_activities
-    where org_id = v_group.org_id
-      and provider = 'sandra_softphone'
-      and jitter_attempt_id = v_group.jitter_attempt_id
-      and jitter_attempt_id is not null
-      and (
-        wrap_token is not null
-        or operator_user_id is not null
-        or disposition is not null
-        or notes is not null
-        or do_not_call_requested
-      );
-
-    if v_operator_rows > 1 then
-      raise exception
-        'cannot deduplicate softphone attempt %, org %: multiple operator rows',
-        v_group.jitter_attempt_id, v_group.org_id;
-    end if;
-
-    select a.*
-      into v_keeper
-    from public.call_activities as a
-    where a.org_id = v_group.org_id
-      and a.provider = 'sandra_softphone'
-      and a.jitter_attempt_id = v_group.jitter_attempt_id
-      and a.jitter_attempt_id is not null
-    order by (
-      a.wrap_token is not null
-      or a.operator_user_id is not null
-      or a.disposition is not null
-      or a.notes is not null
-      or a.do_not_call_requested
-    ) desc,
-      (a.wrap_token is not null) desc,
-      (a.operator_user_id is not null) desc,
-      a.created_at,
-      a.id
-    limit 1
-    for update;
-
-    for v_loser in
-      select a.*
-      from public.call_activities as a
-      where a.org_id = v_group.org_id
-        and a.provider = 'sandra_softphone'
-        and a.jitter_attempt_id = v_group.jitter_attempt_id
-        and a.jitter_attempt_id is not null
-        and a.id <> v_keeper.id
-      order by a.created_at, a.id
-    loop
-      if (
-        v_keeper.property_id is not null
-        and v_loser.property_id is not null
-        and v_keeper.property_id is distinct from v_loser.property_id
-      ) or (
-        v_keeper.contact_id is not null
-        and v_loser.contact_id is not null
-        and v_keeper.contact_id is distinct from v_loser.contact_id
-      ) or (
-        v_keeper.dialer_batch_item_id is not null
-        and v_loser.dialer_batch_item_id is not null
-        and v_keeper.dialer_batch_item_id is distinct from v_loser.dialer_batch_item_id
-      ) or (
-        v_keeper.jitter_session_id is not null
-        and v_loser.jitter_session_id is not null
-        and v_keeper.jitter_session_id is distinct from v_loser.jitter_session_id
-      ) or (
-        v_keeper.started_at is not null
-        and v_loser.started_at is not null
-        and v_keeper.started_at is distinct from v_loser.started_at
-      ) or (
-        v_keeper.ended_at is not null
-        and v_loser.ended_at is not null
-        and v_keeper.ended_at is distinct from v_loser.ended_at
-      ) or (
-        v_keeper.duration_seconds is not null
-        and v_loser.duration_seconds is not null
-        and v_keeper.duration_seconds is distinct from v_loser.duration_seconds
-      ) or (
-        v_keeper.provider_call_id is not null
-        and v_loser.provider_call_id is not null
-        and v_keeper.provider_call_id is distinct from v_loser.provider_call_id
-      ) or (
-        v_keeper.recording_path is not null
-        and v_loser.recording_path is not null
-        and v_keeper.recording_path is distinct from v_loser.recording_path
-      ) or (
-        v_keeper.error_code is not null
-        and v_loser.error_code is not null
-        and v_keeper.error_code is distinct from v_loser.error_code
-      ) or (
-        v_keeper.error_message is not null
-        and v_loser.error_message is not null
-        and v_keeper.error_message is distinct from v_loser.error_message
-      ) or (
-        v_keeper.recording_status not in ('none', 'pending')
-        and v_loser.recording_status not in ('none', 'pending')
-        and v_keeper.recording_status is distinct from v_loser.recording_status
-      ) or (
-        v_keeper.transcript_status not in ('none', 'pending')
-        and v_loser.transcript_status not in ('none', 'pending')
-        and v_keeper.transcript_status is distinct from v_loser.transcript_status
-      ) or (
-        v_keeper.summary_status not in ('none', 'pending')
-        and v_loser.summary_status not in ('none', 'pending')
-        and v_keeper.summary_status is distinct from v_loser.summary_status
-      ) then
-        raise exception
-          'cannot deduplicate softphone attempt %, org %: conflicting artifact rows',
-          v_group.jitter_attempt_id, v_group.org_id;
-      end if;
-
-      if exists (
-        select 1 from public.call_recordings
-        where call_activity_id = v_keeper.id
-      ) and exists (
-        select 1 from public.call_recordings
-        where call_activity_id = v_loser.id
-      ) then
-        raise exception
-          'cannot deduplicate softphone attempt %, org %: multiple recordings',
-          v_group.jitter_attempt_id, v_group.org_id;
-      end if;
-      if exists (
-        select 1 from public.call_transcripts
-        where call_activity_id = v_keeper.id
-      ) and exists (
-        select 1 from public.call_transcripts
-        where call_activity_id = v_loser.id
-      ) then
-        raise exception
-          'cannot deduplicate softphone attempt %, org %: multiple transcripts',
-          v_group.jitter_attempt_id, v_group.org_id;
-      end if;
-
-      -- Preserve child artifacts before the loser is deleted with its
-      -- cascade. Each child table is unique per activity, so the checks above
-      -- make these moves deterministic.
-      update public.call_recordings
-      set call_activity_id = v_keeper.id
-      where call_activity_id = v_loser.id;
-      update public.call_transcripts
-      set call_activity_id = v_keeper.id
-      where call_activity_id = v_loser.id;
-      update public.dialer_batch_items
-      set last_call_activity_id = v_keeper.id
-      where last_call_activity_id = v_loser.id;
-
-      update public.call_activities as k
-      set property_id = coalesce(k.property_id, v_loser.property_id),
-          contact_id = coalesce(k.contact_id, v_loser.contact_id),
-          dialer_batch_item_id = coalesce(k.dialer_batch_item_id, v_loser.dialer_batch_item_id),
-          jitter_session_id = coalesce(k.jitter_session_id, v_loser.jitter_session_id),
-          started_at = coalesce(k.started_at, v_loser.started_at),
-          ended_at = coalesce(k.ended_at, v_loser.ended_at),
-          duration_seconds = coalesce(k.duration_seconds, v_loser.duration_seconds),
-          provider_call_id = coalesce(k.provider_call_id, v_loser.provider_call_id),
-          recording_path = coalesce(k.recording_path, v_loser.recording_path),
-          error_code = coalesce(k.error_code, v_loser.error_code),
-          error_message = coalesce(k.error_message, v_loser.error_message),
-          phone_e164 = coalesce(k.phone_e164, v_loser.phone_e164),
-          recording_status = case
-            when k.recording_status in ('available', 'failed') then k.recording_status
-            else coalesce(nullif(v_loser.recording_status, 'none'), k.recording_status)
-          end,
-          transcript_status = case
-            when k.transcript_status in ('available', 'failed') then k.transcript_status
-            else coalesce(nullif(v_loser.transcript_status, 'none'), k.transcript_status)
-          end,
-          summary_status = case
-            when k.summary_status in ('available', 'failed') then k.summary_status
-            else coalesce(nullif(v_loser.summary_status, 'none'), k.summary_status)
-          end,
-          raw_event_count = coalesce(k.raw_event_count, 0) + coalesce(v_loser.raw_event_count, 0),
-          updated_at = greatest(k.updated_at, v_loser.updated_at)
-      where k.id = v_keeper.id;
-
-      delete from public.call_activities
-      where id = v_loser.id;
-
-      select a.*
-        into v_keeper
-      from public.call_activities as a
-      where a.id = v_keeper.id
-      for update;
-    end loop;
-  end loop;
+  ) as d;
+  if v_dupes > 0 then
+    raise exception
+      'softphone attempt-id duplicates exist (% groups); resolve manually before applying this migration',
+      v_dupes;
+  end if;
 end;
 $softphone_attempt_key$;
 

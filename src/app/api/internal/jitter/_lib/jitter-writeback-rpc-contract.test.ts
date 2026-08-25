@@ -70,7 +70,9 @@ describe("Jitter call-activity softphone writeback RPC contract", () => {
     expect(sql).toContain("group by org_id, jitter_attempt_id");
     expect(sql).toContain("and jitter_attempt_id is not null");
     expect(sql).toContain("having count(*) > 1");
-    expect(sql).toContain("cannot deduplicate softphone attempt");
+    // Random-UUID attempt ids make duplicates impossible in production; the
+    // migration verifies that invariant and fails loudly instead of merging.
+    expect(sql).toContain("softphone attempt-id duplicates exist");
     expect(sql).not.toContain("skipping softphone attempt uniqueness index");
     expect(sql).toContain(
       "on conflict (org_id, provider, jitter_attempt_id)\n          where provider = 'sandra_softphone' do update",

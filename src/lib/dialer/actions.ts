@@ -299,6 +299,11 @@ export async function completeSoftphoneCall(input: {
   callback?: CallbackInput;
 }): Promise<SoftphoneActionResult<{ activityId: string; callbackTaskId?: string }>> {
   if (!input.notes.trim()) return { ok: false, error: "Add a note to log the outcome." };
+  // wrapToken is interpolated into a PostgREST .or() filter below; a strict
+  // UUID shape keeps client input out of filter grammar.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.wrapToken)) {
+    return { ok: false, error: "Invalid call token." };
+  }
   try {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
