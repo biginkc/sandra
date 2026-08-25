@@ -54,3 +54,17 @@ This product serves 100 users or fewer. Reject enterprise architecture and scope
 - Verified: composite tenant FK, read-only member RLS/grants, exact reset-helper preservation, source idempotency, guarded Realtime publication, generated type shape, and auth-user deletion preserving historical actor type.
 - Non-blocking guard for next step: the writer must always supply `actor_id` when recording a live `user` event even though historical rows may become null after account deletion.
 - Next bounded step: server-only best-effort writer and focused unit tests; no call-site instrumentation yet.
+
+### Round 2 — writer review
+
+- Status: `REJECT_STEP` — confidence 0.8
+- Blocking finding: one unbounded PostgREST property lookup could silently omit rows above the response cap.
+- Resolution: chunk property ownership reads at 250, abort on any chunk error, keep the final event insert single-shot, and warn only with requested/skipped counts.
+
+### Round 3 — writer re-review
+
+- Status: `APPROVE_STEP` — confidence 0.93
+- Blocking findings: none
+- Verified: two ownership reads for 251 properties, one 251-row insert, sanitized failure/skip logs, truthful partial-property behavior, server-only admin client, exact vocabulary exclusions, and parent-action failure isolation.
+- Accepted small-team tradeoff: no transaction around property lookup and insert; a racing property delete causes the best-effort insert to fail and be logged without affecting the parent action.
+- Next bounded step: instrument lead creation and qualification first, including a test that ledger failure does not change the successful parent result.
