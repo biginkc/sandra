@@ -101,3 +101,14 @@ This product serves 100 users or fewer. Reject enterprise architecture and scope
 - Verified independently by Fable: the RTL alias is the same four-line mapping to the installed package's own `empty.js`; `npm run test:rtl` passed 87 files and 817 tests; Next ignores Vitest configs so the production tripwire remains intact.
 - Scope review: no new behavior, dependency, abstraction, or enterprise machinery was added.
 - Next bounded step: commit this slice, then instrument `reverted_to_prospect`, `status_changed`, and `motivation_changed` using the established confirmed-change pattern.
+
+### Round 8 — lead field mutation review
+
+- Status: `APPROVE_STEP` — high confidence
+- Blocking findings: none
+- Verified: status, motivation, and revert events append only after the action's compare-and-set persisted a real change; idempotent targets, unchanged values, conflicts, failures, and DNC-locked branches return before emission.
+- Verified: actor lookup failures fall back to `system`, and the best-effort writer remains failure-isolated; payloads contain only `from` and `to`.
+- Accepted behavior change: motivation and revert now use compare-and-set plus reconciliation instead of blind last-write-wins. That is required to prevent a stale client from creating a false event or overwriting a concurrent change.
+- Non-blocking: conflict branches do not each have a direct zero-event assertion; a row deleted during reconciliation returns a conflict rather than not-found; one awaited admin round trip is acceptable at this scale.
+- Scope review: appropriate for fewer than 100 users, with no queue, event bus, or extra abstraction.
+- Next bounded step: `assigned` events, beginning with the single-property action and then truthful bulk semantics.

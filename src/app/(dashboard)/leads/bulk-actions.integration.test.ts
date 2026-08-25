@@ -620,12 +620,28 @@ describe("bulk actions (integration)", () => {
     expect(data?.status).toBe("prospect");
     expect(data?.qualified_at).toBeNull();
     expect(data?.qualified_by).toBeNull();
+
+    const { data: events } = await testClient
+      .from("lead_events")
+      .select("event_type, payload")
+      .eq("property_id", id);
+    expect(events).toEqual([
+      {
+        event_type: "reverted_to_prospect",
+        payload: { from: "contacted", to: "prospect" },
+      },
+    ]);
   });
 
   it("revertToProspect is a no-op on an already-prospect row", async () => {
     const id = await seedProspect("1 AlreadyProspect Ln");
     const result = await revertToProspect(id);
     expect(result.ok).toBe(true);
+    const { count } = await testClient
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", id);
+    expect(count).toBe(0);
   });
 
   // --------------------------------------------------------------------------

@@ -11,6 +11,7 @@ const {
   dispatchTaskAssignedSlack,
   dispatchTaskCalendarEvent,
   loadIntegrationPrefs,
+  recordLeadEvent,
   revalidatePath,
   validateActiveAssigneeForProperties,
 } = vi.hoisted(() => ({
@@ -30,6 +31,7 @@ const {
       calendarEnabled: false,
       timezone: "America/Chicago",
     })),
+    recordLeadEvent: vi.fn(),
     revalidatePath: vi.fn(),
     validateActiveAssigneeForProperties: vi.fn(),
   }));
@@ -53,6 +55,15 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 vi.mock("@/lib/errors/report", () => ({
   reportError: vi.fn(),
+}));
+
+vi.mock("@/lib/events", () => ({
+  LEAD_EVENT_TYPES: {
+    MOTIVATION_CHANGED: "motivation_changed",
+    REVERTED_TO_PROSPECT: "reverted_to_prospect",
+    STATUS_CHANGED: "status_changed",
+  },
+  recordLeadEvent,
 }));
 
 vi.mock("next/cache", () => ({
@@ -232,6 +243,7 @@ beforeEach(() => {
     calendarEnabled: false,
     timezone: "America/Chicago",
   });
+  recordLeadEvent.mockReset().mockResolvedValue(undefined);
   revalidatePath.mockReset();
   validateActiveAssigneeForProperties.mockReset();
   validateActiveAssigneeForProperties.mockResolvedValue({
@@ -491,6 +503,11 @@ describe("updatePropertyStatus", () => {
     currentBuilder.eq.mockReturnValue(currentBuilder);
     const currentSelect = vi.fn(() => currentBuilder);
     createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: "00000000-0000-4000-8000-000000000001" } },
+        }),
+      },
       from: vi.fn(() => ({ update, select: currentSelect })),
     });
     return {
@@ -545,6 +562,13 @@ describe("updatePropertyStatus", () => {
     expect(chain.eq).toHaveBeenCalledWith("id", "property-1");
     expect(chain.eq).toHaveBeenCalledWith("status", "new_lead");
     expect(chain.select).toHaveBeenCalledWith("id, status");
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "property-1",
+      actorType: "user",
+      actorId: "00000000-0000-4000-8000-000000000001",
+      eventType: "status_changed",
+      payload: { from: "new_lead", to: "contacted" },
+    });
   });
 
   it("returns the authoritative current stage when a stale update matched no row", async () => {
@@ -600,6 +624,7 @@ describe("updatePropertyStatus", () => {
       ok: true,
       data: { propertyId: "property-1", status: "contacted" },
     });
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 });
 

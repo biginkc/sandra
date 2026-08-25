@@ -19,6 +19,7 @@ import {
   partitionPropertyDncLocks,
 } from "@/lib/dnc/property-lock";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import {
   createStandaloneCassJob,
   failAuthorizedCassJobStart,
@@ -78,6 +79,21 @@ const VALID_STATUSES: readonly PropertyStatus[] = [
   "closed",
   "dead",
 ];
+
+async function getLeadEventActor(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+) {
+  try {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    return user
+      ? ({ actorType: "user", actorId: user.id } as const)
+      : ({ actorType: "system" } as const);
+  } catch {
+    return { actorType: "system" } as const;
+  }
+}
 
 type ContactRow = Database["public"]["Tables"]["contacts"]["Row"];
 type HomeownerDetailsRow =
@@ -246,13 +262,39 @@ export async function updateLeadMotivation(
     const supabase = await createClient();
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
     if (!unlocked.ok) return unlocked;
-    const { error } = await supabase
+    const { data: current, error: lookupError } = await supabase
+      .from("properties")
+      .select("id, motivation_level")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (lookupError) {
+      return {
+        ok: false,
+        error: { code: "MOTIVATION_FETCH_FAILED", message: lookupError.message },
+      };
+    }
+    if (!current) {
+      return {
+        ok: false,
+        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+      };
+    }
+    if (current.motivation_level === level) return ok(null);
+
+    let update = supabase
       .from("properties")
       .update({
         motivation_level: level,
         updated_at: new Date().toISOString(),
       })
       .eq("id", propertyId);
+    update =
+      current.motivation_level === null
+        ? update.is("motivation_level", null)
+        : update.eq("motivation_level", current.motivation_level);
+    const { data: saved, error } = await update
+      .select("id, motivation_level")
+      .maybeSingle();
 
     if (error) {
       return {
@@ -260,6 +302,29 @@ export async function updateLeadMotivation(
         error: { code: "MOTIVATION_UPDATE_FAILED", message: error.message },
       };
     }
+    if (!saved) {
+      const { data: authoritative, error: reconcileError } = await supabase
+        .from("properties")
+        .select("motivation_level")
+        .eq("id", propertyId)
+        .maybeSingle();
+      if (!reconcileError && authoritative?.motivation_level === level) {
+        return ok(null);
+      }
+      return {
+        ok: false,
+        error: {
+          code: "MOTIVATION_CONFLICT",
+          message: "This lead changed before its motivation was saved.",
+        },
+      };
+    }
+    await recordLeadEvent({
+      propertyId,
+      ...(await getLeadEventActor(supabase)),
+      eventType: LEAD_EVENT_TYPES.MOTIVATION_CHANGED,
+      payload: { from: current.motivation_level, to: level },
+    });
     return ok(null);
   } catch (e) {
     reportError(e, {
@@ -408,7 +473,7 @@ export async function revertToProspect(
     }
 
     const nowIso = new Date().toISOString();
-    const { error } = await supabase
+    const { data: saved, error } = await supabase
       .from("properties")
       .update({
         status: "prospect",
@@ -416,13 +481,39 @@ export async function revertToProspect(
         qualified_by: null,
         updated_at: nowIso,
       })
-      .eq("id", propertyId);
+      .eq("id", propertyId)
+      .eq("status", current.status)
+      .select("id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "REVERT_FAILED", message: error.message },
       };
     }
+    if (!saved) {
+      const { data: authoritative, error: reconcileError } = await supabase
+        .from("properties")
+        .select("status")
+        .eq("id", propertyId)
+        .maybeSingle();
+      if (!reconcileError && authoritative?.status === "prospect") {
+        return ok(null);
+      }
+      return {
+        ok: false,
+        error: {
+          code: "REVERT_CONFLICT",
+          message: "This lead changed before the revert was saved.",
+        },
+      };
+    }
+    await recordLeadEvent({
+      propertyId,
+      ...(await getLeadEventActor(supabase)),
+      eventType: LEAD_EVENT_TYPES.REVERTED_TO_PROSPECT,
+      payload: { from: current.status, to: "prospect" },
+    });
     return ok(null);
   } catch (e) {
     reportError(e, {
@@ -1390,6 +1481,15 @@ export async function updatePropertyStatus(
           message: "The lead did not save in the selected stage.",
         },
       };
+    }
+
+    if (expectedPreviousStatus !== status) {
+      await recordLeadEvent({
+        propertyId,
+        ...(await getLeadEventActor(supabase)),
+        eventType: LEAD_EVENT_TYPES.STATUS_CHANGED,
+        payload: { from: expectedPreviousStatus, to: status },
+      });
     }
 
     return ok({ propertyId: data.id, status: data.status as PropertyStatus });
