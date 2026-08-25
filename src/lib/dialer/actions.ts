@@ -9,6 +9,7 @@ import { formatPhoneE164, toPhoneE164 } from "@/lib/phone-format";
 import { createClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/types";
 import { getMemberTimezone } from "@/components/appointments/book-appointment-action";
+import { openCallCapability } from "./call-capability";
 
 type Contact = Pick<
   Database["public"]["Tables"]["contacts"]["Row"],
@@ -293,15 +294,34 @@ export async function completeSoftphoneCall(input: {
   disposition: OutreachDispo;
   notes: string;
   wrapToken: string;
+  /** Browser-held sealed Jitter call capability, when the real transport started. */
+  callCapability?: string;
   callback?: CallbackInput;
 }): Promise<SoftphoneActionResult<{ activityId: string; callbackTaskId?: string }>> {
   if (!input.notes.trim()) return { ok: false, error: "Add a note to log the outcome." };
+  // wrapToken is interpolated into a PostgREST .or() filter below; a strict
+  // UUID shape keeps client input out of filter grammar.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.wrapToken)) {
+    return { ok: false, error: "Invalid call token." };
+  }
   try {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return { ok: false, error: "Not signed in." };
     const { data: membership, error: membershipError } = await supabase.from("memberships").select("org_id").eq("user_id", user.id).limit(1).maybeSingle();
     if (membershipError || !membership) return { ok: false, error: membershipError?.message ?? "No organization membership." };
+    const rawJitterCallId = openCallCapability(input.callCapability, user.id);
+    // Capability-less calls use the wrap token as their Sandra-side attempt
+    // identity, while capability-backed calls use Jitter's call UUID. That
+    // divergence is an accepted residual only for capability-less calls.
+    const jitterAttemptId = `sandra-${rawJitterCallId ?? input.wrapToken}`;
+    // A wrap-up may claim only its own row or a writeback-first row that has
+    // not been claimed yet. The token fence prevents a later submission by
+    // the same operator from overwriting a completed wrap-up for this attempt.
+    // Claimable rows: this operator's own wrap (same token), a
+    // writeback-first row already attributed to this operator but not yet
+    // wrapped (token null), or a fully unclaimed writeback-first row.
+    const activityMatchFilter = `and(operator_user_id.eq.${user.id},wrap_token.eq.${input.wrapToken}),and(operator_user_id.eq.${user.id},wrap_token.is.null),and(operator_user_id.is.null,wrap_token.is.null)`;
 
     if (input.target.propertyId) {
       const { data: property, error: propertyError } = await supabase
@@ -323,69 +343,170 @@ export async function completeSoftphoneCall(input: {
 
     const { data: replayActivity, error: replayActivityError } = await supabase
       .from("call_activities")
-      .select("id")
+      .select("id, property_id, contact_id")
       .eq("org_id", membership.org_id)
       .eq("operator_user_id", user.id)
       .eq("wrap_token", input.wrapToken)
       .maybeSingle();
     if (replayActivityError) return { ok: false, error: replayActivityError.message };
+    if (
+      replayActivity &&
+      ((input.target.propertyId && replayActivity.property_id !== input.target.propertyId) ||
+        (input.target.contactId && replayActivity.contact_id !== input.target.contactId))
+    ) {
+      return { ok: false, error: "The call activity no longer matches the call target." };
+    }
 
     let activity = replayActivity;
+    let activityMatchedByAttempt = false;
+    if (!activity) {
+      const { data: existingActivity, error: existingActivityError } = await supabase
+        .from("call_activities")
+        .select("id, property_id, contact_id, operator_user_id")
+        .eq("org_id", membership.org_id)
+        .eq("provider", "sandra_softphone")
+        .eq("jitter_attempt_id", jitterAttemptId)
+        .or(activityMatchFilter)
+        .limit(1)
+        .maybeSingle();
+      if (existingActivityError) return { ok: false, error: existingActivityError.message };
+      if (existingActivity) {
+        if (
+          (input.target.propertyId && existingActivity.property_id !== input.target.propertyId) ||
+          (input.target.contactId && existingActivity.contact_id !== input.target.contactId)
+        ) {
+          return { ok: false, error: "The call activity no longer matches the call target." };
+        }
+        activity = existingActivity;
+        activityMatchedByAttempt = true;
+      }
+    }
+
+    let activityValues = {
+      org_id: membership.org_id,
+      property_id: activity?.property_id ?? input.target.propertyId,
+      contact_id: activity?.contact_id ?? input.target.contactId,
+      jitter_attempt_id: jitterAttemptId,
+      operator_user_id: user.id,
+      started_at: input.startedAt,
+      ended_at: input.endedAt,
+      duration_seconds: Math.max(0, Math.floor(input.durationSeconds)),
+      outcome: input.outcome,
+      disposition: input.disposition,
+      notes: input.notes.trim(),
+      direction: "outbound",
+      provider: "sandra_softphone",
+      phone_e164: input.target.phoneE164,
+      do_not_call_requested: input.disposition === "dnc",
+      wrap_token: input.wrapToken,
+    };
     let callbackTaskId: string | undefined;
     let dispositionSucceeded = false;
+    let activityCreatedByWrapUp = false;
     try {
-      // This is deliberately first: setOutreachDispo is the authoritative
-      // DNC_LOCKED race check. If it rejects, the wrap-up remains open and no
-      // activity or appointment is written. An exact same-token replay skips
-      // this side effect so a duplicate callback cannot downgrade the
-      // appointment RPC's authoritative booked_appointment disposition.
-      if (!activity && input.target.propertyId) {
-        const dispo = await setOutreachDispo(input.target.propertyId, input.disposition);
-        if (!dispo.ok) return { ok: false, error: dispo.error };
-        dispositionSucceeded = true;
-      }
+      if (activityMatchedByAttempt && activity) {
+        // The attempt and target have been fenced to this operator/token, so
+        // it is now safe to perform the authoritative DNC_LOCKED check before
+        // replacing the writeback-first row's operator fields.
+        if (!replayActivity && input.target.propertyId) {
+          const dispo = await setOutreachDispo(input.target.propertyId, input.disposition);
+          if (!dispo.ok) return { ok: false, error: dispo.error };
+          dispositionSucceeded = true;
+        }
 
-      if (!activity) {
-        const activityValues = {
-          org_id: membership.org_id,
-          property_id: input.target.propertyId,
-          contact_id: input.target.contactId,
-          jitter_attempt_id: `sandra-${crypto.randomUUID()}`,
-          operator_user_id: user.id,
-          started_at: input.startedAt,
-          ended_at: input.endedAt,
-          duration_seconds: Math.max(0, Math.floor(input.durationSeconds)),
-          outcome: input.outcome,
-          disposition: input.disposition,
-          notes: input.notes.trim(),
-          direction: "outbound",
-          provider: "sandra_softphone",
-          phone_e164: input.target.phoneE164,
-          do_not_call_requested: input.disposition === "dnc",
-          wrap_token: input.wrapToken,
-        };
-        const { data: insertedActivity, error: activityError } = await supabase
+        const { data: updatedActivity, error: activityError } = await supabase
           .from("call_activities")
-          .upsert(activityValues, { onConflict: "wrap_token", ignoreDuplicates: true })
+          .update(activityValues)
+          .eq("id", activity.id)
+          .or(activityMatchFilter)
           .select("id")
           .maybeSingle();
-        if (activityError) return { ok: false, error: activityError.message };
-        activity = insertedActivity;
+        if (activityError || !updatedActivity) {
+          return { ok: false, error: activityError?.message ?? "The call activity was not saved." };
+        }
+        activity = { ...activity, id: updatedActivity.id };
+      } else if (!activity) {
+        // An attempt row that exists but was not claimable above (another
+        // operator, or an already-wrapped different token) must reject
+        // BEFORE the disposition side effect runs.
+        const { data: unclaimableRow, error: unclaimableError } = await supabase
+          .from("call_activities")
+          .select("id")
+          .eq("org_id", membership.org_id)
+          .eq("provider", "sandra_softphone")
+          .eq("jitter_attempt_id", jitterAttemptId)
+          .limit(1)
+          .maybeSingle();
+        if (unclaimableError) return { ok: false, error: unclaimableError.message };
+        if (unclaimableRow) {
+          return { ok: false, error: "The call activity was not saved." };
+        }
+        // Preserve origin/main's deliberate order: setOutreachDispo is the
+        // authoritative DNC_LOCKED race check and must run before any row is
+        // written, so a rejected disposition leaves nothing to clean up.
+        // (A concurrent two-tab wrap-up losing the claim after the CRM
+        // change is the accepted residual, unchanged from main.)
+        if (!replayActivity && input.target.propertyId) {
+          const dispo = await setOutreachDispo(input.target.propertyId, input.disposition);
+          if (!dispo.ok) return { ok: false, error: dispo.error };
+          dispositionSucceeded = true;
+        }
+        const { data: insertedActivity, error: activityError } = await supabase
+          .from("call_activities")
+          .insert(activityValues)
+          .select("id")
+          .maybeSingle();
+        if (activityError && activityError.code !== "23505") {
+          return { ok: false, error: activityError.message };
+        }
+        activity = insertedActivity
+          ? {
+              id: insertedActivity.id,
+              property_id: activityValues.property_id,
+              contact_id: activityValues.contact_id,
+            }
+          : null;
+        activityCreatedByWrapUp = Boolean(activity);
 
         if (!activity) {
           const { data: existingActivity, error: existingActivityError } = await supabase
             .from("call_activities")
-            .select("id")
+            .select("id, property_id, contact_id, operator_user_id")
             .eq("org_id", membership.org_id)
-            .eq("operator_user_id", user.id)
-            .eq("wrap_token", input.wrapToken)
+            .eq("provider", "sandra_softphone")
+            .eq("jitter_attempt_id", jitterAttemptId)
+            .or(activityMatchFilter)
+            .limit(1)
             .maybeSingle();
           if (existingActivityError || !existingActivity) {
             return { ok: false, error: existingActivityError?.message ?? "The call activity was not saved." };
           }
-          activity = existingActivity;
+          if (
+            (input.target.propertyId && existingActivity.property_id !== input.target.propertyId) ||
+            (input.target.contactId && existingActivity.contact_id !== input.target.contactId)
+          ) {
+            return { ok: false, error: "The call activity no longer matches the call target." };
+          }
+          activityValues = {
+            ...activityValues,
+            property_id: existingActivity.property_id ?? input.target.propertyId,
+            contact_id: existingActivity.contact_id ?? input.target.contactId,
+          };
+          const { data: updatedActivity, error: updateActivityError } = await supabase
+            .from("call_activities")
+            .update(activityValues)
+            .eq("id", existingActivity.id)
+            .or(activityMatchFilter)
+            .select("id")
+            .maybeSingle();
+          if (updateActivityError || !updatedActivity) {
+            return { ok: false, error: updateActivityError?.message ?? "The call activity was not saved." };
+          }
+          activity = { ...existingActivity, id: updatedActivity.id };
         }
       }
+
+      if (!activity) return { ok: false, error: "The call activity was not saved." };
 
       // fn_book_appointment owns the booked_appointment write. Supplying the
       // stable wrap token makes a retry after a lost response replay the same

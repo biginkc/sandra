@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import type { Database, Json } from "@/lib/supabase/types";
 
 import {
   authenticateJitterWriteback,
@@ -34,13 +36,21 @@ type WritebackBody = {
   recording_path?: string | null;
 };
 
-type ValidatedWriteback = {
-  property: {
-    id: string;
-    org_id: string;
-    address: string | null;
-  };
-};
+type JitterServiceClient = SupabaseClient<Database>;
+
+export const JITTER_WRITEBACK_PROVIDERS = [
+  "jitter",
+  "sandra_softphone",
+] as const;
+
+export function isSupportedJitterWritebackProvider(
+  value: unknown,
+): value is (typeof JITTER_WRITEBACK_PROVIDERS)[number] {
+  return (
+    typeof value === "string" &&
+    (JITTER_WRITEBACK_PROVIDERS as readonly string[]).includes(value)
+  );
+}
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -75,6 +85,10 @@ const RECORDING_PATH_MAX_LENGTH = 2048;
 const JITTER_SESSION_ID_MAX_LENGTH = 512;
 const POSTGRES_INT4_MAX = 2_147_483_647;
 
+function quotePostgrestFilterValue(value: string): string {
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
 function unprocessable(error_code: string, field?: string) {
   return NextResponse.json(
     { error: "validation_error", error_code, ...(field ? { field } : {}) },
@@ -86,9 +100,26 @@ function forbidden(error_code: string) {
   return NextResponse.json({ error: "forbidden", error_code }, { status: 403 });
 }
 
-async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
+async function validateOrgConsistency(
+  serviceClient: JitterServiceClient,
+  body: WritebackBody,
+  attemptId: string,
+) {
+  const isSoftphone = body.provider === "sandra_softphone";
+
+  // Sandra must always send its tenant identity. Lead ids are optional only
+  // for a softphone artifact that may match a writeback-first row; the RPC
+  // requires both ids before inserting a new row.
+  if (isSoftphone && !body.org_id) {
+    return {
+      ok: false as const,
+      response: unprocessable("missing_required_field"),
+    };
+  }
+
   if (
-    (!body.org_id || !body.property_id || !body.contact_id) &&
+    !isSoftphone &&
+    (!body.property_id || !body.contact_id) &&
     !body.dialer_batch_item_id
   ) {
     return {
@@ -127,43 +158,85 @@ async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
     body.contact_id ??= item.contact_id;
   }
 
-  if (!body.org_id || !body.property_id || !body.contact_id) {
+  if (
+    isSoftphone &&
+    !body.dialer_batch_item_id &&
+    (!body.property_id || !body.contact_id)
+  ) {
+    const { data: existingActivity, error: existingActivityError } =
+      await serviceClient
+        .from("call_activities")
+        .select("property_id, contact_id")
+        .eq("org_id", body.org_id!)
+        .eq("provider", "sandra_softphone")
+        .eq("jitter_attempt_id", attemptId)
+        .or(
+          `jitter_session_id.is.null,jitter_session_id.eq.${quotePostgrestFilterValue(body.jitter_session_id!)}`,
+        )
+        .limit(1)
+        .maybeSingle();
+    if (existingActivityError) throw existingActivityError;
+    if (!existingActivity) {
+      return {
+        ok: false as const,
+        response: unprocessable("missing_required_field"),
+      };
+    }
+
+    if (
+      (body.property_id && existingActivity.property_id !== body.property_id) ||
+      (body.contact_id && existingActivity.contact_id !== body.contact_id)
+    ) {
+      return {
+        ok: false as const,
+        response: unprocessable("identity_conflict"),
+      };
+    }
+    body.property_id ??= existingActivity.property_id ?? undefined;
+    body.contact_id ??= existingActivity.contact_id ?? undefined;
+  }
+
+  if (!body.org_id || (!isSoftphone && (!body.property_id || !body.contact_id))) {
     return {
       ok: false as const,
       response: unprocessable("missing_required_field"),
     };
   }
 
-  const { data: property, error: propertyError } = await serviceClient
-    .from("properties")
-    .select("id, org_id, address, deleted_at")
-    .eq("id", body.property_id)
-    .maybeSingle();
-  if (propertyError) throw propertyError;
-  if (!property || property.deleted_at) {
-    return {
-      ok: false as const,
-      response: unprocessable("property_deleted", "property_id"),
-    };
-  }
-  if (property.org_id !== body.org_id) {
-    return {
-      ok: false as const,
-      response: unprocessable("org_mismatch", "property_id"),
-    };
+  if (body.property_id) {
+    const { data: property, error: propertyError } = await serviceClient
+      .from("properties")
+      .select("id, org_id, address, deleted_at")
+      .eq("id", body.property_id)
+      .maybeSingle();
+    if (propertyError) throw propertyError;
+    if (!property || property.deleted_at) {
+      return {
+        ok: false as const,
+        response: unprocessable("property_deleted", "property_id"),
+      };
+    }
+    if (property.org_id !== body.org_id) {
+      return {
+        ok: false as const,
+        response: unprocessable("org_mismatch", "property_id"),
+      };
+    }
   }
 
-  const { data: contact, error: contactError } = await serviceClient
-    .from("contacts")
-    .select("id, org_id")
-    .eq("id", body.contact_id)
-    .maybeSingle();
-  if (contactError) throw contactError;
-  if (!contact || contact.org_id !== body.org_id) {
-    return {
-      ok: false as const,
-      response: unprocessable("org_mismatch", "contact_id"),
-    };
+  if (body.contact_id) {
+    const { data: contact, error: contactError } = await serviceClient
+      .from("contacts")
+      .select("id, org_id")
+      .eq("id", body.contact_id)
+      .maybeSingle();
+    if (contactError) throw contactError;
+    if (!contact || contact.org_id !== body.org_id) {
+      return {
+        ok: false as const,
+        response: unprocessable("org_mismatch", "contact_id"),
+      };
+    }
   }
 
   if (body.dialer_batch_item_id) {
@@ -198,10 +271,7 @@ async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
     }
   }
 
-  return { ok: true as const, property } satisfies {
-    ok: true;
-    property: ValidatedWriteback["property"];
-  };
+  return { ok: true as const };
 }
 
 function validTimestamp(value: string | null | undefined): string | null {
@@ -298,7 +368,7 @@ function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
 }
 
 async function resolveCallbackAssignee(
-  serviceClient: any,
+  serviceClient: JitterServiceClient,
   body: WritebackBody,
 ): Promise<string | null> {
   const preferred = body.callback_assignee_id ?? body.operator_user_id ?? null;
@@ -316,7 +386,7 @@ async function resolveCallbackAssignee(
   const { data: fallback, error } = await serviceClient
     .from("memberships")
     .select("user_id")
-    .eq("org_id", body.org_id)
+    .eq("org_id", body.org_id!)
     .order("role", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -355,9 +425,18 @@ export async function PUT(
     const initialPayloadValidation = validatePayloadSyntax(body);
     if (initialPayloadValidation) return initialPayloadValidation;
 
+    // Jitter does not need to know Sandra's tenant UUID. Bind an omitted
+    // tenant to the authenticated consumer, while still rejecting an
+    // explicitly different tenant before any service-role lookup.
+    if (body.org_id != null && body.org_id !== auth.orgId) {
+      return forbidden("org_consumer_mismatch");
+    }
+    body.org_id ??= auth.orgId;
+
     const validation = await validateOrgConsistency(
-      auth.serviceClient as any,
+      auth.serviceClient,
       body,
+      attemptId,
     );
     if (!validation.ok) return validation.response;
 
@@ -367,7 +446,7 @@ export async function PUT(
     const derivedPayloadValidation = validatePayloadSyntax(body);
     if (derivedPayloadValidation) return derivedPayloadValidation;
 
-    if (body.provider !== "jitter") {
+    if (!isSupportedJitterWritebackProvider(body.provider)) {
       return unprocessable("provider_mismatch", "provider");
     }
     const effectiveIdempotencyKey = `${body.jitter_session_id!.length}:${body.jitter_session_id}:${idempotencyKey}`;
@@ -388,7 +467,7 @@ export async function PUT(
         return unprocessable("callback_at_required", "callback_at");
       }
       callbackAssigneeId = await resolveCallbackAssignee(
-        auth.serviceClient as any,
+        auth.serviceClient,
         body,
       );
       if (!callbackAssigneeId) {
@@ -416,18 +495,19 @@ export async function PUT(
       );
     }
 
-    const { data: payload, error: mutationError } = await (
-      auth.serviceClient as any
-    ).rpc("jitter_writeback_call_activity", {
-      p_attempt_id: attemptId,
-      p_body: body,
-      p_callback_assignee_id: callbackAssigneeId,
+    const { data: payload, error: mutationError } = await auth.serviceClient.rpc(
+      "jitter_writeback_call_activity",
+      {
+        p_attempt_id: attemptId,
+        p_body: body as unknown as Json,
+        p_callback_assignee_id: callbackAssigneeId,
       p_external_id: effectiveIdempotencyKey,
       p_notes: body.notes ?? null,
       p_org_id: auth.orgId,
-      p_recording_path: body.recording_path ?? null,
-      p_request_hash: idempotency.requestHash,
-    });
+        p_recording_path: body.recording_path ?? null,
+        p_request_hash: idempotency.requestHash,
+      },
+    );
     if (mutationError) throw mutationError;
 
     if ((payload as { outcome?: string } | null)?.outcome === "not_found") {

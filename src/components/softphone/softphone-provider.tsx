@@ -32,7 +32,7 @@ import {
 import type { JitterCallerId } from "@/lib/dialer/jitter-contract";
 import { maskPhone } from "@/lib/phone-format";
 import { playDtmfTone } from "@/lib/dialer/dtmf-tone";
-import { type CallTransport, type DtmfDigit } from "@/lib/dialer/transport";
+import { type CallHandle, type CallTransport, type DtmfDigit } from "@/lib/dialer/transport";
 import {
   createSoftphoneCallTransport,
   isJitterTransportEnabled,
@@ -144,6 +144,7 @@ export function SoftphoneProvider({ children }: Props) {
   const [callerIdError, setCallerIdError] = useState<string | null>(null);
   const [callingEnabled] = useState(() => isSoftphoneTransportEnabled());
   const transportRef = useRef<CallTransport | null>(null);
+  const callHandleRef = useRef<CallHandle | null>(null);
   const manualHangupRef = useRef(false);
   const startInFlightRef = useRef(false);
   const terminalHandledRef = useRef(false);
@@ -264,6 +265,7 @@ export function SoftphoneProvider({ children }: Props) {
 
   const resetIdle = useCallback(() => {
     transportRef.current = null;
+    callHandleRef.current = null;
     manualHangupRef.current = false;
     startInFlightRef.current = false;
     terminalHandledRef.current = false;
@@ -480,7 +482,7 @@ export function SoftphoneProvider({ children }: Props) {
       if (status === "failed") void finishTerminal("failed");
     });
     try {
-      await transport.start({
+      const callHandle = await transport.start({
         phoneE164: result.data.phoneE164,
         propertyId: result.data.propertyId ?? undefined,
         contactId: result.data.contactId ?? undefined,
@@ -488,7 +490,11 @@ export function SoftphoneProvider({ children }: Props) {
         ...(intentCapability ? { intentCapability } : {}),
         callerIdE164,
       });
+      callHandleRef.current = callHandle;
     } catch (error) {
+      // A provisioned call can fail during RTC setup after start-call
+      // succeeded; keep its handle so wrap-up uses the real call identity.
+      callHandleRef.current = transport.callHandle?.() ?? callHandleRef.current;
       terminalFailureMessage = error instanceof Error
         ? error.message
         : "The call failed. Add a note to log the outcome.";
@@ -555,7 +561,7 @@ export function SoftphoneProvider({ children }: Props) {
     setPending(true);
     setError(null);
     try {
-      const result = await completeSoftphoneCall({ target, startedAt, endedAt: new Date().toISOString(), durationSeconds: finalSeconds, outcome: callOutcome, disposition, notes, wrapToken, callback });
+      const result = await completeSoftphoneCall({ target, startedAt, endedAt: new Date().toISOString(), durationSeconds: finalSeconds, outcome: callOutcome, disposition, notes, wrapToken, callCapability: callHandleRef.current?.id, callback });
       if (!result.ok) { setError(result.error); return; }
       showToast(`Logged "${SOFTPHONE_DISPOSITIONS.find((item) => item.value === disposition)?.label ?? disposition}" + notes for ${target.name} · ${timerText(finalSeconds)}`);
       transition({ type: "wrap_complete" });

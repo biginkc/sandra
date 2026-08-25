@@ -172,9 +172,44 @@ describe("authenticated Jitter softphone server boundary", () => {
         phone_e164: "+18165550123",
         timezone: "America/Chicago",
         caller_id_e164: "+18165550100",
+        property_ref: "property-1",
+        contact_ref: "contact-1",
+        org_ref: SANDRA_ORG_ID,
       },
       START_CALL_TOKEN,
     );
+  });
+
+  it("sends only the server-prepared real refs, never browser-supplied refs", async () => {
+    mocks.prepareLeadCall.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        ...preparedTarget,
+        propertyId: "00000000-0000-4000-8000-000000000001",
+        contactId: "00000000-0000-4000-8000-000000000002",
+      },
+    });
+
+    await expect(
+      startAuthenticatedJitterCall(
+        callTarget({
+          propertyId: "browser-property-id",
+          contactId: "00000000-0000-4000-8000-000000000002",
+        }),
+      ),
+    ).resolves.toMatchObject({ ok: true });
+
+    expect(mocks.requestStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        property_ref: "00000000-0000-4000-8000-000000000001",
+        contact_ref: "00000000-0000-4000-8000-000000000002",
+        org_ref: SANDRA_ORG_ID,
+      }),
+      START_CALL_TOKEN,
+    );
+    expect(mocks.requestStart.mock.calls[0]?.[0]).not.toMatchObject({
+      property_ref: "browser-property-id",
+    });
   });
 
   it("mints the idempotency key server-side and returns a caller-bound intent", async () => {

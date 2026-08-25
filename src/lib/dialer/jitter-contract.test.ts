@@ -22,6 +22,7 @@ type SeenRequest = {
   method: string;
   path: string;
   search: string;
+  rawBody: string;
   body: Record<string, unknown> | null;
   idempotencyKey: string | null;
 };
@@ -42,6 +43,7 @@ function contractServer(respond: (request: SeenRequest) => Response) {
       method: String(init?.method),
       path: url.pathname,
       search: url.search,
+      rawBody,
       body: rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : null,
       idempotencyKey: headers.get("idempotency-key"),
     });
@@ -114,6 +116,15 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
     const server = contractServer((request) => {
       seen.push(request);
       if (request.path === JITTER_SOFTPHONE_PATHS.startCall) {
+        expect(request.body).toEqual({
+          operator_id: "operator-1",
+          phone_e164: "+18165550123",
+          timezone: "America/Chicago",
+          caller_id_e164: "+18165550100",
+          property_ref: "property-1",
+          contact_ref: "contact-1",
+          org_ref: "org-1",
+        });
         return Response.json({
           call_id: CALL_ID,
           session_id: "session-1",
@@ -147,6 +158,9 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
           phone_e164: "+18165550123",
           timezone: "America/Chicago",
           caller_id_e164: "+18165550100",
+          property_ref: "property-1",
+          contact_ref: "contact-1",
+          org_ref: "org-1",
         },
         IDEMPOTENCY_KEY,
         server,
@@ -198,7 +212,7 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
       data: cancelResponse(),
     });
 
-    expect(seen).toEqual([
+    expect(seen).toMatchObject([
       {
         method: "POST",
         path: JITTER_SOFTPHONE_PATHS.startCall,
@@ -208,6 +222,9 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
           phone_e164: "+18165550123",
           timezone: "America/Chicago",
           caller_id_e164: "+18165550100",
+          property_ref: "property-1",
+          contact_ref: "contact-1",
+          org_ref: "org-1",
         },
         idempotencyKey: IDEMPOTENCY_KEY,
       },
@@ -324,6 +341,9 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
           phone_e164: "+18165550123",
           timezone: "America/Chicago",
           caller_id_e164: "+18165550100",
+          property_ref: "property-1",
+          contact_ref: "contact-1",
+          org_ref: "org-1",
         },
         IDEMPOTENCY_KEY,
         server,
@@ -331,6 +351,7 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
     ).resolves.toMatchObject({ ok: true });
     expect(seen).toHaveLength(2);
     expect(seen[0].idempotencyKey).toBe(IDEMPOTENCY_KEY);
+    expect(seen[1].rawBody).toBe(seen[0].rawBody);
     expect(seen[1]).toEqual(seen[0]);
   });
 

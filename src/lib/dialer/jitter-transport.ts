@@ -213,6 +213,10 @@ export class JitterCallTransport implements CallTransport {
     this.listener = cb;
   }
 
+  callHandle(): CallHandle | null {
+    return this.callId ? { id: this.callId } : null;
+  }
+
   start(target: CallTarget): Promise<CallHandle> {
     if (!this.startPromise) this.startPromise = this.startInternal(target);
     return this.startPromise;
