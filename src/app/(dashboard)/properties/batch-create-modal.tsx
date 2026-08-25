@@ -229,39 +229,45 @@ export function BatchCreateModal({
             <div className="grid grid-cols-3 gap-2">
               <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200">
                 <div className="text-lg font-semibold">
-                  {callabilityCounts ? (
-                    callabilityCounts.callable
-                  ) : (
+                  {previewLoading ? (
                     <Skeleton
                       aria-hidden="true"
                       className="mr-1 inline-block h-6 w-8 align-middle"
                     />
+                  ) : callabilityCounts ? (
+                    callabilityCounts.callable
+                  ) : (
+                    "—"
                   )} callable
                 </div>
                 <p className="text-xs opacity-80">ready now</p>
               </div>
               <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
                 <div className="text-lg font-semibold">
-                  {callabilityCounts ? (
-                    totalBlocked(callabilityCounts)
-                  ) : (
+                  {previewLoading ? (
                     <Skeleton
                       aria-hidden="true"
                       className="mr-1 inline-block h-6 w-8 align-middle"
                     />
+                  ) : callabilityCounts ? (
+                    totalBlocked(callabilityCounts)
+                  ) : (
+                    "—"
                   )} blocked
                 </div>
                 <p className="text-xs opacity-80">current rules</p>
               </div>
               <div className="rounded-md border bg-muted/40 p-3">
                 <div className="text-lg font-semibold">
-                  {callabilityCounts ? (
-                    callabilityCounts.missing
-                  ) : (
+                  {previewLoading ? (
                     <Skeleton
                       aria-hidden="true"
                       className="mr-1 inline-block h-6 w-8 align-middle"
                     />
+                  ) : callabilityCounts ? (
+                    callabilityCounts.missing
+                  ) : (
+                    "—"
                   )} missing phone
                 </div>
                 <p className="text-muted-foreground text-xs">no number</p>

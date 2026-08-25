@@ -220,6 +220,44 @@ describe("<BatchCreateModal />", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("shows dashes instead of skeletons when loading matching prospects fails", async () => {
+    getAllMatchingProspectIds.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "MATCHING_PROSPECTS_FAILED",
+        message: "Could not load prospects",
+      },
+    });
+    renderModal({
+      filterArgs: { blockStack: defaultBlockStack },
+      totalCount: 8,
+    });
+
+    expect(
+      await screen.findByText("Could not load prospects"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("— callable")).toBeInTheDocument();
+    expect(screen.getByText("— blocked")).toBeInTheDocument();
+    expect(screen.getByText("— missing phone")).toBeInTheDocument();
+    expect(document.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(0);
+  });
+
+  it("shows dashes instead of skeletons when callability preview fails", async () => {
+    previewBatchEligibilityAction.mockResolvedValue({
+      ok: false,
+      error: { code: "PREVIEW_FAILED", message: "Could not check callability" },
+    });
+    renderModal({ selectedIds: ["p1"] });
+
+    expect(
+      await screen.findByText("Could not check callability"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("— callable")).toBeInTheDocument();
+    expect(screen.getByText("— blocked")).toBeInTheDocument();
+    expect(screen.getByText("— missing phone")).toBeInTheDocument();
+    expect(document.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(0);
+  });
+
   it("does not enable Create batch when preview returns 0 callable", async () => {
     previewBatchEligibilityAction.mockResolvedValue({
       ok: true,
@@ -256,7 +294,7 @@ describe("<BatchCreateModal />", () => {
     expect(within(list).getByText("outside window: 3")).toBeInTheDocument();
   });
 
-  it("when both selectedIds and filterArgs are undefined: renders error state, Create button disabled, no server action called", () => {
+  it("when both selectedIds and filterArgs are undefined: renders error state, dashes, Create button disabled, no server action called", () => {
     renderModal({ totalCount: 0 });
 
     expect(
@@ -265,6 +303,10 @@ describe("<BatchCreateModal />", () => {
     expect(
       screen.getByRole("button", { name: /Create batch/i }),
     ).toBeDisabled();
+    expect(screen.getByText("— callable")).toBeInTheDocument();
+    expect(screen.getByText("— blocked")).toBeInTheDocument();
+    expect(screen.getByText("— missing phone")).toBeInTheDocument();
+    expect(document.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(0);
     expect(previewBatchEligibilityAction).not.toHaveBeenCalled();
     expect(createDialerBatchFromPropertyIds).not.toHaveBeenCalled();
     expect(createDialerBatchFromFilters).not.toHaveBeenCalled();
