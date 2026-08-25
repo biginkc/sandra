@@ -425,12 +425,13 @@ export async function PUT(
     const initialPayloadValidation = validatePayloadSyntax(body);
     if (initialPayloadValidation) return initialPayloadValidation;
 
-    // Reject an explicitly cross-tenant Sandra payload before the
-    // service-role validator performs any identity lookup. Batch payloads
-    // may still derive org_id from their batch item below.
-    if (body.org_id && body.org_id !== auth.orgId) {
+    // Jitter does not need to know Sandra's tenant UUID. Bind an omitted
+    // tenant to the authenticated consumer, while still rejecting an
+    // explicitly different tenant before any service-role lookup.
+    if (body.org_id != null && body.org_id !== auth.orgId) {
       return forbidden("org_consumer_mismatch");
     }
+    body.org_id ??= auth.orgId;
 
     const validation = await validateOrgConsistency(
       auth.serviceClient,

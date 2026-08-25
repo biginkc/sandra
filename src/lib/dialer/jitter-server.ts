@@ -199,6 +199,11 @@ export async function startAuthenticatedJitterCall(
       phone_e164: prepared.data.phoneE164,
       timezone,
       caller_id_e164: callerIdE164,
+      ...(prepared.data.propertyId
+        ? { property_ref: prepared.data.propertyId }
+        : {}),
+      ...(prepared.data.contactId ? { contact_ref: prepared.data.contactId } : {}),
+      org_ref: SANDRA_ORG_ID,
     },
     intent.idempotencyKey,
   );

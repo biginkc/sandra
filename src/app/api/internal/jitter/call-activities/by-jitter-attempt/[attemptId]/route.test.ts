@@ -237,12 +237,10 @@ describe("Jitter attempt call-activity provider boundary", () => {
     expect(idempotencyMock).not.toHaveBeenCalled();
   });
 
-  it("still requires org_id for a softphone payload", async () => {
+  it("defaults an omitted org_id to the authenticated consumer org", async () => {
     const client = serviceClient();
     const payload = body("sandra_softphone");
     delete payload.org_id;
-    delete payload.property_id;
-    delete payload.contact_id;
     authMock.mockResolvedValue({
       ok: true,
       consumerId: "consumer-1",
@@ -256,9 +254,16 @@ describe("Jitter attempt call-activity provider boundary", () => {
       context("sandra-00000000-0000-4000-8000-000000000003"),
     );
 
-    expect(response.status).toBe(422);
+    expect(response.status).toBe(200);
+    expect(client.rpc).toHaveBeenCalledWith(
+      "jitter_writeback_call_activity",
+      expect.objectContaining({
+        p_org_id: ORG_ID,
+        p_body: expect.objectContaining({ org_id: ORG_ID }),
+      }),
+    );
     await expect(response.json()).resolves.toMatchObject({
-      error_code: "missing_required_field",
+      call_activity: { provider: "sandra_softphone" },
     });
   });
 

@@ -18,6 +18,11 @@ export type JitterStartCallRequest = {
   phone_e164: string;
   timezone: string;
   caller_id_e164: string;
+  /** Sandra-owned IDs, copied from the server-prepared eligible target. */
+  property_ref?: string;
+  contact_ref?: string;
+  /** Sandra's authenticated tenant identity, when available. */
+  org_ref?: string;
 };
 
 export type JitterCallerId = {
