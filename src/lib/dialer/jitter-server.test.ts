@@ -187,6 +187,40 @@ describe("authenticated Jitter softphone server boundary", () => {
     expect(first.data.callToken).not.toBe(second.data.callToken);
   });
 
+  it("keeps deterministic config failures non-ambiguous while generic 5xx stays ambiguous", async () => {
+    const minted = await mintStartIntent();
+    if (!minted.ok) throw new Error("expected a minted intent");
+    const startTarget = () =>
+      callTarget({
+        propertyId: "property-1",
+        contactId: "contact-1",
+        callToken: minted.data.callToken,
+        intentCapability: minted.data.intentCapability,
+      });
+    mocks.requestStart.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      error: "Jitter softphone is not configured.",
+      errorCode: "jitter_invalid_configuration",
+    });
+    await expect(startAuthenticatedJitterCall(startTarget())).resolves.toMatchObject({
+      ok: false,
+      errorCode: "jitter_invalid_configuration",
+      ambiguous: false,
+    });
+    mocks.requestStart.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      error: "Jitter start failed.",
+      errorCode: "softphone_start_failed",
+    });
+    await expect(startAuthenticatedJitterCall(startTarget())).resolves.toMatchObject({
+      ok: false,
+      errorCode: "softphone_start_failed",
+      ambiguous: true,
+    });
+  });
+
   it("cancels by intent, rejects cross-operator use, and refuses capability type confusion", async () => {
     const started = await startAuthenticatedJitterCall(
       callTarget({ propertyId: "property-1", contactId: "contact-1" }),
@@ -505,6 +539,8 @@ describe("authenticated Jitter softphone server boundary", () => {
         ok: false,
         status: 503,
         errorCode: "jitter_not_configured",
+        // Deterministic config failure: nothing left Sandra, never ambiguous.
+        ambiguous: false,
       });
       expect(mocks.requestStart).not.toHaveBeenCalled();
       expect(mocks.prepareLeadCall).not.toHaveBeenCalled();

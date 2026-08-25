@@ -717,6 +717,12 @@ export class JitterCallTransport implements CallTransport {
           );
           return attempt;
         }
+        // An ambiguous start with no fallback available must fail closed:
+        // Jitter may hold a provisioned call this browser can no longer reach.
+        this.lastTeardownConfirmed = false;
+        this.emit("teardown_unconfirmed");
+        this.destroyRtc(true);
+        return Promise.resolve(false);
       }
       this.lastTeardownConfirmed = true;
       this.destroyRtc();

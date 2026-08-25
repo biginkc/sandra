@@ -546,6 +546,24 @@ describe("JitterCallTransport", () => {
     expect(states).toContain("teardown_confirmed");
   });
 
+  it("fails closed to teardown_unconfirmed when ambiguous and no cancelByStartIntent dependency exists", async () => {
+    const startCall = vi.fn(async () => ({
+      ok: false as const,
+      status: 500,
+      error: "May have provisioned.",
+      errorCode: "softphone_start_failed",
+      ambiguous: true,
+    }));
+    const harness = transportHarness({ startCall, cancelByStartIntent: undefined });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await expect(harness.transport.start(target())).rejects.toMatchObject({
+      name: "softphone_start_failed",
+    });
+    expect(states).toContain("teardown_unconfirmed");
+    expect(states).not.toContain("teardown_confirmed");
+  });
+
   it("does not mint or cancel by intent in simulated mode", async () => {
     const harness = transportHarness({
       cancelByStartIntent: vi.fn(async () => ({ ok: true as const, data: cancelData })),

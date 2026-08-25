@@ -123,7 +123,8 @@ export async function startAuthenticatedJitterCall(
       status: 503,
       error: "Jitter softphone is not configured.",
       errorCode: "jitter_not_configured",
-      ambiguous: true,
+      // No request left Sandra, so nothing can have provisioned.
+      ambiguous: false,
     };
   }
 
@@ -199,7 +200,17 @@ export async function startAuthenticatedJitterCall(
     },
     intent.idempotencyKey,
   );
-  if (!started.ok) return { ...started, ambiguous: started.ambiguous ?? started.status >= 500 };
+  if (!started.ok) {
+    // Deterministic configuration failures never reach Jitter; only outcomes
+    // where a request may have committed are ambiguous.
+    const deterministic =
+      started.errorCode === "jitter_not_configured" ||
+      started.errorCode === "jitter_invalid_configuration";
+    return {
+      ...started,
+      ambiguous: started.ambiguous ?? (!deterministic && started.status >= 500),
+    };
+  }
   const capability = sealCallCapability(
     started.data.call_id,
     operator.userId,
