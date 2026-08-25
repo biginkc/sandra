@@ -113,6 +113,23 @@ describe("Tags + ingest auto-apply (integration)", () => {
         .select("tag_id")
         .eq("property_id", propertyId));
       expect(rows).toHaveLength(0);
+
+      const { data: events } = await testClient
+        .from("lead_events")
+        .select("event_type, payload")
+        .eq("property_id", propertyId);
+      expect(events).toEqual(
+        expect.arrayContaining([
+          {
+            event_type: "tag_applied",
+            payload: { tag_id: tag.data.id, label: "Needs roof" },
+          },
+          {
+            event_type: "tag_removed",
+            payload: { tag_id: tag.data.id, label: "Needs roof" },
+          },
+        ]),
+      );
     });
 
     it("is idempotent on attach", async () => {
@@ -128,6 +145,12 @@ describe("Tags + ingest auto-apply (integration)", () => {
         .select("id")
         .eq("property_id", propertyId);
       expect(rows).toHaveLength(1);
+      const { count } = await testClient
+        .from("lead_events")
+        .select("id", { count: "exact", head: true })
+        .eq("property_id", propertyId)
+        .eq("event_type", "tag_applied");
+      expect(count).toBe(1);
     });
 
     it("blocks removal of a system-managed tag", async () => {

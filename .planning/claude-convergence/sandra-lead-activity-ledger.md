@@ -131,3 +131,38 @@ This product serves 100 users or fewer. Reject enterprise architecture and scope
 - Non-blocking carry-forward: the shared-ID assertion should also require UUID shape so two missing values cannot satisfy the set-size check.
 - Shared test coordination: hosted Sandra integration/E2E runs are paused at PR #409's request until its rerun owner confirms the database is clear.
 - Next bounded step: tag and list membership events using the validated bulk pattern.
+
+### Round 11 — tag and list membership review
+
+- Status: `APPROVE_STEP` — high confidence
+- Blocking findings: none
+- Verified: single tag apply/remove uses returned inserted/deleted rows, so idempotent no-ops emit nothing; bulk tag and list operations derive successes from returned membership rows and issue one event batch with actual-success counts.
+- Verified: payloads contain only membership ID, label, and batch metadata; actor invariants hold; partial writes remain truthfully partitioned.
+- Non-blockers: 500 UUID query chunks were larger than the event writer's proven boundary; list re-add no longer refreshes `last_added_at`; Fable proposed a generic tag/list membership helper.
+- Codex decision: accept the concrete chunk-size correction and intentional no-op semantics; reject the generic callback helper because the two schemas and failure policies differ and two call sites do not justify an abstraction.
+
+### Round 12 — membership chunk and anti-bloat re-review
+
+- Status: `APPROVE_STEP` — confidence 0.95
+- Blocking findings: none
+- Verified: one shared membership chunk constant is 250 and covers tag lookup/pre-read/insert plus list pre-read/insert/remove; no old 500-row constant remains.
+- Accepted anti-bloat judgment: keep the two short table-specific paths explicit rather than introduce a generic callback framework.
+- Intent recorded: re-adding an existing list membership is a no-op and does not refresh `last_added_at`; the CSV import path that intentionally maintains that timestamp is untouched.
+- Carry-forward: the initial add-list property lookup was still unchunked.
+
+### Round 13 — add-list ownership lookup re-review
+
+- Status: `APPROVE_STEP` — confidence 0.95
+- Blocking findings: none
+- Verified: add-list deduplicates requested property IDs, reads ownership in disjoint 250-ID chunks, returns before writes on any lookup error, and reports each unique missing property once.
+
+### Rounds 14–15 — membership outcome accounting proof
+
+- Status: `APPROVE_STEP` — high confidence
+- Blocking findings: none
+- Remove-list proof: disjoint delete statements are atomic; every unique requested ID is exactly one of returned/removed, skipped because no visible membership existed, or failed with its whole failed chunk.
+- Add-list proof: existing memberships and candidates are disjoint; successful chunks count returned inserts as successes and concurrent duplicates as skips; a failed chunk and all remaining candidates become failures before the processed count advances.
+- The defensive `Math.max` cannot conceal a negative count because returned inserted rows cannot exceed processed candidate rows.
+- Scope review: no retries, wrapping transaction, generic framework, or other enterprise machinery is warranted for fewer than 100 users.
+- Verification boundary: hosted tag/list assertions are written but remain intentionally unrun while PR #409 owns the shared Sandra test database.
+- Next bounded step: task lifecycle events.

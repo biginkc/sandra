@@ -12,6 +12,7 @@ const {
   dispatchTaskCalendarEvent,
   loadIntegrationPrefs,
   recordLeadEvent,
+  recordLeadEvents,
   revalidatePath,
   validateActiveAssigneeForProperties,
 } = vi.hoisted(() => ({
@@ -32,6 +33,7 @@ const {
       timezone: "America/Chicago",
     })),
     recordLeadEvent: vi.fn(),
+    recordLeadEvents: vi.fn(),
     revalidatePath: vi.fn(),
     validateActiveAssigneeForProperties: vi.fn(),
   }));
@@ -62,8 +64,10 @@ vi.mock("@/lib/events", () => ({
     MOTIVATION_CHANGED: "motivation_changed",
     REVERTED_TO_PROSPECT: "reverted_to_prospect",
     STATUS_CHANGED: "status_changed",
+    LIST_ADDED: "list_added",
   },
   recordLeadEvent,
+  recordLeadEvents,
 }));
 
 vi.mock("next/cache", () => ({
@@ -197,12 +201,27 @@ function makeSupabase(opts: {
   upsertResult: StubResult<null>;
   user: StubResult<{ user: { id: string } | null }>;
   capture: UpsertCapture;
+  listResult?: StubResult<{ id: string; name: string; org_id: string }>;
 }) {
   return {
     auth: {
       getUser: vi.fn().mockResolvedValue(opts.user),
     },
     from: vi.fn((table: string) => {
+      if (table === "lists") {
+        const result = opts.listResult ?? {
+          data: { id: "list-1", name: "Test list", org_id: "org-1" },
+          error: null,
+        };
+        const builder = {
+          select: vi.fn(),
+          eq: vi.fn(),
+          maybeSingle: vi.fn().mockResolvedValue(result),
+        };
+        builder.select.mockReturnValue(builder);
+        builder.eq.mockReturnValue(builder);
+        return builder;
+      }
       if (table === "properties") {
         return {
           select: () => ({
@@ -211,14 +230,28 @@ function makeSupabase(opts: {
         };
       }
       if (table === "property_lists") {
+        const membershipBuilder = {
+          eq: vi.fn(),
+          in: vi.fn().mockResolvedValue({ data: [], error: null }),
+        };
+        membershipBuilder.eq.mockReturnValue(membershipBuilder);
         return {
+          select: vi.fn(() => membershipBuilder),
           upsert: (
             rows: UpsertCapture["rows"],
             options: { onConflict?: string; ignoreDuplicates?: boolean },
           ) => {
             opts.capture.rows.push(...rows);
             opts.capture.options = options;
-            return Promise.resolve(opts.upsertResult);
+            return {
+              select: vi.fn().mockResolvedValue({
+                data:
+                  opts.upsertResult.error === null
+                    ? rows.map((row) => ({ property_id: row.property_id }))
+                    : opts.upsertResult.data,
+                error: opts.upsertResult.error,
+              }),
+            };
           },
         };
       }
@@ -244,6 +277,7 @@ beforeEach(() => {
     timezone: "America/Chicago",
   });
   recordLeadEvent.mockReset().mockResolvedValue(undefined);
+  recordLeadEvents.mockReset().mockResolvedValue(undefined);
   revalidatePath.mockReset();
   validateActiveAssigneeForProperties.mockReset();
   validateActiveAssigneeForProperties.mockResolvedValue({
@@ -682,8 +716,9 @@ describe("addPropertiesToListBulk", () => {
     }
     expect(capture.options).toEqual({
       onConflict: "property_id,list_id",
-      ignoreDuplicates: false,
+      ignoreDuplicates: true,
     });
+    expect(recordLeadEvents).toHaveBeenCalledTimes(1);
   });
 
   it("records ids the lookup did not return as failed entries", async () => {

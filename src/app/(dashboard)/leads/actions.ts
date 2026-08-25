@@ -552,7 +552,7 @@ export type BulkTagRow = {
   system_managed: boolean;
 };
 
-const TAG_BULK_CHUNK_SIZE = 500;
+const MEMBERSHIP_BULK_CHUNK_SIZE = 250;
 
 type BulkTagProperty = { id: string; org_id: string };
 type ResolvedBulkTagRow = BulkTagRow & { org_id: string };
@@ -683,8 +683,8 @@ async function fetchBulkTagProperties(
   propertyIds: string[],
 ): Promise<Result<{ props: BulkTagProperty[]; failed: BulkOutcome["failed"] }>> {
   const props: BulkTagProperty[] = [];
-  for (let i = 0; i < propertyIds.length; i += TAG_BULK_CHUNK_SIZE) {
-    const chunk = propertyIds.slice(i, i + TAG_BULK_CHUNK_SIZE);
+  for (let i = 0; i < propertyIds.length; i += MEMBERSHIP_BULK_CHUNK_SIZE) {
+    const chunk = propertyIds.slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE);
     const { data, error: lookupErr } = await supabase
       .from("properties")
       .select("id, org_id")
@@ -710,7 +710,7 @@ async function applyResolvedCustomTagBulkWithClient(
   supabase: Awaited<ReturnType<typeof createClient>>,
   props: BulkTagProperty[],
   initialFailed: BulkOutcome["failed"],
-  tag: Pick<ResolvedBulkTagRow, "id" | "org_id">,
+  tag: Pick<ResolvedBulkTagRow, "id" | "name" | "org_id">,
 ): Promise<Result<BulkOutcome>> {
   const failed: BulkOutcome["failed"] = [...initialFailed];
   const sameOrgProps: BulkTagProperty[] = [];
@@ -728,38 +728,86 @@ async function applyResolvedCustomTagBulkWithClient(
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  const rows = sameOrgProps.map((p) => ({
-    org_id: p.org_id,
-    property_id: p.id,
-    tag_id: tag.id,
-    applied_by: user?.id ?? null,
-    source: "manual",
-  }));
-
-  let succeeded = 0;
-  for (let i = 0; i < rows.length; i += TAG_BULK_CHUNK_SIZE) {
-    const chunk = rows.slice(i, i + TAG_BULK_CHUNK_SIZE);
-    const { error } = await supabase.from("property_tags").upsert(chunk, {
-      onConflict: "property_id,tag_id",
-      ignoreDuplicates: true,
-    });
-    if (error) {
-      return ok({
-        succeeded,
-        skipped: 0,
-        failed: [
-          ...failed,
-          ...rows.slice(i).map((row) => ({
-            propertyId: row.property_id,
-            message: error.message,
-          })),
-        ],
-      });
+  const existingPropertyIds = new Set<string>();
+  for (let i = 0; i < sameOrgProps.length; i += MEMBERSHIP_BULK_CHUNK_SIZE) {
+    const ids = sameOrgProps
+      .slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE)
+      .map((property) => property.id);
+    const { data: existing, error: existingError } = await supabase
+      .from("property_tags")
+      .select("property_id")
+      .eq("tag_id", tag.id)
+      .in("property_id", ids);
+    if (existingError) {
+      return {
+        ok: false,
+        error: { code: "TAG_FETCH_FAILED", message: existingError.message },
+      };
     }
-    succeeded += chunk.length;
+    for (const row of existing ?? []) existingPropertyIds.add(row.property_id);
   }
 
-  return ok({ succeeded, skipped: 0, failed });
+  const rows = sameOrgProps
+    .filter((property) => !existingPropertyIds.has(property.id))
+    .map((p) => ({
+      org_id: p.org_id,
+      property_id: p.id,
+      tag_id: tag.id,
+      applied_by: user?.id ?? null,
+      source: "manual",
+    }));
+
+  const succeededIds: string[] = [];
+  let processedCandidateCount = 0;
+  for (let i = 0; i < rows.length; i += MEMBERSHIP_BULK_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE);
+    const { data: saved, error } = await supabase
+      .from("property_tags")
+      .upsert(chunk, {
+        onConflict: "property_id,tag_id",
+        ignoreDuplicates: true,
+      })
+      .select("property_id");
+    if (error) {
+      failed.push(
+        ...rows.slice(i).map((row) => ({
+          propertyId: row.property_id,
+          message: error.message,
+        })),
+      );
+      break;
+    }
+    processedCandidateCount += chunk.length;
+    succeededIds.push(...(saved ?? []).map((row) => row.property_id));
+  }
+
+  if (succeededIds.length > 0) {
+    const batchId = randomUUID();
+    const actor = user?.id
+      ? ({ actorType: "user", actorId: user.id } as const)
+      : ({ actorType: "system" } as const);
+    await recordLeadEvents(
+      succeededIds.map((propertyId) => ({
+        propertyId,
+        ...actor,
+        eventType: LEAD_EVENT_TYPES.TAG_APPLIED,
+        payload: {
+          tag_id: tag.id,
+          label: tag.name,
+          batch_id: batchId,
+          batch_count: succeededIds.length,
+        },
+      })),
+    );
+  }
+
+  return ok({
+    succeeded: succeededIds.length,
+    skipped:
+      existingPropertyIds.size +
+      Math.max(0, processedCandidateCount - succeededIds.length),
+    failed,
+  });
 }
 
 async function applyCustomTagBulkWithClient(
@@ -773,7 +821,7 @@ async function applyCustomTagBulkWithClient(
 
   const { data: tag, error: tagErr } = await supabase
     .from("tags")
-    .select("id, category, system_managed, org_id")
+    .select("id, name, category, system_managed, org_id")
     .eq("id", tagId)
     .maybeSingle();
   if (tagErr) {
@@ -808,7 +856,7 @@ async function applyCustomTagBulkWithClient(
     supabase,
     propsResult.data.props,
     propsResult.data.failed,
-    tag as Pick<ResolvedBulkTagRow, "id" | "org_id">,
+    tag as Pick<ResolvedBulkTagRow, "id" | "name" | "org_id">,
   );
 }
 
@@ -1013,55 +1061,144 @@ export async function addPropertiesToListBulk(
   }
   try {
     const supabase = await createClient();
+    const { data: list, error: listError } = await supabase
+      .from("lists")
+      .select("id, name, org_id")
+      .eq("id", listId)
+      .maybeSingle();
+    if (listError) {
+      return {
+        ok: false,
+        error: { code: "LIST_FETCH_FAILED", message: listError.message },
+      };
+    }
+    if (!list) {
+      return {
+        ok: false,
+        error: { code: "LIST_NOT_FOUND", message: "List not found." },
+      };
+    }
     // Look up org_ids so we satisfy property_lists.org_id NOT NULL. Every
     // property has an org; the query scopes to the ids we got, so RLS
     // already filtered out cross-org rows if any.
-    const { data: props, error: lookupErr } = await supabase
-      .from("properties")
-      .select("id, org_id")
-      .in("id", propertyIds);
-    if (lookupErr) {
-      return {
-        ok: false,
-        error: { code: "ADD_TO_LIST_FAILED", message: lookupErr.message },
-      };
+    const uniquePropertyIds = [...new Set(propertyIds)];
+    const props: BulkTagProperty[] = [];
+    for (
+      let i = 0;
+      i < uniquePropertyIds.length;
+      i += MEMBERSHIP_BULK_CHUNK_SIZE
+    ) {
+      const chunk = uniquePropertyIds.slice(
+        i,
+        i + MEMBERSHIP_BULK_CHUNK_SIZE,
+      );
+      const { data, error: lookupError } = await supabase
+        .from("properties")
+        .select("id, org_id")
+        .in("id", chunk);
+      if (lookupError) {
+        return {
+          ok: false,
+          error: { code: "ADD_TO_LIST_FAILED", message: lookupError.message },
+        };
+      }
+      props.push(...((data ?? []) as BulkTagProperty[]));
     }
-    const foundIds = new Set((props ?? []).map((p) => p.id));
+    const foundIds = new Set(props.map((p) => p.id));
     const failed: BulkOutcome["failed"] = [];
-    for (const id of propertyIds) {
+    for (const id of uniquePropertyIds) {
       if (!foundIds.has(id)) {
         failed.push({ propertyId: id, message: "Property not found" });
       }
     }
+    const sameOrgProps = props.filter((property) => {
+      if (property.org_id === list.org_id) return true;
+      failed.push({
+        propertyId: property.id,
+        message: "List does not belong to this property's organization",
+      });
+      return false;
+    });
 
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    const nowIso = new Date().toISOString();
-    const rows = (props ?? []).map((p) => ({
-      org_id: p.org_id,
-      property_id: p.id,
-      list_id: listId,
-      last_added_at: nowIso,
-      last_added_by: user?.id ?? null,
-    }));
-    if (rows.length > 0) {
-      const { error } = await supabase
+    const existingPropertyIds = new Set<string>();
+    for (let i = 0; i < sameOrgProps.length; i += MEMBERSHIP_BULK_CHUNK_SIZE) {
+      const ids = sameOrgProps
+        .slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE)
+        .map((property) => property.id);
+      const { data: existing, error: existingError } = await supabase
         .from("property_lists")
-        .upsert(rows, {
-          onConflict: "property_id,list_id",
-          ignoreDuplicates: false,
-        });
-      if (error) {
+        .select("property_id")
+        .eq("list_id", listId)
+        .in("property_id", ids);
+      if (existingError) {
         return {
           ok: false,
-          error: { code: "ADD_TO_LIST_FAILED", message: error.message },
+          error: { code: "ADD_TO_LIST_FAILED", message: existingError.message },
         };
       }
+      for (const row of existing ?? []) existingPropertyIds.add(row.property_id);
+    }
+
+    const nowIso = new Date().toISOString();
+    const rows = sameOrgProps
+      .filter((property) => !existingPropertyIds.has(property.id))
+      .map((p) => ({
+        org_id: p.org_id,
+        property_id: p.id,
+        list_id: listId,
+        last_added_at: nowIso,
+        last_added_by: user?.id ?? null,
+      }));
+    const succeededIds: string[] = [];
+    let processedCandidateCount = 0;
+    for (let i = 0; i < rows.length; i += MEMBERSHIP_BULK_CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE);
+      const { data: saved, error } = await supabase
+        .from("property_lists")
+        .upsert(chunk, {
+          onConflict: "property_id,list_id",
+          ignoreDuplicates: true,
+        })
+        .select("property_id");
+      if (error) {
+        failed.push(
+          ...rows.slice(i).map((row) => ({
+            propertyId: row.property_id,
+            message: error.message,
+          })),
+        );
+        break;
+      }
+      processedCandidateCount += chunk.length;
+      succeededIds.push(...(saved ?? []).map((row) => row.property_id));
+    }
+    if (succeededIds.length > 0) {
+      const batchId = randomUUID();
+      const actor = user?.id
+        ? ({ actorType: "user", actorId: user.id } as const)
+        : ({ actorType: "system" } as const);
+      await recordLeadEvents(
+        succeededIds.map((propertyId) => ({
+          propertyId,
+          ...actor,
+          eventType: LEAD_EVENT_TYPES.LIST_ADDED,
+          payload: {
+            list_id: listId,
+            label: list.name,
+            batch_id: batchId,
+            batch_count: succeededIds.length,
+          },
+        })),
+      );
     }
     return ok({
-      succeeded: rows.length,
-      skipped: 0,
+      succeeded: succeededIds.length,
+      skipped:
+        existingPropertyIds.size +
+        Math.max(0, processedCandidateCount - succeededIds.length),
       failed,
     });
   } catch (e) {
@@ -1082,22 +1219,79 @@ export async function removePropertiesFromListBulk(
   }
   try {
     const supabase = await createClient();
-    const { error, count } = await supabase
-      .from("property_lists")
-      .delete({ count: "exact" })
-      .eq("list_id", listId)
-      .in("property_id", propertyIds);
-    if (error) {
+    const uniquePropertyIds = [...new Set(propertyIds)];
+    const { data: list, error: listError } = await supabase
+      .from("lists")
+      .select("name")
+      .eq("id", listId)
+      .maybeSingle();
+    if (listError) {
       return {
         ok: false,
-        error: { code: "REMOVE_FROM_LIST_FAILED", message: error.message },
+        error: { code: "LIST_FETCH_FAILED", message: listError.message },
       };
     }
-    const succeeded = count ?? 0;
+    if (!list) {
+      return {
+        ok: false,
+        error: { code: "LIST_NOT_FOUND", message: "List not found." },
+      };
+    }
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const removedIds: string[] = [];
+    const failed: BulkOutcome["failed"] = [];
+    for (
+      let i = 0;
+      i < uniquePropertyIds.length;
+      i += MEMBERSHIP_BULK_CHUNK_SIZE
+    ) {
+      const chunk = uniquePropertyIds.slice(
+        i,
+        i + MEMBERSHIP_BULK_CHUNK_SIZE,
+      );
+      const { data: removed, error } = await supabase
+      .from("property_lists")
+      .delete()
+      .eq("list_id", listId)
+        .in("property_id", chunk)
+        .select("property_id");
+      if (error) {
+        failed.push(
+          ...chunk.map((propertyId) => ({
+            propertyId,
+            message: error.message,
+          })),
+        );
+        continue;
+      }
+      removedIds.push(...(removed ?? []).map((row) => row.property_id));
+    }
+    if (removedIds.length > 0) {
+      const batchId = randomUUID();
+      const actor = user?.id
+        ? ({ actorType: "user", actorId: user.id } as const)
+        : ({ actorType: "system" } as const);
+      await recordLeadEvents(
+        removedIds.map((propertyId) => ({
+          propertyId,
+          ...actor,
+          eventType: LEAD_EVENT_TYPES.LIST_REMOVED,
+          payload: {
+            list_id: listId,
+            label: list.name,
+            batch_id: batchId,
+            batch_count: removedIds.length,
+          },
+        })),
+      );
+    }
     return ok({
-      succeeded,
-      skipped: propertyIds.length - succeeded,
-      failed: [],
+      succeeded: removedIds.length,
+      skipped:
+        uniquePropertyIds.length - removedIds.length - failed.length,
+      failed,
     });
   } catch (e) {
     reportError(e, {

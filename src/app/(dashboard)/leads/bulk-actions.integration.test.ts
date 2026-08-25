@@ -198,6 +198,9 @@ describe("bulk actions (integration)", () => {
       ),
     );
     expect(batchIds.size).toBe(1);
+    expect([...batchIds][0]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
     expect(events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -233,12 +236,26 @@ describe("bulk actions (integration)", () => {
     // Re-adding the same ids must not create duplicate property_lists rows.
     const second = await addPropertiesToListBulk(ids, listId);
     expect(second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.data).toMatchObject({ succeeded: 2, skipped: 0 });
+    expect(second.data).toMatchObject({ succeeded: 0, skipped: 2 });
 
     const { count } = await testClient
       .from("property_lists")
       .select("*", { count: "exact", head: true })
       .eq("list_id", listId);
     expect(count).toBe(2);
+    const { data: events } = await testClient
+      .from("lead_events")
+      .select("payload")
+      .eq("event_type", "list_added")
+      .in("property_id", ids);
+    expect(events).toHaveLength(2);
+    expect(events?.[0]?.payload).toMatchObject({
+      list_id: listId,
+      label: "Absentee High Equity",
+      batch_count: 2,
+    });
   });
 
   it("removePropertiesFromListBulk deletes memberships for the given list only", async () => {
@@ -260,6 +277,20 @@ describe("bulk actions (integration)", () => {
       .eq("property_id", id);
     expect(stillOn).toHaveLength(1);
     expect(stillOn?.[0].list_id).toBe(listB);
+    const { data: removedEvents } = await testClient
+      .from("lead_events")
+      .select("payload")
+      .eq("property_id", id)
+      .eq("event_type", "list_removed");
+    expect(removedEvents).toEqual([
+      {
+        payload: expect.objectContaining({
+          list_id: listA,
+          label: "Absentee",
+          batch_count: 1,
+        }),
+      },
+    ]);
   });
 
   it("applyTagBulk refuses non-custom tags with TAG_NOT_APPLICABLE", async () => {
@@ -293,6 +324,22 @@ describe("bulk actions (integration)", () => {
       .select("*", { count: "exact", head: true })
       .eq("tag_id", tagId);
     expect(count).toBe(2);
+
+    const retry = await applyTagBulk(ids, tagId);
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.data).toMatchObject({ succeeded: 0, skipped: 2 });
+    const { data: events } = await testClient
+      .from("lead_events")
+      .select("payload")
+      .eq("event_type", "tag_applied")
+      .in("property_id", ids);
+    expect(events).toHaveLength(2);
+    expect(events?.[0]?.payload).toMatchObject({
+      tag_id: tagId,
+      label: "competing-offer",
+      batch_count: 2,
+    });
   });
 
   it("applyTagBulk refuses to attach a tag to properties in another organization", async () => {
