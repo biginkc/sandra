@@ -199,3 +199,12 @@ This product serves 100 users or fewer. Reject enterprise architecture and scope
 - Task proof: one truthful event is persisted for create, snooze, reassign, and complete; immediate retries/no-ops, failed transitions, post-completion snooze, and propertyless appointments do not create generic task events; payloads exclude private task title/body text.
 - Fable's round-17 implementation approval remains current because no implementation or test code changed after that review; this round records only the subsequently completed hosted evidence.
 - Next bounded step: commit and push the approved task slice, then instrument appointment lifecycle events without broadening into a generic lifecycle framework.
+
+### Round 19 — appointment lifecycle review
+
+- Surface: property-linked booking, held/no-show completion, cancellation, successor-row reschedule, and reassignment through the existing appointment RPC actions. Propertyless appointments, failed mutations, keyed replays, and same-assignee operations do not create lead events.
+- Manual adversarial findings fixed: append reassignment activity before the potentially slow Calendar kick; suppress false same-assignee events and notifications; add exact failure, replay, propertyless, privacy, and self-assignment proofs.
+- Three manual re-review lanes returned no findings. Fallow's inherited complexity/duplication findings do not justify a new event framework.
+- Fable verdict: `APPROVE_STEP`, high confidence, zero blocking and zero non-blocking findings after exact-diff re-review. Explicit scope verdict: no bloat; direct calls through the shared writer are proportionate for at most 100 users.
+- Verification: appointment/writer suites passed 79/79, typecheck passed, scoped lint passed, diff check passed, and the production build passed with only the inherited handled `/templates` dynamic-render log.
+- Next bounded step: commit and push this slice, then instrument the next remaining mutation family without broadening scope.
