@@ -22,7 +22,12 @@ const cancelData = {
 };
 
 function target(overrides: Record<string, unknown> = {}) {
-  return { phoneE164: "+18165550123", callToken: CALL_TOKEN, ...overrides };
+  return {
+    phoneE164: "+18165550123",
+    callToken: CALL_TOKEN,
+    intentCapability: "intent-capability",
+    ...overrides,
+  };
 }
 
 class FakeRtcClient {
@@ -69,6 +74,7 @@ function transportHarness(
     startCall: vi.fn(async () => ({
       ok: true as const,
       data: { callId: "call-1", batchId: "batch-1" },
+      ambiguous: false,
     })),
     getToken: vi.fn(async () => ({
       ok: true as const,
@@ -83,6 +89,7 @@ function transportHarness(
       data: { dialing: true as const },
     })),
     cancel: vi.fn(async () => ({ ok: true as const, data: cancelData })),
+    cancelByStartIntent: vi.fn(async () => ({ ok: true as const, data: cancelData })),
     reportAudioHealth: vi.fn(async () => ({
       ok: true as const,
       data: { accepted: true, status: "healthy" as const },
@@ -392,7 +399,6 @@ describe("JitterCallTransport", () => {
     [409, "operator_busy"],
     [422, "not_callable"],
     [422, "caller_id_unavailable"],
-    [503, "caller_id_inventory_unavailable"],
   ] as const)(
     "maps a %s start envelope to the distinct %s state without inventing a call to cancel",
     async (status, errorCode) => {
@@ -401,6 +407,7 @@ describe("JitterCallTransport", () => {
         status,
         error: "Cannot start.",
         errorCode,
+        ambiguous: false,
       }));
       const harness = transportHarness({ startCall });
       const states: string[] = [];
@@ -410,8 +417,180 @@ describe("JitterCallTransport", () => {
       });
       expect(states).toEqual(["connecting", errorCode]);
       expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+      expect(harness.dependencies.cancelByStartIntent).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    [500, "softphone_start_failed"],
+    [503, "caller_id_inventory_unavailable"],
+  ] as const)(
+    "uses start-intent teardown for a delivered %s after Jitter may have provisioned",
+    async (status, errorCode) => {
+      const startCall = vi.fn(async () => ({
+        ok: false as const,
+        status,
+        error: "Cannot start.",
+        errorCode,
+        ambiguous: true,
+      }));
+      const harness = transportHarness({ startCall });
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+      await expect(harness.transport.start(target())).rejects.toMatchObject({
+        name: errorCode,
+      });
+      expect(harness.dependencies.cancelByStartIntent).toHaveBeenCalledWith(
+        "intent-capability",
+        "failed",
+      );
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+      expect(states).toEqual(["connecting", "failed"]);
+    },
+  );
+
+  it("uses start-intent teardown after a thrown/lost start response", async () => {
+    const startCall = vi.fn()
+      .mockRejectedValueOnce(new Error("start action response lost"))
+      .mockRejectedValueOnce(new Error("start action response lost again"));
+    const harness = transportHarness({ startCall });
+    await expect(harness.transport.start(target())).rejects.toThrow(
+      "start action response lost again",
+    );
+    expect(harness.dependencies.cancelByStartIntent).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it("cancels a late start response after hangup begins", async () => {
+    let resolveStart!: (value: {
+      ok: true;
+      data: { callId: string; batchId: string };
+      ambiguous: false;
+    }) => void;
+    const startCall = vi.fn(
+      () =>
+        new Promise<{
+          ok: true;
+          data: { callId: string; batchId: string };
+          ambiguous: false;
+        }>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    const harness = transportHarness({ startCall });
+    const start = harness.transport.start(target());
+    await flush();
+
+    const hangup = harness.transport.hangup();
+    await flush();
+    expect(harness.dependencies.cancelByStartIntent).toHaveBeenCalledWith(
+      "intent-capability",
+      "hangup",
+    );
+
+    resolveStart({
+      ok: true,
+      data: { callId: "late-call", batchId: "batch-1" },
+      ambiguous: false,
+    });
+    await expect(start).rejects.toThrow("Call start was canceled.");
+    await expect(hangup).resolves.toEqual({
+      durationSeconds: 0,
+      outcome: "failed",
+    });
+    expect(harness.dependencies.getToken).not.toHaveBeenCalled();
+    expect(harness.dependencies.connect).not.toHaveBeenCalled();
+  });
+
+  it("fires fallback for a delivered success with a lost or malformed body", async () => {
+    const startCall = vi.fn(async () => ({
+      ok: false as const,
+      status: 502,
+      error: "Jitter softphone returned an invalid response.",
+      errorCode: "jitter_contract_violation",
+      ambiguous: true,
+    }));
+    const harness = transportHarness({ startCall });
+    await expect(harness.transport.start(target())).rejects.toMatchObject({
+      name: "jitter_contract_violation",
+    });
+    expect(harness.dependencies.cancelByStartIntent).toHaveBeenCalledWith(
+      "intent-capability",
+      "failed",
+    );
+  });
+
+  it("leaves teardown unconfirmed across repeated 404s and confirms only on 200", async () => {
+    const startCall = vi.fn(async () => ({
+      ok: false as const,
+      status: 500,
+      error: "May have provisioned.",
+      errorCode: "softphone_start_failed",
+      ambiguous: true,
+    }));
+    const cancelByStartIntent = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, status: 404, error: "Not found", errorCode: "not_found" })
+      .mockResolvedValueOnce({ ok: false as const, status: 404, error: "Not found", errorCode: "not_found" })
+      .mockResolvedValueOnce({ ok: false as const, status: 404, error: "Not found", errorCode: "not_found" })
+      .mockResolvedValueOnce({ ok: true as const, data: cancelData });
+    const harness = transportHarness({ startCall, cancelByStartIntent });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await expect(harness.transport.start(target())).rejects.toMatchObject({
+      name: "softphone_start_failed",
+    });
+    expect(cancelByStartIntent).toHaveBeenCalledTimes(3);
+    expect(states).toContain("teardown_unconfirmed");
+    await harness.transport.hangup();
+    expect(cancelByStartIntent).toHaveBeenCalledTimes(4);
+    expect(states).toContain("teardown_confirmed");
+  });
+
+  it("treats an explicit non-ambiguous 503 as authoritative: no retry, no fallback, no unconfirmed banner", async () => {
+    const startCall = vi.fn(async () => ({
+      ok: false as const,
+      status: 503,
+      error: "Jitter softphone is misconfigured.",
+      errorCode: "jitter_invalid_configuration",
+      ambiguous: false,
+    }));
+    const harness = transportHarness({ startCall });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await expect(harness.transport.start(target())).rejects.toMatchObject({
+      name: "jitter_invalid_configuration",
+    });
+    expect(startCall).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.cancelByStartIntent).not.toHaveBeenCalled();
+    expect(states).not.toContain("teardown_unconfirmed");
+  });
+
+  it("fails closed to teardown_unconfirmed when ambiguous and no cancelByStartIntent dependency exists", async () => {
+    const startCall = vi.fn(async () => ({
+      ok: false as const,
+      status: 500,
+      error: "May have provisioned.",
+      errorCode: "softphone_start_failed",
+      ambiguous: true,
+    }));
+    const harness = transportHarness({ startCall, cancelByStartIntent: undefined });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await expect(harness.transport.start(target())).rejects.toMatchObject({
+      name: "softphone_start_failed",
+    });
+    expect(states).toContain("teardown_unconfirmed");
+    expect(states).not.toContain("teardown_confirmed");
+  });
+
+  it("does not mint or cancel by intent in simulated mode", async () => {
+    const harness = transportHarness({
+      cancelByStartIntent: vi.fn(async () => ({ ok: true as const, data: cancelData })),
+    });
+    await harness.transport.start(target({ intentCapability: undefined }));
+    await harness.transport.hangup();
+    expect(harness.dependencies.cancelByStartIntent).not.toHaveBeenCalled();
+  });
 
   it("retries a lost accepted-phase response while the same call remains active", async () => {
     const connect = vi

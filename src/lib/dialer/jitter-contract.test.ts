@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   JITTER_SOFTPHONE_PATHS,
   requestJitterCancel,
+  requestJitterCancelByIdempotencyKey,
   requestJitterAudioHealth,
   requestJitterConnect,
   requestJitterStartCall,
@@ -277,6 +278,28 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
     expect(signJitterSoftphoneBody(SERVICE_TOKEN)).toBe(
       `sha256=${createHmac("sha256", SERVICE_TOKEN).update("").digest("hex")}`,
     );
+  });
+
+  it("cancels by the same idempotency key when the start response is lost", async () => {
+    vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
+    vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
+    const server = contractServer((request) => {
+      expect(request).toMatchObject({
+        method: "POST",
+        path: JITTER_SOFTPHONE_PATHS.cancel,
+        body: { idempotency_key: IDEMPOTENCY_KEY, reason: "failed" },
+        idempotencyKey: null,
+      });
+      return Response.json(cancelResponse());
+    });
+
+    await expect(
+      requestJitterCancelByIdempotencyKey(
+        IDEMPOTENCY_KEY,
+        "failed",
+        server,
+      ),
+    ).resolves.toEqual({ ok: true, data: cancelResponse() });
   });
 
   it("retries start-call with the identical Idempotency-Key and exact body", async () => {
