@@ -126,9 +126,11 @@ function makeMessage(
       overrides.conversation_id ??
       `conv-${overrides.contact_id ?? "contact-1"}`,
     from_address:
-      overrides.direction === "inbound" ? "+15551234567" : "+18162804181",
+      overrides.from_address ??
+      (overrides.direction === "inbound" ? "+15551234567" : "+18162804181"),
     to_address:
-      overrides.direction === "inbound" ? "+18162804181" : "+15551234567",
+      overrides.to_address ??
+      (overrides.direction === "inbound" ? "+18162804181" : "+15551234567"),
     created_at: overrides.created_at ?? "2026-04-29T12:00:00Z",
     read_at: overrides.read_at ?? null,
     metadata: overrides.metadata ?? null,
@@ -583,6 +585,65 @@ describe("<InboxDetail />", () => {
       "preserve after provider failure",
     );
   });
+
+  it.each([
+    {
+      routeChange: "customer phone",
+      fromAddress: "+18162804181",
+      toAddress: "+15550000003",
+    },
+    {
+      routeChange: "Sandra sender",
+      fromAddress: "+18162804182",
+      toAddress: "+15551234567",
+    },
+  ])(
+    "refreshes thread identity when another outbound changes the $routeChange",
+    async ({ fromAddress, routeChange, toAddress }) => {
+      const data = makeData({
+        contactId: `contact-route-${routeChange}`,
+        propertyId: `prop-route-${routeChange}`,
+        threadId: `conv-route-${routeChange}`,
+        conversationId: `conv-route-${routeChange}`,
+      });
+
+      render(
+        <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+      );
+
+      await waitFor(() => {
+        expect(supabaseMock.subscriptions.length).toBeGreaterThan(0);
+      });
+      const insertSubscription = supabaseMock.subscriptions.find(
+        (subscription) =>
+          subscription.type === "postgres_changes" &&
+          subscription.filter.event === "INSERT",
+      );
+      expect(insertSubscription).toBeDefined();
+
+      await act(async () => {
+        insertSubscription!.callback({
+          new: makeMessage({
+            id: `outbound-route-${routeChange}`,
+            body: "sent somewhere else",
+            direction: "outbound",
+            status: "pending",
+            contact_id: data.contactId,
+            property_id: data.propertyId,
+            conversation_id: data.conversationId,
+            from_address: fromAddress,
+            to_address: toAddress,
+          }),
+        });
+      });
+
+      expect(screen.getByTestId("inline-reply-refreshing")).toHaveTextContent(
+        "Updating the thread phone before reply",
+      );
+      expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+      expect(refreshCalls.length).toBeGreaterThan(0);
+    },
+  );
 
   it("renders a persisted queued reply after reload instead of dropping it from the thread", () => {
     render(

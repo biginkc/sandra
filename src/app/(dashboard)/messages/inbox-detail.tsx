@@ -22,6 +22,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { copyToClipboard } from "@/lib/csv/export";
+import { normalizePhone } from "@/lib/csv/normalize";
 import { formatPhoneE164 } from "@/lib/phone-format";
 import { cn } from "@/lib/utils";
 
@@ -417,11 +418,20 @@ export function InboxDetail({
     replyRefreshGate?.threadId === data.threadId &&
     replyRefreshGate.initialMessages === data.initialMessages;
   const handleLiveMessage = (message: MessageRow) => {
-    // Only inbound messages can change which customer phone this thread
-    // should reply to. Outbound pending rows are created before the provider
-    // responds; refreshing for those rows would unmount InlineReply and lose
-    // the operator's draft if delivery fails.
-    if (message.direction !== "inbound") return;
+    // The current inline send inserts an outbound pending row before the
+    // provider responds. Ignore only that same route so a provider failure
+    // cannot unmount the composer and erase its draft. An outbound from
+    // another tab/operator may use a different saved customer phone or sender,
+    // so it must still refresh the authoritative thread identity.
+    const sameOutboundRoute =
+      message.direction === "outbound" &&
+      normalizePhone(message.to_address) !== null &&
+      normalizePhone(message.to_address) ===
+        normalizePhone(data.replyToPhone) &&
+      normalizePhone(message.from_address) !== null &&
+      normalizePhone(message.from_address) ===
+        normalizePhone(data.threadBusinessPhone);
+    if (sameOutboundRoute) return;
     setReplyRefreshGate({
       threadId: data.threadId,
       initialMessages: data.initialMessages,
