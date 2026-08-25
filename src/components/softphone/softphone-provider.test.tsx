@@ -694,6 +694,8 @@ describe("SoftphoneProvider transport gate", () => {
 
     const firstToken = completeSoftphoneCall.mock.calls[0][0].wrapToken;
     const retryToken = completeSoftphoneCall.mock.calls[1][0].wrapToken;
+    expect(completeSoftphoneCall.mock.calls[0][0].callCapability).toBe("simulated-session");
+    expect(completeSoftphoneCall.mock.calls[1][0].callCapability).toBe("simulated-session");
     expect(firstToken).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
     expect(retryToken).toBe(firstToken);
     expect(createTransport.mock.results[0].value.start).toHaveBeenCalledWith(

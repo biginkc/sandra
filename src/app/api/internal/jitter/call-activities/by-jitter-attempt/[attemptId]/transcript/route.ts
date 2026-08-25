@@ -8,6 +8,7 @@ import {
   requireIdempotencyKey,
 } from "../../../../_lib/auth";
 import { parseTranscriptWritebackBody } from "../../../../_lib/artifact-writeback-payload";
+import { callActivityAttemptProviderFilter } from "../../../../_lib/call-activity-lookup";
 import { responseForWritebackPayload } from "../../../../_lib/writeback-response";
 
 type RouteContext = { params: Promise<{ attemptId: string }> };
@@ -64,9 +65,8 @@ export async function PUT(
       .from("call_activities")
       .select("id")
       .eq("org_id", auth.orgId)
-      .eq("provider", "jitter")
-      .eq("jitter_session_id", scopeId)
       .eq("jitter_attempt_id", attemptId)
+      .or(callActivityAttemptProviderFilter(scopeId))
       .maybeSingle();
     if (activityError) throw activityError;
     if (!activity) return parentNotFound();

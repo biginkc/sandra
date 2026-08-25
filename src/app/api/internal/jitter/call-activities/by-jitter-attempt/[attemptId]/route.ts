@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import type { Database, Json } from "@/lib/supabase/types";
 
 import {
   authenticateJitterWriteback,
@@ -41,6 +43,22 @@ type ValidatedWriteback = {
     address: string | null;
   };
 };
+
+type JitterServiceClient = SupabaseClient<Database>;
+
+export const JITTER_WRITEBACK_PROVIDERS = [
+  "jitter",
+  "sandra_softphone",
+] as const;
+
+export function isSupportedJitterWritebackProvider(
+  value: unknown,
+): value is (typeof JITTER_WRITEBACK_PROVIDERS)[number] {
+  return (
+    typeof value === "string" &&
+    (JITTER_WRITEBACK_PROVIDERS as readonly string[]).includes(value)
+  );
+}
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -86,7 +104,10 @@ function forbidden(error_code: string) {
   return NextResponse.json({ error: "forbidden", error_code }, { status: 403 });
 }
 
-async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
+async function validateOrgConsistency(
+  serviceClient: JitterServiceClient,
+  body: WritebackBody,
+) {
   if (
     (!body.org_id || !body.property_id || !body.contact_id) &&
     !body.dialer_batch_item_id
@@ -298,7 +319,7 @@ function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
 }
 
 async function resolveCallbackAssignee(
-  serviceClient: any,
+  serviceClient: JitterServiceClient,
   body: WritebackBody,
 ): Promise<string | null> {
   const preferred = body.callback_assignee_id ?? body.operator_user_id ?? null;
@@ -316,7 +337,7 @@ async function resolveCallbackAssignee(
   const { data: fallback, error } = await serviceClient
     .from("memberships")
     .select("user_id")
-    .eq("org_id", body.org_id)
+    .eq("org_id", body.org_id!)
     .order("role", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -356,7 +377,7 @@ export async function PUT(
     if (initialPayloadValidation) return initialPayloadValidation;
 
     const validation = await validateOrgConsistency(
-      auth.serviceClient as any,
+      auth.serviceClient,
       body,
     );
     if (!validation.ok) return validation.response;
@@ -367,7 +388,7 @@ export async function PUT(
     const derivedPayloadValidation = validatePayloadSyntax(body);
     if (derivedPayloadValidation) return derivedPayloadValidation;
 
-    if (body.provider !== "jitter") {
+    if (!isSupportedJitterWritebackProvider(body.provider)) {
       return unprocessable("provider_mismatch", "provider");
     }
     const effectiveIdempotencyKey = `${body.jitter_session_id!.length}:${body.jitter_session_id}:${idempotencyKey}`;
@@ -388,7 +409,7 @@ export async function PUT(
         return unprocessable("callback_at_required", "callback_at");
       }
       callbackAssigneeId = await resolveCallbackAssignee(
-        auth.serviceClient as any,
+        auth.serviceClient,
         body,
       );
       if (!callbackAssigneeId) {
@@ -416,18 +437,19 @@ export async function PUT(
       );
     }
 
-    const { data: payload, error: mutationError } = await (
-      auth.serviceClient as any
-    ).rpc("jitter_writeback_call_activity", {
-      p_attempt_id: attemptId,
-      p_body: body,
-      p_callback_assignee_id: callbackAssigneeId,
+    const { data: payload, error: mutationError } = await auth.serviceClient.rpc(
+      "jitter_writeback_call_activity",
+      {
+        p_attempt_id: attemptId,
+        p_body: body as unknown as Json,
+        p_callback_assignee_id: callbackAssigneeId,
       p_external_id: effectiveIdempotencyKey,
       p_notes: body.notes ?? null,
       p_org_id: auth.orgId,
-      p_recording_path: body.recording_path ?? null,
-      p_request_hash: idempotency.requestHash,
-    });
+        p_recording_path: body.recording_path ?? null,
+        p_request_hash: idempotency.requestHash,
+      },
+    );
     if (mutationError) throw mutationError;
 
     if ((payload as { outcome?: string } | null)?.outcome === "not_found") {

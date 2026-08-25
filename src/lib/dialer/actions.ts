@@ -9,6 +9,7 @@ import { formatPhoneE164, toPhoneE164 } from "@/lib/phone-format";
 import { createClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/types";
 import { getMemberTimezone } from "@/components/appointments/book-appointment-action";
+import { openCallCapability } from "./call-capability";
 
 type Contact = Pick<
   Database["public"]["Tables"]["contacts"]["Row"],
@@ -293,6 +294,8 @@ export async function completeSoftphoneCall(input: {
   disposition: OutreachDispo;
   notes: string;
   wrapToken: string;
+  /** Browser-held sealed Jitter call capability, when the real transport started. */
+  callCapability?: string;
   callback?: CallbackInput;
 }): Promise<SoftphoneActionResult<{ activityId: string; callbackTaskId?: string }>> {
   if (!input.notes.trim()) return { ok: false, error: "Add a note to log the outcome." };
@@ -302,6 +305,8 @@ export async function completeSoftphoneCall(input: {
     if (!user) return { ok: false, error: "Not signed in." };
     const { data: membership, error: membershipError } = await supabase.from("memberships").select("org_id").eq("user_id", user.id).limit(1).maybeSingle();
     if (membershipError || !membership) return { ok: false, error: membershipError?.message ?? "No organization membership." };
+    const rawJitterCallId = openCallCapability(input.callCapability, user.id);
+    const jitterAttemptId = `sandra-${rawJitterCallId ?? input.wrapToken}`;
 
     if (input.target.propertyId) {
       const { data: property, error: propertyError } = await supabase
@@ -331,6 +336,46 @@ export async function completeSoftphoneCall(input: {
     if (replayActivityError) return { ok: false, error: replayActivityError.message };
 
     let activity = replayActivity;
+    let activityMatchedByAttempt = false;
+    if (!activity) {
+      const { data: existingActivity, error: existingActivityError } = await supabase
+        .from("call_activities")
+        .select("id, property_id, contact_id")
+        .eq("org_id", membership.org_id)
+        .eq("provider", "sandra_softphone")
+        .eq("jitter_attempt_id", jitterAttemptId)
+        .maybeSingle();
+      if (existingActivityError) return { ok: false, error: existingActivityError.message };
+      if (existingActivity) {
+        if (
+          existingActivity.property_id !== input.target.propertyId ||
+          existingActivity.contact_id !== input.target.contactId
+        ) {
+          return { ok: false, error: "The call activity no longer matches the call target." };
+        }
+        activity = existingActivity;
+        activityMatchedByAttempt = true;
+      }
+    }
+
+    const activityValues = {
+      org_id: membership.org_id,
+      property_id: input.target.propertyId,
+      contact_id: input.target.contactId,
+      jitter_attempt_id: jitterAttemptId,
+      operator_user_id: user.id,
+      started_at: input.startedAt,
+      ended_at: input.endedAt,
+      duration_seconds: Math.max(0, Math.floor(input.durationSeconds)),
+      outcome: input.outcome,
+      disposition: input.disposition,
+      notes: input.notes.trim(),
+      direction: "outbound",
+      provider: "sandra_softphone",
+      phone_e164: input.target.phoneE164,
+      do_not_call_requested: input.disposition === "dnc",
+      wrap_token: input.wrapToken,
+    };
     let callbackTaskId: string | undefined;
     let dispositionSucceeded = false;
     try {
@@ -339,34 +384,27 @@ export async function completeSoftphoneCall(input: {
       // activity or appointment is written. An exact same-token replay skips
       // this side effect so a duplicate callback cannot downgrade the
       // appointment RPC's authoritative booked_appointment disposition.
-      if (!activity && input.target.propertyId) {
+      if (!replayActivity && input.target.propertyId) {
         const dispo = await setOutreachDispo(input.target.propertyId, input.disposition);
         if (!dispo.ok) return { ok: false, error: dispo.error };
         dispositionSucceeded = true;
       }
 
-      if (!activity) {
-        const activityValues = {
-          org_id: membership.org_id,
-          property_id: input.target.propertyId,
-          contact_id: input.target.contactId,
-          jitter_attempt_id: `sandra-${crypto.randomUUID()}`,
-          operator_user_id: user.id,
-          started_at: input.startedAt,
-          ended_at: input.endedAt,
-          duration_seconds: Math.max(0, Math.floor(input.durationSeconds)),
-          outcome: input.outcome,
-          disposition: input.disposition,
-          notes: input.notes.trim(),
-          direction: "outbound",
-          provider: "sandra_softphone",
-          phone_e164: input.target.phoneE164,
-          do_not_call_requested: input.disposition === "dnc",
-          wrap_token: input.wrapToken,
-        };
+      if (activityMatchedByAttempt && activity) {
+        const { data: updatedActivity, error: activityError } = await supabase
+          .from("call_activities")
+          .update(activityValues)
+          .eq("id", activity.id)
+          .select("id")
+          .maybeSingle();
+        if (activityError || !updatedActivity) {
+          return { ok: false, error: activityError?.message ?? "The call activity was not saved." };
+        }
+        activity = updatedActivity;
+      } else if (!activity) {
         const { data: insertedActivity, error: activityError } = await supabase
           .from("call_activities")
-          .upsert(activityValues, { onConflict: "wrap_token", ignoreDuplicates: true })
+          .upsert(activityValues, { onConflict: "provider,jitter_attempt_id", ignoreDuplicates: true })
           .select("id")
           .maybeSingle();
         if (activityError) return { ok: false, error: activityError.message };
@@ -377,15 +415,26 @@ export async function completeSoftphoneCall(input: {
             .from("call_activities")
             .select("id")
             .eq("org_id", membership.org_id)
-            .eq("operator_user_id", user.id)
-            .eq("wrap_token", input.wrapToken)
+            .eq("provider", "sandra_softphone")
+            .eq("jitter_attempt_id", jitterAttemptId)
             .maybeSingle();
           if (existingActivityError || !existingActivity) {
             return { ok: false, error: existingActivityError?.message ?? "The call activity was not saved." };
           }
-          activity = existingActivity;
+          const { data: updatedActivity, error: updateActivityError } = await supabase
+            .from("call_activities")
+            .update(activityValues)
+            .eq("id", existingActivity.id)
+            .select("id")
+            .maybeSingle();
+          if (updateActivityError || !updatedActivity) {
+            return { ok: false, error: updateActivityError?.message ?? "The call activity was not saved." };
+          }
+          activity = updatedActivity;
         }
       }
+
+      if (!activity) return { ok: false, error: "The call activity was not saved." };
 
       // fn_book_appointment owns the booked_appointment write. Supplying the
       // stable wrap token makes a retry after a lost response replay the same
