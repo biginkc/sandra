@@ -1684,6 +1684,60 @@ export type Database = {
           },
         ]
       }
+      lead_events: {
+        Row: {
+          actor_id: string | null
+          actor_type: string
+          created_at: string
+          event_type: string
+          id: string
+          org_id: string
+          payload: Json
+          property_id: string
+          source_id: string | null
+          source_type: string | null
+        }
+        Insert: {
+          actor_id?: string | null
+          actor_type: string
+          created_at?: string
+          event_type: string
+          id?: string
+          org_id: string
+          payload?: Json
+          property_id: string
+          source_id?: string | null
+          source_type?: string | null
+        }
+        Update: {
+          actor_id?: string | null
+          actor_type?: string
+          created_at?: string
+          event_type?: string
+          id?: string
+          org_id?: string
+          payload?: Json
+          property_id?: string
+          source_id?: string | null
+          source_type?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lead_events_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "lead_events_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+        ]
+      }
       lead_notes: {
         Row: {
           author_user_id: string | null
