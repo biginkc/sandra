@@ -32,7 +32,7 @@ import { BlockOptionsProvider } from "./_components/block-options-provider";
 import { renderBlock } from "./_components/blocks/registry";
 import type { Preset } from "./_components/quick-filter-chip";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
-import { LEAD_SOURCES } from "@/lib/leads/create";
+import { LEAD_SOURCES } from "@/lib/leads/sources";
 
 
 const PAGE_SIZE = 50;

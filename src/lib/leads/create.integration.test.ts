@@ -131,6 +131,18 @@ describe("createLead (integration)", () => {
       .single();
     expect(contact!.first_name).toBe("Jane");
     expect(contact!.phone_1).toBe("+18165551001");
+
+    const { data: events } = await supabase
+      .from("lead_events")
+      .select("event_type, actor_type, payload")
+      .eq("property_id", result.data.propertyId);
+    expect(events).toEqual([
+      {
+        event_type: "lead_created",
+        actor_type: "system",
+        payload: { source: "cold_call" },
+      },
+    ]);
   });
 
   it("dedups property by normalized address — second call returns existing id with wasDuplicate=true", async () => {
@@ -151,6 +163,12 @@ describe("createLead (integration)", () => {
     if (!second.ok) return;
     expect(second.data.propertyId).toBe(first.data.propertyId);
     expect(second.data.wasDuplicate).toBe(true);
+    const { count } = await supabase
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", first.data.propertyId)
+      .eq("event_type", "lead_created");
+    expect(count).toBe(1);
   });
 
   it("dedups contact by phone_1", async () => {

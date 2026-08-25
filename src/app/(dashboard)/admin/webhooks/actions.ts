@@ -5,7 +5,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { LEAD_SOURCES, type LeadSource } from "@/lib/leads/create";
+import { LEAD_SOURCES, type LeadSource } from "@/lib/leads/sources";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 

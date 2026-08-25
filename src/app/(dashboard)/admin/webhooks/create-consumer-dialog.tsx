@@ -28,7 +28,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { callAction } from "@/lib/errors/call-action";
 import { copyToClipboard } from "@/lib/csv/export";
-import { LEAD_SOURCES, type LeadSource } from "@/lib/leads/create";
+import { LEAD_SOURCES, type LeadSource } from "@/lib/leads/sources";
 
 import { createWebhookConsumer } from "./actions";
 import type { WebhookConsumerType } from "./url";

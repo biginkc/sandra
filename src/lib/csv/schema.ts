@@ -1,4 +1,4 @@
-import { LEAD_SOURCES } from "@/lib/leads/create";
+import { LEAD_SOURCES } from "@/lib/leads/sources";
 
 /**
  * Target-field schema for CSV mapping.

@@ -68,3 +68,36 @@ This product serves 100 users or fewer. Reject enterprise architecture and scope
 - Verified: two ownership reads for 251 properties, one 251-row insert, sanitized failure/skip logs, truthful partial-property behavior, server-only admin client, exact vocabulary exclusions, and parent-action failure isolation.
 - Accepted small-team tradeoff: no transaction around property lookup and insert; a racing property delete causes the best-effort insert to fail and be logged without affecting the parent action.
 - Next bounded step: instrument lead creation and qualification first, including a test that ledger failure does not change the successful parent result.
+
+### Round 4 — lead creation and qualification review
+
+- Status: `REJECT_STEP` — high confidence
+- Blocking finding: client components imported `LEAD_SOURCES` through the now server-persistent lead creation module, so adding the event writer connected the browser module graph to admin-only code.
+- Resolution: move `LEAD_SOURCES` and `LeadSource` into a pure leaf module, repoint every importer, restore the `server-only` tripwire, and install the official `server-only` package.
+- Verified before the next round: the production Next build passed with the tripwire active, proving no client graph reaches the writer.
+
+### Round 5 — server/client boundary re-review
+
+- Status: `REJECT_STEP` — confidence 0.9
+- The round-4 production boundary blocker was resolved.
+- Blocking finding: Vitest's integration environment did not resolve Next's `react-server` condition, so direct imports of the protected server modules threw before the new integration tests could run.
+- Resolution: alias `server-only` to the package's own `empty.js` implementation in both Vitest configs. The real package export and production tripwire remain unchanged.
+
+### Round 6 — test-harness re-review
+
+- Status: Fable `APPROVE_STEP` — confidence 0.9; Codex commit gate rejected the slice
+- Fable blocking findings: none
+- Verified independently by Fable: the aliases target the installed package's own empty implementation, the production writer still imports `server-only`, focused unit tests passed, and the hosted creation/qualification pair passed 19/19 six consecutive times.
+- Codex adversarial finding: Fable checked the unit and integration configs but missed the separate RTL config. The full pre-commit gate rejected eight browser-component suites because that runner still loaded the production tripwire.
+- Resolution under test: apply the identical official-package alias to `vitest.rtl.config.ts`, then rerun the complete pre-commit verification. Fable approval is invalidated until the changed head is re-reviewed.
+- Observed non-blocker: shared hosted integration state produced earlier transient missing-row failures. Repeated clean runs show no persistent ledger defect. Do not add a blind insert retry: an ambiguous network result could duplicate events lacking source identity. Prefer bounded assertion polling only if the full hosted suite proves a recurring ledger-visibility flake.
+- Scope review: the slice remains appropriate for fewer than 100 users; no queue, event bus, retry service, or speculative framework was added.
+- Next bounded step: remaining declared mutation call sites, beginning with lead fields and disposition.
+
+### Round 7 — complete test-runner boundary review
+
+- Status: `APPROVE_STEP` — high confidence
+- Blocking findings: none
+- Verified independently by Fable: the RTL alias is the same four-line mapping to the installed package's own `empty.js`; `npm run test:rtl` passed 87 files and 817 tests; Next ignores Vitest configs so the production tripwire remains intact.
+- Scope review: no new behavior, dependency, abstraction, or enterprise machinery was added.
+- Next bounded step: commit this slice, then instrument `reverted_to_prospect`, `status_changed`, and `motivation_changed` using the established confirmed-change pattern.

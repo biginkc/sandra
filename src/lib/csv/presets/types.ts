@@ -16,7 +16,7 @@
  * deterministic, no I/O, no React. Adding a vendor = new file under
  * `lib/csv/presets/` + push to the registry in `index.ts`.
  */
-import type { LeadSource } from "@/lib/leads/create";
+import type { LeadSource } from "@/lib/leads/sources";
 
 export type VendorPresetId =
   | "propstream"

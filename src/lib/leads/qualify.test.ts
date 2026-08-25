@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
+const eventMocks = vi.hoisted(() => ({ recordLeadEvent: vi.fn() }));
+
+vi.mock("@/lib/events", () => ({
+  LEAD_EVENT_TYPES: { QUALIFIED: "qualified" },
+  recordLeadEvent: eventMocks.recordLeadEvent,
+}));
+
 import { qualifyProperty } from "./qualify";
 
 function selectResult(data: unknown) {
@@ -60,5 +67,27 @@ describe("qualifyProperty permanent DNC", () => {
 
     expect(result).toMatchObject({ status: "failed", message: expect.stringContaining("DNC_LOCKED") });
     expect(update.eq).toHaveBeenCalledWith("is_dnc_locked", false);
+  });
+
+  it("records only a persisted prospect promotion", async () => {
+    eventMocks.recordLeadEvent.mockReset().mockResolvedValue(undefined);
+    const initial = selectResult({ status: "prospect", is_dnc_locked: false });
+    const update = updateResult({ id: "property-1" });
+    const from = vi.fn().mockReturnValueOnce(initial).mockReturnValueOnce(update);
+
+    const result = await qualifyProperty(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { from } as any,
+      "property-1",
+      "system:inbound_reply",
+    );
+
+    expect(result).toEqual({ status: "qualified" });
+    expect(eventMocks.recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "property-1",
+      actorType: "system",
+      eventType: "qualified",
+      payload: { from: "prospect", to: "new_lead" },
+    });
   });
 });
