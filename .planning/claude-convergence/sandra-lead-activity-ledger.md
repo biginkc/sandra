@@ -112,3 +112,22 @@ This product serves 100 users or fewer. Reject enterprise architecture and scope
 - Non-blocking: conflict branches do not each have a direct zero-event assertion; a row deleted during reconciliation returns a conflict rather than not-found; one awaited admin round trip is acceptable at this scale.
 - Scope review: appropriate for fewer than 100 users, with no queue, event bus, or extra abstraction.
 - Next bounded step: `assigned` events, beginning with the single-property action and then truthful bulk semantics.
+
+### Round 9 — assignment mutation review
+
+- Status: `APPROVE_STEP` — high confidence
+- Blocking findings: none
+- Verified: single assignment uses old-value compare-and-set and emits only after a real persisted change; bulk assignment partitions every requested row into changed, skipped, or failed without double-counting.
+- Verified: null and non-null previous assignments use correct predicates; partial group failures are not reconciled twice; missing/deleted rows cannot be counted as successes; notifications receive only changed IDs.
+- Verified: one `recordLeadEvents` call carries a shared `batch_id` and actual-success `batch_count`; actor IDs are required before using actor type `user`.
+- Non-blocking test gaps: cover mixed prior-assignee groups plus an unchanged row, and assert the single clear-assignment payload.
+- Scope review: grouping by prior assignee is the smallest correct concurrency-safe bulk shape for fewer than 100 users, not enterprise machinery.
+
+### Round 10 — assignment test-gap re-review
+
+- Status: `APPROVE_STEP` — high confidence
+- Blocking findings: none
+- Verified without touching the paused shared database: the completed pre-pause hosted run passed 36/36; the new mixed batch test proves two actual changes, one skip, truthful prior values, shared batch metadata, and count two; the single clear test proves `{from: userId, to: null}`.
+- Non-blocking carry-forward: the shared-ID assertion should also require UUID shape so two missing values cannot satisfy the set-size check.
+- Shared test coordination: hosted Sandra integration/E2E runs are paused at PR #409's request until its rerun owner confirms the database is clear.
+- Next bounded step: tag and list membership events using the validated bulk pattern.

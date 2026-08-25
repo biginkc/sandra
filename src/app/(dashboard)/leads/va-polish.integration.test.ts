@@ -76,6 +76,17 @@ describe("VA polish seams — Feature 1 integration", () => {
         .eq("id", id)
         .single();
       expect(data?.assigned_user_id).toBe(createdUserId);
+
+      const { data: events } = await testClient
+        .from("lead_events")
+        .select("event_type, payload")
+        .eq("property_id", id);
+      expect(events).toEqual([
+        {
+          event_type: "assigned",
+          payload: { from: null, to: createdUserId },
+        },
+      ]);
     });
 
     it("clears assignment when passed null", async () => {
@@ -92,9 +103,23 @@ describe("VA polish seams — Feature 1 integration", () => {
         .eq("id", id)
         .single();
       expect(data?.assigned_user_id).toBeNull();
+
+      const { data: events } = await testClient
+        .from("lead_events")
+        .select("event_type, payload")
+        .eq("property_id", id);
+      expect(events).toHaveLength(2);
+      expect(events).toEqual(
+        expect.arrayContaining([
+          {
+            event_type: "assigned",
+            payload: { from: userId, to: null },
+          },
+        ]),
+      );
     });
 
-    it("bumps updated_at on assignment change", async () => {
+    it("does not bump updated_at or append an event for an unchanged assignment", async () => {
       const { id } = await seedProperty();
       const { data: before } = await testClient
         .from("properties")
@@ -102,15 +127,18 @@ describe("VA polish seams — Feature 1 integration", () => {
         .eq("id", id)
         .single();
       await new Promise((r) => setTimeout(r, 50));
-      await updateLeadAssignee(id, null); // no-op change; still bumps timestamp
+      await updateLeadAssignee(id, null);
       const { data: after } = await testClient
         .from("properties")
         .select("updated_at")
         .eq("id", id)
         .single();
-      expect(new Date(after!.updated_at).getTime()).toBeGreaterThan(
-        new Date(before!.updated_at).getTime(),
-      );
+      expect(after!.updated_at).toBe(before!.updated_at);
+      const { count } = await testClient
+        .from("lead_events")
+        .select("id", { count: "exact", head: true })
+        .eq("property_id", id);
+      expect(count).toBe(0);
     });
   });
 

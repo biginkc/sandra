@@ -1,5 +1,6 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import { start } from "workflow/api";
@@ -19,7 +20,11 @@ import {
   partitionPropertyDncLocks,
 } from "@/lib/dnc/property-lock";
 import { reportError } from "@/lib/errors/report";
-import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
+import {
+  LEAD_EVENT_TYPES,
+  recordLeadEvent,
+  recordLeadEvents,
+} from "@/lib/events";
 import {
   createStandaloneCassJob,
   failAuthorizedCassJobStart,
@@ -87,7 +92,7 @@ async function getLeadEventActor(
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    return user
+    return user?.id
       ? ({ actorType: "user", actorId: user.id } as const)
       : ({ actorType: "system" } as const);
   } catch {
@@ -842,50 +847,153 @@ export async function assignLeadsBulk(
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    const { error } = await supabase
+    const { data: currentAssignments, error: lookupError } = await supabase
       .from("properties")
-      .update({
-        assigned_user_id: userId,
-        updated_at: new Date().toISOString(),
-      })
+      .select("id, assigned_user_id")
       .in("id", assignIds);
-    if (error) {
+    if (lookupError) {
       return {
         ok: false,
-        error: { code: "ASSIGN_BULK_FAILED", message: error.message },
+        error: { code: "ASSIGN_BULK_FAILED", message: lookupError.message },
       };
+    }
+
+    const assignmentById = new Map(
+      (currentAssignments ?? []).map((row) => [row.id, row.assigned_user_id]),
+    );
+    const unchangedIds = assignIds.filter(
+      (propertyId) => assignmentById.get(propertyId) === userId,
+    );
+    const candidateIds = assignIds.filter(
+      (propertyId) => assignmentById.get(propertyId) !== userId,
+    );
+    const idsByPrevious = new Map<string | null, string[]>();
+    for (const propertyId of candidateIds) {
+      const previous = assignmentById.get(propertyId) ?? null;
+      const group = idsByPrevious.get(previous) ?? [];
+      group.push(propertyId);
+      idsByPrevious.set(previous, group);
+    }
+
+    const changedIds: string[] = [];
+    const failed: BulkOutcome["failed"] = [
+      ...partition.data.locked.map((propertyId) => ({
+        propertyId,
+        message: DNC_LOCKED_MESSAGE,
+      })),
+      ...partition.data.missing.map((propertyId) => ({
+        propertyId,
+        message: "Property not found",
+      })),
+    ];
+    const previousByChangedId = new Map<string, string | null>();
+    const writeFailedIds = new Set<string>();
+    for (const [previous, ids] of idsByPrevious) {
+      let update = supabase
+        .from("properties")
+        .update({
+          assigned_user_id: userId,
+          updated_at: new Date().toISOString(),
+        })
+        .in("id", ids);
+      update =
+        previous === null
+          ? update.is("assigned_user_id", null)
+          : update.eq("assigned_user_id", previous);
+      const { data: saved, error } = await update.select("id");
+      if (error) {
+        ids.forEach((propertyId) => writeFailedIds.add(propertyId));
+        failed.push(
+          ...ids.map((propertyId) => ({
+            propertyId,
+            message: error.message,
+          })),
+        );
+        continue;
+      }
+      for (const row of saved ?? []) {
+        changedIds.push(row.id);
+        previousByChangedId.set(row.id, previous);
+      }
+    }
+
+    const changedIdSet = new Set(changedIds);
+    const racedIds = candidateIds.filter(
+      (id) => !changedIdSet.has(id) && !writeFailedIds.has(id),
+    );
+    let concurrentlySatisfied = 0;
+    if (racedIds.length > 0) {
+      const { data: authoritative, error: reconcileError } = await supabase
+        .from("properties")
+        .select("id, assigned_user_id")
+        .in("id", racedIds);
+      if (reconcileError) {
+        failed.push(
+          ...racedIds.map((propertyId) => ({
+            propertyId,
+            message: "The current assignment could not be verified.",
+          })),
+        );
+      } else {
+        const authoritativeById = new Map(
+          (authoritative ?? []).map((row) => [row.id, row.assigned_user_id]),
+        );
+        for (const propertyId of racedIds) {
+          if (authoritativeById.get(propertyId) === userId) {
+            concurrentlySatisfied++;
+          } else {
+            failed.push({
+              propertyId,
+              message: "This lead changed before the assignment was saved.",
+            });
+          }
+        }
+      }
+    }
+
+    if (changedIds.length > 0) {
+      const batchId = randomUUID();
+      const actor = user?.id
+        ? ({ actorType: "user", actorId: user.id } as const)
+        : ({ actorType: "system" } as const);
+      await recordLeadEvents(
+        changedIds.map((propertyId) => ({
+          propertyId,
+          ...actor,
+          eventType: LEAD_EVENT_TYPES.ASSIGNED,
+          payload: {
+            from: previousByChangedId.get(propertyId) ?? null,
+            to: userId,
+            batch_id: batchId,
+            batch_count: changedIds.length,
+          },
+        })),
+      );
     }
 
     // Feature 7 — fire property_assigned notifications. Best-effort:
     // dispatch swallows errors internally, and we catch anything that
     // bubbles so a notification hiccup never fails the assignment.
-    try {
-      await dispatchPropertyAssigned(supabase, {
-        propertyIds: assignIds,
-        newAssigneeId: userId,
-        actorId: user?.id ?? null,
-        assignerName: user?.email?.split("@")[0] ?? null,
-      });
-    } catch (e) {
-      reportError(e, {
-        tags: { surface: "assign_leads_bulk_notification_dispatch" },
-        extra: { count: assignIds.length },
-      });
+    if (changedIds.length > 0) {
+      try {
+        await dispatchPropertyAssigned(supabase, {
+          propertyIds: changedIds,
+          newAssigneeId: userId,
+          actorId: user?.id ?? null,
+          assignerName: user?.email?.split("@")[0] ?? null,
+        });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "assign_leads_bulk_notification_dispatch" },
+          extra: { count: changedIds.length },
+        });
+      }
     }
 
     return ok({
-      succeeded: assignIds.length,
-      skipped: 0,
-      failed: [
-        ...partition.data.locked.map((propertyId) => ({
-          propertyId,
-          message: DNC_LOCKED_MESSAGE,
-        })),
-        ...partition.data.missing.map((propertyId) => ({
-          propertyId,
-          message: "Property not found",
-        })),
-      ],
+      succeeded: changedIds.length,
+      skipped: unchangedIds.length + concurrentlySatisfied,
+      failed,
     });
   } catch (e) {
     reportError(e, {
@@ -1979,19 +2087,68 @@ export async function updateLeadAssignee(
         },
       };
     }
-    const { error } = await supabase
+    const { data: current, error: lookupError } = await supabase
+      .from("properties")
+      .select("id, assigned_user_id")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (lookupError) {
+      return {
+        ok: false,
+        error: { code: "ASSIGNEE_FETCH_FAILED", message: lookupError.message },
+      };
+    }
+    if (!current) {
+      return {
+        ok: false,
+        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+      };
+    }
+    if (current.assigned_user_id === userId) return ok(null);
+
+    let update = supabase
       .from("properties")
       .update({
         assigned_user_id: userId,
         updated_at: new Date().toISOString(),
       })
       .eq("id", propertyId);
+    update =
+      current.assigned_user_id === null
+        ? update.is("assigned_user_id", null)
+        : update.eq("assigned_user_id", current.assigned_user_id);
+    const { data: saved, error } = await update
+      .select("id, assigned_user_id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "ASSIGNEE_UPDATE_FAILED", message: error.message },
       };
     }
+    if (!saved) {
+      const { data: authoritative, error: reconcileError } = await supabase
+        .from("properties")
+        .select("assigned_user_id")
+        .eq("id", propertyId)
+        .maybeSingle();
+      if (!reconcileError && authoritative?.assigned_user_id === userId) {
+        return ok(null);
+      }
+      return {
+        ok: false,
+        error: {
+          code: "ASSIGNEE_CONFLICT",
+          message: "This lead changed before the assignment was saved.",
+        },
+      };
+    }
+    await recordLeadEvent({
+      propertyId,
+      ...(await getLeadEventActor(supabase)),
+      eventType: LEAD_EVENT_TYPES.ASSIGNED,
+      payload: { from: current.assigned_user_id, to: userId },
+    });
     return ok(null);
   } catch (e) {
     reportError(e, {
