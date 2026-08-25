@@ -1,5 +1,6 @@
 import {
   cancelJitterSoftphoneCall,
+  cancelJitterSoftphoneCallByStartIntent,
   connectJitterSoftphoneCall,
   getJitterSoftphoneToken,
   reportJitterSoftphoneAudioHealth,
@@ -13,6 +14,7 @@ import type {
   JitterAudioHealthSample,
   JitterConnectPhase,
   JitterProxyResult,
+  JitterStartCallResult,
   JitterTokenResponse,
 } from "./jitter-contract";
 import type {
@@ -69,7 +71,7 @@ export type JitterTransportDependencies = {
   prepareMicrophone(): Promise<void>;
   startCall(
     target: CallTarget,
-  ): Promise<JitterProxyResult<{ callId: string; batchId: string }>>;
+  ): Promise<JitterStartCallResult>;
   getToken(callId: string): Promise<JitterProxyResult<JitterTokenResponse>>;
   connect(
     callId: string,
@@ -77,6 +79,10 @@ export type JitterTransportDependencies = {
   ): Promise<JitterProxyResult<{ dialing: true }>>;
   cancel(
     callId: string,
+    reason: JitterCancelReason,
+  ): Promise<JitterProxyResult<JitterCancelResponse>>;
+  cancelByStartIntent?(
+    intentCapability: string,
     reason: JitterCancelReason,
   ): Promise<JitterProxyResult<JitterCancelResponse>>;
   reportAudioHealth(
@@ -103,6 +109,7 @@ const defaultDependencies: JitterTransportDependencies = {
   getToken: getJitterSoftphoneToken,
   connect: connectJitterSoftphoneCall,
   cancel: cancelJitterSoftphoneCall,
+  cancelByStartIntent: cancelJitterSoftphoneCallByStartIntent,
   reportAudioHealth: reportJitterSoftphoneAudioHealth,
   sendDigit: sendJitterSoftphoneDigit,
   createRtcClient: createTelnyxRtcClient,
@@ -162,6 +169,8 @@ export class JitterCallTransport implements CallTransport {
   private listener: ((state: CallTransportState) => void) | null = null;
   private currentState: CallTransportState | null = null;
   private callId: string | null = null;
+  private startIntentCapability: string | null = null;
+  private startOutcomeAmbiguous = false;
   private rtcClient: TelnyxRtcLike | null = null;
   private currentCall: TelnyxCallLike | null = null;
   private currentCallId: string | null = null;
@@ -280,6 +289,8 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private async startInternal(target: CallTarget): Promise<CallHandle> {
+    this.startIntentCapability = target.intentCapability ?? null;
+    this.startOutcomeAmbiguous = false;
     this.emit("connecting");
     try {
       // Ask for microphone access while the call-button gesture is still the
@@ -290,7 +301,16 @@ export class JitterCallTransport implements CallTransport {
       // capture is proven available.
       await this.dependencies.prepareMicrophone();
       const started = await this.startCallWithLostResponseRecovery(target);
+      this.startOutcomeAmbiguous = started.ambiguous === true;
       if (!started.ok) throw proxyError(started);
+      if (this.hangupRequested || this.terminal || this.cancelPromise) {
+        // The operator may have ended the attempt while the start response was
+        // in flight. Treat that response as ambiguous and never resurrect a
+        // late-arriving browser leg after fallback teardown began.
+        this.startOutcomeAmbiguous = true;
+        await this.cancel("hangup");
+        throw new Error("Call start was canceled.");
+      }
       this.callId = started.data.callId;
       this.removePageHideListener = this.dependencies.subscribePageHide(() =>
         this.onPageHide(),
@@ -336,9 +356,8 @@ export class JitterCallTransport implements CallTransport {
 
   private async startCallWithLostResponseRecovery(
     target: CallTarget,
-  ): Promise<JitterProxyResult<{ callId: string; batchId: string }>> {
-    let lastResult:
-      JitterProxyResult<{ callId: string; batchId: string }> | undefined;
+  ): Promise<JitterStartCallResult> {
+    let lastResult: JitterStartCallResult | undefined;
     let lastError: unknown;
     for (
       let attempt = 0;
@@ -346,16 +365,29 @@ export class JitterCallTransport implements CallTransport {
       attempt += 1
     ) {
       try {
-        lastResult = await this.dependencies.startCall(target);
-        if (lastResult.ok || lastResult.status < 500) return lastResult;
+        const result = await this.dependencies.startCall(target);
+        lastResult = result;
+        if (result.ok) return result;
+        if (result.ambiguous === true || result.status >= 500) continue;
+        // Every delivered 4xx is authoritative. It is safe to stop retrying
+        // and must not trigger cancel-by-key fallback.
+        return { ...result, ambiguous: false };
       } catch (error) {
         lastError = error;
       }
     }
-    if (lastResult) return lastResult;
-    throw lastError instanceof Error
-      ? lastError
-      : new Error("Jitter call start response was lost.");
+    if (lastResult) return { ...lastResult, ambiguous: true };
+    if (lastError instanceof Error) {
+      Object.assign(lastError, { ambiguous: true });
+      throw lastError;
+    }
+    return {
+      ok: false,
+      status: 503,
+      error: "Jitter call start response was lost.",
+      errorCode: "jitter_unavailable",
+      ambiguous: true,
+    };
   }
 
   private bindRtcEvents(client: TelnyxRtcLike): void {
@@ -601,6 +633,11 @@ export class JitterCallTransport implements CallTransport {
     error: unknown,
     failureState: Extract<CallTransportState, "failed" | "operator_busy" | "not_callable" | "caller_id_unavailable" | "caller_id_inventory_unavailable"> = "failed",
   ): Promise<void> {
+    if (error instanceof Error && "ambiguous" in error) {
+      this.startOutcomeAmbiguous =
+        this.startOutcomeAmbiguous ||
+        (error as Error & { ambiguous?: unknown }).ambiguous === true;
+    }
     if (!this.terminal) {
       this.terminal = "failed";
       this.terminalAt ??= this.dependencies.now();
@@ -608,13 +645,14 @@ export class JitterCallTransport implements CallTransport {
       const reject = this.rejectRegistration;
       this.clearRegistration();
       reject?.(error);
-      this.emit(failureState);
+      this.emit(this.startOutcomeAmbiguous ? "failed" : failureState);
     }
     await this.cancel("failed");
   }
 
   private async hangupInternal(): Promise<CallResult> {
     this.hangupRequested = true;
+    if (!this.callId && this.startPromise) this.startOutcomeAmbiguous = true;
     this.expectedIncoming = false;
     this.terminalAt ??= this.dependencies.now();
     try {
@@ -640,6 +678,46 @@ export class JitterCallTransport implements CallTransport {
   private cancel(reason: JitterCancelReason): Promise<boolean> {
     if (this.cancelPromise) return this.cancelPromise;
     if (!this.callId) {
+      if (this.startOutcomeAmbiguous && this.startIntentCapability) {
+        const intentCapability = this.startIntentCapability;
+        const cancelByStartIntent = this.dependencies.cancelByStartIntent;
+        if (cancelByStartIntent) {
+          const attempt = (async () => {
+            for (let index = 0; index < JITTER_CANCEL_ATTEMPTS; index += 1) {
+              try {
+                const result = await cancelByStartIntent(intentCapability, reason);
+                if (result.ok) {
+                  const recovered = !this.lastTeardownConfirmed;
+                  this.lastTeardownConfirmed = true;
+                  this.destroyRtc();
+                  if (recovered) this.emit("teardown_confirmed");
+                  return true;
+                }
+              } catch {
+                // A thrown/lost Server Action response is unconfirmed.
+              }
+              const delayMs = JITTER_CANCEL_BACKOFF_MS[index];
+              if (delayMs !== undefined) await this.dependencies.sleep(delayMs);
+            }
+            this.lastTeardownConfirmed = false;
+            this.emit("teardown_unconfirmed");
+            this.destroyRtc(true);
+            return false;
+          })();
+          this.cancelPromise = attempt;
+          void attempt.then(
+            (confirmed) => {
+              if (!confirmed && this.cancelPromise === attempt)
+                this.cancelPromise = null;
+            },
+            () => {
+              this.lastTeardownConfirmed = false;
+              if (this.cancelPromise === attempt) this.cancelPromise = null;
+            },
+          );
+          return attempt;
+        }
+      }
       this.lastTeardownConfirmed = true;
       this.destroyRtc();
       return Promise.resolve(true);
@@ -876,9 +954,13 @@ function proxyError(error: {
   error: string;
   errorCode: string;
   reason?: string;
+  ambiguous?: boolean;
 }): Error {
   const result = new Error(error.reason ?? error.error);
   result.name = error.errorCode;
+  Object.assign(result, {
+    ambiguous: error.ambiguous === true,
+  });
   return result;
 }
 

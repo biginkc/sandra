@@ -6,6 +6,8 @@ export type CallTarget = {
   contactId?: string;
   /** Stable per-call intent shared with wrap-up and Jitter idempotency. */
   callToken?: string;
+  /** Server-sealed start intent used only by the real Jitter transport. */
+  intentCapability?: string;
 };
 
 export type CallHandle = { id: string };

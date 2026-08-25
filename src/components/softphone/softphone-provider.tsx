@@ -25,12 +25,19 @@ import {
   type SoftphoneTarget,
 } from "@/lib/dialer/actions";
 import { SOFTPHONE_DISPOSITIONS, type SoftphoneDisposition } from "@/lib/dialer/dispositions";
-import { loadJitterSoftphoneCallerIds } from "@/lib/dialer/jitter-actions";
+import {
+  loadJitterSoftphoneCallerIds,
+  mintJitterStartIntent,
+} from "@/lib/dialer/jitter-actions";
 import type { JitterCallerId } from "@/lib/dialer/jitter-contract";
 import { maskPhone } from "@/lib/phone-format";
 import { playDtmfTone } from "@/lib/dialer/dtmf-tone";
 import { type CallTransport, type DtmfDigit } from "@/lib/dialer/transport";
-import { createSoftphoneCallTransport, isSoftphoneTransportEnabled } from "@/lib/dialer/transport-selection";
+import {
+  createSoftphoneCallTransport,
+  isJitterTransportEnabled,
+  isSoftphoneTransportEnabled,
+} from "@/lib/dialer/transport-selection";
 import { transitionSoftphoneState, type SoftphoneState } from "@/lib/dialer/state-machine";
 
 export type SoftphoneLead = {
@@ -302,6 +309,20 @@ export function SoftphoneProvider({ children }: Props) {
     transition({ type: "call_started" });
     setPending(true);
     setError(null);
+    const jitterTransport = isJitterTransportEnabled();
+    let startIntent: { callToken: string; intentCapability: string } | null = null;
+    if (jitterTransport) {
+      const minted = await mintJitterStartIntent();
+      if (!minted.ok) {
+        startInFlightRef.current = false;
+        setPending(false);
+        setTarget(null);
+        setPhone("idle");
+        setError(minted.error);
+        return;
+      }
+      startIntent = minted.data;
+    }
     const callerIdE164 = selectedCallerIdRef.current &&
       callerIdsRef.current.some((item) => item.phone_e164 === selectedCallerIdRef.current)
       ? selectedCallerIdRef.current
@@ -350,7 +371,8 @@ export function SoftphoneProvider({ children }: Props) {
     setCallOutcome("connected_human");
     // One stable call intent owns both Jitter start retries and Sandra wrap-up
     // retries, so neither side can duplicate work after a lost response.
-    const callToken = crypto.randomUUID();
+    const callToken = startIntent?.callToken ?? crypto.randomUUID();
+    const intentCapability = startIntent?.intentCapability;
     setWrapToken(callToken);
     const transport = createSoftphoneCallTransport();
     transportRef.current = transport;
@@ -454,6 +476,7 @@ export function SoftphoneProvider({ children }: Props) {
         propertyId: result.data.propertyId ?? undefined,
         contactId: result.data.contactId ?? undefined,
         callToken,
+        ...(intentCapability ? { intentCapability } : {}),
         callerIdE164,
       });
     } catch (error) {

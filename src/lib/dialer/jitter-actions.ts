@@ -7,12 +7,14 @@ import type {
 } from "./jitter-contract";
 import {
   cancelAuthenticatedJitterCall,
+  cancelJitterCallByStartIntent,
   connectAuthenticatedJitterCall,
   getAuthenticatedJitterToken,
   getAuthenticatedJitterCallerIds,
   reportAuthenticatedJitterAudioHealth,
   sendAuthenticatedJitterDigit,
   startAuthenticatedJitterCall,
+  mintStartIntent,
 } from "./jitter-server";
 import {
   isSimulatedTransportEnabled,
@@ -21,6 +23,10 @@ import {
 
 export async function startJitterSoftphoneCall(target: CallTarget) {
   return startAuthenticatedJitterCall(target);
+}
+
+export async function mintJitterStartIntent() {
+  return mintStartIntent();
 }
 
 export async function loadJitterSoftphoneCallerIds() {
@@ -53,6 +59,13 @@ export async function cancelJitterSoftphoneCall(
   reason: JitterCancelReason,
 ) {
   return cancelAuthenticatedJitterCall(callId, reason);
+}
+
+export async function cancelJitterSoftphoneCallByStartIntent(
+  intentCapability: string,
+  reason: JitterCancelReason,
+) {
+  return cancelJitterCallByStartIntent(intentCapability, reason);
 }
 
 export async function reportJitterSoftphoneAudioHealth(

@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { completeSoftphoneCall, loadCallerIds, loadDialerRecents, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, searchDialerLeads, createTransport, transportEnabled, playDtmfTone } = vi.hoisted(() => ({
+const { completeSoftphoneCall, loadCallerIds, loadDialerRecents, mintStartIntent, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, searchDialerLeads, createTransport, jitterEnabled, transportEnabled, playDtmfTone } = vi.hoisted(() => ({
   completeSoftphoneCall: vi.fn(),
   loadDialerRecents: vi.fn(async () => ({ ok: true, data: [] })),
   prepareLeadCall: vi.fn(),
@@ -13,6 +13,8 @@ const { completeSoftphoneCall, loadCallerIds, loadDialerRecents, prepareLeadCall
   searchDialerLeads: vi.fn(async () => ({ ok: true, data: [] })),
   playDtmfTone: vi.fn(),
   loadCallerIds: vi.fn(),
+  mintStartIntent: vi.fn(),
+  jitterEnabled: vi.fn(),
 }));
 
 vi.mock("@/lib/dialer/actions", () => ({
@@ -26,12 +28,14 @@ vi.mock("@/lib/dialer/actions", () => ({
 
 vi.mock("@/lib/dialer/jitter-actions", () => ({
   loadJitterSoftphoneCallerIds: loadCallerIds,
+  mintJitterStartIntent: mintStartIntent,
 }));
 
 vi.mock("@/lib/dialer/dtmf-tone", () => ({ playDtmfTone }));
 
 vi.mock("@/lib/dialer/transport-selection", () => ({
   createSoftphoneCallTransport: createTransport,
+  isJitterTransportEnabled: jitterEnabled,
   isSoftphoneTransportEnabled: transportEnabled,
 }));
 
@@ -46,8 +50,10 @@ describe("SoftphoneProvider transport gate", () => {
     searchDialerLeads.mockResolvedValue({ ok: true, data: [] });
     playDtmfTone.mockReset();
     resumeFailedSoftphoneCall.mockReset();
+    mintStartIntent.mockReset();
     loadDialerRecents.mockResolvedValue({ ok: true, data: [] });
     transportEnabled.mockImplementation(() => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "simulated");
+    jitterEnabled.mockImplementation(() => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "jitter");
     createTransport.mockImplementation(() => {
       let listener: ((state: "connecting" | "ringing" | "live" | "ended" | "failed") => void) | null = null;
       return {
@@ -69,6 +75,10 @@ describe("SoftphoneProvider transport gate", () => {
     loadCallerIds.mockResolvedValue({
       ok: true,
       data: { caller_ids: [{ phone_e164: "+18165550100", label: "Main" }] },
+    });
+    mintStartIntent.mockResolvedValue({
+      ok: true,
+      data: { callToken: "server-call-token", intentCapability: "server-intent-capability" },
     });
     window.localStorage.clear();
   });
@@ -164,12 +174,36 @@ describe("SoftphoneProvider transport gate", () => {
 
     await user.click(screen.getByTestId("call-lead-button"));
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not prepare the call. Try again.");
-    expect(resumeFailedSoftphoneCall).toHaveBeenCalledWith("property-1");
     expect(screen.getByTestId("dialer-input")).toBeInTheDocument();
 
     await user.click(screen.getByTestId("call-lead-button"));
     expect(await screen.findByRole("alert")).toHaveTextContent("Lead is not callable.");
     expect(prepareLeadCall).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not mint a Jitter intent or invoke intent cancel in simulated mode", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        contactId: "contact-1",
+        phoneE164: "+18165550123",
+        maskedPhone: "(816) 555-0123",
+        name: "Softphone Lead",
+        address: "1 Main St",
+        state: "MO",
+        startedAt: "2026-08-21T15:00:00.000Z",
+      },
+    });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalled());
+    expect(mintStartIntent).not.toHaveBeenCalled();
+    expect(createTransport.mock.results[0].value.start).toHaveBeenCalledWith(
+      expect.not.objectContaining({ intentCapability: expect.anything() }),
+    );
   });
 
   it("accepts clicked and keyboard digits once, tones only those presses, and keeps paste silent", async () => {

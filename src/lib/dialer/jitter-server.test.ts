@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   requestToken: vi.fn(),
   requestConnect: vi.fn(),
   requestCancel: vi.fn(),
+  requestCancelByKey: vi.fn(),
   requestAudioHealth: vi.fn(),
   requestCallerIds: vi.fn(),
 }));
@@ -32,6 +33,7 @@ vi.mock("./jitter-contract", async (importOriginal) => ({
   requestJitterToken: mocks.requestToken,
   requestJitterConnect: mocks.requestConnect,
   requestJitterCancel: mocks.requestCancel,
+  requestJitterCancelByIdempotencyKey: mocks.requestCancelByKey,
   requestJitterAudioHealth: mocks.requestAudioHealth,
   requestJitterCallerIds: mocks.requestCallerIds,
 }));
@@ -42,12 +44,13 @@ import {
   getAuthenticatedJitterToken,
   reportAuthenticatedJitterAudioHealth,
   startAuthenticatedJitterCall,
+  mintStartIntent,
+  cancelJitterCallByStartIntent,
   getAuthenticatedJitterCallerIds,
 } from "./jitter-server";
 
 const SANDRA_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 const CALL_ID = "00000000-0000-4000-8000-000000000011";
-const CALL_TOKEN = "11111111-1111-4111-8111-111111111111";
 const OLD_CAPABILITY_KEY = `v1:${"o".repeat(48)}`;
 const NEW_CAPABILITY_KEY = `v1:${"n".repeat(48)}`;
 
@@ -75,12 +78,21 @@ const cancelData = {
   },
 };
 
+let START_INTENT = "";
+let START_CALL_TOKEN = "";
+
 function callTarget(overrides: Record<string, unknown> = {}) {
-  return { phoneE164: "+18165550123", callerIdE164: "+18165550100", callToken: CALL_TOKEN, ...overrides };
+  return {
+    phoneE164: "+18165550123",
+    callerIdE164: "+18165550100",
+    callToken: START_CALL_TOKEN,
+    intentCapability: START_INTENT,
+    ...overrides,
+  };
 }
 
 describe("authenticated Jitter softphone server boundary", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", "test-service-token");
     vi.stubEnv("SOFTPHONE_CAPABILITY_KEY", OLD_CAPABILITY_KEY);
@@ -119,6 +131,7 @@ describe("authenticated Jitter softphone server boundary", () => {
       data: { dialing: true },
     });
     mocks.requestCancel.mockResolvedValue({ ok: true, data: cancelData });
+    mocks.requestCancelByKey.mockResolvedValue({ ok: true, data: cancelData });
     mocks.requestAudioHealth.mockResolvedValue({
       ok: true,
       data: { accepted: true, status: "healthy" },
@@ -127,6 +140,11 @@ describe("authenticated Jitter softphone server boundary", () => {
       ok: true,
       data: { caller_ids: [{ phone_e164: "+18165550100", label: "Main" }] },
     });
+    const minted = await mintStartIntent();
+    if (!minted.ok) throw new Error("expected start intent mint");
+    START_INTENT = minted.data.intentCapability;
+    START_CALL_TOKEN = minted.data.callToken;
+    vi.clearAllMocks();
   });
 
   it("authorizes active Sandra access and sends the selected caller ID", async () => {
@@ -155,8 +173,52 @@ describe("authenticated Jitter softphone server boundary", () => {
         timezone: "America/Chicago",
         caller_id_e164: "+18165550100",
       },
-      CALL_TOKEN,
+      START_CALL_TOKEN,
     );
+  });
+
+  it("mints the idempotency key server-side and returns a caller-bound intent", async () => {
+    const first = await mintStartIntent();
+    const second = await mintStartIntent();
+    expect(first).toMatchObject({ ok: true, data: { intentCapability: expect.stringMatching(/^v1\./) } });
+    expect(second).toMatchObject({ ok: true, data: { intentCapability: expect.stringMatching(/^v1\./) } });
+    if (!first.ok || !second.ok) throw new Error("expected minted intents");
+    expect(first.data.callToken).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(first.data.callToken).not.toBe(second.data.callToken);
+  });
+
+  it("cancels by intent, rejects cross-operator use, and refuses capability type confusion", async () => {
+    const started = await startAuthenticatedJitterCall(
+      callTarget({ propertyId: "property-1", contactId: "contact-1" }),
+    );
+    if (!started.ok) throw new Error("expected successful start");
+
+    await expect(
+      cancelJitterCallByStartIntent(START_INTENT, "abandoned"),
+    ).resolves.toMatchObject({ ok: true });
+    expect(mocks.requestCancelByKey).toHaveBeenCalledWith(
+      START_CALL_TOKEN,
+      "abandoned",
+    );
+
+    await expect(
+      cancelAuthenticatedJitterCall(START_INTENT, "abandoned"),
+    ).resolves.toMatchObject({ ok: false, status: 400 });
+    await expect(
+      cancelJitterCallByStartIntent(started.data.callId, "abandoned"),
+    ).resolves.toMatchObject({ ok: false, status: 400 });
+
+    mocks.getUser.mockResolvedValue({
+      data: { user: { id: "user-2" } },
+      error: null,
+    });
+    mocks.getCallerMemberships.mockResolvedValue([
+      { user_id: "user-2", org_id: SANDRA_ORG_ID, role: "member" },
+    ]);
+    await expect(
+      cancelJitterCallByStartIntent(START_INTENT, "abandoned"),
+    ).resolves.toMatchObject({ ok: false, status: 400 });
+    expect(mocks.requestCancelByKey).toHaveBeenCalledTimes(1);
   });
 
   it("authenticates caller-ID inventory reads before contacting Jitter", async () => {
@@ -191,7 +253,7 @@ describe("authenticated Jitter softphone server boundary", () => {
           contactId: "contact-1",
         }),
       ),
-    ).resolves.toEqual({
+    ).resolves.toMatchObject({
       ok: false,
       status: 422,
       error: "Calling is unavailable during quiet hours.",

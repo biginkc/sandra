@@ -76,9 +76,23 @@ export type JitterProxyError = {
   error: string;
   errorCode: string;
   reason?: string;
+  /** Set only when a start request may have committed before its response was lost. */
+  ambiguous?: boolean;
 };
 
 export type JitterProxyResult<T> = { ok: true; data: T } | JitterProxyError;
+
+/**
+ * `ambiguous` is deliberately independent from HTTP status: a delivered 500
+ * and a lost response can both mean Jitter provisioned. Any delivered 4xx is
+ * authoritative and clears the fallback.
+ */
+export type JitterStartCallResult = JitterProxyResult<{
+  callId: string;
+  batchId: string;
+}> & {
+  ambiguous?: boolean;
+};
 
 type JsonObject = Record<string, unknown>;
 type ResponseValidator<T> = (value: unknown) => value is T;
@@ -135,6 +149,7 @@ export async function requestJitterSoftphone<T>(args: {
   method?: "GET" | "POST";
   body?: JsonObject;
   idempotencyKey?: string;
+  ambiguousOnNetworkError?: boolean;
   validate: ResponseValidator<T>;
   fetchImpl?: typeof fetch;
 }): Promise<JitterProxyResult<T>> {
@@ -172,6 +187,7 @@ export async function requestJitterSoftphone<T>(args: {
       status: 503,
       error: "Jitter softphone is unavailable.",
       errorCode: "jitter_unavailable",
+      ...(args.ambiguousOnNetworkError ? { ambiguous: true } : {}),
     };
   }
 
@@ -216,6 +232,7 @@ export async function requestJitterStartCall(
       path: JITTER_SOFTPHONE_PATHS.startCall,
       body,
       idempotencyKey,
+      ambiguousOnNetworkError: true,
       validate: isStartResponse,
       fetchImpl,
     });
@@ -269,6 +286,19 @@ export function requestJitterCancel(
   return requestJitterSoftphone({
     path: JITTER_SOFTPHONE_PATHS.cancel,
     body: { call_id: callId, reason },
+    validate: isCancelResponse,
+    fetchImpl,
+  });
+}
+
+export function requestJitterCancelByIdempotencyKey(
+  idempotencyKey: string,
+  reason: JitterCancelReason,
+  fetchImpl?: typeof fetch,
+): Promise<JitterProxyResult<JitterCancelResponse>> {
+  return requestJitterSoftphone({
+    path: JITTER_SOFTPHONE_PATHS.cancel,
+    body: { idempotency_key: idempotencyKey, reason },
     validate: isCancelResponse,
     fetchImpl,
   });

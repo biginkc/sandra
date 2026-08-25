@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import { getCallerMemberships, type Membership } from "@/lib/auth/memberships";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
@@ -8,6 +8,7 @@ import { createClient } from "@/lib/supabase/server";
 
 import {
   requestJitterCancel,
+  requestJitterCancelByIdempotencyKey,
   requestJitterAudioHealth,
   requestJitterConnect,
   requestJitterCallerIds,
@@ -22,6 +23,7 @@ import {
   type JitterCallerIdsResponse,
   type JitterProxyError,
   type JitterProxyResult,
+  type JitterStartCallResult,
   type JitterTokenResponse,
 } from "./jitter-contract";
 import type { CallTarget } from "./transport";
@@ -33,7 +35,7 @@ const MIN_CAPABILITY_KEY_LENGTH = 32;
 const MAX_CAPABILITY_KEY_LENGTH = 512;
 
 type AuthenticatedOperator = { ok: true; userId: string };
-type ClientStartResponse = { callId: string; batchId: string };
+type StartIntent = { idempotencyKey: string; userId: string };
 
 async function authenticatedOperator(): Promise<
   AuthenticatedOperator | JitterProxyError
@@ -87,23 +89,31 @@ function invalidInput(error: string): JitterProxyError {
 
 export async function startAuthenticatedJitterCall(
   target: unknown,
-): Promise<JitterProxyResult<ClientStartResponse>> {
+): Promise<JitterStartCallResult> {
   if (!isCallTarget(target))
-    return invalidInput("A valid call target is required.");
+    return startLocalError("A valid call target is required.");
   if (!E164.test(target.phoneE164))
-    return invalidInput("A valid E.164 phone number is required.");
+    return startLocalError("A valid E.164 phone number is required.");
   if (
     typeof target.callerIdE164 !== "string" ||
     !E164.test(target.callerIdE164)
   )
-    return invalidInput("A valid caller ID is required.");
+    return startLocalError("A valid caller ID is required.");
   const callerIdE164 = target.callerIdE164;
   if (target.propertyId !== undefined && !validRef(target.propertyId))
-    return invalidInput("Invalid property reference.");
+    return startLocalError("Invalid property reference.");
   if (target.contactId !== undefined && !validRef(target.contactId))
-    return invalidInput("Invalid contact reference.");
+    return startLocalError("Invalid contact reference.");
   if (!validRef(target.callToken, 200))
-    return invalidInput("A stable call token is required.");
+    return startLocalError("A stable call token is required.");
+  if (!validRef(target.intentCapability, MAX_CAPABILITY_LENGTH))
+    return startLocalError("A valid start intent is required.");
+
+  // Server Actions are public mutation boundaries. Authorize and validate the
+  // sealed intent before the eligibility path, which can pause a lead.
+  const operator = await authenticatedOperator();
+  if (!operator.ok) return startLocalError(operator.error, operator);
+
   const capabilitySigningKey = capabilityKey(
     process.env.SOFTPHONE_CAPABILITY_KEY,
   );
@@ -113,13 +123,18 @@ export async function startAuthenticatedJitterCall(
       status: 503,
       error: "Jitter softphone is not configured.",
       errorCode: "jitter_not_configured",
+      ambiguous: true,
     };
   }
 
-  // Server Actions are public mutation boundaries. Authorize before the
-  // eligibility path, which can pause a lead's active sequences.
-  const operator = await authenticatedOperator();
-  if (!operator.ok) return operator;
+  const intent = openStartIntentCapability(
+    target.intentCapability,
+    operator.userId,
+    capabilitySigningKey,
+  );
+  if (!intent || intent.idempotencyKey !== target.callToken) {
+    return startLocalError("Invalid Jitter start intent.");
+  }
 
   // Re-run the unchanged Sandra eligibility path instead of trusting a
   // browser-prepared target.
@@ -127,52 +142,52 @@ export async function startAuthenticatedJitterCall(
     ? await prepareLeadCall(target.propertyId)
     : await prepareManualCall(target.phoneE164);
   if (!prepared.ok) {
-    return {
+    return startLocalError(prepared.error, {
       ok: false,
       status: 422,
       error: prepared.error,
       errorCode: "not_callable",
       reason: prepared.error,
-    };
+    });
   }
   if (
     prepared.data.phoneE164 !== target.phoneE164 ||
     (target.contactId !== undefined &&
       prepared.data.contactId !== target.contactId)
   ) {
-    return {
+    return startLocalError("The call target no longer matches Sandra's eligible lead.", {
       ok: false,
       status: 422,
       error: "The call target no longer matches Sandra's eligible lead.",
       errorCode: "not_callable",
       reason: "target_changed",
-    };
+    });
   }
 
   // prepareManualCall historically uses Missouri as a quiet-hours fallback
   // for an unlinked number. CONTRACT v2 requires the prospect's actual IANA
   // timezone, so that fallback must never cross the Jitter boundary.
   if (!prepared.data.propertyId) {
-    return {
+    return startLocalError("A verified lead timezone is required before calling this number.", {
       ok: false,
       status: 422,
       error: "A verified lead timezone is required before calling this number.",
       errorCode: "not_callable",
       reason: "timezone_unverified",
-    };
+    });
   }
 
   const timezone = prepared.data.state
     ? STATE_TO_TZ[prepared.data.state.trim().toUpperCase()]
     : undefined;
   if (!timezone) {
-    return {
+    return startLocalError("The call target does not have a supported IANA timezone.", {
       ok: false,
       status: 422,
       error: "The call target does not have a supported IANA timezone.",
       errorCode: "not_callable",
       reason: "timezone_unavailable",
-    };
+    });
   }
 
   const started = await requestJitterStartCall(
@@ -182,9 +197,9 @@ export async function startAuthenticatedJitterCall(
       timezone,
       caller_id_e164: callerIdE164,
     },
-    target.callToken,
+    intent.idempotencyKey,
   );
-  if (!started.ok) return started;
+  if (!started.ok) return { ...started, ambiguous: started.ambiguous ?? started.status >= 500 };
   const capability = sealCallCapability(
     started.data.call_id,
     operator.userId,
@@ -193,6 +208,31 @@ export async function startAuthenticatedJitterCall(
   return {
     ok: true,
     data: { callId: capability, batchId: started.data.batch_id },
+    ambiguous: false,
+  };
+}
+
+export async function mintStartIntent(): Promise<
+  JitterProxyResult<{ callToken: string; intentCapability: string }>
+> {
+  const operator = await authenticatedOperator();
+  if (!operator.ok) return operator;
+  const key = capabilityKey(process.env.SOFTPHONE_CAPABILITY_KEY);
+  if (!key) {
+    return {
+      ok: false,
+      status: 503,
+      error: "Jitter softphone is not configured.",
+      errorCode: "jitter_not_configured",
+    };
+  }
+  const callToken = randomUUID();
+  return {
+    ok: true,
+    data: {
+      callToken,
+      intentCapability: sealStartIntentCapability(callToken, operator.userId, key),
+    },
   };
 }
 
@@ -241,6 +281,35 @@ export async function cancelAuthenticatedJitterCall(
   return requestJitterCancel(callId, reason);
 }
 
+export async function cancelJitterCallByStartIntent(
+  intentCapability: unknown,
+  reason: unknown,
+): Promise<JitterProxyResult<JitterCancelResponse>> {
+  if (!isCancelReason(reason)) {
+    return invalidInput("Invalid Jitter cancellation reason.");
+  }
+  const operator = await authenticatedOperator();
+  if (!operator.ok) return operator;
+  const capabilitySigningKey = capabilityKey(
+    process.env.SOFTPHONE_CAPABILITY_KEY,
+  );
+  if (!capabilitySigningKey) {
+    return {
+      ok: false,
+      status: 503,
+      error: "Jitter softphone is not configured.",
+      errorCode: "jitter_not_configured",
+    };
+  }
+  const intent = openStartIntentCapability(
+    intentCapability,
+    operator.userId,
+    capabilitySigningKey,
+  );
+  if (!intent) return invalidInput("Invalid Jitter start intent.");
+  return requestJitterCancelByIdempotencyKey(intent.idempotencyKey, reason);
+}
+
 export async function sendAuthenticatedJitterDigit(
   callCapability: unknown,
   digit: unknown,
@@ -277,7 +346,9 @@ function isCallTarget(value: unknown): value is CallTarget {
     (target.propertyId === undefined ||
       typeof target.propertyId === "string") &&
     (target.contactId === undefined || typeof target.contactId === "string") &&
-    typeof target.callToken === "string"
+    typeof target.callToken === "string" &&
+    (target.intentCapability === undefined ||
+      typeof target.intentCapability === "string")
   );
 }
 
@@ -313,11 +384,26 @@ function sealCallCapability(
   key: string,
 ): string {
   const payload = Buffer.from(
-    JSON.stringify({ callId, userId }),
+    JSON.stringify({ type: "call", callId, userId }),
     "utf8",
   ).toString("base64url");
   const signature = createHmac("sha256", key)
-    .update(`sandra-softphone:${payload}`)
+    .update(`sandra-softphone:call:${payload}`)
+    .digest("base64url");
+  return `v1.${payload}.${signature}`;
+}
+
+function sealStartIntentCapability(
+  idempotencyKey: string,
+  userId: string,
+  key: string,
+): string {
+  const payload = Buffer.from(
+    JSON.stringify({ type: "start_intent", idempotencyKey, userId }),
+    "utf8",
+  ).toString("base64url");
+  const signature = createHmac("sha256", key)
+    .update(`sandra-softphone:start-intent:${payload}`)
     .digest("base64url");
   return `v1.${payload}.${signature}`;
 }
@@ -343,7 +429,7 @@ function openCallCapability(value: unknown, userId: string): string | null {
     .slice(0, 2)
     .some((candidate) => {
       const expected = createHmac("sha256", candidate)
-        .update(`sandra-softphone:${payload}`)
+        .update(`sandra-softphone:call:${payload}`)
         .digest();
       return (
         actual.length === expected.length && timingSafeEqual(actual, expected)
@@ -356,9 +442,65 @@ function openCallCapability(value: unknown, userId: string): string | null {
     ) as unknown;
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded))
       return null;
-    const candidate = decoded as { callId?: unknown; userId?: unknown };
-    return candidate.userId === userId && validRef(candidate.callId)
+    const candidate = decoded as {
+      type?: unknown;
+      callId?: unknown;
+      userId?: unknown;
+    };
+    return candidate.type === "call" &&
+      candidate.userId === userId && validRef(candidate.callId)
       ? candidate.callId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function openStartIntentCapability(
+  value: unknown,
+  userId: string,
+  key: string,
+): StartIntent | null {
+  if (!validRef(value, MAX_CAPABILITY_LENGTH)) return null;
+  const [version, payload, signature, extra] = value.split(".");
+  if (version !== "v1" || !payload || !signature || extra !== undefined)
+    return null;
+  let actual: Buffer;
+  try {
+    actual = Buffer.from(signature, "base64url");
+  } catch {
+    return null;
+  }
+  const currentKey = capabilityKey(process.env.SOFTPHONE_CAPABILITY_KEY);
+  const previousKey = capabilityKey(process.env.SOFTPHONE_CAPABILITY_KEY_PREVIOUS);
+  if (currentKey !== key) return null;
+  const verified = [currentKey, previousKey]
+    .filter((candidate): candidate is string => Boolean(candidate))
+    .slice(0, 2)
+    .some((candidate) => {
+      const expected = createHmac("sha256", candidate)
+        .update(`sandra-softphone:start-intent:${payload}`)
+        .digest();
+      return (
+        actual.length === expected.length && timingSafeEqual(actual, expected)
+      );
+    });
+  if (!verified) return null;
+  try {
+    const decoded = JSON.parse(
+      Buffer.from(payload, "base64url").toString("utf8"),
+    ) as unknown;
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded))
+      return null;
+    const candidate = decoded as {
+      type?: unknown;
+      idempotencyKey?: unknown;
+      userId?: unknown;
+    };
+    return candidate.type === "start_intent" &&
+      candidate.userId === userId &&
+      validRef(candidate.idempotencyKey, 200)
+      ? { idempotencyKey: candidate.idempotencyKey, userId: candidate.userId }
       : null;
   } catch {
     return null;
@@ -373,4 +515,11 @@ function capabilityKey(value: string | undefined): string | null {
     key.length <= MAX_CAPABILITY_KEY_LENGTH
     ? key
     : null;
+}
+
+function startLocalError(
+  error: string,
+  result: JitterProxyError = invalidInput(error),
+): JitterStartCallResult {
+  return { ...result, ambiguous: false };
 }
