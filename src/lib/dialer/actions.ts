@@ -426,6 +426,31 @@ export async function completeSoftphoneCall(input: {
         }
         activity = { ...activity, id: updatedActivity.id };
       } else if (!activity) {
+        // An attempt row that exists but was not claimable above (another
+        // operator, or an already-wrapped different token) must reject
+        // BEFORE the disposition side effect runs.
+        const { data: unclaimableRow, error: unclaimableError } = await supabase
+          .from("call_activities")
+          .select("id")
+          .eq("org_id", membership.org_id)
+          .eq("provider", "sandra_softphone")
+          .eq("jitter_attempt_id", jitterAttemptId)
+          .limit(1)
+          .maybeSingle();
+        if (unclaimableError) return { ok: false, error: unclaimableError.message };
+        if (unclaimableRow) {
+          return { ok: false, error: "The call activity was not saved." };
+        }
+        // Preserve origin/main's deliberate order: setOutreachDispo is the
+        // authoritative DNC_LOCKED race check and must run before any row is
+        // written, so a rejected disposition leaves nothing to clean up.
+        // (A concurrent two-tab wrap-up losing the claim after the CRM
+        // change is the accepted residual, unchanged from main.)
+        if (!replayActivity && input.target.propertyId) {
+          const dispo = await setOutreachDispo(input.target.propertyId, input.disposition);
+          if (!dispo.ok) return { ok: false, error: dispo.error };
+          dispositionSucceeded = true;
+        }
         const { data: insertedActivity, error: activityError } = await supabase
           .from("call_activities")
           .insert(activityValues)
@@ -482,26 +507,6 @@ export async function completeSoftphoneCall(input: {
       }
 
       if (!activity) return { ok: false, error: "The call activity was not saved." };
-
-      // A no-row wrap-up claims its identity with the unique attempt fence
-      // before changing lead disposition. If the insert lost a race, the
-      // fallback above has already confirmed the raced row's target.
-      if (!replayActivity && !activityMatchedByAttempt && input.target.propertyId) {
-        const dispo = await setOutreachDispo(input.target.propertyId, input.disposition);
-        if (!dispo.ok) {
-          if (activityCreatedByWrapUp) {
-            await supabase
-              .from("call_activities")
-              .delete()
-              .eq("id", activity.id)
-              .eq("org_id", membership.org_id)
-              .eq("operator_user_id", user.id)
-              .eq("wrap_token", input.wrapToken);
-          }
-          return { ok: false, error: dispo.error };
-        }
-        dispositionSucceeded = true;
-      }
 
       // fn_book_appointment owns the booked_appointment write. Supplying the
       // stable wrap token makes a retry after a lost response replay the same

@@ -197,7 +197,7 @@ describe("prepareManualCall", () => {
     );
   });
 
-  it("runs disposition, activity, callback booking, then softphone resume in order", async () => {
+  it("runs disposition before the activity write, then booking and softphone resume", async () => {
     const order: string[] = [];
     const activityUpserts: Array<Record<string, unknown>> = [];
     setOutreachDispo.mockImplementation(async () => { order.push("disposition"); return { ok: true }; });
@@ -226,7 +226,7 @@ describe("prepareManualCall", () => {
       wrapToken: "11111111-1111-4111-8111-111111111111",
       callback: { date: "2026-08-22", time: "09:00", timeZone: "America/Chicago" },
     })).resolves.toMatchObject({ ok: true, data: { activityId: "activity-1", callbackTaskId: "task-1" } });
-    expect(order).toEqual(["activity", "disposition", "booking", "resume"]);
+    expect(order).toEqual(["disposition", "activity", "booking", "resume"]);
     expect(activityUpserts[0]).toMatchObject({
       jitter_attempt_id: "sandra-11111111-1111-4111-8111-111111111111",
       wrap_token: "11111111-1111-4111-8111-111111111111",
