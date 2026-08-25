@@ -461,6 +461,47 @@ describe("JitterCallTransport", () => {
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
   });
 
+  it("cancels a late start response after hangup begins", async () => {
+    let resolveStart!: (value: {
+      ok: true;
+      data: { callId: string; batchId: string };
+      ambiguous: false;
+    }) => void;
+    const startCall = vi.fn(
+      () =>
+        new Promise<{
+          ok: true;
+          data: { callId: string; batchId: string };
+          ambiguous: false;
+        }>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    const harness = transportHarness({ startCall });
+    const start = harness.transport.start(target());
+    await flush();
+
+    const hangup = harness.transport.hangup();
+    await flush();
+    expect(harness.dependencies.cancelByStartIntent).toHaveBeenCalledWith(
+      "intent-capability",
+      "hangup",
+    );
+
+    resolveStart({
+      ok: true,
+      data: { callId: "late-call", batchId: "batch-1" },
+      ambiguous: false,
+    });
+    await expect(start).rejects.toThrow("Call start was canceled.");
+    await expect(hangup).resolves.toEqual({
+      durationSeconds: 0,
+      outcome: "failed",
+    });
+    expect(harness.dependencies.getToken).not.toHaveBeenCalled();
+    expect(harness.dependencies.connect).not.toHaveBeenCalled();
+  });
+
   it("fires fallback for a delivered success with a lost or malformed body", async () => {
     const startCall = vi.fn(async () => ({
       ok: false as const,

@@ -206,6 +206,41 @@ describe("SoftphoneProvider transport gate", () => {
     );
   });
 
+  it("recovers from a thrown Jitter start-intent mint and permits retry", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
+    transportEnabled.mockReturnValue(true);
+    jitterEnabled.mockReturnValue(true);
+    mintStartIntent
+      .mockRejectedValueOnce(new Error("start intent response lost"))
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { callToken: "server-call-token", intentCapability: "server-intent-capability" },
+      });
+    prepareLeadCall.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        contactId: "contact-1",
+        phoneE164: "+18165550123",
+        maskedPhone: "(816) 555-0123",
+        name: "Softphone Lead",
+        address: "1 Main St",
+        state: "MO",
+        startedAt: "2026-08-21T15:00:00.000Z",
+      },
+    });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+
+    await user.click(screen.getByTestId("call-lead-button"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not start the call. Try again.");
+    expect(screen.queryByTestId("call-preparing")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalled());
+    expect(mintStartIntent).toHaveBeenCalledTimes(2);
+  });
+
   it("accepts clicked and keyboard digits once, tones only those presses, and keeps paste silent", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     const user = userEvent.setup();

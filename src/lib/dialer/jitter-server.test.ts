@@ -444,6 +444,28 @@ describe("authenticated Jitter softphone server boundary", () => {
     expect(mocks.requestToken).not.toHaveBeenCalled();
   });
 
+  it("rejects a start intent minted for a different Sandra user before preparation", async () => {
+    mocks.getUser.mockResolvedValue({
+      data: { user: { id: "user-2" } },
+      error: null,
+    });
+    mocks.getCallerMemberships.mockResolvedValue([
+      { user_id: "user-2", org_id: SANDRA_ORG_ID, role: "member" },
+    ]);
+
+    await expect(
+      startAuthenticatedJitterCall(
+        callTarget({ propertyId: "property-1", contactId: "contact-1" }),
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      status: 400,
+      errorCode: "invalid_request",
+    });
+    expect(mocks.prepareLeadCall).not.toHaveBeenCalled();
+    expect(mocks.requestStart).not.toHaveBeenCalled();
+  });
+
   it("accepts an in-flight capability minted under the bounded previous key after rotation", async () => {
     const started = await startAuthenticatedJitterCall(
       callTarget({

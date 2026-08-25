@@ -311,14 +311,23 @@ export function SoftphoneProvider({ children }: Props) {
     setError(null);
     const jitterTransport = isJitterTransportEnabled();
     let startIntent: { callToken: string; intentCapability: string } | null = null;
+    const abortStart = (message: string) => {
+      startInFlightRef.current = false;
+      setPending(false);
+      setTarget(null);
+      setPhone("idle");
+      setError(message);
+    };
     if (jitterTransport) {
-      const minted = await mintJitterStartIntent();
+      let minted: Awaited<ReturnType<typeof mintJitterStartIntent>>;
+      try {
+        minted = await mintJitterStartIntent();
+      } catch {
+        abortStart("Could not start the call. Try again.");
+        return;
+      }
       if (!minted.ok) {
-        startInFlightRef.current = false;
-        setPending(false);
-        setTarget(null);
-        setPhone("idle");
-        setError(minted.error);
+        abortStart(minted.error);
         return;
       }
       startIntent = minted.data;
