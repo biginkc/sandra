@@ -659,6 +659,7 @@ function makeActionClient(
           (!operatorScope || row.operatorUserId === operatorScope || row.operatorUserId === null) &&
           (!activityMatch ||
             (row.operatorUserId === activityMatch.operatorUserId && row.wrapToken === activityMatch.wrapToken) ||
+            (row.operatorUserId === activityMatch.operatorUserId && row.wrapToken === null) ||
             (row.operatorUserId === null && row.wrapToken === null))
         );
       });
@@ -669,7 +670,7 @@ function makeActionClient(
           const match = expression.match(/^operator_user_id\.eq\.([^,]+),operator_user_id\.is\.null$/);
           operatorScope = match?.[1] ?? null;
           const activityMatchExpression = expression.match(
-            /^and\(operator_user_id\.eq\.([^,]+),wrap_token\.eq\.([^\)]+)\),and\(operator_user_id\.is\.null,wrap_token\.is\.null\)$/,
+            /^and\(operator_user_id\.eq\.([^,]+),wrap_token\.eq\.([^\)]+)\),and\(operator_user_id\.eq\.[^,]+,wrap_token\.is\.null\),and\(operator_user_id\.is\.null,wrap_token\.is\.null\)$/,
           );
           activityMatch = activityMatchExpression
             ? {

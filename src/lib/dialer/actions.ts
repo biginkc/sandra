@@ -318,7 +318,10 @@ export async function completeSoftphoneCall(input: {
     // A wrap-up may claim only its own row or a writeback-first row that has
     // not been claimed yet. The token fence prevents a later submission by
     // the same operator from overwriting a completed wrap-up for this attempt.
-    const activityMatchFilter = `and(operator_user_id.eq.${user.id},wrap_token.eq.${input.wrapToken}),and(operator_user_id.is.null,wrap_token.is.null)`;
+    // Claimable rows: this operator's own wrap (same token), a
+    // writeback-first row already attributed to this operator but not yet
+    // wrapped (token null), or a fully unclaimed writeback-first row.
+    const activityMatchFilter = `and(operator_user_id.eq.${user.id},wrap_token.eq.${input.wrapToken}),and(operator_user_id.eq.${user.id},wrap_token.is.null),and(operator_user_id.is.null,wrap_token.is.null)`;
 
     if (input.target.propertyId) {
       const { data: property, error: propertyError } = await supabase

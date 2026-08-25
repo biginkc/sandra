@@ -28,6 +28,12 @@ export type CallTransportState =
 
 export interface CallTransport {
   start(target: CallTarget): Promise<CallHandle>;
+  /**
+   * The server-issued call handle, when one exists — available even if
+   * start() later rejects (e.g. RTC setup fails after provisioning), so
+   * wrap-up can keep the provisioned call's identity.
+   */
+  callHandle?(): CallHandle | null;
   mute(on: boolean): void;
   hold(on: boolean): Promise<boolean>;
   /** Sends one live in-band menu/extension digit without changing call state. */

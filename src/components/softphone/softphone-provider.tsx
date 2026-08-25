@@ -492,6 +492,9 @@ export function SoftphoneProvider({ children }: Props) {
       });
       callHandleRef.current = callHandle;
     } catch (error) {
+      // A provisioned call can fail during RTC setup after start-call
+      // succeeded; keep its handle so wrap-up uses the real call identity.
+      callHandleRef.current = transport.callHandle?.() ?? callHandleRef.current;
       terminalFailureMessage = error instanceof Error
         ? error.message
         : "The call failed. Add a note to log the outcome.";
