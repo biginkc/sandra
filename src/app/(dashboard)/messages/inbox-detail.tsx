@@ -694,9 +694,6 @@ export function InboxDetail({
                 homeownerPhone={data.replyToPhone}
                 replyToPhone={data.replyToPhone}
                 phoneUnavailableMessage="This thread number is not saved on the homeowner contact — save or resolve it before replying."
-                persistedMessageIds={data.initialMessages.map(
-                  (message) => message.id,
-                )}
               />
             ) : (
               <div

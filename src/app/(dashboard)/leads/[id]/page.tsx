@@ -783,9 +783,6 @@ export default async function LeadDetailPage({
                   homeownerPhone={homeownerSmsPhone}
                   replyToPhone={homeownerSmsPhone}
                   preferredFromNumber={preferredFromNumber}
-                  persistedMessageIds={initialMessages.map(
-                    (message) => message.id,
-                  )}
                   footerAction={
                     !smsPresentation.smsRestricted &&
                     !inlineReplyUnavailable ? (

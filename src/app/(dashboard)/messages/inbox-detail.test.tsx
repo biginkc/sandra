@@ -228,7 +228,13 @@ describe("<InboxDetail />", () => {
     vi.mocked(sendSmsFromLead).mockReset();
     vi.mocked(sendSmsFromLead).mockResolvedValue({
       ok: true,
-      data: { outcome: { status: "queued", messageId: "queued-reply-1" } },
+      data: {
+        outcome: {
+          status: "sent",
+          messageId: "sent-reply-1",
+          externalId: "mock_sent-reply-1",
+        },
+      },
     } as Awaited<ReturnType<typeof sendSmsFromLead>>);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -401,7 +407,7 @@ describe("<InboxDetail />", () => {
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
   });
 
-  it("queues inline replies to the same saved thread phone shown in Messages", async () => {
+  it("sends inline replies immediately to the same saved thread phone shown in Messages", async () => {
     const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-reply-phone",
@@ -412,7 +418,7 @@ describe("<InboxDetail />", () => {
       initialMessages: [],
     });
 
-    const view = render(
+    render(
       <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
@@ -428,56 +434,24 @@ describe("<InboxDetail />", () => {
         "prop-reply-phone",
         "Thanks",
         null,
-        true,
+        false,
         "+15550000002",
       );
     });
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
-    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
-      "Queued · in Outbox",
-    );
-    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
-      "Thanks",
-    );
-    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
-      "Outbox controls delivery",
-    );
+    expect(toast.success).toHaveBeenCalledWith("Message sent", {
+      description: "Sent to +15550000002.",
+    });
     expect(screen.getByRole("button", { name: "Insert template" })).toHaveClass(
       "min-h-11",
     );
-
-    view.rerender(
-      <InboxDetail
-        data={{
-          ...data,
-          initialMessages: [
-            makeMessage({
-              id: "queued-reply-1",
-              body: "Thanks",
-              direction: "outbound",
-              status: "queued",
-              contact_id: "contact-reply-phone",
-              property_id: "prop-reply-phone",
-              conversation_id: data.conversationId,
-            }),
-          ],
-        }}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
-    );
-    expect(screen.queryByTestId("inline-reply-queued-receipt")).toBeNull();
-    expect(screen.getAllByText("Thanks")).toHaveLength(1);
-    expect(screen.getByTestId("messages-thread-delivery-status")).toHaveTextContent(
-      "Queued · in Outbox",
-    );
   });
 
-  it("does not claim success or clear the draft if queueOnly returns an impossible immediate send", async () => {
+  it("does not claim success or clear the draft if immediate send unexpectedly queues", async () => {
     const user = userEvent.setup();
     vi.mocked(sendSmsFromLead).mockResolvedValueOnce({
       ok: true,
-      data: { outcome: { status: "sent" } },
+      data: { outcome: { status: "queued", messageId: "unexpected-queue" } },
     } as Awaited<ReturnType<typeof sendSmsFromLead>>);
     render(
       <InboxDetail
@@ -493,6 +467,10 @@ describe("<InboxDetail />", () => {
 
     await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
     expect(composer).toHaveValue("keep this draft");
+    expect(toast.error).toHaveBeenCalledWith("Send did not complete", {
+      description:
+        "The server queued this reply unexpectedly. Review Outbox before retrying.",
+    });
   });
 
   it("explains a missing approved sender and preserves the reply draft", async () => {
@@ -549,9 +527,9 @@ describe("<InboxDetail />", () => {
     );
 
     expect(screen.getByText("durable queued body")).toBeInTheDocument();
-    expect(screen.getByTestId("messages-thread-delivery-status")).toHaveTextContent(
-      "Queued · in Outbox",
-    );
+    expect(
+      screen.getByTestId("messages-thread-delivery-status"),
+    ).toHaveTextContent("Queued · in Outbox");
   });
 
   it("pauses Messages replies after a live same-thread insert until server detail refreshes", async () => {
