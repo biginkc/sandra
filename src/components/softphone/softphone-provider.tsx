@@ -31,6 +31,8 @@ import {
 } from "@/lib/dialer/jitter-actions";
 import type { JitterCallerId } from "@/lib/dialer/jitter-contract";
 import { maskPhone } from "@/lib/phone-format";
+import { CoachLiveView } from "@/components/coach/coach-live-view";
+import { isCoachUiEnabled } from "@/lib/coach/flags";
 import { playDtmfTone } from "@/lib/dialer/dtmf-tone";
 import { type CallHandle, type CallTransport, type DtmfDigit } from "@/lib/dialer/transport";
 import {
@@ -143,6 +145,8 @@ export function SoftphoneProvider({ children }: Props) {
   const [selectedCallerId, setSelectedCallerId] = useState<string | null>(null);
   const [callerIdError, setCallerIdError] = useState<string | null>(null);
   const [callingEnabled] = useState(() => isSoftphoneTransportEnabled());
+  const [coachUiEnabled] = useState(() => isCoachUiEnabled());
+  const [coachCollapsed, setCoachCollapsed] = useState(false);
   const transportRef = useRef<CallTransport | null>(null);
   const callHandleRef = useRef<CallHandle | null>(null);
   const manualHangupRef = useRef(false);
@@ -291,6 +295,7 @@ export function SoftphoneProvider({ children }: Props) {
     setStartedAt(null);
     setCallOutcome("connected_human");
     setWrapToken(null);
+    setCoachCollapsed(false);
     setPhone("idle");
   }, []);
 
@@ -380,6 +385,7 @@ export function SoftphoneProvider({ children }: Props) {
     setLiveKeypadOpen(false);
     setMuted(false);
     setCallOutcome("connected_human");
+    setCoachCollapsed(false);
     // One stable call intent owns both Jitter start retries and Sandra wrap-up
     // retries, so neither side can duplicate work after a lost response.
     const callToken = startIntent?.callToken ?? crypto.randomUUID();
@@ -638,7 +644,28 @@ export function SoftphoneProvider({ children }: Props) {
   return (
     <SoftphoneContext.Provider value={contextValue}>
       {children}
-      {typeof document !== "undefined" && phone !== "closed"
+      {typeof document !== "undefined" && phone !== "closed" && coachUiEnabled && isOnCall && wrapToken && !coachCollapsed
+        ? createPortal(
+          <CoachLiveView
+            key={wrapToken}
+            callId={wrapToken}
+            propertyId={target?.propertyId ?? null}
+            sellerPhoneE164={target?.phoneE164 ?? null}
+            repPhoneE164={selectedCallerId}
+            callName={callName}
+            seconds={seconds}
+            muted={muted}
+            held={held}
+            holdPending={holdPending}
+            onMute={() => { setMuted((value) => !value); transportRef.current?.mute(!muted); }}
+            onHold={() => { void toggleHold(); }}
+            onHangup={hangup}
+            onCollapse={() => setCoachCollapsed(true)}
+          />,
+          document.body,
+        )
+        : null}
+      {typeof document !== "undefined" && phone !== "closed" && !(coachUiEnabled && isOnCall && wrapToken && !coachCollapsed)
         ? createPortal(
         <>
           <button type="button" aria-label="Close dialer overlay" className="fixed inset-0 top-16 z-50 bg-stone-950/35 backdrop-blur-[3px] md:left-64" onClick={() => { if (phone === "idle") { resetIdle(); setPhone("closed"); } }} />
