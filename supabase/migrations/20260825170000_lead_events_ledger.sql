@@ -9,7 +9,7 @@ create table public.lead_events (
   org_id uuid not null references public.organizations(id) on delete cascade,
   property_id uuid not null,
   actor_type text not null,
-  actor_id uuid references auth.users(id) on delete set null,
+  actor_id uuid,
   event_type text not null,
   payload jsonb not null default '{}'::jsonb,
   source_type text,
@@ -17,7 +17,7 @@ create table public.lead_events (
   created_at timestamptz not null default now(),
   constraint lead_events_property_org_fkey
     foreign key (property_id, org_id)
-    references public.properties(id, org_id) on delete cascade,
+    references public.properties(id, org_id),
   constraint lead_events_actor_type_check
     check (actor_type in ('user', 'ai', 'system')),
   constraint lead_events_actor_identity_check
@@ -49,10 +49,15 @@ create policy lead_events_org_select on public.lead_events
   for select to authenticated
   using (public.hugo_has_active_org_access(org_id));
 
--- The application writer uses createAdminClient() on the server. Keeping the
--- browser role read-only avoids a SECURITY DEFINER RPC and its extra attack
--- surface for this small-team ledger.
-revoke insert, update, delete on public.lead_events from anon, authenticated;
+-- The application writer uses createAdminClient() on the server. Make the
+-- append-only ACL explicit instead of relying on hosted-project defaults:
+-- browser users may read same-org rows and the server role may only read or
+-- append. The table owner retains the privileges needed by migrations and the
+-- tightly scoped reset/merge helpers below.
+revoke all on table public.lead_events
+  from public, anon, authenticated, service_role;
+grant select on table public.lead_events to authenticated;
+grant select, insert on table public.lead_events to service_role;
 
 do $$
 begin
@@ -66,6 +71,51 @@ begin
     execute 'alter publication supabase_realtime add table public.lead_events';
   end if;
 end $$;
+
+-- Duplicate-property merges are the one approved maintenance path that may
+-- re-point existing ledger rows. Preserve the hardened public authorization
+-- wrapper and move loser history before the private merge body deletes the
+-- loser property. Any later failure rolls this update back with the merge.
+create or replace function public.merge_duplicate_properties(
+  keeper_id uuid,
+  loser_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_keeper_org_id uuid;
+  v_loser_org_id uuid;
+begin
+  select p.org_id into v_keeper_org_id
+  from public.properties p where p.id = keeper_id;
+  select p.org_id into v_loser_org_id
+  from public.properties p where p.id = loser_id;
+  if v_keeper_org_id is null or v_loser_org_id is null then
+    raise exception 'merge_duplicate_properties: one or both rows not found'
+      using errcode = 'P0002';
+  end if;
+  if v_keeper_org_id <> v_loser_org_id
+     or not public.hugo_has_active_org_access(v_keeper_org_id) then
+    raise exception 'merge_duplicate_properties: active access required'
+      using errcode = '42501';
+  end if;
+
+  update public.lead_events
+  set property_id = keeper_id
+  where property_id = loser_id
+    and org_id = v_keeper_org_id;
+
+  perform public.merge_duplicate_properties_hugo_unchecked(keeper_id, loser_id);
+end;
+$$;
+
+revoke all on function public.merge_duplicate_properties(uuid, uuid)
+  from public, anon, service_role;
+grant execute on function public.merge_duplicate_properties(uuid, uuid)
+  to authenticated;
 
 -- Keep the integration-test reset helper aligned with the latest complete
 -- definition from 20260814150000_appointments_schema.sql.

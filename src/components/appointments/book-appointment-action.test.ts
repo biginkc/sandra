@@ -12,7 +12,7 @@ const {
   kickCalendarMutationSync,
   loadIntegrationPrefs,
   pausePropertyEnrollments,
-  recordLeadEvent,
+  recordLeadEvents,
   requireOrgMembership,
   requireOrgMembershipByResource,
   revalidatePath,
@@ -34,7 +34,7 @@ const {
     timezone: "America/Chicago",
   })),
   pausePropertyEnrollments: vi.fn().mockResolvedValue({ paused: 0 }),
-  recordLeadEvent: vi.fn().mockResolvedValue(undefined),
+  recordLeadEvents: vi.fn().mockResolvedValue(undefined),
   requireOrgMembership: vi.fn(),
   requireOrgMembershipByResource: vi.fn(),
   revalidatePath: vi.fn(),
@@ -56,8 +56,11 @@ vi.mock("@/lib/integrations/slack/dispatch", () => ({
 vi.mock("@/lib/notifications/dispatch", () => ({ dispatchTaskAssigned }));
 vi.mock("@/lib/sequences/enrollment", () => ({ pausePropertyEnrollments }));
 vi.mock("@/lib/events", () => ({
-  LEAD_EVENT_TYPES: { APPOINTMENT_BOOKED: "appointment_booked" },
-  recordLeadEvent,
+  LEAD_EVENT_TYPES: {
+    APPOINTMENT_BOOKED: "appointment_booked",
+    QUALIFIED: "qualified",
+  },
+  recordLeadEvents,
 }));
 vi.mock("@/lib/appointments/inline-sync-kick", () => ({
   kickCalendarMutationSync,
@@ -636,10 +639,10 @@ describe("bookAppointment — RPC + side effects", () => {
     // via after() — but this is a retry of an already-dispatched booking,
     // so it must not double-notify the assignee.
     expect(afterMock).not.toHaveBeenCalled();
-    expect(recordLeadEvent).not.toHaveBeenCalled();
+    expect(recordLeadEvents).not.toHaveBeenCalled();
   });
 
-  it("records one privacy-safe event from the RPC-confirmed property booking", async () => {
+  it("records privacy-safe booking and confirmed qualification events", async () => {
     createClient.mockResolvedValue(
       makeSupabaseMock({
         userId: "user-1",
@@ -666,22 +669,64 @@ describe("bookAppointment — RPC + side effects", () => {
       note: "Private appointment note",
     });
 
-    expect(recordLeadEvent).toHaveBeenCalledWith({
-      propertyId: "prop-RETURNED",
-      actorType: "user",
-      actorId: "user-1",
-      eventType: "appointment_booked",
-      payload: {
-        task_id: "task-1",
-        assignee_id: "user-2",
-        due_at: "2026-06-15T19:00:00.000Z",
+    expect(recordLeadEvents).toHaveBeenCalledWith([
+      {
+        propertyId: "prop-RETURNED",
+        actorType: "user",
+        actorId: "user-1",
+        eventType: "appointment_booked",
+        payload: {
+          task_id: "task-1",
+          assignee_id: "user-2",
+          due_at: "2026-06-15T19:00:00.000Z",
+        },
+        sourceType: "appointments.booked",
+        sourceId: "calendar-ledger-1",
       },
-      sourceType: "appointments.booked",
-      sourceId: "calendar-ledger-1",
-    });
-    const event = recordLeadEvent.mock.calls[0]?.[0];
-    expect(JSON.stringify(event)).not.toContain("Private appointment title");
-    expect(JSON.stringify(event)).not.toContain("Private appointment note");
+      {
+        propertyId: "prop-RETURNED",
+        actorType: "user",
+        actorId: "user-1",
+        eventType: "qualified",
+        payload: { from: "prospect", to: "new_lead" },
+        sourceType: "appointments.qualified",
+        sourceId: "calendar-ledger-1",
+      },
+    ]);
+    expect(recordLeadEvents).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(recordLeadEvents.mock.calls)).not.toContain(
+      "Private appointment title",
+    );
+    expect(JSON.stringify(recordLeadEvents.mock.calls)).not.toContain(
+      "Private appointment note",
+    );
+  });
+
+  it("does not fabricate qualification when the property was already a lead", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        rpcResult: {
+          data: {
+            task_id: "task-2",
+            already_qualified: true,
+            calendar_chain_id: "chain-2",
+            ledger_id: "calendar-ledger-2",
+            related_property_id: "prop-2",
+            contact_id: null,
+            duplicate: false,
+          },
+          error: null,
+        },
+      }),
+    );
+
+    await bookAppointment(VALID_INPUT);
+
+    expect(recordLeadEvents).toHaveBeenCalledTimes(1);
+    expect(recordLeadEvents).toHaveBeenCalledWith([
+      expect.objectContaining({ eventType: "appointment_booked" }),
+    ]);
   });
 
   it("surfaces an RPC error instead of a synthetic success", async () => {
@@ -698,7 +743,7 @@ describe("bookAppointment — RPC + side effects", () => {
       expect(result.error.code).toBe("BOOK_APPOINTMENT_FAILED");
       expect(result.error.message).toBe("timezone mismatch");
     }
-    expect(recordLeadEvent).not.toHaveBeenCalled();
+    expect(recordLeadEvents).not.toHaveBeenCalled();
   });
 
   it("fires assignment side effects (admin-loaded prefs) only when booking for someone else", async () => {
@@ -861,7 +906,7 @@ describe("bookAppointment — RPC + side effects", () => {
     });
 
     expect(pausePropertyEnrollments).not.toHaveBeenCalled();
-    expect(recordLeadEvent).not.toHaveBeenCalled();
+    expect(recordLeadEvents).not.toHaveBeenCalled();
   });
 
   it("does not fail the booking when pausing enrollments throws — best-effort, booking already committed", async () => {

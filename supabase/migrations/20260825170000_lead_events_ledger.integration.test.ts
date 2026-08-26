@@ -136,7 +136,7 @@ describe("Migration 20260825170000 — lead events ledger", () => {
     expect(error?.message).toMatch(/foreign key|violates/i);
   });
 
-  it("denies INSERT, UPDATE, and DELETE to an authenticated member", async () => {
+  it("grants only the approved append/read privileges", async () => {
     const propertyId = await insertProperty();
     const member = await createUserForOrg(BMH_ORG_ID);
     const { data: inserted } = await serviceClient
@@ -148,19 +148,72 @@ describe("Migration 20260825170000 — lead events ledger", () => {
     const { error: insertError } = await member.client
       .from("lead_events")
       .insert(eventInsert(propertyId));
-    expect(insertError?.message).toMatch(/permission denied|row-level security/i);
+    expect(insertError?.message).toMatch(
+      /permission denied|row-level security/i,
+    );
 
     const { error: updateError } = await member.client
       .from("lead_events")
       .update({ event_type: "qualified" })
       .eq("id", inserted!.id);
-    expect(updateError?.message).toMatch(/permission denied|row-level security/i);
+    expect(updateError?.message).toMatch(
+      /permission denied|row-level security/i,
+    );
 
     const { error: deleteError } = await member.client
       .from("lead_events")
       .delete()
       .eq("id", inserted!.id);
-    expect(deleteError?.message).toMatch(/permission denied|row-level security/i);
+    expect(deleteError?.message).toMatch(
+      /permission denied|row-level security/i,
+    );
+
+    const { error: serviceUpdateError } = await serviceClient
+      .from("lead_events")
+      .update({ event_type: "qualified" })
+      .eq("id", inserted!.id);
+    expect(serviceUpdateError?.message).toMatch(/permission denied/i);
+
+    const { error: serviceDeleteError } = await serviceClient
+      .from("lead_events")
+      .delete()
+      .eq("id", inserted!.id);
+    expect(serviceDeleteError?.message).toMatch(/permission denied/i);
+
+    const privileges = await pg.query<{
+      authenticated_select: boolean;
+      authenticated_insert: boolean;
+      service_select: boolean;
+      service_insert: boolean;
+      service_update: boolean;
+      service_delete: boolean;
+      service_truncate: boolean;
+    }>(`
+      select
+        has_table_privilege('authenticated', 'public.lead_events', 'select')
+          as authenticated_select,
+        has_table_privilege('authenticated', 'public.lead_events', 'insert')
+          as authenticated_insert,
+        has_table_privilege('service_role', 'public.lead_events', 'select')
+          as service_select,
+        has_table_privilege('service_role', 'public.lead_events', 'insert')
+          as service_insert,
+        has_table_privilege('service_role', 'public.lead_events', 'update')
+          as service_update,
+        has_table_privilege('service_role', 'public.lead_events', 'delete')
+          as service_delete,
+        has_table_privilege('service_role', 'public.lead_events', 'truncate')
+          as service_truncate
+    `);
+    expect(privileges.rows[0]).toEqual({
+      authenticated_select: true,
+      authenticated_insert: false,
+      service_select: true,
+      service_insert: true,
+      service_update: false,
+      service_delete: false,
+      service_truncate: false,
+    });
 
     const { data: after } = await serviceClient
       .from("lead_events")
@@ -181,11 +234,13 @@ describe("Migration 20260825170000 — lead events ledger", () => {
           actor_id: actor.userId,
         }),
       );
-      expect(error?.message).toMatch(/lead_events_actor_identity_check|violates/i);
+      expect(error?.message).toMatch(
+        /lead_events_actor_identity_check|violates/i,
+      );
     }
   });
 
-  it("preserves a user event when the referenced account is deleted", async () => {
+  it("preserves a user event and actor identity when the account is deleted", async () => {
     const propertyId = await insertProperty();
     const actor = await createUserForOrg(BMH_ORG_ID);
     const { data: inserted, error } = await serviceClient
@@ -200,13 +255,32 @@ describe("Migration 20260825170000 — lead events ledger", () => {
       .single();
     expect(error).toBeNull();
 
-    expect((await serviceClient.auth.admin.deleteUser(actor.userId)).error).toBeNull();
+    expect(
+      (await serviceClient.auth.admin.deleteUser(actor.userId)).error,
+    ).toBeNull();
     const { data: after } = await serviceClient
       .from("lead_events")
       .select("actor_type, actor_id")
       .eq("id", inserted!.id)
       .single();
-    expect(after).toEqual({ actor_type: "user", actor_id: null });
+    expect(after).toEqual({ actor_type: "user", actor_id: actor.userId });
+  });
+
+  it("blocks direct property deletion while ledger history still points to it", async () => {
+    const propertyId = await insertProperty();
+    await serviceClient.from("lead_events").insert(eventInsert(propertyId));
+
+    const { error } = await serviceClient
+      .from("properties")
+      .delete()
+      .eq("id", propertyId);
+    expect(error?.message).toMatch(/foreign key|violates/i);
+
+    const { count } = await serviceClient
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", propertyId);
+    expect(count).toBe(1);
   });
 
   it("deduplicates non-null source identities but permits unsourced events", async () => {
@@ -217,12 +291,17 @@ describe("Migration 20260825170000 — lead events ledger", () => {
       source_id: sourceId,
     });
 
-    expect((await serviceClient.from("lead_events").insert(sourced)).error).toBeNull();
+    expect(
+      (await serviceClient.from("lead_events").insert(sourced)).error,
+    ).toBeNull();
     const duplicate = await serviceClient.from("lead_events").insert(sourced);
     expect(duplicate.error?.message).toMatch(/duplicate key|unique/i);
 
     const unsourced = eventInsert(propertyId);
-    expect((await serviceClient.from("lead_events").insert([unsourced, unsourced])).error).toBeNull();
+    expect(
+      (await serviceClient.from("lead_events").insert([unsourced, unsourced]))
+        .error,
+    ).toBeNull();
   });
 
   it("publishes lead_events for Supabase Realtime", async () => {

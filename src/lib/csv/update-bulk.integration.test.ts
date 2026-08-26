@@ -7,7 +7,10 @@ import { resetTenantTables } from "@tests/integration/reset";
 
 const supabase = createTestClient();
 
-async function seedProperty(address: string, status = "new_lead"): Promise<string> {
+async function seedProperty(
+  address: string,
+  status = "new_lead",
+): Promise<string> {
   const { data, error } = await supabase
     .from("properties")
     .insert({
@@ -112,7 +115,9 @@ describe("update-bulk runner (integration)", () => {
         { Address: "200 Dup St", Status: "interested" },
       ],
     });
-    expect(preview.duplicateAddresses).toContain(normalizeAddress("200 Dup St"));
+    expect(preview.duplicateAddresses).toContain(
+      normalizeAddress("200 Dup St"),
+    );
   });
 
   it("bulk-update job: status flips queued → running → completed; counters populated", async () => {
@@ -129,7 +134,9 @@ describe("update-bulk runner (integration)", () => {
     });
     const { data } = await supabase
       .from("jobs")
-      .select("status, processed_items, succeeded_items, failed_items, started_at, completed_at")
+      .select(
+        "status, processed_items, succeeded_items, failed_items, started_at, completed_at",
+      )
       .eq("id", jobId)
       .single();
     expect(data!.status).toBe("completed");
@@ -155,5 +162,135 @@ describe("update-bulk runner (integration)", () => {
     });
     expect(preview.unknownTags).toEqual(["schmurf"]);
     expect(preview.unmatched.length).toBe(3);
+  });
+
+  it("records only confirmed status changes with truthful batch metadata", async () => {
+    const firstId = await seedProperty("500 Ledger Status A");
+    const secondId = await seedProperty("501 Ledger Status B");
+    const actorId = crypto.randomUUID();
+    const jobId = await createUpdateJob(2);
+
+    const first = await applyBulkUpdate(supabase, {
+      subOperationId: "update-property-status",
+      rows: [
+        { Address: "500 Ledger Status A", Status: "contacted" },
+        { Address: "501 Ledger Status B", Status: "contacted" },
+      ],
+      userId: actorId,
+      jobId,
+    });
+    expect(first.updatedCount).toBe(2);
+
+    const { data: events, error } = await supabase
+      .from("lead_events")
+      .select("property_id, actor_type, actor_id, event_type, payload")
+      .in("property_id", [firstId, secondId])
+      .eq("event_type", "status_changed");
+    expect(error).toBeNull();
+    expect(events).toHaveLength(2);
+    const statusEvents = (events ?? []) as Array<{
+      actor_id: string | null;
+      actor_type: string;
+      payload: Record<string, unknown>;
+    }>;
+    expect(new Set(statusEvents.map((event) => event.actor_id))).toEqual(
+      new Set([actorId]),
+    );
+    expect(
+      new Set(statusEvents.map((event) => event.payload.batch_id)),
+    ).toHaveProperty("size", 1);
+    expect(
+      statusEvents.every(
+        (event) =>
+          event.actor_type === "user" &&
+          event.payload.from === "new_lead" &&
+          event.payload.to === "contacted" &&
+          event.payload.batch_count === 2,
+      ),
+    ).toBe(true);
+
+    const replayJob = await createUpdateJob(2);
+    const replay = await applyBulkUpdate(supabase, {
+      subOperationId: "update-property-status",
+      rows: [
+        { Address: "500 Ledger Status A", Status: "contacted" },
+        { Address: "501 Ledger Status B", Status: "contacted" },
+      ],
+      userId: actorId,
+      jobId: replayJob,
+    });
+    expect(replay.updatedCount).toBe(0);
+    const { count } = await supabase
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .in("property_id", [firstId, secondId])
+      .eq("event_type", "status_changed");
+    expect(count).toBe(2);
+  });
+
+  it("records motivation and only newly inserted tag associations", async () => {
+    const propertyId = await seedProperty("600 Ledger Fields");
+    const actorId = crypto.randomUUID();
+    const motivationJob = await createUpdateJob(1);
+    const motivation = await applyBulkUpdate(supabase, {
+      subOperationId: "update-motivation-level",
+      rows: [{ Address: "600 Ledger Fields", Motivation: "hot" }],
+      userId: actorId,
+      jobId: motivationJob,
+    });
+    expect(motivation.updatedCount).toBe(1);
+
+    const { data: tag, error: tagError } = await supabase
+      .from("tags")
+      .insert({ name: "Ledger tag", category: "custom" })
+      .select("id")
+      .single();
+    expect(tagError).toBeNull();
+    const tagJob = await createUpdateJob(1);
+    const tagApply = await applyBulkUpdate(supabase, {
+      subOperationId: "tag-existing-properties",
+      rows: [{ Address: "600 Ledger Fields", Tags: "Ledger tag" }],
+      userId: actorId,
+      jobId: tagJob,
+    });
+    expect(tagApply.updatedCount).toBe(1);
+
+    const replayJob = await createUpdateJob(1);
+    const replay = await applyBulkUpdate(supabase, {
+      subOperationId: "tag-existing-properties",
+      rows: [{ Address: "600 Ledger Fields", Tags: "Ledger tag" }],
+      userId: actorId,
+      jobId: replayJob,
+    });
+    expect(replay.updatedCount).toBe(0);
+
+    const { data: events, error: eventsError } = await supabase
+      .from("lead_events")
+      .select("event_type, actor_id, payload")
+      .eq("property_id", propertyId)
+      .in("event_type", ["motivation_changed", "tag_applied"])
+      .order("event_type");
+    expect(eventsError).toBeNull();
+    expect(events).toHaveLength(2);
+    expect(events).toEqual([
+      expect.objectContaining({
+        event_type: "motivation_changed",
+        actor_id: actorId,
+        payload: expect.objectContaining({
+          from: null,
+          to: "hot",
+          batch_count: 1,
+        }),
+      }),
+      expect.objectContaining({
+        event_type: "tag_applied",
+        actor_id: actorId,
+        payload: expect.objectContaining({
+          tag_id: tag!.id,
+          label: "Ledger tag",
+          batch_count: 1,
+        }),
+      }),
+    ]);
   });
 });

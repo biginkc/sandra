@@ -1,17 +1,42 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createClient, recordLeadEvent } = vi.hoisted(() => ({
+const {
+  createClient,
+  createContactFromUnknownHelper,
+  createPropertyAndResolve,
+  recordLeadEvent,
+} = vi.hoisted(() => ({
   createClient: vi.fn(),
+  createContactFromUnknownHelper: vi.fn(),
+  createPropertyAndResolve: vi.fn(),
   recordLeadEvent: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/events", () => ({
-  LEAD_EVENT_TYPES: { QUEUED_MESSAGE_DELETED: "queued_message_deleted" },
+  LEAD_EVENT_TYPES: {
+    LEAD_CREATED: "lead_created",
+    QUEUED_MESSAGE_DELETED: "queued_message_deleted",
+  },
   recordLeadEvent,
 }));
+vi.mock("@/lib/messages/triage", () => ({
+  createContactFromUnknown: createContactFromUnknownHelper,
+  dismissUnknownSender: vi.fn(),
+  matchUnknownSender: vi.fn(),
+  mergeUnknownSenderToProperty: vi.fn(),
+  restoreDismissedSender: vi.fn(),
+}));
+vi.mock("@/lib/messages/resolve", () => ({
+  createPropertyAndResolve,
+  resolveThreadToExistingProperty: vi.fn(),
+}));
 
-import { deleteQueuedMessage } from "./actions";
+import {
+  createContactFromUnknownAction,
+  createPropertyAndResolveAction,
+  deleteQueuedMessage,
+} from "./actions";
 
 function makeClient(options?: {
   userId?: string | null;
@@ -124,6 +149,122 @@ describe("deleteQueuedMessage", () => {
       ok: false,
       error: { code: "DELETE_FAILED", message: "delete failed" },
     });
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe("message property creation activity", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("records a lead-created event after unknown-sender triage succeeds", async () => {
+    const { client } = makeClient({ userId: "user-1" });
+    createClient.mockResolvedValue(client);
+    createContactFromUnknownHelper.mockResolvedValue({
+      ok: true,
+      data: { contactId: "contact-1", propertyId: PROPERTY_ID },
+    });
+
+    const result = await createContactFromUnknownAction({
+      fromAddress: "+15555550101",
+      role: "homeowner",
+      contact: { firstName: "Synthetic" },
+      property: { address: "1 Test St", state: "MO" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: PROPERTY_ID,
+      actorType: "user",
+      actorId: "user-1",
+      eventType: "lead_created",
+      payload: { source: "unknown_sender" },
+      sourceType: "properties.created",
+      sourceId: PROPERTY_ID,
+    });
+  });
+
+  it("does not triage or record when the caller is unauthenticated", async () => {
+    const { client } = makeClient({ userId: null });
+    createClient.mockResolvedValue(client);
+
+    const result = await createContactFromUnknownAction({
+      fromAddress: "+15555550101",
+      role: "homeowner",
+      contact: {},
+      property: { address: "1 Test St", state: "MO" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(createContactFromUnknownHelper).not.toHaveBeenCalled();
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("does not record a lead-created event when unknown-sender triage fails", async () => {
+    const { client } = makeClient({ userId: "user-1" });
+    createClient.mockResolvedValue(client);
+    createContactFromUnknownHelper.mockResolvedValue({
+      ok: false,
+      error: { code: "PROPERTY_INSERT_FAILED", message: "failed" },
+    });
+
+    await createContactFromUnknownAction({
+      fromAddress: "+15555550101",
+      role: "homeowner",
+      contact: {},
+      property: { address: "1 Test St", state: "MO" },
+    });
+
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("records a lead-created event only after create-and-resolve succeeds", async () => {
+    const { client } = makeClient({ userId: "user-2" });
+    createClient.mockResolvedValue(client);
+    createPropertyAndResolve.mockResolvedValue({
+      ok: true,
+      data: {
+        updated: 2,
+        conversationId: "conversation-1",
+        propertyId: PROPERTY_ID,
+      },
+    });
+
+    const result = await createPropertyAndResolveAction({
+      sourceConversationId: "source-1",
+      contactId: "contact-1",
+      role: "homeowner",
+      property: { address: "2 Test St", state: "MO" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: PROPERTY_ID,
+      actorType: "user",
+      actorId: "user-2",
+      eventType: "lead_created",
+      payload: { source: "message_resolution" },
+      sourceType: "properties.created",
+      sourceId: PROPERTY_ID,
+    });
+  });
+
+  it("does not record create-and-resolve failures", async () => {
+    const { client } = makeClient({ userId: "user-2" });
+    createClient.mockResolvedValue(client);
+    createPropertyAndResolve.mockResolvedValue({
+      ok: false,
+      error: { code: "MESSAGE_UPDATE_FAILED", message: "failed" },
+    });
+
+    await createPropertyAndResolveAction({
+      sourceConversationId: "source-1",
+      contactId: "contact-1",
+      role: "homeowner",
+      property: { address: "2 Test St", state: "MO" },
+    });
+
     expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 });

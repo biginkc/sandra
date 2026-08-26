@@ -220,7 +220,28 @@ export async function createContactFromUnknownAction(input: {
 }): Promise<Result<{ contactId: string; propertyId: string }>> {
   try {
     const supabase = await createClient();
-    return await createContactFromUnknownHelper({ supabase, ...input });
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "NOT_SIGNED_IN", message: "Not signed in." },
+      };
+    }
+    const result = await createContactFromUnknownHelper({ supabase, ...input });
+    if (result.ok) {
+      await recordLeadEvent({
+        propertyId: result.data.propertyId,
+        actorType: "user",
+        actorId: user.id,
+        eventType: LEAD_EVENT_TYPES.LEAD_CREATED,
+        payload: { source: "unknown_sender" },
+        sourceType: "properties.created",
+        sourceId: result.data.propertyId,
+      });
+    }
+    return result;
   } catch (e) {
     reportError(e, {
       tags: { surface: "create_contact_from_unknown" },
@@ -368,10 +389,33 @@ export async function createPropertyAndResolveAction(input: {
     state: string;
     zip?: string | null;
   };
-}): Promise<Result<{ updated: number; conversationId: string; propertyId: string }>> {
+}): Promise<
+  Result<{ updated: number; conversationId: string; propertyId: string }>
+> {
   try {
     const supabase = await createClient();
-    return await createPropertyAndResolve({ supabase, ...input });
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "NOT_SIGNED_IN", message: "Not signed in." },
+      };
+    }
+    const result = await createPropertyAndResolve({ supabase, ...input });
+    if (result.ok) {
+      await recordLeadEvent({
+        propertyId: result.data.propertyId,
+        actorType: "user",
+        actorId: user.id,
+        eventType: LEAD_EVENT_TYPES.LEAD_CREATED,
+        payload: { source: "message_resolution" },
+        sourceType: "properties.created",
+        sourceId: result.data.propertyId,
+      });
+    }
+    return result;
   } catch (e) {
     reportError(e, {
       tags: { surface: "create_property_and_resolve" },

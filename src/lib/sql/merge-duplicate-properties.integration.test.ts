@@ -54,8 +54,9 @@ describe("merge_duplicate_properties() (integration)", () => {
     expect(keeper).toBeDefined();
     expect(loser).toBeDefined();
 
-    // Drop a message + job + job_item referencing the loser so we can
-    // verify the re-point. Job is a scaffolded csv_import.
+    // Drop a message + job + job_item and distinct ledger rows referencing
+    // both properties so we can verify every durable row survives the merge.
+    // Job is a scaffolded csv_import.
     const { data: job } = await supabase
       .from("jobs")
       .insert({ type: "csv_import", status: "completed", total_items: 1 })
@@ -72,6 +73,25 @@ describe("merge_duplicate_properties() (integration)", () => {
       property_id: loser!.id,
       status: "success",
     });
+    const { data: eventsBefore, error: eventsInsertError } = await supabase
+      .from("lead_events")
+      .insert([
+        {
+          org_id: keeper!.org_id,
+          property_id: keeper!.id,
+          actor_type: "system",
+          event_type: "lead_created",
+        },
+        {
+          org_id: loser!.org_id,
+          property_id: loser!.id,
+          actor_type: "system",
+          event_type: "status_changed",
+        },
+      ])
+      .select("id");
+    expect(eventsInsertError).toBeNull();
+    expect(eventsBefore).toHaveLength(2);
 
     const { error } = await authed.rpc("merge_duplicate_properties", {
       keeper_id: keeper!.id,
@@ -109,6 +129,19 @@ describe("merge_duplicate_properties() (integration)", () => {
       .from("job_items")
       .select("property_id");
     expect(itemsAfter?.[0].property_id).toBe(keeper!.id);
+
+    const { data: eventsAfter, error: eventsAfterError } = await supabase
+      .from("lead_events")
+      .select("id, property_id")
+      .order("id");
+    expect(eventsAfterError).toBeNull();
+    expect(eventsAfter).toHaveLength(2);
+    expect(eventsAfter?.map((event) => event.id).sort()).toEqual(
+      eventsBefore?.map((event) => event.id).sort(),
+    );
+    expect(
+      eventsAfter?.every((event) => event.property_id === keeper!.id),
+    ).toBe(true);
 
     // Audit snapshot written.
     const { data: mergeRow } = await supabase

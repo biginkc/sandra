@@ -10,7 +10,11 @@ import {
 } from "@/lib/auth/require-org-membership";
 import { errFromUnknown, err, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
+import {
+  LEAD_EVENT_TYPES,
+  recordLeadEvents,
+  type RecordLeadEventInput,
+} from "@/lib/events";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { dispatchTaskAssignedSlack } from "@/lib/integrations/slack/dispatch";
 import { dispatchTaskAssigned } from "@/lib/notifications/dispatch";
@@ -391,19 +395,33 @@ export async function bookAppointment(
     const linkedContactId = data.contact_id ?? undefined;
 
     if (linkedPropertyId && !result.duplicate) {
-      await recordLeadEvent({
-        propertyId: linkedPropertyId,
-        actorType: "user",
-        actorId: user.id,
-        eventType: LEAD_EVENT_TYPES.APPOINTMENT_BOOKED,
-        payload: {
-          task_id: result.taskId,
-          assignee_id: input.assigneeId,
-          due_at: startUtc.toISOString(),
+      const events: RecordLeadEventInput[] = [
+        {
+          propertyId: linkedPropertyId,
+          actorType: "user" as const,
+          actorId: user.id,
+          eventType: LEAD_EVENT_TYPES.APPOINTMENT_BOOKED,
+          payload: {
+            task_id: result.taskId,
+            assignee_id: input.assigneeId,
+            due_at: startUtc.toISOString(),
+          },
+          sourceType: "appointments.booked",
+          sourceId: data.ledger_id,
         },
-        sourceType: "appointments.booked",
-        sourceId: data.ledger_id,
-      });
+      ];
+      if (!result.alreadyQualified) {
+        events.push({
+          propertyId: linkedPropertyId,
+          actorType: "user" as const,
+          actorId: user.id,
+          eventType: LEAD_EVENT_TYPES.QUALIFIED,
+          payload: { from: "prospect", to: "new_lead" },
+          sourceType: "appointments.qualified",
+          sourceId: data.ledger_id,
+        });
+      }
+      await recordLeadEvents(events);
     }
 
     // Advance the exact create-ledger row before calendar/provider work or
