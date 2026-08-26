@@ -179,4 +179,20 @@ describe("coachReducer — coach_note nudges", () => {
     state = coachReducer(state, { type: "dismiss_nudge", nudgeId: first.id });
     expect(state.nudges).toEqual([second]);
   });
+
+  it("uses the producer's noteId as the nudge id when given", () => {
+    const state = coachReducer(initialCoachState(), {
+      type: "coach_note",
+      noteId: "note-42",
+      text: "Pain word — go deeper.",
+      phaseId: "reveal",
+      ts: "t1",
+    });
+    expect(state.nudges[0].id).toBe("note-42");
+  });
+
+  it("stores a null phaseId when the event doesn't carry one — not every nudge is phase-scoped", () => {
+    const state = coachReducer(initialCoachState(), { type: "coach_note", text: "Pain word — go deeper.", ts: "t1" });
+    expect(state.nudges[0].phaseId).toBeNull();
+  });
 });

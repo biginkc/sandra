@@ -105,11 +105,16 @@ export type CoachTimerEvent = CoachEventVersions & {
 /** A short coaching nudge the producer emits for phase-entry rules and
  * pain-word prompts (the same content that lives in this script's
  * coach_notes, surfaced live instead of only pre-rendered). Rendered as a
- * transient nudge card with the same lifecycle as an objection card. */
+ * transient nudge card, lighter than an objection card (no three-beat
+ * layout) and shorter-lived (~20s vs 45s). `noteId` is optional — when the
+ * producer sends one it's used as the nudge's stable id, otherwise one is
+ * generated. `phaseId` is optional too: a nudge isn't always tied to a
+ * specific phase (e.g. a pain-word prompt can fire mid-phase). */
 export type CoachNoteEvent = CoachEventVersions & {
   type: "coach_note";
+  noteId?: string;
   text: string;
-  phaseId: CoachPhaseId;
+  phaseId?: CoachPhaseId;
   ts: string;
 };
 
@@ -201,10 +206,11 @@ export type CoachHoldTimer = {
 };
 
 export type CoachNudge = {
-  /** Instance id — unique per occurrence, even for a repeated nudge. */
+  /** Instance id — the producer's noteId when given, otherwise generated.
+   * Unique per occurrence, even for a repeated nudge. */
   id: string;
   text: string;
-  phaseId: CoachPhaseId;
+  phaseId: CoachPhaseId | null;
   ts: string;
 };
 

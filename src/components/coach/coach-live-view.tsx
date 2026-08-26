@@ -667,7 +667,9 @@ function EntryTokenChip({
   );
 }
 
-const NUDGE_TTL_MS = 45_000;
+// Lighter and shorter-lived than an objection card (45s) — a nudge is a
+// one-line coaching prompt, not a three-beat framework to act on.
+const NUDGE_TTL_MS = 20_000;
 
 /** Coaching nudges (phase-entry rules, pain-word prompts) the producer
  * pushes live via coach_note events — same transient-guidance treatment as

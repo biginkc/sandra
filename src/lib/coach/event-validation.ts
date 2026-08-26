@@ -145,18 +145,20 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
       break;
     }
     case "coach_note": {
-      if (
-        isNonEmptyString(payload.text) &&
-        typeof payload.phaseId === "string" &&
-        PHASE_IDS.has(payload.phaseId) &&
-        isNonEmptyString(payload.ts)
-      ) {
+      // phaseId is optional (a nudge isn't always tied to a specific
+      // phase) — but when present it must be one of our known phases,
+      // same reasoning as the `phase` event: an unrecognized phaseId
+      // passed through unchecked is corruption, not a valid "no phase".
+      const hasPhaseId = payload.phaseId !== undefined;
+      const phaseIdValid = !hasPhaseId || (typeof payload.phaseId === "string" && PHASE_IDS.has(payload.phaseId));
+      if (isNonEmptyString(payload.text) && phaseIdValid && isNonEmptyString(payload.ts)) {
         return {
           ok: true,
           event: {
             type: "coach_note",
+            ...(isNonEmptyString(payload.noteId) ? { noteId: payload.noteId } : {}),
             text: payload.text,
-            phaseId: payload.phaseId as CoachPhaseId,
+            ...(hasPhaseId ? { phaseId: payload.phaseId as CoachPhaseId } : {}),
             ts: payload.ts,
             ...versions,
           },

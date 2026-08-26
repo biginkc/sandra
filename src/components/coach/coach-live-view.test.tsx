@@ -327,14 +327,18 @@ describe("<CoachLiveView />", () => {
     broadcast({ type: "coach_note", text: "First nudge.", phaseId: "introduction", ts: "t1" });
     expect(screen.getAllByTestId("coach-nudge")).toHaveLength(1);
 
+    // 15s in, first nudge has 5s left on its 20s TTL.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(40_000);
+      await vi.advanceTimersByTimeAsync(15_000);
     });
     broadcast({ type: "coach_note", text: "Second nudge.", phaseId: "introduction", ts: "t2" });
     expect(screen.getAllByTestId("coach-nudge")).toHaveLength(2);
 
+    // 6s later: 21s elapsed for the first nudge — it should have
+    // auto-dismissed. Only 6s elapsed for the second — it must remain,
+    // proving the second nudge arriving didn't reset the first's timer.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(6_000);
     });
     expect(screen.getAllByTestId("coach-nudge")).toHaveLength(1);
     expect(screen.getByTestId("coach-nudge")).toHaveTextContent("Second nudge.");

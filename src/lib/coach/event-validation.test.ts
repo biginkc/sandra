@@ -52,6 +52,29 @@ describe("parseCoachEvent — valid events", () => {
       },
     });
   });
+
+  it("parses a coach_note event with an optional noteId", () => {
+    const result = parseCoachEvent({
+      type: "coach_note",
+      noteId: "note-42",
+      text: "Pain word — go deeper.",
+      phaseId: "reveal",
+      ts: "t1",
+    });
+    expect(result).toEqual({
+      ok: true,
+      event: { type: "coach_note", noteId: "note-42", text: "Pain word — go deeper.", phaseId: "reveal", ts: "t1" },
+    });
+  });
+
+  it("parses a coach_note event with no phaseId at all — not every nudge is phase-scoped", () => {
+    const result = parseCoachEvent({ type: "coach_note", text: "Pain word — go deeper.", ts: "t1" });
+    expect(result).toEqual({
+      ok: true,
+      event: { type: "coach_note", text: "Pain word — go deeper.", ts: "t1" },
+    });
+    if (result.ok) expect("phaseId" in result.event).toBe(false);
+  });
 });
 
 describe("parseCoachEvent — content versions (scriptVersion/matcherVersion)", () => {
