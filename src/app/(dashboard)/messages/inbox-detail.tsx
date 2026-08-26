@@ -9,7 +9,7 @@ import {
   PhoneIcon,
 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 
 import { toast } from "sonner";
 
@@ -24,6 +24,10 @@ import {
 import { copyToClipboard } from "@/lib/csv/export";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { formatPhoneE164 } from "@/lib/phone-format";
+import {
+  deriveSmsParties,
+  isSmsRouteAuthoritative,
+} from "@/lib/messages/sms-parties";
 import { cn } from "@/lib/utils";
 
 import { InlineReply } from "../leads/[id]/inline-reply";
@@ -70,7 +74,10 @@ const DISPO_LABELS: Record<string, string> = {
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 type ReplyRefreshGate = {
   threadId: string;
-  initialMessages: MessageRow[];
+  messageId: string;
+  /** Null while provider confirmation is pending; the current snapshot once
+   * a terminal update has triggered an authoritative server refresh. */
+  initialMessages: MessageRow[] | null;
 };
 
 function initialsOfName(name: string | null): string {
@@ -301,6 +308,11 @@ export function InboxDetail({
   const [resolveOpen, setResolveOpen] = useState(false);
   const [replyRefreshGate, setReplyRefreshGate] =
     useState<ReplyRefreshGate | null>(null);
+  const replyRefreshGateRef = useRef<ReplyRefreshGate | null>(null);
+  const updateReplyRefreshGate = (gate: ReplyRefreshGate | null) => {
+    replyRefreshGateRef.current = gate;
+    setReplyRefreshGate(gate);
+  };
 
   const closeDetail = useCallback(() => {
     if (onBackToList) {
@@ -403,7 +415,7 @@ export function InboxDetail({
     propertySmsOptedOut: data.outreachDispo === "opted_out",
     phoneSuppressed: data.phoneSuppressed,
     outreachDispo: data.outreachDispo,
-    phoneLineType: null,
+    phoneLineType: data.replyToPhoneLineType,
   });
   const isSmsRestricted =
     data.contactDoNotContact || smsPresentation.smsRestricted;
@@ -414,30 +426,124 @@ export function InboxDetail({
     !data.smsSafetyReadFailed &&
     !data.contactDoNotContact &&
     !hasBadThreadNumber;
+  const initialPendingOutboundMessageIds = new Set(
+    data.initialMessages
+      .filter(
+        (message) =>
+          message.direction === "outbound" && message.status === "pending",
+      )
+      .map((message) => message.id),
+  );
+  const liveGateSnapshotMessage =
+    replyRefreshGate?.initialMessages === null
+      ? data.initialMessages.find(
+          (message) => message.id === replyRefreshGate.messageId,
+        )
+      : null;
   const replyRefreshPending =
-    replyRefreshGate?.threadId === data.threadId &&
-    replyRefreshGate.initialMessages === data.initialMessages;
-  const handleLiveMessage = (message: MessageRow) => {
-    // The current inline send inserts an outbound pending row before the
-    // provider responds. Ignore only that same route so a provider failure
-    // cannot unmount the composer and erase its draft. An outbound from
-    // another tab/operator may use a different saved customer phone or sender,
-    // so it must still refresh the authoritative thread identity.
-    const sameOutboundRoute =
-      message.direction === "outbound" &&
-      normalizePhone(message.to_address) !== null &&
-      normalizePhone(message.to_address) ===
+    initialPendingOutboundMessageIds.size > 0 ||
+    (replyRefreshGate?.threadId === data.threadId &&
+      (replyRefreshGate.initialMessages === null
+        ? !liveGateSnapshotMessage || liveGateSnapshotMessage.status === "pending"
+        : replyRefreshGate.initialMessages === data.initialMessages));
+  const handleLiveMessage = (
+    message: MessageRow,
+    event: "INSERT" | "UPDATE",
+  ) => {
+    const parties = deriveSmsParties(message);
+    const sameRoute =
+      normalizePhone(parties.customerPhone) !== null &&
+      normalizePhone(parties.customerPhone) ===
         normalizePhone(data.replyToPhone) &&
-      normalizePhone(message.from_address) !== null &&
-      normalizePhone(message.from_address) ===
+      normalizePhone(parties.businessPhone) !== null &&
+      normalizePhone(parties.businessPhone) ===
         normalizePhone(data.threadBusinessPhone);
-    if (sameOutboundRoute) return;
-    setReplyRefreshGate({
+
+    // A changed-route outbound attempt is not authoritative until the
+    // provider confirms it. Preserve and gate the draft while it is pending;
+    // a later sent/delivered or failed update refreshes to the correct route.
+    if (
+      event === "INSERT" &&
+      message.direction === "outbound" &&
+      message.status === "pending"
+    ) {
+      updateReplyRefreshGate({
+        threadId: data.threadId,
+        messageId: message.id,
+        initialMessages: null,
+      });
+      return;
+    }
+
+    // The page can mount after the pending INSERT has already happened. In
+    // that case the initial server snapshot is the gate source, and its first
+    // terminal UPDATE must trigger the same authoritative refresh.
+    if (
+      event === "UPDATE" &&
+      initialPendingOutboundMessageIds.has(message.id) &&
+      message.status !== "pending"
+    ) {
+      updateReplyRefreshGate({
+        threadId: data.threadId,
+        messageId: message.id,
+        initialMessages: data.initialMessages,
+      });
+      router.refresh();
+      return;
+    }
+
+    // A provider can report failure after first reporting sent. This browser
+    // may have loaded after the pending/sent transition, so it has no gate to
+    // match. Refresh every in-thread failed outbound so the server can fall
+    // back to the prior authoritative route while the draft stays mounted.
+    if (
+      event === "UPDATE" &&
+      message.direction === "outbound" &&
+      message.status === "failed"
+    ) {
+      updateReplyRefreshGate({
+        threadId: data.threadId,
+        messageId: message.id,
+        initialMessages: data.initialMessages,
+      });
+      router.refresh();
+      return;
+    }
+
+    if (
+      event === "UPDATE" &&
+      replyRefreshGateRef.current?.threadId === data.threadId &&
+      replyRefreshGateRef.current.messageId === message.id &&
+      message.status !== "pending"
+    ) {
+      updateReplyRefreshGate({
+        threadId: data.threadId,
+        messageId: message.id,
+        initialMessages: data.initialMessages,
+      });
+      router.refresh();
+      return;
+    }
+
+    if (!isSmsRouteAuthoritative(message)) return;
+    // Same-route outbound inserts/updates cannot change sender/destination.
+    // Inbound messages still refresh because STOP and other inbound handling
+    // can change consent, suppression, or disposition on the existing route.
+    if (message.direction === "outbound" && sameRoute) return;
+    updateReplyRefreshGate({
       threadId: data.threadId,
+      messageId: message.id,
       initialMessages: data.initialMessages,
     });
     router.refresh();
   };
+
+  const replyPhoneUnavailableMessage =
+    data.replyToPhoneLineType === "landline"
+      ? "This thread number is saved as a landline — use a mobile number for SMS."
+      : data.threadCustomerPhone
+        ? "This thread number is not saved on the homeowner contact — save or resolve it before replying."
+        : "This conversation does not have a confirmed SMS reply route yet. Open the lead to send from a saved mobile number.";
 
   return (
     <div
@@ -692,7 +798,7 @@ export function InboxDetail({
               >
                 {data.homeownerContactId === data.contactId &&
                 !data.replyToPhone
-                  ? "This thread number is not saved on the homeowner contact — save or resolve it before replying."
+                  ? replyPhoneUnavailableMessage
                   : "SMS reply unavailable for this restricted thread. Review the notice above before taking another safe action."}
               </div>
             ) : null}
@@ -716,7 +822,7 @@ export function InboxDetail({
                   homeownerPhone={data.replyToPhone}
                   replyToPhone={data.replyToPhone}
                   preferredFromNumber={data.threadBusinessPhone}
-                  phoneUnavailableMessage="This thread number is not saved on the homeowner contact — save or resolve it before replying."
+                  phoneUnavailableMessage={replyPhoneUnavailableMessage}
                   routeRefreshPending={replyRefreshPending}
                   suspended={isSmsRestricted}
                 />

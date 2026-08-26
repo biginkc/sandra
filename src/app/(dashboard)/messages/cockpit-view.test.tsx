@@ -159,6 +159,7 @@ function makeDetail(contactId: string, body: string): InboxDetailData {
     threadBusinessPhone: "+18162804181",
     contactPhone: "+15551234567",
     replyToPhone: "+15551234567",
+    replyToPhoneLineType: "mobile",
     propertyId,
     propertyAddress: "123 Main St, Albany, NY",
     homeownerContactId: contactId,

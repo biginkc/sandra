@@ -1,8 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
-  deriveSmsParties,
-  findMatchingSavedContactPhone,
+  findLatestAuthoritativeSmsRoute,
 } from "@/lib/messages/sms-parties";
 import {
   computeConsentState,
@@ -10,6 +9,10 @@ import {
 } from "@/lib/messaging/consent";
 import { resolveSmsConversationOrg } from "@/lib/messages/threading";
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
+import {
+  selectSmsPhoneByNumber,
+  type SmsPhoneChoice,
+} from "@/lib/messaging/sms-phone";
 import type { Database } from "@/lib/supabase/types";
 
 export type InboxDetail = {
@@ -27,6 +30,8 @@ export type InboxDetail = {
   contactPhone: string | null;
   /** Saved contact phone that matches the open thread, safe for replying. */
   replyToPhone: string | null;
+  /** Exact saved slot classification for the open thread phone. */
+  replyToPhoneLineType: SmsPhoneChoice["lineType"] | null;
   propertyId: string | null;
   propertyAddress: string | null;
   homeownerContactId: string | null;
@@ -103,7 +108,7 @@ export async function fetchInboxDetail(
     supabase
       .from("contacts")
       .select(
-        "org_id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out",
+        "org_id, first_name, last_name, entity_name, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out",
       )
       .eq("id", contactId)
       .eq("org_id", conversationOrgId)
@@ -129,9 +134,16 @@ export async function fetchInboxDetail(
 
   const c = contactRes.data;
   const p = propertyRes.data;
-  const latestMessage = messages[messages.length - 1];
-  const parties = deriveSmsParties(latestMessage);
-  const replyToPhone = findMatchingSavedContactPhone(c, parties.customerPhone);
+  const authoritativeRoute = findLatestAuthoritativeSmsRoute(messages);
+  const parties = authoritativeRoute?.parties ?? {
+    customerPhone: null,
+    businessPhone: null,
+  };
+  const replyPhoneChoice = selectSmsPhoneByNumber(c, parties.customerPhone);
+  const replyToPhone =
+    replyPhoneChoice?.lineType === "landline"
+      ? null
+      : (replyPhoneChoice?.phone ?? null);
   let smsConsentState: ConsentState | null = null;
   let phoneSuppressed: boolean | null = null;
   if (c) {
@@ -169,6 +181,7 @@ export async function fetchInboxDetail(
     threadBusinessPhone: parties.businessPhone,
     contactPhone: parties.customerPhone,
     replyToPhone,
+    replyToPhoneLineType: replyPhoneChoice?.lineType ?? null,
     propertyId,
     propertyAddress: p
       ? [p.address, p.city, p.state].filter(Boolean).join(", ")

@@ -31,7 +31,7 @@ type Props = {
   contactId: string | null;
   conversationId?: string | null;
   propertyId: string | null;
-  onLiveMessage?: (message: Message) => void;
+  onLiveMessage?: (message: Message, event: "INSERT" | "UPDATE") => void;
   nowMs?: number;
 };
 
@@ -204,9 +204,13 @@ export function useLeadMessages({
 }: {
   initial: Message[];
   scope: LeadMessageScope;
-  onLiveMessage?: (message: Message) => void;
+  onLiveMessage?: (message: Message, event: "INSERT" | "UPDATE") => void;
 }): Message[] {
   const { contactId, conversationId, matchMode, propertyId } = scope;
+  const onLiveMessageRef = useRef(onLiveMessage);
+  useEffect(() => {
+    onLiveMessageRef.current = onLiveMessage;
+  }, [onLiveMessage]);
   const [messages, setMessages] = useState<Message[]>(() =>
     sortMessages(
       filterThreadMessages(initial, {
@@ -265,7 +269,7 @@ export function useLeadMessages({
                 ...previous.filter((message) => message.id !== row.id),
               ]).slice(-200),
             );
-            onLiveMessage?.(row);
+            onLiveMessageRef.current?.(row, "INSERT");
           },
         )
         .on(
@@ -273,13 +277,13 @@ export function useLeadMessages({
           { event: "UPDATE", schema: "public", table: "messages" },
           (payload) => {
             const row = payload.new as Message;
+            const belongs = messageBelongsToThread(row, {
+              contactId,
+              conversationId,
+              matchMode,
+              propertyId,
+            });
             setMessages((previous) => {
-              const belongs = messageBelongsToThread(row, {
-                contactId,
-                conversationId,
-                matchMode,
-                propertyId,
-              });
               if (!belongs) {
                 return previous.filter((message) => message.id !== row.id);
               }
@@ -288,6 +292,7 @@ export function useLeadMessages({
                 ...previous.filter((message) => message.id !== row.id),
               ]).slice(-200);
             });
+            if (belongs) onLiveMessageRef.current?.(row, "UPDATE");
           },
         )
         .subscribe();
@@ -298,7 +303,7 @@ export function useLeadMessages({
       mounted = false;
       if (channel) void supabase.removeChannel(channel);
     };
-  }, [contactId, conversationId, matchMode, onLiveMessage, propertyId]);
+  }, [contactId, conversationId, matchMode, propertyId]);
 
   return messages;
 }
