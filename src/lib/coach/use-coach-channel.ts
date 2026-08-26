@@ -6,6 +6,7 @@ import { useEffect, useReducer, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { coachReducer, initialCoachState } from "./event-reducer";
 import { parseCoachEvent } from "./event-validation";
+import { CLOSR_SCRIPT } from "./script-block";
 import type { CoachPhaseId, CoachState } from "./types";
 
 /** Rolling liveness window: if no coach event arrives within this long of
@@ -33,12 +34,18 @@ const RESUBSCRIBE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
  * request a rebuild from, so this is an honest "we can't be sure" signal,
  * not a silent one) — callers should surface it and clear it once
  * acknowledged or once fresh events prove the feed is current.
+ * `scriptOutOfSync` is the producer's declared scriptVersion whenever it
+ * differs from this app's loaded script (CLOSR_SCRIPT.version) — reset to
+ * null the moment a later event reports a matching version. Absent from
+ * an event entirely (producer mid-rollout), the last known value is left
+ * unchanged rather than guessed at.
  */
 export function useCoachChannel(callId: string | null, startingPhaseId: CoachPhaseId = "introduction") {
   const [state, dispatch] = useReducer(coachReducer, startingPhaseId, initialCoachState);
   const [degraded, setDegraded] = useState(false);
   const [reconnectGap, setReconnectGap] = useState(false);
   const [malformedEventCount, setMalformedEventCount] = useState(0);
+  const [scriptOutOfSync, setScriptOutOfSync] = useState<string | null>(null);
 
   useEffect(() => {
     if (!callId) return;
@@ -108,6 +115,9 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
           // A fresh, valid event is the best evidence we have that the feed
           // is caught up — clear the gap flag whether or not it was set.
           setReconnectGap(false);
+          if (result.event.scriptVersion) {
+            setScriptOutOfSync(result.event.scriptVersion === CLOSR_SCRIPT.version ? null : result.event.scriptVersion);
+          }
           dispatch(result.event);
         })
         .subscribe((status) => {
@@ -155,6 +165,7 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
     reconnectGap,
     dismissReconnectGap: () => setReconnectGap(false),
     malformedEventCount,
+    scriptOutOfSync,
   };
 }
 
@@ -163,4 +174,5 @@ export type UseCoachChannelResult = {
   degraded: boolean;
   reconnectGap: boolean;
   malformedEventCount: number;
+  scriptOutOfSync: string | null;
 };

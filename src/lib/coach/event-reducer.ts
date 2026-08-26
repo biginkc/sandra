@@ -2,11 +2,12 @@ import { EMPTY_ENTRY_FIELDS } from "./token-resolver";
 import type { CoachEntryToken, CoachEvent, CoachPhaseId, CoachState, CoachTranscriptEvent, CoachTranscriptLine } from "./types";
 
 /** Local, client-only actions layered on top of server CoachEvents — never
- * broadcast back to the server. Card dismissal is owned per-card by the
- * ObjectionCard component itself (its own 45s timer or a tap), not driven
- * from here. */
+ * broadcast back to the server. Card/nudge dismissal is owned per-instance
+ * by the component itself (its own 45s timer or a tap), not driven from
+ * here. */
 export type CoachLocalAction =
   | { type: "dismiss_objection"; cardId: string }
+  | { type: "dismiss_nudge"; nudgeId: string }
   | { type: "override_phase"; phaseId: CoachPhaseId }
   | { type: "set_entry_field"; field: CoachEntryToken; value: string };
 
@@ -22,6 +23,7 @@ export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"
     overriddenPhaseId: null,
     transcript: [],
     objectionCards: [],
+    nudges: [],
     probeCount: 0,
     gates: {},
     holdTimer: null,
@@ -105,10 +107,25 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         lastEventAt: action.ts,
         holdTimer: { timerId: action.timerId, startedAt: action.startedAt, durationS: action.durationS },
       };
+    case "coach_note":
+      return {
+        ...state,
+        connected: true,
+        lastEventAt: action.ts,
+        nudges: [
+          ...state.nudges,
+          { id: `${action.phaseId}-${action.ts}-${state.nudges.length}`, text: action.text, phaseId: action.phaseId, ts: action.ts },
+        ],
+      };
     case "dismiss_objection":
       return {
         ...state,
         objectionCards: state.objectionCards.filter((card) => card.id !== action.cardId),
+      };
+    case "dismiss_nudge":
+      return {
+        ...state,
+        nudges: state.nudges.filter((nudge) => nudge.id !== action.nudgeId),
       };
     case "override_phase":
       return {

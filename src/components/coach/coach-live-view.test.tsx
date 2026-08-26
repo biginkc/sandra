@@ -300,4 +300,55 @@ describe("<CoachLiveView />", () => {
     const card = screen.getByTestId("objection-card");
     expect(card).toHaveTextContent(/live worked example/i);
   });
+
+  it("renders a coach_note as a nudge card and never counts it as a dropped/unknown event", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "coach_note", text: "Say their name twice in the first line.", phaseId: "introduction", ts: "t1" });
+    expect(screen.getByTestId("coach-nudge")).toHaveTextContent("Say their name twice in the first line.");
+  });
+
+  it("dismisses a nudge on tap, independent of any objection cards showing", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "coach_note", text: "Pain word — go deeper.", phaseId: "reveal", ts: "t1" });
+    const nudge = screen.getByTestId("coach-nudge");
+    await userEvent.click(nudge);
+    expect(screen.queryByTestId("coach-nudge")).not.toBeInTheDocument();
+  });
+
+  it("keeps every nudge's dismiss timer independent, same as objection cards", async () => {
+    vi.useFakeTimers();
+    render(<Harness {...baseProps()} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    broadcast({ type: "coach_note", text: "First nudge.", phaseId: "introduction", ts: "t1" });
+    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(40_000);
+    });
+    broadcast({ type: "coach_note", text: "Second nudge.", phaseId: "introduction", ts: "t2" });
+    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(1);
+    expect(screen.getByTestId("coach-nudge")).toHaveTextContent("Second nudge.");
+  });
+
+  it("shows the 'coach out of sync' banner when an event reports a different script version, and clears it once versions match again", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    expect(screen.queryByTestId("coach-version-mismatch")).not.toBeInTheDocument();
+
+    broadcast({ type: "counter", probeCount: 1, ts: "t1", scriptVersion: "0.9.0" });
+    expect(screen.getByTestId("coach-version-mismatch")).toHaveTextContent("0.9.0");
+
+    broadcast({ type: "counter", probeCount: 2, ts: "t2", scriptVersion: "1.0.1" });
+    expect(screen.queryByTestId("coach-version-mismatch")).not.toBeInTheDocument();
+  });
 });

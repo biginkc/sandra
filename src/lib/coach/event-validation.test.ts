@@ -34,6 +34,55 @@ describe("parseCoachEvent — valid events", () => {
       event: { type: "timer", timerId: "hold_timer", startedAt: "t0", durationS: 180, ts: "t1" },
     });
   });
+
+  it("parses a coach_note event — first-class, not a forward-compat unknown type", () => {
+    const result = parseCoachEvent({
+      type: "coach_note",
+      text: "Never open with 'How are you doing today?'",
+      phaseId: "introduction",
+      ts: "t1",
+    });
+    expect(result).toEqual({
+      ok: true,
+      event: {
+        type: "coach_note",
+        text: "Never open with 'How are you doing today?'",
+        phaseId: "introduction",
+        ts: "t1",
+      },
+    });
+  });
+});
+
+describe("parseCoachEvent — content versions (scriptVersion/matcherVersion)", () => {
+  it("attaches scriptVersion and matcherVersion when present on any event type", () => {
+    const result = parseCoachEvent({
+      type: "phase",
+      phaseId: "reveal",
+      ts: "t1",
+      scriptVersion: "1.0.1",
+      matcherVersion: "3",
+    });
+    expect(result).toEqual({
+      ok: true,
+      event: { type: "phase", phaseId: "reveal", ts: "t1", scriptVersion: "1.0.1", matcherVersion: "3" },
+    });
+  });
+
+  it("omits versions entirely when absent — still valid (producer mid-rollout)", () => {
+    const result = parseCoachEvent({ type: "phase", phaseId: "reveal", ts: "t1" });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect("scriptVersion" in result.event).toBe(false);
+      expect("matcherVersion" in result.event).toBe(false);
+    }
+  });
+
+  it("drops a wrong-typed version field rather than passing it through as absent-but-trusted", () => {
+    const result = parseCoachEvent({ type: "phase", phaseId: "reveal", ts: "t1", scriptVersion: 42 });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect("scriptVersion" in result.event).toBe(false);
+  });
 });
 
 describe("parseCoachEvent — malformed known-type events are dropped and counted", () => {
@@ -65,6 +114,15 @@ describe("parseCoachEvent — malformed known-type events are dropped and counte
     expect(parseCoachEvent({ type: "timer", timerId: "hold_timer", startedAt: "t0", ts: "t1" }).ok).toBe(false);
   });
 
+  it("rejects a coach_note event missing text", () => {
+    expect(parseCoachEvent({ type: "coach_note", phaseId: "introduction", ts: "t1" }).ok).toBe(false);
+  });
+
+  it("rejects a coach_note event with an unrecognized phaseId", () => {
+    const result = parseCoachEvent({ type: "coach_note", text: "hi", phaseId: "not_a_real_phase", ts: "t1" });
+    expect(result).toEqual({ ok: false, reason: "malformed", rawType: "coach_note" });
+  });
+
   it("rejects a non-object payload", () => {
     expect(parseCoachEvent(null).ok).toBe(false);
     expect(parseCoachEvent("just a string").ok).toBe(false);
@@ -77,8 +135,8 @@ describe("parseCoachEvent — malformed known-type events are dropped and counte
 });
 
 describe("parseCoachEvent — unknown event types are tolerated, not counted as malformed", () => {
-  it("treats a forward-compat type like coach_note as unknown_type, not malformed", () => {
-    const result = parseCoachEvent({ type: "coach_note", text: "Never open with...", phaseId: "introduction", ts: "t1" });
-    expect(result).toEqual({ ok: false, reason: "unknown_type", rawType: "coach_note" });
+  it("treats a genuinely unrecognized type as unknown_type, not malformed", () => {
+    const result = parseCoachEvent({ type: "deal_update", offerPrice: "$210,000", ts: "t1" });
+    expect(result).toEqual({ ok: false, reason: "unknown_type", rawType: "deal_update" });
   });
 });

@@ -42,7 +42,25 @@ export const COACH_PHASE_ORDER: readonly CoachPhaseId[] = [
   "close",
 ];
 
-export type CoachTranscriptEvent = {
+/**
+ * Every event carries the producer's content versions, so the client can
+ * tell when it's coaching from a stale/mismatched script rather than
+ * silently rendering the wrong lines. `scriptVersion` is compared against
+ * this file's loaded script (CLOSR_SCRIPT.version in script-block.ts) —
+ * a mismatch surfaces a persistent "coach out of sync" banner that clears
+ * itself the moment a later event reports a matching version.
+ * `matcherVersion` is captured/tracked but not gated on client-side: this
+ * app has no separately-versioned "matcher" of its own to diff against —
+ * display and match content ship together in the same script file/version.
+ * Both are optional so events from a producer mid-rollout of version
+ * tagging still validate.
+ */
+export type CoachEventVersions = {
+  scriptVersion?: string;
+  matcherVersion?: string;
+};
+
+export type CoachTranscriptEvent = CoachEventVersions & {
   type: "transcript";
   speaker: CoachSpeaker;
   text: string;
@@ -50,37 +68,48 @@ export type CoachTranscriptEvent = {
   ts: string;
 };
 
-export type CoachPhaseEvent = {
+export type CoachPhaseEvent = CoachEventVersions & {
   type: "phase";
   phaseId: CoachPhaseId;
   ts: string;
 };
 
-export type CoachObjectionEvent = {
+export type CoachObjectionEvent = CoachEventVersions & {
   type: "objection";
   objectionId: string;
   ts: string;
 };
 
-export type CoachCounterEvent = {
+export type CoachCounterEvent = CoachEventVersions & {
   type: "counter";
   /** Reveal-phase probe counter — number of discovery questions asked so far. */
   probeCount: number;
   ts: string;
 };
 
-export type CoachGateEvent = {
+export type CoachGateEvent = CoachEventVersions & {
   type: "gate";
   gateId: string;
   cleared: boolean;
   ts: string;
 };
 
-export type CoachTimerEvent = {
+export type CoachTimerEvent = CoachEventVersions & {
   type: "timer";
   timerId: string;
   startedAt: string;
   durationS: number;
+  ts: string;
+};
+
+/** A short coaching nudge the producer emits for phase-entry rules and
+ * pain-word prompts (the same content that lives in this script's
+ * coach_notes, surfaced live instead of only pre-rendered). Rendered as a
+ * transient nudge card with the same lifecycle as an objection card. */
+export type CoachNoteEvent = CoachEventVersions & {
+  type: "coach_note";
+  text: string;
+  phaseId: CoachPhaseId;
   ts: string;
 };
 
@@ -90,7 +119,8 @@ export type CoachEvent =
   | CoachObjectionEvent
   | CoachCounterEvent
   | CoachGateEvent
-  | CoachTimerEvent;
+  | CoachTimerEvent
+  | CoachNoteEvent;
 
 // ---- Token resolution ----
 
@@ -170,6 +200,14 @@ export type CoachHoldTimer = {
   durationS: number;
 };
 
+export type CoachNudge = {
+  /** Instance id — unique per occurrence, even for a repeated nudge. */
+  id: string;
+  text: string;
+  phaseId: CoachPhaseId;
+  ts: string;
+};
+
 export type CoachState = {
   /** True once the first event of any kind has arrived. */
   connected: boolean;
@@ -179,6 +217,7 @@ export type CoachState = {
   overriddenPhaseId: CoachPhaseId | null;
   transcript: CoachTranscriptLine[];
   objectionCards: CoachObjectionCard[];
+  nudges: CoachNudge[];
   probeCount: number;
   gates: Record<string, boolean>;
   holdTimer: CoachHoldTimer | null;

@@ -142,3 +142,41 @@ describe("coachReducer — entry fields (deal-panel tokens)", () => {
     expect(state.entryFields.net_to_seller).toBeNull();
   });
 });
+
+describe("coachReducer — coach_note nudges", () => {
+  it("starts with no nudges", () => {
+    expect(initialCoachState().nudges).toEqual([]);
+  });
+
+  it("appends a nudge on a coach_note event", () => {
+    const state = coachReducer(initialCoachState(), {
+      type: "coach_note",
+      text: "Say their name twice in the first line.",
+      phaseId: "introduction",
+      ts: "t1",
+    });
+    expect(state.nudges).toHaveLength(1);
+    expect(state.nudges[0]).toMatchObject({ text: "Say their name twice in the first line.", phaseId: "introduction" });
+    expect(state.connected).toBe(true);
+  });
+
+  it("keeps distinct instances for repeated coach_note text", () => {
+    let state = coachReducer(initialCoachState(), {
+      type: "coach_note",
+      text: "Pain word — go deeper.",
+      phaseId: "reveal",
+      ts: "t1",
+    });
+    state = coachReducer(state, { type: "coach_note", text: "Pain word — go deeper.", phaseId: "reveal", ts: "t2" });
+    expect(state.nudges).toHaveLength(2);
+    expect(state.nudges[0].id).not.toBe(state.nudges[1].id);
+  });
+
+  it("removes a nudge on dismiss_nudge without touching others", () => {
+    let state = coachReducer(initialCoachState(), { type: "coach_note", text: "A", phaseId: "introduction", ts: "t1" });
+    state = coachReducer(state, { type: "coach_note", text: "B", phaseId: "introduction", ts: "t2" });
+    const [first, second] = state.nudges;
+    state = coachReducer(state, { type: "dismiss_nudge", nudgeId: first.id });
+    expect(state.nudges).toEqual([second]);
+  });
+});

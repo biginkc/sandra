@@ -236,9 +236,68 @@ describe("useCoachChannel", () => {
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
     act(() =>
       latestChannel()._broadcastHandler?.({
-        payload: { type: "coach_note", text: "Never open with...", phaseId: "introduction", ts: "t1" },
+        payload: { type: "deal_update", offerPrice: "$210,000", ts: "t1" },
       }),
     );
     expect(result.current.malformedEventCount).toBe(0);
+  });
+
+  it("dispatches a coach_note event into nudges — first-class, not dropped", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-note"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() =>
+      latestChannel()._broadcastHandler?.({
+        payload: { type: "coach_note", text: "Never open with 'How are you doing today?'", phaseId: "introduction", ts: "t1" },
+      }),
+    );
+    expect(result.current.state.nudges).toHaveLength(1);
+    expect(result.current.malformedEventCount).toBe(0);
+  });
+
+  it("scriptOutOfSync stays null while events report the loaded script's own version", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-version-ok"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() =>
+      latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 1, ts: "t1", scriptVersion: "1.0.1" } }),
+    );
+    expect(result.current.scriptOutOfSync).toBeNull();
+  });
+
+  it("scriptOutOfSync flags the remote version the moment an event reports a mismatch", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-version-mismatch"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() =>
+      latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 1, ts: "t1", scriptVersion: "0.9.0" } }),
+    );
+    expect(result.current.scriptOutOfSync).toBe("0.9.0");
+  });
+
+  it("scriptOutOfSync clears once a later event reports a matching version again", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-version-recover"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() =>
+      latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 1, ts: "t1", scriptVersion: "0.9.0" } }),
+    );
+    expect(result.current.scriptOutOfSync).toBe("0.9.0");
+    act(() =>
+      latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 2, ts: "t2", scriptVersion: "1.0.1" } }),
+    );
+    expect(result.current.scriptOutOfSync).toBeNull();
+  });
+
+  it("scriptOutOfSync is left unchanged by an event that carries no scriptVersion at all", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-version-absent"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() =>
+      latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 1, ts: "t1", scriptVersion: "0.9.0" } }),
+    );
+    expect(result.current.scriptOutOfSync).toBe("0.9.0");
+    act(() => latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 2, ts: "t2" } }));
+    expect(result.current.scriptOutOfSync).toBe("0.9.0");
   });
 });

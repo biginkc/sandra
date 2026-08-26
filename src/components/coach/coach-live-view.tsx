@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import type { DtmfDigit } from "@/lib/dialer/transport";
 import {
   buildPhaseScriptBlock,
+  CLOSR_SCRIPT,
   getScriptObjection,
   getScriptPhase,
   nextPhaseId,
@@ -22,6 +23,7 @@ import type {
   CoachCallContext,
   CoachEntryToken,
   CoachHoldTimer,
+  CoachNudge,
   CoachObjectionCard,
   CoachPhaseId,
   CoachToken,
@@ -87,7 +89,19 @@ function timerText(seconds: number): string {
 
 export function CoachLiveView(props: CoachLiveViewProps) {
   const { session, callName, callStatus, seconds, muted, held, holdPending, onDigit, onMute, onHold, onHangup, onCollapse } = props;
-  const { state, dispatch, degraded, reconnectGap, dismissReconnectGap, contextLoad, retryContext, branchOverrides, selectVariant, setEntryField } = session;
+  const {
+    state,
+    dispatch,
+    degraded,
+    reconnectGap,
+    dismissReconnectGap,
+    scriptOutOfSync,
+    contextLoad,
+    retryContext,
+    branchOverrides,
+    selectVariant,
+    setEntryField,
+  } = session;
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -148,6 +162,18 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         degraded={degraded}
         callStatus={callStatus}
       />
+      {scriptOutOfSync ? (
+        <div
+          role="alert"
+          data-testid="coach-version-mismatch"
+          className="flex shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/10 px-4 py-1.5 text-xs text-destructive"
+        >
+          <span>
+            Coach out of sync — the live coach is running script {scriptOutOfSync}, this view is on {CLOSR_SCRIPT.version}.
+            Script lines below may not match what the coach is tracking.
+          </span>
+        </div>
+      ) : null}
       {reconnectGap ? (
         <div
           role="status"
@@ -172,6 +198,10 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           onSelectVariant={onSelectVariant}
         />
       </div>
+      <NudgeOverlay
+        nudges={state.nudges}
+        onDismiss={(nudgeId) => dispatch({ type: "dismiss_nudge", nudgeId })}
+      />
       <ObjectionOverlay
         cards={state.objectionCards}
         tokens={tokens}
@@ -633,6 +663,57 @@ function EntryTokenChip({
       )}
     >
       {resolved.isPlaceholder ? `+ ${ENTRY_TOKEN_LABEL[token]}` : resolved.value}
+    </button>
+  );
+}
+
+const NUDGE_TTL_MS = 45_000;
+
+/** Coaching nudges (phase-entry rules, pain-word prompts) the producer
+ * pushes live via coach_note events — same transient-guidance treatment as
+ * objection cards (slide in, own auto-dismiss timer, tap to dismiss, never
+ * modal), rendered in their own top-left area so they never collide with
+ * objection cards at top-right. */
+function NudgeOverlay({
+  nudges,
+  onDismiss,
+}: {
+  nudges: CoachNudge[];
+  onDismiss: (nudgeId: string) => void;
+}) {
+  if (nudges.length === 0) return null;
+  return (
+    <div className="pointer-events-none fixed top-20 left-4 z-[90] flex w-[min(320px,calc(100vw-32px))] flex-col gap-2">
+      {nudges.map((nudge) => (
+        <NudgeCard key={nudge.id} nudge={nudge} onDismiss={() => onDismiss(nudge.id)} />
+      ))}
+    </div>
+  );
+}
+
+/** Owns its own auto-dismiss timer, scoped to this nudge's mount lifetime —
+ * a sibling nudge appearing or disappearing never resets or cancels it
+ * (same pattern as ObjectionCard). */
+function NudgeCard({ nudge, onDismiss }: { nudge: CoachNudge; onDismiss: () => void }) {
+  const onDismissRef = useRef(onDismiss);
+  useEffect(() => {
+    onDismissRef.current = onDismiss;
+  });
+
+  useEffect(() => {
+    const timer = setTimeout(() => onDismissRef.current(), NUDGE_TTL_MS);
+    return () => clearTimeout(timer);
+    // Intentionally mount-once — same pattern as ObjectionCard.
+  }, []);
+
+  return (
+    <button
+      type="button"
+      data-testid="coach-nudge"
+      onClick={onDismiss}
+      className="animate-in slide-in-from-left-4 pointer-events-auto rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-left text-sm text-amber-900 shadow-lg"
+    >
+      {nudge.text}
     </button>
   );
 }
