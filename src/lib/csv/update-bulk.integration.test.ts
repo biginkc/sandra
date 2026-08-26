@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { normalizeAddress } from "@/lib/csv/normalize";
 import { previewBulkUpdate, applyBulkUpdate } from "@/lib/csv/update-bulk";
@@ -6,6 +6,23 @@ import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const supabase = createTestClient();
+let actorId = "";
+
+beforeAll(async () => {
+  const { data, error } = await supabase.auth.admin.createUser({
+    email: `csv-ledger-${crypto.randomUUID()}@test.invalid`,
+    password: `test-pw-${crypto.randomUUID()}`,
+    email_confirm: true,
+  });
+  if (error || !data.user) {
+    throw error ?? new Error("CSV ledger actor creation failed");
+  }
+  actorId = data.user.id;
+});
+
+afterAll(async () => {
+  if (actorId) await supabase.auth.admin.deleteUser(actorId);
+});
 
 async function seedProperty(
   address: string,
@@ -167,7 +184,6 @@ describe("update-bulk runner (integration)", () => {
   it("records only confirmed status changes with truthful batch metadata", async () => {
     const firstId = await seedProperty("500 Ledger Status A");
     const secondId = await seedProperty("501 Ledger Status B");
-    const actorId = crypto.randomUUID();
     const jobId = await createUpdateJob(2);
 
     const first = await applyBulkUpdate(supabase, {
@@ -230,7 +246,6 @@ describe("update-bulk runner (integration)", () => {
 
   it("records motivation and only newly inserted tag associations", async () => {
     const propertyId = await seedProperty("600 Ledger Fields");
-    const actorId = crypto.randomUUID();
     const motivationJob = await createUpdateJob(1);
     const motivation = await applyBulkUpdate(supabase, {
       subOperationId: "update-motivation-level",
