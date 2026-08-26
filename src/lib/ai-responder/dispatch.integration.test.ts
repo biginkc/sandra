@@ -13,7 +13,7 @@ import {
   seedSenderCatalog,
 } from "@tests/integration/delivery";
 
-import { dispatchAiResponse } from "./dispatch";
+import { dispatchAiResponse, markPropertyNeedsAttention } from "./dispatch";
 import type { AnthropicLike } from "./generate";
 import { IDENTITY_REPLY_BODY } from "./identity";
 import type { AiStructuredOutput } from "./types";
@@ -735,6 +735,32 @@ describe("dispatchAiResponse (integration)", () => {
       .eq("id", propertyId)
       .single();
     expect(property!.needs_human_attention).toBe(true);
+
+    const { data: events } = await supabase
+      .from("lead_events")
+      .select("actor_type, actor_id, event_type, payload")
+      .eq("property_id", propertyId)
+      .eq("event_type", "ai_escalated");
+    expect(events).toEqual([
+      {
+        actor_type: "ai",
+        actor_id: null,
+        event_type: "ai_escalated",
+        payload: {
+          from: false,
+          to: true,
+          reason: "keyword:price_offer",
+        },
+      },
+    ]);
+
+    await markPropertyNeedsAttention(supabase, propertyId, "retry_reason");
+    const { count: retryEventCount } = await supabase
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", propertyId)
+      .eq("event_type", "ai_escalated");
+    expect(retryEventCount).toBe(1);
   });
 
   it("tier-C keyword (lawyer) → escalates", async () => {

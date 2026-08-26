@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { createClient } from "@/lib/supabase/server";
 
 /**
@@ -16,7 +17,17 @@ export async function clearNeedsHumanAttention(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
-    const { error } = await supabase
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+    const { data: updated, error } = await supabase
       .from("properties")
       .update({
         needs_human_attention: false,
@@ -24,12 +35,24 @@ export async function clearNeedsHumanAttention(
         last_ai_escalation_at: null,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", propertyId);
+      .eq("id", propertyId)
+      .eq("needs_human_attention", true)
+      .select("id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "CLEAR_ATTENTION_FAILED", message: error.message },
       };
+    }
+    if (updated) {
+      await recordLeadEvent({
+        propertyId,
+        actorType: "user",
+        actorId: user.id,
+        eventType: LEAD_EVENT_TYPES.AI_ESCALATION_CLEARED,
+        payload: { from: true, to: false },
+      });
     }
     revalidatePath(`/leads/${propertyId}`);
     return ok(null);
@@ -55,18 +78,40 @@ export async function setSkipTraceDisabled(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
-    const { error } = await supabase
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+    const { data: updated, error } = await supabase
       .from("properties")
       .update({
         skip_trace_disabled: disabled,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", propertyId);
+      .eq("id", propertyId)
+      .eq("skip_trace_disabled", !disabled)
+      .select("id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "SKIP_TRACE_TOGGLE_FAILED", message: error.message },
       };
+    }
+    if (updated) {
+      await recordLeadEvent({
+        propertyId,
+        actorType: "user",
+        actorId: user.id,
+        eventType: LEAD_EVENT_TYPES.SKIP_TRACE_TOGGLED,
+        payload: { from: !disabled, to: disabled },
+      });
     }
     revalidatePath(`/leads/${propertyId}`);
     return ok(null);
@@ -90,18 +135,40 @@ export async function setAiResponderDisabled(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
-    const { error } = await supabase
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+    const { data: updated, error } = await supabase
       .from("properties")
       .update({
         ai_responder_disabled: disabled,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", propertyId);
+      .eq("id", propertyId)
+      .eq("ai_responder_disabled", !disabled)
+      .select("id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "AI_TOGGLE_FAILED", message: error.message },
       };
+    }
+    if (updated) {
+      await recordLeadEvent({
+        propertyId,
+        actorType: "user",
+        actorId: user.id,
+        eventType: LEAD_EVENT_TYPES.AI_RESPONDER_TOGGLED,
+        payload: { from: !disabled, to: disabled },
+      });
     }
     revalidatePath(`/leads/${propertyId}`);
     return ok(null);

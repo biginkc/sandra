@@ -12,6 +12,7 @@ import {
 } from "@/lib/messaging/suppression";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 
 import { listAdminUserIds } from "@/lib/auth/admins";
 import { createNotification } from "@/lib/notifications/dispatch";
@@ -1048,7 +1049,7 @@ export async function markPropertyNeedsAttention(
   reason: string,
 ): Promise<void> {
   const now = new Date().toISOString();
-  const { error } = await supabase
+  const { data: updated, error } = await supabase
     .from("properties")
     .update({
       needs_human_attention: true,
@@ -1056,11 +1057,23 @@ export async function markPropertyNeedsAttention(
       last_ai_escalation_at: now,
       updated_at: now,
     })
-    .eq("id", propertyId);
+    .eq("id", propertyId)
+    .eq("needs_human_attention", false)
+    .select("id")
+    .maybeSingle();
   if (error) {
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_mark_attention" },
       extra: { propertyId, reason },
+    });
+    return;
+  }
+  if (updated) {
+    await recordLeadEvent({
+      propertyId,
+      actorType: "ai",
+      eventType: LEAD_EVENT_TYPES.AI_ESCALATED,
+      payload: { from: false, to: true, reason },
     });
   }
 }
