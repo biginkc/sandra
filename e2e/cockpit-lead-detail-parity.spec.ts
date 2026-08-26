@@ -503,10 +503,16 @@ test("lead detail blocks a landline-only lead without an authoritative thread", 
     page.getByTestId("sms-channel-restriction-header"),
   ).toBeVisible();
   await expect(
-    page.getByText(
-      "SMS cannot be delivered to the selected landline. Call or mail instead.",
-    ),
+    page.getByTestId("sms-channel-restriction-header"),
+  ).toContainText("Landline only");
+  await expect(
+    page.getByTestId("sms-channel-restriction-inline"),
   ).toBeVisible();
+  await expect(
+    page.getByTestId("sms-channel-restriction-inline"),
+  ).toContainText(
+    "SMS cannot be delivered to the selected landline. Call or mail instead.",
+  );
   await expect(page.getByTestId("inline-reply")).toHaveCount(0);
 });
 
