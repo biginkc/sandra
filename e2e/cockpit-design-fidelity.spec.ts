@@ -247,13 +247,13 @@ test.describe("Messages cockpit — design fidelity", () => {
     await expect(page.getByTestId("dispo-more")).toBeVisible();
     await expect(page.getByTestId("message-open-lead")).toHaveCount(0);
 
-    // Composer card with From: + queue-only button + Outbox disclaimer
+    // Composer card with From: + immediate-send button + safety disclaimer
     const reply = page.getByTestId("inline-reply");
     await expect(reply).toContainText("From:");
     await expect(reply.getByTestId("inline-reply-send")).toContainText(
-      "Queue SMS",
+      "Send SMS",
     );
-    await expect(reply).toContainText(/adds the message to Outbox/i);
+    await expect(reply).toContainText(/Sends immediately after Sandra checks/i);
 
     // Day separator pill in the thread
     await expect(
@@ -310,14 +310,14 @@ test.describe("Messages cockpit — design fidelity", () => {
       "Connected",
     );
 
-    // Same InlineReply → From: line + queue-only button + disclaimer
+    // Same InlineReply → From: line + immediate-send button + disclaimer
     const reply = page.getByTestId("inline-reply");
     await expect(reply).toBeVisible();
     await expect(reply).toContainText("From:");
     await expect(reply.getByTestId("inline-reply-send")).toContainText(
-      "Queue SMS",
+      "Send SMS",
     );
-    await expect(reply).toContainText(/adds the message to Outbox/i);
+    await expect(reply).toContainText(/Sends immediately after Sandra checks/i);
     await expect(reply.getByTestId("lead-add-note-composer")).toBeVisible();
 
     // These stable landmarks distinguish the approved compact redesign from

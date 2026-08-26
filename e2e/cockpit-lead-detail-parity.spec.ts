@@ -7,6 +7,7 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
+import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
 /**
@@ -19,7 +20,9 @@ let phoneCounter = 0;
 
 function uniquePhone(): string {
   phoneCounter += 1;
-  const tail = String(Date.now() + phoneCounter).slice(-7).padStart(7, "0");
+  const tail = String(Date.now() + phoneCounter)
+    .slice(-7)
+    .padStart(7, "0");
   return `+1816${tail}`;
 }
 
@@ -94,16 +97,28 @@ async function seedConsentedLead(
   };
 }
 
+function callableStateForNow(): string | null {
+  for (const state of Object.keys(STATE_TO_TZ).sort()) {
+    if (checkQuietHours(state).ok) return state;
+  }
+  return null;
+}
+
 test("reply from cockpit shows up on the lead detail page (test 29)", async ({
   page,
 }) => {
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
+  const callableState = callableStateForNow();
+  if (callableState === null) {
+    test.skip(true, "outside legal send windows in every configured US state");
+    return;
+  }
   const { propertyId, threadId } = await seedConsentedLead(admin, {
     phone: uniquePhone(),
     addressTag: "PARITY-29",
-    state: "MO",
+    state: callableState,
   });
 
   await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
@@ -115,10 +130,12 @@ test("reply from cockpit shows up on the lead detail page (test 29)", async ({
   await expect(async () => {
     const { data } = await admin
       .from("messages")
-      .select("status")
+      .select("status, external_id")
       .eq("property_id", propertyId)
       .eq("body", reply);
-    expect(data).toEqual([{ status: "queued" }]);
+    expect(data).toHaveLength(1);
+    expect(data![0]).toMatchObject({ status: "sent" });
+    expect(data![0].external_id).toMatch(/^mock_/);
   }).toPass({ timeout: 10_000 });
 
   // Switch to lead detail.
@@ -127,9 +144,9 @@ test("reply from cockpit shows up on the lead detail page (test 29)", async ({
     .getByTestId("messages-thread-msg")
     .filter({ hasText: reply });
   await expect(leadBubble).toBeVisible();
-  await expect(leadBubble.getByTestId("messages-thread-delivery-status")).toHaveText(
-    "Queued · in Outbox",
-  );
+  await expect(
+    leadBubble.getByTestId("messages-thread-delivery-status"),
+  ).toHaveText("Sent");
 });
 
 test("reply from lead detail shows up on the cockpit (test 30)", async ({
@@ -138,10 +155,15 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
+  const callableState = callableStateForNow();
+  if (callableState === null) {
+    test.skip(true, "outside legal send windows in every configured US state");
+    return;
+  }
   const { propertyId, threadId } = await seedConsentedLead(admin, {
     phone: uniquePhone(),
     addressTag: "PARITY-30",
-    state: "MO",
+    state: callableState,
   });
 
   await page.goto(`/leads/${propertyId}`);
@@ -153,10 +175,12 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
   await expect(async () => {
     const { data } = await admin
       .from("messages")
-      .select("status")
+      .select("status, external_id")
       .eq("property_id", propertyId)
       .eq("body", reply);
-    expect(data).toEqual([{ status: "queued" }]);
+    expect(data).toHaveLength(1);
+    expect(data![0]).toMatchObject({ status: "sent" });
+    expect(data![0].external_id).toMatch(/^mock_/);
   }).toPass({ timeout: 10_000 });
 
   await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
@@ -166,7 +190,7 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
   await expect(cockpitBubble).toBeVisible();
   await expect(
     cockpitBubble.getByTestId("messages-thread-delivery-status"),
-  ).toHaveText("Queued · in Outbox");
+  ).toHaveText("Sent");
 });
 
 test("Realtime cross-surface: both surfaces update from the other (test 31)", async ({
@@ -208,7 +232,10 @@ test("Realtime cross-surface: both surfaces update from the other (test 31)", as
       page.waitForLoadState("networkidle"),
       leadPage.waitForLoadState("networkidle"),
     ]);
-    await Promise.all([page.waitForTimeout(1000), leadPage.waitForTimeout(1000)]);
+    await Promise.all([
+      page.waitForTimeout(1000),
+      leadPage.waitForTimeout(1000),
+    ]);
 
     const inboundBody = `cross surface realtime ${Date.now()}`;
     const res = await request.post(`${baseURL}/api/webhooks/dialpad/sms`, {

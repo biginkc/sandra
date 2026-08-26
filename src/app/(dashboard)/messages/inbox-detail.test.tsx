@@ -126,9 +126,11 @@ function makeMessage(
       overrides.conversation_id ??
       `conv-${overrides.contact_id ?? "contact-1"}`,
     from_address:
-      overrides.direction === "inbound" ? "+15551234567" : "+18162804181",
+      overrides.from_address ??
+      (overrides.direction === "inbound" ? "+15551234567" : "+18162804181"),
     to_address:
-      overrides.direction === "inbound" ? "+18162804181" : "+15551234567",
+      overrides.to_address ??
+      (overrides.direction === "inbound" ? "+18162804181" : "+15551234567"),
     created_at: overrides.created_at ?? "2026-04-29T12:00:00Z",
     read_at: overrides.read_at ?? null,
     metadata: overrides.metadata ?? null,
@@ -228,7 +230,13 @@ describe("<InboxDetail />", () => {
     vi.mocked(sendSmsFromLead).mockReset();
     vi.mocked(sendSmsFromLead).mockResolvedValue({
       ok: true,
-      data: { outcome: { status: "queued", messageId: "queued-reply-1" } },
+      data: {
+        outcome: {
+          status: "sent",
+          messageId: "sent-reply-1",
+          externalId: "mock_sent-reply-1",
+        },
+      },
     } as Awaited<ReturnType<typeof sendSmsFromLead>>);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -401,7 +409,7 @@ describe("<InboxDetail />", () => {
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
   });
 
-  it("queues inline replies to the same saved thread phone shown in Messages", async () => {
+  it("sends inline replies immediately to the same saved thread phone shown in Messages", async () => {
     const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-reply-phone",
@@ -412,12 +420,15 @@ describe("<InboxDetail />", () => {
       initialMessages: [],
     });
 
-    const view = render(
+    render(
       <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     expect(screen.getByTestId("inline-reply")).toHaveTextContent(
       "+1 (555) 000-0002",
+    );
+    expect(screen.getByTestId("inline-reply")).toHaveTextContent(
+      "+1 (816) 280-4181",
     );
 
     await user.type(screen.getByLabelText("Reply to this lead"), "Thanks");
@@ -427,57 +438,25 @@ describe("<InboxDetail />", () => {
       expect(sendSmsFromLead).toHaveBeenCalledWith(
         "prop-reply-phone",
         "Thanks",
-        null,
-        true,
+        "+18162804181",
+        false,
         "+15550000002",
       );
     });
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
-    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
-      "Queued · in Outbox",
-    );
-    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
-      "Thanks",
-    );
-    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
-      "Outbox controls delivery",
-    );
+    expect(toast.success).toHaveBeenCalledWith("Message sent", {
+      description: "Sent to +15550000002.",
+    });
     expect(screen.getByRole("button", { name: "Insert template" })).toHaveClass(
       "min-h-11",
     );
-
-    view.rerender(
-      <InboxDetail
-        data={{
-          ...data,
-          initialMessages: [
-            makeMessage({
-              id: "queued-reply-1",
-              body: "Thanks",
-              direction: "outbound",
-              status: "queued",
-              contact_id: "contact-reply-phone",
-              property_id: "prop-reply-phone",
-              conversation_id: data.conversationId,
-            }),
-          ],
-        }}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
-    );
-    expect(screen.queryByTestId("inline-reply-queued-receipt")).toBeNull();
-    expect(screen.getAllByText("Thanks")).toHaveLength(1);
-    expect(screen.getByTestId("messages-thread-delivery-status")).toHaveTextContent(
-      "Queued · in Outbox",
-    );
   });
 
-  it("does not claim success or clear the draft if queueOnly returns an impossible immediate send", async () => {
+  it("does not claim success or clear the draft if immediate send unexpectedly queues", async () => {
     const user = userEvent.setup();
     vi.mocked(sendSmsFromLead).mockResolvedValueOnce({
       ok: true,
-      data: { outcome: { status: "sent" } },
+      data: { outcome: { status: "queued", messageId: "unexpected-queue" } },
     } as Awaited<ReturnType<typeof sendSmsFromLead>>);
     render(
       <InboxDetail
@@ -493,6 +472,10 @@ describe("<InboxDetail />", () => {
 
     await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
     expect(composer).toHaveValue("keep this draft");
+    expect(toast.error).toHaveBeenCalledWith("Send did not complete", {
+      description:
+        "The server queued this reply unexpectedly. Review Outbox before retrying.",
+    });
   });
 
   it("explains a missing approved sender and preserves the reply draft", async () => {
@@ -525,6 +508,143 @@ describe("<InboxDetail />", () => {
     expect(composer).toHaveValue("keep this draft too");
   });
 
+  it("keeps the exact draft when an outbound pending insert precedes provider failure", async () => {
+    const user = userEvent.setup();
+    let resolveSend:
+      | ((value: Awaited<ReturnType<typeof sendSmsFromLead>>) => void)
+      | undefined;
+    vi.mocked(sendSmsFromLead).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    const data = makeData({
+      contactId: "contact-outbound-pending",
+      propertyId: "prop-outbound-pending",
+      threadId: "conv-outbound-pending",
+      conversationId: "conv-outbound-pending",
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    const composer = screen.getByLabelText("Reply to this lead");
+    await user.type(composer, "preserve after provider failure");
+    await user.click(screen.getByTestId("inline-reply-send"));
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+
+    const insertSubscription = supabaseMock.subscriptions.find(
+      (subscription) =>
+        subscription.type === "postgres_changes" &&
+        subscription.filter.event === "INSERT",
+    );
+    expect(insertSubscription).toBeDefined();
+
+    await act(async () => {
+      insertSubscription!.callback({
+        new: makeMessage({
+          id: "outbound-pending",
+          body: "preserve after provider failure",
+          direction: "outbound",
+          status: "pending",
+          contact_id: data.contactId,
+          property_id: data.propertyId,
+          conversation_id: data.conversationId,
+        }),
+      });
+    });
+
+    expect(
+      screen.queryByTestId("inline-reply-refreshing"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(
+      "preserve after provider failure",
+    );
+    expect(refreshCalls).toHaveLength(0);
+
+    await act(async () => {
+      resolveSend?.({
+        ok: true,
+        data: {
+          outcome: {
+            status: "provider_failed",
+            error: "Provider rejected the message.",
+          },
+        },
+      } as Awaited<ReturnType<typeof sendSmsFromLead>>);
+    });
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith("Provider error", {
+        description: "Provider rejected the message.",
+      });
+    });
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(
+      "preserve after provider failure",
+    );
+  });
+
+  it.each([
+    {
+      routeChange: "customer phone",
+      fromAddress: "+18162804181",
+      toAddress: "+15550000003",
+    },
+    {
+      routeChange: "Sandra sender",
+      fromAddress: "+18162804182",
+      toAddress: "+15551234567",
+    },
+  ])(
+    "refreshes thread identity when another outbound changes the $routeChange",
+    async ({ fromAddress, routeChange, toAddress }) => {
+      const data = makeData({
+        contactId: `contact-route-${routeChange}`,
+        propertyId: `prop-route-${routeChange}`,
+        threadId: `conv-route-${routeChange}`,
+        conversationId: `conv-route-${routeChange}`,
+      });
+
+      render(
+        <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+      );
+
+      await waitFor(() => {
+        expect(supabaseMock.subscriptions.length).toBeGreaterThan(0);
+      });
+      const insertSubscription = supabaseMock.subscriptions.find(
+        (subscription) =>
+          subscription.type === "postgres_changes" &&
+          subscription.filter.event === "INSERT",
+      );
+      expect(insertSubscription).toBeDefined();
+
+      await act(async () => {
+        insertSubscription!.callback({
+          new: makeMessage({
+            id: `outbound-route-${routeChange}`,
+            body: "sent somewhere else",
+            direction: "outbound",
+            status: "pending",
+            contact_id: data.contactId,
+            property_id: data.propertyId,
+            conversation_id: data.conversationId,
+            from_address: fromAddress,
+            to_address: toAddress,
+          }),
+        });
+      });
+
+      expect(screen.getByTestId("inline-reply-refreshing")).toHaveTextContent(
+        "Updating the thread phone before reply",
+      );
+      expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+      expect(refreshCalls.length).toBeGreaterThan(0);
+    },
+  );
+
   it("renders a persisted queued reply after reload instead of dropping it from the thread", () => {
     render(
       <InboxDetail
@@ -549,9 +669,9 @@ describe("<InboxDetail />", () => {
     );
 
     expect(screen.getByText("durable queued body")).toBeInTheDocument();
-    expect(screen.getByTestId("messages-thread-delivery-status")).toHaveTextContent(
-      "Queued · in Outbox",
-    );
+    expect(
+      screen.getByTestId("messages-thread-delivery-status"),
+    ).toHaveTextContent("Queued · in Outbox");
   });
 
   it("pauses Messages replies after a live same-thread insert until server detail refreshes", async () => {
