@@ -4,6 +4,23 @@
  * call_id is the softphone's wrap token (the id minted once per call and
  * shared with Sandra wrap-up). This file is the single source of truth for
  * the shape both sides agree on — keep it in sync with the server.
+ *
+ * Channel authorization (who may subscribe to `coach:{call_id}`):
+ * Jitter's softphone ledger (jitter_sandra_softphone_calls) lives in a
+ * SEPARATE Supabase project from Sandra's, but broadcasts on this channel
+ * land in Sandra's project — so ownership for Realtime Broadcast
+ * Authorization is recorded Sandra-side, not traced through Jitter's
+ * tables. `src/lib/dialer/jitter-server.ts`'s `startAuthenticatedJitterCall`
+ * writes one row per call to `public.coach_call_index` (client_call_id,
+ * operator_user_id, property_id) via the service-role client, BEFORE the
+ * Jitter start-call request — so the row exists before the browser can
+ * possibly subscribe. A `realtime.messages` RLS policy
+ * (`supabase/migrations/20260826170000_coach_call_index.sql`) then allows
+ * an authenticated user to receive broadcasts on `coach:{client_call_id}`
+ * only when a coach_call_index row for that id has `operator_user_id =
+ * auth.uid()`. The client must open the channel with
+ * `{ config: { private: true } }` (see use-coach-channel.ts) for this
+ * policy to be enforced at all — public channels bypass it entirely.
  */
 
 export type CoachSpeaker = "rep" | "seller";

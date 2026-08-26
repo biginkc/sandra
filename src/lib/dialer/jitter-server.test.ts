@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   requestCancelByKey: vi.fn(),
   requestAudioHealth: vi.fn(),
   requestCallerIds: vi.fn(),
+  coachCallIndexUpsert: vi.fn(),
 }));
 
 vi.mock("@/lib/dialer/actions", () => ({
@@ -21,6 +22,15 @@ vi.mock("@/lib/dialer/actions", () => ({
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({ auth: { getUser: mocks.getUser } })),
+}));
+
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: vi.fn(() => ({
+    from: vi.fn((table: string) => {
+      if (table !== "coach_call_index") throw new Error(`unexpected admin table: ${table}`);
+      return { upsert: mocks.coachCallIndexUpsert };
+    }),
+  })),
 }));
 
 vi.mock("@/lib/auth/memberships", () => ({
@@ -140,6 +150,7 @@ describe("authenticated Jitter softphone server boundary", () => {
       ok: true,
       data: { caller_ids: [{ phone_e164: "+18165550100", label: "Main" }] },
     });
+    mocks.coachCallIndexUpsert.mockResolvedValue({ error: null });
     const minted = await mintStartIntent();
     if (!minted.ok) throw new Error("expected start intent mint");
     START_INTENT = minted.data.intentCapability;
@@ -178,6 +189,38 @@ describe("authenticated Jitter softphone server boundary", () => {
       },
       START_CALL_TOKEN,
     );
+  });
+
+  it("indexes the call for coach realtime authorization before requesting the Jitter start, keyed by the same idempotency token", async () => {
+    const result = await startAuthenticatedJitterCall(
+      callTarget({ propertyId: "property-1", contactId: "contact-1", callerIdE164: "+18165550100" }),
+    );
+    expect(result.ok).toBe(true);
+    expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
+      { client_call_id: START_CALL_TOKEN, operator_user_id: "user-1", property_id: "property-1" },
+      { onConflict: "client_call_id" },
+    );
+    expect(mocks.coachCallIndexUpsert.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.requestStart.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("never blocks the call when the coach_call_index write fails", async () => {
+    mocks.coachCallIndexUpsert.mockResolvedValueOnce({ error: { message: "db unavailable" } });
+    const result = await startAuthenticatedJitterCall(
+      callTarget({ propertyId: "property-1", contactId: "contact-1", callerIdE164: "+18165550100" }),
+    );
+    expect(result.ok).toBe(true);
+    expect(mocks.requestStart).toHaveBeenCalled();
+  });
+
+  it("never blocks the call when the coach_call_index write throws", async () => {
+    mocks.coachCallIndexUpsert.mockRejectedValueOnce(new Error("network error"));
+    const result = await startAuthenticatedJitterCall(
+      callTarget({ propertyId: "property-1", contactId: "contact-1", callerIdE164: "+18165550100" }),
+    );
+    expect(result.ok).toBe(true);
+    expect(mocks.requestStart).toHaveBeenCalled();
   });
 
   it("sends only the server-prepared real refs, never browser-supplied refs", async () => {
