@@ -107,7 +107,8 @@ type AgentDetailsRow = Database["public"]["Tables"]["agent_details"]["Row"];
 type PropertyRow = Database["public"]["Tables"]["properties"]["Row"];
 
 export type DetailedLead = PropertyRow & {
-  homeowner: (ContactRow & { homeowner_details: HomeownerDetailsRow | null }) | null;
+  homeowner:
+    (ContactRow & { homeowner_details: HomeownerDetailsRow | null }) | null;
   agent: (ContactRow & { agent_details: AgentDetailsRow | null }) | null;
 };
 
@@ -160,6 +161,31 @@ export async function verifyLeadAddress(
 ): Promise<Result<VerifyResult>> {
   try {
     const supabase = await createClient();
+    let userId: string;
+    try {
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
+      if (authError || !user) {
+        return {
+          ok: false,
+          error: {
+            code: "AUTH_REQUIRED",
+            message: "Sign in to verify this address.",
+          },
+        };
+      }
+      userId = user.id;
+    } catch {
+      return {
+        ok: false,
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Sign in to verify this address.",
+        },
+      };
+    }
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
     if (!unlocked.ok) return unlocked;
     const { data: property } = await supabase
@@ -181,13 +207,24 @@ export async function verifyLeadAddress(
 
     switch (outcome.status) {
       case "verified":
-      case "stored_with_status":
+      case "stored_with_status": {
+        await recordLeadEvent({
+          propertyId,
+          actorType: "user",
+          actorId: userId,
+          eventType: LEAD_EVENT_TYPES.ADDRESS_VERIFIED,
+          payload: {
+            cass_status: outcome.verified.cassStatus,
+            cache_hit: outcome.cacheHit,
+          },
+        });
         return ok({
           cassStatus: outcome.verified.cassStatus,
           standardized: outcome.verified.standardized,
           isVacant: outcome.verified.isVacant ?? null,
           cacheHit: outcome.cacheHit,
         });
+      }
       case "provider_off":
         return {
           ok: false,
@@ -275,7 +312,10 @@ export async function updateLeadMotivation(
     if (lookupError) {
       return {
         ok: false,
-        error: { code: "MOTIVATION_FETCH_FAILED", message: lookupError.message },
+        error: {
+          code: "MOTIVATION_FETCH_FAILED",
+          message: lookupError.message,
+        },
       };
     }
     if (!current) {
@@ -404,9 +444,7 @@ export type BulkQualifyFailure = { propertyId: string; message: string };
  * going. The UI shows a toast summarizing qualified / already-qualified /
  * failed so the VA knows exactly what landed.
  */
-export async function qualifyLeadsBulk(
-  propertyIds: string[],
-): Promise<
+export async function qualifyLeadsBulk(propertyIds: string[]): Promise<
   Result<{
     qualified: number;
     alreadyQualified: number;
@@ -548,7 +586,8 @@ export type BulkTagRow = {
   id: string;
   name: string;
   color: string | null;
-  category: "source" | "marketing" | "skip_trace" | "phone" | "journey" | "custom";
+  category:
+    "source" | "marketing" | "skip_trace" | "phone" | "journey" | "custom";
   system_managed: boolean;
 };
 
@@ -681,7 +720,9 @@ async function resolveCustomTagForBulk(
 async function fetchBulkTagProperties(
   supabase: Awaited<ReturnType<typeof createClient>>,
   propertyIds: string[],
-): Promise<Result<{ props: BulkTagProperty[]; failed: BulkOutcome["failed"] }>> {
+): Promise<
+  Result<{ props: BulkTagProperty[]; failed: BulkOutcome["failed"] }>
+> {
   const props: BulkTagProperty[] = [];
   for (let i = 0; i < propertyIds.length; i += MEMBERSHIP_BULK_CHUNK_SIZE) {
     const chunk = propertyIds.slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE);
@@ -1088,10 +1129,7 @@ export async function addPropertiesToListBulk(
       i < uniquePropertyIds.length;
       i += MEMBERSHIP_BULK_CHUNK_SIZE
     ) {
-      const chunk = uniquePropertyIds.slice(
-        i,
-        i + MEMBERSHIP_BULK_CHUNK_SIZE,
-      );
+      const chunk = uniquePropertyIds.slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE);
       const { data, error: lookupError } = await supabase
         .from("properties")
         .select("id, org_id")
@@ -1139,7 +1177,8 @@ export async function addPropertiesToListBulk(
           error: { code: "ADD_TO_LIST_FAILED", message: existingError.message },
         };
       }
-      for (const row of existing ?? []) existingPropertyIds.add(row.property_id);
+      for (const row of existing ?? [])
+        existingPropertyIds.add(row.property_id);
     }
 
     const nowIso = new Date().toISOString();
@@ -1247,14 +1286,11 @@ export async function removePropertiesFromListBulk(
       i < uniquePropertyIds.length;
       i += MEMBERSHIP_BULK_CHUNK_SIZE
     ) {
-      const chunk = uniquePropertyIds.slice(
-        i,
-        i + MEMBERSHIP_BULK_CHUNK_SIZE,
-      );
+      const chunk = uniquePropertyIds.slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE);
       const { data: removed, error } = await supabase
-      .from("property_lists")
-      .delete()
-      .eq("list_id", listId)
+        .from("property_lists")
+        .delete()
+        .eq("list_id", listId)
         .in("property_id", chunk)
         .select("property_id");
       if (error) {
@@ -1289,8 +1325,7 @@ export async function removePropertiesFromListBulk(
     }
     return ok({
       succeeded: removedIds.length,
-      skipped:
-        uniquePropertyIds.length - removedIds.length - failed.length,
+      skipped: uniquePropertyIds.length - removedIds.length - failed.length,
       failed,
     });
   } catch (e) {
@@ -1627,12 +1662,16 @@ export async function verifyPropertiesBulk(
       };
     }
     const orgIds = new Set((ownedRows ?? []).map((row) => row.org_id));
-    if ((ownedRows ?? []).length !== new Set(verifyIds).size || orgIds.size !== 1) {
+    if (
+      (ownedRows ?? []).length !== new Set(verifyIds).size ||
+      orgIds.size !== 1
+    ) {
       return {
         ok: false,
         error: {
           code: "VERIFY_SCOPE_FAILED",
-          message: "Every selected property must belong to the same organization.",
+          message:
+            "Every selected property must belong to the same organization.",
         },
       };
     }
@@ -1752,7 +1791,8 @@ export async function updatePropertyStatus(
           ok: false,
           error: {
             code: "STATUS_RECONCILIATION_FAILED",
-            message: "The lead changed, but its current stage could not be loaded.",
+            message:
+              "The lead changed, but its current stage could not be loaded.",
           },
         };
       }
@@ -1768,7 +1808,8 @@ export async function updatePropertyStatus(
           code: "STATUS_CONFLICT",
           message:
             "This lead changed before your move was saved. Its current stage has been restored.",
-          ...(current && VALID_STATUSES.includes(current.status as PropertyStatus)
+          ...(current &&
+          VALID_STATUSES.includes(current.status as PropertyStatus)
             ? { details: { currentStatus: current.status } }
             : {}),
         },
@@ -2633,15 +2674,15 @@ export async function getPropertyNeighbors(
   if (!current) return { prevId: null, nextId: null };
 
   let previousQuery = supabase
-      .from("properties")
-      .select("id")
-      .is("deleted_at", null)
-      .gt("created_at", current.created_at);
+    .from("properties")
+    .select("id")
+    .is("deleted_at", null)
+    .gt("created_at", current.created_at);
   let nextQuery = supabase
-      .from("properties")
-      .select("id")
-      .is("deleted_at", null)
-      .lt("created_at", current.created_at);
+    .from("properties")
+    .select("id")
+    .is("deleted_at", null)
+    .lt("created_at", current.created_at);
   if (mode === "prospect") {
     // Permanent DNC preserves the record's historical pipeline stage; it
     // does not move every locked record into Prospects. Keep neighbor
@@ -2658,10 +2699,7 @@ export async function getPropertyNeighbors(
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle(),
-    nextQuery
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
+    nextQuery.order("created_at", { ascending: false }).limit(1).maybeSingle(),
   ]);
 
   return {

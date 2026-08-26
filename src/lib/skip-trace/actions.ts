@@ -7,6 +7,7 @@ import { listAdminUserIds } from "@/lib/auth/admins";
 import { CASS_COST_PER_LOOKUP_USD } from "@/lib/enrichment/cass-job";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
 import {
   dispatchJobCompleted,
   dispatchSkipTraceRequested,
@@ -56,6 +57,7 @@ export type SkipTracePreflight = {
 type InternalSkipTracePreflight = SkipTracePreflight & {
   eligiblePropertyIds: string[];
   orgId: string | null;
+  hasMixedOrganizations: boolean;
 };
 
 function tracefyCreditsRequired(eligibleCount: number): number {
@@ -121,6 +123,10 @@ async function buildSkipTracePreflight(
     (p) => !p.skip_trace_disabled && p.cass_status !== "verified",
   );
   const killSwitched = rows.filter((p) => p.skip_trace_disabled);
+  const eligibleOrgIds = new Set(
+    allowed.map((property) => property.org_id).filter(Boolean),
+  );
+  const hasMixedOrganizations = eligibleOrgIds.size > 1;
   const required = tracefyCreditsRequired(allowed.length);
   const creditState = await getTracefyCreditState(required);
 
@@ -135,12 +141,28 @@ async function buildSkipTracePreflight(
     tracefyCreditsAvailable: creditState.available,
     tracefyCreditStatus: creditState.status,
     canLaunchSkipTrace:
-      allowed.length > 0 && creditState.status === "sufficient",
+      allowed.length > 0 &&
+      !hasMixedOrganizations &&
+      creditState.status === "sufficient",
     estimatedCassVerificationCostUsd:
       cassVerificationCandidates.length * CASS_COST_PER_LOOKUP_USD,
     cassVerificationPropertyIds: cassVerificationCandidates.map((p) => p.id),
     eligiblePropertyIds: allowed.map((p) => p.id),
-    orgId: allowed[0]?.org_id ?? rows[0]?.org_id ?? null,
+    orgId:
+      eligibleOrgIds.size === 1
+        ? ([...eligibleOrgIds][0] ?? null)
+        : (rows[0]?.org_id ?? null),
+    hasMixedOrganizations,
+  };
+}
+
+function mixedOrganizationError(): Result<never> {
+  return {
+    ok: false,
+    error: {
+      code: "MIXED_ORGANIZATIONS",
+      message: "Select properties from one organization at a time.",
+    },
   };
 }
 
@@ -284,11 +306,12 @@ export async function preflightSkipTrace(
       };
     }
 
-    return ok(
-      publicPreflight(
-        await buildSkipTracePreflight(supabase, uniquePropertyIds(propertyIds)),
-      ),
+    const preflight = await buildSkipTracePreflight(
+      supabase,
+      uniquePropertyIds(propertyIds),
     );
+    if (preflight.hasMixedOrganizations) return mixedOrganizationError();
+    return ok(publicPreflight(preflight));
   } catch (e) {
     reportError(e, { tags: { surface: "preflight_skip_trace" } });
     return errFromUnknown(e, "PREFLIGHT_SKIP_TRACE_FAILED");
@@ -319,6 +342,7 @@ export async function requestSkipTrace(
 
     const requestedIds = uniquePropertyIds(propertyIds);
     const preflight = await buildSkipTracePreflight(supabase, requestedIds);
+    if (preflight.hasMixedOrganizations) return mixedOrganizationError();
     const killSwitchSkipped = preflight.killSwitchSkipped;
     const cassSkipped = preflight.cassVerificationPropertyIds.length;
     if (preflight.eligible === 0) {
@@ -382,7 +406,29 @@ export async function requestSkipTrace(
       parts.push(eligibleIds.slice(i, i + PROVIDER_BATCH_MAX));
     }
 
-    const jobIds: string[] = [];
+    const batchId = crypto.randomUUID();
+    const createdParts: Array<{ jobId: string; propertyIds: string[] }> = [];
+    const recordCreatedRequests = async () => {
+      const batchCount = createdParts.reduce(
+        (count, part) => count + part.propertyIds.length,
+        0,
+      );
+      await recordLeadEvents(
+        createdParts.flatMap((part) =>
+          part.propertyIds.map((propertyId) => ({
+            propertyId,
+            eventType: LEAD_EVENT_TYPES.SKIP_TRACE_REQUESTED,
+            actorType: "user" as const,
+            actorId: user.id,
+            payload: {
+              job_id: part.jobId,
+              batch_id: batchId,
+              batch_count: batchCount,
+            },
+          })),
+        ),
+      );
+    };
     for (let p = 0; p < parts.length; p++) {
       const partIds = parts[p];
       const partLabel =
@@ -407,6 +453,7 @@ export async function requestSkipTrace(
         .single();
 
       if (insertErr || !jobRow) {
+        await recordCreatedRequests();
         return {
           ok: false,
           error: {
@@ -415,8 +462,10 @@ export async function requestSkipTrace(
           },
         };
       }
-      jobIds.push(jobRow.id);
+      createdParts.push({ jobId: jobRow.id, propertyIds: partIds });
     }
+    await recordCreatedRequests();
+    const jobIds = createdParts.map((part) => part.jobId);
 
     if (isAdmin) {
       // Run immediately via durable Workflow, not a raw after() runner.
