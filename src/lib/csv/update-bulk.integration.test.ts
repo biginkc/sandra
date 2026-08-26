@@ -21,7 +21,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (actorId) await supabase.auth.admin.deleteUser(actorId);
+  if (!actorId) return;
+  const { error } = await supabase.auth.admin.deleteUser(actorId);
+  if (error) throw new Error(`CSV ledger actor cleanup failed: ${error.message}`);
 });
 
 async function seedProperty(
