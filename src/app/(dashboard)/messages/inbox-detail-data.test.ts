@@ -54,8 +54,11 @@ function makeContact(
     last_name: overrides.last_name ?? "Contact",
     entity_name: overrides.entity_name ?? null,
     phone_1: overrides.phone_1 ?? "+15551234567",
+    phone_1_type: overrides.phone_1_type ?? null,
     phone_2: overrides.phone_2 ?? null,
+    phone_2_type: overrides.phone_2_type ?? null,
     phone_3: overrides.phone_3 ?? null,
+    phone_3_type: overrides.phone_3_type ?? null,
     email: overrides.email ?? null,
     notes: overrides.notes ?? null,
     do_not_contact: overrides.do_not_contact ?? false,
@@ -647,6 +650,7 @@ describe("fetchInboxDetail", () => {
           property_id: RECENT_PROPERTY_ID,
           conversation_id: CONVERSATION_ID,
           direction: "outbound",
+          status: "sent",
           from_address: "+18162804182",
           to_address: "+15550000003",
           created_at: "2026-06-09T12:00:00.000Z",
@@ -711,6 +715,95 @@ describe("fetchInboxDetail", () => {
     expect(detail?.threadCustomerPhone).toBe("+15550000003");
     expect(detail?.threadBusinessPhone).toBe("+18162804182");
     expect(detail?.replyToPhone).toBe("+15550000003");
+  });
+
+  it("ignores newer queued and failed rows when deriving the reply route", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "authoritative-inbound",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          direction: "inbound",
+          status: "received",
+          from_address: "+15550000001",
+          to_address: "+18162804181",
+          created_at: "2026-06-09T12:00:00.000Z",
+        }),
+        makeMessage({
+          id: "newer-failed",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          direction: "outbound",
+          status: "failed",
+          from_address: "+18162804182",
+          to_address: "+15550000002",
+          created_at: "2026-06-09T12:01:00.000Z",
+        }),
+        makeMessage({
+          id: "newest-queued",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          direction: "outbound",
+          status: "queued",
+          from_address: "+18162804183",
+          to_address: "+15550000003",
+          created_at: "2026-06-09T12:02:00.000Z",
+        }),
+      ],
+      contacts: [
+        makeContact({
+          id: CONTACT_ID,
+          phone_1: "+15550000001",
+          phone_2: "+15550000002",
+          phone_3: "+15550000003",
+        }),
+      ],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.initialMessages).toHaveLength(3);
+    expect(detail?.threadCustomerPhone).toBe("+15550000001");
+    expect(detail?.threadBusinessPhone).toBe("+18162804181");
+    expect(detail?.replyToPhone).toBe("+15550000001");
+  });
+
+  it("classifies the exact saved thread phone as a landline", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "landline-inbound",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          direction: "inbound",
+          status: "received",
+          from_address: "+15550000002",
+          to_address: "+18162804181",
+        }),
+      ],
+      contacts: [
+        makeContact({
+          id: CONTACT_ID,
+          phone_1: "+15550000001",
+          phone_1_type: "mobile",
+          phone_2: "+15550000002",
+          phone_2_type: "landline",
+        }),
+      ],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.threadCustomerPhone).toBe("+15550000002");
+    expect(detail?.replyToPhone).toBeNull();
+    expect(detail?.replyToPhoneLineType).toBe("landline");
   });
 
   it("keeps contact-only ambiguous threads propertyless while showing the sender number", async () => {

@@ -192,6 +192,33 @@ describe("<InlineReply /> disabled explanations", () => {
     expect(routerRefreshMock).not.toHaveBeenCalled();
   });
 
+  it("treats a lost action response as unconfirmed and preserves the draft", async () => {
+    const user = userEvent.setup();
+    vi.mocked(sendSmsFromLead).mockRejectedValueOnce(
+      new Error("Network connection lost"),
+    );
+
+    render(
+      <InlineReply
+        propertyId="property-1"
+        homeownerContactId="contact-1"
+        homeownerPhone="+18165550123"
+      />,
+    );
+
+    const composer = screen.getByLabelText("Reply to this lead");
+    await user.type(composer, "Keep this ambiguous-result draft");
+    await user.click(screen.getByRole("button", { name: "Send reply" }));
+
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    expect(composer).toHaveValue("Keep this ambiguous-result draft");
+    expect(toast.error).toHaveBeenCalledWith("Send not confirmed", {
+      description:
+        "Sandra lost the send result. Check the thread before retrying to avoid a duplicate message.",
+    });
+    expect(routerRefreshMock).not.toHaveBeenCalled();
+  });
+
   it("sends once from the keyboard shortcut and exposes the pending state", async () => {
     const user = userEvent.setup();
     let resolveSend:

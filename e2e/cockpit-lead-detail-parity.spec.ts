@@ -411,6 +411,7 @@ test("lead detail blocks an existing thread whose customer number is unsaved", a
     addressTag: "UNSAVED-ROUTE",
     state: "MO",
   });
+  await seedPhoneSuppression(admin, savedPhone, seeded.contactId);
   await seedLatestInboundRoute(
     admin,
     seeded,
@@ -419,6 +420,9 @@ test("lead detail blocks an existing thread whose customer number is unsaved", a
   );
 
   await page.goto(`/leads/${seeded.propertyId}`);
+  await expect(
+    page.getByTestId("sms-channel-restriction-header"),
+  ).toBeVisible();
   await expect(
     page.getByText(
       "This thread number is not saved on the homeowner contact — save it before replying.",
@@ -447,6 +451,7 @@ test("lead detail blocks a landline thread even when another saved phone is mobi
   if (contactError) {
     throw new Error(`landline seed failed: ${contactError.message}`);
   }
+  await seedPhoneSuppression(admin, mobilePhone, seeded.contactId);
   await seedLatestInboundRoute(
     admin,
     seeded,
@@ -456,10 +461,58 @@ test("lead detail blocks a landline thread even when another saved phone is mobi
 
   await page.goto(`/leads/${seeded.propertyId}`);
   await expect(
+    page.getByTestId("sms-channel-restriction-header"),
+  ).toBeVisible();
+  await expect(
     page.getByText(
       "This thread number is saved as a landline — use a mobile number for SMS.",
     ),
   ).toBeVisible();
+  await expect(page.getByTestId("inline-reply")).toHaveCount(0);
+});
+
+test("lead detail blocks a landline-only lead without an authoritative thread", async ({
+  page,
+}) => {
+  const admin = adminClient();
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+  const landlinePhone = uniquePhone();
+  const seeded = await seedConsentedLead(admin, {
+    phone: landlinePhone,
+    addressTag: "LANDLINE-NO-ROUTE",
+    state: "MO",
+  });
+  const { error: contactError } = await admin
+    .from("contacts")
+    .update({ phone_1_type: "landline" })
+    .eq("id", seeded.contactId);
+  if (contactError) {
+    throw new Error(`landline seed failed: ${contactError.message}`);
+  }
+  const { error: messageError } = await admin
+    .from("messages")
+    .delete()
+    .eq("conversation_id", seeded.threadId);
+  if (messageError) {
+    throw new Error(`message cleanup failed: ${messageError.message}`);
+  }
+
+  await page.goto(`/leads/${seeded.propertyId}`);
+  await expect(
+    page.getByTestId("sms-channel-restriction-header"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("sms-channel-restriction-header"),
+  ).toContainText("Landline only");
+  await expect(
+    page.getByTestId("sms-channel-restriction-inline"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("sms-channel-restriction-inline"),
+  ).toContainText(
+    "SMS cannot be delivered to the selected landline. Call or mail instead.",
+  );
   await expect(page.getByTestId("inline-reply")).toHaveCount(0);
 });
 

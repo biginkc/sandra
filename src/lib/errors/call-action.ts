@@ -7,6 +7,8 @@ export type CallActionOptions = {
   successMessage?: string;
   /** Fallback title when the action errors without a human-readable message. */
   fallbackMessage?: string;
+  /** Safe description for an unexpected rejection such as response loss. */
+  unexpectedErrorDescription?: string;
 };
 
 /**
@@ -33,7 +35,7 @@ export async function callAction<T>(
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     toast.error(options.fallbackMessage ?? "Unexpected error", {
-      description: message,
+      description: options.unexpectedErrorDescription ?? message,
     });
     return {
       ok: false,

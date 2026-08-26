@@ -99,6 +99,10 @@ describe("Lead Detail v2 integration contract", () => {
     expect(inlinePresentation).toContain("consentState,");
     expect(headerPresentation).toContain("phoneSuppressionResult");
     expect(inlinePresentation).toContain("inlinePhoneSuppressionResult");
+    expect(inlinePresentation).toContain(
+      "latestHomeownerSmsRoute",
+    );
+    expect(inlinePresentation).toContain(": smsPresentation");
   });
 
   it("keeps the permanent DNC return ahead of normal-page work", () => {

@@ -22,7 +22,7 @@ import {
   selectBestSmsPhone,
   selectSmsPhoneByNumber,
 } from "@/lib/messaging/sms-phone";
-import { deriveSmsParties } from "@/lib/messages/sms-parties";
+import { findLatestAuthoritativeSmsRoute } from "@/lib/messages/sms-parties";
 import { canShowCallButton } from "@/lib/dialer/eligibility";
 import { zillowUrl } from "@/lib/utils/zillow-url";
 
@@ -324,28 +324,15 @@ export default async function LeadDetailPage({
   // An existing thread's customer and business numbers are one route. Pick
   // both from the same newest homeowner SMS row so a lead with multiple saved
   // phones cannot accidentally reply from sender B to customer phone A.
-  let latestHomeownerSmsRoute: ReturnType<typeof deriveSmsParties> | null =
-    null;
-  for (const message of [...initialMessages].reverse()) {
-    const routeAuthoritativeStatus =
-      (message.direction === "inbound" && message.status === "received") ||
-      (message.direction === "outbound" &&
-        (message.status === "sent" || message.status === "delivered"));
-    if (
-      message.channel !== "sms" ||
-      !homeownerContactId ||
-      message.contact_id !== homeownerContactId ||
-      message.property_id !== lead.id ||
-      !routeAuthoritativeStatus
-    ) {
-      continue;
-    }
-
-    const route = deriveSmsParties(message);
-    if (!route.customerPhone || !route.businessPhone) continue;
-    latestHomeownerSmsRoute = route;
-    break;
-  }
+  const latestHomeownerSmsRoute = findLatestAuthoritativeSmsRoute(
+    initialMessages.filter(
+      (message) =>
+        message.channel === "sms" &&
+        Boolean(homeownerContactId) &&
+        message.contact_id === homeownerContactId &&
+        message.property_id === lead.id,
+    ),
+  )?.parties ?? null;
   const inlineRoutePhoneChoice = latestHomeownerSmsRoute
     ? selectSmsPhoneByNumber(
         lead.homeowner,
@@ -367,12 +354,13 @@ export default async function LeadDetailPage({
         : undefined;
   // Preserve the header composer's preferred-phone presentation, but verify
   // the inline thread's exact saved phone when it uses another slot.
-  const inlineSmsPhoneSuppressionPromise =
-    inlineReplyPhone && inlineReplyPhone !== homeownerSmsPhone
+  const inlineSmsPhoneSuppressionPromise = inlineReplyPhone
+    ? inlineReplyPhone !== homeownerSmsPhone
       ? isSmsPhoneSuppressed(supabase, inlineReplyPhone, lead.org_id)
           .then((value) => ({ ok: true as const, value }))
           .catch(() => ({ ok: false as const, value: null }))
-      : smsPhoneSuppressionPromise;
+      : smsPhoneSuppressionPromise
+    : Promise.resolve({ ok: true as const, value: false });
 
   // Notes — newest first for the feed component.
   const { data: notesRaw, error: notesError } = await supabase
@@ -540,13 +528,13 @@ export default async function LeadDetailPage({
   // Invalid thread routes (unsaved or landline) keep InlineReply's more
   // specific explanation. Valid routes get a full restriction decision for
   // their exact slot instead of inheriting the header phone's result.
-  const inlineSmsPresentation = inlineReplyPhone
+  const inlineSmsPresentation = latestHomeownerSmsRoute
     ? deriveLeadSmsPresentation({
         hasContact: Boolean(lead.homeowner),
-        hasUsablePhone: Boolean(
-          (inlineRoutePhoneChoice ?? homeownerSmsChoice)?.lineType !==
-            "landline",
-        ),
+        // Unsaved and landline established routes are explained by
+        // InlineReply. Keep this gate focused on contact/property-wide
+        // restrictions and the exact route's suppression state.
+        hasUsablePhone: true,
         consentState,
         contactSmsOptedOut: lead.homeowner?.sms_opted_out ?? false,
         propertySmsOptedOut: lead.outreach_dispo === "opted_out",
@@ -554,8 +542,7 @@ export default async function LeadDetailPage({
           ? inlinePhoneSuppressionResult.value
           : null,
         outreachDispo: lead.outreach_dispo,
-        phoneLineType:
-          (inlineRoutePhoneChoice ?? homeownerSmsChoice)?.lineType ?? null,
+        phoneLineType: inlineRoutePhoneChoice?.lineType ?? null,
       })
     : smsPresentation;
 

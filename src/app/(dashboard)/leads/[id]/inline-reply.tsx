@@ -85,7 +85,11 @@ export function InlineReply({
           false,
           effectiveToPhone,
         ),
-        { fallbackMessage: "SMS send failed" },
+        {
+          fallbackMessage: "Send not confirmed",
+          unexpectedErrorDescription:
+            "Sandra lost the send result. Check the thread before retrying to avoid a duplicate message.",
+        },
       );
       if (!result.ok) return;
 
