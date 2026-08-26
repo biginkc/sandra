@@ -9,6 +9,8 @@ import {
 } from "./fixtures";
 import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
+import { formatPhoneE164 } from "../src/lib/phone-format";
+import { MOCK_SENDER_SECONDARY } from "../tests/integration/delivery";
 
 /**
  * Feature 8 Phase 1 — the cockpit message thread and the lead detail unified
@@ -95,6 +97,35 @@ async function seedConsentedLead(
     propertyId: prop.id,
     threadId: conversationId,
   };
+}
+
+async function seedLatestInboundRoute(
+  admin: ReturnType<typeof adminClient>,
+  seeded: { contactId: string; propertyId: string; threadId: string },
+  customerPhone: string,
+  businessPhone: string,
+): Promise<void> {
+  const { error: ageError } = await admin
+    .from("messages")
+    .update({ created_at: new Date(Date.now() - 60_000).toISOString() })
+    .eq("conversation_id", seeded.threadId);
+  if (ageError) throw new Error(`message aging failed: ${ageError.message}`);
+
+  const { error: messageError } = await admin.from("messages").insert({
+    channel: "sms",
+    direction: "inbound",
+    status: "received",
+    conversation_id: seeded.threadId,
+    contact_id: seeded.contactId,
+    property_id: seeded.propertyId,
+    from_address: customerPhone,
+    to_address: businessPhone,
+    body: "newest paired route",
+    created_at: new Date().toISOString(),
+  });
+  if (messageError) {
+    throw new Error(`latest route seed failed: ${messageError.message}`);
+  }
 }
 
 function callableStateForNow(): string | null {
@@ -191,6 +222,183 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
   await expect(
     cockpitBubble.getByTestId("messages-thread-delivery-status"),
   ).toHaveText("Sent");
+});
+
+test("lead detail replies on the newest paired customer and business route", async ({
+  page,
+}) => {
+  const admin = adminClient();
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+  const callableState = callableStateForNow();
+  if (callableState === null) {
+    test.skip(true, "outside legal send windows in every configured US state");
+    return;
+  }
+
+  const firstPhone = uniquePhone();
+  const secondPhone = uniquePhone();
+  const seeded = await seedConsentedLead(admin, {
+    phone: firstPhone,
+    addressTag: "PAIRED-ROUTE",
+    state: callableState,
+  });
+  const { error: contactError } = await admin
+    .from("contacts")
+    .update({ phone_2: secondPhone, phone_2_type: "mobile" })
+    .eq("id", seeded.contactId);
+  if (contactError) {
+    throw new Error(`second phone seed failed: ${contactError.message}`);
+  }
+  await seedLatestInboundRoute(
+    admin,
+    seeded,
+    secondPhone,
+    MOCK_SENDER_SECONDARY,
+  );
+
+  // Newer rows that did not establish a successful route must not override
+  // the property-linked received message above.
+  const propertylessThreadId = await ensureConversationIdForThread(
+    admin,
+    seeded.contactId,
+    null,
+  );
+  const nonAuthoritativeBase = Date.now() + 60_000;
+  const { error: nonAuthoritativeError } = await admin.from("messages").insert([
+    {
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      conversation_id: propertylessThreadId,
+      contact_id: seeded.contactId,
+      property_id: null,
+      from_address: firstPhone,
+      to_address: E2E_MOCK_BUSINESS_NUMBER,
+      body: "newer unrelated propertyless route",
+      created_at: new Date(nonAuthoritativeBase).toISOString(),
+    },
+    {
+      channel: "sms",
+      direction: "outbound",
+      status: "failed",
+      conversation_id: seeded.threadId,
+      contact_id: seeded.contactId,
+      property_id: seeded.propertyId,
+      from_address: E2E_MOCK_BUSINESS_NUMBER,
+      to_address: firstPhone,
+      body: "newer failed route",
+      created_at: new Date(nonAuthoritativeBase + 1_000).toISOString(),
+    },
+    {
+      channel: "sms",
+      direction: "outbound",
+      status: "queued",
+      conversation_id: seeded.threadId,
+      contact_id: seeded.contactId,
+      property_id: seeded.propertyId,
+      from_address: E2E_MOCK_BUSINESS_NUMBER,
+      to_address: firstPhone,
+      body: "newer queued route",
+      created_at: new Date(nonAuthoritativeBase + 2_000).toISOString(),
+    },
+  ]);
+  if (nonAuthoritativeError) {
+    throw new Error(
+      `non-authoritative route seed failed: ${nonAuthoritativeError.message}`,
+    );
+  }
+
+  await page.goto(`/leads/${seeded.propertyId}`);
+  const inlineReply = page.getByTestId("inline-reply");
+  await expect(inlineReply).toContainText(formatPhoneE164(secondPhone)!);
+  await expect(inlineReply).toContainText(
+    formatPhoneE164(MOCK_SENDER_SECONDARY)!,
+  );
+
+  const reply = `paired route ${Date.now()}`;
+  await inlineReply.getByLabel("Reply to this lead").fill(reply);
+  await inlineReply.getByTestId("inline-reply-send").click();
+
+  await expect(async () => {
+    const { data } = await admin
+      .from("messages")
+      .select("from_address, to_address, status, external_id")
+      .eq("property_id", seeded.propertyId)
+      .eq("body", reply);
+    expect(data).toHaveLength(1);
+    expect(data![0]).toMatchObject({
+      from_address: MOCK_SENDER_SECONDARY,
+      to_address: secondPhone,
+      status: "sent",
+    });
+    expect(data![0].external_id).toMatch(/^mock_/);
+  }).toPass({ timeout: 10_000 });
+});
+
+test("lead detail blocks an existing thread whose customer number is unsaved", async ({
+  page,
+}) => {
+  const admin = adminClient();
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+  const savedPhone = uniquePhone();
+  const unsavedThreadPhone = uniquePhone();
+  const seeded = await seedConsentedLead(admin, {
+    phone: savedPhone,
+    addressTag: "UNSAVED-ROUTE",
+    state: "MO",
+  });
+  await seedLatestInboundRoute(
+    admin,
+    seeded,
+    unsavedThreadPhone,
+    MOCK_SENDER_SECONDARY,
+  );
+
+  await page.goto(`/leads/${seeded.propertyId}`);
+  await expect(
+    page.getByText(
+      "This thread number is not saved on the homeowner contact — save it before replying.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByTestId("inline-reply")).toHaveCount(0);
+});
+
+test("lead detail blocks a landline thread even when another saved phone is mobile", async ({
+  page,
+}) => {
+  const admin = adminClient();
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+  const mobilePhone = uniquePhone();
+  const landlinePhone = uniquePhone();
+  const seeded = await seedConsentedLead(admin, {
+    phone: mobilePhone,
+    addressTag: "LANDLINE-ROUTE",
+    state: "MO",
+  });
+  const { error: contactError } = await admin
+    .from("contacts")
+    .update({ phone_2: landlinePhone, phone_2_type: "landline" })
+    .eq("id", seeded.contactId);
+  if (contactError) {
+    throw new Error(`landline seed failed: ${contactError.message}`);
+  }
+  await seedLatestInboundRoute(
+    admin,
+    seeded,
+    landlinePhone,
+    MOCK_SENDER_SECONDARY,
+  );
+
+  await page.goto(`/leads/${seeded.propertyId}`);
+  await expect(
+    page.getByText(
+      "This thread number is saved as a landline — use a mobile number for SMS.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByTestId("inline-reply")).toHaveCount(0);
 });
 
 test("Realtime cross-surface: both surfaces update from the other (test 31)", async ({

@@ -23,6 +23,10 @@ type Props = {
   replyToPhone?: string | null;
   preferredFromNumber?: string | null;
   phoneUnavailableMessage?: string;
+  /** Prevents sending while Messages refreshes the authoritative SMS route. */
+  routeRefreshPending?: boolean;
+  /** Keeps draft state mounted while a parent safety restriction hides UI. */
+  suspended?: boolean;
   /** Compact adjacent action rendered with the send-safety explanation. */
   footerAction?: React.ReactNode;
 };
@@ -41,6 +45,8 @@ export function InlineReply({
   replyToPhone = null,
   preferredFromNumber = null,
   phoneUnavailableMessage,
+  routeRefreshPending = false,
+  suspended = false,
   footerAction,
 }: Props) {
   const router = useRouter();
@@ -63,7 +69,8 @@ export function InlineReply({
 
   const length = body.length;
   const tooLong = length > 1600;
-  const canSend = !disabled && length > 0 && !tooLong && !pending;
+  const canSend =
+    !disabled && length > 0 && !tooLong && !pending && !routeRefreshPending;
   const effectiveToPhone = replyToPhone ?? homeownerPhone;
 
   const send = () => {
@@ -121,14 +128,18 @@ export function InlineReply({
           toast.error("No approved sender", { description: outcome.reason });
           break;
         case "provider_failed":
-          toast.error("Provider error", { description: outcome.error });
+          toast.error("Send not confirmed", {
+            description: `${outcome.error} Check the thread before retrying to avoid a duplicate message.`,
+          });
           break;
         case "contact_not_found":
         case "property_not_found":
           toast.error("Lead not found");
           break;
         case "db_error":
-          toast.error("Database error", { description: outcome.error });
+          toast.error("Send not confirmed", {
+            description: `${outcome.error} Check the thread before retrying to avoid a duplicate message.`,
+          });
           break;
       }
     });
@@ -141,6 +152,10 @@ export function InlineReply({
       send();
     }
   };
+
+  // Returning null does not unmount this component, so its draft survives a
+  // temporary route/safety restriction without exposing a send control.
+  if (suspended) return null;
 
   if (disabled) {
     return (
