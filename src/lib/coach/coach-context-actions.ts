@@ -1,5 +1,7 @@
 "use server";
 
+import type { User } from "@supabase/supabase-js";
+
 import { createClient } from "@/lib/supabase/server";
 import type { CoachCallContext } from "./types";
 
@@ -10,10 +12,9 @@ type CoachLeadRow = {
   homeowner: { first_name: string | null; last_name: string | null; entity_name: string | null } | null;
 };
 
-/** Sandra has no rep display-name field yet (no profiles/team_members
- * table) — best we can do today is title-case the auth email's local part.
- * Swap this for a real name field the moment one exists. */
-function repNameFromEmail(email: string | null | undefined): string | null {
+/** Title-cases the auth email's local part ("jane.doe@" -> "Jane Doe") — the
+ * fallback used until a rep sets a real display_name. */
+function repNameFallbackFromEmail(email: string | null | undefined): string | null {
   if (!email) return null;
   const localPart = email.split("@")[0];
   if (!localPart) return null;
@@ -22,6 +23,23 @@ function repNameFromEmail(email: string | null | undefined): string | null {
     .filter(Boolean)
     .map((part) => part[0]!.toUpperCase() + part.slice(1))
     .join(" ") || null;
+}
+
+/**
+ * Sandra has no `profiles`/`team_members` table — the only per-user record
+ * outside auth.users is `memberships`, which is Hugo's access/role ledger
+ * (see admin/users/actions.ts: "Hugo owns account creation and access
+ * grants") and isn't the right home for a cosmetic display name. Reps set
+ * their own name via `supabase.auth.updateUser({ data: { display_name } })`
+ * — the same auth.users user_metadata mechanism the password-reset flow
+ * already uses (src/app/auth/set-password/actions.ts) — so it's self-service
+ * with no new RLS policy needed. Falls back to the email-derived name until
+ * a rep sets one.
+ */
+function repDisplayName(user: Pick<User, "email" | "user_metadata"> | null | undefined): string | null {
+  const stored = user?.user_metadata?.display_name;
+  if (typeof stored === "string" && stored.trim()) return stored.trim();
+  return repNameFallbackFromEmail(user?.email);
 }
 
 function sellerName(homeowner: CoachLeadRow["homeowner"]): string | null {
@@ -60,7 +78,7 @@ export async function loadCoachCallContext(input: {
     sellerName: sellerName(lead?.homeowner ?? null),
     propertyAddress: lead?.address ?? null,
     propertyCounty: lead?.county?.name ?? null,
-    repName: repNameFromEmail(user?.email),
+    repName: repDisplayName(user),
     repPhoneE164: input.repPhoneE164,
     motivation: lead?.motivation_level ?? null,
     leadId: input.propertyId,
