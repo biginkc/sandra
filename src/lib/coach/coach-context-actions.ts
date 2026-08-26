@@ -2,12 +2,12 @@
 
 import type { User } from "@supabase/supabase-js";
 
+import { reportError } from "@/lib/errors/report";
 import { createClient } from "@/lib/supabase/server";
 import type { CoachCallContext, CoachOccupancy } from "./types";
 
 type CoachLeadRow = {
   address: string | null;
-  motivation_level: string | null;
   source: string | null;
   is_vacant: boolean | null;
   absentee_flag: boolean | null;
@@ -15,15 +15,20 @@ type CoachLeadRow = {
   homeowner: { first_name: string | null; last_name: string | null; entity_name: string | null } | null;
 };
 
-/** Drives the Reveal phase's Entry branch auto-selection. Sandra has no
- * explicit "owner_occupied" flag — it's inferred from is_vacant/absentee_flag,
- * matching how the rest of the app treats those columns (see prospects
- * filters). Unknown when neither is set. */
+/**
+ * Drives the Reveal phase's Entry branch auto-selection. `is_vacant` must
+ * be explicitly `false` (positively confirmed, not merely absent/unscored)
+ * before `absentee_flag` is trusted to distinguish owner vs tenant —
+ * `absentee_flag` only means the mailing address differs from the property
+ * address, which is equally consistent with "has tenants" or "sits vacant
+ * and we just haven't scored it yet". Trusting absentee_flag alone
+ * previously mislabeled an unscored-vacancy lead as tenant-occupied.
+ */
 function occupancy(lead: CoachLeadRow | null): CoachOccupancy | null {
   if (!lead) return null;
   if (lead.is_vacant === true) return "vacant";
-  if (lead.absentee_flag === false) return "owner_occupied";
-  if (lead.absentee_flag === true) return "tenant_occupied";
+  if (lead.is_vacant === false && lead.absentee_flag === false) return "owner_occupied";
+  if (lead.is_vacant === false && lead.absentee_flag === true) return "tenant_occupied";
   return "unknown";
 }
 
@@ -80,12 +85,26 @@ export async function loadCoachCallContext(input: {
       ? supabase
           .from("properties")
           .select(
-            "address, motivation_level, source, is_vacant, absentee_flag, county:counties(name), homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)",
+            "address, source, is_vacant, absentee_flag, county:counties(name), homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)",
           )
           .eq("id", input.propertyId)
           .maybeSingle()
-      : Promise.resolve({ data: null }),
+      : Promise.resolve({ data: null, error: null }),
   ]);
+
+  // A Supabase query error (RLS denial, network, bad column, …) resolves
+  // without throwing — `data` comes back null exactly as it would for a
+  // genuinely missing lead. Left unchecked, that silently degrades to an
+  // all-placeholder context with no signal anything went wrong. Throwing
+  // here routes it into the caller's existing "context failed to load"
+  // retry-banner path instead of pretending the lead just has no data.
+  if (leadResult.error) {
+    reportError(leadResult.error, {
+      tags: { surface: "coach_context_load" },
+      extra: { propertyId: input.propertyId },
+    });
+    throw new Error(`Could not load lead details for the coach: ${leadResult.error.message}`);
+  }
 
   const lead = leadResult.data as unknown as CoachLeadRow | null;
 
@@ -95,7 +114,12 @@ export async function loadCoachCallContext(input: {
     propertyCounty: lead?.county?.name ?? null,
     repName: repDisplayName(user),
     repPhoneE164: input.repPhoneE164,
-    motivation: lead?.motivation_level ?? null,
+    // Sandra has no free-text seller-motivation field. properties.motivation_level
+    // is a hot/warm/cold SCORE, not the seller's stated reason — mapping it to
+    // {motivation} would put "warm" into a sentence expecting "downsizing" or
+    // "job relocation". Until a real motivation/reason text column exists,
+    // this always renders as a placeholder chip rather than the wrong value.
+    motivation: null,
     leadId: input.propertyId,
     sellerPhoneE164: input.sellerPhoneE164,
     // No cold-caller field exists in Sandra's schema yet — always a

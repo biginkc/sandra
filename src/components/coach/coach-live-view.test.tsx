@@ -2,6 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useCoachSession } from "@/lib/coach/use-coach-session";
 import type { CoachCallContext } from "@/lib/coach/types";
 
 type BroadcastHandler = (message: { payload: unknown }) => void;
@@ -11,6 +12,7 @@ type MockChannel = {
   on: (type: string, filter: unknown, handler: BroadcastHandler) => MockChannel;
   subscribe: (cb: SubscribeCallback) => MockChannel;
   _broadcastHandler: BroadcastHandler | null;
+  _subscribeCallback: SubscribeCallback | null;
 };
 
 const { loadCoachCallContext } = vi.hoisted(() => ({ loadCoachCallContext: vi.fn() }));
@@ -22,11 +24,13 @@ let channels: MockChannel[] = [];
 function makeMockChannel(): MockChannel {
   const channel: MockChannel = {
     _broadcastHandler: null,
+    _subscribeCallback: null,
     on(_type, _filter, handler) {
       channel._broadcastHandler = handler;
       return channel;
     },
-    subscribe() {
+    subscribe(cb) {
+      channel._subscribeCallback = cb;
       return channel;
     },
   };
@@ -64,7 +68,7 @@ const sampleContext: CoachCallContext = {
   propertyCounty: "Jackson",
   repName: "Alex Rep",
   repPhoneE164: "+18165551234",
-  motivation: "Job relocation",
+  motivation: null,
   leadId: "lead-1",
   sellerPhoneE164: "+18165559876",
   coldCallerName: null,
@@ -72,12 +76,23 @@ const sampleContext: CoachCallContext = {
   occupancy: "owner_occupied",
 };
 
-function baseProps(overrides: Partial<CoachLiveViewProps> = {}): CoachLiveViewProps {
+type HarnessProps = Omit<CoachLiveViewProps, "session"> & {
+  callId?: string;
+  propertyId?: string | null;
+  sellerPhoneE164?: string | null;
+  repPhoneE164?: string | null;
+};
+
+/** Mirrors how softphone-provider actually wires this up: the session is
+ * owned outside CoachLiveView (via useCoachSession) and passed in as a
+ * prop, so it survives the view unmounting on collapse. */
+function Harness({ callId = "call-1", propertyId = "lead-1", sellerPhoneE164 = "+18165559876", repPhoneE164 = "+18165551234", ...rest }: HarnessProps) {
+  const session = useCoachSession(callId, propertyId, sellerPhoneE164, repPhoneE164);
+  return <CoachLiveView session={session} {...rest} />;
+}
+
+function baseProps(overrides: Partial<HarnessProps> = {}): HarnessProps {
   return {
-    callId: "call-1",
-    propertyId: "lead-1",
-    sellerPhoneE164: "+18165559876",
-    repPhoneE164: "+18165551234",
     callName: "Jane Homeowner",
     callStatus: "live",
     seconds: 12,
@@ -104,34 +119,46 @@ describe("<CoachLiveView />", () => {
   });
 
   it("renders the script and phase rail once context resolves", async () => {
-    render(<CoachLiveView {...baseProps()} />);
+    render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     expect(screen.getByTestId("phase-rail-introduction")).toBeInTheDocument();
     expect(screen.getAllByText(/Alex Rep/).length).toBeGreaterThan(0);
   });
 
   it("shows Ringing… (not a 00:00 timer) and a pre-connect pill while the call is still ringing", async () => {
-    render(<CoachLiveView {...baseProps({ callStatus: "ringing", seconds: 0 })} />);
+    render(<Harness {...baseProps({ callStatus: "ringing", seconds: 0 })} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     expect(screen.getByTestId("coach-call-timer")).toHaveTextContent("Ringing…");
     expect(screen.getByTestId("call-status-pill")).toHaveTextContent("Ringing…");
   });
 
   it("shows Connecting… while the call is connecting", async () => {
-    render(<CoachLiveView {...baseProps({ callStatus: "connecting", seconds: 0 })} />);
+    render(<Harness {...baseProps({ callStatus: "connecting", seconds: 0 })} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     expect(screen.getByTestId("coach-call-timer")).toHaveTextContent("Connecting…");
   });
 
   it("shows the running mm:ss timer once live", async () => {
-    render(<CoachLiveView {...baseProps({ callStatus: "live", seconds: 65 })} />);
+    render(<Harness {...baseProps({ callStatus: "live", seconds: 65 })} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     expect(screen.getByTestId("coach-call-timer")).toHaveTextContent("01:05");
   });
 
+  it("disables Hold whenever the call isn't actually live yet (connecting/ringing)", async () => {
+    render(<Harness {...baseProps({ callStatus: "connecting" })} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    expect(screen.getByTestId("coach-hold")).toBeDisabled();
+  });
+
+  it("enables Hold once the call is live", async () => {
+    render(<Harness {...baseProps({ callStatus: "live" })} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    expect(screen.getByTestId("coach-hold")).toBeEnabled();
+  });
+
   it("calls onCollapse on Escape", async () => {
     const onCollapse = vi.fn();
-    render(<CoachLiveView {...baseProps({ onCollapse })} />);
+    render(<Harness {...baseProps({ onCollapse })} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     await userEvent.keyboard("{Escape}");
     expect(onCollapse).toHaveBeenCalledTimes(1);
@@ -139,14 +166,14 @@ describe("<CoachLiveView />", () => {
 
   it("calls onCollapse from the collapse button", async () => {
     const onCollapse = vi.fn();
-    render(<CoachLiveView {...baseProps({ onCollapse })} />);
+    render(<Harness {...baseProps({ onCollapse })} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     await userEvent.click(screen.getByTestId("coach-collapse"));
     expect(onCollapse).toHaveBeenCalledTimes(1);
   });
 
   it("reacts to a phase event by advancing the rail", async () => {
-    render(<CoachLiveView {...baseProps()} />);
+    render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     broadcast({ type: "phase", phaseId: "reveal", ts: "t1" });
     expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute("aria-current", "step");
@@ -154,7 +181,7 @@ describe("<CoachLiveView />", () => {
 
   it("shows a static, all-placeholder script and never an infinite spinner when context load fails", async () => {
     loadCoachCallContext.mockReset().mockRejectedValue(new Error("network"));
-    render(<CoachLiveView {...baseProps()} />);
+    render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeInTheDocument());
     expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument();
     expect(screen.getAllByTestId("token-placeholder").length).toBeGreaterThan(0);
@@ -162,7 +189,7 @@ describe("<CoachLiveView />", () => {
 
   it("retries context loading from the error banner", async () => {
     loadCoachCallContext.mockReset().mockRejectedValueOnce(new Error("network")).mockResolvedValueOnce(sampleContext);
-    render(<CoachLiveView {...baseProps()} />);
+    render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeInTheDocument());
     await userEvent.click(screen.getByTestId("coach-context-retry"));
     await waitFor(() => expect(screen.queryByTestId("coach-context-error")).not.toBeInTheDocument());
@@ -170,7 +197,7 @@ describe("<CoachLiveView />", () => {
   });
 
   it("lets the rep fill an entry-token chip (e.g. offer price) inline", async () => {
-    render(<CoachLiveView {...baseProps()} />);
+    render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
     const chip = screen.getAllByTestId("entry-chip-offer_price")[0];
@@ -183,17 +210,36 @@ describe("<CoachLiveView />", () => {
   });
 
   it("lets the rep manually switch a branch's variant", async () => {
-    render(<CoachLiveView {...baseProps()} />);
+    render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     const fsboTab = screen.getByTestId("variant-Opener-fsbo");
     await userEvent.click(fsboTab);
     expect(fsboTab).toHaveAttribute("aria-selected", "true");
     expect(screen.getAllByText(/For Sale by Owner/).length).toBeGreaterThan(0);
+    // Restructured opener variants still lead with the shared greeting.
+    expect(screen.getAllByText(/Alex Rep/).length).toBeGreaterThan(0);
+  });
+
+  it("shows the reconnect-gap banner after a real reconnect, and dismiss clears it", async () => {
+    const { REALTIME_SUBSCRIBE_STATES } = await import("@supabase/supabase-js");
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    expect(screen.queryByTestId("coach-reconnect-gap")).not.toBeInTheDocument();
+
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    expect(screen.queryByTestId("coach-reconnect-gap")).not.toBeInTheDocument(); // first subscribe isn't a reconnect
+
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    expect(screen.getByTestId("coach-reconnect-gap")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId("dismiss-reconnect-gap"));
+    expect(screen.queryByTestId("coach-reconnect-gap")).not.toBeInTheDocument();
   });
 
   it("keeps every objection card's dismiss timer independent — a second card doesn't reset the first's", async () => {
     vi.useFakeTimers();
-    render(<CoachLiveView {...baseProps()} />);
+    render(<Harness {...baseProps()} />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
@@ -222,11 +268,36 @@ describe("<CoachLiveView />", () => {
   });
 
   it("dismisses an objection card on tap", async () => {
-    render(<CoachLiveView {...baseProps()} />);
+    render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     broadcast({ type: "objection", objectionId: "price_too_low", ts: "t1" });
     const card = screen.getByTestId("objection-card");
     await userEvent.click(card);
     expect(screen.queryByTestId("objection-card")).not.toBeInTheDocument();
+  });
+
+  it("resolves tokens in objection card text — no raw {seller_name} braces on screen", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "objection", objectionId: "end_buyer", ts: "t1" });
+    const card = screen.getByTestId("objection-card");
+    expect(card).toHaveTextContent("Jane, that's a fantastic question");
+    expect(card).not.toHaveTextContent("{seller_name}");
+  });
+
+  it("auto-selects the not_in_rush objection's owner_occupied overcome track from context occupancy", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "objection", objectionId: "not_in_rush", ts: "t1" });
+    const card = screen.getByTestId("objection-card");
+    expect(card).toHaveTextContent("where do you plan on going next");
+  });
+
+  it("renders the zillow_worth objection's live-math template guidance", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "objection", objectionId: "zillow_worth", ts: "t1" });
+    const card = screen.getByTestId("objection-card");
+    expect(card).toHaveTextContent(/live worked example/i);
   });
 });

@@ -17,23 +17,30 @@ function last4Alnum(value: string | null): string | null {
 }
 
 /**
- * {county_first2_upper}-{lead_id_last4}, falling back to
- * {county_first2_upper}-{seller_phone_last4} when the lead id is unusable,
- * per closr-script-v0.json's file_number_rule.
+ * {county_first2_upper}-{lead_id_last4}. Per the approved script's token
+ * legend, the documented fallback triggers when COUNTY is missing (not
+ * when the lead id is) and its value is the seller phone's last 4 digits
+ * ALONE — no county prefix, since county is exactly what's unavailable.
+ * When county is present but the lead id isn't, the county prefix is kept
+ * and the phone digits are used as the suffix instead.
  */
 export function resolveFileNumber(context: CoachCallContext): ResolvedToken {
   const prefix = countyPrefix(context.propertyCounty);
-  if (!prefix) return { value: COACH_TOKEN_PLACEHOLDER, isPlaceholder: true };
+  const phoneTail = last4Alnum(context.sellerPhoneE164);
+
+  if (!prefix) {
+    // County missing entirely — documented fallback is the phone tail alone.
+    return phoneTail
+      ? { value: phoneTail, isPlaceholder: false }
+      : { value: COACH_TOKEN_PLACEHOLDER, isPlaceholder: true };
+  }
 
   const idTail = last4Alnum(context.leadId);
-  if (idTail && idTail.length === 4) {
-    return { value: `${prefix}-${idTail}`, isPlaceholder: false };
-  }
+  if (idTail) return { value: `${prefix}-${idTail}`, isPlaceholder: false };
 
-  const phoneTail = last4Alnum(context.sellerPhoneE164);
-  if (phoneTail && phoneTail.length === 4) {
-    return { value: `${prefix}-${phoneTail}`, isPlaceholder: false };
-  }
+  // County is known but the lead id isn't — keep the county prefix and
+  // fall back to the phone tail as the suffix.
+  if (phoneTail) return { value: `${prefix}-${phoneTail}`, isPlaceholder: false };
 
   return { value: COACH_TOKEN_PLACEHOLDER, isPlaceholder: true };
 }

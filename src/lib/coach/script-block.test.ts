@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildPhaseScriptBlock, getScriptObjection, nextPhaseId, selectBranchVariantKey } from "./script-block";
+import { buildPhaseScriptBlock, getScriptObjection, getScriptPhase, nextPhaseId, resolveObjectionOvercome, selectBranchVariantKey } from "./script-block";
 import { CLOSR_SCRIPT } from "./script-block";
 import { resolveCoachTokens } from "./token-resolver";
 import type { CoachCallContext } from "./types";
@@ -82,12 +82,16 @@ describe("buildPhaseScriptBlock", () => {
 });
 
 describe("branch variant selection", () => {
-  it("auto-selects the opener variant from lead_source", () => {
+  it("auto-selects the opener variant from lead_source, with the shared greeting still first", () => {
     const block = buildPhaseScriptBlock("introduction", tokens, { leadSource: "cold_call", occupancy: null });
     const opener = block?.branches.find((branch) => branch.tag === "Opener");
     expect(opener?.selected.key).toBe("cold_call");
     expect(opener?.autoSelected).toBe(true);
-    expect(allText(opener!.selected.lines[0].segments)).toContain("Rose");
+    // Every opener variant must lead with the greeting — it's not a
+    // mutually-exclusive "default" variant that disappears once a
+    // lead-source variant auto-selects.
+    expect(allText(opener!.selected.lines[0].segments)).toContain("Alex Rep");
+    expect(allText(opener!.selected.lines[1].segments)).toContain("Rose");
   });
 
   it("falls back to the default opener variant for a source with no mapped branch (e.g. FSBO-less sources)", () => {
@@ -119,6 +123,14 @@ describe("branch variant selection", () => {
     const key = selectBranchVariantKey(branch, { leadSource: null, occupancy: null }, null);
     expect(key).toBe(branch.variants[0].key);
   });
+
+  it("every Opener variant leads with the shared greeting line, not just the auto-selected one", () => {
+    const opener = CLOSR_SCRIPT.phases.find((phase) => phase.id === "introduction")!.display.branches[0];
+    expect(opener.tag).toBe("Opener");
+    for (const variant of opener.variants) {
+      expect(variant.lines[0].text).toContain("this is {rep_name}");
+    }
+  });
 });
 
 describe("nextPhaseId", () => {
@@ -140,5 +152,76 @@ describe("getScriptObjection", () => {
 
   it("returns undefined for an unknown objection id", () => {
     expect(getScriptObjection("does_not_exist")).toBeUndefined();
+  });
+
+  it("carries the zillow_worth live-math template flag and guidance note", () => {
+    const objection = getScriptObjection("zillow_worth");
+    expect(objection?.display.template).toBe(true);
+    expect(objection?.display.template_note).toBeTruthy();
+  });
+});
+
+describe("resolveObjectionOvercome", () => {
+  const notInRush = getScriptObjection("not_in_rush")!;
+
+  it("picks the owner_occupied track", () => {
+    expect(resolveObjectionOvercome(notInRush, "owner_occupied")).toContain("where do you plan on going next");
+  });
+
+  it("picks the tenant_occupied track", () => {
+    expect(resolveObjectionOvercome(notInRush, "tenant_occupied")).toContain("hanging up the landlord duties");
+  });
+
+  it("picks the vacant track", () => {
+    expect(resolveObjectionOvercome(notInRush, "vacant")).toContain("collecting dust");
+  });
+
+  it("falls back to the default overcome when occupancy is null", () => {
+    expect(resolveObjectionOvercome(notInRush, null)).toBe(notInRush.display.overcome);
+  });
+
+  it("falls back to the default overcome for an objection with no occupancy tracks at all", () => {
+    const priceTooLow = getScriptObjection("price_too_low")!;
+    expect(resolveObjectionOvercome(priceTooLow, "owner_occupied")).toBe(priceTooLow.display.overcome);
+  });
+});
+
+describe("coach_notes fidelity — every phase carries its full rule set from the approved script", () => {
+  it("Introduction has all 6 coach rules, including the two previously omitted", () => {
+    const notes = getScriptPhase("introduction")!.coach_notes.map((note) => note.text);
+    expect(notes.some((text) => text.includes("someone else must sign"))).toBe(true);
+    expect(notes.some((text) => text.includes("Inbound leads get the full intro"))).toBe(true);
+  });
+
+  it("Reveal has the 'four tools' and 'kill shot' rules", () => {
+    const notes = getScriptPhase("reveal")!.coach_notes.map((note) => note.text);
+    expect(notes.some((text) => text.includes("Four tools"))).toBe(true);
+    expect(notes.some((text) => text.includes("kill shot"))).toBe(true);
+  });
+
+  it("Assessment has the 'acknowledge condition' and 'don't advance while unclear' rules", () => {
+    const notes = getScriptPhase("assessment")!.coach_notes.map((note) => note.text);
+    expect(notes.some((text) => text.includes("acknowledge condition"))).toBe(true);
+    expect(notes.some((text) => text.includes("liens, tenants, repairs"))).toBe(true);
+  });
+
+  it("Secure Positioning has the novation and 'use the holds' rules", () => {
+    const notes = getScriptPhase("secure_positioning")!.coach_notes.map((note) => note.text);
+    expect(notes.some((text) => text.includes("novation"))).toBe(true);
+    expect(notes.some((text) => text.includes("Use the holds"))).toBe(true);
+  });
+
+  it("Offer has the 'net pocket + outcome' rule", () => {
+    const notes = getScriptPhase("offer")!.coach_notes.map((note) => note.text);
+    expect(notes.some((text) => text.includes("net pocket"))).toBe(true);
+  });
+
+  it("Close has all 5 coach rules, not a lossy merge of 2", () => {
+    const notes = getScriptPhase("close")!.coach_notes.map((note) => note.text);
+    expect(notes).toHaveLength(5);
+    expect(notes.some((text) => text.includes("Possible") && text.includes("probably"))).toBe(true);
+    expect(notes.some((text) => text.includes("contract to sign"))).toBe(true);
+    expect(notes.some((text) => text.includes("attorney"))).toBe(true);
+    expect(notes.some((text) => text.includes("never fake pressure"))).toBe(true);
   });
 });

@@ -166,4 +166,79 @@ describe("useCoachChannel", () => {
     await flush();
     expect(channelSpy).not.toHaveBeenCalled();
   });
+
+  it("cancels a queued resubscribe timer if the channel recovers on its own before it fires", async () => {
+    renderHook(() => useCoachChannel("call-race"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+    const channelCountAfterError = channels.length;
+    // The channel recovers on its own (same instance) before the queued
+    // backoff timer fires.
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000); // past the first backoff delay
+    });
+    // No new channel should have been created — the stale resubscribe was
+    // cancelled instead of tearing down the connection that just recovered.
+    expect(channels.length).toBe(channelCountAfterError);
+    expect(removeChannel).not.toHaveBeenCalled();
+  });
+
+  it("marks reconnectGap on a real reconnect (a SUBSCRIBED after an error), not on the first subscribe", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-gap"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    expect(result.current.reconnectGap).toBe(false);
+
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    expect(result.current.reconnectGap).toBe(true);
+  });
+
+  it("clears reconnectGap once a fresh valid event arrives", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-gap-clear"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    expect(result.current.reconnectGap).toBe(true);
+
+    act(() => latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 2, ts: "t1" } }));
+    expect(result.current.reconnectGap).toBe(false);
+  });
+
+  it("dismissReconnectGap clears it manually", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-gap-dismiss"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    expect(result.current.reconnectGap).toBe(true);
+
+    act(() => result.current.dismissReconnectGap());
+    expect(result.current.reconnectGap).toBe(false);
+  });
+
+  it("drops a malformed event, counts it, and never dispatches it into state", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-bad"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() =>
+      latestChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "not_a_real_phase", ts: "t1" } }),
+    );
+    expect(result.current.malformedEventCount).toBe(1);
+    expect(result.current.state.currentPhaseId).toBe("introduction");
+  });
+
+  it("tolerates an unknown event type (producer forward-compat) without counting it as malformed", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-unknown-type"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() =>
+      latestChannel()._broadcastHandler?.({
+        payload: { type: "coach_note", text: "Never open with...", phaseId: "introduction", ts: "t1" },
+      }),
+    );
+    expect(result.current.malformedEventCount).toBe(0);
+  });
 });

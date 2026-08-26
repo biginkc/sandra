@@ -8,7 +8,12 @@ import { loadCoachCallContext } from "./coach-context-actions";
 
 const lead = {
   address: "123 Main St",
-  motivation_level: "Job relocation",
+  // motivation_level (production values: "hot" | "warm" | "cold") is
+  // deliberately NOT the seller's stated motivation — it's a lead-scoring
+  // tier, not free text like "downsizing" or "job relocation". Sandra has
+  // no dedicated motivation/reason field, so {motivation} always resolves
+  // to a placeholder regardless of what this row contains.
+  motivation_level: "warm",
   source: "cold_call",
   is_vacant: false,
   absentee_flag: false,
@@ -16,14 +21,18 @@ const lead = {
   homeowner: { first_name: "Jane", last_name: "Doe", entity_name: null },
 };
 
-function mockSupabase(user: { email?: string; user_metadata?: Record<string, unknown> } | null, leadRow: unknown = lead) {
+function mockSupabase(
+  user: { email?: string; user_metadata?: Record<string, unknown> } | null,
+  leadRow: unknown = lead,
+  leadError: { message: string } | null = null,
+) {
   createClient.mockResolvedValue({
     auth: { getUser: vi.fn().mockResolvedValue({ data: { user } }) },
     from: vi.fn(() => {
       const builder = {
         select: vi.fn(() => builder),
         eq: vi.fn(() => builder),
-        maybeSingle: vi.fn().mockResolvedValue({ data: leadRow, error: null }),
+        maybeSingle: vi.fn().mockResolvedValue({ data: leadError ? null : leadRow, error: leadError }),
       };
       return builder;
     }),
@@ -65,18 +74,23 @@ describe("loadCoachCallContext — lead fields", () => {
     createClient.mockReset();
   });
 
-  it("resolves seller name, address, county, and motivation from the property row", async () => {
+  it("resolves seller name, address, and county from the property row", async () => {
     mockSupabase({ email: "alex.rep@bmhgroupkc.com" });
     const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: "+18165559876", repPhoneE164: "+18165551234" });
     expect(context).toMatchObject({
       sellerName: "Jane Doe",
       propertyAddress: "123 Main St",
       propertyCounty: "Jackson",
-      motivation: "Job relocation",
       leadId: "p1",
       sellerPhoneE164: "+18165559876",
       repPhoneE164: "+18165551234",
     });
+  });
+
+  it("never maps motivation_level (a hot/warm/cold score) to {motivation} — always a placeholder-triggering null", async () => {
+    mockSupabase({ email: "alex.rep@bmhgroupkc.com" }, { ...lead, motivation_level: "hot" });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.motivation).toBeNull();
   });
 
   it("skips the property lookup entirely when there's no propertyId", async () => {
@@ -96,6 +110,13 @@ describe("loadCoachCallContext — lead fields", () => {
     mockSupabase({ email: "alex.rep@bmhgroupkc.com" });
     const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
     expect(context.leadSource).toBe("cold_call");
+  });
+
+  it("throws (never silently returns an empty context) when the property query itself errors", async () => {
+    mockSupabase({ email: "alex.rep@bmhgroupkc.com" }, lead, { message: "permission denied for table properties" });
+    await expect(
+      loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null }),
+    ).rejects.toThrow(/permission denied/);
   });
 });
 
@@ -124,6 +145,23 @@ describe("loadCoachCallContext — occupancy derivation", () => {
 
   it("is unknown when neither is_vacant nor absentee_flag is set", async () => {
     mockSupabase({ email: "a@b.com" }, { ...lead, is_vacant: null, absentee_flag: null });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.occupancy).toBe("unknown");
+  });
+
+  it("is unknown — NOT tenant_occupied — when is_vacant is unscored but absentee_flag is true", async () => {
+    // Regression: absentee_flag only means the mailing address differs
+    // from the property — that's equally consistent with "has tenants" or
+    // "sits vacant, just not scored yet". Previously this fell straight to
+    // tenant_occupied whenever is_vacant wasn't literally `true`,
+    // mislabeling an unscored-vacancy lead as having tenants.
+    mockSupabase({ email: "a@b.com" }, { ...lead, is_vacant: null, absentee_flag: true });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.occupancy).toBe("unknown");
+  });
+
+  it("is unknown — NOT owner_occupied — when is_vacant is unscored but absentee_flag is false", async () => {
+    mockSupabase({ email: "a@b.com" }, { ...lead, is_vacant: null, absentee_flag: false });
     const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
     expect(context.occupancy).toBe("unknown");
   });

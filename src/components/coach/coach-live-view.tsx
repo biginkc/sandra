@@ -7,17 +7,17 @@ import { PhoneKeypad } from "@/components/softphone/phone-keypad";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { DtmfDigit } from "@/lib/dialer/transport";
-import { loadCoachCallContext } from "@/lib/coach/coach-context-actions";
 import {
   buildPhaseScriptBlock,
   getScriptObjection,
   getScriptPhase,
   nextPhaseId,
+  resolveObjectionOvercome,
   type BranchSelectContext,
   type PhaseScriptBlock,
   type ScriptBranchBlock,
 } from "@/lib/coach/script-block";
-import { resolveCoachTokens } from "@/lib/coach/token-resolver";
+import { resolveCoachTokens, resolveDisplayText } from "@/lib/coach/token-resolver";
 import type {
   CoachCallContext,
   CoachEntryToken,
@@ -30,18 +30,16 @@ import type {
   ResolvedTokens,
 } from "@/lib/coach/types";
 import { COACH_ENTRY_TOKENS, COACH_PHASE_ORDER } from "@/lib/coach/types";
-import { useCoachChannel } from "@/lib/coach/use-coach-channel";
+import type { CoachSession, ContextLoadState } from "@/lib/coach/use-coach-session";
 import { isNearTranscriptBottom } from "@/lib/coach/transcript-scroll";
 import { cn } from "@/lib/utils";
 
 export type CoachCallStatus = "connecting" | "ringing" | "live" | "ended" | "failed" | null;
 
 export type CoachLiveViewProps = {
-  /** Channel key — `coach:{callId}` on Supabase Realtime Broadcast. */
-  callId: string;
-  propertyId: string | null;
-  sellerPhoneE164: string | null;
-  repPhoneE164: string | null;
+  /** The persistent coach session — owned by the provider, not this view,
+   * so collapsing/reopening the view never resets it. */
+  session: CoachSession;
   callName: string;
   callStatus: CoachCallStatus;
   seconds: number;
@@ -53,7 +51,9 @@ export type CoachLiveViewProps = {
   onHold: () => void;
   onHangup: () => void;
   /** Shrinks back to the classic call popover — Esc does the same. The
-   * popover surfaces an "Open live coach" button to reverse this. */
+   * popover surfaces an "Open live coach" button to reverse this. The
+   * coach session itself (transcript, phase, gates, cards, entered
+   * values) lives in the provider and is unaffected by this. */
   onCollapse: () => void;
 };
 
@@ -85,54 +85,9 @@ function timerText(seconds: number): string {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-type ContextLoadState =
-  | { status: "loading" }
-  | { status: "ready"; context: CoachCallContext }
-  | { status: "error" };
-
 export function CoachLiveView(props: CoachLiveViewProps) {
-  const {
-    callId,
-    propertyId,
-    sellerPhoneE164,
-    repPhoneE164,
-    callName,
-    callStatus,
-    seconds,
-    muted,
-    held,
-    holdPending,
-    onDigit,
-    onMute,
-    onHold,
-    onHangup,
-    onCollapse,
-  } = props;
-  const { state, dispatch, degraded } = useCoachChannel(callId);
-  const [contextLoad, setContextLoad] = useState<ContextLoadState>({ status: "loading" });
-  const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>({});
-  const [contextAttempt, setContextAttempt] = useState(0);
-
-  useEffect(() => {
-    let mounted = true;
-    // Deliberately doesn't reset to "loading" here: the initial mount
-    // already starts there via useState, and a later retry re-fetching in
-    // the background while the previous ready/error state stays on screen
-    // is better UX than flashing back to a spinner or blank placeholders.
-    loadCoachCallContext({ propertyId, sellerPhoneE164, repPhoneE164 })
-      .then((loaded) => {
-        if (mounted) setContextLoad({ status: "ready", context: loaded });
-      })
-      .catch(() => {
-        if (mounted) setContextLoad({ status: "error" });
-      });
-    return () => {
-      mounted = false;
-    };
-    // Resolved once at dial time on purpose — token values shouldn't drift
-    // mid-call. contextAttempt is a manual retry knob, not a data dependency.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [propertyId, contextAttempt]);
+  const { session, callName, callStatus, seconds, muted, held, holdPending, onDigit, onMute, onHold, onHangup, onCollapse } = props;
+  const { state, dispatch, degraded, reconnectGap, dismissReconnectGap, contextLoad, retryContext, branchOverrides, selectVariant, setEntryField } = session;
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -165,12 +120,10 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   }));
 
   const onEditEntry = useCallback(
-    (field: CoachEntryToken, value: string) => dispatch({ type: "set_entry_field", field, value }),
-    [dispatch],
+    (field: CoachEntryToken, value: string) => setEntryField(field, value),
+    [setEntryField],
   );
-  const onSelectVariant = useCallback((tag: string, key: string) => {
-    setBranchOverrides((prev) => ({ ...prev, [tag]: key }));
-  }, []);
+  const onSelectVariant = useCallback((tag: string, key: string) => selectVariant(tag, key), [selectVariant]);
 
   return (
     <div
@@ -195,6 +148,18 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         degraded={degraded}
         callStatus={callStatus}
       />
+      {reconnectGap ? (
+        <div
+          role="status"
+          data-testid="coach-reconnect-gap"
+          className="flex shrink-0 items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-4 py-1.5 text-xs text-amber-900"
+        >
+          <span>Reconnected — some coach events may have been missed while disconnected.</span>
+          <button type="button" data-testid="dismiss-reconnect-gap" onClick={dismissReconnectGap} className="font-bold underline">
+            Dismiss
+          </button>
+        </div>
+      ) : null}
       <div className="flex min-h-0 flex-1">
         <TranscriptFeed lines={state.transcript} />
         <ScriptPanel
@@ -202,13 +167,15 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           nextBlock={nextBlock}
           degraded={degraded}
           contextLoad={contextLoad}
-          onRetryContext={() => setContextAttempt((value) => value + 1)}
+          onRetryContext={retryContext}
           onEditEntry={onEditEntry}
           onSelectVariant={onSelectVariant}
         />
       </div>
       <ObjectionOverlay
         cards={state.objectionCards}
+        tokens={tokens}
+        occupancy={activeContext.occupancy}
         onDismiss={(cardId) => dispatch({ type: "dismiss_objection", cardId })}
       />
       <CallControlDock
@@ -401,12 +368,18 @@ function ScriptPanel({
   onSelectVariant: (tag: string, key: string) => void;
 }) {
   if (!block) {
-    // Only reachable for a genuinely unknown phase id — never for a
-    // load-in-progress or failed context, which resolve against an
-    // all-placeholder context instead so the script stays readable.
+    // Only reachable for a genuinely unknown/corrupt phase id slipping past
+    // event validation — not for a load-in-progress or failed context,
+    // which resolve against an all-placeholder context instead. A spinner
+    // here would imply something is still loading, which is false: nothing
+    // will ever resolve this. Say so plainly instead of wedging silently.
     return (
       <main className="flex flex-1 items-center justify-center overflow-y-auto p-6">
-        <Loader2Icon className="size-5 animate-spin text-muted-foreground" aria-hidden />
+        <div className="max-w-sm text-center">
+          <Loader2Icon className="mx-auto mb-3 size-5 text-muted-foreground" aria-hidden />
+          <p className="text-sm font-semibold text-destructive">This call phase isn&apos;t recognized.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Use the phase rail above to jump to a known phase.</p>
+        </div>
       </main>
     );
   }
@@ -666,16 +639,20 @@ function EntryTokenChip({
 
 function ObjectionOverlay({
   cards,
+  tokens,
+  occupancy,
   onDismiss,
 }: {
   cards: CoachObjectionCard[];
+  tokens: ResolvedTokens;
+  occupancy: CoachCallContext["occupancy"];
   onDismiss: (cardId: string) => void;
 }) {
   if (cards.length === 0) return null;
   return (
     <div className="pointer-events-none fixed top-20 right-4 z-[90] flex w-[min(360px,calc(100vw-32px))] flex-col gap-2">
       {cards.map((card) => (
-        <ObjectionCard key={card.id} card={card} onDismiss={() => onDismiss(card.id)} />
+        <ObjectionCard key={card.id} card={card} tokens={tokens} occupancy={occupancy} onDismiss={() => onDismiss(card.id)} />
       ))}
     </div>
   );
@@ -683,9 +660,37 @@ function ObjectionOverlay({
 
 const OBJECTION_CARD_TTL_MS = 45_000;
 
+function ObjectionLine({ label, text, tokens }: { label: string; text: string; tokens: ResolvedTokens }) {
+  const segments = resolveDisplayText(text, tokens);
+  return (
+    <p>
+      <span className="font-bold">{label} — </span>
+      {segments.map((segment, index) => {
+        if (segment.kind === "text") return <span key={index}>{segment.value}</span>;
+        if (segment.kind === "tone") return <ToneChip key={index} text={segment.label} />;
+        // Objection text never contains the 3 rep-entry tokens today, but
+        // fall back to plain-value rendering (no inline editor here) if
+        // the script ever adds one — the card is transient, not the right
+        // place to capture a deal value.
+        return <span key={index} className="font-semibold">{segment.resolved.value}</span>;
+      })}
+    </p>
+  );
+}
+
 /** Owns its own auto-dismiss timer, scoped to this card's mount lifetime —
  * a sibling card appearing or disappearing never resets or cancels it. */
-function ObjectionCard({ card, onDismiss }: { card: CoachObjectionCard; onDismiss: () => void }) {
+function ObjectionCard({
+  card,
+  tokens,
+  occupancy,
+  onDismiss,
+}: {
+  card: CoachObjectionCard;
+  tokens: ResolvedTokens;
+  occupancy: CoachCallContext["occupancy"];
+  onDismiss: () => void;
+}) {
   const onDismissRef = useRef(onDismiss);
   // Keeps the ref current after every render — refs must not be written
   // during render itself, only in an effect or event handler.
@@ -701,6 +706,7 @@ function ObjectionCard({ card, onDismiss }: { card: CoachObjectionCard; onDismis
   }, []);
 
   const objection = getScriptObjection(card.objectionId);
+  const overcomeText = objection ? resolveObjectionOvercome(objection, occupancy) : null;
   return (
     <button
       type="button"
@@ -712,20 +718,16 @@ function ObjectionCard({ card, onDismiss }: { card: CoachObjectionCard; onDismis
         <span className="text-xs font-bold tracking-wide text-muted-foreground uppercase">Objection</span>
         {objection?.display.tonality ? <ToneChip text={objection.display.tonality} /> : null}
       </div>
-      {objection ? (
+      {objection && overcomeText ? (
         <div className="space-y-1.5 text-sm">
-          <p>
-            <span className="font-bold">Acknowledge — </span>
-            {objection.display.acknowledge}
-          </p>
-          <p>
-            <span className="font-bold">Disarm — </span>
-            {objection.display.disarm}
-          </p>
-          <p>
-            <span className="font-bold">Overcome — </span>
-            {objection.display.overcome}
-          </p>
+          <ObjectionLine label="Acknowledge" text={objection.display.acknowledge} tokens={tokens} />
+          <ObjectionLine label="Disarm" text={objection.display.disarm} tokens={tokens} />
+          <ObjectionLine label="Overcome" text={overcomeText} tokens={tokens} />
+          {objection.display.template ? (
+            <p className="rounded-lg border border-dashed border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-900">
+              {objection.display.template_note ?? "Live worked example — substitute the seller's real numbers."}
+            </p>
+          ) : null}
         </div>
       ) : (
         <p className="text-sm text-muted-foreground">{card.objectionId}</p>
@@ -822,7 +824,7 @@ function CallControlDock({
             variant={held ? "default" : "outline"}
             size="sm"
             aria-pressed={held}
-            disabled={holdPending}
+            disabled={holdPending || callStatus !== "live"}
             data-testid="coach-hold"
             onClick={onHold}
           >

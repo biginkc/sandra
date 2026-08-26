@@ -1,10 +1,14 @@
 import scriptJson from "./closr-script-v0.json";
-import type { ClosrScript, ScriptBranch, ScriptPhase, ScriptVariant } from "./script-schema";
+import { assertValidClosrScript, type ClosrScript, type ScriptBranch, type ScriptObjection, type ScriptPhase, type ScriptVariant } from "./script-schema";
 import { resolveDisplayText, type DisplayTextSegment } from "./token-resolver";
-import type { CoachCallContext, CoachPhaseId, ResolvedTokens } from "./types";
+import type { CoachCallContext, CoachOccupancy, CoachPhaseId, ResolvedTokens } from "./types";
 import { COACH_PHASE_ORDER } from "./types";
 
-export const CLOSR_SCRIPT: ClosrScript = scriptJson as unknown as ClosrScript;
+// Fail loud at load rather than let a malformed script produce silent
+// `undefined` crashes deep in the UI later.
+assertValidClosrScript(scriptJson);
+
+export const CLOSR_SCRIPT: ClosrScript = scriptJson;
 
 export function getScriptPhase(phaseId: CoachPhaseId): ScriptPhase | undefined {
   return CLOSR_SCRIPT.phases.find((phase) => phase.id === phaseId);
@@ -12,6 +16,17 @@ export function getScriptPhase(phaseId: CoachPhaseId): ScriptPhase | undefined {
 
 export function getScriptObjection(objectionId: string) {
   return CLOSR_SCRIPT.objections.find((objection) => objection.id === objectionId);
+}
+
+/** Picks the objection's overcome text: an occupancy-specific track when
+ * the objection declares one and it matches, otherwise the default
+ * `overcome`. Occupancy is already known from the coach context (it drives
+ * the Reveal phase's Entry branch too), so this needs no manual selector. */
+export function resolveObjectionOvercome(objection: ScriptObjection, occupancy: CoachOccupancy | null): string {
+  if (occupancy && objection.display.overcome_by_occupancy?.[occupancy]) {
+    return objection.display.overcome_by_occupancy[occupancy]!;
+  }
+  return objection.display.overcome;
 }
 
 export function nextPhaseId(phaseId: CoachPhaseId): CoachPhaseId | null {

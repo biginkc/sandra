@@ -41,18 +41,38 @@ vi.mock("@/lib/dialer/transport-selection", () => ({
 
 const { loadCoachCallContext } = vi.hoisted(() => ({ loadCoachCallContext: vi.fn() }));
 vi.mock("@/lib/coach/coach-context-actions", () => ({ loadCoachCallContext }));
+
+type CoachBroadcastHandler = (message: { payload: unknown }) => void;
+type CoachMockChannel = {
+  on: (type: string, filter: unknown, handler: CoachBroadcastHandler) => CoachMockChannel;
+  subscribe: () => CoachMockChannel;
+  _broadcastHandler: CoachBroadcastHandler | null;
+};
+let coachChannels: CoachMockChannel[] = [];
+function latestCoachChannel(): CoachMockChannel {
+  const channel = coachChannels[coachChannels.length - 1];
+  if (!channel) throw new Error("No coach channel created yet");
+  return channel;
+}
+
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
     auth: { getSession: () => Promise.resolve({ data: { session: null } }) },
     realtime: { setAuth: vi.fn() },
-    channel: () => ({
-      on() {
-        return this;
-      },
-      subscribe() {
-        return this;
-      },
-    }),
+    channel: () => {
+      const channel: CoachMockChannel = {
+        _broadcastHandler: null,
+        on(_type, _filter, handler) {
+          channel._broadcastHandler = handler;
+          return channel;
+        },
+        subscribe() {
+          return channel;
+        },
+      };
+      coachChannels.push(channel);
+      return channel;
+    },
     removeChannel: vi.fn(),
   }),
 }));
@@ -811,6 +831,7 @@ const COACH_LEAD = {
 
 describe("SoftphoneProvider coach UI flag", () => {
   beforeEach(() => {
+    coachChannels = [];
     completeSoftphoneCall.mockReset();
     prepareLeadCall.mockReset();
     resumeFailedSoftphoneCall.mockReset();
@@ -939,5 +960,85 @@ describe("SoftphoneProvider coach UI flag", () => {
 
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.getByTestId("softphone-popover")).toBeVisible());
+  });
+
+  it("preserves the coach session across collapse/reopen — phase and transcript survive, only the view unmounts", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+
+    act(() => latestCoachChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "reveal", ts: "t1" } }));
+    expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute("aria-current", "step");
+
+    act(() =>
+      latestCoachChannel()._broadcastHandler?.({
+        payload: { type: "transcript", speaker: "seller", text: "hello there", isFinal: true, ts: "t2" },
+      }),
+    );
+    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("hello there");
+
+    await user.click(screen.getByTestId("coach-collapse"));
+    expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
+    expect(screen.getByTestId("softphone-popover")).toBeVisible();
+
+    await user.click(screen.getByTestId("reopen-coach"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute("aria-current", "step");
+    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("hello there");
+    // The underlying realtime subscription itself was never torn down and
+    // recreated by the collapse/reopen — proof the session, not just its
+    // rendered values, lived in the provider the whole time.
+    expect(coachChannels.length).toBe(1);
+    expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a DTMF send failure above the coach overlay and never plays the tone before the send resolves", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    let resolveSendDigit!: (value: boolean) => void;
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "connecting" | "ringing" | "live" | "ended" | "failed") => void) | null = null;
+      return {
+        onStateChange: vi.fn((cb) => { listener = cb; }),
+        start: vi.fn(async () => {
+          listener?.("connecting");
+          listener?.("live");
+          return { id: "simulated-session" };
+        }),
+        mute: vi.fn(),
+        hold: vi.fn(async () => true),
+        sendDigit: vi.fn(() => new Promise<boolean>((resolve) => { resolveSendDigit = resolve; })),
+        hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })),
+      };
+    });
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+
+    await user.click(screen.getByTestId("coach-keypad-toggle"));
+    await user.click(screen.getByLabelText("Keypad 5"));
+
+    // No local tone before the transport confirms delivery.
+    expect(playDtmfTone).not.toHaveBeenCalled();
+
+    act(() => resolveSendDigit(false)); // transport reports the digit was not delivered
+    const toast = await screen.findByRole("status");
+    expect(toast).toHaveTextContent("That keypad tone was not sent. Try again.");
+    expect(playDtmfTone).not.toHaveBeenCalled();
+    // Must render above the full-screen coach overlay (z-[80]) and the
+    // objection-card layer (z-[90]) so it's visible while the coach view is open.
+    expect(toast.className).toMatch(/z-\[100\]/);
   });
 });

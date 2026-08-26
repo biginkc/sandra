@@ -94,11 +94,22 @@ describe("resolveFileNumber", () => {
     expect(result).toEqual({ value: "JA-9876", isPlaceholder: false });
   });
 
-  it("returns a placeholder when neither county nor a usable id/phone exist", () => {
+  it("falls back to the phone tail ALONE (no county prefix) when county is missing — the documented fallback", () => {
+    // Per the approved script's token legend: "Fallback if county missing:
+    // last 4 of seller's phone." The fallback triggers on county being
+    // unavailable, and its value has no county prefix (county is exactly
+    // what's missing) — this is distinct from the county-present-but-no-
+    // lead-id case above, which keeps the county prefix.
     expect(resolveFileNumber({ ...baseContext, propertyCounty: null })).toEqual({
-      value: "—",
-      isPlaceholder: true,
+      value: "9876",
+      isPlaceholder: false,
     });
+  });
+
+  it("returns a placeholder only when truly nothing is usable", () => {
+    expect(
+      resolveFileNumber({ ...baseContext, propertyCounty: null, sellerPhoneE164: null }),
+    ).toEqual({ value: "—", isPlaceholder: true });
     expect(
       resolveFileNumber({ ...baseContext, leadId: null, sellerPhoneE164: null }),
     ).toEqual({ value: "—", isPlaceholder: true });

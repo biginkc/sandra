@@ -34,6 +34,7 @@ import { maskPhone } from "@/lib/phone-format";
 import { CoachLiveView } from "@/components/coach/coach-live-view";
 import { PhoneKeypad } from "@/components/softphone/phone-keypad";
 import { isCoachUiEnabled } from "@/lib/coach/flags";
+import { useCoachSession } from "@/lib/coach/use-coach-session";
 import { playDtmfTone } from "@/lib/dialer/dtmf-tone";
 import { type CallHandle, type CallTransport, type DtmfDigit } from "@/lib/dialer/transport";
 import {
@@ -141,6 +142,16 @@ export function SoftphoneProvider({ children }: Props) {
   const [callingEnabled] = useState(() => isSoftphoneTransportEnabled());
   const [coachUiEnabled] = useState(() => isCoachUiEnabled());
   const [coachCollapsed, setCoachCollapsed] = useState(false);
+  // Owned independently of coachCollapsed and of whether CoachLiveView is
+  // mounted at all: collapsing the coach view must never reset its
+  // transcript, phase, gates, objection cards, or entered deal values —
+  // only the view unmounts, not this session.
+  const coachSession = useCoachSession(
+    coachUiEnabled ? wrapToken : null,
+    target?.propertyId ?? null,
+    target?.phoneE164 ?? null,
+    selectedCallerId,
+  );
   const transportRef = useRef<CallTransport | null>(null);
   const callHandleRef = useRef<CallHandle | null>(null);
   const manualHangupRef = useRef(false);
@@ -604,15 +615,27 @@ export function SoftphoneProvider({ children }: Props) {
     if (phone !== "live" || heldRef.current || holdPendingRef.current || callStatus !== "live") return;
     const transport = transportRef.current;
     if (!transport) return;
-    playDtmfTone(digit);
-    void transport.sendDigit(digit).then((sent) => {
-      if (!sent) showToast("That keypad tone was not sent. Try again.");
-    });
+    // Play the tone only after the transport confirms delivery — a local
+    // tone that plays before the send resolves lies to the rep about
+    // whether the digit actually reached the call. Toast (not a coach-view
+    // element) surfaces any failure, and it renders above the full-screen
+    // coach overlay so it's visible even while the coach view is open.
+    void (async () => {
+      try {
+        const sent = await transport.sendDigit(digit);
+        if (sent) playDtmfTone(digit);
+        else showToast("That keypad tone was not sent. Try again.");
+      } catch {
+        showToast("That keypad tone was not sent. Try again.");
+      }
+    })();
   }, [callStatus, phone, showToast]);
 
   const toggleHold = useCallback(async () => {
     const transport = transportRef.current;
-    if (!transport || holdPendingRef.current) return;
+    // Hold only ever makes sense once the call is actually live — a hold
+    // request while still connecting/ringing has nothing real to hold.
+    if (!transport || holdPendingRef.current || callStatus !== "live") return;
     const next = !heldRef.current;
     holdPendingRef.current = true;
     setHoldPending(true);
@@ -625,7 +648,7 @@ export function SoftphoneProvider({ children }: Props) {
     }
     holdPendingRef.current = false;
     setHoldPending(false);
-  }, [transition]);
+  }, [callStatus, transition]);
 
   const contextValue = useMemo(() => ({
     openLead,
@@ -641,11 +664,7 @@ export function SoftphoneProvider({ children }: Props) {
       {typeof document !== "undefined" && phone !== "closed" && coachUiEnabled && isOnCall && wrapToken && !coachCollapsed
         ? createPortal(
           <CoachLiveView
-            key={wrapToken}
-            callId={wrapToken}
-            propertyId={target?.propertyId ?? null}
-            sellerPhoneE164={target?.phoneE164 ?? null}
-            repPhoneE164={selectedCallerId}
+            session={coachSession}
             callName={callName}
             callStatus={callStatus}
             seconds={seconds}
@@ -712,7 +731,7 @@ export function SoftphoneProvider({ children }: Props) {
       )
         : null}
       {typeof document !== "undefined" && toast
-        ? createPortal(<div role="status" className="fixed bottom-6 left-1/2 z-[70] -translate-x-1/2 rounded-lg bg-[#111827] px-4 py-2.5 text-sm font-semibold text-white shadow-lg">{toast}</div>, document.body)
+        ? createPortal(<div role="status" className="fixed bottom-6 left-1/2 z-[100] -translate-x-1/2 rounded-lg bg-[#111827] px-4 py-2.5 text-sm font-semibold text-white shadow-lg">{toast}</div>, document.body)
         : null}
     </SoftphoneContext.Provider>
   );
@@ -769,7 +788,7 @@ function LiveView({ target, callName, callStatus, seconds, muted, held, holdPend
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [callStatus, held, keypadOpen, onDigit]);
 
-  return <div className="p-5 pb-4 text-center">{coachAvailable ? <button type="button" data-testid="reopen-coach" onClick={onReopenCoach} className="mb-3 inline-flex items-center gap-1 rounded-full border border-[#d6d1ce] bg-white px-2.5 py-1 text-[11px] font-bold text-[#57534e] hover:bg-[#f5f4f2]">Open live coach</button> : null}<span data-testid="call-live-pill" className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-emerald-800"><span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />{holdPending ? "Updating hold…" : held ? "On hold" : callStatus === "connecting" ? "Connecting" : callStatus === "ringing" ? "Ringing" : "Live · browser audio"}</span><div className="mt-3.5 text-lg font-extrabold">{callName}</div><div className="mt-0.5 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : ""}</div><div data-testid="call-timer" className={`my-4.5 font-mono text-[34px] font-bold leading-none ${held ? "text-amber-700" : "text-emerald-600"}`}>{timerText(seconds)}</div>{keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={held || holdPending || callStatus !== "live"} /> : null}<div className="mt-3 flex justify-center gap-2"><button type="button" aria-pressed={muted} data-testid="call-mute" onClick={onMute} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${muted ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{muted ? "Unmute" : "Mute"}</button><button type="button" aria-expanded={keypadOpen} data-testid="call-keypad" disabled={held || holdPending || callStatus !== "live"} onClick={onToggleKeypad} className="min-w-16 rounded-[9px] border border-[#e5e1df] bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Keypad</button><button type="button" aria-pressed={held} data-testid="call-hold" disabled={holdPending} onClick={onHold} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold disabled:opacity-40 ${held ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{held ? "Resume" : "Hold"}</button><button type="button" data-testid="call-hangup" onClick={onHangup} className="rounded-[9px] border-0 bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-700">Hang up</button></div></div>;
+  return <div className="p-5 pb-4 text-center">{coachAvailable ? <button type="button" data-testid="reopen-coach" onClick={onReopenCoach} className="mb-3 inline-flex items-center gap-1 rounded-full border border-[#d6d1ce] bg-white px-2.5 py-1 text-[11px] font-bold text-[#57534e] hover:bg-[#f5f4f2]">Open live coach</button> : null}<span data-testid="call-live-pill" className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-emerald-800"><span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />{holdPending ? "Updating hold…" : held ? "On hold" : callStatus === "connecting" ? "Connecting" : callStatus === "ringing" ? "Ringing" : "Live · browser audio"}</span><div className="mt-3.5 text-lg font-extrabold">{callName}</div><div className="mt-0.5 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : ""}</div><div data-testid="call-timer" className={`my-4.5 font-mono text-[34px] font-bold leading-none ${held ? "text-amber-700" : "text-emerald-600"}`}>{timerText(seconds)}</div>{keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={held || holdPending || callStatus !== "live"} /> : null}<div className="mt-3 flex justify-center gap-2"><button type="button" aria-pressed={muted} data-testid="call-mute" onClick={onMute} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${muted ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{muted ? "Unmute" : "Mute"}</button><button type="button" aria-expanded={keypadOpen} data-testid="call-keypad" disabled={held || holdPending || callStatus !== "live"} onClick={onToggleKeypad} className="min-w-16 rounded-[9px] border border-[#e5e1df] bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Keypad</button><button type="button" aria-pressed={held} data-testid="call-hold" disabled={holdPending || callStatus !== "live"} onClick={onHold} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold disabled:opacity-40 ${held ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{held ? "Resume" : "Hold"}</button><button type="button" data-testid="call-hangup" onClick={onHangup} className="rounded-[9px] border-0 bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-700">Hang up</button></div></div>;
 }
 
 function WrapView({ target, finalSeconds, notes, setNotes, callbackOpen, setCallbackOpen, callbackTime, setCallbackTime, pending, error, teardownUnconfirmed, onRetryTeardown, onDisposition, onCallback, onCustomCallback }: { target: SoftphoneTarget | null; finalSeconds: number; notes: string; setNotes: (value: string) => void; callbackOpen: boolean; setCallbackOpen: (value: boolean) => void; callbackTime: string; setCallbackTime: (value: string) => void; pending: boolean; error: string | null; teardownUnconfirmed: boolean; onRetryTeardown: () => void; onDisposition: (disposition: SoftphoneDisposition) => void; onCallback: (kind: "today_pm" | "tomorrow_am") => void; onCustomCallback: () => void }) {
