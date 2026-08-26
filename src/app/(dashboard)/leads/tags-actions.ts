@@ -3,6 +3,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 
 export type TagRow = {
   id: string;
@@ -94,23 +95,55 @@ export async function applyPropertyTag(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
+    const { data: tag, error: tagError } = await supabase
+      .from("tags")
+      .select("name")
+      .eq("id", tagId)
+      .maybeSingle();
+    if (tagError) {
+      return {
+        ok: false,
+        error: { code: "TAG_FETCH_FAILED", message: tagError.message },
+      };
+    }
+    if (!tag) {
+      return {
+        ok: false,
+        error: { code: "TAG_NOT_FOUND", message: "Tag not found." },
+      };
+    }
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    const { error } = await supabase.from("property_tags").upsert(
-      {
-        property_id: propertyId,
-        tag_id: tagId,
-        source: "manual",
-        applied_by: user?.id ?? null,
-      },
-      { onConflict: "property_id,tag_id", ignoreDuplicates: true },
-    );
+    const { data: saved, error } = await supabase
+      .from("property_tags")
+      .upsert(
+        {
+          property_id: propertyId,
+          tag_id: tagId,
+          source: "manual",
+          applied_by: user?.id ?? null,
+        },
+        { onConflict: "property_id,tag_id", ignoreDuplicates: true },
+      )
+      .select("id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "TAG_APPLY_FAILED", message: error.message },
       };
+    }
+    if (saved) {
+      const actor = user?.id
+        ? ({ actorType: "user", actorId: user.id } as const)
+        : ({ actorType: "system" } as const);
+      await recordLeadEvent({
+        propertyId,
+        ...actor,
+        eventType: LEAD_EVENT_TYPES.TAG_APPLIED,
+        payload: { tag_id: tagId, label: tag.name },
+      });
     }
     return ok(null);
   } catch (e) {
@@ -135,11 +168,17 @@ export async function removePropertyTag(
   try {
     const supabase = await createClient();
     // Check the tag is user-removable first.
-    const { data: tag } = await supabase
+    const { data: tag, error: tagError } = await supabase
       .from("tags")
-      .select("system_managed, category")
+      .select("system_managed, category, name")
       .eq("id", tagId)
       .maybeSingle();
+    if (tagError) {
+      return {
+        ok: false,
+        error: { code: "TAG_FETCH_FAILED", message: tagError.message },
+      };
+    }
     if (!tag) {
       return {
         ok: false,
@@ -157,16 +196,32 @@ export async function removePropertyTag(
       };
     }
 
-    const { error } = await supabase
+    const { data: removed, error } = await supabase
       .from("property_tags")
       .delete()
       .eq("property_id", propertyId)
-      .eq("tag_id", tagId);
+      .eq("tag_id", tagId)
+      .select("id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "TAG_REMOVE_FAILED", message: error.message },
       };
+    }
+    if (removed) {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      const actor = user?.id
+        ? ({ actorType: "user", actorId: user.id } as const)
+        : ({ actorType: "system" } as const);
+      await recordLeadEvent({
+        propertyId,
+        ...actor,
+        eventType: LEAD_EVENT_TYPES.TAG_REMOVED,
+        payload: { tag_id: tagId, label: tag.name },
+      });
     }
     return ok(null);
   } catch (e) {

@@ -9,9 +9,14 @@ import {
   normalizeZip,
 } from "@/lib/csv/normalize";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { telnyxLookupFromEnv } from "@/lib/line-type-lookup/telnyx";
+import { LEAD_SOURCES, type LeadSource } from "@/lib/leads/sources";
 import type { PhoneLineType } from "@/lib/messaging/line-type";
 import type { Database } from "@/lib/supabase/types";
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Canonical list of `properties.source` values. Mirrors the DB CHECK
@@ -25,21 +30,6 @@ import type { Database } from "@/lib/supabase/types";
  * `agent_outreach` were added so detection has a faithful
  * provenance value to assign.
  */
-export const LEAD_SOURCES = [
-  "dealmachine",
-  "propstream",
-  "titlepro",
-  "reisift",
-  "agent_outreach",
-  "driving_for_dollars",
-  "referral",
-  "cold_call",
-  "sms",
-  "web_form",
-  "direct_mail",
-] as const;
-
-export type LeadSource = (typeof LEAD_SOURCES)[number];
 export type LeadMotivation = "hot" | "warm" | "cold";
 
 export type CreateLeadInput = {
@@ -328,6 +318,19 @@ export async function createLead(
       },
     };
   }
+
+  const actor =
+    input.createdBy && UUID_PATTERN.test(input.createdBy)
+      ? ({ actorType: "user", actorId: input.createdBy } as const)
+      : ({ actorType: "system" } as const);
+  await recordLeadEvent({
+    propertyId: inserted.id,
+    ...actor,
+    eventType: LEAD_EVENT_TYPES.LEAD_CREATED,
+    payload: { source: input.source },
+    sourceType: "properties.created",
+    sourceId: inserted.id,
+  });
 
   return {
     ok: true,

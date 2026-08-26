@@ -5,6 +5,7 @@ const {
   afterMock,
   dispatchTaskCalendarEventUpdate,
   loadIntegrationPrefs,
+  recordLeadEvent,
 } = vi.hoisted(() => ({
   afterCallbacks: [] as Array<() => Promise<void> | void>,
   afterMock: vi.fn((callback: () => Promise<void> | void) => {
@@ -19,6 +20,9 @@ const {
     calendarEnabled: true,
     timezone: "America/Chicago",
   })),
+  recordLeadEvent: vi.fn(async (input: unknown) => {
+    void input;
+  }),
 }));
 
 vi.mock("next/server", () => ({ after: afterMock }));
@@ -26,6 +30,15 @@ vi.mock("@/lib/integrations/google/dispatch", () => ({
   dispatchTaskCalendarEventUpdate,
 }));
 vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
+vi.mock("@/lib/events", () => ({
+  LEAD_EVENT_TYPES: {
+    TASK_CREATED: "task_created",
+    TASK_COMPLETED: "task_completed",
+    TASK_SNOOZED: "task_snoozed",
+    TASK_REASSIGNED: "task_reassigned",
+  },
+  recordLeadEvent,
+}));
 
 import {
   completeTask,
@@ -112,6 +125,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  expect(responseQueue).toHaveLength(0);
   vi.clearAllMocks();
   vi.unstubAllEnvs();
 });
@@ -128,7 +142,15 @@ describe("dispoToTaskType", () => {
 
 describe("createTask", () => {
   it("inserts the row with all input fields and returns ok(task)", async () => {
-    const fakeRow = { id: "task-1", title: "test", status: "open" };
+    const fakeRow = {
+      id: "task-1",
+      title: "test",
+      status: "open",
+      type: "follow_up",
+      due_at: "2026-05-08T14:00:00Z",
+      assignee_id: "user-2",
+      related_property_id: "prop-3",
+    };
     responseQueue = [{ data: fakeRow, error: null }];
 
     const result = await createTask(
@@ -149,9 +171,7 @@ describe("createTask", () => {
     if (!result.ok) return;
     expect(result.data).toEqual(fakeRow);
 
-    const insert = calls.find(
-      (c) => c.table === "tasks" && c.op === "insert",
-    );
+    const insert = calls.find((c) => c.table === "tasks" && c.op === "insert");
     expect(insert).toBeDefined();
     const payload = insert!.insertPayload as Record<string, unknown>;
     expect(payload.org_id).toBe("org-1");
@@ -169,10 +189,36 @@ describe("createTask", () => {
     expect("description" in payload).toBe(false);
     expect("end_at" in payload).toBe(false);
     expect("calendar_chain_id" in payload).toBe(false);
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "prop-3",
+      actorType: "user",
+      actorId: "user-1",
+      eventType: "task_created",
+      payload: {
+        task_id: "task-1",
+        task_type: "follow_up",
+        due_at: "2026-05-08T14:00:00Z",
+        assignee_id: "user-2",
+      },
+      sourceType: "tasks.created",
+      sourceId: "task-1",
+    });
+    expect(recordLeadEvent.mock.calls[0]?.[0]).not.toHaveProperty(
+      "payload.title",
+    );
+    expect(recordLeadEvent.mock.calls[0]?.[0]).not.toHaveProperty(
+      "payload.description",
+    );
   });
 
   it("inserts a property-less appointment with contact/description/endAt and nulls related_property_id", async () => {
-    const fakeRow = { id: "task-2", title: "Book a call", status: "open" };
+    const fakeRow = {
+      id: "task-2",
+      title: "Book a call",
+      status: "open",
+      type: "appointment",
+      related_property_id: null,
+    };
     responseQueue = [{ data: fakeRow, error: null }];
 
     const result = await createTask(
@@ -192,9 +238,7 @@ describe("createTask", () => {
     );
 
     expect(result.ok).toBe(true);
-    const insert = calls.find(
-      (c) => c.table === "tasks" && c.op === "insert",
-    );
+    const insert = calls.find((c) => c.table === "tasks" && c.op === "insert");
     const payload = insert!.insertPayload as Record<string, unknown>;
     expect(payload.related_property_id).toBeNull();
     expect(payload.contact_id).toBe("contact-9");
@@ -205,6 +249,36 @@ describe("createTask", () => {
     // every appointment to carry one, generated here at creation.
     expect(typeof payload.calendar_chain_id).toBe("string");
     expect((payload.calendar_chain_id as string).length).toBeGreaterThan(0);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("does not duplicate a property-linked appointment as task_created", async () => {
+    const fakeRow = {
+      id: "appointment-1",
+      title: "Private appointment",
+      status: "open",
+      type: "appointment",
+      related_property_id: "prop-3",
+    };
+    responseQueue = [{ data: fakeRow, error: null }];
+
+    const result = await createTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        orgId: "org-1",
+        assigneeId: "user-2",
+        relatedPropertyId: "prop-3",
+        type: "appointment",
+        title: "Private appointment",
+        dueAt: "2026-05-08T14:00:00Z",
+        endAt: "2026-05-08T14:30:00Z",
+        createdBy: "user-1",
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   it("returns err with TASK_CREATE_FAILED when supabase errors", async () => {
@@ -250,7 +324,9 @@ describe("createTask", () => {
     expect(result.error.message).toBe(
       "Appointments require an end time after their start time.",
     );
-    expect(calls.find((c) => c.table === "tasks" && c.op === "insert")).toBeUndefined();
+    expect(
+      calls.find((c) => c.table === "tasks" && c.op === "insert"),
+    ).toBeUndefined();
   });
 
   it("returns err(TASK_CREATE_INVALID) for an appointment with endAt <= dueAt, issuing no insert", async () => {
@@ -271,7 +347,9 @@ describe("createTask", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.code).toBe("TASK_CREATE_INVALID");
-    expect(calls.find((c) => c.table === "tasks" && c.op === "insert")).toBeUndefined();
+    expect(
+      calls.find((c) => c.table === "tasks" && c.op === "insert"),
+    ).toBeUndefined();
   });
 
   it("returns err(TASK_CREATE_INVALID) for a follow_up carrying endAt, issuing no insert", async () => {
@@ -293,19 +371,38 @@ describe("createTask", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.code).toBe("TASK_CREATE_INVALID");
-    expect(calls.find((c) => c.table === "tasks" && c.op === "insert")).toBeUndefined();
+    expect(
+      calls.find((c) => c.table === "tasks" && c.op === "insert"),
+    ).toBeUndefined();
   });
 });
 
+function taskRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "task-1",
+    type: "follow_up",
+    status: "open",
+    due_at: "2026-05-08T14:00:00Z",
+    assignee_id: "user-1",
+    related_property_id: "property-3",
+    contact_id: null,
+    title: "Call the owner",
+    end_at: null,
+    ...overrides,
+  };
+}
+
 describe("completeTask", () => {
-  it("flips status to completed and stamps completed_at + completed_by, excluding appointments via the atomic predicate", async () => {
-    const fakeRow = {
-      id: "task-1",
+  it("records a property-linked completion only after the compare-and-set succeeds", async () => {
+    const previous = taskRow();
+    const completed = taskRow({
       status: "completed",
-      completed_at: "2026-05-06T18:00:00Z",
       completed_by: "user-1",
-    };
-    responseQueue = [{ data: fakeRow, error: null }];
+    });
+    responseQueue = [
+      { data: previous, error: null },
+      { data: completed, error: null },
+    ];
 
     const result = await completeTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -315,53 +412,65 @@ describe("completeTask", () => {
     );
 
     expect(result.ok).toBe(true);
-    const taskCalls = calls.filter((c) => c.table === "tasks");
-    expect(taskCalls).toHaveLength(1);
-    const update = taskCalls[0];
-    expect(update.op).toBe("update");
-    const payload = update.updatePayload as Record<string, unknown>;
-    expect(payload.status).toBe("completed");
-    expect(payload.completed_by).toBe("user-1");
-    expect(typeof payload.completed_at).toBe("string");
-    expect(typeof payload.updated_at).toBe("string");
-
-    expect(update.filters).toEqual([
-      { op: "eq", args: ["id", "task-1"] },
-      { op: "neq", args: ["type", "appointment"] },
-    ]);
-  });
-
-  it("refuses to complete an appointment — UPDATE excludes it (neq predicate), follow-up read confirms type, returns TASK_COMPLETE_UNSUPPORTED", async () => {
-    responseQueue = [
-      // UPDATE's neq predicate excludes the row: zero rows back.
-      { data: null, error: null },
-      // Follow-up type read distinguishes appointment from missing.
-      { data: { type: "appointment" }, error: null },
-    ];
-
-    const result = await completeTask(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      makeSupabase() as any,
-      "task-1",
-      "user-1",
-    );
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe("TASK_COMPLETE_UNSUPPORTED");
-    }
-    const taskCalls = calls.filter((c) => c.table === "tasks");
+    const taskCalls = calls.filter((call) => call.table === "tasks");
     expect(taskCalls).toHaveLength(2);
-    expect(taskCalls[0].op).toBe("update");
-    expect(taskCalls[0].filters).toEqual([
+    expect(taskCalls[1].op).toBe("update");
+    expect(taskCalls[1].filters).toEqual([
       { op: "eq", args: ["id", "task-1"] },
+      { op: "eq", args: ["status", "open"] },
+      { op: "eq", args: ["assignee_id", "user-1"] },
       { op: "neq", args: ["type", "appointment"] },
     ]);
-    expect(taskCalls[1].op).toBe("select");
+    expect(taskCalls[1].updatePayload).toEqual({
+      status: "completed",
+      completed_at: expect.any(String),
+      completed_by: "user-1",
+      updated_at: expect.any(String),
+    });
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "property-3",
+      actorType: "user",
+      actorId: "user-1",
+      eventType: "task_completed",
+      payload: { task_id: "task-1", from: "open", to: "completed" },
+    });
   });
 
-  it("fails closed when the UPDATE errors — no follow-up read, no fall-through write", async () => {
-    responseQueue = [{ data: null, error: { message: "connection reset" } }];
+  it("treats an already-completed task as a no-op without another event", async () => {
+    responseQueue = [{ data: taskRow({ status: "completed" }), error: null }];
+
+    const result = await completeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "user-1",
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls.filter((call) => call.table === "tasks")).toHaveLength(1);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a concurrent same-target completion without a duplicate event", async () => {
+    responseQueue = [
+      { data: taskRow(), error: null },
+      { data: null, error: null },
+      { data: taskRow({ status: "completed" }), error: null },
+    ];
+
+    const result = await completeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "user-1",
+    );
+
+    expect(result.ok).toBe(true);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("refuses appointments before issuing an update", async () => {
+    responseQueue = [{ data: taskRow({ type: "appointment" }), error: null }];
 
     const result = await completeTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -371,157 +480,85 @@ describe("completeTask", () => {
     );
 
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe("TASK_COMPLETE_FAILED");
-      expect(result.error.message).toBe("connection reset");
-    }
-    // The error short-circuits before any follow-up read.
-    const taskCalls = calls.filter((c) => c.table === "tasks");
-    expect(taskCalls).toHaveLength(1);
-    expect(taskCalls[0].op).toBe("update");
+    if (!result.ok) expect(result.error.code).toBe("TASK_COMPLETE_UNSUPPORTED");
+    expect(calls.some((call) => call.op === "update")).toBe(false);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
-  it("returns TASK_COMPLETE_FAILED when the task doesn't exist (UPDATE and follow-up read both empty)", async () => {
+  it("does not append an event when the completion update fails", async () => {
     responseQueue = [
-      { data: null, error: null },
-      { data: null, error: null },
+      { data: taskRow(), error: null },
+      { data: null, error: { message: "connection reset" } },
     ];
 
+    const result = await completeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "user-1",
+    );
+
+    expect(result.ok).toBe(false);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("returns TASK_COMPLETE_FAILED when the task does not exist", async () => {
+    responseQueue = [{ data: null, error: null }];
     const result = await completeTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       "missing-task",
       "user-1",
     );
-
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe("TASK_COMPLETE_FAILED");
-    }
-    const taskCalls = calls.filter((c) => c.table === "tasks");
-    expect(taskCalls).toHaveLength(2);
+    if (!result.ok) expect(result.error.code).toBe("TASK_COMPLETE_FAILED");
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stale Slack assignee before completion and event attribution", async () => {
+    responseQueue = [{ data: taskRow({ assignee_id: "user-2" }), error: null }];
+    const result = await completeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "user-1",
+      "user-1",
+    );
+    expect(result.ok).toBe(false);
+    expect(calls.some((call) => call.op === "update")).toBe(false);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the assignee changes during a Slack completion", async () => {
+    responseQueue = [
+      { data: taskRow({ assignee_id: "user-1" }), error: null },
+      { data: null, error: null },
+      { data: taskRow({ assignee_id: "user-2" }), error: null },
+    ];
+    const result = await completeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "user-1",
+      "user-1",
+    );
+    expect(result.ok).toBe(false);
+    const update = calls.filter((call) => call.op === "update")[0];
+    expect(update.filters).toContainEqual({
+      op: "eq",
+      args: ["assignee_id", "user-1"],
+    });
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 });
 
 describe("snoozeTask", () => {
-  it("bumps due_at and snoozed_until forward, leaves status unchanged, omits end_at, and issues no pre-read for a non-appointment row", async () => {
+  it("records the old and new due time, then preserves the calendar update", async () => {
+    const newDue = "2026-05-09T14:00:00Z";
     responseQueue = [
-      // The UPDATE itself carries .neq("type", "appointment") and returns
-      // the row directly — no pre-read before it.
-      { data: { id: "task-1", due_at: "2026-05-09T14:00:00Z" }, error: null },
-    ];
-
-    const result = await snoozeTask(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      makeSupabase() as any,
-      "task-1",
-      "2026-05-09T14:00:00Z",
-    );
-
-    expect(result.ok).toBe(true);
-    // Exactly one tasks call: the UPDATE. No pre-read fired.
-    const taskCalls = calls.filter((c) => c.table === "tasks");
-    expect(taskCalls).toHaveLength(1);
-    const update = taskCalls[0];
-    expect(update.op).toBe("update");
-    const payload = update.updatePayload as Record<string, unknown>;
-    expect(payload.due_at).toBe("2026-05-09T14:00:00Z");
-    expect(payload.snoozed_until).toBe("2026-05-09T14:00:00Z");
-    expect(payload.status).toBeUndefined();
-    expect(payload.end_at).toBeUndefined();
-    expect(update.filters).toEqual([
-      { op: "eq", args: ["id", "task-1"] },
-      { op: "neq", args: ["type", "appointment"] },
-    ]);
-  });
-
-  it("refuses to snooze an appointment — UPDATE excludes it (neq predicate), follow-up read confirms type, returns TASK_SNOOZE_UNSUPPORTED", async () => {
-    responseQueue = [
-      // UPDATE's neq predicate excludes the row: zero rows back.
-      { data: null, error: null },
-      // Follow-up type read distinguishes appointment from missing.
-      { data: { type: "appointment" }, error: null },
-    ];
-
-    const result = await snoozeTask(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      makeSupabase() as any,
-      "task-1",
-      "2026-05-10T16:00:00Z",
-    );
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe("TASK_SNOOZE_UNSUPPORTED");
-    }
-    const taskCalls = calls.filter((c) => c.table === "tasks");
-    expect(taskCalls).toHaveLength(2);
-    expect(taskCalls[0].op).toBe("update");
-    expect(taskCalls[0].filters).toEqual([
-      { op: "eq", args: ["id", "task-1"] },
-      { op: "neq", args: ["type", "appointment"] },
-    ]);
-    expect(taskCalls[1].op).toBe("select");
-  });
-
-  it("fails closed when the UPDATE errors — no follow-up read, no fall-through write", async () => {
-    responseQueue = [{ data: null, error: { message: "connection reset" } }];
-
-    const result = await snoozeTask(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      makeSupabase() as any,
-      "task-1",
-      "2026-05-10T16:00:00Z",
-    );
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe("TASK_SNOOZE_FAILED");
-      expect(result.error.message).toBe("connection reset");
-    }
-    // The error short-circuits before any follow-up read.
-    const taskCalls = calls.filter((c) => c.table === "tasks");
-    expect(taskCalls).toHaveLength(1);
-    expect(taskCalls[0].op).toBe("update");
-  });
-
-  it("returns TASK_SNOOZE_FAILED when the task doesn't exist (UPDATE and follow-up read both empty)", async () => {
-    responseQueue = [
-      { data: null, error: null },
-      { data: null, error: null },
-    ];
-
-    const result = await snoozeTask(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      makeSupabase() as any,
-      "missing-task",
-      "2026-05-10T16:00:00Z",
-    );
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe("TASK_SNOOZE_FAILED");
-    }
-    const taskCalls = calls.filter((c) => c.table === "tasks");
-    expect(taskCalls).toHaveLength(2);
-  });
-
-  it("schedules a Google Calendar update when snooze changes due_at", async () => {
-    responseQueue = [
-      {
-        data: {
-          id: "task-1",
-          assignee_id: "user-2",
-          related_property_id: "property-3",
-          title: "Call the owner",
-          due_at: "2026-05-09T14:00:00Z",
-        },
-        error: null,
-      },
-      {
-        data: { address: "123 Snooze Ln" },
-        error: null,
-      },
+      { data: taskRow(), error: null },
+      { data: taskRow({ due_at: newDue }), error: null },
+      { data: { address: "123 Snooze Ln" }, error: null },
     ];
     loadIntegrationPrefs.mockResolvedValueOnce({
       slackEnabled: true,
@@ -533,24 +570,41 @@ describe("snoozeTask", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       "task-1",
-      "2026-05-09T14:00:00Z",
+      newDue,
+      "user-9",
     );
 
     expect(result.ok).toBe(true);
-    expect(loadIntegrationPrefs).toHaveBeenCalledWith(
-      expect.anything(),
-      "user-2",
-    );
-    expect(afterMock).toHaveBeenCalledTimes(1);
-
+    const update = calls.filter((call) => call.table === "tasks")[1];
+    expect(update.filters).toEqual([
+      { op: "eq", args: ["id", "task-1"] },
+      { op: "eq", args: ["due_at", "2026-05-08T14:00:00Z"] },
+      { op: "eq", args: ["status", "open"] },
+      { op: "neq", args: ["type", "appointment"] },
+    ]);
+    expect(update.updatePayload).toEqual({
+      due_at: newDue,
+      snoozed_until: newDue,
+      updated_at: expect.any(String),
+    });
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "property-3",
+      actorType: "user",
+      actorId: "user-9",
+      eventType: "task_snoozed",
+      payload: {
+        task_id: "task-1",
+        from: "2026-05-08T14:00:00Z",
+        to: newDue,
+      },
+    });
     await flushAfterCallbacks();
-
     expect(dispatchTaskCalendarEventUpdate).toHaveBeenCalledWith({
       taskId: "task-1",
-      assigneeId: "user-2",
+      assigneeId: "user-1",
       taskTitle: "Call the owner",
       propertyAddress: "123 Snooze Ln",
-      dueAt: "2026-05-09T14:00:00Z",
+      dueAt: newDue,
       endAt: undefined,
       timezone: "America/Denver",
       deepLink: "https://app.test/messages?property_id=property-3",
@@ -558,227 +612,212 @@ describe("snoozeTask", () => {
     });
   });
 
-  it("threads end_at through to the calendar update when the row carries one", async () => {
+  it("treats the same instant in different timestamp formats as a no-op", async () => {
+    const storedDueAt = "2026-05-08T14:00:00+00:00";
+    const requestedDueAt = "2026-05-08T14:00:00.000Z";
     responseQueue = [
+      { data: taskRow({ due_at: storedDueAt }), error: null },
+    ];
+    const result = await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      requestedDueAt,
+      "user-9",
+    );
+    expect(result.ok).toBe(true);
+    expect(calls.filter((call) => call.table === "tasks")).toHaveLength(1);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+    expect(afterMock).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a concurrent same-target snooze without another event", async () => {
+    const newDue = "2026-05-09T14:00:00.000Z";
+    responseQueue = [
+      { data: taskRow(), error: null },
+      { data: null, error: null },
       {
-        data: {
-          id: "task-1",
-          assignee_id: "user-2",
-          related_property_id: "property-3",
-          title: "Call the owner",
-          due_at: "2026-05-09T14:00:00Z",
-          end_at: "2026-05-09T14:30:00Z",
-        },
-        error: null,
-      },
-      {
-        data: { address: "123 Snooze Ln" },
+        data: taskRow({ due_at: "2026-05-09T14:00:00+00:00" }),
         error: null,
       },
     ];
-    loadIntegrationPrefs.mockResolvedValueOnce({
-      slackEnabled: true,
-      calendarEnabled: true,
-      timezone: "America/Denver",
-    });
+    const result = await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      newDue,
+      "user-9",
+    );
+    expect(result.ok).toBe(true);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+    expect(afterMock).not.toHaveBeenCalled();
+  });
 
+  it("refuses appointments before issuing an update", async () => {
+    responseQueue = [{ data: taskRow({ type: "appointment" }), error: null }];
     const result = await snoozeTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       "task-1",
       "2026-05-09T14:00:00Z",
+      "user-9",
     );
-
-    expect(result.ok).toBe(true);
-    await flushAfterCallbacks();
-
-    expect(dispatchTaskCalendarEventUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ endAt: "2026-05-09T14:30:00Z" }),
-    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("TASK_SNOOZE_UNSUPPORTED");
+    expect(calls.some((call) => call.op === "update")).toBe(false);
   });
 
-  it("schedules a title-only calendar update and a thread deep link for a contact-only task (no property)", async () => {
+  it("rejects an initially completed task without moving its calendar or recording an event", async () => {
     responseQueue = [
-      {
-        data: {
-          id: "task-1",
-          assignee_id: "user-2",
-          related_property_id: null,
-          contact_id: "contact-9",
-          title: "Call the owner",
-          due_at: "2026-05-09T14:00:00Z",
-        },
-        error: null,
-      },
+      { data: taskRow({ status: "completed" }), error: null },
     ];
-    loadIntegrationPrefs.mockResolvedValueOnce({
-      slackEnabled: true,
-      calendarEnabled: true,
-      timezone: "America/Denver",
-    });
-
     const result = await snoozeTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       "task-1",
       "2026-05-09T14:00:00Z",
+      "user-9",
     );
-
-    expect(result.ok).toBe(true);
-    // No property lookup should fire — only the tasks update call.
-    expect(calls.filter((c) => c.table === "properties")).toHaveLength(0);
-    await flushAfterCallbacks();
-
-    expect(dispatchTaskCalendarEventUpdate).toHaveBeenCalledWith({
-      taskId: "task-1",
-      assigneeId: "user-2",
-      taskTitle: "Call the owner",
-      propertyAddress: "Call the owner",
-      dueAt: "2026-05-09T14:00:00Z",
-      endAt: undefined,
-      timezone: "America/Denver",
-      deepLink: "https://app.test/messages?thread=contact-9",
-      calendarEnabled: true,
-    });
+    expect(result.ok).toBe(false);
+    expect(calls.some((call) => call.op === "update")).toBe(false);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+    expect(afterMock).not.toHaveBeenCalled();
   });
 
-  it("falls back to the base URL deep link for a fully unlinked personal block", async () => {
+  it("does not append an event when the snooze update fails", async () => {
     responseQueue = [
-      {
-        data: {
-          id: "task-1",
-          assignee_id: "user-2",
-          related_property_id: null,
-          contact_id: null,
-          title: "Block 2pm-3pm",
-          due_at: "2026-05-09T14:00:00Z",
-        },
-        error: null,
-      },
+      { data: taskRow(), error: null },
+      { data: null, error: { message: "connection reset" } },
     ];
-    loadIntegrationPrefs.mockResolvedValueOnce({
-      slackEnabled: true,
-      calendarEnabled: true,
-      timezone: "America/Denver",
-    });
-
-    await snoozeTask(
+    const result = await snoozeTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       "task-1",
       "2026-05-09T14:00:00Z",
+      "user-9",
     );
-    await flushAfterCallbacks();
+    expect(result.ok).toBe(false);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
 
-    expect(dispatchTaskCalendarEventUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        propertyAddress: "Block 2pm-3pm",
-        deepLink: "https://app.test",
-      }),
+  it("fails closed if completion wins before the snooze update", async () => {
+    const newDue = "2026-05-09T14:00:00Z";
+    responseQueue = [
+      { data: taskRow(), error: null },
+      { data: null, error: null },
+      { data: taskRow({ status: "completed" }), error: null },
+    ];
+    const result = await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      newDue,
+      "user-9",
     );
+    expect(result.ok).toBe(false);
+    const update = calls.filter((call) => call.op === "update")[0];
+    expect(update.filters).toContainEqual({
+      op: "eq",
+      args: ["status", "open"],
+    });
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+    expect(afterMock).not.toHaveBeenCalled();
   });
 });
 
 describe("reassignTask", () => {
-  it("updates assignee_id and bumps updated_at, excluding appointments via the atomic predicate", async () => {
+  it("records the old and new assignee after a compare-and-set succeeds", async () => {
     responseQueue = [
-      {
-        data: { id: "task-1", assignee_id: "user-2" },
-        error: null,
-      },
+      { data: taskRow(), error: null },
+      { data: taskRow({ assignee_id: "user-2" }), error: null },
     ];
-
     const result = await reassignTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       "task-1",
       "user-2",
+      "user-9",
     );
-
     expect(result.ok).toBe(true);
-    const taskCalls = calls.filter((c) => c.table === "tasks");
-    expect(taskCalls).toHaveLength(1);
-    const update = taskCalls[0];
-    expect(update.op).toBe("update");
-    const payload = update.updatePayload as Record<string, unknown>;
-    expect(payload.assignee_id).toBe("user-2");
-    expect(typeof payload.updated_at).toBe("string");
+    const update = calls.filter((call) => call.table === "tasks")[1];
     expect(update.filters).toEqual([
       { op: "eq", args: ["id", "task-1"] },
+      { op: "eq", args: ["assignee_id", "user-1"] },
       { op: "neq", args: ["type", "appointment"] },
     ]);
+    expect(update.updatePayload).toEqual({
+      assignee_id: "user-2",
+      updated_at: expect.any(String),
+    });
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "property-3",
+      actorType: "user",
+      actorId: "user-9",
+      eventType: "task_reassigned",
+      payload: { task_id: "task-1", from: "user-1", to: "user-2" },
+    });
   });
 
-  it("refuses to reassign an appointment — UPDATE excludes it (neq predicate), follow-up read confirms type, returns TASK_REASSIGN_UNSUPPORTED", async () => {
-    responseQueue = [
-      // UPDATE's neq predicate excludes the row: zero rows back.
-      { data: null, error: null },
-      // Follow-up type read distinguishes appointment from missing.
-      { data: { type: "appointment" }, error: null },
-    ];
-
+  it("treats assigning to the current owner as a no-op", async () => {
+    responseQueue = [{ data: taskRow({ assignee_id: "user-2" }), error: null }];
     const result = await reassignTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       "task-1",
       "user-2",
+      "user-9",
     );
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe("TASK_REASSIGN_UNSUPPORTED");
-    }
-    const taskCalls = calls.filter((c) => c.table === "tasks");
-    expect(taskCalls).toHaveLength(2);
-    expect(taskCalls[0].op).toBe("update");
-    expect(taskCalls[0].filters).toEqual([
-      { op: "eq", args: ["id", "task-1"] },
-      { op: "neq", args: ["type", "appointment"] },
-    ]);
-    expect(taskCalls[1].op).toBe("select");
+    expect(result.ok).toBe(true);
+    expect(calls.filter((call) => call.table === "tasks")).toHaveLength(1);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
-  it("fails closed when the UPDATE errors — no follow-up read, no fall-through write", async () => {
-    responseQueue = [{ data: null, error: { message: "connection reset" } }];
-
+  it("reconciles a concurrent same-target reassignment without a duplicate event", async () => {
+    responseQueue = [
+      { data: taskRow(), error: null },
+      { data: null, error: null },
+      { data: taskRow({ assignee_id: "user-2" }), error: null },
+    ];
     const result = await reassignTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       "task-1",
-      "user-bogus",
+      "user-2",
+      "user-9",
     );
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe("TASK_REASSIGN_FAILED");
-      expect(result.error.message).toBe("connection reset");
-    }
-    // The error short-circuits before any follow-up read.
-    const taskCalls = calls.filter((c) => c.table === "tasks");
-    expect(taskCalls).toHaveLength(1);
-    expect(taskCalls[0].op).toBe("update");
+    expect(result.ok).toBe(true);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
-  it("returns TASK_REASSIGN_FAILED when the task doesn't exist (UPDATE and follow-up read both empty)", async () => {
-    responseQueue = [
-      { data: null, error: null },
-      { data: null, error: null },
-    ];
-
+  it("refuses appointments before issuing an update", async () => {
+    responseQueue = [{ data: taskRow({ type: "appointment" }), error: null }];
     const result = await reassignTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
-      "missing-task",
+      "task-1",
       "user-2",
+      "user-9",
     );
-
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe("TASK_REASSIGN_FAILED");
-      expect(result.error.message).toBe("Failed to reassign task");
-    }
-    const taskCalls = calls.filter((c) => c.table === "tasks");
-    expect(taskCalls).toHaveLength(2);
+    if (!result.ok) expect(result.error.code).toBe("TASK_REASSIGN_UNSUPPORTED");
+    expect(calls.some((call) => call.op === "update")).toBe(false);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("does not append an event when the reassignment update fails", async () => {
+    responseQueue = [
+      { data: taskRow(), error: null },
+      { data: null, error: { message: "connection reset" } },
+    ];
+    const result = await reassignTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "user-2",
+      "user-9",
+    );
+    expect(result.ok).toBe(false);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 });
 

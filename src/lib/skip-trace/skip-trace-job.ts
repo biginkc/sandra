@@ -2,6 +2,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
 import { reportError } from "@/lib/errors/report";
+import {
+  LEAD_EVENT_TYPES,
+  recordLeadEvent,
+  recordLeadEvents,
+} from "@/lib/events";
 import { dispatchJobCompleted } from "@/lib/notifications/dispatch";
 import type { Database, Json } from "@/lib/supabase/types";
 
@@ -1053,9 +1058,11 @@ class ClaimLostError extends Error {
 }
 
 type LedgerEntry = {
+  id: string;
   status: string;
   errorClass: string | null;
   noMatch: boolean;
+  fromCache: boolean;
 };
 
 /** Error classes that are a FINAL answer for this run — resuming must
@@ -1123,12 +1130,17 @@ async function readItemLedger(
       lastId = row.id;
       if (!row.property_id) continue;
       const entry: LedgerEntry = {
+        id: row.id,
         status: row.status,
         errorClass: row.error_class ?? null,
         noMatch:
           !!row.output_payload &&
           typeof row.output_payload === "object" &&
           (row.output_payload as Record<string, unknown>).no_match === true,
+        fromCache:
+          !!row.output_payload &&
+          typeof row.output_payload === "object" &&
+          (row.output_payload as Record<string, unknown>).from_cache === true,
       };
       if (entry.status === "error" && ledgerRank(entry) === 0) {
         retryableErrorItemIds.push(row.id);
@@ -1142,6 +1154,61 @@ async function readItemLedger(
     if (!data || data.length < 1000) break;
   }
   return { ledger, retryableErrorItemIds };
+}
+
+async function repairMissingCompletionEvents(
+  supabase: SupabaseClient<Database>,
+  jobId: string,
+  ledger: Map<string, LedgerEntry>,
+): Promise<void> {
+  const successful = [...ledger.entries()].filter(
+    ([, entry]) => entry.status === "success",
+  );
+  if (successful.length === 0) return;
+
+  try {
+    const existingSourceIds = new Set<string>();
+    for (const ids of chunked(
+      successful.map(([, entry]) => entry.id),
+      IN_CHUNK,
+    )) {
+      const { data, error } = await supabase
+        .from("lead_events")
+        .select("source_id")
+        .eq("source_type", "job_items.skip_trace")
+        .in("source_id", ids);
+      if (error) throw error;
+      for (const event of data ?? []) {
+        if (event.source_id) existingSourceIds.add(event.source_id);
+      }
+    }
+
+    await recordLeadEvents(
+      successful.flatMap(([propertyId, entry]) =>
+        existingSourceIds.has(entry.id)
+          ? []
+          : [
+              {
+                propertyId,
+                eventType: LEAD_EVENT_TYPES.SKIP_TRACE_COMPLETED,
+                actorType: "system" as const,
+                payload: {
+                  job_id: jobId,
+                  outcome: entry.noMatch ? "no_match" : "matched",
+                  from_cache: entry.fromCache,
+                },
+                sourceType: "job_items.skip_trace",
+                sourceId: entry.id,
+              },
+            ],
+      ),
+    );
+  } catch (error) {
+    reportError(error, {
+      tags: { surface: "skip_trace_completion_event_repair" },
+      extra: { jobId, successfulCount: successful.length },
+    });
+  }
 }
 
 async function finalizeClaimed(
@@ -1227,6 +1294,7 @@ async function finalizeClaimed(
     params.jobId,
     bumpHeartbeat,
   );
+  await repairMissingCompletionEvents(supabase, params.jobId, startLedger);
   const alreadyProcessed = new Set<string>();
   for (const [pid, entry] of startLedger) {
     // ledgerRank 0 = retryable error → reprocess. Everything else
@@ -1580,16 +1648,17 @@ async function persistAndRecord(
   // reconciliation-safe state instead of finalizing away the uncertainty.
   const writeItem = async (
     fields: Parameters<typeof insertJobItem>[3],
-  ): Promise<void> => {
+  ): Promise<string | null> => {
     try {
       await ledger?.beforeLedgerWrite?.(result.propertyId);
-      await insertJobItem(supabase, jobId, result.propertyId, fields);
+      return await insertJobItem(supabase, jobId, result.propertyId, fields);
     } catch (error) {
       reportError(error, {
         tags: { surface: "skip_trace_persist_record_insert" },
         extra: { jobId, propertyId: result.propertyId, status: fields.status },
       });
       if (ledger?.requireLedgerWrite) throw error;
+      return null;
     }
   };
 
@@ -1616,7 +1685,7 @@ async function persistAndRecord(
 
   if (outcome.status === "matched") {
     summary.matched++;
-    await writeItem({
+    const jobItemId = await writeItem({
       status: "success",
       result: {
         from_cache: fromCache,
@@ -1625,9 +1694,23 @@ async function persistAndRecord(
         emails_added: outcome.emailsAdded,
       },
     });
+    if (jobItemId) {
+      await recordLeadEvent({
+        propertyId: result.propertyId,
+        eventType: LEAD_EVENT_TYPES.SKIP_TRACE_COMPLETED,
+        actorType: "system",
+        payload: {
+          job_id: jobId,
+          outcome: "matched",
+          from_cache: fromCache,
+        },
+        sourceType: "job_items.skip_trace",
+        sourceId: jobItemId,
+      });
+    }
   } else if (outcome.status === "no_match") {
     summary.no_match++;
-    await writeItem({
+    const jobItemId = await writeItem({
       status: "success",
       result: {
         from_cache: fromCache,
@@ -1635,6 +1718,20 @@ async function persistAndRecord(
         no_match: true,
       },
     });
+    if (jobItemId) {
+      await recordLeadEvent({
+        propertyId: result.propertyId,
+        eventType: LEAD_EVENT_TYPES.SKIP_TRACE_COMPLETED,
+        actorType: "system",
+        payload: {
+          job_id: jobId,
+          outcome: "no_match",
+          from_cache: fromCache,
+        },
+        sourceType: "job_items.skip_trace",
+        sourceId: jobItemId,
+      });
+    }
   } else if (outcome.status === "dnc_contact_ambiguous") {
     summary.failed++;
     summary.dnc_contact_ambiguous = (summary.dnc_contact_ambiguous ?? 0) + 1;
@@ -1727,8 +1824,10 @@ async function insertJobItem(
     error_message?: string;
     result?: Record<string, unknown>;
   },
-): Promise<void> {
+): Promise<string> {
+  const jobItemId = crypto.randomUUID();
   const { error } = await supabase.from("job_items").insert({
+    id: jobItemId,
     job_id: jobId,
     property_id: propertyId,
     status: fields.status,
@@ -1743,6 +1842,7 @@ async function insertJobItem(
     });
     throw new Error(`insert job_item failed: ${error.message}`);
   }
+  return jobItemId;
 }
 
 async function finalizeJob(

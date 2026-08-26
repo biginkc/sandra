@@ -129,7 +129,7 @@ describe("bulk actions (integration)", () => {
     createdAuthUsers.length = 0;
   });
 
-  it("assignLeadsBulk updates every selected property", async () => {
+  it("assignLeadsBulk skips properties already at the requested assignment", async () => {
     const ids = [
       await seedProspect("1 Assign Ln"),
       await seedProspect("2 Assign Ln"),
@@ -138,7 +138,8 @@ describe("bulk actions (integration)", () => {
     // safe shape that doesn't require a seeded auth user.
     const result = await assignLeadsBulk(ids, null);
     if (!result.ok) throw new Error(result.error.message);
-    expect(result.data.succeeded).toBe(2);
+    expect(result.data.succeeded).toBe(0);
+    expect(result.data.skipped).toBe(2);
 
     const { data } = await testClient
       .from("properties")
@@ -147,6 +148,79 @@ describe("bulk actions (integration)", () => {
     for (const row of data ?? []) {
       expect(row.assigned_user_id).toBeNull();
     }
+    const { count } = await testClient
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .in("property_id", ids);
+    expect(count).toBe(0);
+  });
+
+  it("assignLeadsBulk groups mixed previous assignees and skips the unchanged row", async () => {
+    const actor = await createAuthUser(`ba-mixed-actor-${Date.now()}@test.invalid`);
+    const prior = await createAuthUser(`ba-mixed-prior-${Date.now()}@test.invalid`);
+    const target = await createAuthUser(`ba-mixed-target-${Date.now()}@test.invalid`);
+    await grantActiveMembership(prior);
+    await grantActiveMembership(target);
+    currentUserId = actor;
+    currentEmail = "actor@test.invalid";
+
+    const fromPrior = await seedProspect("1 Mixed Prior Ln");
+    const fromNull = await seedProspect("2 Mixed Null Ln");
+    const unchanged = await seedProspect("3 Mixed Same Ln");
+    const { error: seedError } = await testClient
+      .from("properties")
+      .update({ assigned_user_id: prior })
+      .eq("id", fromPrior);
+    if (seedError) throw seedError;
+    const { error: unchangedSeedError } = await testClient
+      .from("properties")
+      .update({ assigned_user_id: target })
+      .eq("id", unchanged);
+    if (unchangedSeedError) throw unchangedSeedError;
+
+    const result = await assignLeadsBulk(
+      [fromPrior, fromNull, unchanged],
+      target,
+    );
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.data).toEqual({ succeeded: 2, skipped: 1, failed: [] });
+
+    const { data: events } = await testClient
+      .from("lead_events")
+      .select("property_id, payload")
+      .in("property_id", [fromPrior, fromNull, unchanged]);
+    expect(events).toHaveLength(2);
+    const batchIds = new Set(
+      (events ?? []).map((event) =>
+        typeof event.payload === "object" && event.payload !== null
+          ? (event.payload as { batch_id?: string }).batch_id
+          : undefined,
+      ),
+    );
+    expect(batchIds.size).toBe(1);
+    expect([...batchIds][0]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          property_id: fromPrior,
+          payload: expect.objectContaining({
+            from: prior,
+            to: target,
+            batch_count: 2,
+          }),
+        }),
+        expect.objectContaining({
+          property_id: fromNull,
+          payload: expect.objectContaining({
+            from: null,
+            to: target,
+            batch_count: 2,
+          }),
+        }),
+      ]),
+    );
   });
 
   it("addPropertiesToListBulk stacks onto an existing list (no duplicate rows)", async () => {
@@ -162,12 +236,26 @@ describe("bulk actions (integration)", () => {
     // Re-adding the same ids must not create duplicate property_lists rows.
     const second = await addPropertiesToListBulk(ids, listId);
     expect(second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.data).toMatchObject({ succeeded: 2, skipped: 0 });
+    expect(second.data).toMatchObject({ succeeded: 0, skipped: 2 });
 
     const { count } = await testClient
       .from("property_lists")
       .select("*", { count: "exact", head: true })
       .eq("list_id", listId);
     expect(count).toBe(2);
+    const { data: events } = await testClient
+      .from("lead_events")
+      .select("payload")
+      .eq("event_type", "list_added")
+      .in("property_id", ids);
+    expect(events).toHaveLength(2);
+    expect(events?.[0]?.payload).toMatchObject({
+      list_id: listId,
+      label: "Absentee High Equity",
+      batch_count: 2,
+    });
   });
 
   it("removePropertiesFromListBulk deletes memberships for the given list only", async () => {
@@ -189,6 +277,20 @@ describe("bulk actions (integration)", () => {
       .eq("property_id", id);
     expect(stillOn).toHaveLength(1);
     expect(stillOn?.[0].list_id).toBe(listB);
+    const { data: removedEvents } = await testClient
+      .from("lead_events")
+      .select("payload")
+      .eq("property_id", id)
+      .eq("event_type", "list_removed");
+    expect(removedEvents).toEqual([
+      {
+        payload: expect.objectContaining({
+          list_id: listA,
+          label: "Absentee",
+          batch_count: 1,
+        }),
+      },
+    ]);
   });
 
   it("applyTagBulk refuses non-custom tags with TAG_NOT_APPLICABLE", async () => {
@@ -222,6 +324,22 @@ describe("bulk actions (integration)", () => {
       .select("*", { count: "exact", head: true })
       .eq("tag_id", tagId);
     expect(count).toBe(2);
+
+    const retry = await applyTagBulk(ids, tagId);
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.data).toMatchObject({ succeeded: 0, skipped: 2 });
+    const { data: events } = await testClient
+      .from("lead_events")
+      .select("payload")
+      .eq("event_type", "tag_applied")
+      .in("property_id", ids);
+    expect(events).toHaveLength(2);
+    expect(events?.[0]?.payload).toMatchObject({
+      tag_id: tagId,
+      label: "competing-offer",
+      batch_count: 2,
+    });
   });
 
   it("applyTagBulk refuses to attach a tag to properties in another organization", async () => {
@@ -620,12 +738,28 @@ describe("bulk actions (integration)", () => {
     expect(data?.status).toBe("prospect");
     expect(data?.qualified_at).toBeNull();
     expect(data?.qualified_by).toBeNull();
+
+    const { data: events } = await testClient
+      .from("lead_events")
+      .select("event_type, payload")
+      .eq("property_id", id);
+    expect(events).toEqual([
+      {
+        event_type: "reverted_to_prospect",
+        payload: { from: "contacted", to: "prospect" },
+      },
+    ]);
   });
 
   it("revertToProspect is a no-op on an already-prospect row", async () => {
     const id = await seedProspect("1 AlreadyProspect Ln");
     const result = await revertToProspect(id);
     expect(result.ok).toBe(true);
+    const { count } = await testClient
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", id);
+    expect(count).toBe(0);
   });
 
   // --------------------------------------------------------------------------
@@ -660,6 +794,28 @@ describe("bulk actions (integration)", () => {
       expect(new Set(forAssignee!.map((n) => n.entity_id))).toEqual(
         new Set(ids),
       );
+
+      const { data: events } = await testClient
+        .from("lead_events")
+        .select("property_id, event_type, payload")
+        .in("property_id", ids);
+      expect(events).toHaveLength(3);
+      const batchIds = new Set(
+        (events ?? []).map((event) =>
+          typeof event.payload === "object" && event.payload !== null
+            ? (event.payload as { batch_id?: string }).batch_id
+            : undefined,
+        ),
+      );
+      expect(batchIds.size).toBe(1);
+      for (const event of events ?? []) {
+        expect(event.event_type).toBe("assigned");
+        expect(event.payload).toMatchObject({
+          from: null,
+          to: assignee,
+          batch_count: 3,
+        });
+      }
 
       const { count: forActor } = await testClient
         .from("notifications")

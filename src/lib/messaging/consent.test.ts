@@ -119,7 +119,7 @@ describe("recordConsentEvent", () => {
         sourceDetail: { externalId: "shared-id" },
         idempotencyKey: "shared-id",
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ inserted: true, id: expect.any(String) });
 
     expect(filters).toContainEqual(["source", "sendillo_inbound_webhook"]);
     expect(insert).toHaveBeenCalledWith(

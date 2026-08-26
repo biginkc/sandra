@@ -2,9 +2,10 @@
 
 import { redirect } from "next/navigation";
 
-import { createLead, type LeadSource } from "@/lib/leads/create";
+import { createLead } from "@/lib/leads/create";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import type { LeadSource } from "@/lib/leads/sources";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 

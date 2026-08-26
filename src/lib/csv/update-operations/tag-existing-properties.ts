@@ -52,12 +52,14 @@ export const tagExistingPropertiesOp: SubOperationModule = {
       (tagRows ?? []).map((r) => [r.name.toLowerCase(), r.id]),
     );
 
-    const resolvedIds: string[] = [];
+    const resolved = new Map<string, { id: string; label: string }>();
     const missing: string[] = [];
     for (const wanted of requested) {
       const id = byLowerName.get(wanted.toLowerCase());
-      if (id) resolvedIds.push(id);
-      else missing.push(wanted.toLowerCase());
+      if (id) {
+        const row = (tagRows ?? []).find((tag) => tag.id === id);
+        if (row) resolved.set(id, { id, label: row.name });
+      } else missing.push(wanted.toLowerCase());
     }
 
     if (missing.length > 0) {
@@ -78,18 +80,19 @@ export const tagExistingPropertiesOp: SubOperationModule = {
     void lowercased; // keep eslint happy if it complains; the var documents intent
 
     if (!options.dryRun) {
-      const upsertRows = resolvedIds.map((tagId) => ({
+      const upsertRows = [...resolved.values()].map((tag) => ({
         property_id: property.id,
-        tag_id: tagId,
+        tag_id: tag.id,
         source: "import",
         applied_by: ctx.userId,
       }));
-      const { error: upsertErr } = await ctx.supabase
+      const { data: inserted, error: upsertErr } = await ctx.supabase
         .from("property_tags")
         .upsert(upsertRows, {
           onConflict: "property_id,tag_id",
           ignoreDuplicates: true,
-        });
+        })
+        .select("tag_id");
       if (upsertErr) {
         return {
           kind: "rejected",
@@ -99,6 +102,19 @@ export const tagExistingPropertiesOp: SubOperationModule = {
           detail: upsertErr.message,
         };
       }
+      const insertedIds = new Set((inserted ?? []).map((row) => row.tag_id));
+      if (insertedIds.size === 0) {
+        return { kind: "unchanged", rowIndex, address, reason: "no-change" };
+      }
+      return {
+        kind: "updated",
+        rowIndex,
+        address,
+        before: {},
+        after: {
+          tags: [...resolved.values()].filter((tag) => insertedIds.has(tag.id)),
+        },
+      };
     }
 
     return {

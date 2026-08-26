@@ -285,7 +285,12 @@ export async function completeTaskFromSlack(input: {
     }
     if (task.status === "completed") return { ok: true };
 
-    const result = await completeTask(admin, input.taskId, resolvedUserId);
+    const result = await completeTask(
+      admin,
+      input.taskId,
+      resolvedUserId,
+      resolvedUserId,
+    );
     if (!result.ok) throw new Error(result.error.message);
 
     return { ok: true };

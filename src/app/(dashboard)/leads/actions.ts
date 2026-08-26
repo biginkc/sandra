@@ -1,5 +1,6 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import { start } from "workflow/api";
@@ -19,6 +20,11 @@ import {
   partitionPropertyDncLocks,
 } from "@/lib/dnc/property-lock";
 import { reportError } from "@/lib/errors/report";
+import {
+  LEAD_EVENT_TYPES,
+  recordLeadEvent,
+  recordLeadEvents,
+} from "@/lib/events";
 import {
   createStandaloneCassJob,
   failAuthorizedCassJobStart,
@@ -79,6 +85,21 @@ const VALID_STATUSES: readonly PropertyStatus[] = [
   "dead",
 ];
 
+async function getLeadEventActor(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+) {
+  try {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    return user?.id
+      ? ({ actorType: "user", actorId: user.id } as const)
+      : ({ actorType: "system" } as const);
+  } catch {
+    return { actorType: "system" } as const;
+  }
+}
+
 type ContactRow = Database["public"]["Tables"]["contacts"]["Row"];
 type HomeownerDetailsRow =
   Database["public"]["Tables"]["homeowner_details"]["Row"];
@@ -86,7 +107,8 @@ type AgentDetailsRow = Database["public"]["Tables"]["agent_details"]["Row"];
 type PropertyRow = Database["public"]["Tables"]["properties"]["Row"];
 
 export type DetailedLead = PropertyRow & {
-  homeowner: (ContactRow & { homeowner_details: HomeownerDetailsRow | null }) | null;
+  homeowner:
+    (ContactRow & { homeowner_details: HomeownerDetailsRow | null }) | null;
   agent: (ContactRow & { agent_details: AgentDetailsRow | null }) | null;
 };
 
@@ -139,6 +161,31 @@ export async function verifyLeadAddress(
 ): Promise<Result<VerifyResult>> {
   try {
     const supabase = await createClient();
+    let userId: string;
+    try {
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
+      if (authError || !user) {
+        return {
+          ok: false,
+          error: {
+            code: "AUTH_REQUIRED",
+            message: "Sign in to verify this address.",
+          },
+        };
+      }
+      userId = user.id;
+    } catch {
+      return {
+        ok: false,
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Sign in to verify this address.",
+        },
+      };
+    }
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
     if (!unlocked.ok) return unlocked;
     const { data: property } = await supabase
@@ -160,13 +207,24 @@ export async function verifyLeadAddress(
 
     switch (outcome.status) {
       case "verified":
-      case "stored_with_status":
+      case "stored_with_status": {
+        await recordLeadEvent({
+          propertyId,
+          actorType: "user",
+          actorId: userId,
+          eventType: LEAD_EVENT_TYPES.ADDRESS_VERIFIED,
+          payload: {
+            cass_status: outcome.verified.cassStatus,
+            cache_hit: outcome.cacheHit,
+          },
+        });
         return ok({
           cassStatus: outcome.verified.cassStatus,
           standardized: outcome.verified.standardized,
           isVacant: outcome.verified.isVacant ?? null,
           cacheHit: outcome.cacheHit,
         });
+      }
       case "provider_off":
         return {
           ok: false,
@@ -246,13 +304,42 @@ export async function updateLeadMotivation(
     const supabase = await createClient();
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
     if (!unlocked.ok) return unlocked;
-    const { error } = await supabase
+    const { data: current, error: lookupError } = await supabase
+      .from("properties")
+      .select("id, motivation_level")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (lookupError) {
+      return {
+        ok: false,
+        error: {
+          code: "MOTIVATION_FETCH_FAILED",
+          message: lookupError.message,
+        },
+      };
+    }
+    if (!current) {
+      return {
+        ok: false,
+        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+      };
+    }
+    if (current.motivation_level === level) return ok(null);
+
+    let update = supabase
       .from("properties")
       .update({
         motivation_level: level,
         updated_at: new Date().toISOString(),
       })
       .eq("id", propertyId);
+    update =
+      current.motivation_level === null
+        ? update.is("motivation_level", null)
+        : update.eq("motivation_level", current.motivation_level);
+    const { data: saved, error } = await update
+      .select("id, motivation_level")
+      .maybeSingle();
 
     if (error) {
       return {
@@ -260,6 +347,29 @@ export async function updateLeadMotivation(
         error: { code: "MOTIVATION_UPDATE_FAILED", message: error.message },
       };
     }
+    if (!saved) {
+      const { data: authoritative, error: reconcileError } = await supabase
+        .from("properties")
+        .select("motivation_level")
+        .eq("id", propertyId)
+        .maybeSingle();
+      if (!reconcileError && authoritative?.motivation_level === level) {
+        return ok(null);
+      }
+      return {
+        ok: false,
+        error: {
+          code: "MOTIVATION_CONFLICT",
+          message: "This lead changed before its motivation was saved.",
+        },
+      };
+    }
+    await recordLeadEvent({
+      propertyId,
+      ...(await getLeadEventActor(supabase)),
+      eventType: LEAD_EVENT_TYPES.MOTIVATION_CHANGED,
+      payload: { from: current.motivation_level, to: level },
+    });
     return ok(null);
   } catch (e) {
     reportError(e, {
@@ -334,9 +444,7 @@ export type BulkQualifyFailure = { propertyId: string; message: string };
  * going. The UI shows a toast summarizing qualified / already-qualified /
  * failed so the VA knows exactly what landed.
  */
-export async function qualifyLeadsBulk(
-  propertyIds: string[],
-): Promise<
+export async function qualifyLeadsBulk(propertyIds: string[]): Promise<
   Result<{
     qualified: number;
     alreadyQualified: number;
@@ -408,7 +516,7 @@ export async function revertToProspect(
     }
 
     const nowIso = new Date().toISOString();
-    const { error } = await supabase
+    const { data: saved, error } = await supabase
       .from("properties")
       .update({
         status: "prospect",
@@ -416,13 +524,39 @@ export async function revertToProspect(
         qualified_by: null,
         updated_at: nowIso,
       })
-      .eq("id", propertyId);
+      .eq("id", propertyId)
+      .eq("status", current.status)
+      .select("id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "REVERT_FAILED", message: error.message },
       };
     }
+    if (!saved) {
+      const { data: authoritative, error: reconcileError } = await supabase
+        .from("properties")
+        .select("status")
+        .eq("id", propertyId)
+        .maybeSingle();
+      if (!reconcileError && authoritative?.status === "prospect") {
+        return ok(null);
+      }
+      return {
+        ok: false,
+        error: {
+          code: "REVERT_CONFLICT",
+          message: "This lead changed before the revert was saved.",
+        },
+      };
+    }
+    await recordLeadEvent({
+      propertyId,
+      ...(await getLeadEventActor(supabase)),
+      eventType: LEAD_EVENT_TYPES.REVERTED_TO_PROSPECT,
+      payload: { from: current.status, to: "prospect" },
+    });
     return ok(null);
   } catch (e) {
     reportError(e, {
@@ -452,11 +586,12 @@ export type BulkTagRow = {
   id: string;
   name: string;
   color: string | null;
-  category: "source" | "marketing" | "skip_trace" | "phone" | "journey" | "custom";
+  category:
+    "source" | "marketing" | "skip_trace" | "phone" | "journey" | "custom";
   system_managed: boolean;
 };
 
-const TAG_BULK_CHUNK_SIZE = 500;
+const MEMBERSHIP_BULK_CHUNK_SIZE = 250;
 
 type BulkTagProperty = { id: string; org_id: string };
 type ResolvedBulkTagRow = BulkTagRow & { org_id: string };
@@ -585,10 +720,12 @@ async function resolveCustomTagForBulk(
 async function fetchBulkTagProperties(
   supabase: Awaited<ReturnType<typeof createClient>>,
   propertyIds: string[],
-): Promise<Result<{ props: BulkTagProperty[]; failed: BulkOutcome["failed"] }>> {
+): Promise<
+  Result<{ props: BulkTagProperty[]; failed: BulkOutcome["failed"] }>
+> {
   const props: BulkTagProperty[] = [];
-  for (let i = 0; i < propertyIds.length; i += TAG_BULK_CHUNK_SIZE) {
-    const chunk = propertyIds.slice(i, i + TAG_BULK_CHUNK_SIZE);
+  for (let i = 0; i < propertyIds.length; i += MEMBERSHIP_BULK_CHUNK_SIZE) {
+    const chunk = propertyIds.slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE);
     const { data, error: lookupErr } = await supabase
       .from("properties")
       .select("id, org_id")
@@ -614,7 +751,7 @@ async function applyResolvedCustomTagBulkWithClient(
   supabase: Awaited<ReturnType<typeof createClient>>,
   props: BulkTagProperty[],
   initialFailed: BulkOutcome["failed"],
-  tag: Pick<ResolvedBulkTagRow, "id" | "org_id">,
+  tag: Pick<ResolvedBulkTagRow, "id" | "name" | "org_id">,
 ): Promise<Result<BulkOutcome>> {
   const failed: BulkOutcome["failed"] = [...initialFailed];
   const sameOrgProps: BulkTagProperty[] = [];
@@ -632,38 +769,86 @@ async function applyResolvedCustomTagBulkWithClient(
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  const rows = sameOrgProps.map((p) => ({
-    org_id: p.org_id,
-    property_id: p.id,
-    tag_id: tag.id,
-    applied_by: user?.id ?? null,
-    source: "manual",
-  }));
-
-  let succeeded = 0;
-  for (let i = 0; i < rows.length; i += TAG_BULK_CHUNK_SIZE) {
-    const chunk = rows.slice(i, i + TAG_BULK_CHUNK_SIZE);
-    const { error } = await supabase.from("property_tags").upsert(chunk, {
-      onConflict: "property_id,tag_id",
-      ignoreDuplicates: true,
-    });
-    if (error) {
-      return ok({
-        succeeded,
-        skipped: 0,
-        failed: [
-          ...failed,
-          ...rows.slice(i).map((row) => ({
-            propertyId: row.property_id,
-            message: error.message,
-          })),
-        ],
-      });
+  const existingPropertyIds = new Set<string>();
+  for (let i = 0; i < sameOrgProps.length; i += MEMBERSHIP_BULK_CHUNK_SIZE) {
+    const ids = sameOrgProps
+      .slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE)
+      .map((property) => property.id);
+    const { data: existing, error: existingError } = await supabase
+      .from("property_tags")
+      .select("property_id")
+      .eq("tag_id", tag.id)
+      .in("property_id", ids);
+    if (existingError) {
+      return {
+        ok: false,
+        error: { code: "TAG_FETCH_FAILED", message: existingError.message },
+      };
     }
-    succeeded += chunk.length;
+    for (const row of existing ?? []) existingPropertyIds.add(row.property_id);
   }
 
-  return ok({ succeeded, skipped: 0, failed });
+  const rows = sameOrgProps
+    .filter((property) => !existingPropertyIds.has(property.id))
+    .map((p) => ({
+      org_id: p.org_id,
+      property_id: p.id,
+      tag_id: tag.id,
+      applied_by: user?.id ?? null,
+      source: "manual",
+    }));
+
+  const succeededIds: string[] = [];
+  let processedCandidateCount = 0;
+  for (let i = 0; i < rows.length; i += MEMBERSHIP_BULK_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE);
+    const { data: saved, error } = await supabase
+      .from("property_tags")
+      .upsert(chunk, {
+        onConflict: "property_id,tag_id",
+        ignoreDuplicates: true,
+      })
+      .select("property_id");
+    if (error) {
+      failed.push(
+        ...rows.slice(i).map((row) => ({
+          propertyId: row.property_id,
+          message: error.message,
+        })),
+      );
+      break;
+    }
+    processedCandidateCount += chunk.length;
+    succeededIds.push(...(saved ?? []).map((row) => row.property_id));
+  }
+
+  if (succeededIds.length > 0) {
+    const batchId = randomUUID();
+    const actor = user?.id
+      ? ({ actorType: "user", actorId: user.id } as const)
+      : ({ actorType: "system" } as const);
+    await recordLeadEvents(
+      succeededIds.map((propertyId) => ({
+        propertyId,
+        ...actor,
+        eventType: LEAD_EVENT_TYPES.TAG_APPLIED,
+        payload: {
+          tag_id: tag.id,
+          label: tag.name,
+          batch_id: batchId,
+          batch_count: succeededIds.length,
+        },
+      })),
+    );
+  }
+
+  return ok({
+    succeeded: succeededIds.length,
+    skipped:
+      existingPropertyIds.size +
+      Math.max(0, processedCandidateCount - succeededIds.length),
+    failed,
+  });
 }
 
 async function applyCustomTagBulkWithClient(
@@ -677,7 +862,7 @@ async function applyCustomTagBulkWithClient(
 
   const { data: tag, error: tagErr } = await supabase
     .from("tags")
-    .select("id, category, system_managed, org_id")
+    .select("id, name, category, system_managed, org_id")
     .eq("id", tagId)
     .maybeSingle();
   if (tagErr) {
@@ -712,7 +897,7 @@ async function applyCustomTagBulkWithClient(
     supabase,
     propsResult.data.props,
     propsResult.data.failed,
-    tag as Pick<ResolvedBulkTagRow, "id" | "org_id">,
+    tag as Pick<ResolvedBulkTagRow, "id" | "name" | "org_id">,
   );
 }
 
@@ -751,50 +936,153 @@ export async function assignLeadsBulk(
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    const { error } = await supabase
+    const { data: currentAssignments, error: lookupError } = await supabase
       .from("properties")
-      .update({
-        assigned_user_id: userId,
-        updated_at: new Date().toISOString(),
-      })
+      .select("id, assigned_user_id")
       .in("id", assignIds);
-    if (error) {
+    if (lookupError) {
       return {
         ok: false,
-        error: { code: "ASSIGN_BULK_FAILED", message: error.message },
+        error: { code: "ASSIGN_BULK_FAILED", message: lookupError.message },
       };
+    }
+
+    const assignmentById = new Map(
+      (currentAssignments ?? []).map((row) => [row.id, row.assigned_user_id]),
+    );
+    const unchangedIds = assignIds.filter(
+      (propertyId) => assignmentById.get(propertyId) === userId,
+    );
+    const candidateIds = assignIds.filter(
+      (propertyId) => assignmentById.get(propertyId) !== userId,
+    );
+    const idsByPrevious = new Map<string | null, string[]>();
+    for (const propertyId of candidateIds) {
+      const previous = assignmentById.get(propertyId) ?? null;
+      const group = idsByPrevious.get(previous) ?? [];
+      group.push(propertyId);
+      idsByPrevious.set(previous, group);
+    }
+
+    const changedIds: string[] = [];
+    const failed: BulkOutcome["failed"] = [
+      ...partition.data.locked.map((propertyId) => ({
+        propertyId,
+        message: DNC_LOCKED_MESSAGE,
+      })),
+      ...partition.data.missing.map((propertyId) => ({
+        propertyId,
+        message: "Property not found",
+      })),
+    ];
+    const previousByChangedId = new Map<string, string | null>();
+    const writeFailedIds = new Set<string>();
+    for (const [previous, ids] of idsByPrevious) {
+      let update = supabase
+        .from("properties")
+        .update({
+          assigned_user_id: userId,
+          updated_at: new Date().toISOString(),
+        })
+        .in("id", ids);
+      update =
+        previous === null
+          ? update.is("assigned_user_id", null)
+          : update.eq("assigned_user_id", previous);
+      const { data: saved, error } = await update.select("id");
+      if (error) {
+        ids.forEach((propertyId) => writeFailedIds.add(propertyId));
+        failed.push(
+          ...ids.map((propertyId) => ({
+            propertyId,
+            message: error.message,
+          })),
+        );
+        continue;
+      }
+      for (const row of saved ?? []) {
+        changedIds.push(row.id);
+        previousByChangedId.set(row.id, previous);
+      }
+    }
+
+    const changedIdSet = new Set(changedIds);
+    const racedIds = candidateIds.filter(
+      (id) => !changedIdSet.has(id) && !writeFailedIds.has(id),
+    );
+    let concurrentlySatisfied = 0;
+    if (racedIds.length > 0) {
+      const { data: authoritative, error: reconcileError } = await supabase
+        .from("properties")
+        .select("id, assigned_user_id")
+        .in("id", racedIds);
+      if (reconcileError) {
+        failed.push(
+          ...racedIds.map((propertyId) => ({
+            propertyId,
+            message: "The current assignment could not be verified.",
+          })),
+        );
+      } else {
+        const authoritativeById = new Map(
+          (authoritative ?? []).map((row) => [row.id, row.assigned_user_id]),
+        );
+        for (const propertyId of racedIds) {
+          if (authoritativeById.get(propertyId) === userId) {
+            concurrentlySatisfied++;
+          } else {
+            failed.push({
+              propertyId,
+              message: "This lead changed before the assignment was saved.",
+            });
+          }
+        }
+      }
+    }
+
+    if (changedIds.length > 0) {
+      const batchId = randomUUID();
+      const actor = user?.id
+        ? ({ actorType: "user", actorId: user.id } as const)
+        : ({ actorType: "system" } as const);
+      await recordLeadEvents(
+        changedIds.map((propertyId) => ({
+          propertyId,
+          ...actor,
+          eventType: LEAD_EVENT_TYPES.ASSIGNED,
+          payload: {
+            from: previousByChangedId.get(propertyId) ?? null,
+            to: userId,
+            batch_id: batchId,
+            batch_count: changedIds.length,
+          },
+        })),
+      );
     }
 
     // Feature 7 — fire property_assigned notifications. Best-effort:
     // dispatch swallows errors internally, and we catch anything that
     // bubbles so a notification hiccup never fails the assignment.
-    try {
-      await dispatchPropertyAssigned(supabase, {
-        propertyIds: assignIds,
-        newAssigneeId: userId,
-        actorId: user?.id ?? null,
-        assignerName: user?.email?.split("@")[0] ?? null,
-      });
-    } catch (e) {
-      reportError(e, {
-        tags: { surface: "assign_leads_bulk_notification_dispatch" },
-        extra: { count: assignIds.length },
-      });
+    if (changedIds.length > 0) {
+      try {
+        await dispatchPropertyAssigned(supabase, {
+          propertyIds: changedIds,
+          newAssigneeId: userId,
+          actorId: user?.id ?? null,
+          assignerName: user?.email?.split("@")[0] ?? null,
+        });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "assign_leads_bulk_notification_dispatch" },
+          extra: { count: changedIds.length },
+        });
+      }
     }
 
     return ok({
-      succeeded: assignIds.length,
-      skipped: 0,
-      failed: [
-        ...partition.data.locked.map((propertyId) => ({
-          propertyId,
-          message: DNC_LOCKED_MESSAGE,
-        })),
-        ...partition.data.missing.map((propertyId) => ({
-          propertyId,
-          message: "Property not found",
-        })),
-      ],
+      succeeded: changedIds.length,
+      skipped: unchangedIds.length + concurrentlySatisfied,
+      failed,
     });
   } catch (e) {
     reportError(e, {
@@ -814,55 +1102,142 @@ export async function addPropertiesToListBulk(
   }
   try {
     const supabase = await createClient();
+    const { data: list, error: listError } = await supabase
+      .from("lists")
+      .select("id, name, org_id")
+      .eq("id", listId)
+      .maybeSingle();
+    if (listError) {
+      return {
+        ok: false,
+        error: { code: "LIST_FETCH_FAILED", message: listError.message },
+      };
+    }
+    if (!list) {
+      return {
+        ok: false,
+        error: { code: "LIST_NOT_FOUND", message: "List not found." },
+      };
+    }
     // Look up org_ids so we satisfy property_lists.org_id NOT NULL. Every
     // property has an org; the query scopes to the ids we got, so RLS
     // already filtered out cross-org rows if any.
-    const { data: props, error: lookupErr } = await supabase
-      .from("properties")
-      .select("id, org_id")
-      .in("id", propertyIds);
-    if (lookupErr) {
-      return {
-        ok: false,
-        error: { code: "ADD_TO_LIST_FAILED", message: lookupErr.message },
-      };
+    const uniquePropertyIds = [...new Set(propertyIds)];
+    const props: BulkTagProperty[] = [];
+    for (
+      let i = 0;
+      i < uniquePropertyIds.length;
+      i += MEMBERSHIP_BULK_CHUNK_SIZE
+    ) {
+      const chunk = uniquePropertyIds.slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE);
+      const { data, error: lookupError } = await supabase
+        .from("properties")
+        .select("id, org_id")
+        .in("id", chunk);
+      if (lookupError) {
+        return {
+          ok: false,
+          error: { code: "ADD_TO_LIST_FAILED", message: lookupError.message },
+        };
+      }
+      props.push(...((data ?? []) as BulkTagProperty[]));
     }
-    const foundIds = new Set((props ?? []).map((p) => p.id));
+    const foundIds = new Set(props.map((p) => p.id));
     const failed: BulkOutcome["failed"] = [];
-    for (const id of propertyIds) {
+    for (const id of uniquePropertyIds) {
       if (!foundIds.has(id)) {
         failed.push({ propertyId: id, message: "Property not found" });
       }
     }
+    const sameOrgProps = props.filter((property) => {
+      if (property.org_id === list.org_id) return true;
+      failed.push({
+        propertyId: property.id,
+        message: "List does not belong to this property's organization",
+      });
+      return false;
+    });
 
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    const nowIso = new Date().toISOString();
-    const rows = (props ?? []).map((p) => ({
-      org_id: p.org_id,
-      property_id: p.id,
-      list_id: listId,
-      last_added_at: nowIso,
-      last_added_by: user?.id ?? null,
-    }));
-    if (rows.length > 0) {
-      const { error } = await supabase
+    const existingPropertyIds = new Set<string>();
+    for (let i = 0; i < sameOrgProps.length; i += MEMBERSHIP_BULK_CHUNK_SIZE) {
+      const ids = sameOrgProps
+        .slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE)
+        .map((property) => property.id);
+      const { data: existing, error: existingError } = await supabase
         .from("property_lists")
-        .upsert(rows, {
-          onConflict: "property_id,list_id",
-          ignoreDuplicates: false,
-        });
-      if (error) {
+        .select("property_id")
+        .eq("list_id", listId)
+        .in("property_id", ids);
+      if (existingError) {
         return {
           ok: false,
-          error: { code: "ADD_TO_LIST_FAILED", message: error.message },
+          error: { code: "ADD_TO_LIST_FAILED", message: existingError.message },
         };
       }
+      for (const row of existing ?? [])
+        existingPropertyIds.add(row.property_id);
+    }
+
+    const nowIso = new Date().toISOString();
+    const rows = sameOrgProps
+      .filter((property) => !existingPropertyIds.has(property.id))
+      .map((p) => ({
+        org_id: p.org_id,
+        property_id: p.id,
+        list_id: listId,
+        last_added_at: nowIso,
+        last_added_by: user?.id ?? null,
+      }));
+    const succeededIds: string[] = [];
+    let processedCandidateCount = 0;
+    for (let i = 0; i < rows.length; i += MEMBERSHIP_BULK_CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE);
+      const { data: saved, error } = await supabase
+        .from("property_lists")
+        .upsert(chunk, {
+          onConflict: "property_id,list_id",
+          ignoreDuplicates: true,
+        })
+        .select("property_id");
+      if (error) {
+        failed.push(
+          ...rows.slice(i).map((row) => ({
+            propertyId: row.property_id,
+            message: error.message,
+          })),
+        );
+        break;
+      }
+      processedCandidateCount += chunk.length;
+      succeededIds.push(...(saved ?? []).map((row) => row.property_id));
+    }
+    if (succeededIds.length > 0) {
+      const batchId = randomUUID();
+      const actor = user?.id
+        ? ({ actorType: "user", actorId: user.id } as const)
+        : ({ actorType: "system" } as const);
+      await recordLeadEvents(
+        succeededIds.map((propertyId) => ({
+          propertyId,
+          ...actor,
+          eventType: LEAD_EVENT_TYPES.LIST_ADDED,
+          payload: {
+            list_id: listId,
+            label: list.name,
+            batch_id: batchId,
+            batch_count: succeededIds.length,
+          },
+        })),
+      );
     }
     return ok({
-      succeeded: rows.length,
-      skipped: 0,
+      succeeded: succeededIds.length,
+      skipped:
+        existingPropertyIds.size +
+        Math.max(0, processedCandidateCount - succeededIds.length),
       failed,
     });
   } catch (e) {
@@ -883,22 +1258,75 @@ export async function removePropertiesFromListBulk(
   }
   try {
     const supabase = await createClient();
-    const { error, count } = await supabase
-      .from("property_lists")
-      .delete({ count: "exact" })
-      .eq("list_id", listId)
-      .in("property_id", propertyIds);
-    if (error) {
+    const uniquePropertyIds = [...new Set(propertyIds)];
+    const { data: list, error: listError } = await supabase
+      .from("lists")
+      .select("name")
+      .eq("id", listId)
+      .maybeSingle();
+    if (listError) {
       return {
         ok: false,
-        error: { code: "REMOVE_FROM_LIST_FAILED", message: error.message },
+        error: { code: "LIST_FETCH_FAILED", message: listError.message },
       };
     }
-    const succeeded = count ?? 0;
+    if (!list) {
+      return {
+        ok: false,
+        error: { code: "LIST_NOT_FOUND", message: "List not found." },
+      };
+    }
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const removedIds: string[] = [];
+    const failed: BulkOutcome["failed"] = [];
+    for (
+      let i = 0;
+      i < uniquePropertyIds.length;
+      i += MEMBERSHIP_BULK_CHUNK_SIZE
+    ) {
+      const chunk = uniquePropertyIds.slice(i, i + MEMBERSHIP_BULK_CHUNK_SIZE);
+      const { data: removed, error } = await supabase
+        .from("property_lists")
+        .delete()
+        .eq("list_id", listId)
+        .in("property_id", chunk)
+        .select("property_id");
+      if (error) {
+        failed.push(
+          ...chunk.map((propertyId) => ({
+            propertyId,
+            message: error.message,
+          })),
+        );
+        continue;
+      }
+      removedIds.push(...(removed ?? []).map((row) => row.property_id));
+    }
+    if (removedIds.length > 0) {
+      const batchId = randomUUID();
+      const actor = user?.id
+        ? ({ actorType: "user", actorId: user.id } as const)
+        : ({ actorType: "system" } as const);
+      await recordLeadEvents(
+        removedIds.map((propertyId) => ({
+          propertyId,
+          ...actor,
+          eventType: LEAD_EVENT_TYPES.LIST_REMOVED,
+          payload: {
+            list_id: listId,
+            label: list.name,
+            batch_id: batchId,
+            batch_count: removedIds.length,
+          },
+        })),
+      );
+    }
     return ok({
-      succeeded,
-      skipped: propertyIds.length - succeeded,
-      failed: [],
+      succeeded: removedIds.length,
+      skipped: uniquePropertyIds.length - removedIds.length - failed.length,
+      failed,
     });
   } catch (e) {
     reportError(e, {
@@ -1234,12 +1662,16 @@ export async function verifyPropertiesBulk(
       };
     }
     const orgIds = new Set((ownedRows ?? []).map((row) => row.org_id));
-    if ((ownedRows ?? []).length !== new Set(verifyIds).size || orgIds.size !== 1) {
+    if (
+      (ownedRows ?? []).length !== new Set(verifyIds).size ||
+      orgIds.size !== 1
+    ) {
       return {
         ok: false,
         error: {
           code: "VERIFY_SCOPE_FAILED",
-          message: "Every selected property must belong to the same organization.",
+          message:
+            "Every selected property must belong to the same organization.",
         },
       };
     }
@@ -1359,7 +1791,8 @@ export async function updatePropertyStatus(
           ok: false,
           error: {
             code: "STATUS_RECONCILIATION_FAILED",
-            message: "The lead changed, but its current stage could not be loaded.",
+            message:
+              "The lead changed, but its current stage could not be loaded.",
           },
         };
       }
@@ -1375,7 +1808,8 @@ export async function updatePropertyStatus(
           code: "STATUS_CONFLICT",
           message:
             "This lead changed before your move was saved. Its current stage has been restored.",
-          ...(current && VALID_STATUSES.includes(current.status as PropertyStatus)
+          ...(current &&
+          VALID_STATUSES.includes(current.status as PropertyStatus)
             ? { details: { currentStatus: current.status } }
             : {}),
         },
@@ -1390,6 +1824,15 @@ export async function updatePropertyStatus(
           message: "The lead did not save in the selected stage.",
         },
       };
+    }
+
+    if (expectedPreviousStatus !== status) {
+      await recordLeadEvent({
+        propertyId,
+        ...(await getLeadEventActor(supabase)),
+        eventType: LEAD_EVENT_TYPES.STATUS_CHANGED,
+        payload: { from: expectedPreviousStatus, to: status },
+      });
     }
 
     return ok({ propertyId: data.id, status: data.status as PropertyStatus });
@@ -1879,19 +2322,68 @@ export async function updateLeadAssignee(
         },
       };
     }
-    const { error } = await supabase
+    const { data: current, error: lookupError } = await supabase
+      .from("properties")
+      .select("id, assigned_user_id")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (lookupError) {
+      return {
+        ok: false,
+        error: { code: "ASSIGNEE_FETCH_FAILED", message: lookupError.message },
+      };
+    }
+    if (!current) {
+      return {
+        ok: false,
+        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+      };
+    }
+    if (current.assigned_user_id === userId) return ok(null);
+
+    let update = supabase
       .from("properties")
       .update({
         assigned_user_id: userId,
         updated_at: new Date().toISOString(),
       })
       .eq("id", propertyId);
+    update =
+      current.assigned_user_id === null
+        ? update.is("assigned_user_id", null)
+        : update.eq("assigned_user_id", current.assigned_user_id);
+    const { data: saved, error } = await update
+      .select("id, assigned_user_id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "ASSIGNEE_UPDATE_FAILED", message: error.message },
       };
     }
+    if (!saved) {
+      const { data: authoritative, error: reconcileError } = await supabase
+        .from("properties")
+        .select("assigned_user_id")
+        .eq("id", propertyId)
+        .maybeSingle();
+      if (!reconcileError && authoritative?.assigned_user_id === userId) {
+        return ok(null);
+      }
+      return {
+        ok: false,
+        error: {
+          code: "ASSIGNEE_CONFLICT",
+          message: "This lead changed before the assignment was saved.",
+        },
+      };
+    }
+    await recordLeadEvent({
+      propertyId,
+      ...(await getLeadEventActor(supabase)),
+      eventType: LEAD_EVENT_TYPES.ASSIGNED,
+      payload: { from: current.assigned_user_id, to: userId },
+    });
     return ok(null);
   } catch (e) {
     reportError(e, {
@@ -2182,15 +2674,15 @@ export async function getPropertyNeighbors(
   if (!current) return { prevId: null, nextId: null };
 
   let previousQuery = supabase
-      .from("properties")
-      .select("id")
-      .is("deleted_at", null)
-      .gt("created_at", current.created_at);
+    .from("properties")
+    .select("id")
+    .is("deleted_at", null)
+    .gt("created_at", current.created_at);
   let nextQuery = supabase
-      .from("properties")
-      .select("id")
-      .is("deleted_at", null)
-      .lt("created_at", current.created_at);
+    .from("properties")
+    .select("id")
+    .is("deleted_at", null)
+    .lt("created_at", current.created_at);
   if (mode === "prospect") {
     // Permanent DNC preserves the record's historical pipeline stage; it
     // does not move every locked record into Prospects. Keep neighbor
@@ -2207,10 +2699,7 @@ export async function getPropertyNeighbors(
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle(),
-    nextQuery
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
+    nextQuery.order("created_at", { ascending: false }).limit(1).maybeSingle(),
   ]);
 
   return {

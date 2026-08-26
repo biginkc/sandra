@@ -23,6 +23,12 @@ import {
   useLeadMessages,
 } from "./messages-thread";
 import { NoteEventCard, type Note, useLeadNotes } from "./notes-feed";
+import {
+  compareActivityTimestamps,
+  LeadEventPill,
+  type LeadEvent,
+  useLeadEvents,
+} from "./lead-events";
 
 export type LeadActivityEvent =
   | { source: "message"; id: string; timestamp: string; row: Message }
@@ -32,6 +38,12 @@ export type LeadActivityEvent =
       id: string;
       timestamp: string;
       row: CallActivityRollupRow;
+    }
+  | {
+      source: "event";
+      id: string;
+      timestamp: string;
+      row: LeadEvent;
     };
 
 type SourceName = LeadActivityEvent["source"];
@@ -42,9 +54,11 @@ type Props = {
   initialMessages: Message[];
   initialNotes: Note[];
   initialCalls: CallActivityRollupRow[];
+  initialEvents: LeadEvent[];
   messageError: string | null;
   noteError: string | null;
   callError: string | null;
+  eventError: string | null;
   authorEmails: Record<string, string>;
   currentUserId: string | null;
   currentUserEmail: string | null;
@@ -66,10 +80,12 @@ export function LeadActivityTimeline(props: Props) {
   const [messageSnapshot, setMessageSnapshot] = useState(props.initialMessages);
   const [noteSnapshot, setNoteSnapshot] = useState(props.initialNotes);
   const [callSnapshot, setCallSnapshot] = useState(props.initialCalls);
+  const [eventSnapshot, setEventSnapshot] = useState(props.initialEvents);
   const [errors, setErrors] = useState<Record<SourceName, string | null>>({
     message: props.messageError,
     note: props.noteError,
     call: props.callError,
+    event: props.eventError,
   });
   const [retrying, setRetrying] = useState<SourceName | null>(null);
 
@@ -77,14 +93,18 @@ export function LeadActivityTimeline(props: Props) {
     setMessageSnapshot(props.initialMessages);
     setNoteSnapshot(props.initialNotes);
     setCallSnapshot(props.initialCalls);
+    if (!props.eventError) setEventSnapshot(props.initialEvents);
     setErrors({
       message: props.messageError,
       note: props.noteError,
       call: props.callError,
+      event: props.eventError,
     });
   }, [
     props.callError,
+    props.eventError,
     props.initialCalls,
+    props.initialEvents,
     props.initialMessages,
     props.initialNotes,
     props.messageError,
@@ -109,9 +129,20 @@ export function LeadActivityTimeline(props: Props) {
     currentUserEmail,
   });
   const calls = useLeadCallRows({ propertyId, initialRows: callSnapshot });
+  const { events: leadEvents, reconciled: eventsReconciled } = useLeadEvents({
+    propertyId,
+    initial: eventSnapshot,
+    serverSnapshot: props.initialEvents,
+  });
+  useEffect(() => {
+    if (!eventsReconciled) return;
+    setErrors((previous) =>
+      previous.event ? { ...previous, event: null } : previous,
+    );
+  }, [eventsReconciled]);
   const activity = useMemo(
-    () => buildLeadActivitySnapshot(messages, notes, calls, errors),
-    [calls, errors, messages, notes],
+    () => buildLeadActivitySnapshot(messages, notes, calls, leadEvents, errors),
+    [calls, errors, leadEvents, messages, notes],
   );
   const events = activity.events;
   const mostRecentOutboundId = [...messages]
@@ -146,7 +177,7 @@ export function LeadActivityTimeline(props: Props) {
           .limit(200);
         if (result.error) throw result.error;
         setNoteSnapshot(result.data as Note[]);
-      } else {
+      } else if (source === "call") {
         const [startedResult, unstartedResult] = await Promise.all([
           supabase
             .from("call_activities")
@@ -175,6 +206,18 @@ export function LeadActivityTimeline(props: Props) {
               []) as unknown as CallActivityRollupRow[]),
           ]),
         );
+      } else {
+        const result = await supabase
+          .from("lead_events")
+          .select(
+            "id, property_id, actor_type, actor_id, event_type, payload, created_at",
+          )
+          .eq("property_id", propertyId)
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: false })
+          .limit(200);
+        if (result.error) throw result.error;
+        setEventSnapshot((result.data ?? []) as LeadEvent[]);
       }
       setErrors((previous) => ({ ...previous, [source]: null }));
     } catch (error) {
@@ -209,7 +252,7 @@ export function LeadActivityTimeline(props: Props) {
 
       {events.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed px-4 py-10 text-center text-sm">
-          No messages, notes, or calls yet.
+          No messages, notes, calls, or activity yet.
         </div>
       ) : (
         <div className="relative before:absolute before:top-3 before:bottom-3 before:left-[15px] before:w-px before:bg-border/70">
@@ -219,7 +262,9 @@ export function LeadActivityTimeline(props: Props) {
                 <ActivityTrustFloor timestamp={activity.trustFloor} />
               ) : null;
             const muted =
-              activity.trustFloor && event.timestamp < activity.trustFloor
+              activity.trustFloor &&
+              compareActivityTimestamps(event.timestamp, activity.trustFloor) <
+                0
                 ? " opacity-60"
                 : "";
             if (event.source === "message") {
@@ -267,6 +312,22 @@ export function LeadActivityTimeline(props: Props) {
                 </Fragment>
               );
             }
+            if (event.source === "event") {
+              return (
+                <Fragment key={`event:${event.id}`}>
+                  {boundary}
+                  <div
+                    className={`relative z-10 flex justify-center pb-4${muted}`}
+                  >
+                    <LeadEventPill
+                      event={event.row}
+                      authorEmails={liveAuthorEmails}
+                      currentUserId={currentUserId}
+                    />
+                  </div>
+                </Fragment>
+              );
+            }
             return (
               <Fragment key={`call:${event.id}`}>
                 {boundary}
@@ -287,6 +348,7 @@ export function normalizeLeadActivityEvents(
   messages: Message[],
   notes: Note[],
   calls: CallActivityRollupRow[],
+  leadEvents: LeadEvent[],
 ): LeadActivityEvent[] {
   const deduplicated = new Map<string, LeadActivityEvent>();
   for (const message of messages) {
@@ -313,15 +375,24 @@ export function normalizeLeadActivityEvents(
       row: call,
     });
   }
+  for (const event of leadEvents) {
+    deduplicated.set(`event:${event.id}`, {
+      source: "event",
+      id: event.id,
+      timestamp: event.created_at,
+      row: event,
+    });
+  }
 
   const sourceOrder: Record<SourceName, number> = {
     message: 0,
     note: 1,
     call: 2,
+    event: 3,
   };
   return [...deduplicated.values()].sort(
     (a, b) =>
-      a.timestamp.localeCompare(b.timestamp) ||
+      compareActivityTimestamps(a.timestamp, b.timestamp) ||
       sourceOrder[a.source] - sourceOrder[b.source] ||
       a.id.localeCompare(b.id),
   );
@@ -334,7 +405,9 @@ export function selectLatestCallActivityRows(
     .sort((a, b) => {
       const aTime = a.started_at ?? a.created_at;
       const bTime = b.started_at ?? b.created_at;
-      return bTime.localeCompare(aTime) || b.id.localeCompare(a.id);
+      return (
+        compareActivityTimestamps(bTime, aTime) || b.id.localeCompare(a.id)
+      );
     })
     .slice(0, 20);
 }
@@ -343,29 +416,49 @@ export function buildLeadActivitySnapshot(
   messages: Message[],
   notes: Note[],
   calls: CallActivityRollupRow[],
+  leadEvents: LeadEvent[],
   errors: Record<SourceName, string | null>,
 ) {
-  const sourceOrder: SourceName[] = ["message", "note", "call"];
+  const sourceOrder: SourceName[] = ["message", "note", "call", "event"];
   const boundedCutoffs = [
     messages.length >= 200 ? messages[0]?.created_at : null,
     notes.length >= 200 ? notes[0]?.created_at : null,
     calls.length >= 20
       ? calls.reduce<string | null>((oldest, call) => {
           const timestamp = call.started_at ?? call.created_at;
-          return oldest === null || timestamp < oldest ? timestamp : oldest;
+          return oldest === null ||
+            compareActivityTimestamps(timestamp, oldest) < 0
+            ? timestamp
+            : oldest;
+        }, null)
+      : null,
+    leadEvents.length >= 200
+      ? leadEvents.reduce<string | null>((oldest, event) => {
+          return oldest === null ||
+            compareActivityTimestamps(event.created_at, oldest) < 0
+            ? event.created_at
+            : oldest;
         }, null)
       : null,
   ].filter((timestamp): timestamp is string => Boolean(timestamp));
   const trustFloor =
-    boundedCutoffs.sort((a, b) => b.localeCompare(a))[0] ?? null;
-  const events = normalizeLeadActivityEvents(messages, notes, calls);
+    boundedCutoffs.sort((a, b) => compareActivityTimestamps(b, a))[0] ?? null;
+  const events = normalizeLeadActivityEvents(
+    messages,
+    notes,
+    calls,
+    leadEvents,
+  );
   return {
     events,
     trustFloor,
     trustBoundaryIndex:
       trustFloor === null
         ? -1
-        : events.findIndex((event) => event.timestamp >= trustFloor),
+        : events.findIndex(
+            (event) =>
+              compareActivityTimestamps(event.timestamp, trustFloor) >= 0,
+          ),
     failures: sourceOrder.flatMap((source) => {
       const detail = errors[source];
       return detail ? [{ source, detail }] : [];
@@ -418,7 +511,13 @@ function ActivitySourceFailure({
   onRetry: (source: SourceName) => void;
 }) {
   const label =
-    source === "message" ? "Messages" : source === "note" ? "Notes" : "Calls";
+    source === "message"
+      ? "Messages"
+      : source === "note"
+        ? "Notes"
+        : source === "call"
+          ? "Calls"
+          : "Activity";
   return (
     <div
       className="border-destructive/40 bg-destructive/5 flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between"

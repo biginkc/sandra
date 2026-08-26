@@ -1,5 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import {
+  LEAD_EVENT_TYPES,
+  recordLeadEvents,
+  type LeadEventType,
+} from "@/lib/events";
 import type { Database } from "@/lib/supabase/types";
 
 import { matchPropertyByAddress } from "./match-by-address";
@@ -43,6 +48,73 @@ export type ApplyBulkUpdateResult = {
   updatedCount: number;
   failedCount: number;
 };
+
+type BulkEventDraft = {
+  propertyId: string;
+  eventType: LeadEventType;
+  payload: Record<string, string | null>;
+  groupKey: string;
+};
+
+function eventDraftsForUpdatedRow(
+  subOperationId: SubOperationId,
+  propertyId: string,
+  result: Extract<RowResult, { kind: "updated" }>,
+): BulkEventDraft[] {
+  if (subOperationId === "update-property-status") {
+    const from = result.before.status;
+    const to = result.after.status;
+    return typeof from === "string" && typeof to === "string"
+      ? [
+          {
+            propertyId,
+            eventType: LEAD_EVENT_TYPES.STATUS_CHANGED,
+            payload: { from, to },
+            groupKey: "status",
+          },
+        ]
+      : [];
+  }
+  if (subOperationId === "update-motivation-level") {
+    const from = result.before.motivation_level;
+    const to = result.after.motivation_level;
+    const validFrom = from === null || typeof from === "string";
+    const validTo = to === null || typeof to === "string";
+    return validFrom && validTo
+      ? [
+          {
+            propertyId,
+            eventType: LEAD_EVENT_TYPES.MOTIVATION_CHANGED,
+            payload: { from: from as string | null, to: to as string | null },
+            groupKey: "motivation",
+          },
+        ]
+      : [];
+  }
+  if (subOperationId !== "tag-existing-properties") return [];
+
+  const tags = result.after.tags;
+  if (!Array.isArray(tags)) return [];
+  return tags.flatMap((tag) => {
+    if (
+      !tag ||
+      typeof tag !== "object" ||
+      Array.isArray(tag) ||
+      typeof tag.id !== "string" ||
+      typeof tag.label !== "string"
+    ) {
+      return [];
+    }
+    return [
+      {
+        propertyId,
+        eventType: LEAD_EVENT_TYPES.TAG_APPLIED,
+        payload: { tag_id: tag.id, label: tag.label },
+        groupKey: `tag:${tag.id}`,
+      },
+    ];
+  });
+}
 
 /**
  * Dry-run every row through match + sub-op apply (with dryRun=true).
@@ -125,6 +197,7 @@ export async function applyBulkUpdate(
   let matchedCount = 0;
   let updatedCount = 0;
   let failedCount = 0;
+  const eventDrafts: BulkEventDraft[] = [];
 
   for (let i = 0; i < args.rows.length; i++) {
     const row = args.rows[i];
@@ -140,8 +213,16 @@ export async function applyBulkUpdate(
       { rowIndex: i, parsedRow: row, property: match.property },
       { dryRun: false },
     );
-    if (result.kind === "updated") updatedCount++;
-    else if (result.kind === "rejected") failedCount++;
+    if (result.kind === "updated") {
+      updatedCount++;
+      eventDrafts.push(
+        ...eventDraftsForUpdatedRow(
+          args.subOperationId,
+          match.property.id,
+          result,
+        ),
+      );
+    } else if (result.kind === "rejected") failedCount++;
     // `unchanged` is not a failure — counted as neither updated nor failed.
   }
 
@@ -160,6 +241,27 @@ export async function applyBulkUpdate(
       completed_at: new Date().toISOString(),
     })
     .eq("id", args.jobId);
+
+  if (args.userId && eventDrafts.length > 0) {
+    const batchId = crypto.randomUUID();
+    const counts = new Map<string, number>();
+    for (const draft of eventDrafts) {
+      counts.set(draft.groupKey, (counts.get(draft.groupKey) ?? 0) + 1);
+    }
+    await recordLeadEvents(
+      eventDrafts.map((draft) => ({
+        propertyId: draft.propertyId,
+        actorType: "user" as const,
+        actorId: args.userId!,
+        eventType: draft.eventType,
+        payload: {
+          ...draft.payload,
+          batch_id: batchId,
+          batch_count: counts.get(draft.groupKey) ?? 1,
+        },
+      })),
+    );
+  }
 
   return { matchedCount, updatedCount, failedCount };
 }

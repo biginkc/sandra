@@ -175,6 +175,43 @@ describe("enrollJobBatch (integration)", () => {
     expect(result.enrolled).toBe(1);
     expect(result.skipped).toBe(2); // no_phone + duplicate_active
     expect(result.failed).toBe(0);
+
+    const { data: enrollment } = await supabase
+      .from("sequence_enrollments")
+      .select("id")
+      .eq("sequence_id", seqId)
+      .eq("property_id", withPhone)
+      .single();
+    expect(enrollment).not.toBeNull();
+    const { data: events } = await supabase
+      .from("lead_events")
+      .select("property_id, actor_type, event_type, payload, source_type, source_id")
+      .eq("event_type", "sequence_enrolled")
+      .in("property_id", [noPhone, withPhone, alreadyActive]);
+    const batchEvents = (events ?? []).filter(
+      (event) =>
+        typeof (event.payload as { batch_id?: unknown } | null)?.batch_id ===
+        "string",
+    );
+    expect(batchEvents).toHaveLength(1);
+    const batchId = (batchEvents[0].payload as { batch_id: string }).batch_id;
+    expect(batchId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(batchEvents[0]).toEqual({
+      property_id: withPhone,
+      actor_type: "system",
+      event_type: "sequence_enrolled",
+      payload: {
+        enrollment_id: enrollment!.id,
+        sequence_id: seqId,
+        label: "Test Sequence",
+        batch_id: batchId,
+        batch_count: 1,
+      },
+      source_type: "sequence_enrollments.created",
+      source_id: enrollment!.id,
+    });
   });
 
   it("counts enrollLead failed outcomes as failed, continuing with remaining items", async () => {

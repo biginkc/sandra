@@ -12,6 +12,7 @@ import {
 import { cassBulkWorkflow } from "@/workflows/cass-bulk";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
@@ -21,7 +22,9 @@ const JOB_ITEM_PAGE_SIZE = 500;
 async function readFailedJobItems(
   supabase: Awaited<ReturnType<typeof createClient>>,
   jobId: string,
-): Promise<Array<{ id: string; property_id: string | null; error_class: string | null }>> {
+): Promise<
+  Array<{ id: string; property_id: string | null; error_class: string | null }>
+> {
   const rows: Array<{
     id: string;
     property_id: string | null;
@@ -39,7 +42,8 @@ async function readFailedJobItems(
       .limit(JOB_ITEM_PAGE_SIZE);
     if (lastId) query = query.gt("id", lastId);
     const { data, error } = await query;
-    if (error) throw new Error(`job item recovery read failed: ${error.message}`);
+    if (error)
+      throw new Error(`job item recovery read failed: ${error.message}`);
     rows.push(...(data ?? []));
     if (!data || data.length < JOB_ITEM_PAGE_SIZE) break;
     lastId = data.at(-1)?.id ?? null;
@@ -132,7 +136,9 @@ export async function startQueuedCassJob(
         error: {
           code: "JOB_STATUS_FLIP_FAILED",
           message:
-            claimError instanceof Error ? claimError.message : String(claimError),
+            claimError instanceof Error
+              ? claimError.message
+              : String(claimError),
         },
       };
     }
@@ -159,7 +165,10 @@ export async function startQueuedCassJob(
 
     return ok({ total: propertyIds.length });
   } catch (e) {
-    reportError(e, { tags: { surface: "start_queued_cass" }, extra: { jobId } });
+    reportError(e, {
+      tags: { surface: "start_queued_cass" },
+      extra: { jobId },
+    });
     return errFromUnknown(e, "START_QUEUED_CASS_FAILED");
   }
 }
@@ -383,9 +392,10 @@ export async function retryFailedSkipTraceItems(
     );
     const retryableIds = new Set(
       erroredItems
-        .filter((r) =>
-          r.error_class === null ||
-          RETRYABLE_ERROR_CLASSES.includes(r.error_class as string),
+        .filter(
+          (r) =>
+            r.error_class === null ||
+            RETRYABLE_ERROR_CLASSES.includes(r.error_class as string),
         )
         .map((r) => r.property_id)
         .filter((id): id is string => typeof id === "string"),
@@ -426,8 +436,9 @@ export async function retryFailedSkipTraceItems(
           },
         };
       }
-      const fallback = (parent.input_params as { property_ids?: unknown } | null)
-        ?.property_ids;
+      const fallback = (
+        parent.input_params as { property_ids?: unknown } | null
+      )?.property_ids;
       propertyIds = Array.isArray(fallback)
         ? Array.from(
             new Set(
@@ -465,6 +476,20 @@ export async function retryFailedSkipTraceItems(
     }
 
     if (childRow.created) {
+      await recordLeadEvents(
+        propertyIds.map((propertyId) => ({
+          propertyId,
+          eventType: LEAD_EVENT_TYPES.SKIP_TRACE_REQUESTED,
+          actorType: "user" as const,
+          actorId: user!.id,
+          payload: {
+            job_id: childRow.job_id,
+            retry_of_job_id: failedJobId,
+            batch_id: childRow.job_id,
+            batch_count: propertyIds.length,
+          },
+        })),
+      );
       try {
         await start(skipTraceSubmitWorkflow, [
           { jobId: childRow.job_id, orgId: parent.org_id },
@@ -472,7 +497,10 @@ export async function retryFailedSkipTraceItems(
       } catch (e) {
         reportError(e, {
           tags: { surface: "retry_skip_trace_workflow_start" },
-          extra: { childId: childRow.job_id, propertyCount: propertyIds.length },
+          extra: {
+            childId: childRow.job_id,
+            propertyCount: propertyIds.length,
+          },
         });
       }
     }

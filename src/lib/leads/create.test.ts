@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const eventMocks = vi.hoisted(() => ({ recordLeadEvent: vi.fn() }));
+
+vi.mock("@/lib/events", () => ({
+  LEAD_EVENT_TYPES: { LEAD_CREATED: "lead_created" },
+  recordLeadEvent: eventMocks.recordLeadEvent,
+}));
+
 // `createLead` is the shared write path used by the lead-import webhook
 // and the manual entry form. The unit test here verifies the new D-04
 // behavior: `input.property.county_id` flows into the property insert
@@ -101,6 +108,7 @@ function makeSupabase() {
 beforeEach(() => {
   responseQueue = [];
   calls = [];
+  eventMocks.recordLeadEvent.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -143,6 +151,14 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
     expect(payload.county_id).toBe("buchanan-county-id");
     expect(payload.assigned_user_id).toBe("teammate-id");
     expect(payload.motivation_level).toBe("hot");
+    expect(eventMocks.recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "prop-new",
+      actorType: "system",
+      eventType: "lead_created",
+      payload: { source: "referral" },
+      sourceType: "properties.created",
+      sourceId: "prop-new",
+    });
   });
 
   it("sets county_id to null when not supplied (webhook payloads etc.)", async () => {

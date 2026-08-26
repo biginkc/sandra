@@ -274,6 +274,12 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       .select("id", { count: "exact", head: true })
       .eq("job_id", jobId);
     expect(itemCount).toBe(0);
+    const { count: eventCount } = await supabase
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", propertyId)
+      .eq("event_type", "skip_trace_completed");
+    expect(eventCount).toBe(0);
     const { count: cacheCount } = await supabase
       .from("skip_trace_cache")
       .select("id", { count: "exact", head: true })
@@ -448,6 +454,11 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
         },
       },
     });
+    const { count: eventCount } = await supabase
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("event_type", "skip_trace_completed");
+    expect(eventCount).toBe(0);
   });
 
   it("rechecks a partial batch after its summary checkpoint", async () => {
@@ -548,6 +559,33 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       .single();
     expect(job!.status).toBe("completed");
     expect(job!.succeeded_items).toBe(1);
+    const { data: item, error: itemError } = await supabase
+      .from("job_items")
+      .select("id")
+      .eq("job_id", jobId)
+      .eq("property_id", propertyId)
+      .single();
+    expect(itemError).toBeNull();
+    const { data: event, error: eventError } = await supabase
+      .from("lead_events")
+      .select(
+        "actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("source_type", "job_items.skip_trace")
+      .eq("source_id", item!.id)
+      .single();
+    expect(eventError).toBeNull();
+    expect(event).toEqual({
+      actor_type: "system",
+      actor_id: null,
+      event_type: "skip_trace_completed",
+      payload: { job_id: jobId, outcome: "matched", from_cache: false },
+      source_type: "job_items.skip_trace",
+      source_id: item!.id,
+    });
+    expect(JSON.stringify(event)).not.toMatch(
+      /Default Ln|mock@example|1816555/,
+    );
   });
 
   it("MISS prefix → no_match, no phones written, job completes", async () => {
@@ -579,6 +617,31 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(
       (job!.result_summary as { no_match?: number } | null)?.no_match,
     ).toBe(1);
+    const { data: item, error: itemError } = await supabase
+      .from("job_items")
+      .select("id")
+      .eq("job_id", jobId)
+      .eq("property_id", propertyId)
+      .single();
+    expect(itemError).toBeNull();
+    const { data: event, error: eventError } = await supabase
+      .from("lead_events")
+      .select(
+        "actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("source_type", "job_items.skip_trace")
+      .eq("source_id", item!.id)
+      .single();
+    expect(eventError).toBeNull();
+    expect(event).toEqual({
+      actor_type: "system",
+      actor_id: null,
+      event_type: "skip_trace_completed",
+      payload: { job_id: jobId, outcome: "no_match", from_cache: false },
+      source_type: "job_items.skip_trace",
+      source_id: item!.id,
+    });
+    expect(JSON.stringify(event)).not.toMatch(/MISS|no data|phone|email/i);
   });
 
   it("DNC prefix → phone is dropped (defensive belt), job completes with no_match-like behavior", async () => {
@@ -1259,21 +1322,29 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     // Simulate the dead pass: one property already has a success item
     // (must be skipped), one has a TRANSIENT error item (must be retried
     // — its stale row deleted and reprocessed to success).
-    await supabase.from("job_items").insert([
-      {
-        job_id: jobId,
-        property_id: ids[0],
-        status: "success",
-        output_payload: { phones_added: 1 },
-      },
-      {
-        job_id: jobId,
-        property_id: ids[2],
-        status: "error",
-        error_class: "database",
-        error_message: "transient hiccup from the dead pass",
-      },
-    ]);
+    const { data: seededItems, error: seededItemsError } = await supabase
+      .from("job_items")
+      .insert([
+        {
+          job_id: jobId,
+          property_id: ids[0],
+          status: "success",
+          output_payload: { phones_added: 1 },
+        },
+        {
+          job_id: jobId,
+          property_id: ids[2],
+          status: "error",
+          error_class: "database",
+          error_message: "transient hiccup from the dead pass",
+        },
+      ])
+      .select("id, property_id");
+    expect(seededItemsError).toBeNull();
+    const seededSuccessItem = seededItems!.find(
+      (item) => item.property_id === ids[0],
+    );
+    expect(seededSuccessItem).toBeDefined();
     // Rescue path: job back to running with the batch still pending.
     await supabase
       .from("jobs")
@@ -1325,6 +1396,24 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(job!.status).toBe("completed");
     expect(job!.succeeded_items).toBe(3);
     expect(job!.failed_items).toBe(0);
+    const { data: repairedEvents, error: repairedEventError } = await supabase
+      .from("lead_events")
+      .select(
+        "actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("source_type", "job_items.skip_trace")
+      .eq("source_id", seededSuccessItem!.id);
+    expect(repairedEventError).toBeNull();
+    expect(repairedEvents).toEqual([
+      {
+        actor_type: "system",
+        actor_id: null,
+        event_type: "skip_trace_completed",
+        payload: { job_id: jobId, outcome: "matched", from_cache: false },
+        source_type: "job_items.skip_trace",
+        source_id: seededSuccessItem!.id,
+      },
+    ]);
   });
 
   it("shared owner name with no phones: second persist reuses the name-only contact instead of colliding", async () => {

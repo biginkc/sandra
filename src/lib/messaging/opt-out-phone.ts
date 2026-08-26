@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizePhone } from "@/lib/csv/normalize";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
@@ -16,6 +17,11 @@ export type ApplyPhoneLevelOptOutInput = {
   providerId: string;
   surface: "stop" | "dnc";
   idempotencyKey: string;
+  leadEvent?: {
+    propertyId: string;
+    actorType: "ai" | "system";
+    trigger: "ai_responder" | "inbound_keyword";
+  };
 };
 
 export async function applyPhoneLevelOptOut(
@@ -70,7 +76,7 @@ export async function applyPhoneLevelOptOut(
     if (!currentContact) continue;
 
     try {
-      await recordConsentEvent(supabase, {
+      const consentOutcome = await recordConsentEvent(supabase, {
         contactId,
         channel: "sms",
         eventType: "opt_out",
@@ -79,6 +85,18 @@ export async function applyPhoneLevelOptOut(
         occurredAt: input.occurredAt,
         idempotencyKey: input.idempotencyKey,
       });
+      if (
+        consentOutcome.inserted &&
+        contactId === input.contactId &&
+        input.leadEvent
+      ) {
+        await recordPrimaryLeadOptOutEvent(supabase, {
+          contactId,
+          consentEventId: consentOutcome.id,
+          orgId: input.orgId,
+          ...input.leadEvent,
+        });
+      }
     } catch (e) {
       // Compliance enforcement beats audit perfection: if a contact row
       // has drifted or a replay-safe insert races oddly, still flip the
@@ -137,6 +155,43 @@ export async function applyPhoneLevelOptOut(
   if (suppressionError) {
     throw suppressionError;
   }
+}
+
+async function recordPrimaryLeadOptOutEvent(
+  supabase: SupabaseClient<Database>,
+  input: {
+    contactId: string;
+    consentEventId: string;
+    orgId: string;
+    propertyId: string;
+    actorType: "ai" | "system";
+    trigger: "ai_responder" | "inbound_keyword";
+  },
+): Promise<void> {
+  const { data: property, error } = await supabase
+    .from("properties")
+    .select("id")
+    .eq("id", input.propertyId)
+    .eq("org_id", input.orgId)
+    .eq("homeowner_contact_id", input.contactId)
+    .maybeSingle();
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "lead_event_opt_out_property_lookup" },
+      extra: { propertyId: input.propertyId, contactId: input.contactId },
+    });
+    return;
+  }
+  if (!property) return;
+
+  await recordLeadEvent({
+    propertyId: input.propertyId,
+    eventType: LEAD_EVENT_TYPES.OPTED_OUT,
+    actorType: input.actorType,
+    payload: { channel: "sms", trigger: input.trigger },
+    sourceType: "consent_events.opt_out",
+    sourceId: input.consentEventId,
+  });
 }
 
 export async function recordSmsPhoneSuppression(

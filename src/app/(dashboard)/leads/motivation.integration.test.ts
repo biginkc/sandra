@@ -37,6 +37,30 @@ describe("updateLeadMotivation (integration)", () => {
       .eq("id", id)
       .single();
     expect(data?.motivation_level).toBe("hot");
+
+    const { data: events } = await testClient
+      .from("lead_events")
+      .select("event_type, payload")
+      .eq("property_id", id);
+    expect(events).toEqual([
+      {
+        event_type: "motivation_changed",
+        payload: { from: null, to: "hot" },
+      },
+    ]);
+  });
+
+  it("does not append an event when the motivation is unchanged", async () => {
+    const id = await seedProperty();
+    await updateLeadMotivation(id, "hot");
+    const result = await updateLeadMotivation(id, "hot");
+    expect(result.ok).toBe(true);
+
+    const { count } = await testClient
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", id);
+    expect(count).toBe(1);
   });
 
   it("clears motivation when passed null", async () => {

@@ -13,6 +13,15 @@ vi.mock("./fips", () => ({
   resolveFips: vi.fn().mockResolvedValue("29021"), // Buchanan County MO
 }));
 
+const { recordLeadEvents } = vi.hoisted(() => ({
+  recordLeadEvents: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/lib/events", () => ({
+  LEAD_EVENT_TYPES: { LEAD_CREATED: "lead_created" },
+  recordLeadEvents,
+}));
+
 import { finalizeIngestion, processIngestChunk } from "./ingest";
 
 type Response = {
@@ -144,9 +153,7 @@ function makeSupabase() {
         calls.push({
           table: "properties",
           op: isDuplicate ? "update" : "insert",
-          insertPayload: isDuplicate
-            ? args.p_existing_patch
-            : args.p_property,
+          insertPayload: isDuplicate ? args.p_existing_patch : args.p_property,
           filters: isDuplicate
             ? [
                 { op: "eq", args: ["id", args.p_existing_property_id] },
@@ -302,6 +309,23 @@ describe("processIngestChunk → ingestRow countyId thread-through (phase 02 D-0
     expect(payload.org_id).toBe("org-1");
     expect(payload.market).toBe("Buchanan County MO");
     expect(payload.county_id).toBe("buchanan-county-id");
+    expect(recordLeadEvents).toHaveBeenCalledTimes(1);
+    expect(recordLeadEvents).toHaveBeenCalledWith([
+      {
+        propertyId: "prop-new",
+        actorType: "system",
+        eventType: "lead_created",
+        payload: {
+          source: "csv",
+          batch_id: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+          ),
+          batch_count: 1,
+        },
+        sourceType: "properties.created",
+        sourceId: "prop-new",
+      },
+    ]);
   });
 
   it("passes county_id=null straight through when the workflow params do not provide it", async () => {
@@ -502,13 +526,15 @@ describe("processIngestChunk → hard rule: unlabeled phones are never saved", (
           agent_phone: "Agent Phone",
           agent_phone_type: "Agent Phone Type",
         },
-        rows: [{
-          Address: "9 Agent Ave",
-          State: "MO",
-          "Agent First": "Alex",
-          "Agent Phone": "8165552020",
-          "Agent Phone Type": "mobile",
-        }],
+        rows: [
+          {
+            Address: "9 Agent Ave",
+            State: "MO",
+            "Agent First": "Alex",
+            "Agent Phone": "8165552020",
+            "Agent Phone Type": "mobile",
+          },
+        ],
       },
     );
 
@@ -642,7 +668,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     );
     expect(ratchet).toBeDefined();
     expect(ratchet!.insertPayload).toEqual({ do_not_contact: true });
-    expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-1"] });
+    expect(ratchet!.filters).toContainEqual({
+      op: "eq",
+      args: ["id", "existing-1"],
+    });
   });
 
   it("matches + ratchets an existing contact via a DNC phone in a SECONDARY slot (Phone 2), with a clean unmatched Phone 1 (secondary-slot match)", async () => {
@@ -690,7 +719,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
       (c) => c.table === "contacts" && c.op === "update",
     );
     expect(ratchet).toBeDefined();
-    expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-2"] });
+    expect(ratchet!.filters).toContainEqual({
+      op: "eq",
+      args: ["id", "existing-2"],
+    });
     // Slot 1's clean number was checked FIRST (priority order preserved)
     // and correctly missed before slot 2's dropped DNC number matched.
     const phoneSelects = calls.filter(
@@ -743,7 +775,9 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
 
     expect(result.succeeded).toBe(0);
     expect(result.failed).toBe(1);
-    expect(result.errors[0]?.message).toContain("do_not_contact ratchet update failed");
+    expect(result.errors[0]?.message).toContain(
+      "do_not_contact ratchet update failed",
+    );
     const errorItem = calls.find(
       (c) => c.table === "job_items" && c.op === "upsert",
     );
@@ -838,7 +872,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     );
     expect(ratchet).toBeDefined();
     expect(ratchet!.insertPayload).toEqual({ do_not_contact: true });
-    expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-3"] });
+    expect(ratchet!.filters).toContainEqual({
+      op: "eq",
+      args: ["id", "existing-3"],
+    });
   });
 
   it("locks a dedup-matched property even when it already links a different homeowner", async () => {
@@ -846,7 +883,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
       { data: { id: "incoming-contact" }, error: null },
       { data: { id: "existing-property" }, error: null }, // address dedup
       {
-        data: { homeowner_contact_id: "different-contact", agent_contact_id: null },
+        data: {
+          homeowner_contact_id: "different-contact",
+          agent_contact_id: null,
+        },
         error: null,
       },
       { data: null, error: null }, // property suppression/provenance ratchet
@@ -876,7 +916,9 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
       outreach_dispo: "dnc",
       source_import_id: "import-1",
     });
-    expect(propertyUpdate?.insertPayload).not.toHaveProperty("homeowner_contact_id");
+    expect(propertyUpdate?.insertPayload).not.toHaveProperty(
+      "homeowner_contact_id",
+    );
   });
 
   it("PropStream-shaped row: a DNC number with no clean phone still matches + ratchets an existing contact (Codex round-2 finding B)", async () => {
@@ -926,7 +968,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
       (c) => c.table === "contacts" && c.op === "update",
     );
     expect(ratchet).toBeDefined();
-    expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-4"] });
+    expect(ratchet!.filters).toContainEqual({
+      op: "eq",
+      args: ["id", "existing-4"],
+    });
   });
 
   it("matching queries phone_1, phone_2, AND phone_3 on the existing contact — not just phone_1 (Codex round-2 finding A)", async () => {
@@ -1043,7 +1088,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
       (c) => c.table === "contacts" && c.op === "update",
     );
     expect(ratchet).toBeDefined();
-    expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-6"] });
+    expect(ratchet!.filters).toContainEqual({
+      op: "eq",
+      args: ["id", "existing-6"],
+    });
     const phoneSelects = calls.filter(
       (c) => c.table === "contacts" && c.op === "select",
     );
@@ -1097,10 +1145,13 @@ describe("processIngestChunk durable resume", () => {
 
   it("skips a checkpointed success and retries only the failed source row", async () => {
     responseQueue = [
-      { data: [
-        { source_row_index: 0, status: "success" },
-        { source_row_index: 1, status: "error" },
-      ], error: null },
+      {
+        data: [
+          { source_row_index: 0, status: "success" },
+          { source_row_index: 1, status: "error" },
+        ],
+        error: null,
+      },
       { data: null, error: null }, // row 1 address dedup miss
       { data: { id: "prop-row-1" }, error: null },
       { data: null, error: null }, // row checkpoint upsert
@@ -1133,11 +1184,16 @@ describe("processIngestChunk durable resume", () => {
       (call) => call.table === "properties" && call.op === "insert",
     );
     expect(propertyWrites).toHaveLength(1);
-    expect((propertyWrites[0].insertPayload as Record<string, unknown>).address).toBe("2 Retry ST");
+    expect(
+      (propertyWrites[0].insertPayload as Record<string, unknown>).address,
+    ).toBe("2 Retry ST");
     const checkpoint = calls.find(
       (call) => call.table === "job_items" && call.op === "upsert",
     );
-    expect(checkpoint?.insertPayload).toMatchObject({ source_row_index: 1, status: "success" });
+    expect(checkpoint?.insertPayload).toMatchObject({
+      source_row_index: 1,
+      status: "success",
+    });
   });
 });
 
@@ -1304,7 +1360,9 @@ describe("processIngestChunk authoritative DNC terminal rows", () => {
       op: "eq",
       args: ["do_not_contact", false],
     });
-    expect(calls.some((call) => call.table === "homeowner_details")).toBe(false);
+    expect(calls.some((call) => call.table === "homeowner_details")).toBe(
+      false,
+    );
     expect(calls.some((call) => call.table === "property_lists")).toBe(false);
     expect(calls.some((call) => call.table === "property_tags")).toBe(false);
   });
@@ -1315,7 +1373,10 @@ describe("processIngestChunk authoritative DNC terminal rows", () => {
       { data: { id: "contact-locked" }, error: null }, // homeowner name match
       { data: { id: "property-locked" }, error: null }, // address dedup hit
       {
-        data: { homeowner_contact_id: "contact-locked", agent_contact_id: null },
+        data: {
+          homeowner_contact_id: "contact-locked",
+          agent_contact_id: null,
+        },
         error: null,
       }, // property patch lookup
       { data: { compliance_locked: true }, error: null }, // authoritative outcome
@@ -1346,13 +1407,14 @@ describe("processIngestChunk authoritative DNC terminal rows", () => {
     );
 
     expect(result).toMatchObject({ succeeded: 0, failed: 0, skipped: 1 });
-    expect(calls.some((call) => call.table === "homeowner_details")).toBe(false);
+    expect(calls.some((call) => call.table === "homeowner_details")).toBe(
+      false,
+    );
     expect(calls.some((call) => call.table === "property_lists")).toBe(false);
     expect(calls.some((call) => call.table === "property_tags")).toBe(false);
     expect(
-      calls.find(
-        (call) => call.table === "job_items" && call.op === "upsert",
-      )?.insertPayload,
+      calls.find((call) => call.table === "job_items" && call.op === "upsert")
+        ?.insertPayload,
     ).toMatchObject({ status: "skipped", compliance_locked: true });
   });
 });
@@ -1392,7 +1454,11 @@ describe("processIngestChunk dedup provenance", () => {
       source_import_id: "import-latest",
     });
     expect(update?.insertPayload).toHaveProperty("source_imported_at");
-    expect(update?.filters).toContainEqual({ op: "eq", args: ["org_id", "org-1"] });
+    expect(update?.filters).toContainEqual({
+      op: "eq",
+      args: ["org_id", "org-1"],
+    });
+    expect(recordLeadEvents).not.toHaveBeenCalled();
   });
 });
 
@@ -1434,7 +1500,10 @@ describe("processIngestChunk atomic property outcome replay", () => {
       boundary: "success checkpoint",
       options: { listId: null, autoTagIds: [] as string[] },
       beforeFailure: [] as Response[],
-      failure: { data: null, error: { message: "synthetic checkpoint failure" } },
+      failure: {
+        data: null,
+        error: { message: "synthetic checkpoint failure" },
+      },
       replaySideEffects: [] as Response[],
     },
   ])(
@@ -1492,9 +1561,20 @@ describe("processIngestChunk atomic property outcome replay", () => {
         params,
       ),
     ).rejects.toThrow("job progress checkpoint");
+    expect(recordLeadEvents).not.toHaveBeenCalled();
 
     responseQueue = [
-      { data: [{ source_row_index: 0, status: "success" }], error: null },
+      {
+        data: [
+          {
+            source_row_index: 0,
+            status: "success",
+            property_id: "prop-boundary",
+            output_payload: { original_outcome: "inserted" },
+          },
+        ],
+        error: null,
+      },
     ];
     const replay = await processIngestChunk(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1507,5 +1587,13 @@ describe("processIngestChunk atomic property outcome replay", () => {
         (call) => call.table === "properties" && call.op === "insert",
       ),
     ).toHaveLength(1);
+    expect(recordLeadEvents).toHaveBeenCalledWith([
+      expect.objectContaining({
+        propertyId: "prop-boundary",
+        eventType: "lead_created",
+        sourceType: "properties.created",
+        sourceId: "prop-boundary",
+      }),
+    ]);
   });
 });

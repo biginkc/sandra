@@ -58,7 +58,17 @@ export async function snoozeTaskAction(
 ): Promise<Result<Task>> {
   try {
     const supabase = await createClient();
-    const result = await snoozeTaskLib(supabase, taskId, snoozedUntil);
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+
+    const result = await snoozeTaskLib(supabase, taskId, snoozedUntil, user.id);
     if (result.ok) {
       revalidatePath("/dashboard");
     }
@@ -78,7 +88,22 @@ export async function reassignTaskAction(
 ): Promise<Result<Task>> {
   try {
     const supabase = await createClient();
-    const result = await reassignTaskLib(supabase, taskId, newAssigneeId);
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+
+    const result = await reassignTaskLib(
+      supabase,
+      taskId,
+      newAssigneeId,
+      user.id,
+    );
     if (result.ok) {
       revalidatePath("/dashboard");
     }

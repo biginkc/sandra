@@ -511,6 +511,7 @@ describe("slack/dispatch", () => {
       supabase,
       dispatchInput.taskId,
       "user-1",
+      "user-1",
     );
   });
 

@@ -3,16 +3,27 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getConsentState } from "@/lib/messaging/consent";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
 import type { Database } from "@/lib/supabase/types";
+import {
+  LEAD_EVENT_TYPES,
+  recordLeadEvent,
+  recordLeadEvents,
+} from "@/lib/events";
 
 import { delayToDate } from "./delays";
 import type { PauseReason } from "./pause-rules";
+
+export type SequenceEventActor =
+  | { actorType: "user"; actorId: string }
+  | { actorType: "ai" | "system"; actorId?: never };
+
+const SYSTEM_ACTOR = { actorType: "system" } as const;
 
 /**
  * Discriminated outcome of `enrollLead`. Callers render a UI toast /
  * alert based on the status; nothing ever throws across the boundary.
  */
 export type EnrollmentOutcome =
-  | { status: "enrolled"; enrollmentId: string }
+  | { status: "enrolled"; enrollmentId: string; sequenceLabel: string }
   | { status: "duplicate_active" }
   | { status: "no_phone"; message: string }
   | { status: "landline_phone"; message: string }
@@ -29,12 +40,13 @@ export async function enrollLead(
     sequenceId: string;
     propertyId: string;
     enrolledByUserId?: string | null;
+    deferEvent?: boolean;
   },
 ): Promise<EnrollmentOutcome> {
   // Load sequence + first step (one round-trip via nested select).
   const { data: seq, error: seqErr } = await client
     .from("sequences")
-    .select("id, org_id, active, archived_at")
+    .select("id, org_id, name, active, archived_at")
     .eq("id", params.sequenceId)
     .maybeSingle();
   if (seqErr) return { status: "failed", message: seqErr.message };
@@ -82,9 +94,7 @@ export async function enrollLead(
     phone_3_type: string | null;
   };
   const rawHomeowner = prop.homeowner as unknown as
-    | HomeownerJoin
-    | HomeownerJoin[]
-    | null;
+    HomeownerJoin | HomeownerJoin[] | null;
   const homeowner = Array.isArray(rawHomeowner)
     ? (rawHomeowner[0] ?? null)
     : rawHomeowner;
@@ -92,7 +102,8 @@ export async function enrollLead(
   if (!homeowner || !destination) {
     return {
       status: "no_phone",
-      message: "Lead has no phone number. Add one (or skip-trace) before enrolling.",
+      message:
+        "Lead has no phone number. Add one (or skip-trace) before enrolling.",
     };
   }
   if (destination.lineType === "landline") {
@@ -108,15 +119,13 @@ export async function enrollLead(
   if (consentState === "opted_out") {
     return {
       status: "no_consent",
-      message: "Contact has opted out of SMS. Can't enroll in a send_sms sequence.",
+      message:
+        "Contact has opted out of SMS. Can't enroll in a send_sms sequence.",
     };
   }
 
   // Calculate first fire time — delay of step 0 from enrollment moment.
-  const nextRunAt = delayToDate(
-    step0.delay_after_previous_minutes,
-    new Date(),
-  );
+  const nextRunAt = delayToDate(step0.delay_after_previous_minutes, new Date());
 
   // INSERT — unique partial index prevents a second active/paused enrollment
   // on the same (sequence, property) pair; catch 23505 and return a friendly
@@ -143,7 +152,29 @@ export async function enrollLead(
     return { status: "failed", message: insertErr.message };
   }
 
-  return { status: "enrolled", enrollmentId: inserted.id };
+  if (!params.deferEvent) {
+    const actor: SequenceEventActor = params.enrolledByUserId
+      ? { actorType: "user", actorId: params.enrolledByUserId }
+      : SYSTEM_ACTOR;
+    await recordLeadEvent({
+      propertyId: params.propertyId,
+      ...actor,
+      eventType: LEAD_EVENT_TYPES.SEQUENCE_ENROLLED,
+      payload: {
+        enrollment_id: inserted.id,
+        sequence_id: params.sequenceId,
+        label: seq.name,
+      },
+      sourceType: "sequence_enrollments.created",
+      sourceId: inserted.id,
+    });
+  }
+
+  return {
+    status: "enrolled",
+    enrollmentId: inserted.id,
+    sequenceLabel: seq.name,
+  };
 }
 
 /**
@@ -162,46 +193,77 @@ export async function pausePropertyEnrollments(
     propertyId: string;
     reason: PauseReason;
     permanent?: boolean;
+    actor?: SequenceEventActor;
   },
 ): Promise<{ paused: number }> {
   const newStatus = params.permanent ? "opted_out" : "paused";
-  const { error, count } = await client
+  const { data: pausedRows, error } = await client
     .from("sequence_enrollments")
-    .update(
-      {
-        status: newStatus,
-        pause_reason: params.reason,
-        ...(params.permanent ? { next_run_at: null } : {}),
-        updated_at: new Date().toISOString(),
-      },
-      { count: "exact" },
-    )
+    .update({
+      status: newStatus,
+      pause_reason: params.reason,
+      ...(params.permanent ? { next_run_at: null } : {}),
+      updated_at: new Date().toISOString(),
+    })
     .eq("property_id", params.propertyId)
-    .eq("status", "active");
+    .eq("status", "active")
+    .select("id, sequence_id");
   if (error) {
     throw new Error(`pausePropertyEnrollments: ${error.message}`);
   }
-  return { paused: count ?? 0 };
+  const paused = pausedRows?.length ?? 0;
+  if (paused > 0) {
+    await recordLeadEvent({
+      propertyId: params.propertyId,
+      ...(params.actor ?? SYSTEM_ACTOR),
+      eventType: LEAD_EVENT_TYPES.SEQUENCE_PAUSED,
+      payload: {
+        count: paused,
+        sequence_ids: [
+          ...new Set((pausedRows ?? []).map((row) => row.sequence_id)),
+        ],
+        reason: params.reason,
+        permanent: params.permanent === true,
+      },
+    });
+  }
+  return { paused };
 }
 
 /** Resume only the enrollments paused by the softphone's active call. */
 export async function resumeByProperty(
   client: SupabaseClient<Database>,
-  params: { propertyId: string },
+  params: { propertyId: string; actor?: SequenceEventActor },
 ): Promise<{ resumed: number }> {
-  const { error, count } = await client
+  const { data: resumedRows, error } = await client
     .from("sequence_enrollments")
     .update({
       status: "active",
       pause_reason: null,
       next_run_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-    }, { count: "exact" })
+    })
     .eq("property_id", params.propertyId)
     .eq("status", "paused")
-    .eq("pause_reason", "call_in_progress");
+    .eq("pause_reason", "call_in_progress")
+    .select("id, sequence_id");
   if (error) throw new Error(`resumeByProperty: ${error.message}`);
-  return { resumed: count ?? 0 };
+  const resumed = resumedRows?.length ?? 0;
+  if (resumed > 0) {
+    await recordLeadEvent({
+      propertyId: params.propertyId,
+      ...(params.actor ?? SYSTEM_ACTOR),
+      eventType: LEAD_EVENT_TYPES.SEQUENCE_RESUMED,
+      payload: {
+        count: resumed,
+        sequence_ids: [
+          ...new Set((resumedRows ?? []).map((row) => row.sequence_id)),
+        ],
+        reason: "call_in_progress_cleared",
+      },
+    });
+  }
+  return { resumed };
 }
 
 /**
@@ -216,6 +278,7 @@ export async function pauseContactEnrollments(
     contactId: string;
     reason: PauseReason;
     permanent?: boolean;
+    actor?: SequenceEventActor;
   },
 ): Promise<{ paused: number }> {
   const { data: properties, error: propertyError } = await client
@@ -223,29 +286,53 @@ export async function pauseContactEnrollments(
     .select("id")
     .eq("homeowner_contact_id", params.contactId);
   if (propertyError) {
-    throw new Error(`pauseContactEnrollments properties: ${propertyError.message}`);
+    throw new Error(
+      `pauseContactEnrollments properties: ${propertyError.message}`,
+    );
   }
   const propertyIds = (properties ?? []).map((p) => p.id);
   if (propertyIds.length === 0) return { paused: 0 };
 
   const newStatus = params.permanent ? "opted_out" : "paused";
-  const { error, count } = await client
+  const { data: pausedRows, error } = await client
     .from("sequence_enrollments")
-    .update(
-      {
-        status: newStatus,
-        pause_reason: params.reason,
-        ...(params.permanent ? { next_run_at: null } : {}),
-        updated_at: new Date().toISOString(),
-      },
-      { count: "exact" },
-    )
+    .update({
+      status: newStatus,
+      pause_reason: params.reason,
+      ...(params.permanent ? { next_run_at: null } : {}),
+      updated_at: new Date().toISOString(),
+    })
     .in("property_id", propertyIds)
-    .eq("status", "active");
+    .eq("status", "active")
+    .select("id, property_id, sequence_id");
   if (error) {
     throw new Error(`pauseContactEnrollments: ${error.message}`);
   }
-  return { paused: count ?? 0 };
+  const paused = pausedRows?.length ?? 0;
+  const grouped = new Map<string, Array<{ id: string; sequence_id: string }>>();
+  for (const row of pausedRows ?? []) {
+    const rows = grouped.get(row.property_id) ?? [];
+    rows.push(row);
+    grouped.set(row.property_id, rows);
+  }
+  if (grouped.size > 0) {
+    const batchId = grouped.size > 1 ? crypto.randomUUID() : null;
+    await recordLeadEvents(
+      [...grouped.entries()].map(([propertyId, rows]) => ({
+        propertyId,
+        ...(params.actor ?? SYSTEM_ACTOR),
+        eventType: LEAD_EVENT_TYPES.SEQUENCE_PAUSED,
+        payload: {
+          count: rows.length,
+          sequence_ids: [...new Set(rows.map((row) => row.sequence_id))],
+          reason: params.reason,
+          permanent: params.permanent === true,
+          ...(batchId ? { batch_id: batchId, batch_count: grouped.size } : {}),
+        },
+      })),
+    );
+  }
+  return { paused };
 }
 
 /**
@@ -257,12 +344,15 @@ export async function pauseContactEnrollments(
 export async function resumeEnrollment(
   client: SupabaseClient<Database>,
   enrollmentId: string,
+  actor: SequenceEventActor = SYSTEM_ACTOR,
 ): Promise<
-  { status: "resumed" } | { status: "not_paused" } | { status: "failed"; message: string }
+  | { status: "resumed" }
+  | { status: "not_paused" }
+  | { status: "failed"; message: string }
 > {
   const { data: enrollment, error: loadErr } = await client
     .from("sequence_enrollments")
-    .select("id, status, sequence_id, current_step_index")
+    .select("id, status, sequence_id, property_id, current_step_index")
     .eq("id", enrollmentId)
     .maybeSingle();
   if (loadErr) return { status: "failed", message: loadErr.message };
@@ -281,7 +371,7 @@ export async function resumeEnrollment(
   const delay = currentStep?.delay_after_previous_minutes ?? 0;
   const nextRunAt = delayToDate(delay, new Date()).toISOString();
 
-  const { error: updateErr } = await client
+  const { data: updated, error: updateErr } = await client
     .from("sequence_enrollments")
     .update({
       status: "active",
@@ -289,8 +379,23 @@ export async function resumeEnrollment(
       next_run_at: nextRunAt,
       updated_at: new Date().toISOString(),
     })
-    .eq("id", enrollmentId);
+    .eq("id", enrollmentId)
+    .eq("status", "paused")
+    .select("id")
+    .maybeSingle();
   if (updateErr) return { status: "failed", message: updateErr.message };
+  if (!updated) return { status: "not_paused" };
+
+  await recordLeadEvent({
+    propertyId: enrollment.property_id,
+    ...actor,
+    eventType: LEAD_EVENT_TYPES.SEQUENCE_RESUMED,
+    payload: {
+      enrollment_id: enrollmentId,
+      sequence_id: enrollment.sequence_id,
+      next_run_at: nextRunAt,
+    },
+  });
 
   return { status: "resumed" };
 }

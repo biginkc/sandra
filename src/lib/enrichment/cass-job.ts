@@ -1,10 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { dispatchJobCompleted } from "@/lib/notifications/dispatch";
 import type { Database, Json } from "@/lib/supabase/types";
 import { verifyPropertyAddress } from "./verify-property";
 export { CASS_COST_PER_LOOKUP_USD } from "@/lib/provider-pricing";
+export { isAwaitingManualStart } from "./cass-job-state";
 
 export type CassJobSummary = {
   total: number;
@@ -45,14 +47,12 @@ type CassRpcClient = {
       p_request_key: string;
     },
   ): Promise<{
-    data:
-      | Array<{
-          job_id: string;
-          claim_token: string | null;
-          created: boolean;
-          job_status: string;
-        }>
-      | null;
+    data: Array<{
+      job_id: string;
+      claim_token: string | null;
+      created: boolean;
+      job_status: string;
+    }> | null;
     error: CassRpcError;
   }>;
   rpc(
@@ -94,24 +94,6 @@ function chunksOf<T>(values: T[], size = RECOVERY_PAGE_SIZE): T[][] {
  * 20K rows — blindly auto-triggering on every import would torch a free
  * tier and surprise the operator.
  */
-/**
- * Per-lookup cost assumption used by the cost-confirm UI. ~$0.03/lookup is
- * SmartyStreets' US Street API rate at the time of this writing. Centralized
- * here so the UI and the plan stay in sync.
- */
-/**
- * Was this CASS child job deliberately parked in `queued` by the autotrigger
- * because the import exceeded the budget cap? Used by the UI to decide
- * whether to surface a "Start CASS" button and a cost confirm. Accepts the
- * raw `jobs.result_summary` jsonb value.
- */
-export function isAwaitingManualStart(resultSummary: unknown): boolean {
-  if (!resultSummary || typeof resultSummary !== "object") return false;
-  const val = (resultSummary as { awaiting_manual_start?: unknown })
-    .awaiting_manual_start;
-  return val === true;
-}
-
 export function getAutotriggerCap(): number {
   const raw = process.env.CASS_AUTOTRIGGER_MAX_ITEMS;
   if (!raw) return DEFAULT_AUTOTRIGGER_CAP;
@@ -155,14 +137,17 @@ export async function selectCassEligibleProperties(
     if (lastItemId) query = query.gt("id", lastItemId);
     const { data: items, error: itemsError } = await query;
     if (itemsError) {
-      throw new Error(`failed to read import property ledger: ${itemsError.message}`);
+      throw new Error(
+        `failed to read import property ledger: ${itemsError.message}`,
+      );
     }
     for (const item of items ?? []) {
       if (item.property_id) candidateIdSet.add(item.property_id);
     }
     if (!items || items.length < RECOVERY_PAGE_SIZE) break;
     lastItemId = items.at(-1)?.id ?? null;
-    if (!lastItemId) throw new Error("import property ledger page had no cursor");
+    if (!lastItemId)
+      throw new Error("import property ledger page had no cursor");
   }
   const candidateIds = [...candidateIdSet];
   if (candidateIds.length === 0) return [];
@@ -177,7 +162,9 @@ export async function selectCassEligibleProperties(
       .eq("cass_status", "unverified")
       .eq("is_dnc_locked", false);
     if (propertiesError) {
-      throw new Error(`failed to read CASS candidates: ${propertiesError.message}`);
+      throw new Error(
+        `failed to read CASS candidates: ${propertiesError.message}`,
+      );
     }
     eligibleIds.push(...(rows ?? []).map((row) => row.id));
   }
@@ -200,7 +187,9 @@ export async function selectCassEligibleProperties(
     if (lastChildId) query = query.gt("id", lastChildId);
     const { data: childJobs, error: childJobsError } = await query;
     if (childJobsError) {
-      throw new Error(`failed to read CASS child ledger: ${childJobsError.message}`);
+      throw new Error(
+        `failed to read CASS child ledger: ${childJobsError.message}`,
+      );
     }
     childJobIds.push(...(childJobs ?? []).map((row) => row.id));
     if (!childJobs || childJobs.length < RECOVERY_PAGE_SIZE) break;
@@ -235,7 +224,8 @@ export async function selectCassEligibleProperties(
         for (const item of ambiguousItems ?? []) {
           if (item.property_id) ambiguousIds.add(item.property_id);
         }
-        if (!ambiguousItems || ambiguousItems.length < RECOVERY_PAGE_SIZE) break;
+        if (!ambiguousItems || ambiguousItems.length < RECOVERY_PAGE_SIZE)
+          break;
         lastAmbiguousItemId = ambiguousItems.at(-1)?.id ?? null;
         if (!lastAmbiguousItemId) {
           throw new Error("ambiguous CASS ledger page had no cursor");
@@ -285,7 +275,9 @@ export async function createCassChildJob(
 
   const row = data?.[0];
   if (error || !row) {
-    throw new Error(`failed to create cass child job: ${error?.message ?? "no job id"}`);
+    throw new Error(
+      `failed to create cass child job: ${error?.message ?? "no job id"}`,
+    );
   }
   return {
     jobId: row.job_id,
@@ -321,7 +313,9 @@ export async function createStandaloneCassJob(
   );
   const row = data?.[0];
   if (error || !row) {
-    throw new Error(`failed to create standalone CASS job: ${error?.message ?? "no job id"}`);
+    throw new Error(
+      `failed to create standalone CASS job: ${error?.message ?? "no job id"}`,
+    );
   }
   return {
     jobId: row.job_id,
@@ -344,7 +338,9 @@ export async function claimAuthorizedCassJobStart(
     },
   );
   if (error || !data) {
-    throw new Error(`failed to claim CASS job start: ${error?.message ?? "no claim token"}`);
+    throw new Error(
+      `failed to claim CASS job start: ${error?.message ?? "no claim token"}`,
+    );
   }
   return data;
 }
@@ -353,7 +349,8 @@ export async function failAuthorizedCassJobStart(
   supabase: SupabaseClient<Database>,
   params: { jobId: string; orgId: string; claimToken: string; error: unknown },
 ): Promise<void> {
-  const message = params.error instanceof Error ? params.error.message : String(params.error);
+  const message =
+    params.error instanceof Error ? params.error.message : String(params.error);
   const { error } = await cassRpcClient(supabase).rpc(
     "fail_authorized_cass_job_start",
     {
@@ -363,7 +360,8 @@ export async function failAuthorizedCassJobStart(
       p_message: message,
     },
   );
-  if (error) throw new Error(`failed to mark CASS start failed: ${error.message}`);
+  if (error)
+    throw new Error(`failed to mark CASS start failed: ${error.message}`);
 }
 
 /**
@@ -403,18 +401,24 @@ export async function runCassChunk(
       error_class?: string | null;
       error_message?: string | null;
       output_payload?: Json | null;
-    }) => {
-      const { error } = await supabase.from("job_items").upsert(
-        {
-          job_id: params.jobId,
-          property_id: propertyId,
-          item_key: propertyId,
-          ...row,
-          processed_at: new Date().toISOString(),
-        },
-        { onConflict: "job_id,item_key" },
-      );
-      if (error) throw new Error(`failed to persist CASS job item: ${error.message}`);
+    }): Promise<string> => {
+      const { data, error } = await supabase
+        .from("job_items")
+        .upsert(
+          {
+            job_id: params.jobId,
+            property_id: propertyId,
+            item_key: propertyId,
+            ...row,
+            processed_at: new Date().toISOString(),
+          },
+          { onConflict: "job_id,item_key" },
+        )
+        .select("id")
+        .single();
+      if (error)
+        throw new Error(`failed to persist CASS job item: ${error.message}`);
+      return data.id;
     };
 
     switch (outcome.status) {
@@ -422,10 +426,23 @@ export async function runCassChunk(
       case "stored_with_status":
         if (outcome.verified.cassStatus === "verified") summary.verified++;
         else if (outcome.verified.cassStatus === "invalid") summary.invalid++;
-        else if (outcome.verified.cassStatus === "ambiguous") summary.ambiguous++;
+        else if (outcome.verified.cassStatus === "ambiguous")
+          summary.ambiguous++;
         if (outcome.cacheHit) summary.cacheHits++;
-        await persistItem({
+        const jobItemId = await persistItem({
           status: "success",
+        });
+        await recordLeadEvent({
+          propertyId,
+          actorType: "system",
+          eventType: LEAD_EVENT_TYPES.ADDRESS_VERIFIED,
+          payload: {
+            job_id: params.jobId,
+            cass_status: outcome.verified.cassStatus,
+            cache_hit: outcome.cacheHit,
+          },
+          sourceType: "job_items.cass",
+          sourceId: jobItemId,
         });
         break;
       case "failed":
@@ -478,7 +495,8 @@ export async function runCassChunk(
         await persistItem({
           status: "skipped",
           error_class: "dnc_locked",
-          error_message: "Skipped at the paid boundary because the property is permanently DNC.",
+          error_message:
+            "Skipped at the paid boundary because the property is permanently DNC.",
         });
         break;
       case "provider_off":
@@ -507,7 +525,8 @@ export async function runCassChunk(
         .from("jobs")
         .update({
           processed_items: params.processedBefore + i + 1,
-          succeeded_items: summary.verified + summary.invalid + summary.ambiguous,
+          succeeded_items:
+            summary.verified + summary.invalid + summary.ambiguous,
           failed_items: summary.failed,
           worker_heartbeat_at: new Date().toISOString(),
         })
@@ -553,8 +572,7 @@ export async function finalizeCassJob(
       result_summary: {
         ...summary,
       },
-      error_message:
-        status === "canceled" ? "Address verifier disabled" : null,
+      error_message: status === "canceled" ? "Address verifier disabled" : null,
     })
     .eq("id", params.jobId);
 

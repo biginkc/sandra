@@ -12,6 +12,7 @@ import {
 } from "@/lib/messaging/suppression";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 
 import { listAdminUserIds } from "@/lib/auth/admins";
 import { createNotification } from "@/lib/notifications/dispatch";
@@ -771,10 +772,12 @@ async function setResponderDispo(
   if (current?.needs_human_attention) {
     return { updated: false, reason: "already_terminal" };
   }
+  if (current?.outreach_dispo === args.dispo) {
+    return { updated: false, reason: "already_terminal" };
+  }
 
   const now = new Date().toISOString();
-  const allowedCurrentDispos = allowedCurrentDisposFor(args.dispo);
-  const { data: updated, error } = await supabase
+  let updateQuery = supabase
     .from("properties")
     .update({
       outreach_dispo: args.dispo,
@@ -783,10 +786,11 @@ async function setResponderDispo(
       updated_at: now,
     })
     .eq("id", args.propertyId)
-    .eq("needs_human_attention", false)
-    .or(
-      `outreach_dispo.is.null,outreach_dispo.in.(${allowedCurrentDispos.join(",")})`,
-    )
+    .eq("needs_human_attention", false);
+  updateQuery = current?.outreach_dispo == null
+    ? updateQuery.is("outreach_dispo", null)
+    : updateQuery.eq("outreach_dispo", current.outreach_dispo);
+  const { data: updated, error } = await updateQuery
     .select("id")
     .maybeSingle();
   if (error) {
@@ -800,11 +804,19 @@ async function setResponderDispo(
     return { updated: false, reason: "already_terminal" };
   }
 
+  await recordLeadEvent({
+    propertyId: args.propertyId,
+    eventType: LEAD_EVENT_TYPES.DISPO_SET,
+    actorType: "ai",
+    payload: { from: current?.outreach_dispo ?? null, to: args.dispo },
+  });
+
   if (args.dispo === "wrong_number") {
     await pausePropertyEnrollments(supabase, {
       propertyId: args.propertyId,
       reason: "inbound_reply",
       permanent: false,
+      actor: { actorType: "ai" },
     });
   }
   return { updated: true };
@@ -831,6 +843,11 @@ async function applyResponderOptOut(
     providerId: "ai_responder",
     surface: "stop",
     idempotencyKey: `ai-responder:${args.propertyId}:${args.contactId}:${args.reason}`,
+    leadEvent: {
+      propertyId: args.propertyId,
+      actorType: "ai",
+      trigger: "ai_responder",
+    },
   });
   const result = await setResponderDispo(supabase, {
     propertyId: args.propertyId,
@@ -864,6 +881,11 @@ async function applyResponderDnc(
     providerId: "ai_responder",
     surface: "dnc",
     idempotencyKey: `ai-responder-dnc:${args.propertyId}:${args.contactId}:${args.reason}`,
+    leadEvent: {
+      propertyId: args.propertyId,
+      actorType: "ai",
+      trigger: "ai_responder",
+    },
   });
   const result = await setResponderDispo(supabase, {
     propertyId: args.propertyId,
@@ -910,6 +932,11 @@ async function applyWrongNumber(
     providerId: "ai_responder",
     surface: "dnc",
     idempotencyKey: `ai-responder-wrong-number:${args.propertyId}:${args.contactId}`,
+    leadEvent: {
+      propertyId: args.propertyId,
+      actorType: "ai",
+      trigger: "ai_responder",
+    },
   });
   return result;
 }
@@ -983,44 +1010,6 @@ function shouldUpdateDispo(
   return (severity[next] ?? 0) >= (current ? (severity[current] ?? 0) : 0);
 }
 
-// Must stay in lockstep with shouldUpdateDispo's carve-out above: that
-// function decides opted_out/dnc MAY overwrite a human-only dispo
-// (nurture/callback_requested/booked_appointment) or bad_number, but the
-// actual UPDATE is a conditional write gated by this allow-list via a
-// `.or(outreach_dispo.in.(...))` filter — without HUMAN_ONLY_DISPOS/
-// bad_number in the opted_out/dnc lists, the WHERE clause would silently
-// match zero rows even though shouldUpdateDispo said the write was
-// allowed, and the caller would see a false "already_terminal". Spreading
-// HUMAN_ONLY_DISPOS here (rather than repeating its members) keeps any
-// future addition to that Set automatically covered.
-function allowedCurrentDisposFor(
-  next: "wrong_number" | "not_interested" | "opted_out" | "dnc",
-): string[] {
-  switch (next) {
-    case "not_interested":
-      return ["not_interested"];
-    case "wrong_number":
-      return ["not_interested", "wrong_number"];
-    case "opted_out":
-      return [
-        "not_interested",
-        "wrong_number",
-        "opted_out",
-        "bad_number",
-        ...HUMAN_ONLY_DISPOS,
-      ];
-    case "dnc":
-      return [
-        "not_interested",
-        "wrong_number",
-        "opted_out",
-        "dnc",
-        "bad_number",
-        ...HUMAN_ONLY_DISPOS,
-      ];
-  }
-}
-
 async function loadInboundBusinessNumber(
   supabase: SupabaseClient<Database>,
   inboundMessageId: string,
@@ -1047,7 +1036,7 @@ export async function markPropertyNeedsAttention(
   reason: string,
 ): Promise<void> {
   const now = new Date().toISOString();
-  const { error } = await supabase
+  const { data: updated, error } = await supabase
     .from("properties")
     .update({
       needs_human_attention: true,
@@ -1055,11 +1044,23 @@ export async function markPropertyNeedsAttention(
       last_ai_escalation_at: now,
       updated_at: now,
     })
-    .eq("id", propertyId);
+    .eq("id", propertyId)
+    .eq("needs_human_attention", false)
+    .select("id")
+    .maybeSingle();
   if (error) {
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_mark_attention" },
       extra: { propertyId, reason },
+    });
+    return;
+  }
+  if (updated) {
+    await recordLeadEvent({
+      propertyId,
+      actorType: "ai",
+      eventType: LEAD_EVENT_TYPES.AI_ESCALATED,
+      payload: { from: false, to: true, reason },
     });
   }
 }

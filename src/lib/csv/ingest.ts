@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
 import { asLineType, type PhoneLineType } from "@/lib/messaging/line-type";
 import type { Database, Json } from "@/lib/supabase/types";
 import { resolveFips } from "./fips";
@@ -230,19 +231,38 @@ export async function processIngestChunk(
   let skipped = 0;
   let droppedUnlabeledPhones = 0;
   const errors: { rowIndex: number; message: string }[] = [];
+  const insertedPropertyIds: string[] = [];
 
-  const completedByRow = new Map<number, string>();
+  const completedByRow = new Map<
+    number,
+    {
+      status: string;
+      propertyId: string | null;
+      originalOutcome: string | null;
+    }
+  >();
   if (params.resumeSafe && params.rows.length > 0) {
     const { data: completed, error } = await supabase
       .from("job_items")
-      .select("source_row_index, status")
+      .select("source_row_index, status, property_id, output_payload")
       .eq("job_id", params.jobId)
       .gte("source_row_index", params.offset)
       .lt("source_row_index", params.offset + params.rows.length);
     if (error) throw new Error(`resume checkpoint read: ${error.message}`);
     for (const item of completed ?? []) {
       if (item.source_row_index != null) {
-        completedByRow.set(item.source_row_index, item.status);
+        const output = item.output_payload;
+        completedByRow.set(item.source_row_index, {
+          status: item.status,
+          propertyId: item.property_id,
+          originalOutcome:
+            output &&
+            typeof output === "object" &&
+            !Array.isArray(output) &&
+            typeof output.original_outcome === "string"
+              ? output.original_outcome
+              : null,
+        });
       }
     }
   }
@@ -250,11 +270,14 @@ export async function processIngestChunk(
   for (let localIndex = 0; localIndex < params.rows.length; localIndex++) {
     const absoluteIndex = params.offset + localIndex;
     const row = params.rows[localIndex];
-    const priorStatus = completedByRow.get(absoluteIndex);
-    if (priorStatus && priorStatus !== "error") {
-      if (priorStatus === "success") succeeded++;
-      else if (priorStatus === "error") failed++;
-      else skipped++;
+    const prior = completedByRow.get(absoluteIndex);
+    if (prior && prior.status !== "error") {
+      if (prior.status === "success") {
+        succeeded++;
+        if (prior.propertyId && prior.originalOutcome === "inserted") {
+          insertedPropertyIds.push(prior.propertyId);
+        }
+      } else skipped++;
       continue;
     }
     const validated = validateRow(row, params.mapping, absoluteIndex);
@@ -386,7 +409,10 @@ export async function processIngestChunk(
         );
       }
       if (result.wasDuplicate) skipped++;
-      else succeeded++;
+      else {
+        succeeded++;
+        insertedPropertyIds.push(result.propertyId);
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       const { error: errorCheckpointError } = await supabase
@@ -445,6 +471,27 @@ export async function processIngestChunk(
         throw new Error(`job progress checkpoint: ${progressError.message}`);
       }
     }
+  }
+
+  if (insertedPropertyIds.length > 0) {
+    const batchId = crypto.randomUUID();
+    const actor = params.userId
+      ? ({ actorType: "user", actorId: params.userId } as const)
+      : ({ actorType: "system" } as const);
+    await recordLeadEvents(
+      insertedPropertyIds.map((propertyId) => ({
+        propertyId,
+        ...actor,
+        eventType: LEAD_EVENT_TYPES.LEAD_CREATED,
+        payload: {
+          source: "csv",
+          batch_id: batchId,
+          batch_count: insertedPropertyIds.length,
+        },
+        sourceType: "properties.created",
+        sourceId: propertyId,
+      })),
+    );
   }
 
   return { succeeded, failed, skipped, droppedUnlabeledPhones, errors };

@@ -3,6 +3,7 @@ import { after } from "next/server";
 
 import type { Result } from "@/lib/errors/result";
 import { err, ok } from "@/lib/errors/result";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { dispatchTaskCalendarEventUpdate } from "@/lib/integrations/google/dispatch";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import type { Database, Tables } from "@/lib/supabase/types";
@@ -101,6 +102,23 @@ export async function createTask(
       message: error?.message ?? "Failed to create task",
     });
   }
+
+  if (data.type !== "appointment" && data.related_property_id) {
+    await recordLeadEvent({
+      propertyId: data.related_property_id,
+      actorType: "user",
+      actorId: input.createdBy,
+      eventType: LEAD_EVENT_TYPES.TASK_CREATED,
+      payload: {
+        task_id: data.id,
+        task_type: data.type,
+        due_at: data.due_at,
+        assignee_id: data.assignee_id,
+      },
+      sourceType: "tasks.created",
+      sourceId: data.id,
+    });
+  }
   return ok(data);
 }
 
@@ -108,13 +126,45 @@ export async function completeTask(
   supabase: SupabaseClient<Database>,
   taskId: string,
   userId: string,
+  expectedAssigneeId?: string,
 ): Promise<Result<Task>> {
+  const { data: previous, error: readError } = await supabase
+    .from("tasks")
+    .select()
+    .eq("id", taskId)
+    .maybeSingle();
+
+  if (readError || !previous) {
+    return err({
+      code: "TASK_COMPLETE_FAILED",
+      message: readError?.message ?? "Failed to complete task",
+    });
+  }
+  if (previous.type === "appointment") {
+    return err({
+      code: "TASK_COMPLETE_UNSUPPORTED",
+      message:
+        "Appointments close through their outcome (held / no-show / rescheduled), not the generic Done action.",
+    });
+  }
+  if (
+    expectedAssigneeId !== undefined &&
+    previous.assignee_id !== expectedAssigneeId
+  ) {
+    return err({
+      code: "TASK_COMPLETE_FAILED",
+      message: "Task is no longer assigned to this user",
+    });
+  }
+  if (previous.status === "completed") return ok(previous);
+
   const now = new Date().toISOString();
   // Appointments complete only through the outcome flow (PR 3): closing
   // one without held/no-show semantics would hide it from the queue with
   // no record of what happened and no calendar lifecycle coordination.
-  // Same atomic-predicate pattern as snoozeTask — never a raceable
-  // pre-read.
+  // The status read supplies the event's truthful previous value. Pair it
+  // with the UPDATE predicate so a racing change returns zero rows and is
+  // reconciled below instead of being overwritten or double-recorded.
   const { data, error } = await supabase
     .from("tasks")
     .update({
@@ -124,6 +174,8 @@ export async function completeTask(
       updated_at: now,
     })
     .eq("id", taskId)
+    .eq("status", previous.status)
+    .eq("assignee_id", previous.assignee_id)
     .neq("type", "appointment")
     .select()
     .maybeSingle();
@@ -136,11 +188,17 @@ export async function completeTask(
   }
 
   if (!data) {
-    const { data: existing } = await supabase
+    const { data: existing, error: reconcileError } = await supabase
       .from("tasks")
-      .select("type")
+      .select()
       .eq("id", taskId)
       .maybeSingle();
+    if (reconcileError) {
+      return err({
+        code: "TASK_COMPLETE_FAILED",
+        message: reconcileError.message,
+      });
+    }
     if (existing?.type === "appointment") {
       return err({
         code: "TASK_COMPLETE_UNSUPPORTED",
@@ -148,9 +206,33 @@ export async function completeTask(
           "Appointments close through their outcome (held / no-show / rescheduled), not the generic Done action.",
       });
     }
+    if (
+      expectedAssigneeId !== undefined &&
+      existing?.assignee_id !== expectedAssigneeId
+    ) {
+      return err({
+        code: "TASK_COMPLETE_FAILED",
+        message: "Task is no longer assigned to this user",
+      });
+    }
+    if (existing?.status === "completed") return ok(existing);
     return err({
       code: "TASK_COMPLETE_FAILED",
       message: "Failed to complete task",
+    });
+  }
+
+  if (data.related_property_id) {
+    await recordLeadEvent({
+      propertyId: data.related_property_id,
+      actorType: "user",
+      actorId: userId,
+      eventType: LEAD_EVENT_TYPES.TASK_COMPLETED,
+      payload: {
+        task_id: data.id,
+        from: previous.status,
+        to: "completed",
+      },
     });
   }
   return ok(data);
@@ -169,14 +251,45 @@ export async function snoozeTask(
   taskId: string,
   /** ISO timestamptz — the new due_at */
   snoozedUntil: string,
+  actorId: string,
 ): Promise<Result<Task>> {
+  const { data: previous, error: readError } = await supabase
+    .from("tasks")
+    .select()
+    .eq("id", taskId)
+    .maybeSingle();
+
+  if (readError || !previous) {
+    return err({
+      code: "TASK_SNOOZE_FAILED",
+      message: readError?.message ?? "Failed to snooze task",
+    });
+  }
+  if (previous.type === "appointment") {
+    return err({
+      code: "TASK_SNOOZE_UNSUPPORTED",
+      message:
+        "Appointments can't be snoozed — reschedule them from the appointment instead.",
+    });
+  }
+  if (previous.status !== "open") {
+    return err({
+      code: "TASK_SNOOZE_FAILED",
+      message: "Only open tasks can be snoozed",
+    });
+  }
+  if (
+    new Date(previous.due_at).getTime() === new Date(snoozedUntil).getTime()
+  ) {
+    return ok(previous);
+  }
+
   const now = new Date().toISOString();
 
   // Appointments are never snoozed: moving one is a reschedule, which the
-  // calendar-mutation lifecycle (PR 3) owns end-to-end. The guard is the
-  // UPDATE's own predicate — atomic with the write, so it cannot fail open
-  // on a racing type change or a failed pre-read; the DB trigger
-  // additionally rejects direct appointment time moves from any caller.
+  // calendar-mutation lifecycle owns end-to-end. The due_at predicate makes
+  // this compare-and-set atomic; the type predicate and DB trigger also
+  // reject a racing appointment conversion.
   const { data, error } = await supabase
     .from("tasks")
     .update({
@@ -185,6 +298,8 @@ export async function snoozeTask(
       updated_at: now,
     })
     .eq("id", taskId)
+    .eq("due_at", previous.due_at)
+    .eq("status", previous.status)
     .neq("type", "appointment")
     .select()
     .maybeSingle();
@@ -197,13 +312,17 @@ export async function snoozeTask(
   }
 
   if (!data) {
-    // Zero rows: the task is an appointment (predicate excluded it) or
-    // doesn't exist. One follow-up read picks the right error message.
-    const { data: existing } = await supabase
+    const { data: existing, error: reconcileError } = await supabase
       .from("tasks")
-      .select("type")
+      .select()
       .eq("id", taskId)
       .maybeSingle();
+    if (reconcileError) {
+      return err({
+        code: "TASK_SNOOZE_FAILED",
+        message: reconcileError.message,
+      });
+    }
     if (existing?.type === "appointment") {
       return err({
         code: "TASK_SNOOZE_UNSUPPORTED",
@@ -211,9 +330,35 @@ export async function snoozeTask(
           "Appointments can't be snoozed — reschedule them from the appointment instead.",
       });
     }
+    if (existing?.status !== "open") {
+      return err({
+        code: "TASK_SNOOZE_FAILED",
+        message: "Only open tasks can be snoozed",
+      });
+    }
+    if (
+      new Date(existing.due_at).getTime() ===
+      new Date(snoozedUntil).getTime()
+    ) {
+      return ok(existing);
+    }
     return err({
       code: "TASK_SNOOZE_FAILED",
       message: "Failed to snooze task",
+    });
+  }
+
+  if (data.related_property_id) {
+    await recordLeadEvent({
+      propertyId: data.related_property_id,
+      actorType: "user",
+      actorId,
+      eventType: LEAD_EVENT_TYPES.TASK_SNOOZED,
+      payload: {
+        task_id: data.id,
+        from: previous.due_at,
+        to: data.due_at,
+      },
     });
   }
   await scheduleCalendarUpdateAfterSnooze(supabase, data);
@@ -224,12 +369,34 @@ export async function reassignTask(
   supabase: SupabaseClient<Database>,
   taskId: string,
   newAssigneeId: string,
+  actorId: string,
 ): Promise<Result<Task>> {
+  const { data: previous, error: readError } = await supabase
+    .from("tasks")
+    .select()
+    .eq("id", taskId)
+    .maybeSingle();
+
+  if (readError || !previous) {
+    return err({
+      code: "TASK_REASSIGN_FAILED",
+      message: readError?.message ?? "Failed to reassign task",
+    });
+  }
+  if (previous.type === "appointment") {
+    return err({
+      code: "TASK_REASSIGN_UNSUPPORTED",
+      message:
+        "Appointments are reassigned from the appointment itself, moving the calendar event with them.",
+    });
+  }
+  if (previous.assignee_id === newAssigneeId) return ok(previous);
+
   const now = new Date().toISOString();
-  // Appointments reassign only through the calendar lifecycle (PR 3):
-  // ownership moves the Google event between accounts, which needs the
-  // ledger. Same atomic-predicate pattern as complete/snooze; the DB
-  // trigger backstops any other caller.
+  // Appointments reassign only through the calendar lifecycle: ownership
+  // moves the Google event between accounts. Compare on the old assignee so
+  // concurrent ownership changes cannot be overwritten or double-recorded;
+  // the type predicate and DB trigger backstop appointment races.
   const { data, error } = await supabase
     .from("tasks")
     .update({
@@ -237,6 +404,7 @@ export async function reassignTask(
       updated_at: now,
     })
     .eq("id", taskId)
+    .eq("assignee_id", previous.assignee_id)
     .neq("type", "appointment")
     .select()
     .maybeSingle();
@@ -249,11 +417,17 @@ export async function reassignTask(
   }
 
   if (!data) {
-    const { data: existing } = await supabase
+    const { data: existing, error: reconcileError } = await supabase
       .from("tasks")
-      .select("type")
+      .select()
       .eq("id", taskId)
       .maybeSingle();
+    if (reconcileError) {
+      return err({
+        code: "TASK_REASSIGN_FAILED",
+        message: reconcileError.message,
+      });
+    }
     if (existing?.type === "appointment") {
       return err({
         code: "TASK_REASSIGN_UNSUPPORTED",
@@ -261,9 +435,24 @@ export async function reassignTask(
           "Appointments are reassigned from the appointment itself, moving the calendar event with them.",
       });
     }
+    if (existing?.assignee_id === newAssigneeId) return ok(existing);
     return err({
       code: "TASK_REASSIGN_FAILED",
       message: "Failed to reassign task",
+    });
+  }
+
+  if (data.related_property_id) {
+    await recordLeadEvent({
+      propertyId: data.related_property_id,
+      actorType: "user",
+      actorId,
+      eventType: LEAD_EVENT_TYPES.TASK_REASSIGNED,
+      payload: {
+        task_id: data.id,
+        from: previous.assignee_id,
+        to: data.assignee_id,
+      },
     });
   }
   return ok(data);
@@ -282,10 +471,7 @@ async function scheduleCalendarUpdateAfterSnooze(
     ? await loadTaskPropertyAddress(supabase, task.related_property_id)
     : task.title;
   const prefs = await loadIntegrationPrefs(supabase, task.assignee_id);
-  const deepLink = buildTaskDeepLink(
-    task.related_property_id,
-    task.contact_id,
-  );
+  const deepLink = buildTaskDeepLink(task.related_property_id, task.contact_id);
 
   after(async () => {
     await dispatchTaskCalendarEventUpdate({
@@ -328,7 +514,8 @@ function buildTaskDeepLink(
   const normalizedBaseUrl = baseUrl.startsWith("http")
     ? baseUrl
     : `https://${baseUrl}`;
-  if (propertyId) return `${normalizedBaseUrl}/messages?property_id=${propertyId}`;
+  if (propertyId)
+    return `${normalizedBaseUrl}/messages?property_id=${propertyId}`;
   // Contact-only tasks (no property) deep-link to the Messages thread
   // instead — canonicalizeThreadId resolves a raw contact id to its
   // conversation.

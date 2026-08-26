@@ -126,11 +126,11 @@ async function uploadCsvToStorage(
 
 // The wizard's source picker now uses the canonical lead-source enum
 // shared with the lead webhook + manual entry form (see
-// `src/lib/leads/create.ts`). Column mapping is handled separately by
+// `src/lib/leads/sources.ts`). Column mapping is handled separately by
 // the `aliases.ts` autodetect — the user no longer needs to identify
 // the vendor for mapping purposes; source is purely an attribution
 // signal that the user picks deliberately.
-import type { LeadSource } from "@/lib/leads/create";
+import type { LeadSource } from "@/lib/leads/sources";
 export type WizardSource = LeadSource;
 
 /**

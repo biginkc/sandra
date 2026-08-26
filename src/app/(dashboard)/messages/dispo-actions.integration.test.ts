@@ -4,18 +4,27 @@ const {
   createClient,
   pauseContactEnrollments,
   qualifyProperty,
+  recordLeadEvent,
   recordConsentEvent,
+  reportError,
   revalidatePath,
 } = vi.hoisted(() => ({
   createClient: vi.fn(),
   pauseContactEnrollments: vi.fn(),
   qualifyProperty: vi.fn(),
+  recordLeadEvent: vi.fn(),
   recordConsentEvent: vi.fn(),
+  reportError: vi.fn(),
   revalidatePath: vi.fn(),
 }));
 
 vi.mock("next/cache", () => ({ revalidatePath }));
 vi.mock("@/lib/leads/qualify", () => ({ qualifyProperty }));
+vi.mock("@/lib/errors/report", () => ({ reportError }));
+vi.mock("@/lib/events", () => ({
+  LEAD_EVENT_TYPES: { DISPO_SET: "dispo_set", OPTED_OUT: "opted_out" },
+  recordLeadEvent,
+}));
 vi.mock("@/lib/messaging/consent", () => ({ recordConsentEvent }));
 vi.mock("@/lib/sequences/enrollment", () => ({ pauseContactEnrollments }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
@@ -26,12 +35,17 @@ type Response = { data?: unknown; error?: { message: string } | null };
 
 let responseQueue: Response[] = [];
 let updatePayloads: Array<{ table: string; payload: unknown }> = [];
+const CONSENT_EVENT_ID = "11111111-1111-4111-8111-111111111111";
 
 beforeEach(() => {
   responseQueue = [];
   updatePayloads = [];
   createClient.mockResolvedValue(makeSupabase("actor-1"));
   qualifyProperty.mockResolvedValue({ status: "qualified" });
+  recordConsentEvent.mockResolvedValue({
+    inserted: true,
+    id: CONSENT_EVENT_ID,
+  });
 });
 
 afterEach(() => {
@@ -40,7 +54,10 @@ afterEach(() => {
 
 describe("setOutreachDispo", () => {
   it("writes only message outcomes and clears follow_up_at", async () => {
-    responseQueue = [{ data: property(), error: null }, { error: null }];
+    responseQueue = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+    ];
 
     const result = await setOutreachDispo("property-1", "not_interested");
 
@@ -53,13 +70,23 @@ describe("setOutreachDispo", () => {
       }),
     });
     expect(recordConsentEvent).not.toHaveBeenCalled();
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "property-1",
+      eventType: "dispo_set",
+      actorType: "user",
+      actorId: "actor-1",
+      payload: { from: null, to: "not_interested" },
+    });
     expect(pauseContactEnrollments).not.toHaveBeenCalled();
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
     expect(revalidatePath).toHaveBeenCalledWith("/properties");
   });
 
   it("accepts needs_sequence as a tag-only disposition", async () => {
-    responseQueue = [{ data: property(), error: null }, { error: null }];
+    responseQueue = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+    ];
 
     const result = await setOutreachDispo("property-1", "needs_sequence");
 
@@ -88,11 +115,63 @@ describe("setOutreachDispo", () => {
     expect(createClient).not.toHaveBeenCalled();
   });
 
+  it("does not record a disposition event for a same-state write", async () => {
+    responseQueue = [
+      { data: property("not_interested"), error: null },
+      { data: { id: "property-1" }, error: null },
+    ];
+
+    const result = await setOutreachDispo("property-1", "not_interested");
+
+    expect(result).toEqual({ ok: true });
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("does not record an event when the compare-and-swap loses a race", async () => {
+    responseQueue = [
+      { data: property(), error: null },
+      { data: null, error: null },
+    ];
+
+    const result = await setOutreachDispo("property-1", "not_interested");
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Disposition changed in another session. Refresh and try again.",
+    });
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("does not claim failure when cache revalidation throws after commit", async () => {
+    responseQueue = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+    ];
+    revalidatePath.mockImplementationOnce(() => {
+      throw new Error("revalidate failed");
+    });
+
+    const result = await setOutreachDispo("property-1", "not_interested");
+
+    expect(result).toEqual({ ok: true });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "revalidate failed" }),
+      expect.objectContaining({
+        tags: { surface: "manual_dispo_revalidate_after_commit" },
+      }),
+    );
+    expect(revalidatePath).toHaveBeenCalledWith("/properties");
+  });
+
   it("keeps DNC and opt-out safety side effects", async () => {
     responseQueue = [
       { data: property(), error: null },
-      { error: null },
-      { error: null },
+      { data: { id: "property-1" }, error: null },
+      {
+        data: { do_not_contact: false, sms_opted_out: false },
+        error: null,
+      },
+      { data: { id: "contact-1" }, error: null },
     ];
 
     const result = await setOutreachDispo("property-1", "opted_out");
@@ -106,6 +185,25 @@ describe("setOutreachDispo", () => {
       sourceDetail: { propertyId: "property-1", dispo: "opted_out" },
       occurredAt: expect.any(Date),
     });
+    expect(recordLeadEvent).toHaveBeenCalledTimes(2);
+    expect(recordLeadEvent.mock.calls).toEqual([
+      [{
+        propertyId: "property-1",
+        eventType: "dispo_set",
+        actorType: "user",
+        actorId: "actor-1",
+        payload: { from: null, to: "opted_out" },
+      }],
+      [{
+        propertyId: "property-1",
+        eventType: "opted_out",
+        actorType: "user",
+        actorId: "actor-1",
+        payload: { channel: "sms", trigger: "manual_disposition" },
+        sourceType: "consent_events.opt_out",
+        sourceId: CONSENT_EVENT_ID,
+      }],
+    ]);
     expect(updatePayloads).toContainEqual({
       table: "contacts",
       payload: expect.objectContaining({
@@ -117,7 +215,49 @@ describe("setOutreachDispo", () => {
       contactId: "contact-1",
       reason: "consent_revoked",
       permanent: true,
+      actor: { actorType: "user", actorId: "actor-1" },
     });
+  });
+
+  it("lets only the contact compare-and-swap winner append opt-out history", async () => {
+    responseQueue = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+      {
+        data: { do_not_contact: false, sms_opted_out: false },
+        error: null,
+      },
+      { data: null, error: null },
+    ];
+
+    const result = await setOutreachDispo("property-1", "opted_out");
+
+    expect(result).toEqual({ ok: true });
+    expect(recordConsentEvent).not.toHaveBeenCalled();
+    expect(recordLeadEvent).toHaveBeenCalledTimes(1);
+    expect(recordLeadEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "dispo_set" }),
+    );
+  });
+
+  it("reports a post-commit contact failure without claiming the disposition failed", async () => {
+    responseQueue = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+      { data: null, error: { message: "contact read failed" } },
+    ];
+
+    const result = await setOutreachDispo("property-1", "opted_out");
+
+    expect(result).toEqual({ ok: true });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "contact read failed" }),
+      expect.objectContaining({
+        tags: { surface: "manual_dispo_contact_read_after_commit" },
+      }),
+    );
+    expect(recordConsentEvent).not.toHaveBeenCalled();
+    expect(recordLeadEvent).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -163,6 +303,7 @@ function makeSupabase(userId: string) {
           return builder;
         }),
         eq: vi.fn(() => builder),
+        is: vi.fn(() => builder),
         maybeSingle: vi.fn(async () => {
           const response = responseQueue.shift();
           return { data: response?.data ?? null, error: response?.error ?? null };
@@ -182,9 +323,10 @@ function makeSupabase(userId: string) {
   };
 }
 
-function property() {
+function property(outreachDispo: string | null = null) {
   return {
     id: "property-1",
     homeowner_contact_id: "contact-1",
+    outreach_dispo: outreachDispo,
   };
 }

@@ -1,8 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { enrollLeadMock } = vi.hoisted(() => ({ enrollLeadMock: vi.fn() }));
+const { enrollLeadMock, recordLeadEvents } = vi.hoisted(() => ({
+  enrollLeadMock: vi.fn(),
+  recordLeadEvents: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("@/lib/sequences/enrollment", () => ({ enrollLead: enrollLeadMock }));
+vi.mock("@/lib/events", () => ({
+  LEAD_EVENT_TYPES: { SEQUENCE_ENROLLED: "sequence_enrolled" },
+  recordLeadEvents,
+}));
 
 import { enrollJobBatch } from "./csv-import";
 
@@ -41,7 +48,10 @@ function makeSupabase(itemCount: number, failAfterFirstPage = false) {
           return builder;
         },
         then: (
-          resolve: (value: { data: unknown[] | null; error: { message: string } | null }) => unknown,
+          resolve: (value: {
+            data: unknown[] | null;
+            error: { message: string } | null;
+          }) => unknown,
         ) => {
           if (table === "job_items") {
             if (failAfterFirstPage && lastId) {
@@ -82,7 +92,14 @@ function makeSupabase(itemCount: number, failAfterFirstPage = false) {
 describe("enrollJobBatch paging", () => {
   beforeEach(() => {
     enrollLeadMock.mockReset();
-    enrollLeadMock.mockResolvedValue({ status: "enrolled" });
+    recordLeadEvents.mockClear();
+    enrollLeadMock.mockImplementation(
+      async (_client: unknown, input: { propertyId: string }) => ({
+        status: "enrolled",
+        enrollmentId: `enrollment-${input.propertyId}`,
+        sequenceLabel: "Import sequence",
+      }),
+    );
   });
 
   it("enrolls every eligible property when a job has more than 1,000 items", async () => {
@@ -94,6 +111,41 @@ describe("enrollJobBatch paging", () => {
 
     expect(result).toEqual({ enrolled: 1_205, skipped: 0, failed: 0 });
     expect(enrollLeadMock).toHaveBeenCalledTimes(1_205);
+    expect(enrollLeadMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ deferEvent: true }),
+    );
+    expect(recordLeadEvents).toHaveBeenCalledTimes(1);
+    const events = recordLeadEvents.mock.calls[0]?.[0] as Array<{
+      propertyId: string;
+      actorType: string;
+      eventType: string;
+      payload: Record<string, unknown>;
+      sourceType: string;
+      sourceId: string;
+    }>;
+    expect(events).toHaveLength(1_205);
+    const batchId = events[0]?.payload.batch_id;
+    expect(batchId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    for (let index = 0; index < events.length; index++) {
+      const ordinal = String(index + 1).padStart(5, "0");
+      expect(events[index]).toEqual({
+        propertyId: `property-${ordinal}`,
+        actorType: "system",
+        eventType: "sequence_enrolled",
+        payload: {
+          enrollment_id: `enrollment-property-${ordinal}`,
+          sequence_id: "sequence-1",
+          label: "Import sequence",
+          batch_id: batchId,
+          batch_count: 1_205,
+        },
+        sourceType: "sequence_enrollments.created",
+        sourceId: `enrollment-property-${ordinal}`,
+      });
+    }
   });
 
   it("fails closed when a later job-item page cannot be read", async () => {
