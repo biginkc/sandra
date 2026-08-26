@@ -6,6 +6,7 @@ import { dispatchJobCompleted } from "@/lib/notifications/dispatch";
 import type { Database, Json } from "@/lib/supabase/types";
 import { verifyPropertyAddress } from "./verify-property";
 export { CASS_COST_PER_LOOKUP_USD } from "@/lib/provider-pricing";
+export { isAwaitingManualStart } from "./cass-job-state";
 
 export type CassJobSummary = {
   total: number;
@@ -93,24 +94,6 @@ function chunksOf<T>(values: T[], size = RECOVERY_PAGE_SIZE): T[][] {
  * 20K rows — blindly auto-triggering on every import would torch a free
  * tier and surprise the operator.
  */
-/**
- * Per-lookup cost assumption used by the cost-confirm UI. ~$0.03/lookup is
- * SmartyStreets' US Street API rate at the time of this writing. Centralized
- * here so the UI and the plan stay in sync.
- */
-/**
- * Was this CASS child job deliberately parked in `queued` by the autotrigger
- * because the import exceeded the budget cap? Used by the UI to decide
- * whether to surface a "Start CASS" button and a cost confirm. Accepts the
- * raw `jobs.result_summary` jsonb value.
- */
-export function isAwaitingManualStart(resultSummary: unknown): boolean {
-  if (!resultSummary || typeof resultSummary !== "object") return false;
-  const val = (resultSummary as { awaiting_manual_start?: unknown })
-    .awaiting_manual_start;
-  return val === true;
-}
-
 export function getAutotriggerCap(): number {
   const raw = process.env.CASS_AUTOTRIGGER_MAX_ITEMS;
   if (!raw) return DEFAULT_AUTOTRIGGER_CAP;

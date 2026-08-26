@@ -63,6 +63,7 @@ import type { Database } from "@/lib/supabase/types";
 import { LeadMediaHero } from "./lead-media-hero";
 import { resolveLeadMediaPresentation } from "./lead-media";
 import { LeadActivityTimeline } from "./lead-activity";
+import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
@@ -370,6 +371,19 @@ export default async function LeadDetailPage({
     .order("created_at", { ascending: false })
     .limit(200);
   const initialNotes = (notesRaw ?? []) as LeadNoteRow[];
+
+  // Append-only lead activity — newest bounded window, merged client-side
+  // with canonical messages, notes, and calls.
+  const { data: leadEventsRaw, error: leadEventsError } = await supabase
+    .from("lead_events")
+    .select(
+      "id, property_id, actor_type, actor_id, event_type, payload, created_at",
+    )
+    .eq("property_id", lead.id)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(200);
+  const initialLeadEvents = (leadEventsRaw ?? []) as LeadEvent[];
 
   // auth.admin.listUsers() spans the entire Auth project, not this lead's
   // organization. Build an active-org membership allowlist first, fail closed
@@ -824,14 +838,17 @@ export default async function LeadDetailPage({
         <div className="grid min-w-0 items-start gap-[14px] xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="min-w-0 space-y-3">
             <LeadActivityTimeline
+              key={lead.id}
               propertyId={lead.id}
               contactId={lead.homeowner?.id ?? null}
               initialMessages={initialMessages}
               initialNotes={initialNotes}
               initialCalls={initialCallRows}
+              initialEvents={initialLeadEvents}
               messageError={threadError?.message ?? null}
               noteError={notesError?.message ?? null}
               callError={callRollupError?.message ?? null}
+              eventError={leadEventsError?.message ?? null}
               authorEmails={authorEmails}
               currentUserId={sessionUser?.id ?? null}
               currentUserEmail={sessionUser?.email ?? null}
