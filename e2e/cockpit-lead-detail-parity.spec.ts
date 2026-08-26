@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import {
   adminClient,
+  DEFAULT_ORG_ID,
   E2E_MOCK_BUSINESS_NUMBER,
   ensureTestUser,
   resetTenantTables,
@@ -128,6 +129,21 @@ async function seedLatestInboundRoute(
   }
 }
 
+async function seedPhoneSuppression(
+  admin: ReturnType<typeof adminClient>,
+  phone: string,
+  contactId: string,
+): Promise<void> {
+  const { error } = await admin.from("sms_phone_suppressions").insert({
+    org_id: DEFAULT_ORG_ID,
+    channel: "sms",
+    phone_e164: phone,
+    source: "e2e-lead-detail-slot-restriction",
+    first_contact_id: contactId,
+  });
+  if (error) throw new Error(`phone suppression seed failed: ${error.message}`);
+}
+
 function callableStateForNow(): string | null {
   for (const state of Object.keys(STATE_TO_TZ).sort()) {
     if (checkQuietHours(state).ok) return state;
@@ -250,6 +266,9 @@ test("lead detail replies on the newest paired customer and business route", asy
   if (contactError) {
     throw new Error(`second phone seed failed: ${contactError.message}`);
   }
+  // The header's preferred phone is suppressed while the active thread phone
+  // is clear. Inline reply must use the thread phone's independent decision.
+  await seedPhoneSuppression(admin, firstPhone, seeded.contactId);
   await seedLatestInboundRoute(
     admin,
     seeded,
@@ -310,6 +329,9 @@ test("lead detail replies on the newest paired customer and business route", asy
   }
 
   await page.goto(`/leads/${seeded.propertyId}`);
+  await expect(
+    page.getByTestId("sms-channel-restriction-header"),
+  ).toBeVisible();
   const inlineReply = page.getByTestId("inline-reply");
   await expect(inlineReply).toContainText(formatPhoneE164(secondPhone)!);
   await expect(inlineReply).toContainText(
@@ -334,6 +356,46 @@ test("lead detail replies on the newest paired customer and business route", asy
     });
     expect(data![0].external_id).toMatch(/^mock_/);
   }).toPass({ timeout: 10_000 });
+});
+
+test("lead detail restricts the suppressed thread phone without hiding a clear header phone", async ({
+  page,
+}) => {
+  const admin = adminClient();
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+  const preferredPhone = uniquePhone();
+  const suppressedThreadPhone = uniquePhone();
+  const seeded = await seedConsentedLead(admin, {
+    phone: preferredPhone,
+    addressTag: "SPLIT-SUPPRESSION",
+    state: "MO",
+  });
+  const { error: contactError } = await admin
+    .from("contacts")
+    .update({ phone_2: suppressedThreadPhone, phone_2_type: "mobile" })
+    .eq("id", seeded.contactId);
+  if (contactError) {
+    throw new Error(`second phone seed failed: ${contactError.message}`);
+  }
+  await seedPhoneSuppression(
+    admin,
+    suppressedThreadPhone,
+    seeded.contactId,
+  );
+  await seedLatestInboundRoute(
+    admin,
+    seeded,
+    suppressedThreadPhone,
+    MOCK_SENDER_SECONDARY,
+  );
+
+  await page.goto(`/leads/${seeded.propertyId}`);
+  await expect(page.getByRole("button", { name: "Send SMS" })).toBeVisible();
+  await expect(
+    page.getByTestId("sms-channel-restriction-inline"),
+  ).toContainText("SMS is disabled");
+  await expect(page.getByTestId("inline-reply")).toHaveCount(0);
 });
 
 test("lead detail blocks an existing thread whose customer number is unsaved", async ({

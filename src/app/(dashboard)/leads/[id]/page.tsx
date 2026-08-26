@@ -365,6 +365,14 @@ export default async function LeadDetailPage({
       : latestHomeownerSmsRoute && !inlineReplyPhone
         ? "This thread number is not saved on the homeowner contact — save it before replying."
         : undefined;
+  // Preserve the header composer's preferred-phone presentation, but verify
+  // the inline thread's exact saved phone when it uses another slot.
+  const inlineSmsPhoneSuppressionPromise =
+    inlineReplyPhone && inlineReplyPhone !== homeownerSmsPhone
+      ? isSmsPhoneSuppressed(supabase, inlineReplyPhone, lead.org_id)
+          .then((value) => ({ ok: true as const, value }))
+          .catch(() => ({ ok: false as const, value: null }))
+      : smsPhoneSuppressionPromise;
 
   // Notes — newest first for the feed component.
   const { data: notesRaw, error: notesError } = await supabase
@@ -510,6 +518,8 @@ export default async function LeadDetailPage({
     ? await smsConsentEventsPromise
     : { data: [], error: null };
   const phoneSuppressionResult = await smsPhoneSuppressionPromise;
+  const inlinePhoneSuppressionResult =
+    await inlineSmsPhoneSuppressionPromise;
   const consentState: ConsentState | null = smsConsentEventsResult.error
     ? null
     : computeConsentState(smsConsentEventsResult.data ?? []);
@@ -527,6 +537,27 @@ export default async function LeadDetailPage({
     outreachDispo: lead.outreach_dispo,
     phoneLineType: homeownerSmsChoice?.lineType ?? null,
   });
+  // Invalid thread routes (unsaved or landline) keep InlineReply's more
+  // specific explanation. Valid routes get a full restriction decision for
+  // their exact slot instead of inheriting the header phone's result.
+  const inlineSmsPresentation = inlineReplyPhone
+    ? deriveLeadSmsPresentation({
+        hasContact: Boolean(lead.homeowner),
+        hasUsablePhone: Boolean(
+          (inlineRoutePhoneChoice ?? homeownerSmsChoice)?.lineType !==
+            "landline",
+        ),
+        consentState,
+        contactSmsOptedOut: lead.homeowner?.sms_opted_out ?? false,
+        propertySmsOptedOut: lead.outreach_dispo === "opted_out",
+        phoneSuppressed: inlinePhoneSuppressionResult.ok
+          ? inlinePhoneSuppressionResult.value
+          : null,
+        outreachDispo: lead.outreach_dispo,
+        phoneLineType:
+          (inlineRoutePhoneChoice ?? homeownerSmsChoice)?.lineType ?? null,
+      })
+    : smsPresentation;
 
   // Tags attached to this property, with the tag row joined inline.
   const { data: tagRowsRaw, error: tagRowsError } = await supabase
@@ -821,10 +852,10 @@ export default async function LeadDetailPage({
             />
             <div className="min-w-0" data-testid="lead-activity-composers">
               <SmsEntryPointGate
-                restricted={smsPresentation.smsRestricted}
+                restricted={inlineSmsPresentation.smsRestricted}
                 placement="inline"
-                restrictionLabel={smsPresentation.consentLabel}
-                restrictionDetail={smsPresentation.consentDetail}
+                restrictionLabel={inlineSmsPresentation.consentLabel}
+                restrictionDetail={inlineSmsPresentation.consentDetail}
               >
                 <InlineReply
                   propertyId={lead.id}
@@ -836,14 +867,15 @@ export default async function LeadDetailPage({
                     inlineReplyPhoneUnavailableMessage
                   }
                   footerAction={
-                    !smsPresentation.smsRestricted &&
+                    !inlineSmsPresentation.smsRestricted &&
                     !inlineReplyUnavailable ? (
                       <AddNoteComposer propertyId={lead.id} compact />
                     ) : null
                   }
                 />
               </SmsEntryPointGate>
-              {smsPresentation.smsRestricted || inlineReplyUnavailable ? (
+              {inlineSmsPresentation.smsRestricted ||
+              inlineReplyUnavailable ? (
                 <div className="mt-2 flex justify-end">
                   <AddNoteComposer propertyId={lead.id} compact />
                 </div>
