@@ -3,6 +3,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { getOutboundSmsMetrics } from "@/lib/messages/message-metrics";
 import {
   createContactFromUnknown as createContactFromUnknownHelper,
@@ -130,12 +131,21 @@ export async function deleteQueuedMessage(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "NOT_SIGNED_IN", message: "Not signed in." },
+      };
+    }
     const { error, data } = await supabase
       .from("messages")
       .delete()
       .eq("id", messageId)
       .eq("status", "queued")
-      .select("id")
+      .select("id, property_id")
       .maybeSingle();
     if (error) {
       return {
@@ -152,6 +162,16 @@ export async function deleteQueuedMessage(
             "Message is no longer queued — refresh the page to see current state.",
         },
       };
+    }
+    if (data.property_id) {
+      await recordLeadEvent({
+        propertyId: data.property_id,
+        eventType: LEAD_EVENT_TYPES.QUEUED_MESSAGE_DELETED,
+        actorType: "user",
+        actorId: user.id,
+        sourceType: "messages.deleted",
+        sourceId: data.id,
+      });
     }
     return ok(null);
   } catch (e) {

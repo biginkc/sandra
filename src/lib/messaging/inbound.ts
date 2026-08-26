@@ -27,6 +27,7 @@ import {
   loadAiReplyDelayConfig,
 } from "@/lib/ai-responder/delay";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { classifyReplyIntent } from "@/lib/leads/classify-reply-intent";
 import { qualifyProperty } from "@/lib/leads/qualify";
 import { resolveInboundThread } from "@/lib/messages/threading";
@@ -78,6 +79,66 @@ export function classifyWrongNumberScope(body: string): "this_property" | "all" 
     return "all";
   }
   return "this_property";
+}
+
+async function setInboundDisposition(
+  supabase: SupabaseClient<Database>,
+  input: {
+    propertyId: string;
+    disposition: "dnc" | "opted_out" | "wrong_number";
+    sourceId: string | null;
+    allowedCurrent?: ReadonlySet<string | null>;
+  },
+): Promise<boolean> {
+  const { data: current, error: readError } = await supabase
+    .from("properties")
+    .select("outreach_dispo")
+    .eq("id", input.propertyId)
+    .maybeSingle();
+  if (readError || !current) {
+    throw new Error(
+      `inbound disposition read: ${readError?.message ?? "property not found"}`,
+    );
+  }
+  if (current.outreach_dispo === input.disposition) return false;
+  if (
+    input.allowedCurrent &&
+    !input.allowedCurrent.has(current.outreach_dispo)
+  ) {
+    return false;
+  }
+
+  let updateQuery = supabase
+    .from("properties")
+    .update({ outreach_dispo: input.disposition })
+    .eq("id", input.propertyId);
+  updateQuery = current.outreach_dispo === null
+    ? updateQuery.is("outreach_dispo", null)
+    : updateQuery.eq("outreach_dispo", current.outreach_dispo);
+  const { data: updated, error: updateError } = await updateQuery
+    .select("id")
+    .maybeSingle();
+  if (updateError) {
+    throw new Error(`inbound disposition write: ${updateError.message}`);
+  }
+  if (!updated) return false;
+
+  const event = {
+    propertyId: input.propertyId,
+    eventType: LEAD_EVENT_TYPES.DISPO_SET,
+    actorType: "system" as const,
+    payload: { from: current.outreach_dispo, to: input.disposition },
+  };
+  if (input.sourceId) {
+    await recordLeadEvent({
+      ...event,
+      sourceType: "webhook_events.disposition",
+      sourceId: input.sourceId,
+    });
+  } else {
+    await recordLeadEvent(event);
+  }
+  return true;
 }
 
 function createServiceRoleClient() {
@@ -290,12 +351,22 @@ export async function handleInboundWebhook(
           providerId: provider.providerId,
           surface: "dnc",
           idempotencyKey: ev.externalId,
+          ...(propertyId
+            ? {
+                leadEvent: {
+                  propertyId,
+                  actorType: "system" as const,
+                  trigger: "inbound_keyword" as const,
+                },
+              }
+            : {}),
         });
         if (propertyId) {
-          await supabase
-            .from("properties")
-            .update({ outreach_dispo: "dnc" })
-            .eq("id", propertyId);
+          await setInboundDisposition(supabase, {
+            propertyId,
+            disposition: "dnc",
+            sourceId: resumeDecision.webhookEventId,
+          });
         }
         const insertOutcome = await insertInboundMessage(supabase, {
           providerId: provider.providerId,
@@ -348,13 +419,28 @@ export async function handleInboundWebhook(
           providerId: provider.providerId,
           surface: "stop",
           idempotencyKey: ev.externalId,
+          ...(propertyId
+            ? {
+                leadEvent: {
+                  propertyId,
+                  actorType: "system" as const,
+                  trigger: "inbound_keyword" as const,
+                },
+              }
+            : {}),
         });
         if (propertyId) {
-          await supabase
-            .from("properties")
-            .update({ outreach_dispo: "opted_out" })
-            .eq("id", propertyId)
-            .or("outreach_dispo.is.null,outreach_dispo.in.(not_interested,wrong_number,opted_out)");
+          await setInboundDisposition(supabase, {
+            propertyId,
+            disposition: "opted_out",
+            sourceId: resumeDecision.webhookEventId,
+            allowedCurrent: new Set([
+              null,
+              "not_interested",
+              "wrong_number",
+              "opted_out",
+            ]),
+          });
         }
         const insertOutcome = await insertInboundMessage(supabase, {
           providerId: provider.providerId,
@@ -445,10 +531,12 @@ export async function handleInboundWebhook(
       if (WRONG_NUMBER_KEYWORDS.test(ev.body)) {
         const wrongScope = classifyWrongNumberScope(ev.body);
         if (propertyId) {
-          await supabase
-            .from("properties")
-            .update({ outreach_dispo: "wrong_number" })
-            .eq("id", propertyId);
+          await setInboundDisposition(supabase, {
+            propertyId,
+            disposition: "wrong_number",
+            sourceId: resumeDecision.webhookEventId,
+            allowedCurrent: new Set([null, "not_interested"]),
+          });
           try {
             await pausePropertyEnrollments(supabase, {
               propertyId,
@@ -484,6 +572,15 @@ export async function handleInboundWebhook(
             providerId: provider.providerId,
             surface: "dnc",
             idempotencyKey: ev.externalId,
+            ...(propertyId
+              ? {
+                  leadEvent: {
+                    propertyId,
+                    actorType: "system" as const,
+                    trigger: "inbound_keyword" as const,
+                  },
+                }
+              : {}),
           });
         }
         const insertOutcome = await insertInboundMessage(supabase, {

@@ -144,6 +144,7 @@ async function seedPendingKeywordReplay(params: {
   body: string;
   eventType: "opt_out" | "help_request";
   keyword: "stop" | "help" | "dnc";
+  propertyId?: string;
 }) {
   const sourceDetail = {
     externalId: params.externalId,
@@ -160,6 +161,7 @@ async function seedPendingKeywordReplay(params: {
     to_address: "+18163706846",
     body: params.body,
     contact_id: params.contactId,
+    property_id: params.propertyId ?? null,
     metadata: { keyword: params.keyword },
   });
   await supabase.from("consent_events").insert({
@@ -387,11 +389,17 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
 
     const { data: events } = await supabase
       .from("consent_events")
-      .select("event_type, source")
+      .select("id, event_type, source")
       .eq("contact_id", contactId)
       .eq("event_type", "opt_out");
     expect(events).toHaveLength(1);
     expect(events?.[0].source).toBe("mock_inbound_webhook");
+    const { data: webhookEvent } = await supabase
+      .from("webhook_events")
+      .select("id")
+      .eq("provider", "mock")
+      .eq("external_id", "msg_stop_001")
+      .single();
     const { data: suppression } = await supabase
       .from("sms_phone_suppressions")
       .select("phone_e164, source, first_contact_id")
@@ -409,6 +417,31 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("id", property!.id)
       .single();
     expect(propertyAfterStop?.outreach_dispo).toBe("opted_out");
+
+    const { data: leadEvents } = await supabase
+      .from("lead_events")
+      .select("event_type, actor_type, actor_id, payload, source_type, source_id")
+      .eq("property_id", property!.id)
+      .order("created_at", { ascending: true });
+    expect(leadEvents).toHaveLength(2);
+    expect(leadEvents).toEqual(expect.arrayContaining([
+      {
+        event_type: "opted_out",
+        actor_type: "system",
+        actor_id: null,
+        payload: { channel: "sms", trigger: "inbound_keyword" },
+        source_type: "consent_events.opt_out",
+        source_id: events?.[0].id,
+      },
+      {
+        event_type: "dispo_set",
+        actor_type: "system",
+        actor_id: null,
+        payload: { from: null, to: "opted_out" },
+        source_type: "webhook_events.disposition",
+        source_id: webhookEvent?.id,
+      },
+    ]));
 
     const { data: stopMessage } = await supabase
       .from("messages")
@@ -497,11 +530,66 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("contact_id", contactId)
       .eq("event_type", "opt_out");
     expect(consentCount).toBe(1);
+    const { data: dncLeadEvents } = await supabase
+      .from("lead_events")
+      .select("event_type")
+      .eq("property_id", property!.id);
+    expect(dncLeadEvents).toEqual([{ event_type: "opted_out" }]);
     const { count: inboundCount } = await supabase
       .from("messages")
       .select("id", { count: "exact", head: true })
       .eq("external_id", "msg_stop_preserve_dnc_001");
     expect(inboundCount).toBe(1);
+  });
+
+  it("wrong-number keyword does not downgrade an existing dnc disposition or append a disposition event", async () => {
+    const phone = "+18165558886";
+    const contactId = await seedContact(phone, { optIn: true });
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "2 Wrong Number DNC Preserve Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+        outreach_dispo: "dnc",
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "mock",
+      from_address: "+18163706846",
+      to_address: phone,
+      body: "Hello",
+      contact_id: contactId,
+      property_id: property!.id,
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_wrong_preserve_dnc_001",
+        from: phone,
+        to: "+18163706846",
+        body: "wrong number",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: propertyAfter } = await supabase
+      .from("properties")
+      .select("outreach_dispo")
+      .eq("id", property!.id)
+      .single();
+    expect(propertyAfter?.outreach_dispo).toBe("dnc");
+    const { count: dispoEventCount } = await supabase
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", property!.id)
+      .eq("event_type", "dispo_set");
+    expect(dispoEventCount).toBe(0);
   });
 
   it("fails soft when attribution lookup errors so STOP still opts out and inserts the inbound", async () => {
@@ -1877,6 +1965,16 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
   it("does not duplicate STOP consent events when replay resumes a pending keyword webhook", async () => {
     const phone = "+18165559113";
     const contactId = await seedContact(phone, { optIn: true });
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "113 STOP Replay Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
     await seedPendingKeywordReplay({
       contactId,
       phone,
@@ -1884,6 +1982,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       body: "STOP",
       eventType: "opt_out",
       keyword: "stop",
+      propertyId: property!.id,
     });
 
     const res = await POST(
@@ -1902,6 +2001,17 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("contact_id", contactId)
       .eq("event_type", "opt_out");
     expect(consentCount).toBe(1);
+
+    const { data: replayLeadEvents } = await supabase
+      .from("lead_events")
+      .select("event_type, source_type")
+      .eq("property_id", property!.id);
+    expect(replayLeadEvents).toEqual([
+      {
+        event_type: "dispo_set",
+        source_type: "webhook_events.disposition",
+      },
+    ]);
 
     const { data: contact } = await supabase
       .from("contacts")

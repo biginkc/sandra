@@ -12,6 +12,18 @@ import { IDENTITY_REPLY_BODY } from "./identity";
 import { validateAiReplyBody } from "./safety";
 import type { AiStructuredOutput } from "./types";
 
+const { recordLeadEvent } = vi.hoisted(() => ({
+  recordLeadEvent: vi.fn(),
+}));
+
+vi.mock("@/lib/events", () => ({
+  LEAD_EVENT_TYPES: {
+    AI_ESCALATED: "ai_escalated",
+    DISPO_SET: "dispo_set",
+  },
+  recordLeadEvent,
+}));
+
 vi.mock("@/lib/messaging/consent", () => ({
   getConsentState: vi.fn(),
 }));
@@ -336,11 +348,15 @@ function createMockSupabase(state: MockState) {
         Object.assign(state.property, updateData);
         return { data: { id: state.property.id }, error: null };
       }
-      return { data: state.property, error: null };
+      return { data: { ...state.property }, error: null };
     };
 
     const query = {
       eq(field: string, value: unknown) {
+        eqFilters.set(field, value);
+        return query;
+      },
+      is(field: string, value: unknown) {
         eqFilters.set(field, value);
         return query;
       },
@@ -895,6 +911,13 @@ describe("dispatchAiResponse debounce", () => {
     expect(state.property.outreach_dispo).toBe("wrong_number");
     expect(state.property.needs_human_attention).toBe(false);
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(recordLeadEvent).toHaveBeenCalledOnce();
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: PROPERTY_ID,
+      eventType: "dispo_set",
+      actorType: "ai",
+      payload: { from: null, to: "wrong_number" },
+    });
   });
 
   it("low-confidence opt_out still suppresses the phone and marks the property opted out", async () => {
@@ -936,6 +959,13 @@ describe("dispatchAiResponse debounce", () => {
     expect(state.property.outreach_dispo).toBe("opted_out");
     expect(state.property.needs_human_attention).toBe(false);
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(recordLeadEvent).toHaveBeenCalledOnce();
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: PROPERTY_ID,
+      eventType: "dispo_set",
+      actorType: "ai",
+      payload: { from: null, to: "opted_out" },
+    });
   });
 
   it("close_dnc writes a suppressed DNC disposition and does not send", async () => {
@@ -976,6 +1006,13 @@ describe("dispatchAiResponse debounce", () => {
     );
     expect(state.property.outreach_dispo).toBe("dnc");
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(recordLeadEvent).toHaveBeenCalledOnce();
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: PROPERTY_ID,
+      eventType: "dispo_set",
+      actorType: "ai",
+      payload: { from: null, to: "dnc" },
+    });
   });
 
   it("deescalate_close sends the fixed named template without humanizer", async () => {
@@ -1013,6 +1050,13 @@ describe("dispatchAiResponse debounce", () => {
       }),
     );
     expect(state.property.outreach_dispo).toBe("not_interested");
+    expect(recordLeadEvent).toHaveBeenCalledOnce();
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: PROPERTY_ID,
+      eventType: "dispo_set",
+      actorType: "ai",
+      payload: { from: null, to: "not_interested" },
+    });
   });
 
   it("does not clobber a human-only disposition during the final write", async () => {
@@ -1042,6 +1086,7 @@ describe("dispatchAiResponse debounce", () => {
 
     expect(outcome).toEqual({ outcome: "skipped", reason: "already_terminal" });
     expect(state.property.outreach_dispo).toBe("nurture");
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   it("does not clobber booked_appointment during the final write", async () => {
@@ -1075,6 +1120,7 @@ describe("dispatchAiResponse debounce", () => {
 
     expect(outcome).toEqual({ outcome: "skipped", reason: "already_terminal" });
     expect(state.property.outreach_dispo).toBe("booked_appointment");
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   it("a consent outcome (opted_out) still overwrites booked_appointment, same precedence as over nurture/callback_requested", async () => {

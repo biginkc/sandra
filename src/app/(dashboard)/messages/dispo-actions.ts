@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { qualifyProperty } from "@/lib/leads/qualify";
 import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
 import { createClient } from "@/lib/supabase/server";
@@ -63,7 +64,7 @@ export async function setOutreachDispo(
 
   const { data: prop, error: propErr } = await supabase
     .from("properties")
-    .select("id, homeowner_contact_id")
+    .select("id, homeowner_contact_id, outreach_dispo")
     .eq("id", propertyId)
     .maybeSingle();
 
@@ -71,47 +72,132 @@ export async function setOutreachDispo(
     return { ok: false, error: propErr?.message ?? "Property not found" };
   }
 
-  const { error: updateErr } = await supabase
+  const now = new Date();
+  let updateQuery = supabase
     .from("properties")
     .update({
       outreach_dispo: dispo,
       follow_up_at: null,
-      updated_at: new Date().toISOString(),
+      updated_at: now.toISOString(),
     })
     .eq("id", propertyId);
+  updateQuery = prop.outreach_dispo === null
+    ? updateQuery.is("outreach_dispo", null)
+    : updateQuery.eq("outreach_dispo", prop.outreach_dispo);
+  const { error: updateErr, data: updated } = await updateQuery
+    .select("id")
+    .maybeSingle();
 
   if (updateErr) {
     return { ok: false, error: updateErr.message };
+  }
+  if (!updated) {
+    return {
+      ok: false,
+      error: "Disposition changed in another session. Refresh and try again.",
+    };
+  }
+
+  if (prop.outreach_dispo !== dispo) {
+    await recordLeadEvent({
+      propertyId,
+      eventType: LEAD_EVENT_TYPES.DISPO_SET,
+      actorType: "user",
+      actorId: user.id,
+      payload: { from: prop.outreach_dispo, to: dispo },
+    });
   }
 
   // TCPA suppression — fire consent event + flip boolean + pause enrollments.
   if (TRIGGERS_OPT_OUT.has(dispo) && prop.homeowner_contact_id) {
     const contactId = prop.homeowner_contact_id;
-    await recordConsentEvent(supabase, {
-      contactId,
-      channel: "sms",
-      eventType: "opt_out",
-      source: "manual_dispo",
-      sourceDetail: { propertyId, dispo },
-      occurredAt: new Date(),
-    });
-    await supabase
+    const { data: contact, error: contactReadError } = await supabase
       .from("contacts")
-      .update({
-        sms_opted_out: true,
-        sms_opted_out_at: new Date().toISOString(),
-      })
-      .eq("id", contactId);
-    await pauseContactEnrollments(supabase, {
-      contactId,
-      reason: "consent_revoked",
-      permanent: true,
-      actor: { actorType: "user", actorId: user.id },
-    });
+      .select("do_not_contact, sms_opted_out")
+      .eq("id", contactId)
+      .maybeSingle();
+    if (contactReadError || !contact) {
+      reportError(
+        new Error(contactReadError?.message ?? "Contact not found"),
+        {
+          tags: { surface: "manual_dispo_contact_read_after_commit" },
+          extra: { propertyId, contactId, dispo },
+        },
+      );
+    } else if (!contact.do_not_contact && !contact.sms_opted_out) {
+      const { data: claimedContact, error: contactUpdateError } = await supabase
+        .from("contacts")
+        .update({
+          sms_opted_out: true,
+          sms_opted_out_at: now.toISOString(),
+        })
+        .eq("id", contactId)
+        .eq("do_not_contact", false)
+        .eq("sms_opted_out", false)
+        .select("id")
+        .maybeSingle();
+      if (
+        contactUpdateError &&
+        !contactUpdateError.message.includes("DNC_LOCKED")
+      ) {
+        reportError(new Error(contactUpdateError.message), {
+          tags: { surface: "manual_dispo_contact_update_after_commit" },
+          extra: { propertyId, contactId, dispo },
+        });
+      } else if (claimedContact) {
+        try {
+          const consentOutcome = await recordConsentEvent(supabase, {
+            contactId,
+            channel: "sms",
+            eventType: "opt_out",
+            source: "manual_dispo",
+            sourceDetail: { propertyId, dispo },
+            occurredAt: now,
+          });
+          if (consentOutcome.inserted) {
+            await recordLeadEvent({
+              propertyId,
+              eventType: LEAD_EVENT_TYPES.OPTED_OUT,
+              actorType: "user",
+              actorId: user.id,
+              payload: { channel: "sms", trigger: "manual_disposition" },
+              sourceType: "consent_events.opt_out",
+              sourceId: consentOutcome.id,
+            });
+          }
+        } catch (error) {
+          reportError(error, {
+            tags: { surface: "manual_dispo_consent_after_commit" },
+            extra: { propertyId, contactId, dispo },
+          });
+        }
+      }
+    }
+    try {
+      await pauseContactEnrollments(supabase, {
+        contactId,
+        reason: "consent_revoked",
+        permanent: true,
+        actor: { actorType: "user", actorId: user.id },
+      });
+    } catch (error) {
+      reportError(error, {
+        tags: { surface: "manual_dispo_sequence_pause_after_commit" },
+        extra: { propertyId, contactId, dispo },
+      });
+    }
   }
 
-  revalidatePath("/messages");
-  revalidatePath("/properties");
+  for (const path of ["/messages", "/properties"]) {
+    try {
+      revalidatePath(path);
+    } catch (error) {
+      reportError(error, {
+        tags: { surface: "manual_dispo_revalidate_after_commit" },
+        extra: { propertyId, dispo, path },
+      });
+    }
+  }
 
   return { ok: true };
 }
