@@ -974,12 +974,24 @@ describe("SoftphoneProvider coach UI flag", () => {
     await user.click(screen.getByTestId("call-lead-button"));
     await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
 
-    act(() => latestCoachChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "reveal", ts: "t1" } }));
+    act(() =>
+      latestCoachChannel()._broadcastHandler?.({
+        payload: { type: "phase", phaseId: "reveal", ts: "t1", scriptVersion: "1.0.1", matcherVersion: "3" },
+      }),
+    );
     expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute("aria-current", "step");
 
     act(() =>
       latestCoachChannel()._broadcastHandler?.({
-        payload: { type: "transcript", speaker: "seller", text: "hello there", isFinal: true, ts: "t2" },
+        payload: {
+          type: "transcript",
+          speaker: "seller",
+          text: "hello there",
+          isFinal: true,
+          ts: "t2",
+          scriptVersion: "1.0.1",
+          matcherVersion: "3",
+        },
       }),
     );
     expect(screen.getByTestId("coach-transcript")).toHaveTextContent("hello there");

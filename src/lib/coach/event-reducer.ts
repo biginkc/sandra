@@ -114,12 +114,7 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         lastEventAt: action.ts,
         nudges: [
           ...state.nudges,
-          {
-            id: action.noteId ?? `${action.phaseId ?? "note"}-${action.ts}-${state.nudges.length}`,
-            text: action.text,
-            phaseId: action.phaseId ?? null,
-            ts: action.ts,
-          },
+          { id: `${action.phaseId}-${action.ts}-${state.nudges.length}`, text: action.text, phaseId: action.phaseId, ts: action.ts },
         ],
       };
     case "dismiss_objection":

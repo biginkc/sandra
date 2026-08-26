@@ -34,16 +34,14 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "boolean" ? false : typeof value === "number" && Number.isFinite(value);
 }
 
-/** scriptVersion/matcherVersion are optional on every event — the producer
- * is mid-rollout of version tagging, so an event without them still
- * validates. When present, each must be a non-empty string; an invalid
- * (wrong-typed) version tag is dropped rather than treated as absent, so a
- * corrupted version string can't silently disable the mismatch check. */
-function parseVersions(payload: Record<string, unknown>): CoachEventVersions {
-  const versions: CoachEventVersions = {};
-  if (isNonEmptyString(payload.scriptVersion)) versions.scriptVersion = payload.scriptVersion;
-  if (isNonEmptyString(payload.matcherVersion)) versions.matcherVersion = payload.matcherVersion;
-  return versions;
+/** scriptVersion/matcherVersion are required on every wire message, per the
+ * producer's verbatim wire contract (src/coach/wire-contract.ts in the
+ * Jitter repo, WIRE_CONTRACT_VERSION '1.0.0'). An event missing either, or
+ * carrying a wrong-typed/empty value, is malformed — not a legacy
+ * unversioned event to pass through. */
+function parseVersions(payload: Record<string, unknown>): CoachEventVersions | null {
+  if (!isNonEmptyString(payload.scriptVersion) || !isNonEmptyString(payload.matcherVersion)) return null;
+  return { scriptVersion: payload.scriptVersion, matcherVersion: payload.matcherVersion };
 }
 
 /**
@@ -63,6 +61,9 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
     return { ok: false, reason: "unknown_type", rawType };
   }
   const versions = parseVersions(payload);
+  if (!versions) {
+    return { ok: false, reason: "malformed", rawType };
+  }
 
   switch (rawType) {
     case "transcript": {
@@ -145,20 +146,18 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
       break;
     }
     case "coach_note": {
-      // phaseId is optional (a nudge isn't always tied to a specific
-      // phase) — but when present it must be one of our known phases,
-      // same reasoning as the `phase` event: an unrecognized phaseId
-      // passed through unchecked is corruption, not a valid "no phase".
-      const hasPhaseId = payload.phaseId !== undefined;
-      const phaseIdValid = !hasPhaseId || (typeof payload.phaseId === "string" && PHASE_IDS.has(payload.phaseId));
-      if (isNonEmptyString(payload.text) && phaseIdValid && isNonEmptyString(payload.ts)) {
+      if (
+        isNonEmptyString(payload.text) &&
+        typeof payload.phaseId === "string" &&
+        PHASE_IDS.has(payload.phaseId) &&
+        isNonEmptyString(payload.ts)
+      ) {
         return {
           ok: true,
           event: {
             type: "coach_note",
-            ...(isNonEmptyString(payload.noteId) ? { noteId: payload.noteId } : {}),
             text: payload.text,
-            ...(hasPhaseId ? { phaseId: payload.phaseId as CoachPhaseId } : {}),
+            phaseId: payload.phaseId as CoachPhaseId,
             ts: payload.ts,
             ...versions,
           },

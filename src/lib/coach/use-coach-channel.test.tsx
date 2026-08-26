@@ -53,6 +53,9 @@ vi.mock("@/lib/supabase/client", () => ({
 
 import { useCoachChannel } from "./use-coach-channel";
 
+/** Every wire event carries both content versions, always — required. */
+const V = { scriptVersion: "1.0.1", matcherVersion: "3" };
+
 function latestChannel(): MockChannel {
   const channel = channels[channels.length - 1];
   if (!channel) throw new Error("No channel created yet");
@@ -92,7 +95,7 @@ describe("useCoachChannel", () => {
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
     expect(result.current.degraded).toBe(false);
 
-    act(() => latestChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "reveal", ts: "t1" } }));
+    act(() => latestChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "reveal", ts: "t1", ...V } }));
     expect(result.current.state.currentPhaseId).toBe("reveal");
     expect(result.current.degraded).toBe(false);
   });
@@ -121,7 +124,7 @@ describe("useCoachChannel", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
-    act(() => latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 1, ts: "t1" } }));
+    act(() => latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 1, ts: "t1", ...V } }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
@@ -203,7 +206,7 @@ describe("useCoachChannel", () => {
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
     expect(result.current.reconnectGap).toBe(true);
 
-    act(() => latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 2, ts: "t1" } }));
+    act(() => latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 2, ts: "t1", ...V } }));
     expect(result.current.reconnectGap).toBe(false);
   });
 
@@ -224,7 +227,7 @@ describe("useCoachChannel", () => {
     await flush();
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
     act(() =>
-      latestChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "not_a_real_phase", ts: "t1" } }),
+      latestChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "not_a_real_phase", ts: "t1", ...V } }),
     );
     expect(result.current.malformedEventCount).toBe(1);
     expect(result.current.state.currentPhaseId).toBe("introduction");
@@ -248,7 +251,13 @@ describe("useCoachChannel", () => {
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
     act(() =>
       latestChannel()._broadcastHandler?.({
-        payload: { type: "coach_note", text: "Never open with 'How are you doing today?'", phaseId: "introduction", ts: "t1" },
+        payload: {
+          type: "coach_note",
+          text: "Never open with 'How are you doing today?'",
+          phaseId: "introduction",
+          ts: "t1",
+          ...V,
+        },
       }),
     );
     expect(result.current.state.nudges).toHaveLength(1);
@@ -260,7 +269,9 @@ describe("useCoachChannel", () => {
     await flush();
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
     act(() =>
-      latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 1, ts: "t1", scriptVersion: "1.0.1" } }),
+      latestChannel()._broadcastHandler?.({
+        payload: { type: "counter", probeCount: 1, ts: "t1", ...V },
+      }),
     );
     expect(result.current.scriptOutOfSync).toBeNull();
   });
@@ -270,7 +281,9 @@ describe("useCoachChannel", () => {
     await flush();
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
     act(() =>
-      latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 1, ts: "t1", scriptVersion: "0.9.0" } }),
+      latestChannel()._broadcastHandler?.({
+        payload: { type: "counter", probeCount: 1, ts: "t1", ...V, scriptVersion: "0.9.0" },
+      }),
     );
     expect(result.current.scriptOutOfSync).toBe("0.9.0");
   });
@@ -280,24 +293,37 @@ describe("useCoachChannel", () => {
     await flush();
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
     act(() =>
-      latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 1, ts: "t1", scriptVersion: "0.9.0" } }),
+      latestChannel()._broadcastHandler?.({
+        payload: { type: "counter", probeCount: 1, ts: "t1", ...V, scriptVersion: "0.9.0" },
+      }),
     );
     expect(result.current.scriptOutOfSync).toBe("0.9.0");
     act(() =>
-      latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 2, ts: "t2", scriptVersion: "1.0.1" } }),
+      latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 2, ts: "t2", ...V } }),
     );
     expect(result.current.scriptOutOfSync).toBeNull();
   });
 
-  it("scriptOutOfSync is left unchanged by an event that carries no scriptVersion at all", async () => {
+  it("an event missing scriptVersion is dropped as malformed and leaves scriptOutOfSync unchanged", async () => {
     const { result } = renderHook(() => useCoachChannel("call-version-absent"));
     await flush();
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
     act(() =>
-      latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 1, ts: "t1", scriptVersion: "0.9.0" } }),
+      latestChannel()._broadcastHandler?.({
+        payload: { type: "counter", probeCount: 1, ts: "t1", ...V, scriptVersion: "0.9.0" },
+      }),
     );
     expect(result.current.scriptOutOfSync).toBe("0.9.0");
-    act(() => latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 2, ts: "t2" } }));
+
+    // Missing scriptVersion entirely — per the wire contract this is a
+    // malformed event, not a legacy unversioned one. It's dropped whole,
+    // so scriptOutOfSync (and everything else) is left exactly as it was.
+    act(() =>
+      latestChannel()._broadcastHandler?.({
+        payload: { type: "counter", probeCount: 2, ts: "t2", matcherVersion: V.matcherVersion },
+      }),
+    );
     expect(result.current.scriptOutOfSync).toBe("0.9.0");
+    expect(result.current.malformedEventCount).toBe(1);
   });
 });

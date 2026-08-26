@@ -58,8 +58,13 @@ function latestChannel(): MockChannel {
   return channel;
 }
 
-function broadcast(payload: unknown) {
-  act(() => latestChannel()._broadcastHandler?.({ payload }));
+/** Every wire event carries both content versions, always — required. Tests
+ * that care about a specific version value pass it explicitly and it wins
+ * over this default. */
+const DEFAULT_VERSIONS = { scriptVersion: "1.0.1", matcherVersion: "3" };
+
+function broadcast(payload: Record<string, unknown>) {
+  act(() => latestChannel()._broadcastHandler?.({ payload: { ...DEFAULT_VERSIONS, ...payload } }));
 }
 
 const sampleContext: CoachCallContext = {

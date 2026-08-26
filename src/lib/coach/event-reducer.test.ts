@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import { coachReducer, initialCoachState } from "./event-reducer";
 import type { CoachState } from "./types";
 
+/** Every wire event carries both content versions, always — required. */
+const V = { scriptVersion: "1.0.1", matcherVersion: "3" };
+
 describe("coachReducer — transcript", () => {
   it("appends a final line for a fresh speaker turn", () => {
     const state = coachReducer(initialCoachState(), {
@@ -11,6 +14,7 @@ describe("coachReducer — transcript", () => {
       text: "Hey Jane, this is Alex.",
       isFinal: true,
       ts: "2026-08-26T10:00:00Z",
+      ...V,
     });
     expect(state.transcript).toHaveLength(1);
     expect(state.transcript[0]).toMatchObject({ speaker: "rep", text: "Hey Jane, this is Alex.", isFinal: true });
@@ -19,8 +23,15 @@ describe("coachReducer — transcript", () => {
 
   it("updates the trailing interim line in place instead of stacking duplicates", () => {
     let state = initialCoachState();
-    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "yeah I", isFinal: false, ts: "t1" });
-    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "yeah I guess", isFinal: false, ts: "t2" });
+    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "yeah I", isFinal: false, ts: "t1", ...V });
+    state = coachReducer(state, {
+      type: "transcript",
+      speaker: "seller",
+      text: "yeah I guess",
+      isFinal: false,
+      ts: "t2",
+      ...V,
+    });
     expect(state.transcript).toHaveLength(1);
     expect(state.transcript[0].text).toBe("yeah I guess");
     expect(state.transcript[0].isFinal).toBe(false);
@@ -31,6 +42,7 @@ describe("coachReducer — transcript", () => {
       text: "yeah I guess so",
       isFinal: true,
       ts: "t3",
+      ...V,
     });
     expect(state.transcript).toHaveLength(1);
     expect(state.transcript[0]).toMatchObject({ text: "yeah I guess so", isFinal: true });
@@ -38,15 +50,15 @@ describe("coachReducer — transcript", () => {
 
   it("starts a new line once a final has landed, even for the same speaker", () => {
     let state = initialCoachState();
-    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "first", isFinal: true, ts: "t1" });
-    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "second", isFinal: true, ts: "t2" });
+    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "first", isFinal: true, ts: "t1", ...V });
+    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "second", isFinal: true, ts: "t2", ...V });
     expect(state.transcript).toHaveLength(2);
   });
 
   it("does not interleave a new speaker's interim line into the previous speaker's turn", () => {
     let state = initialCoachState();
-    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "hello", isFinal: false, ts: "t1" });
-    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "hi", isFinal: false, ts: "t2" });
+    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "hello", isFinal: false, ts: "t1", ...V });
+    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "hi", isFinal: false, ts: "t2", ...V });
     expect(state.transcript).toHaveLength(2);
     expect(state.transcript.map((line) => line.speaker)).toEqual(["rep", "seller"]);
   });
@@ -55,7 +67,7 @@ describe("coachReducer — transcript", () => {
 describe("coachReducer — phase advance", () => {
   it("moves the current phase and clears any manual override", () => {
     let state: CoachState = { ...initialCoachState(), overriddenPhaseId: "close" };
-    state = coachReducer(state, { type: "phase", phaseId: "reveal", ts: "t1" });
+    state = coachReducer(state, { type: "phase", phaseId: "reveal", ts: "t1", ...V });
     expect(state.currentPhaseId).toBe("reveal");
     expect(state.overriddenPhaseId).toBeNull();
   });
@@ -67,6 +79,7 @@ describe("coachReducer — objection card lifecycle", () => {
       type: "objection",
       objectionId: "price_too_low",
       ts: "t1",
+      ...V,
     });
     expect(state.objectionCards).toHaveLength(1);
     const cardId = state.objectionCards[0].id;
@@ -76,8 +89,8 @@ describe("coachReducer — objection card lifecycle", () => {
   });
 
   it("keeps distinct instances for the same objection fired twice", () => {
-    let state = coachReducer(initialCoachState(), { type: "objection", objectionId: "not_in_rush", ts: "t1" });
-    state = coachReducer(state, { type: "objection", objectionId: "not_in_rush", ts: "t2" });
+    let state = coachReducer(initialCoachState(), { type: "objection", objectionId: "not_in_rush", ts: "t1", ...V });
+    state = coachReducer(state, { type: "objection", objectionId: "not_in_rush", ts: "t2", ...V });
     expect(state.objectionCards).toHaveLength(2);
     expect(state.objectionCards[0].id).not.toBe(state.objectionCards[1].id);
   });
@@ -85,14 +98,14 @@ describe("coachReducer — objection card lifecycle", () => {
 
 describe("coachReducer — counters, gates, timers", () => {
   it("tracks the probe counter", () => {
-    const state = coachReducer(initialCoachState(), { type: "counter", probeCount: 4, ts: "t1" });
+    const state = coachReducer(initialCoachState(), { type: "counter", probeCount: 4, ts: "t1", ...V });
     expect(state.probeCount).toBe(4);
   });
 
   it("tracks gate clearance by id", () => {
-    let state = coachReducer(initialCoachState(), { type: "gate", gateId: "no_concerns", cleared: false, ts: "t1" });
+    let state = coachReducer(initialCoachState(), { type: "gate", gateId: "no_concerns", cleared: false, ts: "t1", ...V });
     expect(state.gates.no_concerns).toBe(false);
-    state = coachReducer(state, { type: "gate", gateId: "no_concerns", cleared: true, ts: "t2" });
+    state = coachReducer(state, { type: "gate", gateId: "no_concerns", cleared: true, ts: "t2", ...V });
     expect(state.gates.no_concerns).toBe(true);
   });
 
@@ -103,6 +116,7 @@ describe("coachReducer — counters, gates, timers", () => {
       startedAt: "t1",
       durationS: 180,
       ts: "t1",
+      ...V,
     });
     expect(state.holdTimer).toEqual({ timerId: "hold_timer", startedAt: "t1", durationS: 180 });
   });
@@ -154,6 +168,7 @@ describe("coachReducer — coach_note nudges", () => {
       text: "Say their name twice in the first line.",
       phaseId: "introduction",
       ts: "t1",
+      ...V,
     });
     expect(state.nudges).toHaveLength(1);
     expect(state.nudges[0]).toMatchObject({ text: "Say their name twice in the first line.", phaseId: "introduction" });
@@ -166,33 +181,18 @@ describe("coachReducer — coach_note nudges", () => {
       text: "Pain word — go deeper.",
       phaseId: "reveal",
       ts: "t1",
+      ...V,
     });
-    state = coachReducer(state, { type: "coach_note", text: "Pain word — go deeper.", phaseId: "reveal", ts: "t2" });
+    state = coachReducer(state, { type: "coach_note", text: "Pain word — go deeper.", phaseId: "reveal", ts: "t2", ...V });
     expect(state.nudges).toHaveLength(2);
     expect(state.nudges[0].id).not.toBe(state.nudges[1].id);
   });
 
   it("removes a nudge on dismiss_nudge without touching others", () => {
-    let state = coachReducer(initialCoachState(), { type: "coach_note", text: "A", phaseId: "introduction", ts: "t1" });
-    state = coachReducer(state, { type: "coach_note", text: "B", phaseId: "introduction", ts: "t2" });
+    let state = coachReducer(initialCoachState(), { type: "coach_note", text: "A", phaseId: "introduction", ts: "t1", ...V });
+    state = coachReducer(state, { type: "coach_note", text: "B", phaseId: "introduction", ts: "t2", ...V });
     const [first, second] = state.nudges;
     state = coachReducer(state, { type: "dismiss_nudge", nudgeId: first.id });
     expect(state.nudges).toEqual([second]);
-  });
-
-  it("uses the producer's noteId as the nudge id when given", () => {
-    const state = coachReducer(initialCoachState(), {
-      type: "coach_note",
-      noteId: "note-42",
-      text: "Pain word — go deeper.",
-      phaseId: "reveal",
-      ts: "t1",
-    });
-    expect(state.nudges[0].id).toBe("note-42");
-  });
-
-  it("stores a null phaseId when the event doesn't carry one — not every nudge is phase-scoped", () => {
-    const state = coachReducer(initialCoachState(), { type: "coach_note", text: "Pain word — go deeper.", ts: "t1" });
-    expect(state.nudges[0].phaseId).toBeNull();
   });
 });

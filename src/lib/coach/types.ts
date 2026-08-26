@@ -43,21 +43,22 @@ export const COACH_PHASE_ORDER: readonly CoachPhaseId[] = [
 ];
 
 /**
- * Every event carries the producer's content versions, so the client can
- * tell when it's coaching from a stale/mismatched script rather than
- * silently rendering the wrong lines. `scriptVersion` is compared against
- * this file's loaded script (CLOSR_SCRIPT.version in script-block.ts) —
- * a mismatch surfaces a persistent "coach out of sync" banner that clears
+ * Every wire message carries both content versions, always (confirmed
+ * against the producer's own wire-contract artifact,
+ * src/coach/wire-contract.ts in the Jitter repo, WIRE_CONTRACT_VERSION
+ * '1.0.0') — required, not optional. An event missing either is malformed.
+ * `scriptVersion` is compared against this file's loaded script
+ * (CLOSR_SCRIPT.version in script-block.ts, currently "1.0.1") — a
+ * mismatch surfaces a persistent "coach out of sync" banner that clears
  * itself the moment a later event reports a matching version.
- * `matcherVersion` is captured/tracked but not gated on client-side: this
- * app has no separately-versioned "matcher" of its own to diff against —
- * display and match content ship together in the same script file/version.
- * Both are optional so events from a producer mid-rollout of version
- * tagging still validate.
+ * `matcherVersion` is captured/tracked but not gated on client-side: it's
+ * the follower's independently-versioned matching-logic constant
+ * (MATCHER_VERSION in follower.ts), not something this app has a
+ * corresponding value to diff against.
  */
 export type CoachEventVersions = {
-  scriptVersion?: string;
-  matcherVersion?: string;
+  scriptVersion: string;
+  matcherVersion: string;
 };
 
 export type CoachTranscriptEvent = CoachEventVersions & {
@@ -106,15 +107,15 @@ export type CoachTimerEvent = CoachEventVersions & {
  * pain-word prompts (the same content that lives in this script's
  * coach_notes, surfaced live instead of only pre-rendered). Rendered as a
  * transient nudge card, lighter than an objection card (no three-beat
- * layout) and shorter-lived (~20s vs 45s). `noteId` is optional — when the
- * producer sends one it's used as the nudge's stable id, otherwise one is
- * generated. `phaseId` is optional too: a nudge isn't always tied to a
- * specific phase (e.g. a pain-word prompt can fire mid-phase). */
+ * layout) and shorter-lived (~20s vs 45s). Exact shape per the producer's
+ * verbatim wire contract (src/coach/wire-contract.ts, CoachWireMessage) —
+ * `phaseId` is required and there is no `noteId` field. (An earlier
+ * instruction guessed the opposite — optional phaseId + a noteId field —
+ * before the real contract landed; this matches the actual wire type.) */
 export type CoachNoteEvent = CoachEventVersions & {
   type: "coach_note";
-  noteId?: string;
   text: string;
-  phaseId?: CoachPhaseId;
+  phaseId: CoachPhaseId;
   ts: string;
 };
 
@@ -206,11 +207,11 @@ export type CoachHoldTimer = {
 };
 
 export type CoachNudge = {
-  /** Instance id — the producer's noteId when given, otherwise generated.
-   * Unique per occurrence, even for a repeated nudge. */
+  /** Instance id — generated (the wire contract has no id field on
+   * coach_note). Unique per occurrence, even for a repeated nudge. */
   id: string;
   text: string;
-  phaseId: CoachPhaseId | null;
+  phaseId: CoachPhaseId;
   ts: string;
 };
 

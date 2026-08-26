@@ -36,9 +36,9 @@ const RESUBSCRIBE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
  * acknowledged or once fresh events prove the feed is current.
  * `scriptOutOfSync` is the producer's declared scriptVersion whenever it
  * differs from this app's loaded script (CLOSR_SCRIPT.version) — reset to
- * null the moment a later event reports a matching version. Absent from
- * an event entirely (producer mid-rollout), the last known value is left
- * unchanged rather than guessed at.
+ * null the moment a later event reports a matching version. Every valid
+ * event carries scriptVersion (required by the wire contract), so this is
+ * checked on every dispatch, not conditionally.
  */
 export function useCoachChannel(callId: string | null, startingPhaseId: CoachPhaseId = "introduction") {
   const [state, dispatch] = useReducer(coachReducer, startingPhaseId, initialCoachState);
@@ -115,9 +115,7 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
           // A fresh, valid event is the best evidence we have that the feed
           // is caught up — clear the gap flag whether or not it was set.
           setReconnectGap(false);
-          if (result.event.scriptVersion) {
-            setScriptOutOfSync(result.event.scriptVersion === CLOSR_SCRIPT.version ? null : result.event.scriptVersion);
-          }
+          setScriptOutOfSync(result.event.scriptVersion === CLOSR_SCRIPT.version ? null : result.event.scriptVersion);
           dispatch(result.event);
         })
         .subscribe((status) => {
