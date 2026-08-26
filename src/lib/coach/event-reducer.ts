@@ -1,11 +1,14 @@
-import type { CoachEvent, CoachPhaseId, CoachState, CoachTranscriptEvent, CoachTranscriptLine } from "./types";
+import { EMPTY_ENTRY_FIELDS } from "./token-resolver";
+import type { CoachEntryToken, CoachEvent, CoachPhaseId, CoachState, CoachTranscriptEvent, CoachTranscriptLine } from "./types";
 
 /** Local, client-only actions layered on top of server CoachEvents — never
- * broadcast back to the server, only logged (manual override) or timed out
- * (card dismissal) by the component driving the reducer. */
+ * broadcast back to the server. Card dismissal is owned per-card by the
+ * ObjectionCard component itself (its own 45s timer or a tap), not driven
+ * from here. */
 export type CoachLocalAction =
   | { type: "dismiss_objection"; cardId: string }
-  | { type: "override_phase"; phaseId: CoachPhaseId };
+  | { type: "override_phase"; phaseId: CoachPhaseId }
+  | { type: "set_entry_field"; field: CoachEntryToken; value: string };
 
 export type CoachReducerAction = CoachEvent | CoachLocalAction;
 
@@ -23,6 +26,7 @@ export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"
     gates: {},
     holdTimer: null,
     lastEventAt: null,
+    entryFields: { ...EMPTY_ENTRY_FIELDS },
   };
 }
 
@@ -110,6 +114,11 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
       return {
         ...state,
         overriddenPhaseId: action.phaseId,
+      };
+    case "set_entry_field":
+      return {
+        ...state,
+        entryFields: { ...state.entryFields, [action.field]: action.value.trim() || null },
       };
     default:
       return state;

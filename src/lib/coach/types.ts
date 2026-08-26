@@ -84,9 +84,21 @@ export const COACH_TOKENS = [
   "motivation",
   "rep_phone",
   "file_number",
+  "cold_caller_name",
+  "closing_date",
+  "offer_price",
+  "net_to_seller",
 ] as const;
 
 export type CoachToken = (typeof COACH_TOKENS)[number];
+
+/** The three deal-panel tokens the rep types in live during the call —
+ * never known at dial time, so they can't come from CoachCallContext. */
+export const COACH_ENTRY_TOKENS = ["closing_date", "offer_price", "net_to_seller"] as const;
+
+export type CoachEntryToken = (typeof COACH_ENTRY_TOKENS)[number];
+
+export type CoachOccupancy = "owner_occupied" | "tenant_occupied" | "vacant" | "unknown";
 
 /** Raw, unresolved facts gathered at dial time. Any field may be missing —
  * the resolver renders a placeholder chip instead of leaving text blank. */
@@ -99,11 +111,22 @@ export type CoachCallContext = {
   motivation: string | null;
   leadId: string | null;
   sellerPhoneE164: string | null;
+  /** Assistant/cold-caller on the lead, if recorded — Sandra has no such
+   * field today, so this is always null until one exists. */
+  coldCallerName: string | null;
+  /** Drives the Introduction phase's Opener branch auto-selection. */
+  leadSource: string | null;
+  /** Drives the Reveal phase's Entry branch auto-selection. */
+  occupancy: CoachOccupancy | null;
 };
 
 export type ResolvedToken = { value: string; isPlaceholder: boolean };
 
 export type ResolvedTokens = Record<CoachToken, ResolvedToken>;
+
+/** Rep-entered deal-panel values, keyed by entry token. Null/unset renders
+ * as an editable placeholder chip in the script panel. */
+export type CoachEntryFields = Record<CoachEntryToken, string | null>;
 
 // ---- Reducer state ----
 
@@ -143,4 +166,6 @@ export type CoachState = {
   gates: Record<string, boolean>;
   holdTimer: CoachHoldTimer | null;
   lastEventAt: string | null;
+  /** Rep-entered deal-panel values (closing_date/offer_price/net_to_seller). */
+  entryFields: CoachEntryFields;
 };

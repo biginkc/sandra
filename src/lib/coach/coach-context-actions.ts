@@ -3,14 +3,29 @@
 import type { User } from "@supabase/supabase-js";
 
 import { createClient } from "@/lib/supabase/server";
-import type { CoachCallContext } from "./types";
+import type { CoachCallContext, CoachOccupancy } from "./types";
 
 type CoachLeadRow = {
   address: string | null;
   motivation_level: string | null;
+  source: string | null;
+  is_vacant: boolean | null;
+  absentee_flag: boolean | null;
   county: { name: string } | null;
   homeowner: { first_name: string | null; last_name: string | null; entity_name: string | null } | null;
 };
+
+/** Drives the Reveal phase's Entry branch auto-selection. Sandra has no
+ * explicit "owner_occupied" flag — it's inferred from is_vacant/absentee_flag,
+ * matching how the rest of the app treats those columns (see prospects
+ * filters). Unknown when neither is set. */
+function occupancy(lead: CoachLeadRow | null): CoachOccupancy | null {
+  if (!lead) return null;
+  if (lead.is_vacant === true) return "vacant";
+  if (lead.absentee_flag === false) return "owner_occupied";
+  if (lead.absentee_flag === true) return "tenant_occupied";
+  return "unknown";
+}
 
 /** Title-cases the auth email's local part ("jane.doe@" -> "Jane Doe") — the
  * fallback used until a rep sets a real display_name. */
@@ -65,7 +80,7 @@ export async function loadCoachCallContext(input: {
       ? supabase
           .from("properties")
           .select(
-            "address, motivation_level, county:counties(name), homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)",
+            "address, motivation_level, source, is_vacant, absentee_flag, county:counties(name), homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)",
           )
           .eq("id", input.propertyId)
           .maybeSingle()
@@ -83,5 +98,10 @@ export async function loadCoachCallContext(input: {
     motivation: lead?.motivation_level ?? null,
     leadId: input.propertyId,
     sellerPhoneE164: input.sellerPhoneE164,
+    // No cold-caller field exists in Sandra's schema yet — always a
+    // placeholder chip until one is added.
+    coldCallerName: null,
+    leadSource: lead?.source ?? null,
+    occupancy: occupancy(lead),
   };
 }

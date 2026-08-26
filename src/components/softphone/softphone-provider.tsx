@@ -32,6 +32,7 @@ import {
 import type { JitterCallerId } from "@/lib/dialer/jitter-contract";
 import { maskPhone } from "@/lib/phone-format";
 import { CoachLiveView } from "@/components/coach/coach-live-view";
+import { PhoneKeypad } from "@/components/softphone/phone-keypad";
 import { isCoachUiEnabled } from "@/lib/coach/flags";
 import { playDtmfTone } from "@/lib/dialer/dtmf-tone";
 import { type CallHandle, type CallTransport, type DtmfDigit } from "@/lib/dialer/transport";
@@ -75,13 +76,6 @@ export function useOptionalSoftphone(): SoftphoneContextValue | null {
 }
 
 type Props = { children: ReactNode };
-
-const KEYPAD = [
-  ["1", ""], ["2", "ABC"], ["3", "DEF"],
-  ["4", "GHI"], ["5", "JKL"], ["6", "MNO"],
-  ["7", "PQRS"], ["8", "TUV"], ["9", "WXYZ"],
-  ["*", ""], ["0", "+"], ["#", ""],
-] as const;
 
 const TEARDOWN_WARNING = "Jitter could not confirm that the call ended. Do not start another call yet; automatic cleanup is still pending.";
 const CALLER_ID_STORAGE_KEY = "sandra.softphone.caller-id.v1";
@@ -653,10 +647,12 @@ export function SoftphoneProvider({ children }: Props) {
             sellerPhoneE164={target?.phoneE164 ?? null}
             repPhoneE164={selectedCallerId}
             callName={callName}
+            callStatus={callStatus}
             seconds={seconds}
             muted={muted}
             held={held}
             holdPending={holdPending}
+            onDigit={sendLiveDigit}
             onMute={() => { setMuted((value) => !value); transportRef.current?.mute(!muted); }}
             onHold={() => { void toggleHold(); }}
             onHangup={hangup}
@@ -698,7 +694,7 @@ export function SoftphoneProvider({ children }: Props) {
             ) : phone === "preparing" ? (
               <PreparingView target={target} />
             ) : isOnCall ? (
-              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} holdPending={holdPending} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { setMuted((value) => !value); transportRef.current?.mute(!muted); }} onHold={() => { void toggleHold(); }} onHangup={hangup} />
+              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} holdPending={holdPending} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { setMuted((value) => !value); transportRef.current?.mute(!muted); }} onHold={() => { void toggleHold(); }} onHangup={hangup} coachAvailable={coachUiEnabled} onReopenCoach={() => setCoachCollapsed(false)} />
             ) : (
               <WrapView target={target} finalSeconds={finalSeconds} notes={notes} setNotes={setNotes} callbackOpen={callbackOpen} setCallbackOpen={setCallbackOpen} callbackTime={callbackTime} setCallbackTime={setCallbackTime} pending={pending} error={error} teardownUnconfirmed={teardownUnconfirmed} onRetryTeardown={() => { void retryTeardown(); }} onDisposition={(disposition) => {
                 const config = SOFTPHONE_DISPOSITIONS.find((item) => item.value === disposition);
@@ -761,11 +757,7 @@ function PreparingView({ target }: { target: SoftphoneTarget | null }) {
   return <div data-testid="call-preparing" className="p-8 text-center"><span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-blue-800">Preparing call</span><div className="mt-4 text-lg font-extrabold">{target?.name || "Connecting…"}</div><div className="mt-1 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : "Checking call details and microphone…"}</div></div>;
 }
 
-function PhoneKeypad({ onDigit, disabled = false, disabledDigits = [] }: { onDigit: (digit: DtmfDigit) => void; disabled?: boolean; disabledDigits?: DtmfDigit[] }) {
-  return <div data-testid="phone-keypad" className="mt-3 grid grid-cols-3 gap-1.5">{KEYPAD.map(([digit, letters]) => { const key = digit as DtmfDigit; const keyDisabled = disabled || disabledDigits.includes(key); return <button type="button" disabled={keyDisabled} key={digit} aria-label={`Keypad ${digit}`} onClick={() => onDigit(key)} className="flex flex-col items-center rounded-[10px] border border-[#e5e1df] bg-white px-0 py-2 hover:border-[#d6d1ce] hover:bg-[#f5f4f2] disabled:cursor-not-allowed disabled:opacity-35"><span className="text-[17px] font-bold leading-none">{digit}</span><span className="h-2.5 text-[8px] font-bold tracking-[0.12em] text-[#a8a29e]">{letters}</span></button>; })}</div>;
-}
-
-function LiveView({ target, callName, callStatus, seconds, muted, held, holdPending, keypadOpen, onToggleKeypad, onDigit, onMute, onHold, onHangup }: { target: SoftphoneTarget | null; callName: string; callStatus: string | null; seconds: number; muted: boolean; held: boolean; holdPending: boolean; keypadOpen: boolean; onToggleKeypad: () => void; onDigit: (digit: DtmfDigit) => void; onMute: () => void; onHold: () => void; onHangup: () => void }) {
+function LiveView({ target, callName, callStatus, seconds, muted, held, holdPending, keypadOpen, onToggleKeypad, onDigit, onMute, onHold, onHangup, coachAvailable, onReopenCoach }: { target: SoftphoneTarget | null; callName: string; callStatus: string | null; seconds: number; muted: boolean; held: boolean; holdPending: boolean; keypadOpen: boolean; onToggleKeypad: () => void; onDigit: (digit: DtmfDigit) => void; onMute: () => void; onHold: () => void; onHangup: () => void; coachAvailable: boolean; onReopenCoach: () => void }) {
   useEffect(() => {
     if (!keypadOpen || held || callStatus !== "live") return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -777,7 +769,7 @@ function LiveView({ target, callName, callStatus, seconds, muted, held, holdPend
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [callStatus, held, keypadOpen, onDigit]);
 
-  return <div className="p-5 pb-4 text-center"><span data-testid="call-live-pill" className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-emerald-800"><span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />{holdPending ? "Updating hold…" : held ? "On hold" : callStatus === "connecting" ? "Connecting" : callStatus === "ringing" ? "Ringing" : "Live · browser audio"}</span><div className="mt-3.5 text-lg font-extrabold">{callName}</div><div className="mt-0.5 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : ""}</div><div data-testid="call-timer" className={`my-4.5 font-mono text-[34px] font-bold leading-none ${held ? "text-amber-700" : "text-emerald-600"}`}>{timerText(seconds)}</div>{keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={held || holdPending || callStatus !== "live"} /> : null}<div className="mt-3 flex justify-center gap-2"><button type="button" aria-pressed={muted} data-testid="call-mute" onClick={onMute} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${muted ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{muted ? "Unmute" : "Mute"}</button><button type="button" aria-expanded={keypadOpen} data-testid="call-keypad" disabled={held || holdPending || callStatus !== "live"} onClick={onToggleKeypad} className="min-w-16 rounded-[9px] border border-[#e5e1df] bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Keypad</button><button type="button" aria-pressed={held} data-testid="call-hold" disabled={holdPending} onClick={onHold} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold disabled:opacity-40 ${held ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{held ? "Resume" : "Hold"}</button><button type="button" data-testid="call-hangup" onClick={onHangup} className="rounded-[9px] border-0 bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-700">Hang up</button></div></div>;
+  return <div className="p-5 pb-4 text-center">{coachAvailable ? <button type="button" data-testid="reopen-coach" onClick={onReopenCoach} className="mb-3 inline-flex items-center gap-1 rounded-full border border-[#d6d1ce] bg-white px-2.5 py-1 text-[11px] font-bold text-[#57534e] hover:bg-[#f5f4f2]">Open live coach</button> : null}<span data-testid="call-live-pill" className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-emerald-800"><span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />{holdPending ? "Updating hold…" : held ? "On hold" : callStatus === "connecting" ? "Connecting" : callStatus === "ringing" ? "Ringing" : "Live · browser audio"}</span><div className="mt-3.5 text-lg font-extrabold">{callName}</div><div className="mt-0.5 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : ""}</div><div data-testid="call-timer" className={`my-4.5 font-mono text-[34px] font-bold leading-none ${held ? "text-amber-700" : "text-emerald-600"}`}>{timerText(seconds)}</div>{keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={held || holdPending || callStatus !== "live"} /> : null}<div className="mt-3 flex justify-center gap-2"><button type="button" aria-pressed={muted} data-testid="call-mute" onClick={onMute} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold ${muted ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{muted ? "Unmute" : "Mute"}</button><button type="button" aria-expanded={keypadOpen} data-testid="call-keypad" disabled={held || holdPending || callStatus !== "live"} onClick={onToggleKeypad} className="min-w-16 rounded-[9px] border border-[#e5e1df] bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Keypad</button><button type="button" aria-pressed={held} data-testid="call-hold" disabled={holdPending} onClick={onHold} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold disabled:opacity-40 ${held ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{held ? "Resume" : "Hold"}</button><button type="button" data-testid="call-hangup" onClick={onHangup} className="rounded-[9px] border-0 bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-700">Hang up</button></div></div>;
 }
 
 function WrapView({ target, finalSeconds, notes, setNotes, callbackOpen, setCallbackOpen, callbackTime, setCallbackTime, pending, error, teardownUnconfirmed, onRetryTeardown, onDisposition, onCallback, onCustomCallback }: { target: SoftphoneTarget | null; finalSeconds: number; notes: string; setNotes: (value: string) => void; callbackOpen: boolean; setCallbackOpen: (value: boolean) => void; callbackTime: string; setCallbackTime: (value: string) => void; pending: boolean; error: string | null; teardownUnconfirmed: boolean; onRetryTeardown: () => void; onDisposition: (disposition: SoftphoneDisposition) => void; onCallback: (kind: "today_pm" | "tomorrow_am") => void; onCustomCallback: () => void }) {

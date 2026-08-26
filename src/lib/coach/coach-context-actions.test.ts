@@ -9,6 +9,9 @@ import { loadCoachCallContext } from "./coach-context-actions";
 const lead = {
   address: "123 Main St",
   motivation_level: "Job relocation",
+  source: "cold_call",
+  is_vacant: false,
+  absentee_flag: false,
   county: { name: "Jackson" },
   homeowner: { first_name: "Jane", last_name: "Doe", entity_name: null },
 };
@@ -81,5 +84,53 @@ describe("loadCoachCallContext — lead fields", () => {
     const context = await loadCoachCallContext({ propertyId: null, sellerPhoneE164: null, repPhoneE164: null });
     expect(context.propertyAddress).toBeNull();
     expect(context.sellerName).toBeNull();
+  });
+
+  it("always returns coldCallerName null — no such field exists in Sandra's schema yet", async () => {
+    mockSupabase({ email: "alex.rep@bmhgroupkc.com" });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.coldCallerName).toBeNull();
+  });
+
+  it("passes through the property's source as leadSource for opener branch auto-select", async () => {
+    mockSupabase({ email: "alex.rep@bmhgroupkc.com" });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.leadSource).toBe("cold_call");
+  });
+});
+
+describe("loadCoachCallContext — occupancy derivation", () => {
+  beforeEach(() => {
+    createClient.mockReset();
+  });
+
+  it("is vacant when is_vacant is true, regardless of absentee_flag", async () => {
+    mockSupabase({ email: "a@b.com" }, { ...lead, is_vacant: true, absentee_flag: true });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.occupancy).toBe("vacant");
+  });
+
+  it("is owner_occupied when not vacant and absentee_flag is false", async () => {
+    mockSupabase({ email: "a@b.com" }, { ...lead, is_vacant: false, absentee_flag: false });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.occupancy).toBe("owner_occupied");
+  });
+
+  it("is tenant_occupied when not vacant and absentee_flag is true", async () => {
+    mockSupabase({ email: "a@b.com" }, { ...lead, is_vacant: false, absentee_flag: true });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.occupancy).toBe("tenant_occupied");
+  });
+
+  it("is unknown when neither is_vacant nor absentee_flag is set", async () => {
+    mockSupabase({ email: "a@b.com" }, { ...lead, is_vacant: null, absentee_flag: null });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.occupancy).toBe("unknown");
+  });
+
+  it("is null when there's no lead at all", async () => {
+    mockSupabase({ email: "a@b.com" }, null);
+    const context = await loadCoachCallContext({ propertyId: null, sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.occupancy).toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveCoachTokens, resolveFileNumber, resolveScriptText } from "./token-resolver";
-import type { CoachCallContext } from "./types";
+import { resolveCoachTokens, resolveDisplayText, resolveFileNumber, resolveScriptText } from "./token-resolver";
+import type { CoachCallContext, CoachEntryFields } from "./types";
 
 const baseContext: CoachCallContext = {
   sellerName: "Jane Homeowner",
@@ -12,6 +12,15 @@ const baseContext: CoachCallContext = {
   motivation: "Job relocation",
   leadId: "abcd1234-ef56-7890-abcd-ef1234567890",
   sellerPhoneE164: "+18165559876",
+  coldCallerName: "Rose",
+  leadSource: "cold_call",
+  occupancy: "owner_occupied",
+};
+
+const entryFields: CoachEntryFields = {
+  closing_date: "Sept 15",
+  offer_price: "$210,000",
+  net_to_seller: "$180,000",
 };
 
 describe("resolveCoachTokens", () => {
@@ -22,12 +31,50 @@ describe("resolveCoachTokens", () => {
     expect(tokens.rep_name).toEqual({ value: "Alex Rep", isPlaceholder: false });
     expect(tokens.rep_phone).toEqual({ value: "+18165551234", isPlaceholder: false });
     expect(tokens.motivation).toEqual({ value: "Job relocation", isPlaceholder: false });
+    expect(tokens.cold_caller_name).toEqual({ value: "Rose", isPlaceholder: false });
   });
 
   it("renders a placeholder chip instead of a blank value for missing fields", () => {
-    const tokens = resolveCoachTokens({ ...baseContext, motivation: null, repName: "  " });
+    const tokens = resolveCoachTokens({ ...baseContext, motivation: null, repName: "  ", coldCallerName: null });
     expect(tokens.motivation).toEqual({ value: "—", isPlaceholder: true });
     expect(tokens.rep_name).toEqual({ value: "—", isPlaceholder: true });
+    expect(tokens.cold_caller_name).toEqual({ value: "—", isPlaceholder: true });
+  });
+
+  it("resolves the three deal-panel tokens from entryFields when supplied", () => {
+    const tokens = resolveCoachTokens(baseContext, entryFields);
+    expect(tokens.closing_date).toEqual({ value: "Sept 15", isPlaceholder: false });
+    expect(tokens.offer_price).toEqual({ value: "$210,000", isPlaceholder: false });
+    expect(tokens.net_to_seller).toEqual({ value: "$180,000", isPlaceholder: false });
+  });
+
+  it("treats every deal-panel token as an unset placeholder when entryFields is omitted", () => {
+    const tokens = resolveCoachTokens(baseContext);
+    expect(tokens.closing_date).toEqual({ value: "—", isPlaceholder: true });
+    expect(tokens.offer_price).toEqual({ value: "—", isPlaceholder: true });
+    expect(tokens.net_to_seller).toEqual({ value: "—", isPlaceholder: true });
+  });
+
+  it("covers all 10 declared script tokens with no gaps", () => {
+    const tokens = resolveCoachTokens(baseContext, entryFields);
+    expect(Object.keys(tokens).sort()).toEqual(
+      [
+        "seller_name",
+        "rep_name",
+        "property_address",
+        "motivation",
+        "rep_phone",
+        "file_number",
+        "cold_caller_name",
+        "closing_date",
+        "offer_price",
+        "net_to_seller",
+      ].sort(),
+    );
+    for (const token of Object.values(tokens)) {
+      expect(token).toHaveProperty("value");
+      expect(token).toHaveProperty("isPlaceholder");
+    }
   });
 });
 
@@ -75,12 +122,21 @@ describe("resolveScriptText", () => {
     ]);
   });
 
-  it("passes through unrecognized tokens (e.g. {closing_date}) as literal text", () => {
-    const tokens = resolveCoachTokens(baseContext);
+  it("resolves every declared token, including the deal-panel ones", () => {
+    const tokens = resolveCoachTokens(baseContext, entryFields);
     const segments = resolveScriptText("closing on {closing_date}", tokens);
     expect(segments).toEqual([
       { kind: "text", value: "closing on " },
-      { kind: "text", value: "{closing_date}" },
+      { kind: "token", token: "closing_date", resolved: { value: "Sept 15", isPlaceholder: false } },
+    ]);
+  });
+
+  it("passes through an unrecognized token as literal text", () => {
+    const tokens = resolveCoachTokens(baseContext);
+    const segments = resolveScriptText("{not_a_real_token} here", tokens);
+    expect(segments).toEqual([
+      { kind: "text", value: "{not_a_real_token}" },
+      { kind: "text", value: " here" },
     ]);
   });
 
@@ -88,6 +144,34 @@ describe("resolveScriptText", () => {
     const tokens = resolveCoachTokens(baseContext);
     expect(resolveScriptText("plain sentence", tokens)).toEqual([
       { kind: "text", value: "plain sentence" },
+    ]);
+  });
+});
+
+describe("resolveDisplayText", () => {
+  it("resolves tokens and inline {{tone:label}} cues in the same line", () => {
+    const tokens = resolveCoachTokens(baseContext);
+    const segments = resolveDisplayText(
+      "Well {{tone:playful tone}} no seriously, hey {seller_name}",
+      tokens,
+    );
+    expect(segments).toEqual([
+      { kind: "text", value: "Well " },
+      { kind: "tone", label: "playful tone" },
+      { kind: "text", value: " no seriously, hey " },
+      { kind: "token", token: "seller_name", resolved: { value: "Jane", isPlaceholder: false } },
+    ]);
+  });
+
+  it("handles a tone-only line with no tokens", () => {
+    const tokens = resolveCoachTokens(baseContext);
+    expect(resolveDisplayText("{{tone:sigh}}", tokens)).toEqual([{ kind: "tone", label: "sigh" }]);
+  });
+
+  it("handles plain text with neither tokens nor tone cues", () => {
+    const tokens = resolveCoachTokens(baseContext);
+    expect(resolveDisplayText("Thank you for your time.", tokens)).toEqual([
+      { kind: "text", value: "Thank you for your time." },
     ]);
   });
 });

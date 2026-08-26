@@ -115,3 +115,30 @@ describe("coachReducer — manual override", () => {
     expect(state.currentPhaseId).toBe("introduction");
   });
 });
+
+describe("coachReducer — entry fields (deal-panel tokens)", () => {
+  it("starts with every entry field unset", () => {
+    expect(initialCoachState().entryFields).toEqual({
+      closing_date: null,
+      offer_price: null,
+      net_to_seller: null,
+    });
+  });
+
+  it("sets one entry field without touching the others", () => {
+    let state = coachReducer(initialCoachState(), { type: "set_entry_field", field: "offer_price", value: "$210,000" });
+    expect(state.entryFields.offer_price).toBe("$210,000");
+    expect(state.entryFields.closing_date).toBeNull();
+
+    state = coachReducer(state, { type: "set_entry_field", field: "closing_date", value: "Sept 15" });
+    expect(state.entryFields).toEqual({ closing_date: "Sept 15", offer_price: "$210,000", net_to_seller: null });
+  });
+
+  it("trims whitespace and treats a blank value as clearing the field", () => {
+    let state = coachReducer(initialCoachState(), { type: "set_entry_field", field: "net_to_seller", value: "  $180,000  " });
+    expect(state.entryFields.net_to_seller).toBe("$180,000");
+
+    state = coachReducer(state, { type: "set_entry_field", field: "net_to_seller", value: "   " });
+    expect(state.entryFields.net_to_seller).toBeNull();
+  });
+});

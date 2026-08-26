@@ -1,75 +1,111 @@
 "use client";
 
-import { useEffect, useReducer, useRef, useState } from "react";
+import { REALTIME_SUBSCRIBE_STATES } from "@supabase/supabase-js";
+import { useEffect, useReducer, useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
 import { coachReducer, initialCoachState } from "./event-reducer";
 import type { CoachEvent, CoachPhaseId, CoachState } from "./types";
 
-/** How long we wait after a call goes live with zero coach events before
- * surfacing the "coach connecting…" degraded pill. */
-const DEGRADED_TIMEOUT_MS = 10_000;
-/** Objection cards auto-dismiss after this long unless tapped away first. */
-const OBJECTION_CARD_TTL_MS = 45_000;
+/** Rolling liveness window: if no coach event arrives within this long of
+ * the last one (or of subscribing, for the very first event), the coach is
+ * degraded. Re-armed on every event, not just checked once at mount. */
+const LIVENESS_WINDOW_MS = 15_000;
 /** Broadcast event name the coach service publishes on `coach:{call_id}`. */
 const COACH_BROADCAST_EVENT = "coach_event";
+/** Resubscribe backoff after CHANNEL_ERROR/TIMED_OUT/CLOSED. */
+const RESUBSCRIBE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
 /**
  * Subscribes to the coach service's Supabase Realtime Broadcast channel for
- * one call (`coach:{callId}`), reduces incoming CoachEvents into CoachState,
- * auto-expires objection cards, and flags a degraded (no-data) state so the
- * UI can fall back to a static, manually-scrollable script.
+ * one call (`coach:{callId}`, private — see the ingest side's
+ * realtime.messages RLS policy), reduces incoming CoachEvents into
+ * CoachState, and tracks a rolling degraded (no-live-data) signal so the UI
+ * can fall back to a static, manually-scrollable script. Degraded is not a
+ * one-shot "no event in the first N seconds" check — it re-arms after every
+ * event, and reacts immediately to subscription status changes
+ * (CHANNEL_ERROR/TIMED_OUT/CLOSED), resubscribing with backoff.
  */
 export function useCoachChannel(callId: string | null, startingPhaseId: CoachPhaseId = "introduction") {
   const [state, dispatch] = useReducer(coachReducer, startingPhaseId, initialCoachState);
   const [degraded, setDegraded] = useState(false);
-  const dismissedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!callId) return;
     let mounted = true;
-    const degradedTimer = window.setTimeout(() => {
-      if (mounted) setDegraded(true);
-    }, DEGRADED_TIMEOUT_MS);
-
+    let generation = 0;
+    let channel: ReturnType<ReturnType<typeof createClient>["channel"]> | null = null;
+    let livenessTimer: ReturnType<typeof setTimeout> | null = null;
+    let resubscribeTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
     const supabase = createClient();
-    let channel: ReturnType<typeof supabase.channel> | null = null;
+
+    const armLiveness = () => {
+      if (livenessTimer !== null) clearTimeout(livenessTimer);
+      livenessTimer = setTimeout(() => {
+        if (mounted) setDegraded(true);
+      }, LIVENESS_WINDOW_MS);
+    };
+
+    const teardownChannel = () => {
+      if (channel) {
+        void supabase.removeChannel(channel);
+        channel = null;
+      }
+    };
+
+    const scheduleResubscribe = () => {
+      if (!mounted) return;
+      const delay = RESUBSCRIBE_BACKOFF_MS[Math.min(attempt, RESUBSCRIBE_BACKOFF_MS.length - 1)];
+      attempt += 1;
+      resubscribeTimer = setTimeout(() => {
+        teardownChannel();
+        void start();
+      }, delay);
+    };
 
     const start = async () => {
+      const myGeneration = ++generation;
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token ?? null;
       if (token) supabase.realtime.setAuth(token);
-      if (!mounted) return;
+      if (!mounted || myGeneration !== generation) return;
 
       channel = supabase
-        .channel(`coach:${callId}`)
+        .channel(`coach:${callId}`, { config: { private: true } })
         .on("broadcast", { event: COACH_BROADCAST_EVENT }, (message) => {
-          window.clearTimeout(degradedTimer);
-          if (mounted) setDegraded(false);
+          if (!mounted || myGeneration !== generation) return;
+          armLiveness();
+          setDegraded(false);
           dispatch(message.payload as CoachEvent);
         })
-        .subscribe();
+        .subscribe((status) => {
+          if (!mounted || myGeneration !== generation) return;
+          if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
+            attempt = 0;
+            armLiveness();
+            return;
+          }
+          if (
+            status === REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR ||
+            status === REALTIME_SUBSCRIBE_STATES.TIMED_OUT ||
+            status === REALTIME_SUBSCRIBE_STATES.CLOSED
+          ) {
+            setDegraded(true);
+            scheduleResubscribe();
+          }
+        });
     };
 
+    armLiveness();
     void start();
     return () => {
       mounted = false;
-      window.clearTimeout(degradedTimer);
-      if (channel) void supabase.removeChannel(channel);
+      if (livenessTimer !== null) clearTimeout(livenessTimer);
+      if (resubscribeTimer !== null) clearTimeout(resubscribeTimer);
+      teardownChannel();
     };
   }, [callId]);
-
-  useEffect(() => {
-    const timers = state.objectionCards
-      .filter((card) => !dismissedRef.current.has(card.id))
-      .map((card) => {
-        dismissedRef.current.add(card.id);
-        return window.setTimeout(() => {
-          dispatch({ type: "dismiss_objection", cardId: card.id });
-        }, OBJECTION_CARD_TTL_MS);
-      });
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [state.objectionCards]);
 
   return { state, dispatch, degraded };
 }
