@@ -152,8 +152,42 @@ describe("<InlineReply /> disabled explanations", () => {
 
     await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
     expect(composer).toHaveValue("Keep this exact draft");
-    expect(toast.error).toHaveBeenCalledWith("Provider error", {
-      description: "Provider rejected the message.",
+    expect(toast.error).toHaveBeenCalledWith("Send not confirmed", {
+      description:
+        "Provider rejected the message. Check the thread before retrying to avoid a duplicate message.",
+    });
+    expect(routerRefreshMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves the exact draft and warns before retrying after a database error", async () => {
+    const user = userEvent.setup();
+    vi.mocked(sendSmsFromLead).mockResolvedValueOnce({
+      ok: true,
+      data: {
+        outcome: {
+          status: "db_error",
+          error: "The delivery receipt could not be saved.",
+        },
+      },
+    } as Awaited<ReturnType<typeof sendSmsFromLead>>);
+
+    render(
+      <InlineReply
+        propertyId="property-1"
+        homeownerContactId="contact-1"
+        homeownerPhone="+18165550123"
+      />,
+    );
+
+    const composer = screen.getByLabelText("Reply to this lead");
+    await user.type(composer, "Keep this database-error draft");
+    await user.click(screen.getByRole("button", { name: "Send reply" }));
+
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    expect(composer).toHaveValue("Keep this database-error draft");
+    expect(toast.error).toHaveBeenCalledWith("Send not confirmed", {
+      description:
+        "The delivery receipt could not be saved. Check the thread before retrying to avoid a duplicate message.",
     });
     expect(routerRefreshMock).not.toHaveBeenCalled();
   });

@@ -18,7 +18,11 @@ import {
 } from "@/lib/messaging/consent";
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getMessagingProvider } from "@/lib/messaging/registry";
-import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
+import {
+  selectBestSmsPhone,
+  selectSmsPhoneByNumber,
+} from "@/lib/messaging/sms-phone";
+import { deriveSmsParties } from "@/lib/messages/sms-parties";
 import { canShowCallButton } from "@/lib/dialer/eligibility";
 import { zillowUrl } from "@/lib/utils/zillow-url";
 
@@ -317,6 +321,51 @@ export default async function LeadDetailPage({
     providerDefaultFromNumber ??
     null;
 
+  // An existing thread's customer and business numbers are one route. Pick
+  // both from the same newest homeowner SMS row so a lead with multiple saved
+  // phones cannot accidentally reply from sender B to customer phone A.
+  let latestHomeownerSmsRoute: ReturnType<typeof deriveSmsParties> | null =
+    null;
+  for (const message of [...initialMessages].reverse()) {
+    const routeAuthoritativeStatus =
+      (message.direction === "inbound" && message.status === "received") ||
+      (message.direction === "outbound" &&
+        (message.status === "sent" || message.status === "delivered"));
+    if (
+      message.channel !== "sms" ||
+      !homeownerContactId ||
+      message.contact_id !== homeownerContactId ||
+      message.property_id !== lead.id ||
+      !routeAuthoritativeStatus
+    ) {
+      continue;
+    }
+
+    const route = deriveSmsParties(message);
+    if (!route.customerPhone || !route.businessPhone) continue;
+    latestHomeownerSmsRoute = route;
+    break;
+  }
+  const inlineRoutePhoneChoice = latestHomeownerSmsRoute
+    ? selectSmsPhoneByNumber(
+        lead.homeowner,
+        latestHomeownerSmsRoute.customerPhone,
+      )
+    : null;
+  const inlineReplyPhone = latestHomeownerSmsRoute
+    ? inlineRoutePhoneChoice?.lineType === "landline"
+      ? null
+      : (inlineRoutePhoneChoice?.phone ?? null)
+    : homeownerSmsPhone;
+  const inlineReplyFromNumber =
+    latestHomeownerSmsRoute?.businessPhone ?? preferredFromNumber;
+  const inlineReplyPhoneUnavailableMessage =
+    latestHomeownerSmsRoute && inlineRoutePhoneChoice?.lineType === "landline"
+      ? "This thread number is saved as a landline — use a mobile number for SMS."
+      : latestHomeownerSmsRoute && !inlineReplyPhone
+        ? "This thread number is not saved on the homeowner contact — save it before replying."
+        : undefined;
+
   // Notes — newest first for the feed component.
   const { data: notesRaw, error: notesError } = await supabase
     .from("lead_notes")
@@ -559,7 +608,7 @@ export default async function LeadDetailPage({
         .join(", ") || null
     );
   })();
-  const inlineReplyUnavailable = !lead.homeowner?.id || !homeownerSmsPhone;
+  const inlineReplyUnavailable = !lead.homeowner?.id || !inlineReplyPhone;
   const cassStatusLabel = lead.cass_status
     .replace(/_/g, " ")
     .replace(/^./, (character) => character.toUpperCase());
@@ -780,9 +829,12 @@ export default async function LeadDetailPage({
                 <InlineReply
                   propertyId={lead.id}
                   homeownerContactId={lead.homeowner?.id ?? null}
-                  homeownerPhone={homeownerSmsPhone}
-                  replyToPhone={homeownerSmsPhone}
-                  preferredFromNumber={preferredFromNumber}
+                  homeownerPhone={inlineReplyPhone}
+                  replyToPhone={inlineReplyPhone}
+                  preferredFromNumber={inlineReplyFromNumber}
+                  phoneUnavailableMessage={
+                    inlineReplyPhoneUnavailableMessage
+                  }
                   footerAction={
                     !smsPresentation.smsRestricted &&
                     !inlineReplyUnavailable ? (

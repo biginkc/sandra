@@ -577,8 +577,9 @@ describe("<InboxDetail />", () => {
     });
 
     await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith("Provider error", {
-        description: "Provider rejected the message.",
+      expect(toast.error).toHaveBeenCalledWith("Send not confirmed", {
+        description:
+          "Provider rejected the message. Check the thread before retrying to avoid a duplicate message.",
       });
     });
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue(
@@ -600,6 +601,7 @@ describe("<InboxDetail />", () => {
   ])(
     "refreshes thread identity when another outbound changes the $routeChange",
     async ({ fromAddress, routeChange, toAddress }) => {
+      const user = userEvent.setup();
       const data = makeData({
         contactId: `contact-route-${routeChange}`,
         propertyId: `prop-route-${routeChange}`,
@@ -607,9 +609,12 @@ describe("<InboxDetail />", () => {
         conversationId: `conv-route-${routeChange}`,
       });
 
-      render(
+      const view = render(
         <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
       );
+
+      const draft = `preserve ${routeChange} draft`;
+      await user.type(screen.getByLabelText("Reply to this lead"), draft);
 
       await waitFor(() => {
         expect(supabaseMock.subscriptions.length).toBeGreaterThan(0);
@@ -640,8 +645,53 @@ describe("<InboxDetail />", () => {
       expect(screen.getByTestId("inline-reply-refreshing")).toHaveTextContent(
         "Updating the thread phone before reply",
       );
-      expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+      expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
+      expect(screen.getByLabelText("Reply to this lead")).toHaveValue(draft);
+      expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
       expect(refreshCalls.length).toBeGreaterThan(0);
+
+      view.rerender(
+        <InboxDetail
+          data={{
+            ...data,
+            threadCustomerPhone: toAddress,
+            threadBusinessPhone: fromAddress,
+            replyToPhone: toAddress,
+            initialMessages: [
+              makeMessage({
+                id: `outbound-route-${routeChange}`,
+                body: "sent somewhere else",
+                direction: "outbound",
+                status: "pending",
+                contact_id: data.contactId,
+                property_id: data.propertyId,
+                conversation_id: data.conversationId,
+                from_address: fromAddress,
+                to_address: toAddress,
+              }),
+            ],
+          }}
+          assigneeEmails={{}}
+          currentUserId="user-1"
+        />,
+      );
+
+      expect(
+        screen.queryByTestId("inline-reply-refreshing"),
+      ).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Reply to this lead")).toHaveValue(draft);
+      expect(screen.getByTestId("inline-reply-send")).toBeEnabled();
+
+      await user.click(screen.getByTestId("inline-reply-send"));
+      await waitFor(() => {
+        expect(sendSmsFromLead).toHaveBeenCalledWith(
+          data.propertyId,
+          draft,
+          fromAddress,
+          false,
+          toAddress,
+        );
+      });
     },
   );
 
@@ -675,6 +725,7 @@ describe("<InboxDetail />", () => {
   });
 
   it("pauses Messages replies after a live same-thread insert until server detail refreshes", async () => {
+    const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-live-refresh",
       propertyId: "prop-live-refresh",
@@ -696,8 +747,13 @@ describe("<InboxDetail />", () => {
       ],
     });
 
-    render(
+    const view = render(
       <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    await user.type(
+      screen.getByLabelText("Reply to this lead"),
+      "preserve inbound draft",
     );
 
     await waitFor(() => {
@@ -728,8 +784,82 @@ describe("<InboxDetail />", () => {
     expect(screen.getByTestId("inline-reply-refreshing")).toHaveTextContent(
       "Updating the thread phone before reply",
     );
-    expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+    expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(
+      "preserve inbound draft",
+    );
+    expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
     expect(refreshCalls.length).toBeGreaterThan(0);
+
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    expect(sendSmsFromLead).not.toHaveBeenCalled();
+
+    const refreshedMessages = [
+      ...data.initialMessages,
+      makeMessage({
+        id: "new-live-refresh",
+        body: "new phone",
+        direction: "inbound",
+        contact_id: "contact-live-refresh",
+        property_id: "prop-live-refresh",
+        conversation_id: "conv-live-refresh",
+        from_address: "+15550000002",
+        created_at: "2026-04-29T12:01:00Z",
+      }),
+    ];
+
+    // The authoritative refresh can briefly report that the new thread phone
+    // is not saved. The composer is hidden for safety, but remains mounted so
+    // resolving the phone restores the operator's exact draft.
+    view.rerender(
+      <InboxDetail
+        data={{
+          ...data,
+          threadCustomerPhone: "+15550000002",
+          replyToPhone: null,
+          initialMessages: refreshedMessages,
+        }}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByTestId("inline-reply-restricted")).toHaveTextContent(
+      "not saved on the homeowner contact",
+    );
+    expect(screen.queryByLabelText("Reply to this lead")).not.toBeInTheDocument();
+
+    view.rerender(
+      <InboxDetail
+        data={{
+          ...data,
+          threadCustomerPhone: "+15550000002",
+          replyToPhone: "+15550000002",
+          initialMessages: refreshedMessages,
+        }}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("inline-reply-refreshing"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(
+      "preserve inbound draft",
+    );
+    expect(screen.getByTestId("inline-reply-send")).toBeEnabled();
+
+    await user.click(screen.getByTestId("inline-reply-send"));
+    await waitFor(() => {
+      expect(sendSmsFromLead).toHaveBeenCalledWith(
+        data.propertyId,
+        "preserve inbound draft",
+        data.threadBusinessPhone,
+        false,
+        "+15550000002",
+      );
+    });
   });
 
   it("does not render the homeowner reply composer for agent-only threads", () => {
