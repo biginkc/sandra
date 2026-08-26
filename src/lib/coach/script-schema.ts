@@ -9,8 +9,14 @@
  *    Never rendered as spoken content — a fragment like "sound fair" is not
  *    a sentence a rep should read.
  * Kept separate from the runtime CoachEvent contract (types.ts) — this
- * describes the static script, not the live event stream.
+ * describes the static script, not the live event stream. It DOES import
+ * COACH_TOKENS/COACH_PHASE_ORDER from types.ts, though: the validator
+ * enforces the consumer contract (a script may not declare a token this
+ * app can't resolve, or omit a phase the app assumes exists), which
+ * requires knowing what the app actually supports.
  */
+
+import { COACH_PHASE_ORDER, COACH_TOKENS } from "./types";
 
 export type ScriptLandmark = {
   id: string;
@@ -159,14 +165,20 @@ function isFiniteNumber(value: unknown): value is number {
 const SPEAKERS: ReadonlySet<string> = new Set(["rep", "seller"]);
 const OCCUPANCY_KEYS: ReadonlySet<string> = new Set(["owner_occupied", "tenant_occupied", "vacant", "unknown"]);
 
-/** Matches a `{token}` placeholder, but not `{{tone:...}}` (tone cues are a
- * separate, deliberately different markup — resolveDisplayText's own
+/** Matches ANY single-brace `{...}` span, but not `{{tone:...}}` (tone cues
+ * are a separate, deliberately different markup — resolveDisplayText's own
  * DISPLAY_PATTERN checks the tone alternative first for the same reason).
+ * Deliberately `[^{}]+`, not `\w+` — round-3 hardening used `\w+` and it
+ * missed the exact bug it was meant to catch: `{year built}` (a space, not
+ * an underscore) never matched `\w+` at all, so it wasn't treated as a
+ * placeholder attempt and passed straight through as literal text. Any
+ * text between single braces is either a real `{token}` or a mistake; both
+ * cases belong here, not in a silently-ignored bucket.
  * `{n}`/`{remaining}` in counter.display/timer.display are NOT scanned by
  * this — those fields are never run through resolveDisplayText (the UI
  * builds "Probes N/goal" and "Hold MM:SS" itself from live state), so a
  * placeholder there isn't part of the {token} contract at all. */
-const PLACEHOLDER_PATTERN = /\{\{tone:[^}]+\}\}|\{(\w+)\}/g;
+const PLACEHOLDER_PATTERN = /\{\{tone:[^}]+\}\}|\{([^{}]+)\}/g;
 
 /** Collects any `{token}` in `text` that isn't in `knownTokens` — the exact
  * failure mode that let `{year built}` (a typo'd space instead of an
@@ -292,12 +304,35 @@ export function assertValidClosrScript(data: unknown): asserts data is ClosrScri
   if (typeof data.schema_version !== "number") throw new Error("closr-script: missing schema_version");
   if (!isNonEmptyString(data.version)) throw new Error("closr-script: missing version");
   if (!isStringArray(data.tokens) || data.tokens.length === 0) throw new Error("closr-script: missing tokens[]");
+  const supportedTokens: ReadonlySet<string> = new Set(COACH_TOKENS);
+  for (const token of data.tokens) {
+    if (!supportedTokens.has(token)) {
+      throw new Error(`closr-script: tokens[] declares '${token}', which this app's COACH_TOKENS doesn't support`);
+    }
+  }
   if (!isRecord(data.file_number_rule) || !isNonEmptyString(data.file_number_rule.format)) {
     throw new Error("closr-script: missing/invalid file_number_rule");
   }
   const knownTokens: ReadonlySet<string> = new Set(data.tokens);
 
   if (!Array.isArray(data.phases) || data.phases.length === 0) throw new Error("closr-script: missing phases[]");
+
+  // Pre-pass: collect phase ids to reject duplicates and to validate
+  // match.exit_to references below, which can point forward to a phase
+  // not yet visited in the main per-phase loop's iteration order.
+  const phaseIds = new Set<string>();
+  for (const phase of data.phases) {
+    if (isRecord(phase) && isNonEmptyString(phase.id)) {
+      if (phaseIds.has(phase.id)) throw new Error(`closr-script: duplicate phase id '${phase.id}'`);
+      phaseIds.add(phase.id);
+    }
+  }
+  for (const requiredPhaseId of COACH_PHASE_ORDER) {
+    if (!phaseIds.has(requiredPhaseId)) {
+      throw new Error(`closr-script: missing required phase '${requiredPhaseId}' (every id in COACH_PHASE_ORDER must exist)`);
+    }
+  }
+
   for (const phase of data.phases) {
     if (!isRecord(phase)) throw new Error("closr-script: a phase entry is not an object");
     if (!isNonEmptyString(phase.id)) throw new Error("closr-script: a phase is missing id");
@@ -332,6 +367,9 @@ export function assertValidClosrScript(data: unknown): asserts data is ClosrScri
         if (variant.tone !== undefined && typeof variant.tone !== "string") {
           throw new Error(`closr-script: ${branchLabel} variant '${String(variant.key)}' has a non-string tone`);
         }
+        if (variant.label !== null && typeof variant.label !== "string") {
+          throw new Error(`closr-script: ${branchLabel} variant '${String(variant.key)}' has a non-string, non-null label`);
+        }
         for (const line of variant.lines) {
           if (!isRecord(line) || (line.type !== "say" && line.type !== "note") || !isNonEmptyString(line.text)) {
             throw new Error(`closr-script: ${branchLabel} has a malformed line`);
@@ -349,6 +387,9 @@ export function assertValidClosrScript(data: unknown): asserts data is ClosrScri
     assertValidPainWords(phase.match.pain_words, `${phaseLabel} match.pain_words`);
     if (phase.match.exit_to !== null && typeof phase.match.exit_to !== "string") {
       throw new Error(`closr-script: ${phaseLabel} match.exit_to must be a string or null`);
+    }
+    if (typeof phase.match.exit_to === "string" && !phaseIds.has(phase.match.exit_to)) {
+      throw new Error(`closr-script: ${phaseLabel} match.exit_to references nonexistent phase '${phase.match.exit_to}'`);
     }
     if (!Array.isArray(phase.coach_notes)) throw new Error(`closr-script: ${phaseLabel} missing coach_notes[]`);
     for (const note of phase.coach_notes) {

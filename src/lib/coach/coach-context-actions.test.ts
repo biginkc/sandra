@@ -26,9 +26,10 @@ function mockSupabase(
   user: { email?: string; user_metadata?: Record<string, unknown> } | null,
   leadRow: unknown = lead,
   leadError: { message: string } | null = null,
+  userError: { message: string } | null = null,
 ) {
   createClient.mockResolvedValue({
-    auth: { getUser: vi.fn().mockResolvedValue({ data: { user } }) },
+    auth: { getUser: vi.fn().mockResolvedValue({ data: { user: userError ? null : user }, error: userError }) },
     from: vi.fn(() => {
       const builder = {
         select: vi.fn(() => builder),
@@ -125,6 +126,18 @@ describe("loadCoachCallContext — lead fields", () => {
     await expect(
       loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null }),
     ).rejects.toThrow(/permission denied/);
+  });
+
+  it("throws (never silently blanks the rep context) when auth.getUser() itself errors", async () => {
+    // Regression: getUser()'s error was previously discarded entirely
+    // (only `data: { user }` was destructured) — an expired/invalid
+    // session resolved `user` to null with no signal, silently rendering
+    // a blank rep-name chip instead of routing into the same
+    // "context failed to load" retry path the property-query error uses.
+    mockSupabase({ email: "alex.rep@bmhgroupkc.com" }, lead, null, { message: "invalid or expired session" });
+    await expect(
+      loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null }),
+    ).rejects.toThrow(/invalid or expired session/);
   });
 });
 

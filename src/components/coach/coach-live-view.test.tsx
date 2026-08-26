@@ -2,6 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { CLOSR_SCRIPT } from "@/lib/coach/script-block";
 import { useCoachSession } from "@/lib/coach/use-coach-session";
 import type { CoachCallContext } from "@/lib/coach/types";
 
@@ -61,7 +62,7 @@ function latestChannel(): MockChannel {
 /** Every wire event carries both content versions, always — required. Tests
  * that care about a specific version value pass it explicitly and it wins
  * over this default. */
-const DEFAULT_VERSIONS = { scriptVersion: "1.0.1", matcherVersion: "3" };
+const DEFAULT_VERSIONS = { scriptVersion: CLOSR_SCRIPT.version, matcherVersion: "3" };
 
 function broadcast(payload: Record<string, unknown>) {
   act(() => latestChannel()._broadcastHandler?.({ payload: { ...DEFAULT_VERSIONS, ...payload } }));
@@ -94,6 +95,25 @@ type HarnessProps = Omit<CoachLiveViewProps, "session"> & {
  * prop, so it survives the view unmounting on collapse. */
 function Harness({ callId = "call-1", propertyId = "lead-1", sellerPhoneE164 = "+18165559876", repPhoneE164 = "+18165551234", ...rest }: HarnessProps) {
   const session = useCoachSession(callId, propertyId, sellerPhoneE164, repPhoneE164);
+  return <CoachLiveView session={session} {...rest} />;
+}
+
+/** Same wiring as Harness, but with the session-owning component kept
+ * mounted while CoachLiveView itself is conditionally rendered — mirrors
+ * softphone-provider.tsx exactly (coachSession lives in the provider;
+ * coachCollapsed only toggles whether CoachLiveView is portaled). Lets a
+ * test simulate a real collapse/reopen cycle (CoachLiveView unmounts and
+ * remounts) without destroying the session state that must survive it. */
+function CollapsibleHarness({
+  collapsed,
+  callId = "call-1",
+  propertyId = "lead-1",
+  sellerPhoneE164 = "+18165559876",
+  repPhoneE164 = "+18165551234",
+  ...rest
+}: HarnessProps & { collapsed: boolean }) {
+  const session = useCoachSession(callId, propertyId, sellerPhoneE164, repPhoneE164);
+  if (collapsed) return null;
   return <CoachLiveView session={session} {...rest} />;
 }
 
@@ -273,6 +293,48 @@ describe("<CoachLiveView />", () => {
     expect(screen.queryAllByTestId("objection-card")).toHaveLength(0);
   });
 
+  it("an objection card dismisses at its ORIGINAL deadline even after a collapse/reopen — remounting must not restart its 45s clock", async () => {
+    // The bug this guards: before absolute expiresAt, each card's dismiss
+    // timer was scheduled for a fixed 45s from MOUNT. A collapse/reopen
+    // unmounts and remounts every card (CoachLiveView itself unmounts on
+    // collapse), so a fixed-TTL-per-mount card would silently get a fresh
+    // 45s on every reopen — staying on screen indefinitely across enough
+    // collapse/reopen cycles. None of the OTHER TTL tests in this file
+    // would catch that regression, since none of them ever unmount
+    // CoachLiveView mid-countdown.
+    vi.useFakeTimers();
+    const { rerender } = render(<CollapsibleHarness {...baseProps()} collapsed={false} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t1" });
+    expect(screen.getAllByTestId("objection-card")).toHaveLength(1);
+
+    // 30s into the 45s TTL: collapse (unmount CoachLiveView, session
+    // persists via CollapsibleHarness staying mounted), wait 10s while
+    // collapsed, then reopen.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    rerender(<CollapsibleHarness {...baseProps()} collapsed={true} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    rerender(<CollapsibleHarness {...baseProps()} collapsed={false} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // 40s total have elapsed (30s + 10s) — 5s remain on the ORIGINAL
+    // deadline. The card must still be there (proves it wasn't dismissed
+    // early) but dismiss on the next 5s, not 45s from this reopen.
+    expect(screen.getAllByTestId("objection-card")).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(screen.queryAllByTestId("objection-card")).toHaveLength(0);
+  });
+
   it("dismisses an objection card on tap", async () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
@@ -350,6 +412,36 @@ describe("<CoachLiveView />", () => {
     expect(screen.getByTestId("coach-nudge")).toHaveTextContent("Second nudge.");
   });
 
+  it("a nudge dismisses at its ORIGINAL deadline even after a collapse/reopen — remounting must not restart its 20s clock", async () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<CollapsibleHarness {...baseProps()} collapsed={false} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    broadcast({ type: "coach_note", text: "Say their name twice.", phaseId: "introduction", ts: "t1" });
+    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(1);
+
+    // 12s into the 20s TTL: collapse, wait 5s while collapsed, reopen.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(12_000);
+    });
+    rerender(<CollapsibleHarness {...baseProps()} collapsed={true} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    rerender(<CollapsibleHarness {...baseProps()} collapsed={false} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // 17s total elapsed — 3s remain on the ORIGINAL deadline.
+    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    expect(screen.queryAllByTestId("coach-nudge")).toHaveLength(0);
+  });
+
   it("shows the 'coach out of sync' banner when an event reports a different script version, and clears it once versions match again", async () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
@@ -358,7 +450,7 @@ describe("<CoachLiveView />", () => {
     broadcast({ type: "counter", probeCount: 1, ts: "t1", scriptVersion: "0.9.0" });
     expect(screen.getByTestId("coach-version-mismatch")).toHaveTextContent("0.9.0");
 
-    broadcast({ type: "counter", probeCount: 2, ts: "t2", scriptVersion: "1.0.1" });
+    broadcast({ type: "counter", probeCount: 2, ts: "t2", scriptVersion: CLOSR_SCRIPT.version });
     expect(screen.queryByTestId("coach-version-mismatch")).not.toBeInTheDocument();
   });
 });

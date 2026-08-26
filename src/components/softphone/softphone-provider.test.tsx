@@ -55,6 +55,8 @@ function latestCoachChannel(): CoachMockChannel {
   return channel;
 }
 
+const { removeCoachChannel } = vi.hoisted(() => ({ removeCoachChannel: vi.fn() }));
+
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
     auth: { getSession: () => Promise.resolve({ data: { session: null } }) },
@@ -73,7 +75,7 @@ vi.mock("@/lib/supabase/client", () => ({
       coachChannels.push(channel);
       return channel;
     },
-    removeChannel: vi.fn(),
+    removeChannel: removeCoachChannel,
   }),
 }));
 
@@ -832,6 +834,7 @@ const COACH_LEAD = {
 describe("SoftphoneProvider coach UI flag", () => {
   beforeEach(() => {
     coachChannels = [];
+    removeCoachChannel.mockReset();
     completeSoftphoneCall.mockReset();
     prepareLeadCall.mockReset();
     resumeFailedSoftphoneCall.mockReset();
@@ -1052,5 +1055,59 @@ describe("SoftphoneProvider coach UI flag", () => {
     // Must render above the full-screen coach overlay (z-[80]) and the
     // objection-card layer (z-[90]) so it's visible while the coach view is open.
     expect(toast.className).toMatch(/z-\[100\]/);
+  });
+
+  it("tears down the coach subscription when the call ends — it must not linger through the whole wrap-up phase", async () => {
+    // Regression: coachCallId previously stayed set from live all the way
+    // through wrap-up (only resetIdle(), called much later, cleared it),
+    // leaving a live Realtime subscription open to a call that had
+    // already ended.
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    expect(removeCoachChannel).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("coach-hangup"));
+    await waitFor(() => expect(removeCoachChannel).toHaveBeenCalled());
+  });
+
+  it("tears down the coach subscription when a refusal (operator_busy) arrives AFTER the call was already live and coaching — not just on a clean hangup", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const listener: { current: ((state: "connecting" | "live" | "operator_busy") => void) | null } = { current: null };
+    createTransport.mockReturnValue({
+      onStateChange: vi.fn((cb) => { listener.current = cb; }),
+      start: vi.fn(async () => {
+        listener.current?.("connecting");
+        listener.current?.("live");
+        return { id: "simulated-session" };
+      }),
+      mute: vi.fn(),
+      hold: vi.fn(async () => true),
+      sendDigit: vi.fn(async () => true),
+      hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })),
+    });
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    expect(removeCoachChannel).not.toHaveBeenCalled();
+
+    // A refusal arriving well after the call went live and the coach
+    // subscription was established — coachCallId was genuinely non-null
+    // at this point, unlike a refusal baked into start() itself.
+    act(() => listener.current?.("operator_busy"));
+    await waitFor(() => expect(removeCoachChannel).toHaveBeenCalled());
   });
 });

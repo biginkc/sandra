@@ -80,7 +80,7 @@ export async function loadCoachCallContext(input: {
 }): Promise<CoachCallContext> {
   const supabase = await createClient();
 
-  const [{ data: { user } }, leadResult] = await Promise.all([
+  const [{ data: { user }, error: userError }, leadResult] = await Promise.all([
     supabase.auth.getUser(),
     input.propertyId
       ? supabase
@@ -93,12 +93,21 @@ export async function loadCoachCallContext(input: {
       : Promise.resolve({ data: null, error: null }),
   ]);
 
-  // A Supabase query error (RLS denial, network, bad column, …) resolves
-  // without throwing — `data` comes back null exactly as it would for a
-  // genuinely missing lead. Left unchecked, that silently degrades to an
-  // all-placeholder context with no signal anything went wrong. Throwing
-  // here routes it into the caller's existing "context failed to load"
-  // retry-banner path instead of pretending the lead just has no data.
+  // A Supabase auth or query error (RLS denial, network, expired/invalid
+  // session, bad column, …) resolves without throwing — `user`/`data` come
+  // back null exactly as they would for a genuinely absent session/lead.
+  // Left unchecked, that silently degrades to an all-placeholder context
+  // (repName included) with no signal anything went wrong. Throwing here
+  // routes it into the caller's existing "context failed to load"
+  // retry-banner path instead of pretending the rep has no session or the
+  // lead has no data.
+  if (userError) {
+    reportError(userError, {
+      tags: { surface: "coach_context_load" },
+      extra: { propertyId: input.propertyId, stage: "auth_get_user" },
+    });
+    throw new Error(`Could not verify your session for the coach: ${userError.message}`);
+  }
   if (leadResult.error) {
     reportError(leadResult.error, {
       tags: { surface: "coach_context_load" },

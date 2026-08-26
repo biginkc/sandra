@@ -2,6 +2,8 @@ import { REALTIME_SUBSCRIBE_STATES } from "@supabase/supabase-js";
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { CLOSR_SCRIPT } from "./script-block";
+
 type BroadcastHandler = (message: { payload: unknown }) => void;
 type SubscribeCallback = (status: REALTIME_SUBSCRIBE_STATES) => void;
 
@@ -53,8 +55,12 @@ vi.mock("@/lib/supabase/client", () => ({
 
 import { useCoachChannel } from "./use-coach-channel";
 
-/** Every wire event carries both content versions, always — required. */
-const V = { scriptVersion: "1.0.1", matcherVersion: "3" };
+/** Every wire event carries both content versions, always — required.
+ * scriptVersion is deliberately the LOADED script's own version (not a
+ * hardcoded literal) so tests that rely on it matching CLOSR_SCRIPT.version
+ * (the "in sync" default case) don't silently start failing the next time
+ * the script artifact's version bumps. */
+const V = { scriptVersion: CLOSR_SCRIPT.version, matcherVersion: "3" };
 
 function latestChannel(): MockChannel {
   const channel = channels[channels.length - 1];
@@ -74,7 +80,19 @@ describe("useCoachChannel", () => {
     channels = [];
     getSession.mockReset().mockResolvedValue({ data: { session: { access_token: "tok" } } });
     setAuth.mockReset();
-    removeChannel.mockReset();
+    // Mirrors the real Supabase client: removeChannel() unsubscribes the
+    // channel, which asynchronously fires that SAME channel's own
+    // subscribe callback with CLOSED — this is real teardown behavior,
+    // not a test artifact, and is exactly what makes the deliberate-
+    // teardown/generation race (see the "invalidates generation" test
+    // below) reachable. Deferred a microtask to model "asynchronous, not
+    // synchronous" without needing exact real-world timing. Individual
+    // tests override this per-call with mockImplementationOnce when they
+    // need finer control (e.g. a removal that never resolves).
+    removeChannel.mockReset().mockImplementation(async (channel: MockChannel) => {
+      await Promise.resolve();
+      channel._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CLOSED);
+    });
     channelSpy.mockReset();
   });
 
@@ -133,6 +151,43 @@ describe("useCoachChannel", () => {
     expect(result.current.degraded).toBe(false);
   });
 
+  it("does NOT let malformed traffic re-arm liveness — a stream of garbage must surface as degraded, not keep the feed looking healthy", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-malformed-liveness"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    // A malformed event lands at the 10s mark — under the old logic this
+    // would have reset the 15s liveness window and cleared degraded,
+    // exactly like a valid event. It must not.
+    act(() =>
+      latestChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "not_a_real_phase", ts: "t1", ...V } }),
+    );
+    expect(result.current.malformedEventCount).toBe(1);
+    expect(result.current.degraded).toBe(false); // not yet — only 10s since the last REAL liveness signal (subscribe)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_001);
+    });
+    // 15.001s since SUBSCRIBED with nothing but malformed traffic in
+    // between — the feed must show degraded, not healthy.
+    expect(result.current.degraded).toBe(true);
+  });
+
+  it("does not clear degraded on a malformed event either", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-malformed-does-not-clear-degraded"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+    expect(result.current.degraded).toBe(true);
+
+    act(() =>
+      latestChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "not_a_real_phase", ts: "t1", ...V } }),
+    );
+    expect(result.current.degraded).toBe(true);
+  });
+
   it("goes degraded immediately on CHANNEL_ERROR and resubscribes with backoff", async () => {
     const { result } = renderHook(() => useCoachChannel("call-999"));
     await flush();
@@ -178,6 +233,51 @@ describe("useCoachChannel", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(channels.length).toBeGreaterThan(channelCountWhileRemovalPending);
+  });
+
+  it("invalidates generation before a deliberate teardown, so the old channel's own synthetic CLOSED (fired by removeChannel itself) can't schedule a second resubscribe that kills the replacement mid-join", async () => {
+    // The mock's default removeChannel (see beforeEach) reproduces real
+    // Supabase behavior: removing a channel asynchronously fires that
+    // SAME channel's own subscribe callback with CLOSED. Without bumping
+    // generation before calling it, that CLOSED would be indistinguishable
+    // from a genuine new failure and would schedule a second, unwanted
+    // resubscribe cycle.
+    const { result } = renderHook(() => useCoachChannel("call-teardown-race"));
+    await flush();
+    const firstChannel = latestChannel();
+    act(() => firstChannel._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+
+    // Let the scheduled resubscribe fire: bump generation, remove the old
+    // channel (synthesizing its own CLOSED in the process), create the
+    // replacement.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(channels.length).toBe(2);
+    const replacementChannel = latestChannel();
+    expect(replacementChannel).not.toBe(firstChannel);
+
+    // Advance well past every backoff tier. If the old channel's
+    // synthetic CLOSED had been treated as live (the bug this guards), it
+    // would have scheduled a phantom second resubscribe whose own backoff
+    // fires somewhere in this window — tearing down the replacement
+    // (removeChannel called again, a third channel created) while it may
+    // still be mid-join.
+    removeChannel.mockClear();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(channels.length).toBe(2);
+    expect(removeChannel).not.toHaveBeenCalled();
+
+    // The replacement is still fully functional and its generation
+    // tracking intact: its own SUBSCRIBED runs the normal code path
+    // (marking reconnectGap, since the original CHANNEL_ERROR is still an
+    // unresolved failed attempt) rather than being silently swallowed by
+    // a mismatched/corrupted generation from the earlier race.
+    act(() => replacementChannel._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    expect(result.current.reconnectGap).toBe(true);
   });
 
   it("goes degraded on TIMED_OUT and CLOSED too", async () => {
@@ -264,12 +364,28 @@ describe("useCoachChannel", () => {
     expect(removeChannel).not.toHaveBeenCalled();
   });
 
-  it("marks reconnectGap on a real reconnect (a SUBSCRIBED after an error), not on the first subscribe", async () => {
+  it("marks reconnectGap on a real reconnect (a SUBSCRIBED after an error), not on a clean first subscribe", async () => {
     const { result } = renderHook(() => useCoachChannel("call-gap"));
     await flush();
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
     expect(result.current.reconnectGap).toBe(false);
 
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    expect(result.current.reconnectGap).toBe(true);
+  });
+
+  it("marks reconnectGap even on the VERY FIRST join, when that join only succeeded after an initial failure — the coach_call_index write race", async () => {
+    // Regression: the ownership row the RLS policy checks is written via
+    // after() (jitter-server.ts) and isn't guaranteed to exist yet when
+    // the browser's first subscribe attempt fires. That first attempt can
+    // legitimately CHANNEL_ERROR, then succeed on retry — and events may
+    // have been emitted by the producer in between. The old logic only
+    // flagged a gap on a SUBSCRIBED that followed an EARLIER SUBSCRIBED,
+    // so a first-join failure that later succeeded reported as a clean,
+    // healthy connection — hiding a real gap.
+    const { result } = renderHook(() => useCoachChannel("call-first-join-failure"));
+    await flush();
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
     expect(result.current.reconnectGap).toBe(true);

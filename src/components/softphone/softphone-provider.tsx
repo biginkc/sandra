@@ -173,6 +173,12 @@ export function SoftphoneProvider({ children }: Props) {
   const callerIdsRef = useRef<JitterCallerId[]>([]);
   const selectedCallerIdRef = useRef<string | null>(null);
   const callerIdLoadRef = useRef<Promise<string | null> | null>(null);
+  // Bumped by resetIdle() and hangup() — anything that terminates the call
+  // this session is tracking. transport.start() is awaited, so the call
+  // can be reset/hung-up while it's still resolving; without this, the
+  // post-await `setCoachCallId(callToken)` would resurrect a coach
+  // subscription for a call the rep already walked away from.
+  const attemptGenerationRef = useRef(0);
 
   const loadCallerIds = useCallback((): Promise<string | null> => {
     if (callerIdLoadRef.current) return callerIdLoadRef.current;
@@ -281,6 +287,7 @@ export function SoftphoneProvider({ children }: Props) {
   }, []);
 
   const resetIdle = useCallback(() => {
+    attemptGenerationRef.current += 1;
     transportRef.current = null;
     callHandleRef.current = null;
     manualHangupRef.current = false;
@@ -331,6 +338,12 @@ export function SoftphoneProvider({ children }: Props) {
     // paths below) — the coach hook must never carry a prior call's id
     // forward even for an instant.
     setCoachCallId(null);
+    // This attempt's own generation — checked after the transport.start()
+    // await below. If resetIdle()/hangup() bump it in the meantime (the
+    // rep walked away, or the call ended, while start() was still
+    // resolving), this attempt is superseded and must not resurrect
+    // coach state for a call nobody is tracking anymore.
+    const myAttempt = ++attemptGenerationRef.current;
     if (provisionalTarget) setTarget(provisionalTarget);
     transition({ type: "call_started" });
     setPending(true);
@@ -422,6 +435,10 @@ export function SoftphoneProvider({ children }: Props) {
         setCallOutcome(kind === "failed" ? "failed" : terminalResult.outcome);
         setFinalSeconds(terminalResult.durationSeconds);
         setWrapToken((value) => value ?? crypto.randomUUID());
+        // The call is over — the coach subscription must tear down with
+        // it, not linger for the whole wrap-up phase. wrapToken stays set
+        // (wrap-up/dedup still needs it); coachCallId does not.
+        setCoachCallId(null);
         if (kind === "failed" && result.data.propertyId) {
           try {
             await resumeFailedSoftphoneCall(result.data.propertyId);
@@ -471,6 +488,7 @@ export function SoftphoneProvider({ children }: Props) {
             setTarget(null);
             setStartedAt(null);
             setWrapToken(null);
+            setCoachCallId(null);
             setCallStatus(null);
             setPhone("idle");
             if (
@@ -515,6 +533,15 @@ export function SoftphoneProvider({ children }: Props) {
         ...(intentCapability ? { intentCapability } : {}),
         callerIdE164,
       });
+      if (attemptGenerationRef.current !== myAttempt) {
+        // Superseded while transport.start() was in flight — the rep
+        // already reset or hung up this attempt. Don't touch
+        // callHandleRef (that would clobber whatever the newer state
+        // owns) or resurrect a coach subscription; best-effort clean up
+        // the now-orphaned call the transport just established.
+        void transport.hangup().catch(() => undefined);
+        return;
+      }
       callHandleRef.current = callHandle;
       // Only now — transport.start() actually succeeded — does the coach
       // hook get a callId to subscribe with. Subscribing any earlier would
@@ -561,6 +588,12 @@ export function SoftphoneProvider({ children }: Props) {
   const hangup = useCallback(async () => {
     const transport = transportRef.current;
     if (!transport) return;
+    // Invalidates any startTarget() attempt still awaiting
+    // transport.start() (reachable if the rep hangs up while the call is
+    // still "preparing") — its post-await commit must see itself
+    // superseded rather than resurrecting a coach subscription for a call
+    // that's being hung up right now.
+    attemptGenerationRef.current += 1;
     manualHangupRef.current = true;
     terminalHandledRef.current = true;
     try {
@@ -569,6 +602,9 @@ export function SoftphoneProvider({ children }: Props) {
       setFinalSeconds(result.durationSeconds);
       setCallStatus("ended");
       setWrapToken((value) => value ?? crypto.randomUUID());
+      // Same reasoning as finishTerminal: the call is over, the coach
+      // subscription must not linger through wrap-up.
+      setCoachCallId(null);
       transition({ type: "hangup" });
     } finally {
       manualHangupRef.current = false;

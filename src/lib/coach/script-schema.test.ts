@@ -83,6 +83,13 @@ describe("assertValidClosrScript", () => {
     expect(() => assertValidClosrScript(script)).toThrow(/unknown placeholder/);
   });
 
+  it("rejects the exact {year built} (a space, not an underscore) shape — round-3's \\w+ pattern missed this entirely", () => {
+    const script = validScript();
+    const phases = script.phases as { display: { branches: { variants: { lines: Record<string, unknown>[] }[] }[] } }[];
+    phases[0].display.branches[0].variants[0].lines[0].text = "Looks like the {year built}'s still.";
+    expect(() => assertValidClosrScript(script)).toThrow(/unknown placeholder/);
+  });
+
   it("tolerates {{tone:...}} markup — never mistaken for an unknown {token} placeholder", () => {
     const script = validScript();
     const phases = script.phases as { display: { branches: { variants: { lines: Record<string, unknown>[] }[] }[] } }[];
@@ -153,5 +160,40 @@ describe("assertValidClosrScript", () => {
     const reveal = phases.find((p) => p.id === "reveal")!;
     reveal.match.pain_words = "not an array";
     expect(() => assertValidClosrScript(script)).toThrow(/match\.pain_words is not a string\[\]/);
+  });
+
+  describe("consumer contract — the app's actual assumptions about the script, not just its own internal shape", () => {
+    it("rejects tokens[] declaring a token COACH_TOKENS doesn't support", () => {
+      const script = validScript();
+      (script.tokens as string[]).push("made_up_token");
+      expect(() => assertValidClosrScript(script)).toThrow(/doesn't support/);
+    });
+
+    it("rejects a script missing the introduction phase — the app's default starting phase", () => {
+      const script = validScript();
+      script.phases = (script.phases as { id: string }[]).filter((p) => p.id !== "introduction");
+      expect(() => assertValidClosrScript(script)).toThrow(/missing required phase 'introduction'/);
+    });
+
+    it("rejects duplicate phase ids", () => {
+      const script = validScript();
+      const phases = script.phases as { id: string }[];
+      phases[1].id = phases[0].id;
+      expect(() => assertValidClosrScript(script)).toThrow(/duplicate phase id/);
+    });
+
+    it("rejects a phase's match.exit_to pointing at a phase id that doesn't exist", () => {
+      const script = validScript();
+      const phases = script.phases as { id: string; match: { exit_to: string | null } }[];
+      phases.find((p) => p.id === "introduction")!.match.exit_to = "phase_that_does_not_exist";
+      expect(() => assertValidClosrScript(script)).toThrow(/exit_to references nonexistent phase/);
+    });
+
+    it("rejects a non-string, non-null variant label", () => {
+      const script = validScript();
+      const phases = script.phases as { display: { branches: { variants: Record<string, unknown>[] }[] } }[];
+      phases[0].display.branches[0].variants[0].label = 42;
+      expect(() => assertValidClosrScript(script)).toThrow(/non-string, non-null label/);
+    });
   });
 });

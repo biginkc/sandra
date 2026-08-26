@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { REALTIME_SUBSCRIBE_STATES, type SupabaseClient } from "@supabase/supabase-js";
 
@@ -8,6 +11,55 @@ import { resetTenantTables } from "@tests/integration/reset";
 
 const serviceClient = createTestClient();
 const createdUserIds: string[] = [];
+
+/**
+ * Replays this migration's own SQL directly against the shared
+ * sandra-crm-test project before any test runs, rather than trusting
+ * whatever schema the project already has.
+ *
+ * db-migrate-test.yml only applies migrations on push to `main` (after
+ * review) — a branch's own migration file, like this one before it
+ * merges, is never applied there. Without this, the pre-merge CI job that
+ * runs this test file would exercise stale SQL: the `coach_call_index`
+ * table and its RLS/restrictive policies as they existed the last time
+ * `main` touched this area (possibly not at all), silently passing or
+ * failing for the wrong reasons.
+ *
+ * Deliberately NOT `supabase db push` — that registers the migration in
+ * `schema_migrations` and runs the full ordered migration-safety gate
+ * (scripts/check-migration-safety.mjs), which is reserved for the real
+ * post-merge pipeline and would let an unmerged branch's migration
+ * silently take a permanent slot in the shared project's migration
+ * history. This SQL file is deliberately idempotent (`create table if not
+ * exists`, `drop policy if exists` before every `create policy`) so a
+ * raw, repeated replay is safe — CI runs it on every PR, and any
+ * developer running `npm run test:integration` locally gets the same
+ * replay, so nobody needs a manual step to keep their local shared
+ * project in sync with this branch's schema.
+ *
+ * Runs inside a test file's beforeAll (a worker process), which always
+ * executes after global-setup.ts has acquired the suite's advisory lock —
+ * this replay is therefore serialized against every other integration/E2E
+ * run against the same shared project, not a free-for-all schema change
+ * racing concurrent test runs.
+ */
+async function replayMigration(): Promise<void> {
+  const dbUrl = process.env.TEST_SUPABASE_DB_URL;
+  if (!dbUrl) {
+    throw new Error(
+      "Missing TEST_SUPABASE_DB_URL — required to replay this migration before the authorization tests run. " +
+        "See tests/integration/README.md.",
+    );
+  }
+  const sql = readFileSync(path.resolve(__dirname, "20260826170000_coach_call_index.sql"), "utf8");
+  const client = new Client({ connectionString: dbUrl });
+  await client.connect();
+  try {
+    await client.query(sql);
+  } finally {
+    await client.end();
+  }
+}
 
 // coach_call_index isn't in the generated Database type yet (it can only be
 // regenerated against the live schema after this migration is applied) —
@@ -59,6 +111,7 @@ async function insertProperty(): Promise<string> {
 }
 
 beforeAll(async () => {
+  await replayMigration();
   await resetTenantTables(serviceClient);
   await seedTwoOrgs(serviceClient);
 });
@@ -187,12 +240,20 @@ describe("Migration 20260826170000 — coach:{client_call_id} Realtime Broadcast
       .upsert({ client_call_id: clientCallId, operator_user_id: owner.userId, property_id: propertyId });
 
     other.client.realtime.setAuth(other.jwt);
-    const { status } = await subscribeAndWaitForStatus(other.client, `coach:${clientCallId}`);
-    // Assert denial rather than one specific status flavor — Realtime maps
-    // an RLS-denied private-channel join to a subscribe-callback failure
-    // status (CHANNEL_ERROR in current supabase-js), but the contract this
-    // test protects is "never SUBSCRIBED", not the exact enum value.
-    expect(status).not.toBe(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED);
+    const { status, err } = await subscribeAndWaitForStatus(other.client, `coach:${clientCallId}`);
+    // Require the SPECIFIC authorization-denied shape, not any non-
+    // SUBSCRIBED status. TIMED_OUT/CLOSED are network/timing failures a
+    // flaky run could produce for unrelated reasons and would pass this
+    // assertion as a false "denied" — only CHANNEL_ERROR is what
+    // Realtime's own client (RealtimeChannel.js: the join's `.receive
+    // ('error', ...)` branch) uses to report the join request itself
+    // being rejected, which is what an RLS policy denial actually
+    // produces. `err` carries the server's rejection detail — asserting
+    // it's non-empty proves this was a real reported denial, not (say) a
+    // status the mock/harness produced with no underlying cause.
+    expect(status).toBe(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR);
+    expect(err).toBeInstanceOf(Error);
+    expect(err?.message.length).toBeGreaterThan(0);
     await other.client.removeAllChannels();
   }, 20_000);
 });
@@ -200,21 +261,24 @@ describe("Migration 20260826170000 — coach:{client_call_id} Realtime Broadcast
 /**
  * Subscribes to a private Realtime Broadcast channel and resolves on the
  * first terminal subscribe status (SUBSCRIBED, or a failure status —
- * CHANNEL_ERROR/TIMED_OUT/CLOSED). The caller must have already called
- * `client.realtime.setAuth(jwt)` — subscribing without it always fails,
- * authorized or not, since the private-channel auth handshake has nothing
- * to check.
+ * CHANNEL_ERROR/TIMED_OUT/CLOSED), along with the error object the
+ * client's subscribe callback receives (only ever populated for
+ * CHANNEL_ERROR — see RealtimeChannel.js's `.subscribe()`, which passes
+ * an `Error` built from the join's rejection payload). The caller must
+ * have already called `client.realtime.setAuth(jwt)` — subscribing
+ * without it always fails, authorized or not, since the private-channel
+ * auth handshake has nothing to check.
  */
 function subscribeAndWaitForStatus(
   client: SupabaseClient<Database>,
   topic: string,
   timeoutMs = 15_000,
-): Promise<{ status: REALTIME_SUBSCRIBE_STATES }> {
+): Promise<{ status: REALTIME_SUBSCRIBE_STATES; err?: Error }> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`Timed out after ${timeoutMs}ms waiting for a subscribe status on "${topic}".`));
     }, timeoutMs);
-    client.channel(topic, { config: { private: true } }).subscribe((status) => {
+    client.channel(topic, { config: { private: true } }).subscribe((status, err) => {
       if (
         status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED ||
         status === REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR ||
@@ -222,7 +286,7 @@ function subscribeAndWaitForStatus(
         status === REALTIME_SUBSCRIBE_STATES.CLOSED
       ) {
         clearTimeout(timer);
-        resolve({ status });
+        resolve({ status, err });
       }
     });
   });

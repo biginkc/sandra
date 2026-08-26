@@ -32,10 +32,16 @@ const RESUBSCRIBE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
  * came back. `reconnectGap` flags that some events may have been missed
  * while disconnected (there's no server-side state-snapshot API to
  * request a rebuild from, so this is an honest "we can't be sure" signal,
- * not a silent one) — it represents unrecoverable missed history, not a
- * transient blip, so it only ever clears when the caller explicitly calls
- * `dismissReconnectGap` — a fresh event proves the feed is current again,
- * not that the gap never happened.
+ * not a silent one) — set whenever a SUBSCRIBED was preceded by any
+ * failed attempt, including the very first join (a first-try
+ * CHANNEL_ERROR followed by a successful retry still means events could
+ * have been emitted and lost before the retry landed — that's not a
+ * "clean first connection"). It only ever clears when the caller
+ * explicitly calls `dismissReconnectGap` — a fresh event proves the feed
+ * is current again, not that the gap never happened. Liveness/degraded
+ * are only refreshed by a fully VALIDATED event — malformed or
+ * unknown-type traffic proves bytes are arriving, not that the contract
+ * is intact, so it can't make a broken feed look healthy.
  * `scriptOutOfSync` is the producer's declared scriptVersion whenever it
  * differs from this app's loaded script (CLOSR_SCRIPT.version) — reset to
  * null the moment a later event reports a matching version. Every valid
@@ -75,7 +81,6 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
     let livenessTimer: ReturnType<typeof setTimeout> | null = null;
     let resubscribeTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
-    let everSubscribed = false;
     const supabase = createClient();
 
     const armLiveness = () => {
@@ -115,6 +120,15 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
       resubscribeTimer = setTimeout(() => {
         resubscribeTimer = null;
         void (async () => {
+          // Invalidate the OLD channel's callbacks BEFORE deliberately
+          // removing it. removeChannel() unsubscribes, which can trigger
+          // that SAME channel's own CLOSED status callback (synchronously
+          // or on a microtask) — without bumping generation first, that
+          // callback still sees myGeneration === generation (unchanged)
+          // and treats the deliberate teardown as a fresh failure,
+          // scheduling a SECOND resubscribe that can tear down the
+          // replacement channel while it's mid-join.
+          generation += 1;
           await teardownChannel();
           await start();
         })();
@@ -132,16 +146,22 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
         .channel(`coach:${callId}`, { config: { private: true } })
         .on("broadcast", { event: COACH_BROADCAST_EVENT }, (message) => {
           if (!mounted || myGeneration !== generation) return;
-          armLiveness();
-          setDegraded(false);
           const result = parseCoachEvent(message.payload);
           if (!result.ok) {
             if (result.reason === "malformed") {
               setMalformedEventCount((value) => value + 1);
               console.warn("[coach] dropped malformed event", result.rawType, message.payload);
             }
+            // Only a VALIDATED event counts as liveness proof — armLiveness
+            // /setDegraded(false) run below, never here. Malformed traffic
+            // (or a genuinely unknown forward-compat type) proves bytes are
+            // arriving, not that the contract is intact; a run of garbage
+            // must surface as degraded, not keep resetting the 15s window
+            // and reporting a healthy feed.
             return;
           }
+          armLiveness();
+          setDegraded(false);
           // reconnectGap is NOT cleared here. It represents events that
           // were unrecoverably missed while disconnected — a fresh event
           // proves the feed is current again, not that nothing was lost
@@ -157,14 +177,21 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
             // timer fires — cancel it so it doesn't tear down the
             // connection that just came back.
             clearResubscribeTimer();
+            // A gap exists whenever this SUBSCRIBED was preceded by at
+            // least one failed attempt (attempt > 0, captured before the
+            // reset below) — whether that's a genuine reconnect after a
+            // prior successful subscribe, OR the very first join
+            // succeeding only after an initial failure (e.g. the coach
+            // service's coach_call_index write, fired via after() in
+            // jitter-server.ts, hadn't landed yet when the browser first
+            // tried to subscribe). Either way the producer may have
+            // emitted events before this join actually took, and those
+            // are gone — a "first successful connection" framing would
+            // hide that from the rep instead of surfacing it.
+            const hadFailedAttempt = attempt > 0;
             attempt = 0;
             armLiveness();
-            // Only a *re*-subscribe (not the first one) implies a real gap:
-            // there is no producer-side snapshot API to rebuild phase/gate
-            // state from, so this is an honest "may have missed events"
-            // signal rather than a silent one.
-            if (everSubscribed) setReconnectGap(true);
-            everSubscribed = true;
+            if (hadFailedAttempt) setReconnectGap(true);
             return;
           }
           if (
