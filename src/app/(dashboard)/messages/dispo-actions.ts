@@ -106,6 +106,7 @@ export async function setOutreachDispo(
       contactId,
       reason: "consent_revoked",
       permanent: true,
+      actor: { actorType: "user", actorId: user.id },
     });
   }
 

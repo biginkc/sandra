@@ -117,6 +117,7 @@ describe("setOutreachDispo", () => {
       contactId: "contact-1",
       reason: "consent_revoked",
       permanent: true,
+      actor: { actorType: "user", actorId: "actor-1" },
     });
   });
 });

@@ -797,6 +797,7 @@ describe("bookAppointment — RPC + side effects", () => {
       propertyId: "prop-1",
       reason: "appointment_booked",
       permanent: false,
+      actor: { actorType: "user", actorId: "user-1" },
     });
   });
 
@@ -830,6 +831,7 @@ describe("bookAppointment — RPC + side effects", () => {
       propertyId: "prop-RETURNED",
       reason: "appointment_booked",
       permanent: false,
+      actor: { actorType: "user", actorId: "user-1" },
     });
     expect(pausePropertyEnrollments).not.toHaveBeenCalledWith(
       expect.anything(),

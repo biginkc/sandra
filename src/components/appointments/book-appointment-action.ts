@@ -484,6 +484,7 @@ export async function bookAppointment(
           propertyId: linkedPropertyId,
           reason: "appointment_booked",
           permanent: false,
+          actor: { actorType: "user", actorId: user.id },
         });
       } catch (e) {
         reportError(e, {

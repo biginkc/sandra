@@ -102,7 +102,13 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
     if (blocked) {
       return { ok: false, error: typeof blocked === "string" ? "This lead is not callable." : "This lead is blocked: " + blocked.blocked.replaceAll("_", " ") + "." };
     }
-    await pausePropertyEnrollments(supabase, { propertyId: lead.id, reason: "call_in_progress" });
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return { ok: false, error: "Not signed in." };
+    await pausePropertyEnrollments(supabase, {
+      propertyId: lead.id,
+      reason: "call_in_progress",
+      actor: { actorType: "user", actorId: user.id },
+    });
     return { ok: true, data: target };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Could not start the call." };
@@ -113,7 +119,12 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
 export async function resumeFailedSoftphoneCall(propertyId: string): Promise<void> {
   try {
     const supabase = await createClient();
-    await resumeByProperty(supabase, { propertyId });
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    await resumeByProperty(supabase, {
+      propertyId,
+      actor: { actorType: "user", actorId: user.id },
+    });
   } catch {
     // The scheduled call-in-progress sweeper is the durable backstop.
   }
@@ -165,7 +176,13 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
       if (!quietHours.ok) return { ok: false, error: "Calling is unavailable during quiet hours." };
       const target = leadTarget(linkedLead, phoneE164);
       if (!target || !linkedLead.homeowner) return { ok: false, error: "This lead has no callable phone number." };
-      await pausePropertyEnrollments(supabase, { propertyId: linkedLead.id, reason: "call_in_progress" });
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (authError || !user) return { ok: false, error: "Not signed in." };
+      await pausePropertyEnrollments(supabase, {
+        propertyId: linkedLead.id,
+        reason: "call_in_progress",
+        actor: { actorType: "user", actorId: user.id },
+      });
       return { ok: true, data: target };
     }
 
@@ -560,7 +577,10 @@ export async function completeSoftphoneCall(input: {
       // the softphone-owned pause, never an inbound-reply or appointment pause.
       if (dispositionSucceeded && input.target.propertyId) {
         try {
-          await resumeByProperty(supabase, { propertyId: input.target.propertyId });
+          await resumeByProperty(supabase, {
+            propertyId: input.target.propertyId,
+            actor: { actorType: "user", actorId: user.id },
+          });
         } catch {
           // The 30-minute call-in-progress sweeper is the durable backstop.
         }

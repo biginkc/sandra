@@ -805,6 +805,7 @@ async function setResponderDispo(
       propertyId: args.propertyId,
       reason: "inbound_reply",
       permanent: false,
+      actor: { actorType: "ai" },
     });
   }
   return { updated: true };

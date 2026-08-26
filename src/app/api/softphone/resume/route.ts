@@ -22,7 +22,10 @@ export async function POST(request: Request) {
   }
 
   try {
-    const resumed = await resumeByProperty(supabase, { propertyId: body.propertyId });
+    const resumed = await resumeByProperty(supabase, {
+      propertyId: body.propertyId,
+      actor: { actorType: "user", actorId: user.id },
+    });
     return NextResponse.json({ ok: true, ...resumed });
   } catch (error) {
     return NextResponse.json(
