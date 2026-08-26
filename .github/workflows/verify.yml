@@ -44,3 +44,77 @@ jobs:
         env:
           SANDRA_POSTGRES_BIN: /usr/lib/postgresql/17/bin
         run: npm run verify:hugo-sql && npm run verify:hugo-rollback
+
+  coach-realtime-authorization:
+    name: Coach realtime.messages authorization (integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Serializes against db-migrate-test.yml and e2e.yml, which also hit the
+    # shared sandra-crm-test project — this job's own suite-lock advisory
+    # lock (tests/integration/global-setup.ts) already prevents two
+    # integration runs from truncating tenant tables on top of each other,
+    # but E2E's reset_tenant_tables() calls aren't covered by that lock, so
+    # this still needs to queue behind e2e's group rather than run inside
+    # it unprotected.
+    concurrency:
+      group: e2e-shared-test-project
+      cancel-in-progress: false
+
+    env:
+      TEST_PROJECT_REF: ncsngxlcyxylaeskiteu
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+      TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+      TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link to test project
+        run: supabase link --project-ref "$TEST_PROJECT_REF"
+
+      - name: Resolve session-pooler host/port/user
+        id: pooler
+        # Mirrors db-migrate-test.yml's approach exactly (down to the
+        # step's shape): read the pooler host/shard `supabase link` already
+        # resolved rather than guessing it, so this can't drift from the
+        # project's real region. Only host/port/user go into the step
+        # output — never the password, so nothing secret ever passes
+        # through GITHUB_OUTPUT or the Actions UI. The integration suite's
+        # advisory-lock mutex (tests/integration/global-setup.ts) requires
+        # the SESSION pooler (port 5432), not the transaction pooler
+        # (6543) — a session-level lock is meaningless on a pooler that
+        # hands out a different backend per statement.
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const raw = fs.readFileSync("supabase/.temp/pooler-url", "utf8").trim();
+            const u = new URL(raw);
+            const out = [
+              `host=${u.hostname}`,
+              `port=5432`,
+              `user=${decodeURIComponent(u.username)}`,
+            ].join("\n");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, out + "\n");
+          '
+
+      - name: Run the coach realtime authorization integration test
+        env:
+          TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
+        run: |
+          echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
+          export TEST_SUPABASE_DB_URL="postgresql://${{ steps.pooler.outputs.user }}:$(node -e "process.stdout.write(encodeURIComponent(process.env.TEST_SUPABASE_DB_PASSWORD))")@${{ steps.pooler.outputs.host }}:${{ steps.pooler.outputs.port }}/postgres"
+          npx vitest run --config vitest.integration.config.ts supabase/migrations/20260826170000_coach_call_index.integration.test.ts

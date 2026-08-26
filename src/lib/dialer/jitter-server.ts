@@ -1,7 +1,9 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { after } from "next/server";
 
 import { getCallerMemberships, type Membership } from "@/lib/auth/memberships";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
+import { isCoachUiEnabled } from "@/lib/coach/flags";
 import { prepareLeadCall, prepareManualCall } from "@/lib/dialer/actions";
 import { reportError } from "@/lib/errors/report";
 import { STATE_TO_TZ } from "@/lib/messaging/quiet-hours";
@@ -106,6 +108,19 @@ type CoachCallIndexAdminClient = {
   };
 };
 
+/** Hard ceiling on the coach-indexing write. This value never gates the
+ * dial path directly (the write isn't awaited there at all — see
+ * `after()` at the call site) — it exists so a hung service-role request
+ * can't run indefinitely in the background after the response has
+ * already gone out. */
+const COACH_INDEX_TIMEOUT_MS = 1_500;
+
+function timeout(ms: number): Promise<never> {
+  return new Promise((_, reject) => {
+    setTimeout(() => reject(new Error(`coach_call_index write timed out after ${ms}ms`)), ms);
+  });
+}
+
 /**
  * Records the ownership row the coach realtime.messages RLS policy checks
  * (`supabase/migrations/20260826170000_coach_call_index.sql`). Uses the
@@ -114,6 +129,13 @@ type CoachCallIndexAdminClient = {
  * arbitrary call id. `clientCallId` is the same idempotency key sent to
  * Jitter as the start-call token, which becomes the browser's wrapToken
  * and the coach channel's `coach:{clientCallId}` suffix.
+ *
+ * Never awaited in the dial path (see the `after()` call site below) — a
+ * rep must never wait on this write to start talking. The client-side
+ * subscribe retries with backoff on CHANNEL_ERROR
+ * (use-coach-channel.ts), which is exactly the failure mode a slow write
+ * here would produce, so the two sides are designed to tolerate each
+ * other's latency.
  */
 async function indexCoachCall(input: {
   clientCallId: string;
@@ -122,14 +144,17 @@ async function indexCoachCall(input: {
 }): Promise<void> {
   try {
     const admin = createAdminClient() as unknown as CoachCallIndexAdminClient;
-    const { error } = await admin.from("coach_call_index").upsert(
-      {
-        client_call_id: input.clientCallId,
-        operator_user_id: input.operatorUserId,
-        property_id: input.propertyId,
-      },
-      { onConflict: "client_call_id" },
-    );
+    const { error } = await Promise.race([
+      admin.from("coach_call_index").upsert(
+        {
+          client_call_id: input.clientCallId,
+          operator_user_id: input.operatorUserId,
+          property_id: input.propertyId,
+        },
+        { onConflict: "client_call_id" },
+      ),
+      timeout(COACH_INDEX_TIMEOUT_MS),
+    ]);
     if (error) {
       reportError(error, {
         tags: { surface: "coach_call_index_write" },
@@ -137,7 +162,10 @@ async function indexCoachCall(input: {
       });
     }
   } catch (error) {
-    // Never let a coach-indexing failure block the call itself.
+    // Covers both a Supabase-thrown error and the timeout race above.
+    // Never let a coach-indexing failure or slowness surface anywhere the
+    // call itself can see it — this function already isn't awaited by its
+    // caller, but stay defensive in case that ever changes.
     reportError(error, {
       tags: { surface: "coach_call_index_write" },
       extra: { clientCallId: input.clientCallId },
@@ -250,16 +278,20 @@ export async function startAuthenticatedJitterCall(
   }
 
   // Coach realtime authorization needs an ownership row to exist before the
-  // browser can possibly subscribe to coach:{callToken} — write it here,
-  // before the Jitter start request, using the same identifiers the
-  // start-call payload below sends. Best-effort: a failure here degrades
-  // the coach (no live coaching for this call) but must never block the
-  // call itself.
-  await indexCoachCall({
-    clientCallId: intent.idempotencyKey,
-    operatorUserId: operator.userId,
-    propertyId: prepared.data.propertyId,
-  });
+  // browser can possibly subscribe to coach:{callToken}. Scheduled via
+  // `after()` (runs once this action's response has gone out — see
+  // node_modules/next/dist/docs) rather than awaited: a rep must never
+  // wait on this write to start talking, and it must not run at all when
+  // the coach UI is off, so flag-off is truly zero new behavior on the
+  // dial path. Best-effort: a failure here degrades the coach (no live
+  // coaching for this call) but must never block or affect the call
+  // itself.
+  if (isCoachUiEnabled()) {
+    const clientCallId = intent.idempotencyKey;
+    const operatorUserId = operator.userId;
+    const propertyId = prepared.data.propertyId;
+    after(() => indexCoachCall({ clientCallId, operatorUserId, propertyId }));
+  }
 
   const started = await requestJitterStartCall(
     {

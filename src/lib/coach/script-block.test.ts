@@ -15,6 +15,7 @@ const context: CoachCallContext = {
   leadId: "abcd1234-ef56-7890-abcd-ef1234567890",
   sellerPhoneE164: "+18165559876",
   coldCallerName: "Rose",
+  yearBuilt: null,
   leadSource: null,
   occupancy: null,
 };
@@ -28,6 +29,20 @@ function allText(segments: { kind: string; value?: string; label?: string; resol
 }
 
 describe("buildPhaseScriptBlock", () => {
+  it("resolves {year_built} in the assessment phase's interior-condition line — regression for the {year built} (space, unresolvable) typo", () => {
+    const builtTokens = resolveCoachTokens({ ...context, yearBuilt: "1987" });
+    const block = buildPhaseScriptBlock("assessment", builtTokens);
+    const branchWithInteriorLine = block?.branches
+      .flatMap((branch) => branch.selected.lines)
+      .find((line) => allText(line.segments).includes("interior still looks like"));
+    expect(branchWithInteriorLine).toBeDefined();
+    expect(allText(branchWithInteriorLine!.segments)).toContain("1987");
+    // The bug this guards: {year built} (a space, not {year_built}) never
+    // matched resolveDisplayText's \{(\w+)\} pattern, so the literal
+    // braces rendered verbatim instead of resolving.
+    expect(allText(branchWithInteriorLine!.segments)).not.toContain("{year built}");
+  });
+
   it("resolves tokens inline in the selected variant's lines", () => {
     const block = buildPhaseScriptBlock("introduction", tokens);
     expect(block).not.toBeNull();

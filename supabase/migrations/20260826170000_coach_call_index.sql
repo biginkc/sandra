@@ -49,10 +49,19 @@ create policy coach_call_index_owner_select on public.coach_call_index
   to authenticated
   using (operator_user_id = auth.uid());
 
--- No insert/update/delete policy for `authenticated` — rows are written
--- exclusively by the service-role client from the server-authenticated
--- start-call path (src/lib/dialer/jitter-server.ts), never by the browser.
--- A rep must not be able to claim ownership of an arbitrary call id.
+-- RLS policies restrict which ROWS a grant already permitting SELECT can
+-- see — they don't substitute for the grant itself. Without this, the
+-- `authenticated` role has no privilege on the table at all and every
+-- query (including the realtime.messages policy's EXISTS subquery below)
+-- fails outright rather than returning zero rows. Supabase's documented
+-- RLS pattern is always grant + policy together, never policy alone.
+grant select on public.coach_call_index to authenticated;
+
+-- No insert/update/delete policy or grant for `authenticated` — rows are
+-- written exclusively by the service-role client from the
+-- server-authenticated start-call path (src/lib/dialer/jitter-server.ts),
+-- never by the browser. A rep must not be able to claim ownership of an
+-- arbitrary call id.
 
 -- ----------------------------------------------------------------------------
 -- Realtime Broadcast Authorization: coach:{client_call_id}
@@ -74,6 +83,43 @@ create policy coach_broadcast_owner_select on realtime.messages
       from public.coach_call_index cci
       where cci.client_call_id = split_part(realtime.topic(), ':', 2)
         and cci.operator_user_id = (select auth.uid())
+    )
+  );
+
+-- PostgreSQL ORs together every PERMISSIVE policy that applies to a row —
+-- so the ownership check above is only as strong as "no other permissive
+-- policy on realtime.messages ever grants a broader read". Policy
+-- inventory as of this migration: coach_broadcast_owner_select above is
+-- the ONLY policy on realtime.messages in this project (confirmed —
+-- grep supabase/migrations for `realtime.messages` turns up nothing else).
+-- That's fragile by construction: a future migration could add a
+-- permissive policy for an unrelated topic namespace that's written too
+-- broadly (e.g. omits its own topic-prefix guard) and silently widen
+-- access to `coach:%` too, since permissive policies OR together with no
+-- guard against that here.
+--
+-- RESTRICTIVE policies are ANDed with the permissive result instead of
+-- ORed, so this one holds regardless of what permissive policies exist
+-- now or get added later: for any `coach:%` topic, the ownership check
+-- must pass no matter how permissively some other policy grants access.
+-- Rows outside the `coach:%` namespace are untouched by this policy (the
+-- `not like` branch is unconditionally true for them), so it never
+-- narrows access this project doesn't own a stake in.
+drop policy if exists coach_topics_require_ownership on realtime.messages;
+create policy coach_topics_require_ownership on realtime.messages
+  as restrictive
+  for select
+  to authenticated
+  using (
+    realtime.topic() not like 'coach:%'
+    or (
+      realtime.messages.extension = 'broadcast'
+      and exists (
+        select 1
+        from public.coach_call_index cci
+        where cci.client_call_id = split_part(realtime.topic(), ':', 2)
+          and cci.operator_user_id = (select auth.uid())
+      )
     )
   );
 

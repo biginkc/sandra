@@ -135,6 +135,14 @@ export function SoftphoneProvider({ children }: Props) {
   const [callOutcome, setCallOutcome] = useState<"connected_human" | "failed">("connected_human");
   const [teardownUnconfirmed, setTeardownUnconfirmed] = useState(false);
   const [wrapToken, setWrapToken] = useState<string | null>(null);
+  // Deliberately distinct from wrapToken, which is set as soon as a call
+  // attempt begins (before Jitter is even asked to start) — wrapToken
+  // feeds wrap-up/dedup, which must exist early. coachCallId only becomes
+  // truthy once transport.start() has actually resolved, so the coach
+  // hook never subscribes to coach:{token} before the server's
+  // indexCoachCall write (fired via after() in jitter-server.ts) has had
+  // a chance to land the ownership row that subscription depends on.
+  const [coachCallId, setCoachCallId] = useState<string | null>(null);
   const [callerIds, setCallerIds] = useState<JitterCallerId[]>([]);
   const [callerIdState, setCallerIdState] = useState<CallerIdState>("loading");
   const [selectedCallerId, setSelectedCallerId] = useState<string | null>(null);
@@ -147,7 +155,7 @@ export function SoftphoneProvider({ children }: Props) {
   // transcript, phase, gates, objection cards, or entered deal values —
   // only the view unmounts, not this session.
   const coachSession = useCoachSession(
-    coachUiEnabled ? wrapToken : null,
+    coachUiEnabled ? coachCallId : null,
     target?.propertyId ?? null,
     target?.phoneE164 ?? null,
     selectedCallerId,
@@ -300,6 +308,7 @@ export function SoftphoneProvider({ children }: Props) {
     setStartedAt(null);
     setCallOutcome("connected_human");
     setWrapToken(null);
+    setCoachCallId(null);
     setCoachCollapsed(false);
     setPhone("idle");
   }, []);
@@ -317,6 +326,11 @@ export function SoftphoneProvider({ children }: Props) {
     terminalHandledRef.current = false;
     teardownWarningRef.current = false;
     setTeardownUnconfirmed(false);
+    // Clear any stale identity from a previous attempt up front, on every
+    // possible path out of this function (including the early-abort
+    // paths below) — the coach hook must never carry a prior call's id
+    // forward even for an instant.
+    setCoachCallId(null);
     if (provisionalTarget) setTarget(provisionalTarget);
     transition({ type: "call_started" });
     setPending(true);
@@ -502,6 +516,13 @@ export function SoftphoneProvider({ children }: Props) {
         callerIdE164,
       });
       callHandleRef.current = callHandle;
+      // Only now — transport.start() actually succeeded — does the coach
+      // hook get a callId to subscribe with. Subscribing any earlier would
+      // race the server's coach_call_index write (fired via after(), so
+      // it isn't even guaranteed to have started yet at this point,
+      // let alone landed); the client-side retry-with-backoff on
+      // CHANNEL_ERROR (use-coach-channel.ts) absorbs whatever gap remains.
+      setCoachCallId(callToken);
     } catch (error) {
       // A provisioned call can fail during RTC setup after start-call
       // succeeded; keep its handle so wrap-up uses the real call identity.

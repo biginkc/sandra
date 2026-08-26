@@ -147,6 +147,39 @@ describe("useCoachChannel", () => {
     expect(removeChannel).toHaveBeenCalled();
   });
 
+  it("awaits channel removal before creating its resubscribe replacement — never races removeChannel", async () => {
+    // A removeChannel that resolves on our own schedule, not the mock's
+    // default synchronous-ish behavior — proves the real code path
+    // actually awaits it rather than only happening to work because a
+    // test double resolved instantly.
+    let releaseRemoval: (() => void) | null = null;
+    removeChannel.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { releaseRemoval = resolve; }),
+    );
+
+    renderHook(() => useCoachChannel("call-await-removal"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000); // past the first backoff delay
+    });
+    expect(removeChannel).toHaveBeenCalledTimes(1);
+    const channelCountWhileRemovalPending = channels.length;
+    // Give any stray microtasks a chance to run — the new channel must
+    // still not exist while removal is deliberately held open.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(channels.length).toBe(channelCountWhileRemovalPending);
+
+    await act(async () => {
+      releaseRemoval?.();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(channels.length).toBeGreaterThan(channelCountWhileRemovalPending);
+  });
+
   it("goes degraded on TIMED_OUT and CLOSED too", async () => {
     for (const status of [REALTIME_SUBSCRIBE_STATES.TIMED_OUT, REALTIME_SUBSCRIBE_STATES.CLOSED]) {
       const { result, unmount } = renderHook(() => useCoachChannel(`call-${status}`));
@@ -168,6 +201,50 @@ describe("useCoachChannel", () => {
     renderHook(() => useCoachChannel(null));
     await flush();
     expect(channelSpy).not.toHaveBeenCalled();
+  });
+
+  it("resets transcript/degraded/reconnectGap/malformedEventCount/scriptOutOfSync when callId changes — a new call must never inherit the previous call's state", async () => {
+    const { result, rerender } = renderHook(({ callId }) => useCoachChannel(callId), {
+      initialProps: { callId: "call-A" },
+    });
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() =>
+      latestChannel()._broadcastHandler?.({
+        payload: { type: "transcript", speaker: "rep", text: "hello from call A", isFinal: true, ts: "t1", ...V },
+      }),
+    );
+    expect(result.current.state.transcript).toHaveLength(1);
+
+    // Force it degraded + gapped + malformed-counted + out-of-sync so
+    // there's something real to prove got cleared, not just an untouched
+    // default.
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() =>
+      latestChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "not_a_real_phase", ts: "t2", ...V } }),
+    );
+    act(() =>
+      latestChannel()._broadcastHandler?.({
+        payload: { type: "counter", probeCount: 1, ts: "t3", ...V, scriptVersion: "0.9.0" },
+      }),
+    );
+    expect(result.current.reconnectGap).toBe(true);
+    expect(result.current.malformedEventCount).toBe(1);
+    expect(result.current.scriptOutOfSync).toBe("0.9.0");
+
+    rerender({ callId: "call-B" });
+    await flush();
+
+    expect(result.current.state.transcript).toEqual([]);
+    expect(result.current.state.currentPhaseId).toBe("introduction");
+    expect(result.current.degraded).toBe(false);
+    expect(result.current.reconnectGap).toBe(false);
+    expect(result.current.malformedEventCount).toBe(0);
+    expect(result.current.scriptOutOfSync).toBeNull();
+    // The new callId subscribes on a fresh channel — coach:call-B, not a
+    // reused coach:call-A instance.
+    expect(channelSpy).toHaveBeenCalledWith("coach:call-B", { config: { private: true } });
   });
 
   it("cancels a queued resubscribe timer if the channel recovers on its own before it fires", async () => {
@@ -198,7 +275,7 @@ describe("useCoachChannel", () => {
     expect(result.current.reconnectGap).toBe(true);
   });
 
-  it("clears reconnectGap once a fresh valid event arrives", async () => {
+  it("does NOT clear reconnectGap on a fresh valid event — it represents unrecoverable missed history, not a transient blip", async () => {
     const { result } = renderHook(() => useCoachChannel("call-gap-clear"));
     await flush();
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
@@ -207,6 +284,10 @@ describe("useCoachChannel", () => {
     expect(result.current.reconnectGap).toBe(true);
 
     act(() => latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 2, ts: "t1", ...V } }));
+    expect(result.current.reconnectGap).toBe(true);
+
+    // Only the explicit rep acknowledgment clears it.
+    act(() => result.current.dismissReconnectGap());
     expect(result.current.reconnectGap).toBe(false);
   });
 

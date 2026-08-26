@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { coachReducer, initialCoachState } from "./event-reducer";
+import { coachReducer, initialCoachState, NUDGE_TTL_MS, OBJECTION_CARD_TTL_MS } from "./event-reducer";
 import type { CoachState } from "./types";
 
 /** Every wire event carries both content versions, always — required. */
@@ -62,6 +62,37 @@ describe("coachReducer — transcript", () => {
     expect(state.transcript).toHaveLength(2);
     expect(state.transcript.map((line) => line.speaker)).toEqual(["rep", "seller"]);
   });
+
+  it("updates the REP's own open interim line in place even after the SELLER's interim became the trailing line — per-speaker tracking, not last-line-only", () => {
+    // Regression: rep-interim -> seller-interim -> rep-final used to check
+    // only the trailing line in the whole transcript, which by this point
+    // belongs to the seller — so the rep's final was wrongly appended as a
+    // duplicate instead of updating the rep's still-open line at index 0.
+    let state = initialCoachState();
+    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "hi there", isFinal: false, ts: "t1", ...V });
+    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "yeah", isFinal: false, ts: "t2", ...V });
+    expect(state.transcript).toHaveLength(2);
+
+    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "hi there, how are you", isFinal: true, ts: "t3", ...V });
+
+    expect(state.transcript).toHaveLength(2);
+    expect(state.transcript[0]).toMatchObject({ speaker: "rep", text: "hi there, how are you", isFinal: true });
+    expect(state.transcript[1]).toMatchObject({ speaker: "seller", text: "yeah", isFinal: false });
+  });
+
+  it("starts a fresh line for a speaker whose most recent line is already final, even though it isn't the trailing line", () => {
+    let state = initialCoachState();
+    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "first", isFinal: true, ts: "t1", ...V });
+    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "response", isFinal: false, ts: "t2", ...V });
+    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "second interim", isFinal: false, ts: "t3", ...V });
+
+    expect(state.transcript).toHaveLength(3);
+    expect(state.transcript.map((line) => ({ speaker: line.speaker, text: line.text, isFinal: line.isFinal }))).toEqual([
+      { speaker: "rep", text: "first", isFinal: true },
+      { speaker: "seller", text: "response", isFinal: false },
+      { speaker: "rep", text: "second interim", isFinal: false },
+    ]);
+  });
 });
 
 describe("coachReducer — phase advance", () => {
@@ -93,6 +124,26 @@ describe("coachReducer — objection card lifecycle", () => {
     state = coachReducer(state, { type: "objection", objectionId: "not_in_rush", ts: "t2", ...V });
     expect(state.objectionCards).toHaveLength(2);
     expect(state.objectionCards[0].id).not.toBe(state.objectionCards[1].id);
+  });
+
+  describe("expiresAt — an absolute timestamp, not a relative TTL a remount could restart", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it("sets expiresAt to insert-time-plus-TTL, not TTL alone", () => {
+      vi.setSystemTime(1_000_000);
+      const state = coachReducer(initialCoachState(), { type: "objection", objectionId: "price_too_low", ts: "t1", ...V });
+      expect(state.objectionCards[0].expiresAt).toBe(1_000_000 + OBJECTION_CARD_TTL_MS);
+    });
+
+    it("stamps each card with its OWN insert time, not the first card's", () => {
+      vi.setSystemTime(1_000_000);
+      let state = coachReducer(initialCoachState(), { type: "objection", objectionId: "price_too_low", ts: "t1", ...V });
+      vi.setSystemTime(1_010_000);
+      state = coachReducer(state, { type: "objection", objectionId: "not_in_rush", ts: "t2", ...V });
+      expect(state.objectionCards[0].expiresAt).toBe(1_000_000 + OBJECTION_CARD_TTL_MS);
+      expect(state.objectionCards[1].expiresAt).toBe(1_010_000 + OBJECTION_CARD_TTL_MS);
+    });
   });
 });
 
@@ -194,5 +245,16 @@ describe("coachReducer — coach_note nudges", () => {
     const [first, second] = state.nudges;
     state = coachReducer(state, { type: "dismiss_nudge", nudgeId: first.id });
     expect(state.nudges).toEqual([second]);
+  });
+
+  describe("expiresAt — an absolute timestamp, not a relative TTL a remount could restart", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it("sets expiresAt to insert-time-plus-TTL, not TTL alone", () => {
+      vi.setSystemTime(2_000_000);
+      const state = coachReducer(initialCoachState(), { type: "coach_note", text: "A", phaseId: "introduction", ts: "t1", ...V });
+      expect(state.nudges[0].expiresAt).toBe(2_000_000 + NUDGE_TTL_MS);
+    });
   });
 });

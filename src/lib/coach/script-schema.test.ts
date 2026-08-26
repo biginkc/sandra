@@ -73,6 +73,85 @@ describe("assertValidClosrScript", () => {
     const script = validScript();
     const objection = (script.objections as { display: Record<string, unknown> }[])[0];
     delete objection.display.overcome;
-    expect(() => assertValidClosrScript(script)).toThrow(/missing display\.acknowledge\/disarm\/overcome/);
+    expect(() => assertValidClosrScript(script)).toThrow(/missing\/malformed display fields/);
+  });
+
+  it("rejects a script line referencing an unknown {token} placeholder", () => {
+    const script = validScript();
+    const phases = script.phases as { display: { branches: { variants: { lines: Record<string, unknown>[] }[] }[] } }[];
+    phases[0].display.branches[0].variants[0].lines[0].text = "Something about {made_up_token} here.";
+    expect(() => assertValidClosrScript(script)).toThrow(/unknown placeholder/);
+  });
+
+  it("tolerates {{tone:...}} markup — never mistaken for an unknown {token} placeholder", () => {
+    const script = validScript();
+    const phases = script.phases as { display: { branches: { variants: { lines: Record<string, unknown>[] }[] }[] } }[];
+    phases[0].display.branches[0].variants[0].lines[0].text = "Say this {{tone:warm tone}} then continue.";
+    expect(() => assertValidClosrScript(script)).not.toThrow();
+  });
+
+  it("rejects an unknown placeholder inside an objection's display.overcome", () => {
+    const script = validScript();
+    const objection = (script.objections as { display: Record<string, unknown> }[])[0];
+    objection.display.overcome = "We can close by {made_up_token}.";
+    expect(() => assertValidClosrScript(script)).toThrow(/unknown placeholder/);
+  });
+
+  it("rejects an unknown placeholder inside an objection's overcome_by_occupancy value", () => {
+    const script = validScript();
+    const objection = (script.objections as { id: string; display: Record<string, unknown> }[]).find(
+      (o) => o.id === "not_in_rush",
+    )!;
+    (objection.display.overcome_by_occupancy as Record<string, string>).owner_occupied = "About {made_up_token}.";
+    expect(() => assertValidClosrScript(script)).toThrow(/unknown placeholder/);
+  });
+
+  it("rejects overcome_by_occupancy with an unrecognized occupancy key", () => {
+    const script = validScript();
+    const objection = (script.objections as { id: string; display: Record<string, unknown> }[]).find(
+      (o) => o.id === "not_in_rush",
+    )!;
+    (objection.display.overcome_by_occupancy as Record<string, string>).renting = "some text";
+    expect(() => assertValidClosrScript(script)).toThrow(/overcome_by_occupancy has a malformed entry/);
+  });
+
+  it("rejects an entry_landmark with an invalid speaker — the exact shape that used to slip past a bare Array.isArray check", () => {
+    const script = validScript();
+    const phases = script.phases as { id: string; match: { entry_landmarks: Record<string, unknown>[] } }[];
+    const reveal = phases.find((p) => p.id === "reveal")!;
+    reveal.match.entry_landmarks[0].speaker = "narrator";
+    expect(() => assertValidClosrScript(script)).toThrow(/match\.entry_landmarks\[0\] is malformed/);
+  });
+
+  it("rejects a gate missing clear_on.phrases — the exact shape a v0 gates[] was never checked for", () => {
+    const script = validScript();
+    const phases = script.phases as { id: string; match: { gates: { clear_on: Record<string, unknown> }[] } }[];
+    const securePositioning = phases.find((p) => p.id === "secure_positioning")!;
+    delete securePositioning.match.gates[0].clear_on.phrases;
+    expect(() => assertValidClosrScript(script)).toThrow(/match\.gates\[0\] is malformed/);
+  });
+
+  it("rejects a counter with a non-numeric goal", () => {
+    const script = validScript();
+    const phases = script.phases as { id: string; match: { counters: Record<string, unknown>[] } }[];
+    const reveal = phases.find((p) => p.id === "reveal")!;
+    reveal.match.counters[0].goal = "seven";
+    expect(() => assertValidClosrScript(script)).toThrow(/match\.counters\[0\] is malformed/);
+  });
+
+  it("rejects a timer missing duration_s", () => {
+    const script = validScript();
+    const phases = script.phases as { id: string; match: { timers: Record<string, unknown>[] } }[];
+    const securePositioning = phases.find((p) => p.id === "secure_positioning")!;
+    delete securePositioning.match.timers[0].duration_s;
+    expect(() => assertValidClosrScript(script)).toThrow(/match\.timers\[0\] is malformed/);
+  });
+
+  it("rejects pain_words that aren't a string array", () => {
+    const script = validScript();
+    const phases = script.phases as { id: string; match: Record<string, unknown> }[];
+    const reveal = phases.find((p) => p.id === "reveal")!;
+    reveal.match.pain_words = "not an array";
+    expect(() => assertValidClosrScript(script)).toThrow(/match\.pain_words is not a string\[\]/);
   });
 });

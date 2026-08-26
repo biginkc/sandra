@@ -32,8 +32,10 @@ const RESUBSCRIBE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
  * came back. `reconnectGap` flags that some events may have been missed
  * while disconnected (there's no server-side state-snapshot API to
  * request a rebuild from, so this is an honest "we can't be sure" signal,
- * not a silent one) — callers should surface it and clear it once
- * acknowledged or once fresh events prove the feed is current.
+ * not a silent one) — it represents unrecoverable missed history, not a
+ * transient blip, so it only ever clears when the caller explicitly calls
+ * `dismissReconnectGap` — a fresh event proves the feed is current again,
+ * not that the gap never happened.
  * `scriptOutOfSync` is the producer's declared scriptVersion whenever it
  * differs from this app's loaded script (CLOSR_SCRIPT.version) — reset to
  * null the moment a later event reports a matching version. Every valid
@@ -46,6 +48,24 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
   const [reconnectGap, setReconnectGap] = useState(false);
   const [malformedEventCount, setMalformedEventCount] = useState(0);
   const [scriptOutOfSync, setScriptOutOfSync] = useState<string | null>(null);
+
+  // A new call (different callId, including a transition to/from null)
+  // must start from a clean coach state — this hook lives at the
+  // SoftphoneProvider level and outlives any single call, so without this
+  // a second call would silently inherit the first call's transcript,
+  // phase, gates, objection cards, and entered deal values. Adjusted
+  // during render (React's documented pattern for resetting state when a
+  // prop changes — already used the same way in use-coach-session.ts)
+  // rather than in an effect, so this can't render one stale frame first.
+  const [trackedCallId, setTrackedCallId] = useState(callId);
+  if (callId !== trackedCallId) {
+    setTrackedCallId(callId);
+    dispatch({ type: "reset", startingPhaseId });
+    setDegraded(false);
+    setReconnectGap(false);
+    setMalformedEventCount(0);
+    setScriptOutOfSync(null);
+  }
 
   useEffect(() => {
     if (!callId) return;
@@ -72,10 +92,18 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
       }
     };
 
-    const teardownChannel = () => {
+    const teardownChannel = async () => {
       if (channel) {
-        void supabase.removeChannel(channel);
+        const toRemove = channel;
         channel = null;
+        // Awaited so a caller that recreates the channel right after never
+        // races the old one's removal — removeChannel() unsubscribes and
+        // closes the topic server-side, and creating a new channel on the
+        // same topic before that completes has produced duplicate/ghost
+        // subscriptions in practice. Fire-and-forget (the previous
+        // behavior) only happened to work in tests because the mock
+        // resolved synchronously; a real Supabase client does not.
+        await supabase.removeChannel(toRemove);
       }
     };
 
@@ -86,8 +114,10 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
       attempt += 1;
       resubscribeTimer = setTimeout(() => {
         resubscribeTimer = null;
-        teardownChannel();
-        void start();
+        void (async () => {
+          await teardownChannel();
+          await start();
+        })();
       }, delay);
     };
 
@@ -112,9 +142,11 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
             }
             return;
           }
-          // A fresh, valid event is the best evidence we have that the feed
-          // is caught up — clear the gap flag whether or not it was set.
-          setReconnectGap(false);
+          // reconnectGap is NOT cleared here. It represents events that
+          // were unrecoverably missed while disconnected — a fresh event
+          // proves the feed is current again, not that nothing was lost
+          // in between. Only dismissReconnectGap (an explicit rep
+          // acknowledgment) clears it.
           setScriptOutOfSync(result.event.scriptVersion === CLOSR_SCRIPT.version ? null : result.event.scriptVersion);
           dispatch(result.event);
         })
@@ -152,7 +184,11 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
       mounted = false;
       if (livenessTimer !== null) clearTimeout(livenessTimer);
       clearResubscribeTimer();
-      teardownChannel();
+      // Unmounting (or callId changing, since this effect's cleanup runs
+      // on every dependency change too) doesn't need to await the removal
+      // before doing anything else — nothing here recreates the channel
+      // synchronously the way scheduleResubscribe's continuation does.
+      void teardownChannel();
     };
   }, [callId]);
 

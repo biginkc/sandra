@@ -88,6 +88,8 @@ export function resolveCoachTokens(
         return [token, resolvedOrPlaceholder(context.motivation)];
       case "cold_caller_name":
         return [token, resolvedOrPlaceholder(context.coldCallerName)];
+      case "year_built":
+        return [token, resolvedOrPlaceholder(context.yearBuilt)];
       case "closing_date":
         return [token, resolvedOrPlaceholder(entryFields.closing_date)];
       case "offer_price":

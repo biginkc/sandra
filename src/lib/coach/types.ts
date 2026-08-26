@@ -138,6 +138,7 @@ export const COACH_TOKENS = [
   "rep_phone",
   "file_number",
   "cold_caller_name",
+  "year_built",
   "closing_date",
   "offer_price",
   "net_to_seller",
@@ -167,6 +168,9 @@ export type CoachCallContext = {
   /** Assistant/cold-caller on the lead, if recorded — Sandra has no such
    * field today, so this is always null until one exists. */
   coldCallerName: string | null;
+  /** properties.year_built, as text (e.g. "1987") — the resolver only
+   * emits display strings, never a number the UI would need to format. */
+  yearBuilt: string | null;
   /** Drives the Introduction phase's Opener branch auto-selection. */
   leadSource: string | null;
   /** Drives the Reveal phase's Entry branch auto-selection. */
@@ -198,6 +202,12 @@ export type CoachObjectionCard = {
   id: string;
   objectionId: string;
   ts: string;
+  /** Epoch ms, set once at insert time (event-reducer.ts, Date.now() +
+   * OBJECTION_CARD_TTL_MS) — the card's own dismiss timer computes its
+   * REMAINING time from this on every mount rather than always scheduling
+   * the full TTL, so collapsing and reopening the coach view (which
+   * unmounts/remounts the card) can't restart its clock. */
+  expiresAt: number;
 };
 
 export type CoachHoldTimer = {
@@ -213,6 +223,9 @@ export type CoachNudge = {
   text: string;
   phaseId: CoachPhaseId;
   ts: string;
+  /** Epoch ms, set once at insert time (event-reducer.ts, Date.now() +
+   * NUDGE_TTL_MS) — same reasoning as CoachObjectionCard.expiresAt. */
+  expiresAt: number;
 };
 
 export type CoachState = {

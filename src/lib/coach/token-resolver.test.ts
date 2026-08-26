@@ -13,6 +13,7 @@ const baseContext: CoachCallContext = {
   leadId: "abcd1234-ef56-7890-abcd-ef1234567890",
   sellerPhoneE164: "+18165559876",
   coldCallerName: "Rose",
+  yearBuilt: "1987",
   leadSource: "cold_call",
   occupancy: "owner_occupied",
 };
@@ -32,13 +33,15 @@ describe("resolveCoachTokens", () => {
     expect(tokens.rep_phone).toEqual({ value: "+18165551234", isPlaceholder: false });
     expect(tokens.motivation).toEqual({ value: "Job relocation", isPlaceholder: false });
     expect(tokens.cold_caller_name).toEqual({ value: "Rose", isPlaceholder: false });
+    expect(tokens.year_built).toEqual({ value: "1987", isPlaceholder: false });
   });
 
   it("renders a placeholder chip instead of a blank value for missing fields", () => {
-    const tokens = resolveCoachTokens({ ...baseContext, motivation: null, repName: "  ", coldCallerName: null });
+    const tokens = resolveCoachTokens({ ...baseContext, motivation: null, repName: "  ", coldCallerName: null, yearBuilt: null });
     expect(tokens.motivation).toEqual({ value: "—", isPlaceholder: true });
     expect(tokens.rep_name).toEqual({ value: "—", isPlaceholder: true });
     expect(tokens.cold_caller_name).toEqual({ value: "—", isPlaceholder: true });
+    expect(tokens.year_built).toEqual({ value: "—", isPlaceholder: true });
   });
 
   it("resolves the three deal-panel tokens from entryFields when supplied", () => {
@@ -55,7 +58,7 @@ describe("resolveCoachTokens", () => {
     expect(tokens.net_to_seller).toEqual({ value: "—", isPlaceholder: true });
   });
 
-  it("covers all 10 declared script tokens with no gaps", () => {
+  it("covers all 11 declared script tokens with no gaps", () => {
     const tokens = resolveCoachTokens(baseContext, entryFields);
     expect(Object.keys(tokens).sort()).toEqual(
       [
@@ -66,6 +69,7 @@ describe("resolveCoachTokens", () => {
         "rep_phone",
         "file_number",
         "cold_caller_name",
+        "year_built",
         "closing_date",
         "offer_price",
         "net_to_seller",

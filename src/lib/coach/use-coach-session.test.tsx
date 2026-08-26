@@ -35,6 +35,7 @@ const sampleContext: CoachCallContext = {
   leadId: "lead-1",
   sellerPhoneE164: "+18165559876",
   coldCallerName: null,
+  yearBuilt: null,
   leadSource: null,
   occupancy: null,
 };

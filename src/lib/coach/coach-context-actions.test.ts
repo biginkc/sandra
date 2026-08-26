@@ -17,6 +17,7 @@ const lead = {
   source: "cold_call",
   is_vacant: false,
   absentee_flag: false,
+  year_built: 1998,
   county: { name: "Jackson" },
   homeowner: { first_name: "Jane", last_name: "Doe", entity_name: null },
 };
@@ -84,7 +85,14 @@ describe("loadCoachCallContext — lead fields", () => {
       leadId: "p1",
       sellerPhoneE164: "+18165559876",
       repPhoneE164: "+18165551234",
+      yearBuilt: "1998",
     });
+  });
+
+  it("returns yearBuilt as null when the property row has no year_built", async () => {
+    mockSupabase({ email: "alex.rep@bmhgroupkc.com" }, { ...lead, year_built: null });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.yearBuilt).toBeNull();
   });
 
   it("never maps motivation_level (a hot/warm/cold score) to {motivation} — always a placeholder-triggering null", async () => {

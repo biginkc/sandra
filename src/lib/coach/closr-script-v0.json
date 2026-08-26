@@ -3,7 +3,7 @@
   "version": "1.0.1",
   "source": "BMH CLOSR Call Script — Content Spec v1 (JT's Official CLOSR Sales Process, Jarrad-approved draft 2026-08-26). display content transcribed line-for-line from bmh-closr-call-script.html; match data carried forward from schema v1 (version 0.1.0). v1.0.1: full fidelity pass — greeting line restored to every Opener variant, complete coach_notes per phase, corrected file_number fallback, restored {year built} wording, occupancy-keyed 'not in a rush' objection tracks.",
   "brand": { "company": "BMH Group", "website": "bmhgroupkc.com" },
-  "tokens": ["seller_name", "rep_name", "property_address", "motivation", "rep_phone", "file_number", "cold_caller_name", "closing_date", "offer_price", "net_to_seller"],
+  "tokens": ["seller_name", "rep_name", "property_address", "motivation", "rep_phone", "file_number", "cold_caller_name", "year_built", "closing_date", "offer_price", "net_to_seller"],
   "entry_tokens": ["closing_date", "offer_price", "net_to_seller"],
   "file_number_rule": {
     "format": "{county_first2_upper}-{lead_id_last4}",
@@ -224,7 +224,7 @@
             "variants": [
               { "key": "default", "label": null, "lines": [
                 { "type": "say", "text": "Great, that should be everything I need about the outside for now. So this can segue us into the inside — I'd like you to walk me through the layout of the house as detailed as you can. Would you do that for me?" },
-                { "type": "say", "text": "• Would you say the interior still looks like the {year built}'s, or has it been updated since?" },
+                { "type": "say", "text": "• Would you say the interior still looks like the {year_built}'s, or has it been updated since?" },
                 { "type": "say", "text": "• What type of flooring is it currently?" },
                 { "type": "say", "text": "• Is it sheetrock or paneling?" },
                 { "type": "say", "text": "• What kind of countertops and appliances in the kitchen?" },

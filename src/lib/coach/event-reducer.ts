@@ -9,12 +9,25 @@ export type CoachLocalAction =
   | { type: "dismiss_objection"; cardId: string }
   | { type: "dismiss_nudge"; nudgeId: string }
   | { type: "override_phase"; phaseId: CoachPhaseId }
-  | { type: "set_entry_field"; field: CoachEntryToken; value: string };
+  | { type: "set_entry_field"; field: CoachEntryToken; value: string }
+  /** Dispatched by useCoachChannel whenever callId changes — a fresh call
+   * must start from a clean slate. Not "clear the transcript" bolted onto
+   * existing state; it's a full replacement with initialCoachState so no
+   * field can be missed as the shape evolves. */
+  | { type: "reset"; startingPhaseId: CoachPhaseId };
 
 export type CoachReducerAction = CoachEvent | CoachLocalAction;
 
 /** Caps in-memory transcript growth for very long calls. */
 const MAX_TRANSCRIPT_LINES = 500;
+
+/** Objection card and nudge dismiss TTLs — lives here, not in the UI
+ * component, because CoachObjectionCard.expiresAt/CoachNudge.expiresAt are
+ * computed once at insert time (Date.now() + TTL), not per-render. A card
+ * is heavier (three-beat Acknowledge/Disarm/Overcome layout) and stays up
+ * longer than a nudge (a one-line coaching prompt). */
+export const OBJECTION_CARD_TTL_MS = 45_000;
+export const NUDGE_TTL_MS = 20_000;
 
 export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"): CoachState {
   return {
@@ -34,17 +47,24 @@ export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"
 
 let transcriptSeq = 0;
 
-/** A live interim result replaces the same speaker's trailing interim line
- * in place; a final either commits that in-place line or, if the last line
- * was already final (or belongs to the other speaker), appends fresh. */
+/** A live interim result replaces THAT SPEAKER's still-open interim line in
+ * place; a final either commits that line or, if the speaker's most recent
+ * line was already final (or they have no line yet), appends fresh. Each
+ * speaker owns at most one open (non-final) line at a time, so this looks
+ * for the most recent line FROM THIS SPEAKER specifically — not merely the
+ * last line in the whole transcript, which the other speaker may have
+ * appended in between (e.g. rep-interim -> seller-interim -> rep-final
+ * must update the rep's line, not append a duplicate because the seller's
+ * interim is now the trailing line). */
 function upsertTranscriptLine(
   transcript: CoachTranscriptLine[],
   event: CoachTranscriptEvent,
 ): CoachTranscriptLine[] {
-  const last = transcript[transcript.length - 1];
-  if (last && last.speaker === event.speaker && !last.isFinal) {
-    const updated: CoachTranscriptLine = { ...last, text: event.text, isFinal: event.isFinal, ts: event.ts };
-    return [...transcript.slice(0, -1), updated];
+  for (let i = transcript.length - 1; i >= 0; i -= 1) {
+    if (transcript[i].speaker !== event.speaker) continue;
+    if (transcript[i].isFinal) break; // most recent line from this speaker is already closed — start fresh
+    const updated: CoachTranscriptLine = { ...transcript[i], text: event.text, isFinal: event.isFinal, ts: event.ts };
+    return [...transcript.slice(0, i), updated, ...transcript.slice(i + 1)];
   }
   transcriptSeq += 1;
   const line: CoachTranscriptLine = {
@@ -83,7 +103,12 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         lastEventAt: action.ts,
         objectionCards: [
           ...state.objectionCards,
-          { id: `${action.objectionId}-${action.ts}-${state.objectionCards.length}`, objectionId: action.objectionId, ts: action.ts },
+          {
+            id: `${action.objectionId}-${action.ts}-${state.objectionCards.length}`,
+            objectionId: action.objectionId,
+            ts: action.ts,
+            expiresAt: Date.now() + OBJECTION_CARD_TTL_MS,
+          },
         ],
       };
     case "counter":
@@ -114,7 +139,13 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         lastEventAt: action.ts,
         nudges: [
           ...state.nudges,
-          { id: `${action.phaseId}-${action.ts}-${state.nudges.length}`, text: action.text, phaseId: action.phaseId, ts: action.ts },
+          {
+            id: `${action.phaseId}-${action.ts}-${state.nudges.length}`,
+            text: action.text,
+            phaseId: action.phaseId,
+            ts: action.ts,
+            expiresAt: Date.now() + NUDGE_TTL_MS,
+          },
         ],
       };
     case "dismiss_objection":
@@ -137,6 +168,8 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         ...state,
         entryFields: { ...state.entryFields, [action.field]: action.value.trim() || null },
       };
+    case "reset":
+      return initialCoachState(action.startingPhaseId);
     default:
       return state;
   }

@@ -11,6 +11,7 @@ type CoachLeadRow = {
   source: string | null;
   is_vacant: boolean | null;
   absentee_flag: boolean | null;
+  year_built: number | null;
   county: { name: string } | null;
   homeowner: { first_name: string | null; last_name: string | null; entity_name: string | null } | null;
 };
@@ -85,7 +86,7 @@ export async function loadCoachCallContext(input: {
       ? supabase
           .from("properties")
           .select(
-            "address, source, is_vacant, absentee_flag, county:counties(name), homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)",
+            "address, source, is_vacant, absentee_flag, year_built, county:counties(name), homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)",
           )
           .eq("id", input.propertyId)
           .maybeSingle()
@@ -125,6 +126,7 @@ export async function loadCoachCallContext(input: {
     // No cold-caller field exists in Sandra's schema yet — always a
     // placeholder chip until one is added.
     coldCallerName: null,
+    yearBuilt: lead?.year_built != null ? String(lead.year_built) : null,
     leadSource: lead?.source ?? null,
     occupancy: occupancy(lead),
   };

@@ -69,6 +69,7 @@ const EMPTY_CALL_CONTEXT: CoachCallContext = {
   leadId: null,
   sellerPhoneE164: null,
   coldCallerName: null,
+  yearBuilt: null,
   leadSource: null,
   occupancy: null,
 };
@@ -667,10 +668,6 @@ function EntryTokenChip({
   );
 }
 
-// Lighter and shorter-lived than an objection card (45s) — a nudge is a
-// one-line coaching prompt, not a three-beat framework to act on.
-const NUDGE_TTL_MS = 20_000;
-
 /** Coaching nudges (phase-entry rules, pain-word prompts) the producer
  * pushes live via coach_note events — same transient-guidance treatment as
  * objection cards (slide in, own auto-dismiss timer, tap to dismiss, never
@@ -695,7 +692,11 @@ function NudgeOverlay({
 
 /** Owns its own auto-dismiss timer, scoped to this nudge's mount lifetime —
  * a sibling nudge appearing or disappearing never resets or cancels it
- * (same pattern as ObjectionCard). */
+ * (same pattern as ObjectionCard). The timer's duration is computed from
+ * `nudge.expiresAt` (set once, at insert time, in event-reducer.ts) rather
+ * than a fixed TTL, so a remount — collapsing and reopening the coach view
+ * unmounts every card — picks up the correctly-shrunk remaining time
+ * instead of restarting the full duration. */
 function NudgeCard({ nudge, onDismiss }: { nudge: CoachNudge; onDismiss: () => void }) {
   const onDismissRef = useRef(onDismiss);
   useEffect(() => {
@@ -703,9 +704,12 @@ function NudgeCard({ nudge, onDismiss }: { nudge: CoachNudge; onDismiss: () => v
   });
 
   useEffect(() => {
-    const timer = setTimeout(() => onDismissRef.current(), NUDGE_TTL_MS);
+    const remaining = Math.max(0, nudge.expiresAt - Date.now());
+    const timer = setTimeout(() => onDismissRef.current(), remaining);
     return () => clearTimeout(timer);
-    // Intentionally mount-once — same pattern as ObjectionCard.
+    // Intentionally mount-once — same pattern as ObjectionCard. expiresAt
+    // itself never changes after insert, so there's nothing to re-derive.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -741,8 +745,6 @@ function ObjectionOverlay({
   );
 }
 
-const OBJECTION_CARD_TTL_MS = 45_000;
-
 function ObjectionLine({ label, text, tokens }: { label: string; text: string; tokens: ResolvedTokens }) {
   const segments = resolveDisplayText(text, tokens);
   return (
@@ -762,7 +764,11 @@ function ObjectionLine({ label, text, tokens }: { label: string; text: string; t
 }
 
 /** Owns its own auto-dismiss timer, scoped to this card's mount lifetime —
- * a sibling card appearing or disappearing never resets or cancels it. */
+ * a sibling card appearing or disappearing never resets or cancels it. The
+ * timer's duration is computed from `card.expiresAt` (set once, at insert
+ * time, in event-reducer.ts) rather than a fixed TTL, so a remount —
+ * collapsing and reopening the coach view unmounts every card — picks up
+ * the correctly-shrunk remaining time instead of restarting the full 45s. */
 function ObjectionCard({
   card,
   tokens,
@@ -782,10 +788,13 @@ function ObjectionCard({
   });
 
   useEffect(() => {
-    const timer = setTimeout(() => onDismissRef.current(), OBJECTION_CARD_TTL_MS);
+    const remaining = Math.max(0, card.expiresAt - Date.now());
+    const timer = setTimeout(() => onDismissRef.current(), remaining);
     return () => clearTimeout(timer);
     // Intentionally mount-once: this card's lifetime timer must not be
     // rearmed or cleared by anything other than its own unmount/dismiss.
+    // expiresAt never changes after insert, so there's nothing to re-derive.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const objection = getScriptObjection(card.objectionId);

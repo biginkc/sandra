@@ -152,11 +152,141 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+const SPEAKERS: ReadonlySet<string> = new Set(["rep", "seller"]);
+const OCCUPANCY_KEYS: ReadonlySet<string> = new Set(["owner_occupied", "tenant_occupied", "vacant", "unknown"]);
+
+/** Matches a `{token}` placeholder, but not `{{tone:...}}` (tone cues are a
+ * separate, deliberately different markup — resolveDisplayText's own
+ * DISPLAY_PATTERN checks the tone alternative first for the same reason).
+ * `{n}`/`{remaining}` in counter.display/timer.display are NOT scanned by
+ * this — those fields are never run through resolveDisplayText (the UI
+ * builds "Probes N/goal" and "Hold MM:SS" itself from live state), so a
+ * placeholder there isn't part of the {token} contract at all. */
+const PLACEHOLDER_PATTERN = /\{\{tone:[^}]+\}\}|\{(\w+)\}/g;
+
+/** Collects any `{token}` in `text` that isn't in `knownTokens` — the exact
+ * failure mode that let `{year built}` (a typo'd space instead of an
+ * underscore) render as literal, unresolved braces in the UI instead of
+ * either resolving or failing script validation. */
+function unknownPlaceholders(text: string, knownTokens: ReadonlySet<string>): string[] {
+  const unknown: string[] = [];
+  for (const match of text.matchAll(PLACEHOLDER_PATTERN)) {
+    const token = match[1];
+    if (token && !knownTokens.has(token)) unknown.push(token);
+  }
+  return unknown;
+}
+
+function assertKnownPlaceholders(text: unknown, knownTokens: ReadonlySet<string>, where: string): void {
+  if (typeof text !== "string") return; // shape errors are reported by the caller's own check
+  const unknown = unknownPlaceholders(text, knownTokens);
+  if (unknown.length > 0) {
+    throw new Error(`closr-script: ${where} references unknown placeholder(s) {${unknown.join("}, {")}}`);
+  }
+}
+
+function assertValidLandmarks(value: unknown, where: string): void {
+  if (!Array.isArray(value)) throw new Error(`closr-script: ${where} is not an array`);
+  for (const [index, item] of value.entries()) {
+    if (
+      !isRecord(item) ||
+      !isNonEmptyString(item.id) ||
+      typeof item.speaker !== "string" ||
+      !SPEAKERS.has(item.speaker) ||
+      !isStringArray(item.phrases) ||
+      item.phrases.length === 0 ||
+      (item.note !== undefined && typeof item.note !== "string")
+    ) {
+      throw new Error(`closr-script: ${where}[${index}] is malformed (needs id, speaker in rep|seller, non-empty phrases[])`);
+    }
+  }
+}
+
+function assertValidCounters(value: unknown, where: string): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value)) throw new Error(`closr-script: ${where} is not an array`);
+  for (const [index, item] of value.entries()) {
+    if (
+      !isRecord(item) ||
+      !isNonEmptyString(item.id) ||
+      !isNonEmptyString(item.counts) ||
+      !isFiniteNumber(item.goal) ||
+      !isNonEmptyString(item.display)
+    ) {
+      throw new Error(`closr-script: ${where}[${index}] is malformed (needs id, counts, numeric goal, display)`);
+    }
+  }
+}
+
+function assertValidGates(value: unknown, where: string): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value)) throw new Error(`closr-script: ${where} is not an array`);
+  for (const [index, item] of value.entries()) {
+    if (
+      !isRecord(item) ||
+      !isNonEmptyString(item.id) ||
+      typeof item.blocks_exit !== "boolean" ||
+      !isNonEmptyString(item.display) ||
+      (item.note !== undefined && typeof item.note !== "string") ||
+      !isRecord(item.clear_on) ||
+      typeof item.clear_on.speaker !== "string" ||
+      !SPEAKERS.has(item.clear_on.speaker) ||
+      !isStringArray(item.clear_on.phrases) ||
+      item.clear_on.phrases.length === 0
+    ) {
+      throw new Error(
+        `closr-script: ${where}[${index}] is malformed (needs id, blocks_exit, display, clear_on.speaker/phrases[])`,
+      );
+    }
+  }
+}
+
+function assertValidTimers(value: unknown, where: string): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value)) throw new Error(`closr-script: ${where} is not an array`);
+  for (const [index, item] of value.entries()) {
+    if (
+      !isRecord(item) ||
+      !isNonEmptyString(item.id) ||
+      !isStringArray(item.start_on) ||
+      item.start_on.length === 0 ||
+      !isFiniteNumber(item.duration_s) ||
+      !isNonEmptyString(item.display)
+    ) {
+      throw new Error(`closr-script: ${where}[${index}] is malformed (needs id, non-empty start_on[], numeric duration_s, display)`);
+    }
+  }
+}
+
+function assertValidPainWords(value: unknown, where: string): void {
+  if (value === undefined) return;
+  if (!isStringArray(value)) throw new Error(`closr-script: ${where} is not a string[]`);
+}
+
 /** Fail loud rather than let a malformed script produce silent `undefined`
  * crashes deep in the UI (e.g. `phase.display.branches` on a phase missing
  * `display`). Hand-rolled rather than a schema library — the shape is small
  * and stable, and this only needs to catch structural corruption, not
- * validate every field's semantics. */
+ * validate every field's semantics.
+ *
+ * Deliberately does NOT deep-validate every field that exists on the data:
+ * only the ones this app actually reads. `counter.display`/`gate.display`/
+ * `timer.display` are checked for presence/type but never scanned for
+ * `{token}` placeholders — those three fields are never run through
+ * resolveDisplayText (the UI builds "Probes N/goal" and "Hold MM:SS"
+ * itself from live state), so a `{n}`/`{remaining}` inside them isn't part
+ * of the token contract. `coach_notes.text` and
+ * `objection.display.template_note` are similarly rendered as raw text,
+ * never resolved — see the resolveDisplayText call-site audit in this
+ * file's history for the full account of which fields are and aren't
+ * resolved. Placeholder checking below covers exactly the fields that ARE:
+ * variant line text, branch.trailing_note, and the three objection
+ * response strings (including every overcome_by_occupancy value).
+ */
 export function assertValidClosrScript(data: unknown): asserts data is ClosrScript {
   if (!isRecord(data)) throw new Error("closr-script: root is not an object");
   if (typeof data.schema_version !== "number") throw new Error("closr-script: missing schema_version");
@@ -165,55 +295,108 @@ export function assertValidClosrScript(data: unknown): asserts data is ClosrScri
   if (!isRecord(data.file_number_rule) || !isNonEmptyString(data.file_number_rule.format)) {
     throw new Error("closr-script: missing/invalid file_number_rule");
   }
+  const knownTokens: ReadonlySet<string> = new Set(data.tokens);
+
   if (!Array.isArray(data.phases) || data.phases.length === 0) throw new Error("closr-script: missing phases[]");
   for (const phase of data.phases) {
     if (!isRecord(phase)) throw new Error("closr-script: a phase entry is not an object");
     if (!isNonEmptyString(phase.id)) throw new Error("closr-script: a phase is missing id");
-    if (!isNonEmptyString(phase.name)) throw new Error(`closr-script: phase '${String(phase.id)}' missing name`);
-    if (!isNonEmptyString(phase.purpose)) throw new Error(`closr-script: phase '${String(phase.id)}' missing purpose`);
+    const phaseLabel = `phase '${String(phase.id)}'`;
+    if (!isNonEmptyString(phase.name)) throw new Error(`closr-script: ${phaseLabel} missing name`);
+    if (!isNonEmptyString(phase.purpose)) throw new Error(`closr-script: ${phaseLabel} missing purpose`);
     if (!isRecord(phase.display) || !Array.isArray(phase.display.branches)) {
-      throw new Error(`closr-script: phase '${String(phase.id)}' missing display.branches[]`);
+      throw new Error(`closr-script: ${phaseLabel} missing display.branches[]`);
     }
     for (const branch of phase.display.branches) {
       if (!isRecord(branch) || !isNonEmptyString(branch.tag) || !Array.isArray(branch.variants) || branch.variants.length === 0) {
-        throw new Error(`closr-script: phase '${String(phase.id)}' has a malformed branch`);
+        throw new Error(`closr-script: ${phaseLabel} has a malformed branch`);
+      }
+      const branchLabel = `${phaseLabel} branch '${String(branch.tag)}'`;
+      if (branch.auto_select_by !== null && branch.auto_select_by !== undefined && typeof branch.auto_select_by !== "string") {
+        throw new Error(`closr-script: ${branchLabel} has a non-string auto_select_by`);
+      }
+      if (branch.critical !== undefined && typeof branch.critical !== "boolean") {
+        throw new Error(`closr-script: ${branchLabel} has a non-boolean critical`);
+      }
+      if (branch.hold_after !== undefined && typeof branch.hold_after !== "string") {
+        throw new Error(`closr-script: ${branchLabel} has a non-string hold_after`);
+      }
+      if (branch.trailing_note !== undefined) {
+        if (typeof branch.trailing_note !== "string") throw new Error(`closr-script: ${branchLabel} has a non-string trailing_note`);
+        assertKnownPlaceholders(branch.trailing_note, knownTokens, `${branchLabel} trailing_note`);
       }
       for (const variant of branch.variants) {
         if (!isRecord(variant) || !isNonEmptyString(variant.key) || !Array.isArray(variant.lines) || variant.lines.length === 0) {
-          throw new Error(`closr-script: phase '${String(phase.id)}' branch '${String(branch.tag)}' has a malformed variant`);
+          throw new Error(`closr-script: ${branchLabel} has a malformed variant`);
+        }
+        if (variant.tone !== undefined && typeof variant.tone !== "string") {
+          throw new Error(`closr-script: ${branchLabel} variant '${String(variant.key)}' has a non-string tone`);
         }
         for (const line of variant.lines) {
           if (!isRecord(line) || (line.type !== "say" && line.type !== "note") || !isNonEmptyString(line.text)) {
-            throw new Error(`closr-script: phase '${String(phase.id)}' branch '${String(branch.tag)}' has a malformed line`);
+            throw new Error(`closr-script: ${branchLabel} has a malformed line`);
           }
+          assertKnownPlaceholders(line.text, knownTokens, `${branchLabel} variant '${String(variant.key)}' line`);
         }
       }
     }
-    if (!isRecord(phase.match) || !Array.isArray(phase.match.entry_landmarks) || !Array.isArray(phase.match.advance_landmarks)) {
-      throw new Error(`closr-script: phase '${String(phase.id)}' missing match.entry_landmarks/advance_landmarks`);
+    if (!isRecord(phase.match)) throw new Error(`closr-script: ${phaseLabel} missing match`);
+    assertValidLandmarks(phase.match.entry_landmarks, `${phaseLabel} match.entry_landmarks`);
+    assertValidLandmarks(phase.match.advance_landmarks, `${phaseLabel} match.advance_landmarks`);
+    assertValidCounters(phase.match.counters, `${phaseLabel} match.counters`);
+    assertValidGates(phase.match.gates, `${phaseLabel} match.gates`);
+    assertValidTimers(phase.match.timers, `${phaseLabel} match.timers`);
+    assertValidPainWords(phase.match.pain_words, `${phaseLabel} match.pain_words`);
+    if (phase.match.exit_to !== null && typeof phase.match.exit_to !== "string") {
+      throw new Error(`closr-script: ${phaseLabel} match.exit_to must be a string or null`);
     }
-    if (!Array.isArray(phase.coach_notes)) throw new Error(`closr-script: phase '${String(phase.id)}' missing coach_notes[]`);
+    if (!Array.isArray(phase.coach_notes)) throw new Error(`closr-script: ${phaseLabel} missing coach_notes[]`);
     for (const note of phase.coach_notes) {
-      if (!isRecord(note) || !isNonEmptyString(note.trigger) || !isNonEmptyString(note.text)) {
-        throw new Error(`closr-script: phase '${String(phase.id)}' has a malformed coach_note`);
+      if (
+        !isRecord(note) ||
+        !isNonEmptyString(note.trigger) ||
+        !isNonEmptyString(note.text) ||
+        (note.seller_phrases !== undefined && !isStringArray(note.seller_phrases))
+      ) {
+        throw new Error(`closr-script: ${phaseLabel} has a malformed coach_note`);
       }
     }
   }
+
   if (!Array.isArray(data.objections) || data.objections.length === 0) throw new Error("closr-script: missing objections[]");
   for (const objection of data.objections) {
     if (!isRecord(objection) || !isNonEmptyString(objection.id)) {
       throw new Error("closr-script: an objection is missing id");
     }
+    const objectionLabel = `objection '${String(objection.id)}'`;
     if (!isRecord(objection.match) || !isStringArray(objection.match.triggers) || objection.match.triggers.length === 0) {
-      throw new Error(`closr-script: objection '${String(objection.id)}' missing match.triggers[]`);
+      throw new Error(`closr-script: ${objectionLabel} missing match.triggers[]`);
     }
+    const display = objection.display;
     if (
-      !isRecord(objection.display) ||
-      !isNonEmptyString(objection.display.acknowledge) ||
-      !isNonEmptyString(objection.display.disarm) ||
-      !isNonEmptyString(objection.display.overcome)
+      !isRecord(display) ||
+      !isNonEmptyString(display.acknowledge) ||
+      !isNonEmptyString(display.disarm) ||
+      !isNonEmptyString(display.overcome) ||
+      (display.tonality !== null && typeof display.tonality !== "string") ||
+      (display.template !== undefined && typeof display.template !== "boolean") ||
+      (display.template_note !== undefined && typeof display.template_note !== "string")
     ) {
-      throw new Error(`closr-script: objection '${String(objection.id)}' missing display.acknowledge/disarm/overcome`);
+      throw new Error(`closr-script: ${objectionLabel} missing/malformed display fields`);
+    }
+    assertKnownPlaceholders(display.acknowledge, knownTokens, `${objectionLabel} display.acknowledge`);
+    assertKnownPlaceholders(display.disarm, knownTokens, `${objectionLabel} display.disarm`);
+    assertKnownPlaceholders(display.overcome, knownTokens, `${objectionLabel} display.overcome`);
+    if (display.overcome_by_occupancy !== undefined) {
+      if (!isRecord(display.overcome_by_occupancy)) {
+        throw new Error(`closr-script: ${objectionLabel} display.overcome_by_occupancy is not an object`);
+      }
+      for (const [key, value] of Object.entries(display.overcome_by_occupancy)) {
+        if (!OCCUPANCY_KEYS.has(key) || typeof value !== "string" || value.length === 0) {
+          throw new Error(`closr-script: ${objectionLabel} display.overcome_by_occupancy has a malformed entry '${key}'`);
+        }
+        assertKnownPlaceholders(value, knownTokens, `${objectionLabel} display.overcome_by_occupancy['${key}']`);
+      }
     }
   }
 }
