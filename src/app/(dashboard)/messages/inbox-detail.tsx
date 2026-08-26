@@ -686,6 +686,7 @@ export function InboxDetail({
           <div className="border-t border-border bg-white px-6 py-4">
             {isSmsRestricted ? (
               <div
+                key="inline-reply-restriction"
                 className="rounded-xl border border-dashed border-[#e5e1df] bg-[#fafaf9] p-3 text-center text-xs text-[#57534e]"
                 data-testid="inline-reply-restricted"
               >
@@ -694,24 +695,33 @@ export function InboxDetail({
                   ? "This thread number is not saved on the homeowner contact — save or resolve it before replying."
                   : "SMS reply unavailable for this restricted thread. Review the notice above before taking another safe action."}
               </div>
-            ) : replyRefreshPending ? (
+            ) : null}
+            {data.homeownerContactId === data.contactId ? (
               <div
-                className="rounded-xl border border-dashed border-[#e5e1df] p-3 text-center text-xs text-[#78716c]"
-                data-testid="inline-reply-refreshing"
+                key="inline-reply-composer"
+                className="flex flex-col gap-3"
               >
-                Updating the thread phone before reply...
+                {replyRefreshPending ? (
+                  <div
+                    className="rounded-xl border border-dashed border-[#e5e1df] p-3 text-center text-xs text-[#78716c]"
+                    data-testid="inline-reply-refreshing"
+                  >
+                    Updating the thread phone before reply...
+                  </div>
+                ) : null}
+                <InlineReply
+                  key={`reply-${data.threadId}`}
+                  propertyId={data.propertyId}
+                  homeownerContactId={data.homeownerContactId}
+                  homeownerPhone={data.replyToPhone}
+                  replyToPhone={data.replyToPhone}
+                  preferredFromNumber={data.threadBusinessPhone}
+                  phoneUnavailableMessage="This thread number is not saved on the homeowner contact — save or resolve it before replying."
+                  routeRefreshPending={replyRefreshPending}
+                  suspended={isSmsRestricted}
+                />
               </div>
-            ) : data.homeownerContactId === data.contactId ? (
-              <InlineReply
-                key={`reply-${data.threadId}`}
-                propertyId={data.propertyId}
-                homeownerContactId={data.homeownerContactId}
-                homeownerPhone={data.replyToPhone}
-                replyToPhone={data.replyToPhone}
-                preferredFromNumber={data.threadBusinessPhone}
-                phoneUnavailableMessage="This thread number is not saved on the homeowner contact — save or resolve it before replying."
-              />
-            ) : (
+            ) : !isSmsRestricted ? (
               <div
                 className="rounded-xl border border-dashed border-[#e5e1df] p-3 text-center text-xs text-[#78716c]"
                 data-testid="inline-reply-unavailable"
@@ -719,7 +729,7 @@ export function InboxDetail({
                 SMS replies from Messages are available only when this thread
                 contact is the homeowner.
               </div>
-            )}
+            ) : null}
           </div>
         </>
       ) : data.propertyId && isPermanentlyLocked ? null : (
