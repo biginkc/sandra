@@ -422,7 +422,12 @@ function CoachTopBar({
                       ? "text-emerald-700 dark:text-emerald-400"
                       : isCurrent
                         ? "bg-emerald-700 text-white"
-                        : "text-muted-foreground hover:bg-muted",
+                        // `hover:text-foreground` is load-bearing, not decoration:
+                        // muted-foreground on the hover `bg-muted` surface measures
+                        // 4.40:1, just under AA for this 11px label. Darkening the
+                        // text on hover keeps the hover affordance while staying
+                        // readable.
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
               >
                 {phase?.name ?? phaseId}

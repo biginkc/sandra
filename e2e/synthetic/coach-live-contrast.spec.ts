@@ -98,54 +98,42 @@ type PixelMeasurement = { ratio: number; fg: [number, number, number]; bg: [numb
  * normally rendered, and once with the element's own `color` forced to
  * `transparent` (an inline style always wins over a class, so this reliably
  * hides only the text, leaving every ancestor's opacity/tint/background
- * exactly as painted). The second screenshot's center pixel is the true
- * composited background. In the first screenshot, the pixel with the
- * largest color distance from that background is the most fully-inked
- * glyph pixel available — the best real-pixel estimate of the solid text
- * color, uncontaminated by font anti-aliasing blends at glyph edges.
+ * exactly as painted).
  *
- * Two contamination sources found while building this, both fixed below:
- *  1. A single "most extreme pixel" search is dominated by rare glyphs that
- *     render outside the normal text-color pipeline — the phase rail's
- *     trailing "✓" produced 8 stray near-white pixels (out of ~2950) that
- *     outranked the real emerald-400 label text (~105+ solid-fill pixels
- *     of the same repeated color) purely by being MORE extreme in color
- *     distance, despite being a tiny minority.
- *  2. `rounded-full`/`rounded-2xl` pills clip their own four corners to
- *     transparent, so a screenshot's CORNER pixels show whatever is
- *     visually BEHIND the element (the page, not the pill's own fill) —
- *     on a short pill those corner-leak pixels can outnumber genuine text
- *     pixels and get picked up as "foreground" by a naive frequency count.
- * The fix: trim a geometric margin so corner curvature is never sampled,
- * then within that safe interior, bucket pixels by quantized color among
- * only the top decile by distance from background (favoring solid ink
- * over antialiased blends) and take the most FREQUENT bucket — the real
- * glyph fill repeats far more often than any few-pixel artifact.
+ * The two screenshots are then differenced PER COORDINATE. A pixel that is
+ * identical in both passes cannot be text — only text disappears when
+ * `color` goes transparent — so every unchanged coordinate is discarded,
+ * and each surviving coordinate is compared against ITS OWN background
+ * pixel from the second screenshot rather than against one sampled point.
+ *
+ * That per-coordinate rule is the whole correctness argument, and an
+ * earlier version of this file got it wrong in a way that silently
+ * defeated the entire test. It compared every candidate pixel against a
+ * SINGLE center background pixel, which let anything merely different from
+ * that one point pose as text: the Live badge's emerald border outranked
+ * the badge's own glyphs, so the probe reported the border's contrast and
+ * passed at 13.67:1 while the actual text sat at 3.26:1. Differencing the
+ * two passes excludes borders, tints and decorations by construction,
+ * because none of them change when the text is hidden.
+ *
+ * Among the surviving text pixels, the solid glyph fill is the most
+ * frequent quantized color — anti-aliased edge blends are numerous but
+ * spread thinly across many buckets, while the true ink color repeats
+ * exactly. Rare stray glyphs (the phase rail's trailing "✓" renders a
+ * handful of near-white pixels outside the normal text pipeline) are
+ * outvoted rather than allowed to dominate, which a "most extreme pixel"
+ * search could not do.
  */
 async function measureRenderedContrast(locator: Locator): Promise<PixelMeasurement> {
-  // Only pills/badges (rounded-full etc.) clip their own corners; a plain
-  // text block has none of that risk, and trimming a fixed margin off a
-  // SHORT element (the 10px "coming next" label) can cut away the entire
-  // glyph area. So the trim is proportional to the element's own actual
-  // border-radius, not a blanket percentage.
-  const borderRadiusPx = await locator.evaluate((el) => {
-    const value = getComputedStyle(el).borderTopLeftRadius;
-    const parsed = parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : 0;
-  });
-
   // Decorative `aria-hidden` descendants are not text and are exempt from
   // the 4.5:1 text-contrast rule (they fall under non-text contrast, and a
-  // purely decorative graphic is exempt outright). They must be hidden
-  // before sampling, because the "furthest from background" heuristic will
-  // otherwise latch onto a saturated decorative fill instead of the glyphs:
-  // the Live badge's pulsing `bg-emerald-500` dot is a far bigger colour
-  // jump from white than its own emerald-700 text is, so the probe measured
-  // the dot and reported a failure the actual text does not have. The
-  // `animate-pulse` on that dot also made the reading nondeterministic
-  // between the two passes, hence `animations: "disabled"` as well.
-  // `visibility: hidden` (not `display: none`) so layout — and therefore
-  // glyph position — is untouched between passes.
+  // purely decorative graphic is exempt outright). Hide them before
+  // sampling: the Live badge's `bg-emerald-500` dot pulses, so its pixels
+  // differ between the two passes and would otherwise survive the
+  // difference test and be counted as text. `visibility: hidden` (not
+  // `display: none`) so layout — and therefore glyph position — is
+  // identical across both passes; `animations: "disabled"` on the
+  // screenshots keeps any remaining motion from making readings drift.
   await locator.evaluate((el) => {
     el.querySelectorAll<HTMLElement>('[aria-hidden="true"]').forEach((node, index) => {
       node.dataset.contrastProbeOrigVisibility = node.style.visibility;
@@ -181,63 +169,67 @@ async function measureRenderedContrast(locator: Locator): Promise<PixelMeasureme
     throw new Error("contrast probe screenshots changed size between passes — element must have resized");
   }
   const { width, height, channels } = bgImg.info;
-
-  const cx = Math.floor(width / 2);
-  const cy = Math.floor(height / 2);
-  const bgIdx = (cy * width + cx) * channels;
-  const bg: [number, number, number] = [bgImg.data[bgIdx], bgImg.data[bgIdx + 1], bgImg.data[bgIdx + 2]];
-
-  // Exclude only the four CORNER squares sized to the element's own
-  // border-radius, so corner-clip leakage (contamination source #2 above)
-  // is excluded by construction. This must NOT be a margin strip across
-  // the full width/height: a `rounded-full` pill's radius is ~half its
-  // height, and a full-height margin strip at that radius would wipe out
-  // the entire element (including the un-clipped top-center/bottom-center
-  // band where the text actually sits) — only the corner quarters are
-  // ever actually clipped by border-radius.
-  const cappedRadius = Math.min(borderRadiusPx, Math.floor(Math.min(width, height) / 2));
-  const candidates: { dist: number; r: number; g: number; b: number }[] = [];
-  for (let y = 0; y < height; y++) {
-    const distToYEdge = Math.min(y, height - 1 - y);
-    for (let x = 0; x < width; x++) {
-      const distToXEdge = Math.min(x, width - 1 - x);
-      if (cappedRadius > 0 && distToXEdge < cappedRadius && distToYEdge < cappedRadius) continue;
-      const idx = (y * width + x) * channels;
-      const r = fgImg.data[idx];
-      const g = fgImg.data[idx + 1];
-      const b = fgImg.data[idx + 2];
-      const dist = (r - bg[0]) ** 2 + (g - bg[1]) ** 2 + (b - bg[2]) ** 2;
-      if (dist === 0) continue; // exact background, not a candidate at all
-      candidates.push({ dist, r, g, b });
-    }
+  // Difference the two passes per coordinate. Only text changes when the
+  // element's own `color` is forced transparent, so an unchanged pixel is
+  // by definition not text: borders, translucent tints, decorative fills
+  // and corner-clip leakage all cancel out here, with no geometric
+  // guesswork about where the glyphs might be.
+  const CHANGE_THRESHOLD = 8; // per-channel noise floor for the rasteriser
+  const textPixels: { fr: number; fg_: number; fb: number; br: number; bg_: number; bb: number }[] = [];
+  for (let i = 0; i < width * height; i++) {
+    const idx = i * channels;
+    const fr = fgImg.data[idx];
+    const fg_ = fgImg.data[idx + 1];
+    const fb = fgImg.data[idx + 2];
+    const br = bgImg.data[idx];
+    const bg_ = bgImg.data[idx + 1];
+    const bb = bgImg.data[idx + 2];
+    const changed =
+      Math.abs(fr - br) > CHANGE_THRESHOLD ||
+      Math.abs(fg_ - bg_) > CHANGE_THRESHOLD ||
+      Math.abs(fb - bb) > CHANGE_THRESHOLD;
+    if (!changed) continue;
+    textPixels.push({ fr, fg_, fb, br, bg_, bb });
   }
 
-  let fg: [number, number, number] = bg;
-  if (candidates.length > 0) {
-    // Keep only the top decile by distance from background (contamination
-    // source #1 above: favors solid ink over the much larger population of
-    // antialiased blend pixels), then bucket by quantized color and take
-    // the most frequent bucket (favors the real, repeated glyph fill over
-    // any small cluster of rendering-quirk outliers within that decile).
-    candidates.sort((a, b2) => b2.dist - a.dist);
-    const topDecile = candidates.slice(0, Math.max(1, Math.ceil(candidates.length * 0.1)));
-    const buckets = new Map<string, { count: number; r: number; g: number; b: number }>();
-    const quant = 8;
-    for (const c of topDecile) {
-      const key = `${Math.round(c.r / quant)},${Math.round(c.g / quant)},${Math.round(c.b / quant)}`;
-      const existing = buckets.get(key);
-      if (existing) {
-        existing.count += 1;
-        existing.r += c.r;
-        existing.g += c.g;
-        existing.b += c.b;
-      } else {
-        buckets.set(key, { count: 1, r: c.r, g: c.g, b: c.b });
-      }
-    }
-    const best = [...buckets.values()].sort((a, b2) => b2.count - a.count)[0];
-    fg = [Math.round(best.r / best.count), Math.round(best.g / best.count), Math.round(best.b / best.count)];
+  if (textPixels.length === 0) {
+    throw new Error("contrast probe found no text pixels — the element rendered no visible text to measure");
   }
+
+  // The solid glyph fill is the most frequent quantised colour among the
+  // text pixels. Anti-aliased edge blends are plentiful but scatter across
+  // many buckets; the true ink colour repeats exactly, so it wins on count.
+  const buckets = new Map<string, { count: number; fr: number; fg_: number; fb: number; br: number; bg_: number; bb: number }>();
+  const quant = 8;
+  for (const px of textPixels) {
+    const key = `${Math.round(px.fr / quant)},${Math.round(px.fg_ / quant)},${Math.round(px.fb / quant)}`;
+    const existing = buckets.get(key);
+    if (existing) {
+      existing.count += 1;
+      existing.fr += px.fr;
+      existing.fg_ += px.fg_;
+      existing.fb += px.fb;
+      existing.br += px.br;
+      existing.bg_ += px.bg_;
+      existing.bb += px.bb;
+    } else {
+      buckets.set(key, { count: 1, ...px });
+    }
+  }
+  const best = [...buckets.values()].sort((a, b2) => b2.count - a.count)[0];
+  const fg: [number, number, number] = [
+    Math.round(best.fr / best.count),
+    Math.round(best.fg_ / best.count),
+    Math.round(best.fb / best.count),
+  ];
+  // Background taken from the SAME coordinates the winning glyph pixels
+  // occupy, so a gradient or tint behind the text is measured where the
+  // text actually sits rather than wherever a single probe point landed.
+  const bg: [number, number, number] = [
+    Math.round(best.br / best.count),
+    Math.round(best.bg_ / best.count),
+    Math.round(best.bb / best.count),
+  ];
 
   return { ratio: contrastRatio(fg, bg), fg, bg };
 }
@@ -333,6 +325,19 @@ for (const mode of [
     const currentWhileViewingOther = page.getByTestId("phase-rail-offer");
     await expect(currentWhileViewingOther).toBeVisible();
     assertAA("current-phase pill while viewing a different phase", await measureRenderedContrast(currentWhileViewingOther));
+
+    // An INACTIVE phase label while HOVERED. Hover is a distinct rendered
+    // state with its own background (`hover:bg-muted`), and measuring only
+    // the resting state misses it entirely: muted-foreground on the muted
+    // hover surface measured 4.40:1 — passing at rest, failing the moment
+    // a pointer touches it. Every interactive text element whose colours
+    // change on hover needs its hovered state measured too, not just its
+    // default.
+    const inactivePhase = page.getByTestId("phase-rail-close");
+    await expect(inactivePhase).toBeVisible();
+    await inactivePhase.hover();
+    await page.waitForTimeout(300); // settle `transition-colors`
+    assertAA("inactive phase label while hovered", await measureRenderedContrast(inactivePhase));
   });
 
   test(`meets WCAG AA (>=4.5:1) for tone cues and resolved guidance values in ${mode.label} mode`, async ({ page }) => {
