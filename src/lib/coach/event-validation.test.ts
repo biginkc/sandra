@@ -49,6 +49,7 @@ describe("parseCoachEvent — valid events", () => {
       branchTag: "Frame the call",
       variantKey: "default",
       lineIndex: 2,
+      lineText: "• To add some sort of value to the property so we can resell it on the market, or",
       ts: "t1",
       ...V,
     });
@@ -60,6 +61,7 @@ describe("parseCoachEvent — valid events", () => {
         branchTag: "Frame the call",
         variantKey: "default",
         lineIndex: 2,
+        lineText: "• To add some sort of value to the property so we can resell it on the market, or",
         ts: "t1",
         ...V,
       },
@@ -73,6 +75,7 @@ describe("parseCoachEvent — valid events", () => {
       branchTag: "Opener",
       variantKey: "cold_call",
       lineIndex: 0,
+      lineText: "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!",
       ts: "t1",
       ...V,
     });
@@ -200,10 +203,17 @@ describe("parseCoachEvent — malformed known-type events are dropped and counte
 
   it("rejects a cursor event missing branchTag or variantKey", () => {
     expect(
-      parseCoachEvent({ type: "cursor", phaseId: "introduction", variantKey: "default", lineIndex: 0, ts: "t1", ...V }).ok,
+      parseCoachEvent({ type: "cursor", phaseId: "introduction", variantKey: "default", lineIndex: 0, lineText: "x", ts: "t1", ...V }).ok,
     ).toBe(false);
     expect(
-      parseCoachEvent({ type: "cursor", phaseId: "introduction", branchTag: "Opener", lineIndex: 0, ts: "t1", ...V }).ok,
+      parseCoachEvent({ type: "cursor", phaseId: "introduction", branchTag: "Opener", lineIndex: 0, lineText: "x", ts: "t1", ...V }).ok,
+    ).toBe(false);
+  });
+
+  it("rejects a cursor event missing lineText — the raw script text the wire contract requires, distinct from lineIndex", () => {
+    expect(
+      parseCoachEvent({ type: "cursor", phaseId: "introduction", branchTag: "Opener", variantKey: "default", lineIndex: 0, ts: "t1", ...V })
+        .ok,
     ).toBe(false);
   });
 

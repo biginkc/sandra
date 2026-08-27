@@ -166,13 +166,18 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   // the live cursor for whatever phase the call is actually in.
   const activeCursor: CoachCursor | null =
     state.cursor && state.cursor.phaseId === displayedPhaseId ? state.cursor : null;
+  // resolveCursorLine/resolveCursorNextLine need the resolved PhaseScriptBlock
+  // (not just tokens) — resolution defers to SANDRA'S OWN selected variant
+  // per branch, which only exists on the built block. scriptBlock is null
+  // only for a genuinely unrecognized phase id, in which case there's no
+  // cursor content to resolve either.
   const cursorSpokenLine = useMemo(
-    () => (activeCursor ? resolveCursorLine(activeCursor, tokens) : null),
-    [activeCursor, tokens],
+    () => (activeCursor && scriptBlock ? resolveCursorLine(activeCursor, scriptBlock, tokens) : null),
+    [activeCursor, scriptBlock, tokens],
   );
   const cursorNextLine = useMemo(
-    () => (activeCursor ? resolveCursorNextLine(activeCursor, tokens) : null),
-    [activeCursor, tokens],
+    () => (activeCursor && scriptBlock ? resolveCursorNextLine(activeCursor, scriptBlock, tokens) : null),
+    [activeCursor, scriptBlock, tokens],
   );
   const gateEntries = (scriptBlock?.gates ?? []).map((gate) => ({
     ...gate,

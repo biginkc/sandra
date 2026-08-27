@@ -228,7 +228,7 @@ describe("<CoachLiveView />", () => {
   });
 
   describe("cursor — the Say This card follows the rep's exact live script position", () => {
-    it("moves the dominant card to the exact branch/variant/line the coach reports", async () => {
+    it("moves the dominant card to the exact branch/variant/line the coach reports, matched by raw lineText", async () => {
       render(<Harness {...baseProps()} />);
       await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
       // Baseline (no cursor yet): branch-0's greeting.
@@ -240,6 +240,7 @@ describe("<CoachLiveView />", () => {
         branchTag: "Frame the call",
         variantKey: "default",
         lineIndex: 2,
+        lineText: "• To add some sort of value to the property so we can resell it on the market, or",
         ts: "t1",
       });
 
@@ -259,13 +260,32 @@ describe("<CoachLiveView />", () => {
         branchTag: "Entry",
         variantKey: "unknown",
         lineIndex: 0,
+        lineText: "Ok Jane Homeowner, that should be all you need for now until we find out if we can get you approved for an offer. But until then, could you give me a little bit of a rundown?",
         ts: "t1",
       });
 
       expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
     });
 
-    it("falls back to today's branch-0 behavior when the cursor names an unknown branch, unknown variant, or out-of-range line — never crashes, never renders blank", async () => {
+    it("discards a cursor whose scriptVersion doesn't match this client's loaded script — line addressing has no stable identity across a script edit", async () => {
+      render(<Harness {...baseProps()} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+      broadcast({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 2,
+        lineText: "• To add some sort of value to the property so we can resell it on the market, or",
+        ts: "t1",
+        scriptVersion: "0.0.1-not-the-loaded-script", // overrides the broadcast() default
+      });
+
+      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
+    });
+
+    it("falls back to today's branch-0 default entirely when the cursor's branch doesn't exist in this phase — never crashes, never renders blank", async () => {
       render(<Harness {...baseProps()} />);
       await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
 
@@ -275,30 +295,47 @@ describe("<CoachLiveView />", () => {
         branchTag: "Not A Real Branch",
         variantKey: "default",
         lineIndex: 0,
+        lineText: "irrelevant",
         ts: "t1",
       });
       expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
+      expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument();
+    });
+
+    it("falls back to the NAMED branch's own first spoken line — not branch 0 — when neither lineText nor lineIndex resolve within it", async () => {
+      render(<Harness {...baseProps()} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
 
       broadcast({
         type: "cursor",
         phaseId: "introduction",
-        branchTag: "Opener",
-        variantKey: "not_a_real_variant",
-        lineIndex: 0,
-        ts: "t2",
+        branchTag: "Frame the call", // a real branch, not the phase's dominant one (Opener)
+        variantKey: "default",
+        lineIndex: 999, // out of range
+        lineText: "this text does not appear anywhere in the script",
+        ts: "t1",
       });
-      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
+
+      const sayThisLine = screen.getByTestId("say-this-line");
+      expect(sayThisLine).toHaveTextContent(/reason for my call today/i);
+      expect(sayThisLine).not.toHaveTextContent(/Hey Jane/i);
+    });
+
+    it("resolves via lineIndex when lineText doesn't match, even though the cursor's variantKey is bogus — variantKey is advisory only", async () => {
+      render(<Harness {...baseProps()} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
 
       broadcast({
         type: "cursor",
         phaseId: "introduction",
         branchTag: "Frame the call",
-        variantKey: "default",
-        lineIndex: 999,
-        ts: "t3",
+        variantKey: "not_a_real_variant",
+        lineIndex: 2,
+        lineText: "this text does not appear anywhere in the script",
+        ts: "t1",
       });
-      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
-      expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument();
+
+      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/add some sort of value to the property/i);
     });
 
     it("shows the NEXT line within the current phase in the Coming Next preview, not the next phase, while a cursor is active", async () => {
@@ -313,6 +350,8 @@ describe("<CoachLiveView />", () => {
         branchTag: "Frame the call",
         variantKey: "default",
         lineIndex: 0,
+        lineText:
+          "The reason for my call today, {seller_name}, is to see if we can even do anything good for you in the first place. Because at the end of the day not every property does qualify for an offer — but it's up to you and I to convince my underwriting team to get you approved. Sound fair?",
         ts: "t1",
       });
 
@@ -331,6 +370,7 @@ describe("<CoachLiveView />", () => {
         branchTag: "Frame the call",
         variantKey: "default",
         lineIndex: 2,
+        lineText: "• To add some sort of value to the property so we can resell it on the market, or",
         ts: "t1",
       });
       expect(screen.getByTestId("say-this-line")).toHaveTextContent(/add some sort of value to the property/i);

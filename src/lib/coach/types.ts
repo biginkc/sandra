@@ -123,17 +123,27 @@ export type CoachNoteEvent = CoachEventVersions & {
  * service's follower — not just which phase, but which branch/variant/line
  * within it. Exact shape per the producer's verbatim wire contract
  * (src/coach/wire-contract.ts in the Jitter repo): `lineIndex` indexes into
- * the selected variant's `lines` array. `branchTag`/`variantKey` are
+ * the selected variant's `lines` array, and `lineText` is that same line's
+ * RAW SCRIPT TEXT with placeholders intact (e.g. "Hey {seller_name}? …"),
+ * not the rep's spoken words. `branchTag`/`variantKey`/`lineIndex` are
  * resolved against the client's own closr-script-v0.json — see
- * resolveCursorLine in script-block.ts for the defensive lookup, since a
- * value the producer emits is not guaranteed to still exist in whatever
- * script version this client has loaded. */
+ * resolveCursorPosition in script-block.ts for the defensive, fall-through
+ * resolution, since a value the producer emits is not guaranteed to still
+ * exist (or mean the same thing) in whatever script version this client has
+ * loaded — `scriptVersion` (from CoachEventVersions) is what makes that
+ * check possible: index/text addressing is only meaningful within one
+ * script version, so a version-mismatched cursor is discarded, never
+ * resolved against a script it wasn't produced from. `variantKey` is
+ * ADVISORY ONLY — Jitter cannot know which variant Sandra's own
+ * auto-select/override logic actually picked for a branch, so resolution
+ * always defers to Sandra's own selected variant, never this field. */
 export type CoachCursorEvent = CoachEventVersions & {
   type: "cursor";
   phaseId: CoachPhaseId;
   branchTag: string;
   variantKey: string;
   lineIndex: number;
+  lineText: string;
   ts: string;
 };
 
@@ -236,15 +246,23 @@ export type CoachHoldTimer = {
 };
 
 /** The latest cursor position accepted into state — only ever stored when
- * its phaseId matched state.currentPhaseId at the moment it arrived (phase
- * is authoritative; see coachReducer's "cursor" case), and cleared whenever
- * a later "phase" event actually changes the current phase, so this can
- * never linger as stale guidance for a phase the call has moved past. */
+ * BOTH its phaseId matched state.currentPhaseId (phase is authoritative)
+ * AND its scriptVersion matched this client's loaded script (line
+ * addressing has no stable identity across a script edit) at the moment it
+ * arrived; see coachReducer's "cursor" case. Cleared whenever a later
+ * "phase" event actually changes the current phase, so this can never
+ * linger as stale guidance for a phase the call has moved past. Survives a
+ * rep's local phase-rail override (overriddenPhaseId) untouched — that's
+ * display-only and never reaches the server, so it must not clear live
+ * cursor tracking; resolveCursorPosition (script-block.ts) simply won't
+ * apply it while the rep is browsing a phase other than this one. */
 export type CoachCursor = {
   phaseId: CoachPhaseId;
   branchTag: string;
   variantKey: string;
   lineIndex: number;
+  lineText: string;
+  scriptVersion: string;
   ts: string;
 };
 

@@ -250,41 +250,117 @@ describe("coach_notes fidelity — every phase carries its full rule set from th
   });
 });
 
-describe("resolveCursorLine — resolves against the raw script, not a pre-built block", () => {
-  it("resolves the exact line the cursor names, with tokens filled in", () => {
+describe("resolveCursorLine — revised wire contract, exact fall-through order", () => {
+  // Both blocks below use the file's default selectCtx ({ leadSource: null,
+  // occupancy: null }), so branch-level variant selection always falls back
+  // to each branch's default/first variant unless a test overrides it via
+  // buildPhaseScriptBlock's branchOverrides argument (mirroring a rep's
+  // manual variant switch) — that's what makes "Sandra's own selected
+  // variant" a fixed, known quantity per test rather than something that
+  // shifts with live call context.
+  const introBlock = buildPhaseScriptBlock("introduction", tokens)!;
+  const revealBlock = buildPhaseScriptBlock("reveal", tokens)!;
+
+  it("step 4: resolves via lineText when it matches a line in Sandra's own selected variant — wins even over a garbage variantKey/lineIndex", () => {
     const line = resolveCursorLine(
-      { phaseId: "introduction", branchTag: "Frame the call", variantKey: "default", lineIndex: 2 },
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "not-a-real-variant", // advisory only, must be ignored
+        lineIndex: 999, // would be out of range if consulted
+        lineText: "• To add some sort of value to the property so we can resell it on the market, or",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
       tokens,
     );
     expect(line).not.toBeNull();
-    expect(line!.type).toBe("say");
     expect(allText(line!.segments)).toContain("add some sort of value to the property");
   });
 
-  it("resolves against the variant the cursor names, not the block's auto/override-selected variant", () => {
-    // The Opener branch auto-selects by lead_source; this context has none
-    // set, so the block's `selected` variant would be "default". A cursor
-    // naming "cold_call" explicitly must still resolve to cold_call's line,
-    // proving this reads the named variant, not whatever the block picked.
+  it("step 5: falls back to lineIndex when lineText doesn't match anything in Sandra's own selected variant", () => {
     const line = resolveCursorLine(
-      { phaseId: "introduction", branchTag: "Opener", variantKey: "cold_call", lineIndex: 1 },
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 3,
+        lineText: "this text does not appear anywhere in the script",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
       tokens,
     );
     expect(line).not.toBeNull();
-    expect(allText(line!.segments)).toContain("Rose");
+    expect(allText(line!.segments)).toContain("Buy the property to rent it to someone");
+  });
+
+  it("step 6: falls back to THIS branch's own first spoken line (not branch 0) when neither lineText nor lineIndex resolve", () => {
+    const line = resolveCursorLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call", // not the phase's dominant branch (Opener)
+        variantKey: "default",
+        lineIndex: 999,
+        lineText: "this text does not appear anywhere in the script",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    // "Frame the call"'s own first say line, not Opener's greeting.
+    expect(allText(line!.segments)).toContain("reason for my call today");
+  });
+
+  it("resolves against Sandra's OWN selected variant, never the cursor's advisory variantKey — even when the named variant is real and its line text is well-formed", () => {
+    // Reveal's Entry branch: with occupancy unset, Sandra's own selection
+    // falls back to variants[0] ("unknown"). All four variants share line 0
+    // verbatim but diverge at line 1. The cursor claims "vacant" and hands
+    // over VACANT's line-1 text — that text does not exist in "unknown", so
+    // it must fall through to lineIndex within "unknown", landing on
+    // UNKNOWN's own line 1, not vacant's.
+    const line = resolveCursorLine(
+      {
+        phaseId: "reveal",
+        branchTag: "Entry",
+        variantKey: "vacant",
+        lineIndex: 1,
+        lineText: "I know it's been vacant for a little bit, but what made you decide to go ahead and sell it now?",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      revealBlock,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("Do you currently");
+    expect(allText(line!.segments)).not.toContain("vacant for a little bit");
   });
 
   it("skips forward past a leading note line to the next actual 'say' line — never presents a note as speech", () => {
-    // Reveal's "Example probes — goal 7+" branch, vacant variant: index 4
-    // is a type:"note" line ("Add up everything they've paid so far."), a
-    // rep-facing instruction, not something to say aloud.
+    // Reveal's "Example probes — goal 7+" branch has no auto_select_by, so
+    // it needs a manual override to land Sandra's own selection on
+    // "vacant" (branchOverrides mirrors the rep's manual variant switch).
+    // Index 4 in that variant is a type:"note" line ("Add up everything
+    // they've paid so far."), a rep-facing instruction, not speech.
+    const block = buildPhaseScriptBlock("reveal", tokens, { leadSource: null, occupancy: null }, {
+      "Example probes — goal 7+": "vacant",
+    })!;
     const noteLine = getScriptPhase("reveal")!.display.branches
       .find((b) => b.tag === "Example probes — goal 7+")!
       .variants.find((v) => v.key === "vacant")!.lines[4];
     expect(noteLine.type).toBe("note");
 
     const line = resolveCursorLine(
-      { phaseId: "reveal", branchTag: "Example probes — goal 7+", variantKey: "vacant", lineIndex: 4 },
+      {
+        phaseId: "reveal",
+        branchTag: "Example probes — goal 7+",
+        variantKey: "vacant",
+        lineIndex: 4,
+        lineText: noteLine.text, // raw-text match lands exactly on the note
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      block,
       tokens,
     );
     expect(line).not.toBeNull();
@@ -292,39 +368,113 @@ describe("resolveCursorLine — resolves against the raw script, not a pre-built
     expect(allText(line!.segments)).toContain("So when you sell");
   });
 
-  it("returns null for an unknown branchTag rather than crashing", () => {
+  it("returns null (full branch-0 fallback territory) for an unknown branchTag rather than crashing", () => {
     expect(
-      resolveCursorLine({ phaseId: "introduction", branchTag: "Not A Real Branch", variantKey: "default", lineIndex: 0 }, tokens),
+      resolveCursorLine(
+        {
+          phaseId: "introduction",
+          branchTag: "Not A Real Branch",
+          variantKey: "default",
+          lineIndex: 0,
+          lineText: "irrelevant",
+          scriptVersion: CLOSR_SCRIPT.version,
+        },
+        introBlock,
+        tokens,
+      ),
     ).toBeNull();
   });
 
-  it("returns null for an unknown variantKey rather than crashing", () => {
+  it("never looks a branchTag up across phases — a tag from another phase's branches must not resolve", () => {
+    // "Entry" only exists on Reveal's branches, not Introduction's — even
+    // though the cursor's own phaseId matches the block, the tag must be
+    // scoped to THIS phase's branches only.
     expect(
-      resolveCursorLine({ phaseId: "introduction", branchTag: "Opener", variantKey: "not_a_real_variant", lineIndex: 0 }, tokens),
+      resolveCursorLine(
+        {
+          phaseId: "introduction",
+          branchTag: "Entry",
+          variantKey: "unknown",
+          lineIndex: 0,
+          lineText: "irrelevant",
+          scriptVersion: CLOSR_SCRIPT.version,
+        },
+        introBlock,
+        tokens,
+      ),
     ).toBeNull();
   });
 
-  it("returns null for an out-of-range lineIndex rather than crashing", () => {
+  it("returns null when the cursor's scriptVersion doesn't match this client's loaded script — discarded, not clamped", () => {
     expect(
-      resolveCursorLine({ phaseId: "introduction", branchTag: "Opener", variantKey: "default", lineIndex: 99 }, tokens),
-    ).toBeNull();
-    expect(
-      resolveCursorLine({ phaseId: "introduction", branchTag: "Opener", variantKey: "default", lineIndex: -1 }, tokens),
+      resolveCursorLine(
+        {
+          phaseId: "introduction",
+          branchTag: "Frame the call",
+          variantKey: "default",
+          lineIndex: 2,
+          lineText: "• To add some sort of value to the property so we can resell it on the market, or",
+          scriptVersion: "0.0.1-not-the-loaded-script",
+        },
+        introBlock,
+        tokens,
+      ),
     ).toBeNull();
   });
 
-  it("returns null for an unknown phaseId rather than crashing", () => {
+  it("returns null when the cursor's phaseId doesn't match the displayed block's phase", () => {
     expect(
-      // @ts-expect-error deliberately invalid phase id
-      resolveCursorLine({ phaseId: "not_a_phase", branchTag: "Opener", variantKey: "default", lineIndex: 0 }, tokens),
+      resolveCursorLine(
+        {
+          phaseId: "reveal",
+          branchTag: "Entry",
+          variantKey: "unknown",
+          lineIndex: 0,
+          lineText: "irrelevant",
+          scriptVersion: CLOSR_SCRIPT.version,
+        },
+        introBlock, // introduction block, cursor claims reveal
+        tokens,
+      ),
     ).toBeNull();
   });
 });
 
-describe("resolveCursorNextLine — one line further, same defensive rules", () => {
-  it("resolves the line immediately after the cursor", () => {
+describe("resolveCursorNextLine — one line further than whatever resolveCursorLine actually resolved", () => {
+  const introBlock = buildPhaseScriptBlock("introduction", tokens)!;
+
+  it("resolves the line immediately after the matched position", () => {
     const line = resolveCursorNextLine(
-      { phaseId: "introduction", branchTag: "Frame the call", variantKey: "default", lineIndex: 1 },
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 1,
+        lineText: "Cool, so how we work is very simple. We buy properties for a couple reasons:",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("add some sort of value to the property");
+  });
+
+  it("uses the ACTUAL resolved position, not the raw cursor.lineIndex, when resolution fell back (step 5/6)", () => {
+    // lineText doesn't match anything, so resolution falls back to
+    // lineIndex 1 (step 5) — "next" must be line 2, not line
+    // cursor.lineIndex+1 blindly re-derived from a lineText that never
+    // actually matched.
+    const line = resolveCursorNextLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 1,
+        lineText: "this text does not appear anywhere in the script",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
       tokens,
     );
     expect(line).not.toBeNull();
@@ -332,8 +482,19 @@ describe("resolveCursorNextLine — one line further, same defensive rules", () 
   });
 
   it("skips forward past a note the same way resolveCursorLine does", () => {
+    const block = buildPhaseScriptBlock("reveal", tokens, { leadSource: null, occupancy: null }, {
+      "Example probes — goal 7+": "vacant",
+    })!;
     const line = resolveCursorNextLine(
-      { phaseId: "reveal", branchTag: "Example probes — goal 7+", variantKey: "vacant", lineIndex: 3 },
+      {
+        phaseId: "reveal",
+        branchTag: "Example probes — goal 7+",
+        variantKey: "vacant",
+        lineIndex: 3,
+        lineText: "How long have you been paying that?",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      block,
       tokens,
     );
     expect(line).not.toBeNull();
@@ -347,7 +508,31 @@ describe("resolveCursorNextLine — one line further, same defensive rules", () 
     const lastIndex = lines.length - 1;
 
     const line = resolveCursorNextLine(
-      { phaseId: "introduction", branchTag: "Frame the call", variantKey: "default", lineIndex: lastIndex },
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: lastIndex,
+        lineText: lines[lastIndex].text,
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      tokens,
+    );
+    expect(line).toBeNull();
+  });
+
+  it("returns null when the underlying position can't be resolved at all (e.g. version mismatch)", () => {
+    const line = resolveCursorNextLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 0,
+        lineText: "irrelevant",
+        scriptVersion: "0.0.1-not-the-loaded-script",
+      },
+      introBlock,
       tokens,
     );
     expect(line).toBeNull();

@@ -185,6 +185,7 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
         isNonEmptyString(payload.branchTag) &&
         isNonEmptyString(payload.variantKey) &&
         isNonNegativeInteger(payload.lineIndex) &&
+        isNonEmptyString(payload.lineText) &&
         isNonEmptyString(payload.ts)
       ) {
         return {
@@ -195,6 +196,7 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
             branchTag: payload.branchTag,
             variantKey: payload.variantKey,
             lineIndex: payload.lineIndex,
+            lineText: payload.lineText,
             ts: payload.ts,
             ...versions,
           },

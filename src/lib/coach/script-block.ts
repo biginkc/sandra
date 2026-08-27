@@ -1,5 +1,5 @@
 import scriptJson from "./closr-script-v0.json";
-import { assertValidClosrScript, type ClosrScript, type ScriptBranch, type ScriptObjection, type ScriptPhase, type ScriptVariant } from "./script-schema";
+import { assertValidClosrScript, type ClosrScript, type ScriptBranch, type ScriptLineBlock, type ScriptObjection, type ScriptPhase, type ScriptVariant } from "./script-schema";
 import { resolveDisplayText, type DisplayTextSegment } from "./token-resolver";
 import type { CoachCallContext, CoachCursor, CoachOccupancy, CoachPhaseId, ResolvedTokens } from "./types";
 import { COACH_PHASE_ORDER } from "./types";
@@ -177,49 +177,142 @@ export function buildPhaseScriptBlock(
   };
 }
 
-/**
- * Resolves a cursor's (branchTag, variantKey, lineIndex) against the RAW
- * script — not against a pre-built PhaseScriptBlock — because a
- * PhaseScriptBlock's `branch.selected` is the auto/override-picked variant,
- * which is not necessarily the variant the cursor names. The cursor is
- * authoritative on which variant is live; this looks that variant up
- * directly.
- *
- * Defensive by construction: an unknown phaseId/branchTag/variantKey or an
- * out-of-range lineIndex returns null so the caller can fall back to
- * today's branch-0/first-say-line behavior instead of crashing or
- * rendering blank — the producer's script version and this client's loaded
- * script are never guaranteed to agree on every branch/variant/line.
- *
- * A cursor landing on (or advancing through) a "note" line — a rep-facing
- * stage direction, never meant to be read aloud — scans forward within the
- * SAME variant for the next "say" line, so this never presents a note as
- * speech, matching the rule selectSpokenLine already enforces for the
- * no-cursor path. Returns null (triggering the same fallback) if the
- * variant has no "say" line at or after lineIndex.
- */
-export function resolveCursorLine(cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex">, tokens: ResolvedTokens): DisplayLine | null {
-  const phase = getScriptPhase(cursor.phaseId);
-  if (!phase) return null;
-  const branch = phase.display.branches.find((candidate) => candidate.tag === cursor.branchTag);
-  if (!branch) return null;
-  const variant = branch.variants.find((candidate) => candidate.key === cursor.variantKey);
-  if (!variant) return null;
-  if (cursor.lineIndex < 0 || cursor.lineIndex >= variant.lines.length) return null;
+/** A resolved cursor position, expressed as an index into the RAW variant
+ * `lines` array — always a "say" line unless the variant genuinely has none
+ * at all (see findSayIndexFrom/branchFallbackIndex), so it's safe to
+ * resolve directly and to compute "the next line" as lineIndex+1 within
+ * that SAME lines array without re-deriving anything. */
+type ResolvedCursorPosition = { branchTag: string; variantKey: string; lineIndex: number };
 
-  for (let index = cursor.lineIndex; index < variant.lines.length; index += 1) {
-    const line = variant.lines[index];
-    if (line.type === "say") {
-      return { type: "say", segments: resolveDisplayText(line.text, tokens) };
-    }
+/** Scans forward from `fromIndex` (inclusive) for the next "say" line —
+ * never returns a "note" line, matching the rule selectSpokenLine already
+ * enforces: a rep-facing stage direction must never render as speech, cursor
+ * or not. Returns null only if nothing but notes remain from fromIndex on. */
+function findSayIndexFrom(lines: ScriptLineBlock[], fromIndex: number): number | null {
+  for (let index = fromIndex; index < lines.length; index += 1) {
+    if (lines[index].type === "say") return index;
   }
   return null;
 }
 
-/** Same resolution/fallback rules as resolveCursorLine, one line further —
- * used for the "Coming next" preview when a cursor is active, so the
- * preview shows the next line within the CURRENT phase instead of jumping
- * to the next phase. */
-export function resolveCursorNextLine(cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex">, tokens: ResolvedTokens): DisplayLine | null {
-  return resolveCursorLine({ ...cursor, lineIndex: cursor.lineIndex + 1 }, tokens);
+/** Mirrors selectSpokenLine's own last-resort fallback: the first "say"
+ * line in the variant, or — only if the variant has no "say" line
+ * whatsoever — literal index 0, so a caller is guaranteed *some* line. */
+function branchFallbackIndex(lines: ScriptLineBlock[]): number {
+  return findSayIndexFrom(lines, 0) ?? 0;
+}
+
+/**
+ * Resolves a cursor event into a position within the CURRENTLY DISPLAYED
+ * phase block, following the wire contract's exact fall-through order:
+ *
+ *  1. `scriptVersion` must match this client's loaded script — line
+ *     addressing (both by index and by exact text) has no stable identity
+ *     across a script edit, so a version-mismatched cursor is discarded
+ *     outright here, never resolved against a script it wasn't produced
+ *     from. (The reducer already enforces this before ever storing a
+ *     cursor — this is a second, independent check, not a trust of that.)
+ *  2. `phaseId` must match the block actually being displayed.
+ *  3. `branchTag` must exist WITHIN THAT PHASE's branches — tags are unique
+ *     per phase, never globally, so this never looks a tag up across
+ *     phases (the same trap branchOverrides has, being a flat
+ *     tag-keyed Record with no phase scoping).
+ *  4. Inside SANDRA'S OWN selected variant for that branch (`branch.selected
+ *     .key` — NEVER the cursor's `variantKey`, which is advisory only:
+ *     Jitter cannot know which variant Sandra's auto-select/override logic
+ *     actually picked, and some variants — e.g. reveal's four occupancy
+ *     variants — share lines verbatim, making its guess genuinely
+ *     unreliable), find the line whose raw text equals `lineText`.
+ *  5. Else, if `lineIndex` is in range for Sandra's selected variant, use it.
+ *  6. Else fall back to that SAME branch's own first spoken line (mirrors
+ *     selectSpokenLine, applied to the branch the cursor named — not
+ *     branch 0).
+ * Steps 4-6 all resolve via findSayIndexFrom, so a match landing on (or
+ * advancing through) a "note" line is skipped forward to the next "say"
+ * line, never rendered as speech.
+ *
+ * Returns null only when the branch itself can't be found in this phase, or
+ * the version/phase gate fails (step 1/2/3) — at that point there is no
+ * "this branch" to fall back within, so the caller's job is today's FULL
+ * fallback (branch 0, first say line), which this function deliberately
+ * does not attempt on its own.
+ */
+function resolveCursorPosition(
+  cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex" | "lineText" | "scriptVersion">,
+  block: PhaseScriptBlock,
+): ResolvedCursorPosition | null {
+  if (cursor.scriptVersion !== CLOSR_SCRIPT.version) return null; // 1
+  if (cursor.phaseId !== block.phaseId) return null; // 2
+  const branch = block.branches.find((candidate) => candidate.tag === cursor.branchTag); // 3
+  if (!branch) return null;
+
+  const rawPhase = getScriptPhase(cursor.phaseId);
+  const rawVariant = rawPhase?.display.branches
+    .find((candidate) => candidate.tag === cursor.branchTag)
+    ?.variants.find((candidate) => candidate.key === branch.selected.key); // Sandra's own selection, never cursor.variantKey
+  if (!rawVariant) return null; // defensive only — block.branches and the raw script should never disagree here
+
+  const textMatch = rawVariant.lines.findIndex((line) => line.text === cursor.lineText); // 4
+  if (textMatch >= 0) {
+    const resolved = findSayIndexFrom(rawVariant.lines, textMatch);
+    if (resolved !== null) return { branchTag: branch.tag, variantKey: rawVariant.key, lineIndex: resolved };
+  }
+
+  if (cursor.lineIndex >= 0 && cursor.lineIndex < rawVariant.lines.length) {
+    // 5
+    const resolved = findSayIndexFrom(rawVariant.lines, cursor.lineIndex);
+    if (resolved !== null) return { branchTag: branch.tag, variantKey: rawVariant.key, lineIndex: resolved };
+  }
+
+  // 6 — this branch's own fallback, never branch 0.
+  return { branchTag: branch.tag, variantKey: rawVariant.key, lineIndex: branchFallbackIndex(rawVariant.lines) };
+}
+
+function displayLineAt(branchTag: string, variantKey: string, lineIndex: number, phaseId: CoachPhaseId, tokens: ResolvedTokens): DisplayLine | null {
+  const rawPhase = getScriptPhase(phaseId);
+  const line = rawPhase?.display.branches
+    .find((candidate) => candidate.tag === branchTag)
+    ?.variants.find((candidate) => candidate.key === variantKey)?.lines[lineIndex];
+  if (!line) return null;
+  return { type: line.type, segments: resolveDisplayText(line.text, tokens) };
+}
+
+/** Resolves a cursor event to the exact line to show as "the thing to
+ * say," following resolveCursorPosition's fall-through order — see that
+ * function's docs for the full algorithm. Returns null only when the
+ * cursor's branch can't be found in the displayed phase, or the
+ * version/phase gate fails; the caller falls back to today's full
+ * branch-0/first-say-line behavior in that case. */
+export function resolveCursorLine(
+  cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex" | "lineText" | "scriptVersion">,
+  block: PhaseScriptBlock,
+  tokens: ResolvedTokens,
+): DisplayLine | null {
+  const position = resolveCursorPosition(cursor, block);
+  if (!position) return null;
+  return displayLineAt(position.branchTag, position.variantKey, position.lineIndex, cursor.phaseId, tokens);
+}
+
+/** Same resolution as resolveCursorLine, one line further within the SAME
+ * resolved branch/variant — used for the "Coming next" preview when a
+ * cursor is active, so the preview shows the next line within the CURRENT
+ * phase instead of jumping to the next phase. Built on the position
+ * resolveCursorPosition actually landed on (which may differ from the raw
+ * cursor.lineIndex, e.g. after a step-6 fallback), not on the cursor's own
+ * lineIndex+1, so "next" is always relative to what's actually showing. */
+export function resolveCursorNextLine(
+  cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex" | "lineText" | "scriptVersion">,
+  block: PhaseScriptBlock,
+  tokens: ResolvedTokens,
+): DisplayLine | null {
+  const position = resolveCursorPosition(cursor, block);
+  if (!position) return null;
+  const rawPhase = getScriptPhase(cursor.phaseId);
+  const variant = rawPhase?.display.branches
+    .find((candidate) => candidate.tag === position.branchTag)
+    ?.variants.find((candidate) => candidate.key === position.variantKey);
+  if (!variant) return null;
+  const nextIndex = findSayIndexFrom(variant.lines, position.lineIndex + 1);
+  if (nextIndex === null) return null;
+  return { type: "say", segments: resolveDisplayText(variant.lines[nextIndex].text, tokens) };
 }

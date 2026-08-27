@@ -1,3 +1,4 @@
+import { CLOSR_SCRIPT } from "./script-block";
 import { EMPTY_ENTRY_FIELDS } from "./token-resolver";
 import type { CoachEntryToken, CoachEvent, CoachPhaseId, CoachState, CoachTranscriptEvent, CoachTranscriptLine } from "./types";
 
@@ -195,6 +196,13 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
       // and must be ignored outright rather than applied — never stored,
       // never allowed to move the rep's script position.
       if (action.phaseId !== state.currentPhaseId) return state;
+      // Line addressing (both index and exact text) has no stable identity
+      // across a script edit — a cursor produced against a different
+      // scriptVersion than this client's loaded script must be discarded
+      // outright, never stored and later "clamped" into range at render
+      // time. Checked here (not just at resolution) so a stray
+      // wrong-version event can never overwrite a still-good stored cursor.
+      if (action.scriptVersion !== CLOSR_SCRIPT.version) return state;
       return {
         ...state,
         connected: true,
@@ -204,6 +212,8 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
           branchTag: action.branchTag,
           variantKey: action.variantKey,
           lineIndex: action.lineIndex,
+          lineText: action.lineText,
+          scriptVersion: action.scriptVersion,
           ts: action.ts,
         },
       };
