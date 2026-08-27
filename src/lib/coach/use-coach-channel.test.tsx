@@ -134,6 +134,33 @@ describe("useCoachChannel", () => {
     expect(result.current.degraded).toBe(true);
   });
 
+  it("does not start the liveness warning while ringing, then allows a full window once live without resubscribing", async () => {
+    const { result, rerender } = renderHook(
+      ({ live }) => useCoachChannel("call-ringing", "introduction", live),
+      { initialProps: { live: false } },
+    );
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(45_000);
+    });
+    expect(result.current.degraded).toBe(false);
+    expect(channelSpy).toHaveBeenCalledTimes(1);
+
+    rerender({ live: true });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14_999);
+    });
+    expect(result.current.degraded).toBe(false);
+    expect(channelSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2);
+    });
+    expect(result.current.degraded).toBe(true);
+  });
+
   it("re-arms the liveness window on every event — degraded is a rolling check, not one-shot", async () => {
     const { result } = renderHook(() => useCoachChannel("call-123"));
     await flush();
