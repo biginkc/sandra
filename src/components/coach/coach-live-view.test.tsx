@@ -206,6 +206,27 @@ describe("<CoachLiveView />", () => {
     expect(screen.queryByTestId("say-this-tone")).not.toBeInTheDocument();
   });
 
+  it("in the Coming Next preview, shows the actual next spoken line, not the note that leads that phase's dominant branch", async () => {
+    // Regression: the "Coming next" preview had the identical note-as-speech
+    // bug as the Say This card, but wasn't fixed alongside it — it read
+    // nextBlock.branches[0]?.selected.lines[0] directly instead of going
+    // through the same spoken-line selection rule. Reproducing case: with
+    // Offer as the CURRENT phase, the preview shows Close (the NEXT phase),
+    // whose dominant branch leads with a type:"note" line ("Only for
+    // novation prices on the calculator.") — a glanced-at preview showing
+    // that as the next thing to say is worse than the main card showing it,
+    // since a preview is glanced at, not read carefully.
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
+
+    const preview = screen.getByTestId("next-phase-preview");
+    expect(preview).toHaveTextContent(/Coming next · Close/i);
+    const previewBody = screen.getByTestId("next-phase-preview-body");
+    expect(previewBody).toHaveTextContent(/there is one program i can check/i);
+    expect(previewBody).not.toHaveTextContent(/novation prices on the calculator/i);
+  });
+
   it("keeps the full two-speaker transcript surface and interim/final semantics beside focus mode", async () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
@@ -731,6 +752,18 @@ describe("<CoachLiveView />", () => {
     expect(sayThisCard).toHaveTextContent(/say their name twice in the first line/i);
     expect(sayThisCard).toHaveTextContent(/never open with .how are you doing today/i);
     expect(sayThisCard).toHaveTextContent(/catch you at a bad time/i);
+
+    // The assertions above only prove the phase-level guidance survived.
+    // They would ALL still pass if degraded silently trimmed to the first
+    // branch — which is precisely the regression this test exists to
+    // catch, since the live view now shows exactly one branch's one line.
+    // So assert content that exists ONLY in later branches: "The reason
+    // for my call today" opens introduction branch 1, and the contact
+    // details in branch 2 are the last thing a rep would still need while
+    // reading manually through an outage.
+    expect(sayThisCard).toHaveTextContent(/the reason for my call today/i);
+    expect(sayThisCard).toHaveTextContent(/our company is bmh group/i);
+    expect(sayThisCard).toHaveTextContent(/your file number is/i);
   });
 
   it("keeps useful script coaching visible for an unknown but valid objection id", async () => {

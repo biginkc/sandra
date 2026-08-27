@@ -416,14 +416,40 @@ test.describe("contrast probe negative controls", () => {
   });
 
   test("detects the unreadable half of a split background", async ({ page }) => {
-    // Black text over a half-black/half-white background. An averaging probe,
-    // or one that discards pixels which do not change when the text is
-    // hidden, reports a comfortable pass here — the black-on-black half is
-    // exactly the half it throws away.
+    // Black text over a half-black/half-white background: the glyphs on the
+    // white half are perfectly readable, the ones on the black half are
+    // invisible. A probe that averages, or that discards pixels which do
+    // not change when the text is hidden, reports a comfortable pass —
+    // the black-on-black half is exactly the half it throws away.
+    //
+    // This control was itself found defective by a merge-gate review: the
+    // original string was short enough that Chromium laid every glyph on
+    // the black half, so it was really just testing black-on-black and
+    // would have passed even against a probe with no split handling at
+    // all. Hence the wide fixed width, the long string, and — crucially —
+    // the straddle assertion below. A negative control that can pass for
+    // the wrong reason is as dangerous as the bug it is meant to catch.
     await mountProbeFixture(
       page,
-      `<div data-testid="probe" style="background:linear-gradient(90deg,#000 0 50%,#fff 50% 100%);color:#000000;font-size:20px;padding:12px">Half of this is invisible</div>`,
+      `<div data-testid="probe" style="width:600px;background:linear-gradient(90deg,#000 0 50%,#fff 50% 100%);color:#000000;font-size:20px;padding:0;white-space:nowrap;overflow:hidden">Half of this line is invisible and half is readable</div>`,
     );
+
+    // Prove the fixture actually straddles the boundary before trusting the
+    // measurement: glyphs must exist on BOTH sides of the 50% split.
+    const straddles = await page.getByTestId("probe").evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      const mid = box.left + box.width / 2;
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const rects = Array.from(range.getClientRects());
+      const left = rects.some((r) => r.left < mid - 1);
+      const right = rects.some((r) => r.right > mid + 1);
+      return { left, right, textRight: Math.max(...rects.map((r) => r.right)), mid };
+    });
+    expect(straddles.left, "text must reach the black half").toBe(true);
+    expect(straddles.right, "text must reach the white half — otherwise this is only a black-on-black test").toBe(true);
+
+    // Worst case, not average: the invisible half is what a rep would hit.
     const { ratio } = await measureRenderedContrast(page.getByTestId("probe"));
     expect(ratio).toBeLessThan(1.5);
   });

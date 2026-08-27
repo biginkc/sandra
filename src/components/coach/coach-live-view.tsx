@@ -16,6 +16,7 @@ import {
   nextPhaseId,
   resolveObjectionOvercome,
   type BranchSelectContext,
+  type DisplayLine,
   type PhaseScriptBlock,
   type ScriptBranchBlock,
 } from "@/lib/coach/script-block";
@@ -104,6 +105,21 @@ const MAX_RENDERED_TRANSCRIPT_LINES = 200;
 
 function timerText(seconds: number): string {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** Selects the line to present as "the thing to say" for a branch: the
+ * first line whose type is "say", or — only if the branch has no "say"
+ * line at all — the literal first line, so a caller never renders fully
+ * blank. Every call site that needs to show a branch's spoken content
+ * (the dominant Say This line, the Coming Next preview) must go through
+ * this, rather than indexing lines[0] directly — a blind lines[0] can
+ * land on an internal type:"note" line (e.g. Close's "If far apart —
+ * program pivot" branch leads with one: "Only for novation prices on the
+ * calculator.", a note for the rep, not something to say) and present it
+ * to the rep as speech. */
+function selectSpokenLine(branch: ScriptBranchBlock | null | undefined): DisplayLine | null {
+  if (!branch) return null;
+  return branch.selected.lines.find((line) => line.type === "say") ?? branch.selected.lines[0] ?? null;
 }
 
 export function CoachLiveView(props: CoachLiveViewProps) {
@@ -588,17 +604,13 @@ function ScriptPanel({
       </main>
     );
   }
-  // The dominant "current line" for the live (non-degraded) card must
-  // actually be speech, never an internal strategy note — some phases
-  // (e.g. Close's "If far apart" branch) lead with a type:"note" line
-  // ("Only for novation prices on the calculator.") that is guidance FOR
-  // the rep, not something to say aloud. Prefer the first "say" line;
-  // only fall back to the literal first line if a branch has no "say"
-  // line at all, so the card never renders fully blank.
   const dominantBranch = block.branches[0] ?? null;
-  const spokenLine = dominantBranch
-    ? (dominantBranch.selected.lines.find((line) => line.type === "say") ?? dominantBranch.selected.lines[0] ?? null)
-    : null;
+  const spokenLine = selectSpokenLine(dominantBranch);
+  // Same rule for the "Coming next" preview — it was still blindly reading
+  // lines[0] and could surface a note as the next thing to say (repro: with
+  // Offer as the current phase, Close's dominant branch leads with a note).
+  // A glanced-at preview makes that worse than the main card, not better.
+  const nextSpokenLine = nextBlock ? selectSpokenLine(nextBlock.branches[0] ?? null) : null;
   // The standalone tone chip must be a genuine tonal instruction (how to
   // say THIS line — e.g. "playful tone"), not an arbitrary phase-level
   // strategy note. Genuine tone guidance is authored inline in the script
@@ -766,7 +778,7 @@ function ScriptPanel({
               Coming next · {nextBlock.phaseName}
             </div>
             <p data-testid="next-phase-preview-body" className="text-base leading-relaxed text-stone-600 dark:text-stone-300">
-              {nextBlock.branches[0]?.selected.lines[0]?.segments
+              {nextSpokenLine?.segments
                 .map((segment) => (segment.kind === "tone" ? "" : segment.kind === "text" ? segment.value : segment.resolved.value))
                 .join("")}
             </p>
