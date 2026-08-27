@@ -77,6 +77,23 @@ const EMPTY_CALL_CONTEXT: CoachCallContext = {
 
 const ENTRY_TOKEN_SET: ReadonlySet<string> = new Set(COACH_ENTRY_TOKENS);
 
+/** Display-only shorthand for the phase rail — the mock's rail reads INTRO
+ * · REVEAL · ASSESS · POSITION · OFFER · CLOSE, six short labels that leave
+ * room on the top edge instead of the full phase.display names ("Secure
+ * Positioning") crowding it. This is purely cosmetic: the underlying phase
+ * id, `phaseName` (used for the Say This card / aria-labels elsewhere), and
+ * the rail button's own accessible name all keep the full phase name — only
+ * the rail button's VISIBLE text is shortened. Falls back to the full name
+ * for any phase id not listed here, so a future phase never renders blank. */
+const RAIL_LABEL: Partial<Record<CoachPhaseId, string>> = {
+  introduction: "Intro",
+  reveal: "Reveal",
+  assessment: "Assess",
+  secure_positioning: "Position",
+  offer: "Offer",
+  close: "Close",
+};
+
 const ENTRY_TOKEN_LABEL: Record<CoachEntryToken, string> = {
   closing_date: "closing date",
   offer_price: "offer price",
@@ -404,15 +421,21 @@ function CoachTopBar({
       <ol className="flex min-w-0 items-center gap-1 overflow-x-auto px-4 pb-2" aria-label="Call phases" data-testid="coach-phase-scroller">
         {COACH_PHASE_ORDER.map((phaseId) => {
           const phase = getScriptPhase(phaseId);
+          const fullName = phase?.name ?? phaseId;
           const isCurrent = phaseId === currentPhaseId;
           const isDisplayed = phaseId === displayedPhaseId;
           const isComplete = COACH_PHASE_ORDER.indexOf(phaseId) < currentPhaseIndex;
+          const suffix = isComplete ? " ✓" : "";
           return (
             <li key={phaseId}>
               <button
                 type="button"
                 data-testid={`phase-rail-${phaseId}`}
                 aria-current={isDisplayed ? "step" : undefined}
+                // Accessible name stays the full phase name (matching the
+                // Say This card and the top-strip phase badges) even though
+                // the visible label below is shortened.
+                aria-label={`${fullName}${suffix}`}
                 onClick={() => onSelectPhase(phaseId)}
                 className={cn(
                   "rounded-full px-2.5 py-1 text-[11px] font-bold tracking-wide whitespace-nowrap uppercase transition-colors",
@@ -430,8 +453,10 @@ function CoachTopBar({
                         : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
               >
-                {phase?.name ?? phaseId}
-                {isComplete ? " ✓" : ""}
+                <span>
+                  {RAIL_LABEL[phaseId] ?? fullName}
+                  {suffix}
+                </span>
               </button>
             </li>
           );
@@ -503,7 +528,19 @@ function TranscriptFeed({ lines }: { lines: CoachTranscriptLine[] }) {
               !line.isFinal && "text-muted-foreground italic",
             )}
           >
-            <span className="mr-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
+            <span
+              data-testid="transcript-speaker-label"
+              className={cn(
+                "mr-1.5 text-[10px] font-bold tracking-wide uppercase",
+                // Two-tone speaker labels (mock parity): rep in the same
+                // emerald accent used for resolved tokens/Live pill
+                // elsewhere in this view, seller in the amber already
+                // measured safe for coach-nudge-label. Reused, not invented
+                // — see coach-live-contrast.spec.ts for both measurements
+                // against this transcript's actual bg-muted/30 background.
+                line.speaker === "rep" ? "text-emerald-700 dark:text-emerald-400" : "text-amber-700 dark:text-amber-300",
+              )}
+            >
               {line.speaker === "rep" ? "Rep" : "Seller"}
             </span>
             {line.text}

@@ -440,15 +440,28 @@ describe("<CoachLiveView />", () => {
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     // The variant switcher moved into the full-script disclosure along with
     // the rest of the branch detail — the trimmed "say this" line no longer
-    // carries it directly.
+    // carries it directly. Open the disclosure BEFORE switching, so the
+    // FSBO variant's second line ("For Sale by Owner…") is genuinely
+    // visible when asserted below, not just present-but-hidden inside a
+    // closed <details> — getAllByText does not filter by visibility, so an
+    // assertion made against closed content would keep passing even if the
+    // rep could never actually see what they switched to.
     await userEvent.click(screen.getByText(/Full Introduction script/i));
     const fsboTab = screen.getByTestId("variant-Opener-fsbo");
     await userEvent.click(fsboTab);
     expect(fsboTab).toHaveAttribute("aria-selected", "true");
-    // The trimmed "say this" line re-resolves against the new variant too.
-    expect(screen.getAllByText(/For Sale by Owner/).length).toBeGreaterThan(0);
-    // Restructured opener variants still lead with the shared greeting.
-    expect(screen.getAllByText(/Alex Rep/).length).toBeGreaterThan(0);
+    // The FSBO variant's second line only exists inside the (now open)
+    // full-script disclosure — the trimmed "say this" line still shows
+    // only line 1 of the greeting. Assert real visibility, not just
+    // presence in the DOM.
+    const fsboMatches = screen.getAllByText(/For Sale by Owner/);
+    expect(fsboMatches.length).toBeGreaterThan(0);
+    for (const match of fsboMatches) expect(match).toBeVisible();
+    // Restructured opener variants still lead with the shared greeting,
+    // visible both in the trimmed line and the expanded detail.
+    const repMatches = screen.getAllByText(/Alex Rep/);
+    expect(repMatches.length).toBeGreaterThan(0);
+    for (const match of repMatches) expect(match).toBeVisible();
   });
 
   it("shows the reconnect-gap banner after a real reconnect, and dismiss clears it", async () => {

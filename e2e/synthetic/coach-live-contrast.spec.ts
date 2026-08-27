@@ -250,6 +250,17 @@ for (const mode of [
   }) => {
     await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: false });
 
+    // Two-tone transcript speaker labels (mock parity) — rep in the
+    // emerald accent, seller in amber, against the transcript aside's
+    // actual bg-muted/30 composited background. The harness fixture always
+    // seeds one rep line and one seller line.
+    const repLabel = page.getByTestId("transcript-speaker-label").filter({ hasText: "Rep" }).first();
+    const sellerLabel = page.getByTestId("transcript-speaker-label").filter({ hasText: "Seller" }).first();
+    await expect(repLabel).toBeVisible();
+    await expect(sellerLabel).toBeVisible();
+    assertAA("transcript rep speaker label", await measureRenderedContrast(repLabel));
+    assertAA("transcript seller speaker label", await measureRenderedContrast(sellerLabel));
+
     // Live status pill in the topbar (Badge, border-emerald-200 /
     // text-emerald-700, visible whenever callStatus is "live" and not held
     // — true by default in this harness).
