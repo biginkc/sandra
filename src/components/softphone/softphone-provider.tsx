@@ -159,6 +159,7 @@ export function SoftphoneProvider({ children }: Props) {
     target?.propertyId ?? null,
     target?.phoneE164 ?? null,
     selectedCallerId,
+    callStatus === "live",
   );
   const transportRef = useRef<CallTransport | null>(null);
   const callHandleRef = useRef<CallHandle | null>(null);

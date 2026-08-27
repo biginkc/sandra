@@ -26,8 +26,9 @@ export function useCoachSession(
   propertyId: string | null,
   sellerPhoneE164: string | null,
   repPhoneE164: string | null,
+  livenessActive = true,
 ) {
-  const { dispatch, ...channel } = useCoachChannel(callId);
+  const { dispatch, ...channel } = useCoachChannel(callId, "introduction", livenessActive);
   const [contextLoad, setContextLoad] = useState<ContextLoadState>({ status: "loading" });
   const [contextAttempt, setContextAttempt] = useState(0);
   const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>({});
