@@ -166,7 +166,38 @@ describe("<CoachLiveView />", () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     expect(screen.getByTestId("phase-rail-introduction")).toBeInTheDocument();
+    expect(screen.getByTestId("say-this-card")).toBeVisible();
+    expect(screen.getByTestId("next-phase-preview")).toHaveTextContent(/Coming next · Reveal/i);
     expect(screen.getAllByText(/Alex Rep/).length).toBeGreaterThan(0);
+  });
+
+  it("keeps the full two-speaker transcript surface and interim/final semantics beside focus mode", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+    broadcast({ type: "transcript", speaker: "seller", text: "The yard is getting expensive.", isFinal: true, ts: "t1" });
+    broadcast({ type: "transcript", speaker: "rep", text: "Who has been maintaining it?", isFinal: false, ts: "t2" });
+
+    const transcript = screen.getByTestId("coach-transcript");
+    expect(transcript.closest("aside")).toHaveAttribute("aria-label", "Live transcript");
+    expect(transcript).toHaveTextContent("Seller");
+    expect(transcript).toHaveTextContent("The yard is getting expensive.");
+    expect(transcript).toHaveTextContent("Rep");
+    expect(transcript).toHaveTextContent("Who has been maintaining it?");
+    expect(screen.getAllByTestId("transcript-line").map((line) => line.getAttribute("data-final"))).toEqual(["true", "false"]);
+  });
+
+  it("keeps one authored branch dominant while retaining the rest of the phase in an on-demand full-script disclosure", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+    const disclosure = screen.getByTestId("full-phase-script");
+    expect(disclosure).not.toHaveAttribute("open");
+    expect(disclosure).toHaveTextContent("Frame the call");
+    expect(disclosure).toHaveTextContent("Pen & paper — contact details");
+
+    await userEvent.click(screen.getByText(/Full Introduction script/i));
+    expect(disclosure).toHaveAttribute("open");
   });
 
   it("shows Ringing… (not a 00:00 timer) and a pre-connect pill while the call is still ringing", async () => {
@@ -186,6 +217,8 @@ describe("<CoachLiveView />", () => {
     render(<Harness {...baseProps({ callStatus: "live", seconds: 65 })} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     expect(screen.getByTestId("coach-call-timer")).toHaveTextContent("01:05");
+    expect(screen.getByTestId("coach-live-pill")).toHaveTextContent(/Live/i);
+    expect(screen.queryByTestId("call-status-pill")).not.toBeInTheDocument();
   });
 
   it("disables Hold whenever the call isn't actually live yet (connecting/ringing)", async () => {
@@ -497,38 +530,56 @@ describe("<CoachLiveView />", () => {
     expect(announcer).not.toHaveTextContent("price_too_low");
   });
 
-  it("stacks simultaneous nudge and objection guidance without overlap at 375px", async () => {
+  it("uses one focus surface: objection preempts nudge, then dismissals restore nudge and script in order", async () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
     window.dispatchEvent(new Event("resize"));
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "coach_note", text: "Ask one more question.", phaseId: "reveal", ts: "t1" });
-    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
 
+    broadcast({ type: "coach_note", text: "Ask one more question.", phaseId: "reveal", ts: "t1" });
+    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("data-active", "true");
+    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
+
+    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
     const stack = screen.getByTestId("coach-guidance-stack");
     expect(stack).toContainElement(screen.getByTestId("coach-nudge"));
     expect(stack).toContainElement(screen.getByTestId("objection-card"));
-    expect(stack.className).toMatch(/flex-col/);
-    expect(stack.className).toMatch(/max-w-\[calc\(100vw-2rem\)\]/);
-    // absolute + inset-y (bounded by the relative parent that sits between
-    // the topbar and the call dock) is what structurally guarantees the
-    // stack's bottom edge can never pass the dock's top edge, at any
-    // viewport height — not a fixed viewport-relative max-height, which
-    // drifted out of sync with the dock's real height on a shorter screen.
-    expect(stack.className).toMatch(/absolute/);
-    expect(stack.className).toMatch(/inset-y-4/);
-    expect(stack.className).not.toMatch(/\bfixed\b/);
-    expect(stack.className).not.toMatch(/max-h-\[40vh\]/);
-    // pointer-events-none on the (full-height-forced) outer box, so its
-    // empty space can't swallow clicks meant for the script panel behind
-    // it — only the inner content wrapper, which shrinks to its own
-    // content and scrolls (the real backstop) once it doesn't fit, is
-    // actually clickable.
-    expect(stack.className).toMatch(/pointer-events-none/);
-    const innerWrapper = stack.firstElementChild as HTMLElement;
-    expect(innerWrapper.className).toMatch(/pointer-events-auto/);
-    expect(innerWrapper.className).toMatch(/overflow-y-auto/);
-    expect(innerWrapper.className).toMatch(/max-h-full/);
+    expect(stack.className).toMatch(/overflow-y-auto/);
+    expect(stack.className).not.toMatch(/\babsolute\b|\bfixed\b/);
+    expect(screen.getByTestId("objection-card")).toHaveAttribute("data-active", "true");
+    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("data-active", "false");
+
+    await userEvent.click(screen.getByTestId("objection-card"));
+    expect(screen.queryByTestId("objection-card")).not.toBeInTheDocument();
+    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("data-active", "true");
+    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
+
+    await userEvent.click(screen.getByTestId("coach-nudge"));
+    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
+    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
+    expect(screen.getByTestId("say-this-card")).toBeVisible();
+  });
+
+  it("keeps hidden queued guidance mounted so its absolute expiry still runs before focus returns to it", async () => {
+    vi.useFakeTimers();
+    render(<Harness {...baseProps()} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    broadcast({ type: "coach_note", text: "This nudge must expire while hidden.", phaseId: "reveal", ts: "t1" });
+    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
+    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("data-active", "false");
+    expect(screen.getByTestId("objection-card")).toHaveAttribute("data-active", "true");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(screen.queryByTestId("coach-nudge")).not.toBeInTheDocument();
+
+    act(() => screen.getByTestId("objection-card").click());
+    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
+    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
   });
 
   it("never renders more than the capped number of cards/nudges, even during a rapid-fire burst — the stack's scroll is a backstop, not the only guard", async () => {

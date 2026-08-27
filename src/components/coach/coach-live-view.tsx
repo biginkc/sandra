@@ -182,6 +182,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         gates={gateEntries}
         degraded={degraded}
         callStatus={callStatus}
+        seconds={seconds}
+        held={held}
       />
       {scriptOutOfSync ? (
         <div
@@ -207,35 +209,28 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           </button>
         </div>
       ) : null}
-      {/* relative: this is the guidance stack's real containing block. It's
-          the flex-1 middle region between the (shrink-0) topbar/banners
-          above and the (shrink-0) call dock below — the browser computes
-          its height as whatever's actually left over, automatically
-          shrinking it when the dock grows (e.g. the keypad opening) and
-          expanding it on a taller viewport. Anchoring the guidance stack's
-          top/right/BOTTOM insets to THIS box, rather than to the viewport,
-          is what makes containment structural: its bottom edge is always
-          exactly the dock's top edge, with no top-offset-plus-max-height
-          arithmetic that can drift out of sync at a shorter viewport. */}
-      <div className="relative flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1">
         <TranscriptFeed lines={state.transcript} />
-        <ScriptPanel
-          block={scriptBlock}
-          nextBlock={nextBlock}
-          degraded={degraded}
-          contextLoad={contextLoad}
-          onRetryContext={retryContext}
-          onEditEntry={onEditEntry}
-          onSelectVariant={onSelectVariant}
-        />
-        <GuidanceOverlay
-          nudges={state.nudges}
-          cards={state.objectionCards}
-          tokens={tokens}
-          occupancy={activeContext.occupancy}
-          onDismissNudge={(nudgeId) => dispatch({ type: "dismiss_nudge", nudgeId })}
-          onDismissObjection={(cardId) => dispatch({ type: "dismiss_objection", cardId })}
-        />
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="coach-focus-stage">
+          <GuidanceOverlay
+            nudges={state.nudges}
+            cards={state.objectionCards}
+            tokens={tokens}
+            occupancy={activeContext.occupancy}
+            onDismissNudge={(nudgeId) => dispatch({ type: "dismiss_nudge", nudgeId })}
+            onDismissObjection={(cardId) => dispatch({ type: "dismiss_objection", cardId })}
+          />
+          <ScriptPanel
+            block={scriptBlock}
+            nextBlock={nextBlock}
+            degraded={degraded}
+            suppressed={state.objectionCards.length > 0 || state.nudges.length > 0}
+            contextLoad={contextLoad}
+            onRetryContext={retryContext}
+            onEditEntry={onEditEntry}
+            onSelectVariant={onSelectVariant}
+          />
+        </div>
       </div>
       <GuidanceAnnouncer
         nudges={state.nudges}
@@ -246,7 +241,6 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       <CallControlDock
         callName={callName}
         callStatus={callStatus}
-        seconds={seconds}
         muted={muted}
         held={held}
         holdPending={holdPending}
@@ -325,6 +319,8 @@ function CoachTopBar({
   gates,
   degraded,
   callStatus,
+  seconds,
+  held,
 }: {
   currentPhaseId: CoachPhaseId;
   displayedPhaseId: CoachPhaseId;
@@ -335,15 +331,20 @@ function CoachTopBar({
   gates: { id: string; display: string; cleared: boolean }[];
   degraded: boolean;
   callStatus: CoachCallStatus;
+  seconds: number;
+  held: boolean;
 }) {
   const preConnectLabel = callStatus === "connecting" ? "Connecting…" : callStatus === "ringing" ? "Ringing…" : null;
+  const timerLabel = held ? "On hold" : preConnectLabel ?? timerText(seconds);
+  const currentPhaseIndex = COACH_PHASE_ORDER.indexOf(currentPhaseId);
   return (
-    <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-card px-4 py-3">
-      <ol className="flex flex-1 flex-wrap items-center gap-1.5" aria-label="Call phases">
+    <div className="flex shrink-0 items-center gap-3 overflow-x-auto border-b border-border bg-card px-4 py-2">
+      <ol className="flex min-w-max flex-1 items-center gap-1" aria-label="Call phases">
         {COACH_PHASE_ORDER.map((phaseId) => {
           const phase = getScriptPhase(phaseId);
           const isCurrent = phaseId === currentPhaseId;
           const isDisplayed = phaseId === displayedPhaseId;
+          const isComplete = COACH_PHASE_ORDER.indexOf(phaseId) < currentPhaseIndex;
           return (
             <li key={phaseId}>
               <button
@@ -352,34 +353,49 @@ function CoachTopBar({
                 aria-current={isDisplayed ? "step" : undefined}
                 onClick={() => onSelectPhase(phaseId)}
                 className={cn(
-                  "rounded-full border px-3 py-1.5 text-xs font-bold transition-colors",
-                  isCurrent
-                    ? "border-emerald-600 bg-emerald-600 text-white"
-                    : isDisplayed
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border bg-background text-muted-foreground hover:bg-muted",
+                  "rounded-full px-2.5 py-1 text-[11px] font-bold tracking-wide whitespace-nowrap uppercase transition-colors",
+                  isDisplayed
+                    ? "bg-primary text-primary-foreground"
+                    : isComplete
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : isCurrent
+                        ? "bg-emerald-600 text-white"
+                        : "text-muted-foreground hover:bg-muted",
                 )}
               >
                 {phase?.name ?? phaseId}
+                {isComplete ? " ✓" : ""}
               </button>
             </li>
           );
         })}
       </ol>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex min-w-max items-center gap-2 text-xs">
+        {counter ? (
+          <Badge variant="secondary" data-testid="probe-counter" className="h-5 text-[10px]">
+            {`Probes ${probeCount}/${counter.goal}`}
+          </Badge>
+        ) : null}
+        <span
+          className={cn("font-mono text-xs tabular-nums", held ? "font-semibold text-amber-700 dark:text-amber-400" : "text-muted-foreground")}
+          data-testid="coach-call-timer"
+        >
+          {timerLabel}
+        </span>
         {preConnectLabel ? (
-          <Badge variant="outline" data-testid="call-status-pill" className="text-muted-foreground">
+          <Badge variant="outline" data-testid="call-status-pill" className="h-5 text-[10px] text-muted-foreground">
             {preConnectLabel}
           </Badge>
         ) : null}
-        {degraded ? (
-          <Badge variant="outline" data-testid="coach-connecting-pill" className="text-muted-foreground">
-            Coach connecting…
+        {callStatus === "live" && !held ? (
+          <Badge variant="outline" data-testid="coach-live-pill" className="h-5 gap-1 border-emerald-200 text-[10px] text-emerald-700 dark:text-emerald-400">
+            <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" aria-hidden />
+            Live
           </Badge>
         ) : null}
-        {counter ? (
-          <Badge variant="secondary" data-testid="probe-counter">
-            {`Probes ${probeCount}/${counter.goal}`}
+        {degraded ? (
+          <Badge variant="outline" data-testid="coach-connecting-pill" className="h-5 text-[10px] text-muted-foreground">
+            Coach connecting…
           </Badge>
         ) : null}
         {holdTimer ? <HoldTimerChip timer={holdTimer} /> : null}
@@ -388,6 +404,7 @@ function CoachTopBar({
             key={gate.id}
             data-testid={`gate-${gate.id}`}
             variant={gate.cleared ? "secondary" : "destructive"}
+            className="h-5 text-[10px]"
           >
             {gate.cleared ? "Concerns cleared" : gate.display}
           </Badge>
@@ -406,7 +423,7 @@ function HoldTimerChip({ timer }: { timer: CoachHoldTimer }) {
   const elapsed = Math.max(0, Math.floor((now - new Date(timer.startedAt).getTime()) / 1000));
   const remaining = Math.max(0, timer.durationS - elapsed);
   return (
-    <Badge variant={remaining <= 30 ? "destructive" : "outline"} data-testid="hold-timer">
+    <Badge variant={remaining <= 30 ? "destructive" : "outline"} data-testid="hold-timer" className="h-5 text-[10px]">
       {`Hold ${timerText(remaining)}`}
     </Badge>
   );
@@ -474,6 +491,7 @@ function ScriptPanel({
   block,
   nextBlock,
   degraded,
+  suppressed,
   contextLoad,
   onRetryContext,
   onEditEntry,
@@ -482,6 +500,7 @@ function ScriptPanel({
   block: PhaseScriptBlock | null;
   nextBlock: PhaseScriptBlock | null;
   degraded: boolean;
+  suppressed: boolean;
   contextLoad: ContextLoadState;
   onRetryContext: () => void;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
@@ -494,7 +513,7 @@ function ScriptPanel({
     // here would imply something is still loading, which is false: nothing
     // will ever resolve this. Say so plainly instead of wedging silently.
     return (
-      <main className="flex flex-1 items-center justify-center overflow-y-auto p-6">
+      <main hidden={suppressed} className="flex flex-1 items-center justify-center overflow-y-auto p-6">
         <div className="max-w-sm text-center">
           <Loader2Icon className="mx-auto mb-3 size-5 text-muted-foreground" aria-hidden />
           <p className="text-sm font-semibold text-destructive">This call phase isn&apos;t recognized.</p>
@@ -504,17 +523,17 @@ function ScriptPanel({
     );
   }
   return (
-    <main className="flex-1 overflow-y-auto p-6 md:p-10" data-testid="coach-script-panel">
-      <div className="mx-auto max-w-2xl">
-        <div className="mb-1 text-xs font-bold tracking-wide text-muted-foreground uppercase">
-          {block.phaseName}
-        </div>
-        <p className="mb-4 text-sm text-muted-foreground italic">{block.purpose}</p>
+    <main
+      hidden={suppressed}
+      className="flex-1 overflow-y-auto px-5 py-6 md:px-10 md:py-8"
+      data-testid="coach-script-panel"
+    >
+      <div className={cn("mx-auto flex min-h-full max-w-4xl flex-col py-3", degraded ? "justify-start" : "justify-center")}>
         {contextLoad.status === "error" ? (
           <div
             role="alert"
             data-testid="coach-context-error"
-            className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
           >
             <span>Couldn&apos;t load lead details — showing the script with placeholders.</span>
             <Button type="button" variant="outline" size="xs" data-testid="coach-context-retry" onClick={onRetryContext}>
@@ -527,43 +546,83 @@ function ScriptPanel({
             Live coaching hasn&apos;t connected yet — here&apos;s the full script, scroll manually.
           </p>
         ) : null}
-        {block.openingCues.length > 0 ? (
-          <div className="mb-4 flex flex-wrap gap-1.5">
-            {block.openingCues.map((cue, index) => (
-              <ToneChip key={index} text={cue} />
-            ))}
-          </div>
-        ) : null}
-        <div className="space-y-4">
-          {block.branches.map((branch) => (
-            <BranchCard
-              key={branch.tag}
-              branch={branch}
-              onEditEntry={onEditEntry}
-              onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
-            />
-          ))}
-        </div>
-        {block.situationalCues.length > 0 ? (
-          <div className="mt-5 rounded-xl border border-dashed border-border p-3">
-            <div className="mb-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
-              If this happens…
+        <section
+          aria-label={`Say this — ${block.phaseName}`}
+          data-testid="say-this-card"
+          className="rounded-2xl border border-border border-l-4 border-l-primary bg-card px-5 py-5 shadow-sm md:px-8 md:py-7"
+        >
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Say this</div>
+              <div className="mt-1 text-xs font-bold tracking-wide text-muted-foreground uppercase">{block.phaseName}</div>
             </div>
-            <ul className="space-y-1">
-              {block.situationalCues.map((cue) => (
-                <li key={cue.trigger} className="text-xs text-muted-foreground">
-                  {cue.text}
-                </li>
+            {block.openingCues.length > 0 ? (
+              <div className="flex flex-wrap justify-end gap-1.5">
+                {block.openingCues.map((cue, index) => (
+                  <ToneChip key={index} text={cue} />
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <p className="mb-3 text-sm text-muted-foreground italic">{block.purpose}</p>
+          {degraded ? (
+            <div className="divide-y divide-border/70" data-testid="full-phase-script">
+              {block.branches.map((branch) => (
+                <BranchCard
+                  key={branch.tag}
+                  branch={branch}
+                  compact
+                  onEditEntry={onEditEntry}
+                  onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
+                />
               ))}
-            </ul>
-          </div>
-        ) : null}
-        {nextBlock ? (
-          <div className="mt-8 opacity-45" data-testid="next-phase-preview">
-            <div className="mb-1 text-xs font-bold tracking-wide text-muted-foreground uppercase">
-              Next: {nextBlock.phaseName}
             </div>
-            <p className="text-sm">
+          ) : block.branches[0] ? (
+            <BranchCard
+              branch={block.branches[0]}
+              onEditEntry={onEditEntry}
+              onSelectVariant={(key) => onSelectVariant(block.branches[0].tag, key)}
+            />
+          ) : null}
+          {!degraded && block.branches.length > 1 ? (
+            <details data-testid="full-phase-script" className="mt-5 border-t border-border/70 pt-4 text-muted-foreground">
+              <summary className="cursor-pointer text-xs font-bold tracking-wide uppercase">
+                {`Full ${block.phaseName} script · ${block.branches.length - 1} more ${block.branches.length === 2 ? "section" : "sections"}`}
+              </summary>
+              <div className="mt-3 divide-y divide-border/70">
+                {block.branches.slice(1).map((branch) => (
+                  <BranchCard
+                    key={branch.tag}
+                    branch={branch}
+                    compact
+                    onEditEntry={onEditEntry}
+                    onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
+                  />
+                ))}
+              </div>
+            </details>
+          ) : null}
+          {block.situationalCues.length > 0 ? (
+            <div className="mt-5 rounded-xl border border-dashed border-border p-3">
+              <div className="mb-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
+                If this happens…
+              </div>
+              <ul className="space-y-1">
+                {block.situationalCues.map((cue) => (
+                  <li key={cue.trigger} className="text-xs text-muted-foreground">
+                    {cue.text}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </section>
+        {nextBlock ? (
+          <div className="px-6 pt-5 opacity-45" data-testid="next-phase-preview">
+            <div className="mb-1 text-[10px] font-bold tracking-[0.12em] text-muted-foreground uppercase">
+              Coming next · {nextBlock.phaseName}
+            </div>
+            <p className="text-base leading-relaxed">
               {nextBlock.branches[0]?.selected.lines[0]?.segments
                 .map((segment) => (segment.kind === "tone" ? "" : segment.kind === "text" ? segment.value : segment.resolved.value))
                 .join("")}
@@ -577,10 +636,12 @@ function ScriptPanel({
 
 function BranchCard({
   branch,
+  compact = false,
   onEditEntry,
   onSelectVariant,
 }: {
   branch: ScriptBranchBlock;
+  compact?: boolean;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
   onSelectVariant: (key: string) => void;
 }) {
@@ -588,8 +649,8 @@ function BranchCard({
     <div
       data-testid="script-branch"
       className={cn(
-        "rounded-xl border px-4 py-3",
-        branch.critical ? "border-2 border-primary bg-primary/5" : "border-border bg-card",
+        "py-4 first:pt-0 last:pb-0",
+        branch.critical && "my-3 rounded-xl bg-primary/5 px-3 first:mt-0 last:mb-0",
       )}
     >
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -634,7 +695,7 @@ function BranchCard({
           <p
             key={index}
             className={cn(
-              "text-[15px] leading-relaxed",
+              compact ? "text-[15px] leading-relaxed" : "text-2xl leading-relaxed font-medium md:text-[26px]",
               line.type === "note" && "text-xs text-muted-foreground italic",
             )}
           >
@@ -670,7 +731,7 @@ function BranchCard({
 
 function ToneChip({ text }: { text: string }) {
   return (
-    <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-900">
+    <span className="inline-flex items-center rounded-full border border-amber-300/60 bg-amber-400/15 px-2.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">
       {text}
     </span>
   );
@@ -698,7 +759,7 @@ function TokenChip({
       </span>
     );
   }
-  return <span className="font-semibold">{resolved.value}</span>;
+  return <span className="font-bold text-emerald-600 dark:text-emerald-400">{resolved.value}</span>;
 }
 
 function EntryTokenChip({
@@ -754,7 +815,7 @@ function EntryTokenChip({
         "mx-0.5 inline-flex items-center rounded-full border px-1.5 py-0 text-[11px] font-semibold",
         resolved.isPlaceholder
           ? "border-dashed border-primary/50 text-primary"
-          : "border-primary/40 bg-primary/10 text-primary",
+          : "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
       )}
     >
       {resolved.isPlaceholder ? `+ ${ENTRY_TOKEN_LABEL[token]}` : resolved.value}
@@ -762,12 +823,10 @@ function EntryTokenChip({
   );
 }
 
-/** Coaching nudges and objection cards share one responsive stack so they
- * cannot collide when both arrive on a narrow call screen. */
 /** Exported (only these two subcomponents, not the rest) so the
  * database-free synthetic Playwright spec (e2e/synthetic/
  * coach-live-responsive-layout.spec.ts) can server-render the REAL
- * guidance-stack and call-dock markup via react-dom/server, instead of a
+ * focus-stage guidance and call-dock markup via react-dom/server, instead of a
  * hand-copied HTML approximation that can silently drift from the actual
  * component. */
 export function GuidanceOverlay({
@@ -786,53 +845,54 @@ export function GuidanceOverlay({
   onDismissObjection: (cardId: string) => void;
 }) {
   if (nudges.length === 0 && cards.length === 0) return null;
+  // Objections are the most specific live-call intervention, so the newest
+  // objection wins. With no objection, the newest coaching nudge wins. Every
+  // non-dominant item remains MOUNTED (only visually hidden): each owns an
+  // absolute-expiry timer effect, and unmounting a queued item would freeze
+  // that timer and let stale guidance resurface later.
+  const activeObjectionId = cards.at(-1)?.id ?? null;
+  const activeNudgeId = activeObjectionId ? null : (nudges.at(-1)?.id ?? null);
   return (
-    <div
+    <section
       data-testid="coach-guidance-stack"
-      // absolute + inset-y-4, NOT fixed + top-offset + a vh-based max-height.
-      // The parent (the flex-1 region between the topbar and the call dock —
-      // see CoachLiveView) is `relative` and its height is whatever's
-      // actually left over once the browser lays out the shrink-0 topbar/
-      // banners above and the shrink-0 dock below. Anchoring both `top` AND
-      // `bottom` to THAT box makes this box's bottom edge structurally equal
-      // to the dock's top edge, in every case — a taller keypad, a shorter
-      // viewport, an extra banner — with no fixed vh budget to silently fall
-      // out of sync with the dock's real height (as the prior top-20 +
-      // max-h-[40vh] version did: at 375x667 the dock's actual top sat
-      // higher than 40vh of that shorter viewport predicted, so the stack
-      // overlapped it by ~18px).
-      //
-      // pointer-events-none here, not -auto: setting BOTH top and bottom
-      // insets with no explicit height forces this box to span the FULL
-      // available region regardless of how little content is inside it —
-      // without pointer-events-none, that empty space would sit in front
-      // of (and swallow clicks meant for) the script panel underneath.
-      // Only the inner wrapper below, which shrinks to its own content (or
-      // scrolls once it doesn't fit), re-enables pointer events — the same
-      // pattern each individual card/nudge already uses to stay clickable
-      // inside a pointer-events-none ancestor.
-      className="pointer-events-none absolute inset-y-4 right-4 z-[90] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col"
+      aria-label="Active coaching guidance"
+      className="min-h-0 flex-1 overflow-y-auto px-5 py-6 md:px-10 md:py-8"
     >
-      <div className="pointer-events-auto flex max-h-full flex-col gap-2 overflow-y-auto overscroll-contain">
-        <NudgeOverlay nudges={nudges} onDismiss={onDismissNudge} />
-        <ObjectionOverlay cards={cards} tokens={tokens} occupancy={occupancy} onDismiss={onDismissObjection} />
+      <div className="mx-auto flex min-h-full max-w-4xl items-center py-3">
+        <div className="w-full">
+          <ObjectionOverlay
+            cards={cards}
+            activeCardId={activeObjectionId}
+            tokens={tokens}
+            occupancy={occupancy}
+            onDismiss={onDismissObjection}
+          />
+          <NudgeOverlay nudges={nudges} activeNudgeId={activeNudgeId} onDismiss={onDismissNudge} />
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
 
 function NudgeOverlay({
   nudges,
+  activeNudgeId,
   onDismiss,
 }: {
   nudges: CoachNudge[];
+  activeNudgeId: string | null;
   onDismiss: (nudgeId: string) => void;
 }) {
   if (nudges.length === 0) return null;
   return (
     <div className="flex flex-col gap-2">
       {nudges.map((nudge) => (
-        <NudgeCard key={nudge.id} nudge={nudge} onDismiss={() => onDismiss(nudge.id)} />
+        <NudgeCard
+          key={nudge.id}
+          nudge={nudge}
+          active={nudge.id === activeNudgeId}
+          onDismiss={() => onDismiss(nudge.id)}
+        />
       ))}
     </div>
   );
@@ -845,7 +905,7 @@ function NudgeOverlay({
  * than a fixed TTL, so a remount — collapsing and reopening the coach view
  * unmounts every card — picks up the correctly-shrunk remaining time
  * instead of restarting the full duration. */
-function NudgeCard({ nudge, onDismiss }: { nudge: CoachNudge; onDismiss: () => void }) {
+function NudgeCard({ nudge, active, onDismiss }: { nudge: CoachNudge; active: boolean; onDismiss: () => void }) {
   const onDismissRef = useRef(onDismiss);
   useEffect(() => {
     onDismissRef.current = onDismiss;
@@ -864,21 +924,29 @@ function NudgeCard({ nudge, onDismiss }: { nudge: CoachNudge; onDismiss: () => v
     <button
       type="button"
       data-testid="coach-nudge"
+      data-active={active}
+      hidden={!active}
       onClick={onDismiss}
-      className="animate-in slide-in-from-left-4 pointer-events-auto rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-left text-sm text-amber-900 shadow-lg"
+      className="animate-in slide-in-from-left-4 w-full rounded-2xl border border-amber-300/60 border-l-4 border-l-amber-500 bg-card px-5 py-5 text-left shadow-sm md:px-8 md:py-7"
     >
-      {nudge.text}
+      <span className="block text-[11px] font-extrabold tracking-[0.14em] text-amber-700 uppercase dark:text-amber-300">
+        Coach nudge
+      </span>
+      <span className="mt-3 block text-2xl leading-relaxed font-semibold text-foreground">{nudge.text}</span>
+      <span className="mt-5 block text-xs text-muted-foreground">Tap to dismiss and return to the script.</span>
     </button>
   );
 }
 
 function ObjectionOverlay({
   cards,
+  activeCardId,
   tokens,
   occupancy,
   onDismiss,
 }: {
   cards: CoachObjectionCard[];
+  activeCardId: string | null;
   tokens: ResolvedTokens;
   occupancy: CoachCallContext["occupancy"];
   onDismiss: (cardId: string) => void;
@@ -887,7 +955,14 @@ function ObjectionOverlay({
   return (
     <div className="flex flex-col gap-2">
       {cards.map((card) => (
-        <ObjectionCard key={card.id} card={card} tokens={tokens} occupancy={occupancy} onDismiss={() => onDismiss(card.id)} />
+        <ObjectionCard
+          key={card.id}
+          card={card}
+          active={card.id === activeCardId}
+          tokens={tokens}
+          occupancy={occupancy}
+          onDismiss={() => onDismiss(card.id)}
+        />
       ))}
     </div>
   );
@@ -905,7 +980,7 @@ function ObjectionLine({ label, text, tokens }: { label: string; text: string; t
         // fall back to plain-value rendering (no inline editor here) if
         // the script ever adds one — the card is transient, not the right
         // place to capture a deal value.
-        return <span key={index} className="font-semibold">{segment.resolved.value}</span>;
+        return <span key={index} className="font-bold text-emerald-600 dark:text-emerald-400">{segment.resolved.value}</span>;
       })}
     </p>
   );
@@ -919,11 +994,13 @@ function ObjectionLine({ label, text, tokens }: { label: string; text: string; t
  * the correctly-shrunk remaining time instead of restarting the full 45s. */
 function ObjectionCard({
   card,
+  active,
   tokens,
   occupancy,
   onDismiss,
 }: {
   card: CoachObjectionCard;
+  active: boolean;
   tokens: ResolvedTokens;
   occupancy: CoachCallContext["occupancy"];
   onDismiss: () => void;
@@ -951,15 +1028,17 @@ function ObjectionCard({
     <button
       type="button"
       data-testid="objection-card"
+      data-active={active}
+      hidden={!active}
       onClick={onDismiss}
-      className="animate-in slide-in-from-right-4 pointer-events-auto rounded-2xl border border-border bg-card p-3.5 text-left shadow-lg"
+      className="animate-in slide-in-from-right-4 w-full rounded-2xl border border-border border-l-4 border-l-primary bg-card px-5 py-5 text-left shadow-sm md:px-8 md:py-7"
     >
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="text-xs font-bold tracking-wide text-muted-foreground uppercase">Objection</span>
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <span className="text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Handle this objection</span>
         {objection?.display.tonality ? <ToneChip text={objection.display.tonality} /> : null}
       </div>
       {objection && overcomeText ? (
-        <div className="space-y-1.5 text-sm">
+        <div className="space-y-3 text-base leading-relaxed md:text-lg">
           <ObjectionLine label="Acknowledge" text={objection.display.acknowledge} tokens={tokens} />
           <ObjectionLine label="Disarm" text={objection.display.disarm} tokens={tokens} />
           <ObjectionLine label="Overcome" text={overcomeText} tokens={tokens} />
@@ -972,6 +1051,7 @@ function ObjectionCard({
       ) : (
         <p className="text-sm text-muted-foreground">{card.objectionId}</p>
       )}
+      <span className="mt-5 block text-xs text-muted-foreground">Tap to dismiss and return to the script.</span>
     </button>
   );
 }
@@ -979,7 +1059,6 @@ function ObjectionCard({
 export function CallControlDock({
   callName,
   callStatus,
-  seconds,
   muted,
   held,
   holdPending,
@@ -999,7 +1078,6 @@ export function CallControlDock({
 }: {
   callName: string;
   callStatus: CoachCallStatus;
-  seconds: number;
   muted: boolean;
   held: boolean;
   holdPending: boolean;
@@ -1012,13 +1090,6 @@ export function CallControlDock({
 }) {
   const [keypadOpen, setKeypadOpen] = useState(initialKeypadOpen);
   const live = callStatus === "live";
-  const timerLabel = held
-    ? "On hold"
-    : callStatus === "connecting"
-      ? "Connecting…"
-      : callStatus === "ringing"
-        ? "Ringing…"
-        : timerText(seconds);
 
   // Parity with the classic popover's LiveView (softphone-provider.tsx),
   // which has had this since before the coach view existed. Guards against
@@ -1047,26 +1118,19 @@ export function CallControlDock({
         data-testid="coach-call-dock-row"
         className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between"
       >
-        <div className="flex min-w-0 items-center gap-3">
+        <div className="flex min-w-0 items-center gap-2">
           <Button
             type="button"
-            variant="ghost"
-            size="icon-sm"
+            variant="outline"
+            size="sm"
             aria-label="Collapse to popover"
             data-testid="coach-collapse"
             onClick={onCollapse}
           >
             <XIcon className="size-4" aria-hidden />
+            Collapse
           </Button>
-          <div>
-            <div className="text-sm font-bold">{callName}</div>
-            <div
-              className={cn("font-mono text-xs", live || held ? "text-muted-foreground" : "text-blue-700")}
-              data-testid="coach-call-timer"
-            >
-              {timerLabel}
-            </div>
-          </div>
+          <div className="truncate text-sm font-bold">{callName}</div>
         </div>
         <div data-testid="coach-call-controls" className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
           <Button

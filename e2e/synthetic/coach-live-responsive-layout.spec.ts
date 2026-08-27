@@ -97,7 +97,6 @@ const maxNudges: CoachNudge[] = ["First nudge.", "Second nudge.", "Third nudge, 
 const dockProps = {
   callName: "Jane Homeowner",
   callStatus: "live" as const,
-  seconds: 65,
   muted: false,
   held: false,
   holdPending: false,
@@ -119,18 +118,17 @@ const guidanceOverlayHtml = renderToStaticMarkup(
   }),
 );
 
-/** Mirrors CoachLiveView's own layout exactly, including nesting: a
- * flex-column full-height view with a `relative` flex-1 filler standing in
- * for the topbar/transcript/script area, with the guidance overlay as its
- * CHILD (not a sibling before the dock) — that nesting is what makes the
- * overlay's absolute inset-y-4 anchor to this filler's real bottom edge,
- * which the browser computes as "whatever's left over above the dock",
- * automatically adapting to viewport height and dock height alike. */
+/** Mirrors CoachLiveView's focus-mode nesting: the center region is a
+ * min-height-zero flex child and guidance is normal-flow, scrollable content
+ * inside it. The dock remains a shrink-0 sibling, so an open keypad reduces
+ * the focus region instead of being covered by an overlay. */
 function pageShell(dockHtml: string, guidanceHtml = ""): string {
   return `
     <style>${compiledCss}</style>
     <div class="flex h-dvh flex-col">
-      <div class="relative min-h-0 flex-1">${guidanceHtml}</div>
+      <div class="flex min-h-0 flex-1">
+        <div class="flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="synthetic-focus-stage">${guidanceHtml}</div>
+      </div>
       ${dockHtml}
     </div>
   `;
@@ -165,24 +163,31 @@ test("keeps every call control, including Hang up, inside the 375px viewport and
 // real height didn't. Both must hold for containment to be genuinely
 // structural rather than tuned to one screen size.
 for (const viewportHeight of [812, 667]) {
-  test(`keeps the call dock genuinely clickable and never covered by the guidance stack at 375x${viewportHeight}, even with all 3 objection cards, all 3 nudges, and the keypad open`, async ({ page }) => {
+  test(`keeps one dominant focus card and the call dock clickable at 375x${viewportHeight}, while hidden guidance timers remain mounted and the keypad is open`, async ({ page }) => {
     await page.setViewportSize({ width: 375, height: viewportHeight });
     const dockOpenHtml = renderToStaticMarkup(createElement(CallControlDock, { ...dockProps, initialKeypadOpen: true }));
     await page.setContent(pageShell(dockOpenHtml, guidanceOverlayHtml));
 
     expect(await page.getByTestId("objection-card").count()).toBe(MAX_OBJECTION_CARDS);
     expect(await page.getByTestId("coach-nudge").count()).toBe(MAX_NUDGES);
+    await expect(page.locator('[data-testid="objection-card"][data-active="true"]')).toHaveCount(1);
+    await expect(page.locator('[data-testid="coach-nudge"][data-active="true"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="objection-card"][data-active="false"]')).toHaveCount(MAX_OBJECTION_CARDS - 1);
+    await expect(page.locator('[data-testid="coach-nudge"][data-active="false"]')).toHaveCount(MAX_NUDGES);
 
     const stack = await page.getByTestId("coach-guidance-stack").boundingBox();
+    const focusStage = await page.getByTestId("synthetic-focus-stage").boundingBox();
     const dockRow = await page.getByTestId("coach-call-dock-row").boundingBox();
     const keypad = await page.getByTestId("phone-keypad").boundingBox();
     expect(stack).not.toBeNull();
+    expect(focusStage).not.toBeNull();
     expect(dockRow).not.toBeNull();
     expect(keypad).not.toBeNull();
 
-    // Structural containment: the stack's bottom edge is bound to the real
-    // dock's top edge (via the shared relative ancestor), not computed from
-    // a viewport-height percentage — this must hold at both heights above.
+    // Structural containment: focus guidance is normal-flow scrollable
+    // content inside the real flex region above the dock. No viewport-height
+    // arithmetic or absolute overlay can drift across the keypad/dock edge.
+    expect(stack!.y).toBeGreaterThanOrEqual(focusStage!.y);
     expect(stack!.y + stack!.height).toBeLessThanOrEqual(keypad!.y);
     expect(stack!.y + stack!.height).toBeLessThanOrEqual(dockRow!.y);
 
@@ -194,9 +199,10 @@ for (const viewportHeight of [812, 667]) {
       expect(box!.x + box!.width).toBeLessThanOrEqual(375);
     }
 
-    // Real clicks on the dock controls AND on keypad digits at the far
-    // corners of its grid — if the guidance stack's containment regressed
-    // and grew tall enough to overlap, these would time out as intercepted.
+    // Real clicks on the active focus card, dock controls, and keypad digits
+    // prove hidden queued guidance and the scrolling focus region intercept
+    // none of the operator controls.
+    await page.locator('[data-testid="objection-card"][data-active="true"]').click();
     await page.getByTestId("coach-mute").click();
     await page.getByTestId("coach-hold").click();
     await page.getByTestId("coach-hangup").click();
