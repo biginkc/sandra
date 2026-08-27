@@ -128,7 +128,30 @@ for (const viewport of [
   });
 }
 
-test("does not turn a disrupted offer edit into keyboard DTMF in hydrated Chromium", async ({ page }) => {
+test("keeps offer-entry digits out of DTMF while the keypad is genuinely open and the editor is genuinely mounted, in hydrated Chromium", async ({ page }) => {
+  // Regression for a false-pass a merge-gate review caught: the previous
+  // version of this test opened the keypad, then opened the entry editor
+  // — but EntryTokenChip's onBeginEdit always closes the keypad the
+  // instant editing starts, so keypadOpen was false for the rest of the
+  // test. The digit listener bails on `!keypadOpen` before it ever reaches
+  // the mounted-editor guard (`document.querySelector
+  // ("[data-coach-entry-editor]")`) in coach-live-view.tsx — so the old
+  // test passed even with that guard deleted entirely (confirmed while
+  // writing this fix, in this exact hydrated-Chromium harness).
+  //
+  // This version reopens the keypad via `.dispatchEvent("click")` instead
+  // of Playwright's `.click()`. `.click()` performs a real pointer click,
+  // which — in Chromium — focuses the button and blurs the still-editing
+  // input, committing and closing the editor via its onBlur handler.
+  // `dispatchEvent` fires only the click event without moving focus, so
+  // the editor stays mounted while the keypad reopens. This isn't a test
+  // artifact: real-world cross-browser click-focus behavior varies (e.g.
+  // Safari/Firefox on macOS don't always focus a clicked button), so a rep
+  // can genuinely end up with the keypad open and an editor still
+  // mounted. The digit keydown is then dispatched on the dialog rather
+  // than typed into the (still-focused) input, so `event.target` is
+  // outside any editable field — isolating the mounted-editor guard from
+  // both the keypad-closed guard and the target-is-input guard.
   await page.setViewportSize({ width: 375, height: 812 });
   await mountFullCoach(page, false);
   await page.getByTestId("coach-keypad-toggle").click();
@@ -136,12 +159,17 @@ test("does not turn a disrupted offer edit into keyboard DTMF in hydrated Chromi
   await expect(page.getByTestId("coach-keypad-toggle")).toHaveAttribute("aria-expanded", "false");
   await page.getByTestId("entry-input-offer_price").fill("210");
 
-  await page.evaluate(() => window.coachHarness.showObjection("price_too_low"));
-  await expect(page.getByTestId("objection-card")).toBeVisible();
-  await page.getByRole("dialog", { name: "Live call coach" }).focus();
-  await page.keyboard.press("5");
+  await page.getByTestId("coach-keypad-toggle").dispatchEvent("click");
+  await expect(page.getByTestId("coach-keypad-toggle")).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTestId("entry-input-offer_price")).toBeVisible();
+
+  const dialog = page.getByRole("dialog", { name: "Live call coach" });
+  await dialog.dispatchEvent("keydown", { key: "5" });
 
   expect(await page.evaluate(() => window.coachHarness.digits)).toEqual([]);
+  // The guard didn't merely no-op the keypress — the value typed before
+  // reopening the keypad is still intact.
+  await expect(page.getByTestId("entry-input-offer_price")).toHaveValue("210");
 });
 
 test("does not turn a phase-replaced offer edit into keyboard DTMF in hydrated Chromium", async ({ page }) => {

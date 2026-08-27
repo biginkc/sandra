@@ -588,6 +588,24 @@ function ScriptPanel({
       </main>
     );
   }
+  // The dominant "current line" for the live (non-degraded) card must
+  // actually be speech, never an internal strategy note — some phases
+  // (e.g. Close's "If far apart" branch) lead with a type:"note" line
+  // ("Only for novation prices on the calculator.") that is guidance FOR
+  // the rep, not something to say aloud. Prefer the first "say" line;
+  // only fall back to the literal first line if a branch has no "say"
+  // line at all, so the card never renders fully blank.
+  const dominantBranch = block.branches[0] ?? null;
+  const spokenLine = dominantBranch
+    ? (dominantBranch.selected.lines.find((line) => line.type === "say") ?? dominantBranch.selected.lines[0] ?? null)
+    : null;
+  // The standalone tone chip must be a genuine tonal instruction (how to
+  // say it — e.g. "concerned / curious tone"), not an arbitrary phase-level
+  // strategy note. `selected.tone` is the script's dedicated field for
+  // that (see script-block.ts's ResolvedVariant.tone doc comment); most
+  // variants don't set one, and when none exists the card correctly shows
+  // no chip rather than repurposing an unrelated opening cue.
+  const currentTone = dominantBranch?.selected.tone ?? null;
   return (
     <main
       hidden={suppressed}
@@ -619,38 +637,64 @@ function ScriptPanel({
         >
           <div className="mb-4 text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Say this</div>
           {degraded ? (
-            <div className="divide-y divide-border/70" data-testid="full-phase-script">
-              {block.branches.map((branch) => (
-                <BranchCard
-                  key={branch.tag}
-                  branch={branch}
-                  compact
-                  onEditEntry={onEditEntry}
-                  onBeginEntryEdit={onBeginEntryEdit}
-                  onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
-                />
-              ))}
-            </div>
+            // Degraded = "everything, scroll it yourself": the coach isn't
+            // connected, so this is the only guidance the rep has. Every
+            // authored signal the phase carries (purpose, ALL opening cues,
+            // every branch, situational cues) must render here — the
+            // restrained single-line/single-chip treatment below is only
+            // for the LIVE, coach-connected view.
+            <>
+              {block.purpose ? <p className="mb-3 text-sm text-muted-foreground italic">{block.purpose}</p> : null}
+              {block.openingCues.length > 0 ? (
+                <div className="mb-4 flex flex-wrap gap-1.5">
+                  {block.openingCues.map((cue, index) => (
+                    <ToneChip key={index} text={cue} />
+                  ))}
+                </div>
+              ) : null}
+              <div className="divide-y divide-border/70" data-testid="full-phase-script">
+                {block.branches.map((branch) => (
+                  <BranchCard
+                    key={branch.tag}
+                    branch={branch}
+                    compact
+                    onEditEntry={onEditEntry}
+                    onBeginEntryEdit={onBeginEntryEdit}
+                    onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
+                  />
+                ))}
+              </div>
+              {block.situationalCues.length > 0 ? (
+                <div className="mt-5 rounded-xl border border-dashed border-border p-3">
+                  <div className="mb-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
+                    If this happens…
+                  </div>
+                  <ul className="space-y-1">
+                    {block.situationalCues.map((cue) => (
+                      <li key={cue.trigger} className="text-xs text-muted-foreground">
+                        {cue.text}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </>
           ) : (
             <>
-              {block.branches[0]?.selected.lines[0] ? (
+              {spokenLine ? (
                 <p
                   data-testid="say-this-line"
                   className={cn(
                     "text-2xl leading-relaxed font-medium md:text-[26px]",
-                    block.branches[0].selected.lines[0].type === "note" && "text-xs text-muted-foreground italic",
+                    spokenLine.type === "note" && "text-xs text-muted-foreground italic",
                   )}
                 >
-                  <LineSegments
-                    segments={block.branches[0].selected.lines[0].segments}
-                    onEditEntry={onEditEntry}
-                    onBeginEntryEdit={onBeginEntryEdit}
-                  />
+                  <LineSegments segments={spokenLine.segments} onEditEntry={onEditEntry} onBeginEntryEdit={onBeginEntryEdit} />
                 </p>
               ) : null}
-              {block.openingCues[0] ? (
-                <div className="mt-4">
-                  <ToneChip text={block.openingCues[0]} />
+              {currentTone ? (
+                <div className="mt-4" data-testid="say-this-tone">
+                  <ToneChip text={currentTone} />
                 </div>
               ) : null}
               <details data-testid="full-phase-script" className="mt-5 border-t border-border/70 pt-4 text-muted-foreground">
@@ -659,9 +703,9 @@ function ScriptPanel({
                 </summary>
                 <div className="mt-3 space-y-4">
                   <p className="text-sm text-muted-foreground italic">{block.purpose}</p>
-                  {block.openingCues.length > 1 ? (
+                  {block.openingCues.length > 0 ? (
                     <div className="flex flex-wrap gap-1.5">
-                      {block.openingCues.slice(1).map((cue, index) => (
+                      {block.openingCues.map((cue, index) => (
                         <ToneChip key={index} text={cue} />
                       ))}
                     </div>

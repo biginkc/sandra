@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -171,6 +171,40 @@ describe("<CoachLiveView />", () => {
     expect(screen.getAllByText(/Alex Rep/).length).toBeGreaterThan(0);
   });
 
+  it("in the Close phase, shows the actual spoken line, not the internal note that leads the branch", async () => {
+    // Regression: the Close phase's dominant branch ("If far apart —
+    // program pivot") leads with a type:"note" line ("Only for novation
+    // prices on the calculator.") — guidance FOR the rep, not something to
+    // say aloud. The card must skip past it to the first real "say" line.
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "phase", phaseId: "close", ts: "t1" });
+
+    const sayThisLine = screen.getByTestId("say-this-line");
+    expect(sayThisLine).toHaveTextContent(/if you had that amount in your pocket/i);
+    expect(sayThisLine).not.toHaveTextContent(/novation prices on the calculator/i);
+  });
+
+  it("in the Close phase, shows no tone chip rather than presenting a strategy note as tone", async () => {
+    // The Close phase's dominant branch has no genuine `tone` field on its
+    // selected variant — only general phase_enter coach notes ("Never
+    // negotiate live...", "Ask for the close multiple times..."), none of
+    // which are tonal instructions. The card must render no chip at all
+    // rather than repurposing one of those notes as if it were tone
+    // guidance.
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "phase", phaseId: "close", ts: "t1" });
+
+    // Scoped to the standalone tone-chip slot specifically (data-testid
+    // "say-this-tone"). The phase's general opening cues — including
+    // "Never negotiate live…" — correctly still exist somewhere in the
+    // card (inside the full-script expander, per the degraded-mode-parity
+    // fix above); what must NOT happen is one of them masquerading as the
+    // dedicated tone pill.
+    expect(screen.queryByTestId("say-this-tone")).not.toBeInTheDocument();
+  });
+
   it("keeps the full two-speaker transcript surface and interim/final semantics beside focus mode", async () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
@@ -331,7 +365,30 @@ describe("<CoachLiveView />", () => {
     expect(onDigit).toHaveBeenCalledWith("5");
   });
 
-  it("keeps offer-entry digits out of DTMF after guidance moves focus off the editor", async () => {
+  it("keeps offer-entry digits out of DTMF while the keypad is genuinely open and the editor is genuinely mounted", async () => {
+    // Regression for a false-pass a merge-gate review caught: the previous
+    // version of this test opened the keypad, then opened the entry
+    // editor — but EntryTokenChip's onBeginEdit always closes the keypad
+    // the instant editing starts (onBeginEntryEdit={() => setKeypadOpen(false)}),
+    // so keypadOpen was false for the rest of that test. The digit
+    // listener bails on `!keypadOpen` before it ever reaches the
+    // mounted-editor guard at coach-live-view.tsx (`document.querySelector
+    // ("[data-coach-entry-editor]")`) — so the old test passed even with
+    // that guard deleted entirely (confirmed while writing this fix).
+    //
+    // This version reopens the keypad with `fireEvent.click` instead of
+    // `userEvent.click`. userEvent fully simulates a real pointer
+    // click, which focuses the clicked button and — via the input's
+    // onBlur — commits and closes the still-open editor. fireEvent.click
+    // dispatches only the click event, without moving focus, so the
+    // editor stays mounted while the keypad reopens. This isn't a test
+    // artifact: real-world cross-browser click focus behavior varies (e.g.
+    // Safari/Firefox on macOS don't always focus a clicked button), so a
+    // rep can genuinely end up with the keypad open and an editor still
+    // mounted. The digit keydown is then dispatched on the dialog rather
+    // than typed via the (still-focused) input, so `event.target` is
+    // outside any editable field — isolating the mounted-editor guard from
+    // both the keypad-closed guard and the target-is-input guard.
     const onDigit = vi.fn();
     render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
@@ -342,16 +399,18 @@ describe("<CoachLiveView />", () => {
     expect(screen.getByTestId("coach-keypad-toggle")).toHaveAttribute("aria-expanded", "false");
     await userEvent.type(input, "210");
 
-    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
-    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
-    expect(input).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("coach-keypad-toggle"));
+    expect(screen.getByTestId("coach-keypad-toggle")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("entry-input-offer_price")).toBeInTheDocument();
+    expect(document.querySelector("[data-coach-entry-editor]")).not.toBeNull();
 
     const dialog = screen.getByRole("dialog", { name: "Live call coach" });
-    act(() => dialog.focus());
-    expect(document.activeElement).toBe(dialog);
-    await userEvent.keyboard("5");
+    fireEvent.keyDown(dialog, { key: "5" });
 
     expect(onDigit).not.toHaveBeenCalled();
+    // The editor guard didn't merely no-op the keypress — the value typed
+    // before reopening the keypad is still intact.
+    expect(screen.getByTestId("entry-input-offer_price")).toHaveValue("210");
   });
 
   it("keeps offer-entry digits out of DTMF after a phase replacement removes the editor", async () => {
@@ -661,6 +720,16 @@ describe("<CoachLiveView />", () => {
     expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
     expect(screen.getByTestId("objection-card")).toHaveAttribute("hidden");
     expect(screen.getByTestId("coach-nudge")).toHaveAttribute("hidden");
+
+    // Regression: degraded mode is the only guidance a rep has while the
+    // coach is down, so it must not lose any authored signal the live view
+    // now trims away — the phase's purpose, every opening cue, and every
+    // situational cue must all still render here, not just the branches.
+    const sayThisCard = screen.getByTestId("say-this-card");
+    expect(sayThisCard).toHaveTextContent(/build minor rapport/i);
+    expect(sayThisCard).toHaveTextContent(/say their name twice in the first line/i);
+    expect(sayThisCard).toHaveTextContent(/never open with .how are you doing today/i);
+    expect(sayThisCard).toHaveTextContent(/catch you at a bad time/i);
   });
 
   it("keeps useful script coaching visible for an unknown but valid objection id", async () => {
