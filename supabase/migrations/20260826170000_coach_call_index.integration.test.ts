@@ -140,7 +140,9 @@ async function ensureMigrationSchema(): Promise<void> {
 
 async function rollbackMigrationIfCreatedThisRun(): Promise<void> {
   if (!createdSchemaThisRun) return; // never drop schema this run didn't create
-  await withDbClient((client) => runSqlFile(client, "20260826170000_coach_call_index.rollback.sql"));
+  await withDbClient((client) =>
+    runSqlFile(client, "../rollbacks/20260826170000_coach_call_index.sql"),
+  );
 }
 
 // coach_call_index isn't in the generated Database type yet (it can only be
