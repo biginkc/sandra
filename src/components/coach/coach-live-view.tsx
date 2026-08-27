@@ -419,7 +419,7 @@ function CoachTopBar({
                   isDisplayed
                     ? "bg-primary text-primary-foreground"
                     : isComplete
-                      ? "text-emerald-600 dark:text-emerald-400"
+                      ? "text-emerald-700 dark:text-emerald-400"
                       : isCurrent
                         ? "bg-emerald-600 text-white"
                         : "text-muted-foreground hover:bg-muted",
@@ -774,7 +774,10 @@ function BranchCard({
 
 function ToneChip({ text }: { text: string }) {
   return (
-    <span className="inline-flex items-center rounded-full border border-amber-300/60 bg-amber-400/15 px-2.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">
+    <span
+      data-testid="tone-chip"
+      className="inline-flex items-center rounded-full border border-amber-300/60 bg-amber-400/15 px-2.5 py-0.5 text-[11px] font-semibold text-amber-800 dark:text-amber-300"
+    >
       {text}
     </span>
   );
@@ -811,7 +814,11 @@ function TokenChip({
       </span>
     );
   }
-  return <span className="font-bold text-emerald-600 dark:text-emerald-400">{resolved.value}</span>;
+  return (
+    <span data-testid="token-resolved" className="font-bold text-emerald-700 dark:text-emerald-400">
+      {resolved.value}
+    </span>
+  );
 }
 
 function EntryTokenChip({
@@ -1055,7 +1062,11 @@ function ObjectionLine({ label, text, tokens }: { label: string; text: string; t
         // fall back to plain-value rendering (no inline editor here) if
         // the script ever adds one — the card is transient, not the right
         // place to capture a deal value.
-        return <span key={index} className="font-bold text-emerald-600 dark:text-emerald-400">{segment.resolved.value}</span>;
+        return (
+          <span key={index} data-testid="token-resolved" className="font-bold text-emerald-700 dark:text-emerald-400">
+            {segment.resolved.value}
+          </span>
+        );
       })}
     </p>
   );

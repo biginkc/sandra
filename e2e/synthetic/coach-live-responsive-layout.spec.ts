@@ -64,6 +64,17 @@ for (const viewport of [
     await expect(page.getByTestId("coach-version-mismatch")).toBeVisible();
     await expect(page.getByTestId("coach-reconnect-gap")).toBeVisible();
     await expect(page.getByTestId("coach-transcript")).toHaveCount(1);
+    // The transcript is the only viewport-conditional CSS in this component
+    // (`hidden ... md:flex` on its <aside>) — asserting count alone (as this
+    // test previously did) passes whether or not the compiled Tailwind
+    // actually applied, since the node stays mounted either way. Assert
+    // visibility too so a broken `md:` breakpoint or a missing compiled
+    // class would fail this test.
+    if (viewport.width >= 768) {
+      await expect(page.getByTestId("coach-transcript")).toBeVisible();
+    } else {
+      await expect(page.getByTestId("coach-transcript")).toBeHidden();
+    }
     await expect(page.getByTestId("coach-focus-stage")).toBeVisible();
     await expect(page.getByTestId("coach-call-dock-row")).toBeVisible();
 
