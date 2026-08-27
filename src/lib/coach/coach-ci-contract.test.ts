@@ -56,6 +56,17 @@ function withoutComments(yaml: string): string {
     .join("\n");
 }
 
+/** Same idea, `--`-prefixed SQL comment lines — the reference SQL script's
+ * own prose explains the round-9 bug using the exact vulnerable pattern
+ * it fixed, which would otherwise false-positive a naive "the bad pattern
+ * is gone" check against the real, executable SQL below it. */
+function withoutSqlComments(sql: string): string {
+  return sql
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("--"))
+    .join("\n");
+}
+
 describe("coach realtime authorization CI security contract", () => {
   it("is a single job — not split across jobs that would each need their own environment approval", () => {
     const jobsBlockStart = coachWorkflow.indexOf("\njobs:\n");
@@ -145,12 +156,40 @@ describe("coach realtime authorization CI security contract", () => {
     expect(cleanupStep).toContain("coach_ci_delete_own_ownership");
   });
 
-  it("generates a fresh pair of call ids per run, not a stable/reused identifier", () => {
-    const canaryJob = workflowJob("coach-realtime-canary");
-    const callIdStep = workflowStep(canaryJob, "Generate this run's two ephemeral call ids");
-    expect(callIdStep).toContain("crypto.randomUUID()");
-    expect(callIdStep).toContain("owned_call_id");
-    expect(callIdStep).toContain("foreign_call_id");
+  it("round 9 — neither RPC accepts a caller-supplied call id; row identity is derived server-side from auth.uid()", () => {
+    // A caller-supplied p_call_id plus an unconditional ON CONFLICT DO
+    // UPDATE let either CI account claim ownership of ANY named row and
+    // create unlimited rows. Both RPCs now take NO argument at all — the
+    // workflow no longer generates or threads a call id through anywhere.
+    expect(withoutComments(coachWorkflow)).not.toMatch(/call_id/i);
+    expect(withoutComments(coachWorkflow)).not.toMatch(/crypto\.randomUUID/);
+    // The reference script keeps its round-8 definitions as history (an
+    // honest audit trail of what was actually applied, in order) — the
+    // round-9 block that supersedes them must come AFTER, and define the
+    // no-argument signature.
+    const round9Start = ciTestProjectSetup.indexOf("Round-9 hardening");
+    expect(round9Start).toBeGreaterThan(0);
+    const round9 = ciTestProjectSetup.slice(round9Start);
+    expect(round9).toContain("create or replace function public.coach_ci_seed_ownership()");
+    expect(round9).toContain("create or replace function public.coach_ci_delete_own_ownership()");
+    expect(round9).toContain("'coach-ci-' || auth.uid()::text");
+    expect(round9).not.toMatch(/create or replace function public\.coach_ci_seed_ownership\(p_call_id/);
+  });
+
+  it("round 9 — the allowlist check can't fail open on a NULL account lookup", () => {
+    // `auth.uid()::text NOT IN (subquery, subquery)` is NULL — not TRUE —
+    // if either subquery returns no row, and plpgsql treats a NULL `if`
+    // condition as false: the exception was silently skipped, letting ANY
+    // authenticated TEST-project user through. The fix is a NOT EXISTS
+    // check (never NULL) plus a separate assertion that both known
+    // accounts still exist.
+    const round9Start = ciTestProjectSetup.indexOf("Round-9 hardening");
+    expect(round9Start).toBeGreaterThan(0);
+    const round9 = withoutSqlComments(ciTestProjectSetup.slice(round9Start));
+    expect(round9).not.toMatch(/auth\.uid\(\)::text not in/i);
+    const matches = round9.match(/not exists \(\s*select 1 from auth\.users/g) ?? [];
+    expect(matches.length).toBeGreaterThanOrEqual(2); // one per RPC
+    expect(round9).toContain("expected exactly 2 known CI test accounts");
   });
 
   it("requires a same-client owned-channel success control before the non-owner denial, seeded via the narrow RPCs", () => {
@@ -165,6 +204,11 @@ describe("coach realtime authorization CI security contract", () => {
     expect(ownedSuccess).toBeGreaterThan(0);
     expect(foreignDenial).toBeGreaterThan(ownedSuccess);
     expect(realtimeTest).toContain("expect(foreign.error).toBeInstanceOf(Error)");
+
+    // Round-9: a direct, untyped fetch proves the server itself rejects a
+    // caller-supplied identifier — not merely that the typed client
+    // happens not to send one.
+    expect(realtimeTest).toContain("could not find the function");
   });
 
   it("the CI test-fixture setup script lives outside supabase/migrations/ — it must never reach production", () => {
@@ -176,7 +220,7 @@ describe("coach realtime authorization CI security contract", () => {
     expect(ciTestProjectSetup).toContain("TEST PROJECT ONLY");
     expect(ciTestProjectSetup).toContain("coach_ci_seed_ownership");
     expect(ciTestProjectSetup).toContain("coach_ci_delete_own_ownership");
-    expect(ciTestProjectSetup).toContain("revoke all on function public.coach_ci_seed_ownership(text) from anon");
+    expect(ciTestProjectSetup).toContain("revoke all on function public.coach_ci_seed_ownership() from anon");
 
     // The RPC names the workflow and test actually call must match what
     // this reference script defines, so the two can't silently diverge.

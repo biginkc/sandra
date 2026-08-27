@@ -82,14 +82,6 @@ jobs:
       - name: Install coach canary dependencies
         run: npm ci
 
-      - name: Generate this run's two ephemeral call ids
-        id: call_ids
-        run: |
-          {
-            echo "owned_call_id=$(node -p 'crypto.randomUUID()')"
-            echo "foreign_call_id=$(node -p 'crypto.randomUUID()')"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Run the coach realtime authorization canary
         env:
           TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
@@ -98,16 +90,15 @@ jobs:
           COACH_CI_OWNER_PASSWORD: ${{ secrets.COACH_CI_OWNER_PASSWORD }}
           COACH_CI_FOREIGN_EMAIL: ${{ secrets.COACH_CI_FOREIGN_EMAIL }}
           COACH_CI_FOREIGN_PASSWORD: ${{ secrets.COACH_CI_FOREIGN_PASSWORD }}
-          COACH_CANARY_OWNED_CALL_ID: ${{ steps.call_ids.outputs.owned_call_id }}
-          COACH_CANARY_FOREIGN_CALL_ID: ${{ steps.call_ids.outputs.foreign_call_id }}
         run: npx vitest run --config vitest.coach-realtime.config.ts
 
       # Redundant with the test file's own afterAll cleanup — this is the
       # defense-in-depth layer for a hard process kill (OOM, timeout) that
       # skips afterAll entirely. Both RPCs are self-scoped (each of the two
-      # static users can only delete its OWN row) and idempotent, so
-      # running this even when the test's own cleanup already succeeded is
-      # harmless.
+      # static users can only delete its OWN row, derived server-side from
+      # its own auth.uid() — no call-id argument at all, round-9) and
+      # idempotent, so running this even when the test's own cleanup
+      # already succeeded is harmless.
       - name: Always clean up this run's ownership rows
         if: always()
         env:
@@ -117,8 +108,6 @@ jobs:
           COACH_CI_OWNER_PASSWORD: ${{ secrets.COACH_CI_OWNER_PASSWORD }}
           COACH_CI_FOREIGN_EMAIL: ${{ secrets.COACH_CI_FOREIGN_EMAIL }}
           COACH_CI_FOREIGN_PASSWORD: ${{ secrets.COACH_CI_FOREIGN_PASSWORD }}
-          COACH_CANARY_OWNED_CALL_ID: ${{ steps.call_ids.outputs.owned_call_id }}
-          COACH_CANARY_FOREIGN_CALL_ID: ${{ steps.call_ids.outputs.foreign_call_id }}
         run: |
           sign_in() {
             curl --fail-with-body --silent --show-error --request POST \
@@ -134,12 +123,12 @@ jobs:
               --header "apikey: $TEST_SUPABASE_ANON_KEY" \
               --header "Authorization: Bearer $1" \
               --header "Content-Type: application/json" \
-              --data "$(jq -nc --arg call_id "$2" '{p_call_id: $call_id}')" \
+              --data '{}' \
               --output /dev/null
           }
           cleanup_failed=0
           owner_token="$(sign_in "$COACH_CI_OWNER_EMAIL" "$COACH_CI_OWNER_PASSWORD")" || cleanup_failed=1
-          [ -z "$owner_token" ] || delete_own_row "$owner_token" "$COACH_CANARY_OWNED_CALL_ID" || cleanup_failed=1
+          [ -z "$owner_token" ] || delete_own_row "$owner_token" || cleanup_failed=1
           foreign_token="$(sign_in "$COACH_CI_FOREIGN_EMAIL" "$COACH_CI_FOREIGN_PASSWORD")" || cleanup_failed=1
-          [ -z "$foreign_token" ] || delete_own_row "$foreign_token" "$COACH_CANARY_FOREIGN_CALL_ID" || cleanup_failed=1
+          [ -z "$foreign_token" ] || delete_own_row "$foreign_token" || cleanup_failed=1
           exit "$cleanup_failed"

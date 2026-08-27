@@ -144,3 +144,106 @@ grant execute on function public.coach_ci_seed_ownership(text) to authenticated;
 grant execute on function public.coach_ci_delete_own_ownership(text) to authenticated;
 
 commit;
+
+-- ============================================================================
+-- Round-9 hardening (applied 2026-08-27, same channel as above). Two P1s
+-- found in the original RPCs:
+--
+-- 1. `auth.uid()::text NOT IN (subquery, subquery)` fails open on NULL.
+--    Postgres's three-valued NOT IN logic makes the WHOLE condition NULL
+--    (not TRUE) if either account lookup returns no row — e.g. one of the
+--    two static accounts gets deleted or its email changed. plpgsql
+--    treats a NULL `if` condition as false, so the exception was silently
+--    skipped and ANY authenticated TEST-project user could call the RPC.
+--    Rewritten below as an explicit NOT EXISTS check (a real boolean,
+--    never NULL) plus a separate assertion that both known accounts
+--    still exist at all.
+--
+-- 2. The seed RPC took a caller-supplied p_call_id and did an
+--    unconditional ON CONFLICT DO UPDATE — either CI account could claim
+--    ownership of ANY named row (not just its own) and create unlimited
+--    rows. Both RPCs now take NO argument. The row identity is
+--    'coach-ci-' || auth.uid(), derived entirely server-side, so there is
+--    no parameter through which a caller could ever name a row it
+--    doesn't already own — each account can only ever have exactly one
+--    row. The ON CONFLICT clause is additionally restricted to rows
+--    already owned by the same caller, defense in depth against the
+--    (structurally impossible, given real UUIDs) case of two accounts
+--    deriving the same key.
+-- ============================================================================
+
+begin;
+
+drop function if exists public.coach_ci_seed_ownership(text);
+drop function if exists public.coach_ci_delete_own_ownership(text);
+
+create or replace function public.coach_ci_seed_ownership()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_known_count int;
+begin
+  select count(*) into v_known_count
+  from auth.users
+  where email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com');
+  if v_known_count <> 2 then
+    raise exception 'coach_ci_seed_ownership: expected exactly 2 known CI test accounts, found %', v_known_count;
+  end if;
+
+  if auth.uid() is null or not exists (
+    select 1 from auth.users
+    where id = auth.uid()
+      and email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')
+  ) then
+    raise exception 'coach_ci_seed_ownership: not permitted for this user';
+  end if;
+
+  insert into public.coach_call_index (client_call_id, operator_user_id)
+  values ('coach-ci-' || auth.uid()::text, auth.uid())
+  on conflict (client_call_id) do update
+  set operator_user_id = excluded.operator_user_id
+  where coach_call_index.operator_user_id = auth.uid();
+end;
+$$;
+
+create or replace function public.coach_ci_delete_own_ownership()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_known_count int;
+begin
+  select count(*) into v_known_count
+  from auth.users
+  where email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com');
+  if v_known_count <> 2 then
+    raise exception 'coach_ci_delete_own_ownership: expected exactly 2 known CI test accounts, found %', v_known_count;
+  end if;
+
+  if auth.uid() is null or not exists (
+    select 1 from auth.users
+    where id = auth.uid()
+      and email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')
+  ) then
+    raise exception 'coach_ci_delete_own_ownership: not permitted for this user';
+  end if;
+
+  delete from public.coach_call_index
+  where client_call_id = 'coach-ci-' || auth.uid()::text
+    and operator_user_id = auth.uid();
+end;
+$$;
+
+revoke all on function public.coach_ci_seed_ownership() from public;
+revoke all on function public.coach_ci_delete_own_ownership() from public;
+revoke all on function public.coach_ci_seed_ownership() from anon;
+revoke all on function public.coach_ci_delete_own_ownership() from anon;
+grant execute on function public.coach_ci_seed_ownership() to authenticated;
+grant execute on function public.coach_ci_delete_own_ownership() to authenticated;
+
+commit;

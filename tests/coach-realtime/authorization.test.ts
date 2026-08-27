@@ -14,18 +14,28 @@ function requiredEnv(name: string): string {
  * Neither this test nor the CI workflow that runs it ever holds a
  * service-role key, a DB password, or a Supabase account token — only
  * these two users' own login credentials and the anon key, the exact same
- * shape any real Sandra user authenticates with. A compromised runtime
- * gains nothing beyond what these two accounts can already do: seed/
- * delete their OWN row in coach_call_index, via the coach_ci_seed_
- * ownership / coach_ci_delete_own_ownership RPCs, which check auth.uid()
- * against exactly these two ids server-side — not even a real Sandra user
- * can call them successfully.
+ * shape any real Sandra user authenticates with.
+ *
+ * Round-9 hardening: coach_ci_seed_ownership / coach_ci_delete_own_
+ * ownership take NO argument. The row each account owns is
+ * 'coach-ci-' + auth.uid(), derived entirely server-side — there is no
+ * parameter through which either account could name, claim, or overwrite
+ * a row it doesn't already own, and each account can only ever have
+ * exactly one row (the same derived key every time). Client code computes
+ * the SAME 'coach-ci-' prefix only to know which Realtime topic to
+ * subscribe to — it never tells the server what the row's key is.
  */
 async function signIn(email: string, password: string, client: SupabaseClient): Promise<string> {
   const { data, error } = await client.auth.signInWithPassword({ email, password });
   expect(error).toBeNull();
   expect(data.session?.access_token).toBeTruthy();
-  return data.session!.access_token;
+  expect(data.user?.id).toBeTruthy();
+  client.realtime.setAuth(data.session!.access_token);
+  return data.user!.id;
+}
+
+function callIdFor(userId: string): string {
+  return `coach-ci-${userId}`;
 }
 
 const ownerClient = createClient(
@@ -39,8 +49,8 @@ const foreignClient = createClient(
   { auth: { persistSession: false, autoRefreshToken: false } },
 );
 
-const ownedCallId = requiredEnv("COACH_CANARY_OWNED_CALL_ID");
-const foreignCallId = requiredEnv("COACH_CANARY_FOREIGN_CALL_ID");
+let ownedCallId = "";
+let foreignCallId = "";
 
 function subscribe(topic: string, timeoutMs = 15_000): Promise<{
   channel: RealtimeChannel;
@@ -65,34 +75,47 @@ function subscribe(topic: string, timeoutMs = 15_000): Promise<{
 }
 
 beforeAll(async () => {
-  // Each user seeds their OWN ownership row via the RPC — the row's
-  // operator_user_id is auth.uid() inside that SECURITY DEFINER function,
-  // not a client-supplied value, so neither client can seed a row it
-  // doesn't itself own even if it wanted to.
-  const ownerToken = await signIn(requiredEnv("COACH_CI_OWNER_EMAIL"), requiredEnv("COACH_CI_OWNER_PASSWORD"), ownerClient);
-  ownerClient.realtime.setAuth(ownerToken);
-  const { error: seedOwnedError } = await ownerClient.rpc("coach_ci_seed_ownership", { p_call_id: ownedCallId });
+  const ownerId = await signIn(requiredEnv("COACH_CI_OWNER_EMAIL"), requiredEnv("COACH_CI_OWNER_PASSWORD"), ownerClient);
+  ownedCallId = callIdFor(ownerId);
+  const { error: seedOwnedError } = await ownerClient.rpc("coach_ci_seed_ownership");
   expect(seedOwnedError).toBeNull();
 
-  await signIn(requiredEnv("COACH_CI_FOREIGN_EMAIL"), requiredEnv("COACH_CI_FOREIGN_PASSWORD"), foreignClient);
-  const { error: seedForeignError } = await foreignClient.rpc("coach_ci_seed_ownership", { p_call_id: foreignCallId });
+  const foreignId = await signIn(requiredEnv("COACH_CI_FOREIGN_EMAIL"), requiredEnv("COACH_CI_FOREIGN_PASSWORD"), foreignClient);
+  foreignCallId = callIdFor(foreignId);
+  const { error: seedForeignError } = await foreignClient.rpc("coach_ci_seed_ownership");
   expect(seedForeignError).toBeNull();
 });
 
 afterAll(async () => {
-  // Each client deletes only its OWN row (same auth.uid() enforcement as
-  // seeding) — this is a redundant defense-in-depth layer alongside the
-  // CI workflow's own `if: always()` cleanup step, in case this process
-  // is killed hard enough that afterAll itself never runs.
-  await ownerClient.rpc("coach_ci_delete_own_ownership", { p_call_id: ownedCallId });
-  await foreignClient.rpc("coach_ci_delete_own_ownership", { p_call_id: foreignCallId });
+  // Redundant with the CI workflow's own `if: always()` cleanup step, in
+  // case this process is killed hard enough that afterAll never runs.
+  await ownerClient.rpc("coach_ci_delete_own_ownership");
+  await foreignClient.rpc("coach_ci_delete_own_ownership");
   await ownerClient.removeAllChannels();
   await ownerClient.auth.signOut();
   await foreignClient.auth.signOut();
 });
 
 describe("protected coach Realtime authorization canary", () => {
-  it("proves the same authenticated socket can join its owned call and is explicitly denied the foreign call", async () => {
+  it("rejects a caller-supplied identifier outright — the RPC takes no argument, so a row can never be named by anyone but its own account", async () => {
+    // A raw fetch, not the typed client: proves the server itself refuses
+    // any call carrying a parameter, not merely that our own client
+    // happens not to send one.
+    const response = await fetch(`${requiredEnv("TEST_SUPABASE_URL")}/rest/v1/rpc/coach_ci_seed_ownership`, {
+      method: "POST",
+      headers: {
+        apikey: requiredEnv("TEST_SUPABASE_ANON_KEY"),
+        Authorization: `Bearer ${requiredEnv("TEST_SUPABASE_ANON_KEY")}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ p_call_id: "steal-attempt" }),
+    });
+    expect(response.ok).toBe(false);
+    const body = (await response.json()) as { message?: string };
+    expect(body.message ?? "").toMatch(/could not find the function/i);
+  });
+
+  it("proves the same authenticated socket can join its own seeded call and is explicitly denied the foreign account's — the foreign row can't be read, let alone stolen", async () => {
     // Keep the positive-control channel open. The denial therefore happens
     // on the exact same authenticated Realtime socket, ruling out generic
     // network/auth/channel failure as the source of CHANNEL_ERROR.
