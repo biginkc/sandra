@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { coachReducer, initialCoachState, MAX_NUDGES, MAX_OBJECTION_CARDS, NUDGE_TTL_MS, OBJECTION_CARD_TTL_MS } from "./event-reducer";
+import { CLOSR_SCRIPT } from "./script-block";
 import type { CoachState } from "./types";
 
 /** Every wire event carries both content versions, always — required. */
 const V = { scriptVersion: "1.0.1", matcherVersion: "3" };
+
+/** Cursor-specific versions — a cursor is ONLY ever stored when scriptVersion
+ * matches this client's loaded script (CLOSR_SCRIPT.version), unlike every
+ * other event type, so cursor tests need the real, current version rather
+ * than the arbitrary placeholder `V` uses. */
+const CV = { scriptVersion: CLOSR_SCRIPT.version, matcherVersion: "3" };
 
 describe("coachReducer — transcript", () => {
   it("appends a final line for a fresh speaker turn", () => {
@@ -101,6 +108,176 @@ describe("coachReducer — phase advance", () => {
     state = coachReducer(state, { type: "phase", phaseId: "reveal", ts: "t1", ...V });
     expect(state.currentPhaseId).toBe("reveal");
     expect(state.overriddenPhaseId).toBeNull();
+  });
+});
+
+describe("coachReducer — cursor", () => {
+  it("starts with no cursor", () => {
+    expect(initialCoachState().cursor).toBeNull();
+  });
+
+  it("stores a cursor whose phaseId matches the current phase and scriptVersion matches the loaded script", () => {
+    const state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Frame the call",
+      variantKey: "default",
+      lineIndex: 2,
+      lineText: "• To add some sort of value to the property so we can resell it on the market, or",
+      ts: "t1",
+      ...CV,
+    });
+    expect(state.cursor).toEqual({
+      phaseId: "introduction",
+      branchTag: "Frame the call",
+      variantKey: "default",
+      lineIndex: 2,
+      lineText: "• To add some sort of value to the property so we can resell it on the market, or",
+      scriptVersion: CV.scriptVersion,
+      ts: "t1",
+    });
+    expect(state.connected).toBe(true);
+  });
+
+  it("ignores a cursor whose phaseId does not match the current phase — phase is authoritative", () => {
+    const state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "reveal",
+      branchTag: "Entry",
+      variantKey: "unknown",
+      lineIndex: 0,
+      lineText: "Ok Jane, that should be all you need for now.",
+      ts: "t1",
+      ...CV,
+    });
+    expect(state.cursor).toBeNull();
+    // Nothing else about state should move either — this is a full ignore,
+    // not a partial apply.
+    expect(state.connected).toBe(false);
+  });
+
+  it("ignores a cursor whose scriptVersion doesn't match this client's loaded script — line addressing has no stable identity across a script edit", () => {
+    const state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      lineText: "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!",
+      ts: "t1",
+      scriptVersion: "0.0.1-not-the-loaded-script",
+      matcherVersion: "3",
+    });
+    expect(state.cursor).toBeNull();
+    expect(state.connected).toBe(false);
+  });
+
+  it("a later, non-matching cursor never overwrites a previously stored valid one", () => {
+    let state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      lineText: "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!",
+      ts: "t1",
+      ...CV,
+    });
+    // Neither a wrong-phase nor a wrong-version cursor should be able to
+    // clobber the good one.
+    state = coachReducer(state, {
+      type: "cursor",
+      phaseId: "reveal",
+      branchTag: "Entry",
+      variantKey: "unknown",
+      lineIndex: 0,
+      lineText: "Ok Jane, that should be all you need for now.",
+      ts: "t2",
+      ...CV,
+    });
+    state = coachReducer(state, {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Frame the call",
+      variantKey: "default",
+      lineIndex: 3,
+      lineText: "some stale-version text",
+      ts: "t3",
+      scriptVersion: "0.0.1-not-the-loaded-script",
+      matcherVersion: "3",
+    });
+    expect(state.cursor).toEqual({
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      lineText: "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!",
+      scriptVersion: CV.scriptVersion,
+      ts: "t1",
+    });
+  });
+
+  it("clears the cursor once a phase event actually advances the current phase", () => {
+    let state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      lineText: "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!",
+      ts: "t1",
+      ...CV,
+    });
+    expect(state.cursor).not.toBeNull();
+    state = coachReducer(state, { type: "phase", phaseId: "reveal", ts: "t2", ...V });
+    expect(state.cursor).toBeNull();
+    expect(state.currentPhaseId).toBe("reveal");
+  });
+
+  it("keeps a valid cursor through a redundant phase event that repeats the SAME phaseId", () => {
+    let state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      lineText: "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!",
+      ts: "t1",
+      ...CV,
+    });
+    state = coachReducer(state, { type: "phase", phaseId: "introduction", ts: "t2", ...V });
+    expect(state.cursor).not.toBeNull();
+  });
+
+  it("clears the cursor on reset, same as the rest of session state", () => {
+    let state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      lineText: "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!",
+      ts: "t1",
+      ...CV,
+    });
+    state = coachReducer(state, { type: "reset", startingPhaseId: "introduction" });
+    expect(state.cursor).toBeNull();
+  });
+
+  it("does NOT clear the cursor on a local override_phase action — the rep browsing the rail is display-only and never reaches the server", () => {
+    let state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      lineText: "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!",
+      ts: "t1",
+      ...CV,
+    });
+    state = coachReducer(state, { type: "override_phase", phaseId: "close" });
+    expect(state.cursor).not.toBeNull();
+    expect(state.currentPhaseId).toBe("introduction");
   });
 });
 

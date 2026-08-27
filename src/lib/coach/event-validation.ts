@@ -10,6 +10,7 @@ const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
   "gate",
   "timer",
   "coach_note",
+  "cursor",
 ]);
 
 export type CoachEventParseResult =
@@ -170,6 +171,32 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
             type: "coach_note",
             text: payload.text,
             phaseId: payload.phaseId as CoachPhaseId,
+            ts: payload.ts,
+            ...versions,
+          },
+        };
+      }
+      break;
+    }
+    case "cursor": {
+      if (
+        typeof payload.phaseId === "string" &&
+        PHASE_IDS.has(payload.phaseId) &&
+        isNonEmptyString(payload.branchTag) &&
+        isNonEmptyString(payload.variantKey) &&
+        isNonNegativeInteger(payload.lineIndex) &&
+        isNonEmptyString(payload.lineText) &&
+        isNonEmptyString(payload.ts)
+      ) {
+        return {
+          ok: true,
+          event: {
+            type: "cursor",
+            phaseId: payload.phaseId as CoachPhaseId,
+            branchTag: payload.branchTag,
+            variantKey: payload.variantKey,
+            lineIndex: payload.lineIndex,
+            lineText: payload.lineText,
             ts: payload.ts,
             ...versions,
           },

@@ -1079,8 +1079,8 @@ describe("SoftphoneProvider coach UI flag", () => {
     const toast = await screen.findByRole("status");
     expect(toast).toHaveTextContent("That keypad tone was not sent. Try again.");
     expect(playDtmfTone).not.toHaveBeenCalled();
-    // Must render above the full-screen coach overlay (z-[80]) and the
-    // objection-card layer (z-[90]) so it's visible while the coach view is open.
+    // Must render above the full-screen coach dialog (z-[80]), including its
+    // in-flow objection focus card, so it stays visible while coach mode is open.
     expect(toast.className).toMatch(/z-\[100\]/);
   });
 
