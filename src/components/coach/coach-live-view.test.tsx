@@ -338,6 +338,65 @@ describe("<CoachLiveView />", () => {
       expect(screen.getByTestId("say-this-line")).toHaveTextContent(/add some sort of value to the property/i);
     });
 
+    it("a REP MANUAL VARIANT OVERRIDE always wins over a conflicting cursor — the concrete harm case: rep taps FSBO, Jitter (blind to the tap) guesses cold_call", async () => {
+      render(<Harness {...baseProps()} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+      // The rep manually switches the Opener branch to the FSBO variant —
+      // same interaction as "lets the rep manually switch a branch's
+      // variant" above.
+      await userEvent.click(screen.getByText(/Full Introduction script/i));
+      const fsboTab = screen.getByTestId("variant-Opener-fsbo");
+      await userEvent.click(fsboTab);
+      expect(fsboTab).toHaveAttribute("aria-selected", "true");
+
+      // Jitter's follower has no visibility into that manual tap, so its
+      // cursor keeps guessing cold_call — and hands over cold_call's OWN
+      // line-1 text, which is genuinely absent from fsbo. Even with real
+      // textual evidence for cold_call, the override must not be
+      // second-guessed: resolution stays inside fsbo (falls to lineIndex
+      // there) and must never show cold_call's content.
+      broadcast({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Opener",
+        variantKey: "cold_call",
+        lineIndex: 1,
+        lineText:
+          "It looks like you spoke to one of my assistants {cold_caller_name} a little bit ago about your property on {property_address} — they said you may need help with {motivation}?",
+        ts: "t1",
+      });
+
+      const sayThisLine = screen.getByTestId("say-this-line");
+      expect(sayThisLine).toHaveTextContent(/For Sale by Owner/i);
+      expect(sayThisLine).not.toHaveTextContent(/spoke to one of my assistants/i);
+    });
+
+    it("rescues into the cursor's named variant when lineText is genuinely absent from Sandra's own AUTO-selected variant (no manual override) — real evidence the auto-select guessed wrong", async () => {
+      // Reveal's Entry branch auto-selects by occupancy; this harness's
+      // sampleContext has occupancy "owner_occupied", so Sandra's own pick
+      // is "owner_occupied" — no rep override exists. The cursor claims
+      // "vacant" and hands over VACANT's own line-1 text, absent from
+      // owner_occupied — real evidence Sandra's auto-selection (or the
+      // occupancy data behind it) doesn't match what the follower actually
+      // heard, so the rescue must apply.
+      render(<Harness {...baseProps()} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+      broadcast({ type: "phase", phaseId: "reveal", ts: "t0" });
+
+      broadcast({
+        type: "cursor",
+        phaseId: "reveal",
+        branchTag: "Entry",
+        variantKey: "vacant",
+        lineIndex: 1,
+        lineText: "I know it's been vacant for a little bit, but what made you decide to go ahead and sell it now?",
+        ts: "t1",
+      });
+
+      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/vacant for a little bit/i);
+    });
+
     it("shows the NEXT line within the current phase in the Coming Next preview, not the next phase, while a cursor is active", async () => {
       render(<Harness {...baseProps()} />);
       await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());

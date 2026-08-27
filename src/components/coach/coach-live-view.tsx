@@ -172,12 +172,12 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   // only for a genuinely unrecognized phase id, in which case there's no
   // cursor content to resolve either.
   const cursorSpokenLine = useMemo(
-    () => (activeCursor && scriptBlock ? resolveCursorLine(activeCursor, scriptBlock, tokens) : null),
-    [activeCursor, scriptBlock, tokens],
+    () => (activeCursor && scriptBlock ? resolveCursorLine(activeCursor, scriptBlock, branchOverrides, tokens) : null),
+    [activeCursor, scriptBlock, branchOverrides, tokens],
   );
   const cursorNextLine = useMemo(
-    () => (activeCursor && scriptBlock ? resolveCursorNextLine(activeCursor, scriptBlock, tokens) : null),
-    [activeCursor, scriptBlock, tokens],
+    () => (activeCursor && scriptBlock ? resolveCursorNextLine(activeCursor, scriptBlock, branchOverrides, tokens) : null),
+    [activeCursor, scriptBlock, branchOverrides, tokens],
   );
   const gateEntries = (scriptBlock?.gates ?? []).map((gate) => ({
     ...gate,

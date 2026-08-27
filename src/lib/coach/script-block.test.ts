@@ -260,6 +260,7 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
   // shifts with live call context.
   const introBlock = buildPhaseScriptBlock("introduction", tokens)!;
   const revealBlock = buildPhaseScriptBlock("reveal", tokens)!;
+  const NO_OVERRIDES: Record<string, string> = {};
 
   it("step 4: resolves via lineText when it matches a line in Sandra's own selected variant — wins even over a garbage variantKey/lineIndex", () => {
     const line = resolveCursorLine(
@@ -272,54 +273,21 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
         scriptVersion: CLOSR_SCRIPT.version,
       },
       introBlock,
+      NO_OVERRIDES,
       tokens,
     );
     expect(line).not.toBeNull();
     expect(allText(line!.segments)).toContain("add some sort of value to the property");
   });
 
-  it("step 5: falls back to lineIndex when lineText doesn't match anything in Sandra's own selected variant", () => {
-    const line = resolveCursorLine(
-      {
-        phaseId: "introduction",
-        branchTag: "Frame the call",
-        variantKey: "default",
-        lineIndex: 3,
-        lineText: "this text does not appear anywhere in the script",
-        scriptVersion: CLOSR_SCRIPT.version,
-      },
-      introBlock,
-      tokens,
-    );
-    expect(line).not.toBeNull();
-    expect(allText(line!.segments)).toContain("Buy the property to rent it to someone");
-  });
-
-  it("step 6: falls back to THIS branch's own first spoken line (not branch 0) when neither lineText nor lineIndex resolve", () => {
-    const line = resolveCursorLine(
-      {
-        phaseId: "introduction",
-        branchTag: "Frame the call", // not the phase's dominant branch (Opener)
-        variantKey: "default",
-        lineIndex: 999,
-        lineText: "this text does not appear anywhere in the script",
-        scriptVersion: CLOSR_SCRIPT.version,
-      },
-      introBlock,
-      tokens,
-    );
-    expect(line).not.toBeNull();
-    // "Frame the call"'s own first say line, not Opener's greeting.
-    expect(allText(line!.segments)).toContain("reason for my call today");
-  });
-
-  it("resolves against Sandra's OWN selected variant, never the cursor's advisory variantKey — even when the named variant is real and its line text is well-formed", () => {
-    // Reveal's Entry branch: with occupancy unset, Sandra's own selection
-    // falls back to variants[0] ("unknown"). All four variants share line 0
-    // verbatim but diverge at line 1. The cursor claims "vacant" and hands
-    // over VACANT's line-1 text — that text does not exist in "unknown", so
-    // it must fall through to lineIndex within "unknown", landing on
-    // UNKNOWN's own line 1, not vacant's.
+  it("step 5 (rescue): lineText absent from Sandra's auto-selected variant, but present in the cursor's named variant, resolves there — real evidence the auto-select guessed wrong", () => {
+    // Reveal's Entry branch: with occupancy unset and no manual override,
+    // Sandra's own selection falls back to variants[0] ("unknown"). All
+    // four variants share line 0 verbatim but diverge at line 1. The
+    // cursor claims "vacant" and hands over VACANT's own line-1 text —
+    // genuinely absent from "unknown" — so the rescue must resolve to
+    // vacant's line, proving Jitter's guess earns priority ONLY on real
+    // textual evidence.
     const line = resolveCursorLine(
       {
         phaseId: "reveal",
@@ -330,11 +298,78 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
         scriptVersion: CLOSR_SCRIPT.version,
       },
       revealBlock,
+      NO_OVERRIDES,
       tokens,
     );
     expect(line).not.toBeNull();
-    expect(allText(line!.segments)).toContain("Do you currently");
+    expect(allText(line!.segments)).toContain("vacant for a little bit");
+  });
+
+  it("a REP MANUAL OVERRIDE always wins — the rescue never fires when this branch has one, even if the cursor's variant has a genuine lineText match", () => {
+    // Same Entry branch/vacant-lineText setup as the rescue test above, but
+    // now the rep has manually switched Entry to "owner_occupied" — the
+    // concrete harm scenario: rep taps a variant tab, Jitter (blind to
+    // that tap) guesses a different one. The override must resolve inside
+    // OWNER_OCCUPIED, never switching to vacant no matter how well the
+    // cursor's lineText matches there.
+    const overriddenBlock = buildPhaseScriptBlock("reveal", tokens, { leadSource: null, occupancy: null }, {
+      Entry: "owner_occupied",
+    })!;
+    const line = resolveCursorLine(
+      {
+        phaseId: "reveal",
+        branchTag: "Entry",
+        variantKey: "vacant",
+        lineIndex: 1,
+        lineText: "I know it's been vacant for a little bit, but what made you decide to go ahead and sell it now?",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      overriddenBlock,
+      { Entry: "owner_occupied" },
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    // Falls through to lineIndex within owner_occupied (the override), NOT
+    // vacant's text.
+    expect(allText(line!.segments)).toContain("I know you live here and all");
     expect(allText(line!.segments)).not.toContain("vacant for a little bit");
+  });
+
+  it("falls back to lineIndex within Sandra's own variant when lineText matches NEITHER Sandra's variant nor the cursor's named variant", () => {
+    const line = resolveCursorLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default", // Frame the call has only one variant — nowhere else for lineText to hide
+        lineIndex: 3,
+        lineText: "this text does not appear anywhere in the script",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("Buy the property to rent it to someone");
+  });
+
+  it("step 7: falls back to THIS branch's own first spoken line (not branch 0) when nothing else resolves", () => {
+    const line = resolveCursorLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call", // not the phase's dominant branch (Opener)
+        variantKey: "default",
+        lineIndex: 999,
+        lineText: "this text does not appear anywhere in the script",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    // "Frame the call"'s own first say line, not Opener's greeting.
+    expect(allText(line!.segments)).toContain("reason for my call today");
   });
 
   it("skips forward past a leading note line to the next actual 'say' line — never presents a note as speech", () => {
@@ -343,9 +378,8 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
     // "vacant" (branchOverrides mirrors the rep's manual variant switch).
     // Index 4 in that variant is a type:"note" line ("Add up everything
     // they've paid so far."), a rep-facing instruction, not speech.
-    const block = buildPhaseScriptBlock("reveal", tokens, { leadSource: null, occupancy: null }, {
-      "Example probes — goal 7+": "vacant",
-    })!;
+    const overrides = { "Example probes — goal 7+": "vacant" };
+    const block = buildPhaseScriptBlock("reveal", tokens, { leadSource: null, occupancy: null }, overrides)!;
     const noteLine = getScriptPhase("reveal")!.display.branches
       .find((b) => b.tag === "Example probes — goal 7+")!
       .variants.find((v) => v.key === "vacant")!.lines[4];
@@ -361,6 +395,7 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
         scriptVersion: CLOSR_SCRIPT.version,
       },
       block,
+      overrides,
       tokens,
     );
     expect(line).not.toBeNull();
@@ -380,6 +415,7 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
           scriptVersion: CLOSR_SCRIPT.version,
         },
         introBlock,
+        NO_OVERRIDES,
         tokens,
       ),
     ).toBeNull();
@@ -400,6 +436,7 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
           scriptVersion: CLOSR_SCRIPT.version,
         },
         introBlock,
+        NO_OVERRIDES,
         tokens,
       ),
     ).toBeNull();
@@ -417,6 +454,7 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
           scriptVersion: "0.0.1-not-the-loaded-script",
         },
         introBlock,
+        NO_OVERRIDES,
         tokens,
       ),
     ).toBeNull();
@@ -434,6 +472,7 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
           scriptVersion: CLOSR_SCRIPT.version,
         },
         introBlock, // introduction block, cursor claims reveal
+        NO_OVERRIDES,
         tokens,
       ),
     ).toBeNull();
@@ -442,6 +481,7 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
 
 describe("resolveCursorNextLine — one line further than whatever resolveCursorLine actually resolved", () => {
   const introBlock = buildPhaseScriptBlock("introduction", tokens)!;
+  const NO_OVERRIDES: Record<string, string> = {};
 
   it("resolves the line immediately after the matched position", () => {
     const line = resolveCursorNextLine(
@@ -454,17 +494,17 @@ describe("resolveCursorNextLine — one line further than whatever resolveCursor
         scriptVersion: CLOSR_SCRIPT.version,
       },
       introBlock,
+      NO_OVERRIDES,
       tokens,
     );
     expect(line).not.toBeNull();
     expect(allText(line!.segments)).toContain("add some sort of value to the property");
   });
 
-  it("uses the ACTUAL resolved position, not the raw cursor.lineIndex, when resolution fell back (step 5/6)", () => {
+  it("uses the ACTUAL resolved position, not the raw cursor.lineIndex, when resolution fell back", () => {
     // lineText doesn't match anything, so resolution falls back to
-    // lineIndex 1 (step 5) — "next" must be line 2, not line
-    // cursor.lineIndex+1 blindly re-derived from a lineText that never
-    // actually matched.
+    // lineIndex 1 — "next" must be line 2, not line cursor.lineIndex+1
+    // blindly re-derived from a lineText that never actually matched.
     const line = resolveCursorNextLine(
       {
         phaseId: "introduction",
@@ -475,6 +515,7 @@ describe("resolveCursorNextLine — one line further than whatever resolveCursor
         scriptVersion: CLOSR_SCRIPT.version,
       },
       introBlock,
+      NO_OVERRIDES,
       tokens,
     );
     expect(line).not.toBeNull();
@@ -482,9 +523,8 @@ describe("resolveCursorNextLine — one line further than whatever resolveCursor
   });
 
   it("skips forward past a note the same way resolveCursorLine does", () => {
-    const block = buildPhaseScriptBlock("reveal", tokens, { leadSource: null, occupancy: null }, {
-      "Example probes — goal 7+": "vacant",
-    })!;
+    const overrides = { "Example probes — goal 7+": "vacant" };
+    const block = buildPhaseScriptBlock("reveal", tokens, { leadSource: null, occupancy: null }, overrides)!;
     const line = resolveCursorNextLine(
       {
         phaseId: "reveal",
@@ -495,6 +535,7 @@ describe("resolveCursorNextLine — one line further than whatever resolveCursor
         scriptVersion: CLOSR_SCRIPT.version,
       },
       block,
+      overrides,
       tokens,
     );
     expect(line).not.toBeNull();
@@ -517,6 +558,7 @@ describe("resolveCursorNextLine — one line further than whatever resolveCursor
         scriptVersion: CLOSR_SCRIPT.version,
       },
       introBlock,
+      NO_OVERRIDES,
       tokens,
     );
     expect(line).toBeNull();
@@ -533,6 +575,7 @@ describe("resolveCursorNextLine — one line further than whatever resolveCursor
         scriptVersion: "0.0.1-not-the-loaded-script",
       },
       introBlock,
+      NO_OVERRIDES,
       tokens,
     );
     expect(line).toBeNull();

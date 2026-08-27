@@ -215,19 +215,30 @@ function branchFallbackIndex(lines: ScriptLineBlock[]): number {
  *  2. `phaseId` must match the block actually being displayed.
  *  3. `branchTag` must exist WITHIN THAT PHASE's branches — tags are unique
  *     per phase, never globally, so this never looks a tag up across
- *     phases (the same trap branchOverrides has, being a flat
+ *     phases (the same trap `branchOverrides` has, being a flat
  *     tag-keyed Record with no phase scoping).
  *  4. Inside SANDRA'S OWN selected variant for that branch (`branch.selected
- *     .key` — NEVER the cursor's `variantKey`, which is advisory only:
- *     Jitter cannot know which variant Sandra's auto-select/override logic
- *     actually picked, and some variants — e.g. reveal's four occupancy
- *     variants — share lines verbatim, making its guess genuinely
- *     unreliable), find the line whose raw text equals `lineText`.
- *  5. Else, if `lineIndex` is in range for Sandra's selected variant, use it.
- *  6. Else fall back to that SAME branch's own first spoken line (mirrors
- *     selectSpokenLine, applied to the branch the cursor named — not
- *     branch 0).
- * Steps 4-6 all resolve via findSayIndexFrom, so a match landing on (or
+ *     .key`, which already IS the rep's manual override when one exists —
+ *     `selectBranchVariantKey` checks it first, ahead of auto_select_by),
+ *     find the line whose raw text equals `lineText`.
+ *  5. RESCUE, and ONLY when there is NO manual override for this branch
+ *     (`branchOverrides[cursor.branchTag]` is unset): if `lineText` was
+ *     genuinely absent from Sandra's auto-selected variant, that is real
+ *     evidence the auto-selection guessed wrong — try the cursor's named
+ *     `variantKey` instead, and use it only if `lineText` actually matches
+ *     a line there too. A REP'S MANUAL OVERRIDE ALWAYS WINS and is never
+ *     second-guessed this way: Jitter cannot see the override, so its
+ *     variantKey is not "conflicting evidence," just a guess made blind to
+ *     information Sandra has and Jitter doesn't. (Concretely: the rep taps
+ *     the FSBO variant tab; Jitter, seeing none of that, guesses
+ *     `cold_call`. That guess must never override the rep's own tap.)
+ *  6. Else, if `lineIndex` is in range for the resolved variant (Sandra's
+ *     own selection — the rescue variant is only ever used when its own
+ *     lineText match already resolved step 5), use it.
+ *  7. Else fall back to that SAME branch's own first spoken line, within
+ *     Sandra's own selected variant (mirrors selectSpokenLine, applied to
+ *     the branch the cursor named — not branch 0).
+ * Steps 4-7 all resolve via findSayIndexFrom, so a match landing on (or
  * advancing through) a "note" line is skipped forward to the next "say"
  * line, never rendered as speech.
  *
@@ -240,32 +251,45 @@ function branchFallbackIndex(lines: ScriptLineBlock[]): number {
 function resolveCursorPosition(
   cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex" | "lineText" | "scriptVersion">,
   block: PhaseScriptBlock,
+  branchOverrides: Record<string, string>,
 ): ResolvedCursorPosition | null {
   if (cursor.scriptVersion !== CLOSR_SCRIPT.version) return null; // 1
   if (cursor.phaseId !== block.phaseId) return null; // 2
   const branch = block.branches.find((candidate) => candidate.tag === cursor.branchTag); // 3
   if (!branch) return null;
 
-  const rawPhase = getScriptPhase(cursor.phaseId);
-  const rawVariant = rawPhase?.display.branches
-    .find((candidate) => candidate.tag === cursor.branchTag)
-    ?.variants.find((candidate) => candidate.key === branch.selected.key); // Sandra's own selection, never cursor.variantKey
-  if (!rawVariant) return null; // defensive only — block.branches and the raw script should never disagree here
+  const rawBranch = getScriptPhase(cursor.phaseId)?.display.branches.find((candidate) => candidate.tag === cursor.branchTag);
+  const sandraVariant = rawBranch?.variants.find((candidate) => candidate.key === branch.selected.key); // Sandra's own selection
+  if (!rawBranch || !sandraVariant) return null; // defensive only — block.branches and the raw script should never disagree here
 
-  const textMatch = rawVariant.lines.findIndex((line) => line.text === cursor.lineText); // 4
-  if (textMatch >= 0) {
-    const resolved = findSayIndexFrom(rawVariant.lines, textMatch);
-    if (resolved !== null) return { branchTag: branch.tag, variantKey: rawVariant.key, lineIndex: resolved };
+  const sandraTextMatch = sandraVariant.lines.findIndex((line) => line.text === cursor.lineText); // 4
+  if (sandraTextMatch >= 0) {
+    const resolved = findSayIndexFrom(sandraVariant.lines, sandraTextMatch);
+    if (resolved !== null) return { branchTag: branch.tag, variantKey: sandraVariant.key, lineIndex: resolved };
   }
 
-  if (cursor.lineIndex >= 0 && cursor.lineIndex < rawVariant.lines.length) {
-    // 5
-    const resolved = findSayIndexFrom(rawVariant.lines, cursor.lineIndex);
-    if (resolved !== null) return { branchTag: branch.tag, variantKey: rawVariant.key, lineIndex: resolved };
+  const hasManualOverride = branchOverrides[cursor.branchTag] !== undefined;
+  if (!hasManualOverride && cursor.variantKey !== sandraVariant.key) {
+    // 5 — rescue only fires on genuine textual evidence in the cursor's
+    // named variant; a bare lineIndex there would just be re-trusting
+    // Jitter's guess without proof, the exact thing this rule exists to
+    // prevent.
+    const cursorVariant = rawBranch.variants.find((candidate) => candidate.key === cursor.variantKey);
+    const cursorTextMatch = cursorVariant?.lines.findIndex((line) => line.text === cursor.lineText) ?? -1;
+    if (cursorVariant && cursorTextMatch >= 0) {
+      const resolved = findSayIndexFrom(cursorVariant.lines, cursorTextMatch);
+      if (resolved !== null) return { branchTag: branch.tag, variantKey: cursorVariant.key, lineIndex: resolved };
+    }
   }
 
-  // 6 — this branch's own fallback, never branch 0.
-  return { branchTag: branch.tag, variantKey: rawVariant.key, lineIndex: branchFallbackIndex(rawVariant.lines) };
+  if (cursor.lineIndex >= 0 && cursor.lineIndex < sandraVariant.lines.length) {
+    // 6
+    const resolved = findSayIndexFrom(sandraVariant.lines, cursor.lineIndex);
+    if (resolved !== null) return { branchTag: branch.tag, variantKey: sandraVariant.key, lineIndex: resolved };
+  }
+
+  // 7 — this branch's own fallback, within Sandra's own variant, never branch 0.
+  return { branchTag: branch.tag, variantKey: sandraVariant.key, lineIndex: branchFallbackIndex(sandraVariant.lines) };
 }
 
 function displayLineAt(branchTag: string, variantKey: string, lineIndex: number, phaseId: CoachPhaseId, tokens: ResolvedTokens): DisplayLine | null {
@@ -279,16 +303,20 @@ function displayLineAt(branchTag: string, variantKey: string, lineIndex: number,
 
 /** Resolves a cursor event to the exact line to show as "the thing to
  * say," following resolveCursorPosition's fall-through order — see that
- * function's docs for the full algorithm. Returns null only when the
+ * function's docs for the full algorithm. `branchOverrides` must be the
+ * SAME map passed to buildPhaseScriptBlock for this block (a rep's manual
+ * variant switch, keyed by branch tag — see resolveCursorPosition's step
+ * 5 for why this gates the rescue fallback). Returns null only when the
  * cursor's branch can't be found in the displayed phase, or the
  * version/phase gate fails; the caller falls back to today's full
  * branch-0/first-say-line behavior in that case. */
 export function resolveCursorLine(
   cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex" | "lineText" | "scriptVersion">,
   block: PhaseScriptBlock,
+  branchOverrides: Record<string, string>,
   tokens: ResolvedTokens,
 ): DisplayLine | null {
-  const position = resolveCursorPosition(cursor, block);
+  const position = resolveCursorPosition(cursor, block, branchOverrides);
   if (!position) return null;
   return displayLineAt(position.branchTag, position.variantKey, position.lineIndex, cursor.phaseId, tokens);
 }
@@ -298,14 +326,15 @@ export function resolveCursorLine(
  * cursor is active, so the preview shows the next line within the CURRENT
  * phase instead of jumping to the next phase. Built on the position
  * resolveCursorPosition actually landed on (which may differ from the raw
- * cursor.lineIndex, e.g. after a step-6 fallback), not on the cursor's own
+ * cursor.lineIndex, e.g. after a step-7 fallback), not on the cursor's own
  * lineIndex+1, so "next" is always relative to what's actually showing. */
 export function resolveCursorNextLine(
   cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex" | "lineText" | "scriptVersion">,
   block: PhaseScriptBlock,
+  branchOverrides: Record<string, string>,
   tokens: ResolvedTokens,
 ): DisplayLine | null {
-  const position = resolveCursorPosition(cursor, block);
+  const position = resolveCursorPosition(cursor, block, branchOverrides);
   if (!position) return null;
   const rawPhase = getScriptPhase(cursor.phaseId);
   const variant = rawPhase?.display.branches
