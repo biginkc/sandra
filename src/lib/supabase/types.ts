@@ -63,6 +63,73 @@ export type Database = {
           },
         ]
       }
+      ai_disposition_reviews: {
+        Row: {
+          ai_reason: string
+          conversation_id: string
+          created_at: string
+          disposition: string
+          id: string
+          org_id: string
+          property_id: string
+          resolved_at: string | null
+          reviewed_by: string | null
+          source_inbound_message_id: string
+          status: string
+          superseded_reason: string | null
+        }
+        Insert: {
+          ai_reason: string
+          conversation_id: string
+          created_at?: string
+          disposition: string
+          id?: string
+          org_id: string
+          property_id: string
+          resolved_at?: string | null
+          reviewed_by?: string | null
+          source_inbound_message_id: string
+          status?: string
+          superseded_reason?: string | null
+        }
+        Update: {
+          ai_reason?: string
+          conversation_id?: string
+          created_at?: string
+          disposition?: string
+          id?: string
+          org_id?: string
+          property_id?: string
+          resolved_at?: string | null
+          reviewed_by?: string | null
+          source_inbound_message_id?: string
+          status?: string
+          superseded_reason?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_disposition_reviews_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ai_disposition_reviews_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "ai_disposition_reviews_source_inbound_message_id_fkey"
+            columns: ["source_inbound_message_id"]
+            isOneToOne: true
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       ai_responder_configs: {
         Row: {
           active: boolean
@@ -3867,6 +3934,20 @@ export type Database = {
       }
     }
     Functions: {
+      fn_apply_ai_disposition_with_review: {
+        Args: {
+          p_ai_reason: string
+          p_conversation_id: string
+          p_disposition: string
+          p_property_id: string
+          p_source_inbound_message_id: string
+        }
+        Returns: Json
+      }
+      fn_confirm_ai_disposition_review: {
+        Args: { p_review_id: string }
+        Returns: Json
+      }
       jitter_claim_dialer_batch: {
         Args: {
           p_batch_id: string
