@@ -85,7 +85,9 @@ export default async function MessagesPage({
   // Everything downstream — thread pin, detail fetch, mark-read — deals
   // in canonical ids only.
   const canonicalThreadId =
-    isThreadFilter(effectiveFilter) && selectedThreadId
+    activeTab === "inbox" &&
+    isThreadFilter(effectiveFilter) &&
+    selectedThreadId
       ? await canonicalizeThreadId(supabase, selectedThreadId)
       : null;
 

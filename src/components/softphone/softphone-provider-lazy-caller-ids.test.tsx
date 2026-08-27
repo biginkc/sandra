@@ -71,5 +71,10 @@ describe("SoftphoneProvider caller-ID loading", () => {
     expect(await screen.findByTestId("caller-id-readonly")).toHaveTextContent(
       "Main",
     );
+
+    await user.click(screen.getByLabelText("Close dialer"));
+    await user.click(screen.getByTestId("header-dialer-button"));
+
+    expect(mocks.loadCallerIds).toHaveBeenCalledOnce();
   });
 });

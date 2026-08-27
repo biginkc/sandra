@@ -112,6 +112,15 @@ describe("MessagesPage latency boundaries", () => {
   });
 
   it("does not load queued rows or the Auth directory for list-only Inbox views", async () => {
+    mocks.listThreadPage.mockResolvedValueOnce({
+      threads: [{ assigneeId: "assigned-user" }],
+      counts: EMPTY_COUNTS,
+      total: 1,
+      hiddenCount: 0,
+      page: 1,
+      pageSize: 200,
+    });
+
     const element = (await MessagesPage({
       searchParams: Promise.resolve({ filter: "unread" }),
     })) as ReactElement<{
@@ -135,6 +144,21 @@ describe("MessagesPage latency boundaries", () => {
     expect(mocks.listQueuedPage).toHaveBeenCalledOnce();
     expect(element.props.queued).toEqual([{ id: "queued-row" }]);
     expect(element.props.queuedHasMore).toBe(true);
+  });
+
+  it("does not load hidden Inbox detail work when Outbox retains a thread URL", async () => {
+    await MessagesPage({
+      searchParams: Promise.resolve({
+        tab: "outbox",
+        thread: "conversation-1",
+      }),
+    });
+
+    expect(mocks.canonicalizeThreadId).not.toHaveBeenCalled();
+    expect(mocks.fetchInboxDetail).not.toHaveBeenCalled();
+    expect(mocks.createAdminClient).not.toHaveBeenCalled();
+    expect(mocks.getUserById).not.toHaveBeenCalled();
+    expect(mocks.markMessagesReadForThread).not.toHaveBeenCalled();
   });
 
   it("resolves only the selected detail assignee", async () => {

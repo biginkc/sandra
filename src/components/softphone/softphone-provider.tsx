@@ -580,7 +580,13 @@ export function SoftphoneProvider({ children }: Props) {
   const openIdle = useCallback(() => {
     if (phone === "closed") {
       transition({ type: "open" });
-      if (callingEnabled) void loadCallerIds();
+      const cachedCallerId = selectedCallerIdRef.current;
+      const hasCachedCallerId =
+        cachedCallerId !== null &&
+        callerIdsRef.current.some(
+          (item) => item.phone_e164 === cachedCallerId,
+        );
+      if (callingEnabled && !hasCachedCallerId) void loadCallerIds();
     } else if (phone === "idle") {
       resetIdle();
       setPhone("closed");
