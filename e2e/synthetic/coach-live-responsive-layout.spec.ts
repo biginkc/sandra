@@ -1,18 +1,62 @@
 import { expect, test } from "@playwright/test";
 import tailwindcss from "@tailwindcss/postcss";
-import { readFile } from "node:fs/promises";
+import * as esbuild from "esbuild";
+import Module from "node:module";
+import { createRequire } from "node:module";
 import path from "node:path";
+import vm from "node:vm";
 import postcss from "postcss";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
-const coachViewPath = path.resolve(
-  process.cwd(),
-  "src/components/coach/coach-live-view.tsx",
-);
+import { MAX_NUDGES, MAX_OBJECTION_CARDS } from "../../src/lib/coach/event-reducer";
+import { resolveCoachTokens } from "../../src/lib/coach/token-resolver";
+import type { CoachCallContext, CoachNudge, CoachObjectionCard } from "../../src/lib/coach/types";
+
+type CoachLiveViewModule = typeof import("../../src/components/coach/coach-live-view");
+
+/**
+ * Loads the REAL, on-disk GuidanceOverlay / CallControlDock components for
+ * server rendering — NOT a hand-copied HTML approximation — without going
+ * through Playwright's own TypeScript/JSX loader. Playwright's built-in
+ * transform unconditionally points every .tsx file's automatic JSX runtime
+ * at its OWN jsx-runtime (used internally for its ARIA-snapshot JSX
+ * helpers), not React's — a plain `import` of a React component file here
+ * produces Playwright's `{__pw_type: ...}` marker objects instead of real
+ * React elements, which react-dom/server rejects. Bundling the component
+ * with esbuild (react's automatic jsx runtime, explicit jsxImportSource)
+ * and evaluating the bundle via node:vm — bypassing Node's require hooks
+ * entirely — sidesteps that collision while still compiling the actual
+ * source file on disk, transitive local imports included.
+ */
+function loadRealCoachComponents(): Pick<CoachLiveViewModule, "GuidanceOverlay" | "CallControlDock"> {
+  const entryFile = path.resolve(process.cwd(), "src/components/coach/coach-live-view.tsx");
+  const result = esbuild.buildSync({
+    entryPoints: [entryFile],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node18",
+    jsx: "automatic",
+    jsxImportSource: "react",
+    packages: "external", // react, lucide-react, @base-ui/react, etc. — real npm packages, required normally at eval time
+    alias: { "@": path.resolve(process.cwd(), "src") },
+    write: false,
+    logLevel: "silent",
+  });
+  const code = result.outputFiles[0].text;
+  const script = new vm.Script(Module.wrap(code), { filename: entryFile });
+  const fn = script.runInThisContext();
+  const mod = { exports: {} as Record<string, unknown> };
+  fn(mod.exports, createRequire(entryFile), mod, path.dirname(entryFile), entryFile);
+  return mod.exports as Pick<CoachLiveViewModule, "GuidanceOverlay" | "CallControlDock">;
+}
+
+const { GuidanceOverlay, CallControlDock } = loadRealCoachComponents();
+
 let compiledCss = "";
-let coachViewSource = "";
 
 test.beforeAll(async () => {
-  coachViewSource = await readFile(coachViewPath, "utf8");
   const result = await postcss([tailwindcss()]).process(
     '@import "tailwindcss";',
     { from: path.resolve(process.cwd(), "src/app/globals.css") },
@@ -24,75 +68,133 @@ test.beforeEach(async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
 });
 
-test("finding 7 — every 375px coach call control, including Hang up, stays inside the viewport", async ({
-  page,
-}) => {
-  expect(coachViewSource).toContain(
-    'className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between"',
-  );
-  expect(coachViewSource).toContain(
-    'className="grid grid-cols-2 gap-2 sm:flex sm:items-center"',
-  );
+const sampleContext: CoachCallContext = {
+  sellerName: "Jane Homeowner",
+  propertyAddress: "123 Main St",
+  propertyCounty: "Jackson",
+  repName: "Alex Rep",
+  repPhoneE164: "+18165551234",
+  motivation: null,
+  leadId: "lead-1",
+  sellerPhoneE164: "+18165559876",
+  coldCallerName: null,
+  yearBuilt: null,
+  leadSource: "cold_call",
+  occupancy: "owner_occupied",
+};
+const tokens = resolveCoachTokens(sampleContext);
 
-  await page.setContent(`
+// Exactly at the reducer's caps (event-reducer.ts) — the maximum the
+// guidance stack is ever actually asked to lay out, since anything beyond
+// this is dropped before it reaches the component.
+const maxCards: CoachObjectionCard[] = ["price_too_low", "not_in_rush", "end_buyer"]
+  .slice(0, MAX_OBJECTION_CARDS)
+  .map((objectionId, index) => ({ id: `${objectionId}-${index}`, objectionId, ts: `t${index}`, expiresAt: Date.now() + 45_000 }));
+const maxNudges: CoachNudge[] = ["First nudge.", "Second nudge.", "Third nudge, a little longer to stress the stack's height."]
+  .slice(0, MAX_NUDGES)
+  .map((text, index) => ({ id: `nudge-${index}`, text, phaseId: "introduction" as const, ts: `n${index}`, expiresAt: Date.now() + 20_000 }));
+
+const dockProps = {
+  callName: "Jane Homeowner",
+  callStatus: "live" as const,
+  seconds: 65,
+  muted: false,
+  held: false,
+  holdPending: false,
+  onDigit: () => {},
+  onMute: () => {},
+  onHold: () => {},
+  onHangup: () => {},
+  onCollapse: () => {},
+};
+
+const guidanceOverlayHtml = renderToStaticMarkup(
+  createElement(GuidanceOverlay, {
+    nudges: maxNudges,
+    cards: maxCards,
+    tokens,
+    occupancy: sampleContext.occupancy,
+    onDismissNudge: () => {},
+    onDismissObjection: () => {},
+  }),
+);
+
+/** Mirrors CoachLiveView's own layout: a flex-column full-height view with a
+ * flex-1 filler standing in for the transcript/script area, so the dock
+ * ends up genuinely pinned to the real viewport bottom, exactly like
+ * production. */
+function pageShell(...sections: string[]): string {
+  return `
     <style>${compiledCss}</style>
-    <div class="flex shrink-0 flex-col gap-2 border-t px-4 py-3">
-      <div class="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div class="flex min-w-0 items-center gap-3">
-          <button type="button">Collapse</button>
-          <div><div class="text-sm font-bold">Jane Homeowner</div><div class="font-mono text-xs">00:12</div></div>
-        </div>
-        <div data-testid="controls" class="grid grid-cols-2 gap-2 sm:flex sm:items-center">
-          <button type="button" data-testid="mute">Mute</button>
-          <button type="button" data-testid="keypad">Keypad</button>
-          <button type="button" data-testid="hold">Hold</button>
-          <button type="button" data-testid="hangup">Hang up</button>
-        </div>
-      </div>
+    <div class="flex h-dvh flex-col">
+      <div class="min-h-0 flex-1"></div>
+      ${sections.join("\n")}
     </div>
-  `);
+  `;
+}
 
-  for (const testId of ["controls", "mute", "keypad", "hold", "hangup"]) {
-    const box = await page.getByTestId(testId).boundingBox();
+test("keeps every call control, including Hang up, inside the 375px viewport and genuinely clickable when the keypad is closed", async ({ page }) => {
+  const dockHtml = renderToStaticMarkup(createElement(CallControlDock, dockProps));
+  await page.setContent(pageShell(dockHtml));
+
+  for (const testId of ["coach-call-controls", "coach-mute", "coach-keypad-toggle", "coach-hold", "coach-hangup"]) {
+    const el = page.getByTestId(testId);
+    await expect(el).toBeInViewport();
+    const box = await el.boundingBox();
     expect(box, `${testId} must have browser geometry`).not.toBeNull();
     expect(box!.x, `${testId} left edge`).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width, `${testId} right edge`).toBeLessThanOrEqual(375);
   }
-  await expect(page.getByTestId("hangup")).toBeInViewport();
+
+  // A real Playwright click performs actionability hit-testing (visible,
+  // stable, not obscured by anything else at that point) before dispatching
+  // — it would time out here if some other element intercepted the click.
+  await page.getByTestId("coach-mute").click();
+  await page.getByTestId("coach-keypad-toggle").click();
+  await page.getByTestId("coach-hold").click();
+  await page.getByTestId("coach-hangup").click();
 });
 
-test("finding 8 — simultaneous 375px nudge and objection guidance share one non-overlapping stack", async ({
-  page,
-}) => {
-  expect(coachViewSource).toContain(
-    'className="pointer-events-none fixed top-20 right-4 z-[90] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2"',
-  );
+test("keeps the call dock genuinely clickable and never covered by the guidance stack at 375x812, even with all 3 objection cards, all 3 nudges, and the keypad open", async ({ page }) => {
+  const dockOpenHtml = renderToStaticMarkup(createElement(CallControlDock, { ...dockProps, initialKeypadOpen: true }));
+  await page.setContent(pageShell(guidanceOverlayHtml, dockOpenHtml));
 
-  await page.setContent(`
-    <style>${compiledCss}</style>
-    <div data-testid="stack" class="pointer-events-none fixed top-20 right-4 z-[90] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
-      <div class="flex flex-col gap-2">
-        <button data-testid="nudge" class="pointer-events-auto rounded-xl border px-3 py-2 text-left text-sm">Ask one more question before moving on.</button>
-      </div>
-      <div class="flex flex-col gap-2">
-        <button data-testid="objection" class="pointer-events-auto rounded-2xl border p-3.5 text-left">
-          <strong>Objection</strong>
-          <p>Acknowledge — Yeah, I hear you.</p>
-          <p>Disarm — I apologize that our offer was lower than we hoped.</p>
-          <p>Overcome — What were you hoping I was at least going to say?</p>
-        </button>
-      </div>
-    </div>
-  `);
+  expect(await page.getByTestId("objection-card").count()).toBe(MAX_OBJECTION_CARDS);
+  expect(await page.getByTestId("coach-nudge").count()).toBe(MAX_NUDGES);
 
-  const stack = await page.getByTestId("stack").boundingBox();
-  const nudge = await page.getByTestId("nudge").boundingBox();
-  const objection = await page.getByTestId("objection").boundingBox();
+  const stack = await page.getByTestId("coach-guidance-stack").boundingBox();
+  const dockRow = await page.getByTestId("coach-call-dock-row").boundingBox();
+  const keypad = await page.getByTestId("phone-keypad").boundingBox();
   expect(stack).not.toBeNull();
-  expect(nudge).not.toBeNull();
-  expect(objection).not.toBeNull();
-  expect(stack!.x).toBeGreaterThanOrEqual(0);
-  expect(stack!.x + stack!.width).toBeLessThanOrEqual(375);
-  expect(nudge!.y + nudge!.height).toBeLessThanOrEqual(objection!.y);
-  expect(objection!.x + objection!.width).toBeLessThanOrEqual(375);
+  expect(dockRow).not.toBeNull();
+  expect(keypad).not.toBeNull();
+
+  // The stack's own budget (top-20 + max-h-[40vh]) is what actually
+  // guarantees this, independent of how much content is inside it.
+  const viewportHeight = 812;
+  expect(stack!.height).toBeLessThanOrEqual(viewportHeight * 0.4 + 1);
+  expect(stack!.y + stack!.height).toBeLessThanOrEqual(80 + viewportHeight * 0.4 + 1);
+
+  // Bottom containment: fully loaded, the stack still never reaches down
+  // into the dock — keypad included, since an open keypad is the tallest
+  // the dock ever gets.
+  expect(stack!.y + stack!.height).toBeLessThanOrEqual(keypad!.y);
+  expect(stack!.y + stack!.height).toBeLessThanOrEqual(dockRow!.y);
+
+  for (const testId of ["coach-mute", "coach-keypad-toggle", "coach-hold", "coach-hangup"]) {
+    const el = page.getByTestId(testId);
+    await expect(el).toBeInViewport();
+    const box = await el.boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(375);
+  }
+
+  // Real clicks on the dock controls AND on keypad digits at the far
+  // corners of its grid — if the guidance stack's containment regressed
+  // and grew tall enough to overlap, these would time out as intercepted.
+  await page.getByTestId("coach-mute").click();
+  await page.getByTestId("coach-hold").click();
+  await page.getByTestId("coach-hangup").click();
+  await page.getByRole("button", { name: "Keypad 1" }).click();
+  await page.getByRole("button", { name: "Keypad #" }).click();
 });

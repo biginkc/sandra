@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { MAX_NUDGES, MAX_OBJECTION_CARDS } from "@/lib/coach/event-reducer";
 import { CLOSR_SCRIPT } from "@/lib/coach/script-block";
 import { useCoachSession } from "@/lib/coach/use-coach-session";
 import type { CoachCallContext } from "@/lib/coach/types";
@@ -207,7 +208,16 @@ describe("<CoachLiveView />", () => {
     expect(onCollapse).toHaveBeenCalledTimes(1);
   });
 
-  it("uses the shared modal primitive to enter, contain, and restore keyboard focus", async () => {
+  it("uses the shared modal primitive to enter and contain keyboard focus, and closes on Escape", async () => {
+    // Focus-RESTORATION is intentionally NOT asserted here. This harness's
+    // own "Open live coach" button stays mounted for the harness's whole
+    // lifetime — the exact "kept-alive button" shape production doesn't
+    // have (the real launch control unmounts along with the rest of the
+    // dialer popover once the coach view takes over). The dialog's
+    // finalFocus now targets the always-mounted header dialer button
+    // instead of whatever triggered the open, so a real-mount-lifecycle
+    // restoration test belongs in softphone-provider.test.tsx, against the
+    // actual SoftphoneProvider/SoftphoneHeaderButton wiring, not here.
     const user = userEvent.setup();
     render(<DialogLifecycleHarness />);
     const trigger = screen.getByRole("button", { name: "Open live coach" });
@@ -223,7 +233,6 @@ describe("<CoachLiveView />", () => {
 
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Live call coach" })).not.toBeInTheDocument());
-    expect(trigger).toHaveFocus();
   });
 
   it("calls onCollapse from the collapse button", async () => {
@@ -232,6 +241,48 @@ describe("<CoachLiveView />", () => {
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     await userEvent.click(screen.getByTestId("coach-collapse"));
     expect(onCollapse).toHaveBeenCalledTimes(1);
+  });
+
+  it("dials DTMF via the keyboard once the keypad is open during a live call — parity with the classic popover", async () => {
+    const onDigit = vi.fn();
+    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    await userEvent.click(screen.getByTestId("coach-keypad-toggle"));
+
+    await userEvent.keyboard("5*#");
+
+    expect(onDigit).toHaveBeenNthCalledWith(1, "5");
+    expect(onDigit).toHaveBeenNthCalledWith(2, "*");
+    expect(onDigit).toHaveBeenNthCalledWith(3, "#");
+  });
+
+  it("ignores keyboard digits while the keypad is closed", async () => {
+    const onDigit = vi.fn();
+    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+    await userEvent.keyboard("5");
+
+    expect(onDigit).not.toHaveBeenCalled();
+  });
+
+  it("never dials DTMF from keystrokes typed into the entry-token editor, even with the keypad open", async () => {
+    // The popover never needed this guard — it has no free-text fields.
+    // This dialog's EntryTokenChip does, so typing an offer price like
+    // "210000" must land in the field, not also dial touch-tones into the
+    // live call.
+    const onDigit = vi.fn();
+    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    await userEvent.click(screen.getByTestId("coach-keypad-toggle"));
+    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
+    await userEvent.click(screen.getAllByTestId("entry-chip-offer_price")[0]);
+    const input = screen.getByTestId("entry-input-offer_price");
+
+    await userEvent.type(input, "210000");
+
+    expect(onDigit).not.toHaveBeenCalled();
+    expect(input).toHaveValue("210000");
   });
 
   it("reacts to a phase event by advancing the rail", async () => {
@@ -459,6 +510,30 @@ describe("<CoachLiveView />", () => {
     expect(stack).toContainElement(screen.getByTestId("objection-card"));
     expect(stack.className).toMatch(/flex-col/);
     expect(stack.className).toMatch(/max-w-\[calc\(100vw-2rem\)\]/);
+    // The stack's own max-height + internal scroll is what actually
+    // guarantees it can never grow tall enough to cover the call dock,
+    // regardless of how many cards/nudges are showing.
+    expect(stack.className).toMatch(/max-h-\[40vh\]/);
+    expect(stack.className).toMatch(/overflow-y-auto/);
+  });
+
+  it("never renders more than the capped number of cards/nudges, even during a rapid-fire burst — the stack's scroll is a backstop, not the only guard", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+    const objectionIds = ["price_too_low", "not_in_rush", "end_buyer", "zillow_worth", "list_with_realtor"];
+    for (const [index, objectionId] of objectionIds.entries()) {
+      broadcast({ type: "objection", objectionId, ts: `obj-${index}` });
+    }
+    const nudgeTexts = ["A", "B", "C", "D", "E"];
+    for (const [index, text] of nudgeTexts.entries()) {
+      broadcast({ type: "coach_note", text, phaseId: "introduction", ts: `nudge-${index}` });
+    }
+
+    expect(objectionIds.length).toBeGreaterThan(MAX_OBJECTION_CARDS);
+    expect(nudgeTexts.length).toBeGreaterThan(MAX_NUDGES);
+    expect(screen.getAllByTestId("objection-card")).toHaveLength(MAX_OBJECTION_CARDS);
+    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(MAX_NUDGES);
   });
 
   it("keeps every call action, including Hang up, in the 375px responsive control grid", async () => {

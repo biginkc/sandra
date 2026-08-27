@@ -949,6 +949,33 @@ describe("SoftphoneProvider coach UI flag", () => {
     expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument();
   });
 
+  it("moves focus to the header dialer button when the coach view collapses — a real mount/unmount lifecycle, not a kept-alive trigger", async () => {
+    // The coach dialog's launch mechanism (call-lead-button) isn't a
+    // persistent trigger the way a classic dialog's opener usually is —
+    // by the time the dialog closes, the button that started the call may
+    // well be scrolled off, disabled, or otherwise not the right place to
+    // land focus. CoachLiveView's finalFocus targets the always-mounted
+    // header dialer button instead. This exercises the REAL collapse path
+    // (SoftphoneProvider unmounting CoachLiveView via coachCollapsed),
+    // not a synthetic harness with its own kept-alive open/close button.
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+
+    await user.click(screen.getByTestId("coach-collapse"));
+
+    expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("header-dialer-button")).toHaveFocus());
+  });
+
   it("Escape inside the coach view also collapses back to the classic popover", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");

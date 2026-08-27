@@ -29,6 +29,19 @@ const MAX_TRANSCRIPT_LINES = 500;
 export const OBJECTION_CARD_TTL_MS = 45_000;
 export const NUDGE_TTL_MS = 20_000;
 
+/** Bounds how many simultaneously-visible guidance cards/nudges the
+ * GuidanceOverlay stack ever has to lay out. This is a hard cap on STATE,
+ * not just rendering — a purely presentational cap (slicing the array only
+ * at render time) would leave the un-rendered cards mounted nowhere, so
+ * their own auto-dismiss timer effect would never run and they'd sit in
+ * state forever. Dropping the oldest here means anything capped out is
+ * actually gone, not a zombie waiting on a timer that never fires. Combined
+ * with the stack's own max-height + internal scroll, this is what keeps
+ * the guidance overlay from ever growing tall enough to cover the call
+ * dock, even if objections/nudges fire in a rapid burst. */
+export const MAX_OBJECTION_CARDS = 3;
+export const MAX_NUDGES = 3;
+
 export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"): CoachState {
   return {
     connected: false,
@@ -96,21 +109,25 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         // Server truth always wins over a manual rail tap.
         overriddenPhaseId: null,
       };
-    case "objection":
+    case "objection": {
+      const nextObjectionCards = [
+        ...state.objectionCards,
+        {
+          id: `${action.objectionId}-${action.ts}-${state.objectionCards.length}`,
+          objectionId: action.objectionId,
+          ts: action.ts,
+          expiresAt: Date.now() + OBJECTION_CARD_TTL_MS,
+        },
+      ];
       return {
         ...state,
         connected: true,
         lastEventAt: action.ts,
-        objectionCards: [
-          ...state.objectionCards,
-          {
-            id: `${action.objectionId}-${action.ts}-${state.objectionCards.length}`,
-            objectionId: action.objectionId,
-            ts: action.ts,
-            expiresAt: Date.now() + OBJECTION_CARD_TTL_MS,
-          },
-        ],
+        objectionCards: nextObjectionCards.length > MAX_OBJECTION_CARDS
+          ? nextObjectionCards.slice(nextObjectionCards.length - MAX_OBJECTION_CARDS)
+          : nextObjectionCards,
       };
+    }
     case "counter":
       return {
         ...state,
@@ -132,22 +149,24 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         lastEventAt: action.ts,
         holdTimer: { timerId: action.timerId, startedAt: action.startedAt, durationS: action.durationS },
       };
-    case "coach_note":
+    case "coach_note": {
+      const nextNudges = [
+        ...state.nudges,
+        {
+          id: `${action.phaseId}-${action.ts}-${state.nudges.length}`,
+          text: action.text,
+          phaseId: action.phaseId,
+          ts: action.ts,
+          expiresAt: Date.now() + NUDGE_TTL_MS,
+        },
+      ];
       return {
         ...state,
         connected: true,
         lastEventAt: action.ts,
-        nudges: [
-          ...state.nudges,
-          {
-            id: `${action.phaseId}-${action.ts}-${state.nudges.length}`,
-            text: action.text,
-            phaseId: action.phaseId,
-            ts: action.ts,
-            expiresAt: Date.now() + NUDGE_TTL_MS,
-          },
-        ],
+        nudges: nextNudges.length > MAX_NUDGES ? nextNudges.slice(nextNudges.length - MAX_NUDGES) : nextNudges,
       };
+    }
     case "dismiss_objection":
       return {
         ...state,

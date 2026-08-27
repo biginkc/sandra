@@ -152,6 +152,19 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       <DialogContent
         showCloseButton={false}
         data-testid="coach-live-view"
+        // Base UI's default finalFocus ("trigger or previously focused
+        // element") doesn't hold up here: production never opens this
+        // dialog from a persistent trigger button — it's portaled in
+        // directly once a call goes live, and by the time it closes, the
+        // element that had focus beforehand may well have unmounted (the
+        // call state that owned it has moved on). A function target is
+        // resolved live, at close time, so it can't go stale the way a
+        // ref captured at open time could — it looks up the header dialer
+        // button, which is mounted in the app shell unconditionally
+        // (unlike the classic popover's "reopen coach" button, which only
+        // exists once the collapse this very focus-move is part of has
+        // finished committing).
+        finalFocus={() => document.querySelector<HTMLElement>('[data-testid="header-dialer-button"]') ?? false}
         className="inset-0 top-0 left-0 z-[80] flex h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none bg-background p-0 text-foreground ring-0 sm:max-w-none"
       >
       <DialogTitle className="sr-only">Live call coach</DialogTitle>
@@ -741,7 +754,13 @@ function EntryTokenChip({
 
 /** Coaching nudges and objection cards share one responsive stack so they
  * cannot collide when both arrive on a narrow call screen. */
-function GuidanceOverlay({
+/** Exported (only these two subcomponents, not the rest) so the
+ * database-free synthetic Playwright spec (e2e/synthetic/
+ * coach-live-responsive-layout.spec.ts) can server-render the REAL
+ * guidance-stack and call-dock markup via react-dom/server, instead of a
+ * hand-copied HTML approximation that can silently drift from the actual
+ * component. */
+export function GuidanceOverlay({
   nudges,
   cards,
   tokens,
@@ -760,7 +779,18 @@ function GuidanceOverlay({
   return (
     <div
       data-testid="coach-guidance-stack"
-      className="pointer-events-none fixed top-20 right-4 z-[90] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2"
+      // max-h + overflow-y-auto is what actually guarantees this stack can
+      // never cover the call dock, regardless of how many cards exist —
+      // the reducer-level MAX_OBJECTION_CARDS/MAX_NUDGES cap (event-
+      // reducer.ts) bounds how much there normally is TO scroll, but this
+      // is the real containment. 40vh is a deliberately generous fixed
+      // budget rather than a dock-height measurement: at the narrowest
+      // supported viewport (375x812) it leaves the topbar and the dock —
+      // even with its keypad open, the tallest the dock ever gets — clear
+      // underneath. pointer-events-auto (not -none) so the stack itself
+      // can receive wheel/touch scroll input; each card is still the only
+      // actually-clickable content within it.
+      className="pointer-events-auto fixed top-20 right-4 z-[90] flex max-h-[40vh] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto overscroll-contain"
     >
       <NudgeOverlay nudges={nudges} onDismiss={onDismissNudge} />
       <ObjectionOverlay cards={cards} tokens={tokens} occupancy={occupancy} onDismiss={onDismissObjection} />
@@ -923,7 +953,7 @@ function ObjectionCard({
   );
 }
 
-function CallControlDock({
+export function CallControlDock({
   callName,
   callStatus,
   seconds,
@@ -935,6 +965,14 @@ function CallControlDock({
   onHold,
   onHangup,
   onCollapse,
+  // Purely additive, defaults to the existing behavior: the keypad is
+  // internal, uncontrolled state everywhere in the app, toggled only by
+  // the Keypad button. This only exists so the database-free synthetic
+  // Playwright spec (e2e/synthetic/coach-live-responsive-layout.spec.tsx)
+  // can server-render the REAL keypad-open layout via react-dom/server —
+  // that spec has no JS runtime to click the toggle with, since it sets
+  // static HTML directly rather than hydrating a bundle.
+  initialKeypadOpen = false,
 }: {
   callName: string;
   callStatus: CoachCallStatus;
@@ -947,8 +985,9 @@ function CallControlDock({
   onHold: () => void;
   onHangup: () => void;
   onCollapse: () => void;
+  initialKeypadOpen?: boolean;
 }) {
-  const [keypadOpen, setKeypadOpen] = useState(false);
+  const [keypadOpen, setKeypadOpen] = useState(initialKeypadOpen);
   const live = callStatus === "live";
   const timerLabel = held
     ? "On hold"
@@ -957,6 +996,26 @@ function CallControlDock({
       : callStatus === "ringing"
         ? "Ringing…"
         : timerText(seconds);
+
+  // Parity with the classic popover's LiveView (softphone-provider.tsx),
+  // which has had this since before the coach view existed. Guards against
+  // the one interaction the popover never had to consider: this dialog has
+  // a real Base UI focus trap AND a free-text entry-token editor
+  // (EntryTokenChip) inside it. Typing "210000" into the offer-price field
+  // must never also dial touch-tones into the live call — so, unlike the
+  // popover, this listener bails whenever the keydown's target is an
+  // editable field, not just whenever the keypad happens to be closed.
+  useEffect(() => {
+    if (!keypadOpen || held || callStatus !== "live") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!/^[0-9*#]$/.test(event.key) || event.repeat) return;
+      if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true']")) return;
+      event.preventDefault();
+      onDigit(event.key as DtmfDigit);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [callStatus, held, keypadOpen, onDigit]);
 
   return (
     <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-card px-4 py-3">

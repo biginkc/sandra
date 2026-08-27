@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { coachReducer, initialCoachState, NUDGE_TTL_MS, OBJECTION_CARD_TTL_MS } from "./event-reducer";
+import { coachReducer, initialCoachState, MAX_NUDGES, MAX_OBJECTION_CARDS, NUDGE_TTL_MS, OBJECTION_CARD_TTL_MS } from "./event-reducer";
 import type { CoachState } from "./types";
 
 /** Every wire event carries both content versions, always — required. */
@@ -126,6 +126,20 @@ describe("coachReducer — objection card lifecycle", () => {
     expect(state.objectionCards[0].id).not.toBe(state.objectionCards[1].id);
   });
 
+  it(`caps at ${MAX_OBJECTION_CARDS} simultaneous cards, dropping the OLDEST — a state-level cap, not just presentational, so the guidance stack can never grow unbounded`, () => {
+    let state = initialCoachState();
+    const objectionIds = ["price_too_low", "not_in_rush", "end_buyer", "zillow_worth", "list_with_realtor"];
+    for (const [index, objectionId] of objectionIds.entries()) {
+      state = coachReducer(state, { type: "objection", objectionId, ts: `t${index}`, ...V });
+    }
+    expect(objectionIds.length).toBeGreaterThan(MAX_OBJECTION_CARDS); // the test actually exercises the cap
+    expect(state.objectionCards).toHaveLength(MAX_OBJECTION_CARDS);
+    // The most recent MAX_OBJECTION_CARDS survive, oldest-first order kept.
+    expect(state.objectionCards.map((card) => card.objectionId)).toEqual(
+      objectionIds.slice(objectionIds.length - MAX_OBJECTION_CARDS),
+    );
+  });
+
   describe("expiresAt — an absolute timestamp, not a relative TTL a remount could restart", () => {
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());
@@ -245,6 +259,17 @@ describe("coachReducer — coach_note nudges", () => {
     const [first, second] = state.nudges;
     state = coachReducer(state, { type: "dismiss_nudge", nudgeId: first.id });
     expect(state.nudges).toEqual([second]);
+  });
+
+  it(`caps at ${MAX_NUDGES} simultaneous nudges, dropping the OLDEST`, () => {
+    let state = initialCoachState();
+    const texts = ["A", "B", "C", "D", "E"];
+    for (const [index, text] of texts.entries()) {
+      state = coachReducer(state, { type: "coach_note", text, phaseId: "introduction", ts: `t${index}`, ...V });
+    }
+    expect(texts.length).toBeGreaterThan(MAX_NUDGES); // the test actually exercises the cap
+    expect(state.nudges).toHaveLength(MAX_NUDGES);
+    expect(state.nudges.map((nudge) => nudge.text)).toEqual(texts.slice(texts.length - MAX_NUDGES));
   });
 
   describe("expiresAt — an absolute timestamp, not a relative TTL a remount could restart", () => {
