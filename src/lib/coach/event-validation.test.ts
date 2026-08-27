@@ -35,10 +35,10 @@ describe("parseCoachEvent — valid events", () => {
       event: { type: "gate", gateId: "no_concerns", cleared: true, ts: "t1", ...V },
     });
     expect(
-      parseCoachEvent({ type: "timer", timerId: "hold_timer", startedAt: "t0", durationS: 180, ts: "t1", ...V }),
+      parseCoachEvent({ type: "timer", timerId: "hold_timer", startedAt: "2026-08-26T18:00:00.000Z", durationS: 180, ts: "t1", ...V }),
     ).toEqual({
       ok: true,
-      event: { type: "timer", timerId: "hold_timer", startedAt: "t0", durationS: 180, ts: "t1", ...V },
+      event: { type: "timer", timerId: "hold_timer", startedAt: "2026-08-26T18:00:00.000Z", durationS: 180, ts: "t1", ...V },
     });
   });
 
@@ -115,12 +115,23 @@ describe("parseCoachEvent — malformed known-type events are dropped and counte
     expect(parseCoachEvent({ type: "counter", probeCount: Number.NaN, ts: "t1", ...V }).ok).toBe(false);
   });
 
+  it("rejects negative and fractional counter values before they can corrupt the live UI", () => {
+    expect(parseCoachEvent({ type: "counter", probeCount: -1, ts: "t1", ...V }).ok).toBe(false);
+    expect(parseCoachEvent({ type: "counter", probeCount: 1.5, ts: "t1", ...V }).ok).toBe(false);
+  });
+
   it("rejects a gate event with a non-boolean cleared", () => {
     expect(parseCoachEvent({ type: "gate", gateId: "no_concerns", cleared: "yes", ts: "t1", ...V }).ok).toBe(false);
   });
 
   it("rejects a timer event missing durationS", () => {
-    expect(parseCoachEvent({ type: "timer", timerId: "hold_timer", startedAt: "t0", ts: "t1", ...V }).ok).toBe(false);
+    expect(parseCoachEvent({ type: "timer", timerId: "hold_timer", startedAt: "2026-08-26T18:00:00.000Z", ts: "t1", ...V }).ok).toBe(false);
+  });
+
+  it("rejects invalid timer ranges and unparseable starts instead of rendering Hold NaN:NaN", () => {
+    expect(parseCoachEvent({ type: "timer", timerId: "hold_timer", startedAt: "2026-08-26T18:00:00.000Z", durationS: -1, ts: "t1", ...V }).ok).toBe(false);
+    expect(parseCoachEvent({ type: "timer", timerId: "hold_timer", startedAt: "2026-08-26T18:00:00.000Z", durationS: 1.5, ts: "t1", ...V }).ok).toBe(false);
+    expect(parseCoachEvent({ type: "timer", timerId: "hold_timer", startedAt: "not-a-date", durationS: 180, ts: "t1", ...V }).ok).toBe(false);
   });
 
   it("rejects a coach_note event missing text", () => {

@@ -34,6 +34,18 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "boolean" ? false : typeof value === "number" && Number.isFinite(value);
 }
 
+function isNonNegativeInteger(value: unknown): value is number {
+  return isFiniteNumber(value) && Number.isInteger(value) && value >= 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return isFiniteNumber(value) && Number.isInteger(value) && value > 0;
+}
+
+function isParseableTimestamp(value: unknown): value is string {
+  return isNonEmptyString(value) && Number.isFinite(Date.parse(value));
+}
+
 /** scriptVersion/matcherVersion are required on every wire message, per the
  * producer's verbatim wire contract (src/coach/wire-contract.ts in the
  * Jitter repo, WIRE_CONTRACT_VERSION '1.0.0'). An event missing either, or
@@ -107,7 +119,7 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
       break;
     }
     case "counter": {
-      if (isFiniteNumber(payload.probeCount) && isNonEmptyString(payload.ts)) {
+      if (isNonNegativeInteger(payload.probeCount) && isNonEmptyString(payload.ts)) {
         return {
           ok: true,
           event: { type: "counter", probeCount: payload.probeCount, ts: payload.ts, ...versions },
@@ -127,8 +139,8 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
     case "timer": {
       if (
         isNonEmptyString(payload.timerId) &&
-        isNonEmptyString(payload.startedAt) &&
-        isFiniteNumber(payload.durationS) &&
+        isParseableTimestamp(payload.startedAt) &&
+        isPositiveInteger(payload.durationS) &&
         isNonEmptyString(payload.ts)
       ) {
         return {
