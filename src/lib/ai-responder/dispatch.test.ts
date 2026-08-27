@@ -85,6 +85,12 @@ type AiClaimRow = {
 };
 
 type MockState = {
+  aiDispoReviews: Array<{
+    conversationId: string;
+    disposition: string;
+    inboundMessageId: string;
+    reason: string;
+  }>;
   aiClaims: AiClaimRow[];
   aiClaimInsertError?: boolean;
   contact: {
@@ -134,6 +140,7 @@ const HAPPY_REPLY: AiStructuredOutput = {
 
 function createMockState(): MockState {
   return {
+    aiDispoReviews: [],
     config: {
       active: true,
       business_hours_only: false,
@@ -537,6 +544,54 @@ function createMockSupabase(state: MockState) {
       }
       throw new Error(`Unexpected table: ${table}`);
     },
+    rpc(name: string, args: Record<string, unknown>) {
+      if (name !== "fn_apply_ai_disposition_with_review") {
+        throw new Error(`Unexpected RPC: ${name}`);
+      }
+
+      const disposition = String(args.p_disposition);
+      const current = state.property.outreach_dispo;
+      const humanOwned = new Set([
+        "bad_number",
+        "nurture",
+        "callback_requested",
+        "booked_appointment",
+      ]);
+      const severity: Record<string, number> = {
+        not_interested: 1,
+        wrong_number: 2,
+        opted_out: 3,
+        dnc: 4,
+      };
+      const alreadyTerminal =
+        state.property.needs_human_attention ||
+        (current === disposition && state.aiDispoReviews.length === 0) ||
+        (disposition !== "opted_out" &&
+          disposition !== "dnc" &&
+          current !== null &&
+          humanOwned.has(current)) ||
+        (severity[disposition] ?? 0) < (current ? (severity[current] ?? 0) : 0);
+
+      if (alreadyTerminal) {
+        return Promise.resolve({
+          data: { status: "already_terminal" },
+          error: null,
+        });
+      }
+
+      state.property.outreach_dispo = disposition;
+      state.property.needs_human_attention = false;
+      state.aiDispoReviews.push({
+        conversationId: String(args.p_conversation_id),
+        disposition,
+        inboundMessageId: String(args.p_source_inbound_message_id),
+        reason: String(args.p_ai_reason),
+      });
+      return Promise.resolve({
+        data: { status: "applied", reviewId: "review-1" },
+        error: null,
+      });
+    },
   };
 }
 
@@ -911,13 +966,47 @@ describe("dispatchAiResponse debounce", () => {
     expect(state.property.outreach_dispo).toBe("wrong_number");
     expect(state.property.needs_human_attention).toBe(false);
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
-    expect(recordLeadEvent).toHaveBeenCalledOnce();
-    expect(recordLeadEvent).toHaveBeenCalledWith({
-      propertyId: PROPERTY_ID,
-      eventType: "dispo_set",
-      actorType: "ai",
-      payload: { from: null, to: "wrong_number" },
+    expect(state.aiDispoReviews).toEqual([
+      {
+        conversationId: CONVERSATION_ID,
+        disposition: "wrong_number",
+        inboundMessageId: "inbound-low-confidence",
+        reason: "model:wrong_number",
+      },
+    ]);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("fails closed to human attention when an AI disposition lacks exact inbound identity", async () => {
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "close_wrong_number",
+      wrong_scope: "this_property",
+      confidence: 0.9,
+      sentiment: "neutral",
     });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "wrong number",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "disposition_write_failed",
+    });
+    expect(state.property.outreach_dispo).toBeNull();
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.aiDispoReviews).toEqual([]);
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
   });
 
   it("low-confidence opt_out still suppresses the phone and marks the property opted out", async () => {
@@ -959,13 +1048,15 @@ describe("dispatchAiResponse debounce", () => {
     expect(state.property.outreach_dispo).toBe("opted_out");
     expect(state.property.needs_human_attention).toBe(false);
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
-    expect(recordLeadEvent).toHaveBeenCalledOnce();
-    expect(recordLeadEvent).toHaveBeenCalledWith({
-      propertyId: PROPERTY_ID,
-      eventType: "dispo_set",
-      actorType: "ai",
-      payload: { from: null, to: "opted_out" },
-    });
+    expect(state.aiDispoReviews).toEqual([
+      {
+        conversationId: CONVERSATION_ID,
+        disposition: "opted_out",
+        inboundMessageId: "inbound-low-confidence-opt-out",
+        reason: "model:opt_out",
+      },
+    ]);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   it("close_dnc writes a suppressed DNC disposition and does not send", async () => {
@@ -1006,13 +1097,15 @@ describe("dispatchAiResponse debounce", () => {
     );
     expect(state.property.outreach_dispo).toBe("dnc");
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
-    expect(recordLeadEvent).toHaveBeenCalledOnce();
-    expect(recordLeadEvent).toHaveBeenCalledWith({
-      propertyId: PROPERTY_ID,
-      eventType: "dispo_set",
-      actorType: "ai",
-      payload: { from: null, to: "dnc" },
-    });
+    expect(state.aiDispoReviews).toEqual([
+      {
+        conversationId: CONVERSATION_ID,
+        disposition: "dnc",
+        inboundMessageId: "inbound-threat",
+        reason: "model:threat_dnc",
+      },
+    ]);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   it("deescalate_close sends the fixed named template without humanizer", async () => {
@@ -1050,13 +1143,15 @@ describe("dispatchAiResponse debounce", () => {
       }),
     );
     expect(state.property.outreach_dispo).toBe("not_interested");
-    expect(recordLeadEvent).toHaveBeenCalledOnce();
-    expect(recordLeadEvent).toHaveBeenCalledWith({
-      propertyId: PROPERTY_ID,
-      eventType: "dispo_set",
-      actorType: "ai",
-      payload: { from: null, to: "not_interested" },
-    });
+    expect(state.aiDispoReviews).toEqual([
+      {
+        conversationId: CONVERSATION_ID,
+        disposition: "not_interested",
+        inboundMessageId: "inbound-deescalate",
+        reason: "model:deescalate_close",
+      },
+    ]);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   it("does not clobber a human-only disposition during the final write", async () => {

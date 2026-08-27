@@ -6,10 +6,7 @@ import { getConsentState } from "@/lib/messaging/consent";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
-import {
-  HUMAN_OWNED_DISPOS,
-  shouldSuppressAutomatedSend,
-} from "@/lib/messaging/suppression";
+import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
@@ -68,19 +65,6 @@ export type AiDispatchOptions = {
 };
 
 const AI_REPLY_THREAD_DEBOUNCE_MS = 45_000;
-// Sourced from suppression.ts's HUMAN_OWNED_DISPOS (the single disposition
-// spine, Codex round 2) rather than a locally-duplicated literal set — a
-// human-owned outcome (nurture/callback_requested/booked_appointment) that
-// the AI responder must neither dispatch against nor clobber. Both
-// isTerminalAiResponderProperty (pre-generation gate, via
-// shouldSuppressAutomatedSend) and shouldUpdateDispo's preservation check
-// (final-write gate) key off this same Set, so adding a value in
-// suppression.ts covers both call sites — a consent-class outcome
-// (opted_out/dnc) still overwrites it, same as it overwrites
-// nurture/callback_requested, via shouldUpdateDispo's existing
-// `next !== "opted_out" && next !== "dnc"` carve-out.
-const HUMAN_ONLY_DISPOS: ReadonlySet<string> = HUMAN_OWNED_DISPOS;
-
 const DEESCALATION_TEMPLATE_WITH_NAME =
   "So sorry to bug you. Sounds like you get a lot of these. Are you {first_name}? Just want to make sure we don't bother you again.";
 const DEESCALATION_TEMPLATE_GENERIC =
@@ -381,6 +365,8 @@ export async function dispatchAiResponse(
       const optOutResult = await applyResponderOptOut(supabase, {
         propertyId: input.propertyId,
         contactId: input.contactId,
+        conversationId: input.conversationId ?? null,
+        inboundMessageId: input.inboundMessageId ?? null,
         inboundFromPhone: input.inboundFromPhone ?? null,
         orgId: property.org_id,
         reason: route.reason,
@@ -402,6 +388,8 @@ export async function dispatchAiResponse(
       const dncResult = await applyResponderDnc(supabase, {
         propertyId: input.propertyId,
         contactId: input.contactId,
+        conversationId: input.conversationId ?? null,
+        inboundMessageId: input.inboundMessageId ?? null,
         inboundFromPhone: input.inboundFromPhone ?? null,
         orgId: property.org_id,
         reason: route.reason,
@@ -416,6 +404,8 @@ export async function dispatchAiResponse(
       const wrongNumberResult = await applyWrongNumber(supabase, {
         propertyId: input.propertyId,
         contactId: input.contactId,
+        conversationId: input.conversationId ?? null,
+        inboundMessageId: input.inboundMessageId ?? null,
         inboundFromPhone: input.inboundFromPhone ?? null,
         orgId: property.org_id,
         scope: route.scope,
@@ -430,6 +420,8 @@ export async function dispatchAiResponse(
     case "auto_close":
       const autoCloseResult = await setResponderDispo(supabase, {
         propertyId: input.propertyId,
+        conversationId: input.conversationId ?? null,
+        inboundMessageId: input.inboundMessageId ?? null,
         dispo: route.dispo,
         reason: route.reason,
       });
@@ -477,6 +469,8 @@ export async function dispatchAiResponse(
       if (route.kind === "deescalate_close") {
         const closeResult = await setResponderDispo(supabase, {
           propertyId: input.propertyId,
+          conversationId: input.conversationId ?? null,
+          inboundMessageId: input.inboundMessageId ?? null,
           dispo: "not_interested",
           reason: route.reason,
         });
@@ -750,49 +744,32 @@ async function setResponderDispo(
   supabase: SupabaseClient<Database>,
   args: {
     propertyId: string;
+    conversationId: string | null;
+    inboundMessageId: string | null;
     dispo: "wrong_number" | "not_interested" | "opted_out" | "dnc";
     reason: string;
   },
 ): Promise<ResponderDispoResult> {
-  const { data: current, error: currentError } = await supabase
-    .from("properties")
-    .select("outreach_dispo, needs_human_attention")
-    .eq("id", args.propertyId)
-    .maybeSingle();
-  if (currentError) {
-    reportError(new Error(currentError.message), {
-      tags: { surface: "ai_responder_dispo_read" },
-      extra: { propertyId: args.propertyId, reason: args.reason },
+  if (!args.conversationId || !args.inboundMessageId) {
+    const reason = "ai_disposition_missing_thread_identity";
+    await markPropertyNeedsAttention(supabase, args.propertyId, reason);
+    reportError(new Error(reason), {
+      tags: { surface: "ai_responder_set_dispo" },
+      extra: { propertyId: args.propertyId, dispo: args.dispo },
     });
     return { updated: false, reason: "db_error" };
   }
-  if (!shouldUpdateDispo(current?.outreach_dispo ?? null, args.dispo)) {
-    return { updated: false, reason: "already_terminal" };
-  }
-  if (current?.needs_human_attention) {
-    return { updated: false, reason: "already_terminal" };
-  }
-  if (current?.outreach_dispo === args.dispo) {
-    return { updated: false, reason: "already_terminal" };
-  }
 
-  const now = new Date().toISOString();
-  let updateQuery = supabase
-    .from("properties")
-    .update({
-      outreach_dispo: args.dispo,
-      needs_human_attention: false,
-      last_ai_escalation_reason: null,
-      updated_at: now,
-    })
-    .eq("id", args.propertyId)
-    .eq("needs_human_attention", false);
-  updateQuery = current?.outreach_dispo == null
-    ? updateQuery.is("outreach_dispo", null)
-    : updateQuery.eq("outreach_dispo", current.outreach_dispo);
-  const { data: updated, error } = await updateQuery
-    .select("id")
-    .maybeSingle();
+  const { data, error } = await supabase.rpc(
+    "fn_apply_ai_disposition_with_review",
+    {
+      p_property_id: args.propertyId,
+      p_conversation_id: args.conversationId,
+      p_source_inbound_message_id: args.inboundMessageId,
+      p_disposition: args.dispo,
+      p_ai_reason: args.reason,
+    },
+  );
   if (error) {
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_set_dispo" },
@@ -800,16 +777,18 @@ async function setResponderDispo(
     });
     return { updated: false, reason: "db_error" };
   }
-  if (!updated) {
+
+  const status = readAiDispositionRpcStatus(data);
+  if (status === "already_terminal") {
     return { updated: false, reason: "already_terminal" };
   }
-
-  await recordLeadEvent({
-    propertyId: args.propertyId,
-    eventType: LEAD_EVENT_TYPES.DISPO_SET,
-    actorType: "ai",
-    payload: { from: current?.outreach_dispo ?? null, to: args.dispo },
-  });
+  if (status !== "applied" && status !== "replayed") {
+    reportError(new Error("unexpected AI disposition RPC response"), {
+      tags: { surface: "ai_responder_set_dispo" },
+      extra: { propertyId: args.propertyId, dispo: args.dispo, status },
+    });
+    return { updated: false, reason: "db_error" };
+  }
 
   if (args.dispo === "wrong_number") {
     await pausePropertyEnrollments(supabase, {
@@ -827,6 +806,8 @@ async function applyResponderOptOut(
   args: {
     propertyId: string;
     contactId: string;
+    conversationId: string | null;
+    inboundMessageId: string | null;
     inboundFromPhone: string | null;
     orgId: string;
     reason: string;
@@ -851,6 +832,8 @@ async function applyResponderOptOut(
   });
   const result = await setResponderDispo(supabase, {
     propertyId: args.propertyId,
+    conversationId: args.conversationId,
+    inboundMessageId: args.inboundMessageId,
     dispo: "opted_out",
     reason: args.reason,
   });
@@ -865,6 +848,8 @@ async function applyResponderDnc(
   args: {
     propertyId: string;
     contactId: string;
+    conversationId: string | null;
+    inboundMessageId: string | null;
     inboundFromPhone: string | null;
     orgId: string;
     reason: string;
@@ -889,6 +874,8 @@ async function applyResponderDnc(
   });
   const result = await setResponderDispo(supabase, {
     propertyId: args.propertyId,
+    conversationId: args.conversationId,
+    inboundMessageId: args.inboundMessageId,
     dispo: "dnc",
     reason: args.reason,
   });
@@ -903,6 +890,8 @@ async function applyWrongNumber(
   args: {
     propertyId: string;
     contactId: string;
+    conversationId: string | null;
+    inboundMessageId: string | null;
     inboundFromPhone: string | null;
     orgId: string;
     scope: AiWrongScope;
@@ -911,6 +900,8 @@ async function applyWrongNumber(
 ): Promise<ResponderDispoResult> {
   const result = await setResponderDispo(supabase, {
     propertyId: args.propertyId,
+    conversationId: args.conversationId,
+    inboundMessageId: args.inboundMessageId,
     dispo: "wrong_number",
     reason: args.reason,
   });
@@ -989,25 +980,16 @@ async function buildDeescalationBody(
   return named.length <= 160 ? named : DEESCALATION_TEMPLATE_GENERIC;
 }
 
-function shouldUpdateDispo(
-  current: string | null,
-  next: "wrong_number" | "not_interested" | "opted_out" | "dnc",
-): boolean {
-  const severity: Record<string, number> = {
-    not_interested: 1,
-    wrong_number: 2,
-    opted_out: 3,
-    dnc: 4,
-  };
-  if (
-    next !== "opted_out" &&
-    next !== "dnc" &&
-    current !== null &&
-    (HUMAN_ONLY_DISPOS.has(current) || current === "bad_number")
-  ) {
-    return false;
-  }
-  return (severity[next] ?? 0) >= (current ? (severity[current] ?? 0) : 0);
+function readAiDispositionRpcStatus(
+  value: Json,
+): "applied" | "replayed" | "already_terminal" | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const status = (value as Record<string, Json>).status;
+  return status === "applied" ||
+    status === "replayed" ||
+    status === "already_terminal"
+    ? status
+    : null;
 }
 
 async function loadInboundBusinessNumber(
