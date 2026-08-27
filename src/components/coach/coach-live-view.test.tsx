@@ -311,6 +311,7 @@ describe("<CoachLiveView />", () => {
     broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
     await userEvent.click(screen.getAllByTestId("entry-chip-offer_price")[0]);
     const input = screen.getByTestId("entry-input-offer_price");
+    expect(screen.getByTestId("coach-keypad-toggle")).toHaveAttribute("aria-expanded", "false");
 
     await userEvent.type(input, "210000");
 
@@ -318,10 +319,74 @@ describe("<CoachLiveView />", () => {
     expect(input).toHaveValue("210000");
   });
 
+  it("keeps intentional keyboard DTMF working when guidance appears without an active editor", async () => {
+    const onDigit = vi.fn();
+    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    await userEvent.click(screen.getByTestId("coach-keypad-toggle"));
+    broadcast({ type: "coach_note", text: "Slow down.", phaseId: "introduction", ts: "t1" });
+
+    await userEvent.keyboard("5");
+
+    expect(onDigit).toHaveBeenCalledWith("5");
+  });
+
+  it("keeps offer-entry digits out of DTMF after guidance moves focus off the editor", async () => {
+    const onDigit = vi.fn();
+    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    await userEvent.click(screen.getByTestId("coach-keypad-toggle"));
+    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
+    await userEvent.click(screen.getAllByTestId("entry-chip-offer_price")[0]);
+    const input = screen.getByTestId("entry-input-offer_price");
+    expect(screen.getByTestId("coach-keypad-toggle")).toHaveAttribute("aria-expanded", "false");
+    await userEvent.type(input, "210");
+
+    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
+    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
+    expect(input).toBeInTheDocument();
+
+    const dialog = screen.getByRole("dialog", { name: "Live call coach" });
+    act(() => dialog.focus());
+    expect(document.activeElement).toBe(dialog);
+    await userEvent.keyboard("5");
+
+    expect(onDigit).not.toHaveBeenCalled();
+  });
+
+  it("keeps offer-entry digits out of DTMF after a phase replacement removes the editor", async () => {
+    const onDigit = vi.fn();
+    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    await userEvent.click(screen.getByTestId("coach-keypad-toggle"));
+    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
+    await userEvent.click(screen.getAllByTestId("entry-chip-offer_price")[0]);
+    await userEvent.type(screen.getByTestId("entry-input-offer_price"), "210");
+
+    broadcast({ type: "phase", phaseId: "reveal", ts: "t2" });
+    act(() => screen.getByRole("dialog", { name: "Live call coach" }).focus());
+    await userEvent.keyboard("5");
+
+    expect(onDigit).not.toHaveBeenCalled();
+  });
+
   it("reacts to a phase event by advancing the rail", async () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     broadcast({ type: "phase", phaseId: "reveal", ts: "t1" });
+    expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute("aria-current", "step");
+    expect(screen.getByTestId("coach-current-phase")).toHaveTextContent("Phase · Reveal");
+  });
+
+  it("keeps the server's current phase pinned while labeling a manual viewing override separately", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
+
+    await userEvent.click(screen.getByTestId("phase-rail-reveal"));
+
+    expect(screen.getByTestId("coach-current-phase")).toHaveTextContent("Phase · Offer");
+    expect(screen.getByTestId("coach-viewing-phase")).toHaveTextContent("Viewing · Reveal");
     expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute("aria-current", "step");
   });
 
@@ -558,6 +623,70 @@ describe("<CoachLiveView />", () => {
     expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
     expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
     expect(screen.getByTestId("say-this-card")).toBeVisible();
+  });
+
+  it("keeps the full manual script visible in degraded mode while queued guidance timers stay mounted", async () => {
+    const { REALTIME_SUBSCRIBE_STATES } = await import("@supabase/supabase-js");
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+    broadcast({ type: "coach_note", text: "This must not hide the fallback script.", phaseId: "introduction", ts: "t1" });
+    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
+    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
+
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+
+    expect(screen.getByTestId("coach-degraded-note")).toBeVisible();
+    expect(screen.getByTestId("full-phase-script")).toBeVisible();
+    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
+    expect(screen.getByTestId("coach-guidance-timers")).toBeInTheDocument();
+    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
+    expect(screen.getByTestId("objection-card")).toHaveAttribute("hidden");
+    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("hidden");
+  });
+
+  it("keeps useful script coaching visible for an unknown but valid objection id", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+    broadcast({ type: "objection", objectionId: "seller_mentions_new_market_term", ts: "t1" });
+
+    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
+    expect(screen.getByTestId("say-this-card")).toBeVisible();
+    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
+    expect(screen.getByTestId("coach-guidance-timers")).toBeInTheDocument();
+    expect(screen.getByTestId("objection-card")).toHaveAttribute("hidden");
+    expect(screen.getByTestId("coach-live-view")).not.toHaveTextContent("seller_mentions_new_market_term");
+    expect(screen.getByTestId("coach-guidance-announcer")).toHaveTextContent(
+      "New objection detected. Continue following the live script.",
+    );
+  });
+
+  it("lets the newest unknown objection restore the script instead of resurfacing an older known card", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t1" });
+    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
+
+    broadcast({ type: "objection", objectionId: "seller_mentions_new_market_term", ts: "t2" });
+
+    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
+    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("objection-card")).toHaveLength(2);
+    for (const card of screen.getAllByTestId("objection-card")) expect(card).toHaveAttribute("hidden");
+  });
+
+  it("lets the newest unknown objection restore the script instead of resurfacing an older nudge", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "coach_note", text: "Ask one more question.", phaseId: "reveal", ts: "t1" });
+    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
+
+    broadcast({ type: "objection", objectionId: "seller_mentions_new_market_term", ts: "t2" });
+
+    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
+    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
+    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("hidden");
   });
 
   it("keeps hidden queued guidance mounted so its absolute expiry still runs before focus returns to it", async () => {

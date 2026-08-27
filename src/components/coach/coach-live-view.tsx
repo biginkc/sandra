@@ -104,6 +104,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     selectVariant,
     setEntryField,
   } = session;
+  const [keypadOpen, setKeypadOpen] = useState(false);
 
   // The script must always render, even mid-load or after a failed context
   // fetch — a static, all-placeholder script is still useful, and never an
@@ -126,6 +127,11 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     ...gate,
     cleared: state.gates[gate.id] ?? false,
   }));
+  const latestObjection = state.objectionCards.at(-1);
+  const hasActionableGuidance = latestObjection
+    ? isActionableObjection(latestObjection, activeContext.occupancy)
+    : state.nudges.length > 0;
+  const showGuidance = !degraded && hasActionableGuidance;
 
   const onEditEntry = useCallback(
     (field: CoachEntryToken, value: string) => setEntryField(field, value),
@@ -217,6 +223,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
             cards={state.objectionCards}
             tokens={tokens}
             occupancy={activeContext.occupancy}
+            visible={!degraded}
             onDismissNudge={(nudgeId) => dispatch({ type: "dismiss_nudge", nudgeId })}
             onDismissObjection={(cardId) => dispatch({ type: "dismiss_objection", cardId })}
           />
@@ -224,10 +231,11 @@ export function CoachLiveView(props: CoachLiveViewProps) {
             block={scriptBlock}
             nextBlock={nextBlock}
             degraded={degraded}
-            suppressed={state.objectionCards.length > 0 || state.nudges.length > 0}
+            suppressed={showGuidance}
             contextLoad={contextLoad}
             onRetryContext={retryContext}
             onEditEntry={onEditEntry}
+            onBeginEntryEdit={() => setKeypadOpen(false)}
             onSelectVariant={onSelectVariant}
           />
         </div>
@@ -249,6 +257,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         onHold={onHold}
         onHangup={onHangup}
         onCollapse={onCollapse}
+        keypadOpen={keypadOpen}
+        onKeypadOpenChange={setKeypadOpen}
       />
       </DialogContent>
     </Dialog>
@@ -298,7 +308,9 @@ function GuidanceAnnouncer({
       {cards.map((card) => {
         const objection = getScriptObjection(card.objectionId);
         const overcome = objection ? resolveObjectionOvercome(objection, occupancy) : null;
-        if (!objection || !overcome) return <span key={card.id}>New objection guidance.</span>;
+        if (!objection || !overcome) {
+          return <span key={card.id}>New objection detected. Continue following the live script.</span>;
+        }
         return (
           <span key={card.id}>
             {`New objection guidance. Acknowledge: ${resolvedTextForAnnouncement(objection.display.acknowledge, tokens)} Disarm: ${resolvedTextForAnnouncement(objection.display.disarm, tokens)} Overcome: ${resolvedTextForAnnouncement(overcome, tokens)}`}
@@ -337,40 +349,19 @@ function CoachTopBar({
   const preConnectLabel = callStatus === "connecting" ? "Connecting…" : callStatus === "ringing" ? "Ringing…" : null;
   const timerLabel = held ? "On hold" : preConnectLabel ?? timerText(seconds);
   const currentPhaseIndex = COACH_PHASE_ORDER.indexOf(currentPhaseId);
+  const currentPhaseName = getScriptPhase(currentPhaseId)?.name ?? currentPhaseId;
+  const displayedPhaseName = getScriptPhase(displayedPhaseId)?.name ?? displayedPhaseId;
   return (
-    <div className="flex shrink-0 items-center gap-3 overflow-x-auto border-b border-border bg-card px-4 py-2">
-      <ol className="flex min-w-max flex-1 items-center gap-1" aria-label="Call phases">
-        {COACH_PHASE_ORDER.map((phaseId) => {
-          const phase = getScriptPhase(phaseId);
-          const isCurrent = phaseId === currentPhaseId;
-          const isDisplayed = phaseId === displayedPhaseId;
-          const isComplete = COACH_PHASE_ORDER.indexOf(phaseId) < currentPhaseIndex;
-          return (
-            <li key={phaseId}>
-              <button
-                type="button"
-                data-testid={`phase-rail-${phaseId}`}
-                aria-current={isDisplayed ? "step" : undefined}
-                onClick={() => onSelectPhase(phaseId)}
-                className={cn(
-                  "rounded-full px-2.5 py-1 text-[11px] font-bold tracking-wide whitespace-nowrap uppercase transition-colors",
-                  isDisplayed
-                    ? "bg-primary text-primary-foreground"
-                    : isComplete
-                      ? "text-emerald-600 dark:text-emerald-400"
-                      : isCurrent
-                        ? "bg-emerald-600 text-white"
-                        : "text-muted-foreground hover:bg-muted",
-                )}
-              >
-                {phase?.name ?? phaseId}
-                {isComplete ? " ✓" : ""}
-              </button>
-            </li>
-          );
-        })}
-      </ol>
-      <div className="flex min-w-max items-center gap-2 text-xs">
+    <div className="shrink-0 border-b border-border bg-card">
+      <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs" data-testid="coach-status-strip">
+        <Badge variant="secondary" data-testid="coach-current-phase" className="h-5 text-[10px]">
+          {`Phase · ${currentPhaseName}`}
+        </Badge>
+        {displayedPhaseId !== currentPhaseId ? (
+          <Badge variant="outline" data-testid="coach-viewing-phase" className="h-5 text-[10px]">
+            {`Viewing · ${displayedPhaseName}`}
+          </Badge>
+        ) : null}
         {counter ? (
           <Badge variant="secondary" data-testid="probe-counter" className="h-5 text-[10px]">
             {`Probes ${probeCount}/${counter.goal}`}
@@ -410,6 +401,37 @@ function CoachTopBar({
           </Badge>
         ))}
       </div>
+      <ol className="flex min-w-0 items-center gap-1 overflow-x-auto px-4 pb-2" aria-label="Call phases" data-testid="coach-phase-scroller">
+        {COACH_PHASE_ORDER.map((phaseId) => {
+          const phase = getScriptPhase(phaseId);
+          const isCurrent = phaseId === currentPhaseId;
+          const isDisplayed = phaseId === displayedPhaseId;
+          const isComplete = COACH_PHASE_ORDER.indexOf(phaseId) < currentPhaseIndex;
+          return (
+            <li key={phaseId}>
+              <button
+                type="button"
+                data-testid={`phase-rail-${phaseId}`}
+                aria-current={isDisplayed ? "step" : undefined}
+                onClick={() => onSelectPhase(phaseId)}
+                className={cn(
+                  "rounded-full px-2.5 py-1 text-[11px] font-bold tracking-wide whitespace-nowrap uppercase transition-colors",
+                  isDisplayed
+                    ? "bg-primary text-primary-foreground"
+                    : isComplete
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : isCurrent
+                        ? "bg-emerald-600 text-white"
+                        : "text-muted-foreground hover:bg-muted",
+                )}
+              >
+                {phase?.name ?? phaseId}
+                {isComplete ? " ✓" : ""}
+              </button>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }
@@ -495,6 +517,7 @@ function ScriptPanel({
   contextLoad,
   onRetryContext,
   onEditEntry,
+  onBeginEntryEdit,
   onSelectVariant,
 }: {
   block: PhaseScriptBlock | null;
@@ -504,6 +527,7 @@ function ScriptPanel({
   contextLoad: ContextLoadState;
   onRetryContext: () => void;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  onBeginEntryEdit: () => void;
   onSelectVariant: (tag: string, key: string) => void;
 }) {
   if (!block) {
@@ -573,6 +597,7 @@ function ScriptPanel({
                   branch={branch}
                   compact
                   onEditEntry={onEditEntry}
+                  onBeginEntryEdit={onBeginEntryEdit}
                   onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
                 />
               ))}
@@ -581,6 +606,7 @@ function ScriptPanel({
             <BranchCard
               branch={block.branches[0]}
               onEditEntry={onEditEntry}
+              onBeginEntryEdit={onBeginEntryEdit}
               onSelectVariant={(key) => onSelectVariant(block.branches[0].tag, key)}
             />
           ) : null}
@@ -596,6 +622,7 @@ function ScriptPanel({
                     branch={branch}
                     compact
                     onEditEntry={onEditEntry}
+                    onBeginEntryEdit={onBeginEntryEdit}
                     onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
                   />
                 ))}
@@ -638,11 +665,13 @@ function BranchCard({
   branch,
   compact = false,
   onEditEntry,
+  onBeginEntryEdit,
   onSelectVariant,
 }: {
   branch: ScriptBranchBlock;
   compact?: boolean;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  onBeginEntryEdit: () => void;
   onSelectVariant: (key: string) => void;
 }) {
   return (
@@ -702,7 +731,15 @@ function BranchCard({
             {line.segments.map((segment, segIndex) => {
               if (segment.kind === "text") return <span key={segIndex}>{segment.value}</span>;
               if (segment.kind === "tone") return <ToneChip key={segIndex} text={segment.label} />;
-              return <TokenChip key={segIndex} token={segment.token} resolved={segment.resolved} onEditEntry={onEditEntry} />;
+              return (
+                <TokenChip
+                  key={segIndex}
+                  token={segment.token}
+                  resolved={segment.resolved}
+                  onEditEntry={onEditEntry}
+                  onBeginEntryEdit={onBeginEntryEdit}
+                />
+              );
             })}
           </p>
         ))}
@@ -715,7 +752,13 @@ function BranchCard({
             ) : segment.kind === "tone" ? (
               <ToneChip key={index} text={segment.label} />
             ) : (
-              <TokenChip key={index} token={segment.token} resolved={segment.resolved} onEditEntry={onEditEntry} />
+              <TokenChip
+                key={index}
+                token={segment.token}
+                resolved={segment.resolved}
+                onEditEntry={onEditEntry}
+                onBeginEntryEdit={onBeginEntryEdit}
+              />
             ),
           )}
         </p>
@@ -741,13 +784,22 @@ function TokenChip({
   token,
   resolved,
   onEditEntry,
+  onBeginEntryEdit,
 }: {
   token: CoachToken;
   resolved: ResolvedToken;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  onBeginEntryEdit: () => void;
 }) {
   if (ENTRY_TOKEN_SET.has(token)) {
-    return <EntryTokenChip token={token as CoachEntryToken} resolved={resolved} onCommit={(value) => onEditEntry(token as CoachEntryToken, value)} />;
+    return (
+      <EntryTokenChip
+        token={token as CoachEntryToken}
+        resolved={resolved}
+        onBeginEdit={onBeginEntryEdit}
+        onCommit={(value) => onEditEntry(token as CoachEntryToken, value)}
+      />
+    );
   }
   if (resolved.isPlaceholder) {
     return (
@@ -765,10 +817,12 @@ function TokenChip({
 function EntryTokenChip({
   token,
   resolved,
+  onBeginEdit,
   onCommit,
 }: {
   token: CoachEntryToken;
   resolved: ResolvedToken;
+  onBeginEdit: () => void;
   onCommit: (value: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -808,6 +862,7 @@ function EntryTokenChip({
       type="button"
       data-testid={`entry-chip-${token}`}
       onClick={() => {
+        onBeginEdit();
         setDraft(resolved.isPlaceholder ? "" : resolved.value);
         setEditing(true);
       }}
@@ -823,17 +878,12 @@ function EntryTokenChip({
   );
 }
 
-/** Exported (only these two subcomponents, not the rest) so the
- * database-free synthetic Playwright spec (e2e/synthetic/
- * coach-live-responsive-layout.spec.ts) can server-render the REAL
- * focus-stage guidance and call-dock markup via react-dom/server, instead of a
- * hand-copied HTML approximation that can silently drift from the actual
- * component. */
-export function GuidanceOverlay({
+function GuidanceOverlay({
   nudges,
   cards,
   tokens,
   occupancy,
+  visible = true,
   onDismissNudge,
   onDismissObjection,
 }: {
@@ -841,6 +891,7 @@ export function GuidanceOverlay({
   cards: CoachObjectionCard[];
   tokens: ResolvedTokens;
   occupancy: CoachCallContext["occupancy"];
+  visible?: boolean;
   onDismissNudge: (nudgeId: string) => void;
   onDismissObjection: (cardId: string) => void;
 }) {
@@ -850,8 +901,27 @@ export function GuidanceOverlay({
   // non-dominant item remains MOUNTED (only visually hidden): each owns an
   // absolute-expiry timer effect, and unmounting a queued item would freeze
   // that timer and let stale guidance resurface later.
-  const activeObjectionId = cards.at(-1)?.id ?? null;
-  const activeNudgeId = activeObjectionId ? null : (nudges.at(-1)?.id ?? null);
+  const latestObjection = cards.at(-1);
+  const activeObjectionId = visible && latestObjection && isActionableObjection(latestObjection, occupancy)
+    ? latestObjection.id
+    : null;
+  const activeNudgeId = visible && !latestObjection ? (nudges.at(-1)?.id ?? null) : null;
+  const hasVisibleGuidance = activeObjectionId !== null || activeNudgeId !== null;
+
+  if (!hasVisibleGuidance) {
+    return (
+      <div hidden aria-hidden="true" data-testid="coach-guidance-timers">
+        <ObjectionOverlay
+          cards={cards}
+          activeCardId={null}
+          tokens={tokens}
+          occupancy={occupancy}
+          onDismiss={onDismissObjection}
+        />
+        <NudgeOverlay nudges={nudges} activeNudgeId={null} onDismiss={onDismissNudge} />
+      </div>
+    );
+  }
   return (
     <section
       data-testid="coach-guidance-stack"
@@ -872,6 +942,11 @@ export function GuidanceOverlay({
       </div>
     </section>
   );
+}
+
+function isActionableObjection(card: CoachObjectionCard, occupancy: CoachCallContext["occupancy"]): boolean {
+  const objection = getScriptObjection(card.objectionId);
+  return objection !== undefined && resolveObjectionOvercome(objection, occupancy) !== null;
 }
 
 function NudgeOverlay({
@@ -1049,14 +1124,14 @@ function ObjectionCard({
           ) : null}
         </div>
       ) : (
-        <p className="text-sm text-muted-foreground">{card.objectionId}</p>
+        <p className="text-sm text-muted-foreground">Keep following the live script while coaching refreshes.</p>
       )}
       <span className="mt-5 block text-xs text-muted-foreground">Tap to dismiss and return to the script.</span>
     </button>
   );
 }
 
-export function CallControlDock({
+function CallControlDock({
   callName,
   callStatus,
   muted,
@@ -1067,14 +1142,8 @@ export function CallControlDock({
   onHold,
   onHangup,
   onCollapse,
-  // Purely additive, defaults to the existing behavior: the keypad is
-  // internal, uncontrolled state everywhere in the app, toggled only by
-  // the Keypad button. This only exists so the database-free synthetic
-  // Playwright spec (e2e/synthetic/coach-live-responsive-layout.spec.tsx)
-  // can server-render the REAL keypad-open layout via react-dom/server —
-  // that spec has no JS runtime to click the toggle with, since it sets
-  // static HTML directly rather than hydrating a bundle.
-  initialKeypadOpen = false,
+  keypadOpen,
+  onKeypadOpenChange,
 }: {
   callName: string;
   callStatus: CoachCallStatus;
@@ -1086,9 +1155,9 @@ export function CallControlDock({
   onHold: () => void;
   onHangup: () => void;
   onCollapse: () => void;
-  initialKeypadOpen?: boolean;
+  keypadOpen: boolean;
+  onKeypadOpenChange: (open: boolean) => void;
 }) {
-  const [keypadOpen, setKeypadOpen] = useState(initialKeypadOpen);
   const live = callStatus === "live";
 
   // Parity with the classic popover's LiveView (softphone-provider.tsx),
@@ -1104,6 +1173,12 @@ export function CallControlDock({
     const onKeyDown = (event: KeyboardEvent) => {
       if (!/^[0-9*#]$/.test(event.key) || event.repeat) return;
       if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true']")) return;
+      // Guidance can hide the script and move focus to the dialog between
+      // offer-entry keystrokes. The editor itself remains mounted under the
+      // hidden script panel so its draft and blur/commit lifecycle survive;
+      // use that mounted editor as the source of truth instead of trusting
+      // only the key event's newly-moved target.
+      if (document.querySelector("[data-coach-entry-editor]")) return;
       event.preventDefault();
       onDigit(event.key as DtmfDigit);
     };
@@ -1151,7 +1226,7 @@ export function CallControlDock({
             aria-expanded={keypadOpen}
             disabled={held || holdPending || !live}
             data-testid="coach-keypad-toggle"
-            onClick={() => setKeypadOpen((value) => !value)}
+            onClick={() => onKeypadOpenChange(!keypadOpen)}
           >
             Keypad
           </Button>
