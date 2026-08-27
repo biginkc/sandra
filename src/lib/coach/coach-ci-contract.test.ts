@@ -20,6 +20,14 @@ const localIntegrationTest = readFileSync(
   path.join(repoRoot, "supabase/migrations/20260826170000_coach_call_index.integration.test.ts"),
   "utf8",
 );
+const migrationSql = readFileSync(
+  path.join(repoRoot, "supabase/migrations/20260826170000_coach_call_index.sql"),
+  "utf8",
+);
+const rollbackSql = readFileSync(
+  path.join(repoRoot, "supabase/migrations/20260826170000_coach_call_index.rollback.sql"),
+  "utf8",
+);
 
 /** Slices one top-level job block (2-space-indented `name:` key) out of the
  * coach workflow, up to (not including) the next top-level job key. */
@@ -50,6 +58,37 @@ function withoutComments(yaml: string): string {
     .split("\n")
     .filter((line) => !line.trim().startsWith("#"))
     .join("\n");
+}
+
+/** Extracts a `cat > file <<'DELIMITER' ... DELIMITER` heredoc body embedded
+ * in the workflow's YAML block-literal `run:` text, undoing the uniform
+ * indentation the surrounding YAML block scalar requires every line to
+ * carry (bare `<<'DELIMITER'`, unlike `<<-`, does NOT strip that
+ * indentation itself at shell-execution time — the terminator line's own
+ * leading whitespace is what the workflow's indentation actually is, so
+ * that's what gets stripped from every body line here too). */
+function extractHeredoc(source: string, delimiter: string): string {
+  const openMarker = `<<'${delimiter}'`;
+  const openIdx = source.indexOf(openMarker);
+  if (openIdx < 0) throw new Error(`heredoc open marker not found: ${delimiter}`);
+  const bodyStart = source.indexOf("\n", openIdx) + 1;
+  const lines = source.slice(bodyStart).split("\n");
+  const bodyLines: string[] = [];
+  let indent: string | null = null;
+  for (const line of lines) {
+    if (line.trim() === delimiter) {
+      indent = line.slice(0, line.indexOf(delimiter));
+      break;
+    }
+    bodyLines.push(line);
+  }
+  if (indent === null) throw new Error(`heredoc terminator not found: ${delimiter}`);
+  const stripped = bodyLines.map((line) => {
+    if (line === "") return "";
+    if (line.startsWith(indent as string)) return line.slice((indent as string).length);
+    throw new Error(`heredoc body line does not match the terminator's indentation: ${JSON.stringify(line)}`);
+  });
+  return `${stripped.join("\n")}\n`;
 }
 
 describe("coach realtime authorization CI security contract", () => {
@@ -106,7 +145,7 @@ describe("coach realtime authorization CI security contract", () => {
     const canaryJob = workflowJob("coach-realtime-canary");
     const cleanupStep = workflowStep(canaryJob, "Always remove coach canary schema and rows");
     expect(cleanupStep).toMatch(/if:\s*always\(\)/);
-    expect(cleanupStep).toContain("20260826170000_coach_call_index.rollback.sql");
+    expect(cleanupStep).toContain("$RUNNER_TEMP/coach-migration/rollback.sql");
     expect(coachWorkflow).toContain("group: e2e-shared-test-project");
     expect(migrationWorkflow).toContain("group: e2e-shared-test-project");
     for (const workflow of [coachWorkflow, migrationWorkflow, e2eWorkflow]) {
@@ -194,5 +233,40 @@ describe("coach realtime authorization CI security contract", () => {
     expect(localIntegrationTest).toContain("to_regclass('public.coach_call_index')");
     expect(localIntegrationTest).toMatch(/if\s*\(!createdSchemaThisRun\)\s*return;/);
     expect(localIntegrationTest).not.toMatch(/beforeAll\([\s\S]{0,80}rollback/);
+  });
+
+  it("no privileged step reads migration/rollback SQL from the PR's own checkout", () => {
+    // Round-7 finding: the replay and cleanup steps used to run `psql -f
+    // supabase/migrations/...sql`, reading SQL straight out of this job's
+    // checkout of the PR's own tree — content a same-repo PR fully
+    // controls. Both privileged steps now read from a path materialized
+    // OUTSIDE the checkout ($RUNNER_TEMP) from SQL embedded directly in
+    // this workflow file's own text, so editing the PR's migration files
+    // alone can no longer change what a privileged step executes.
+    const canaryJob = workflowJob("coach-realtime-canary");
+    expect(withoutComments(canaryJob)).not.toMatch(/supabase\/migrations\//);
+
+    const materializeStep = workflowStep(canaryJob, "Materialize the reviewed migration/rollback SQL outside the PR checkout");
+    expect(materializeStep).not.toMatch(/env:/);
+    expect(materializeStep).toContain("$RUNNER_TEMP/coach-migration");
+
+    const replayStep = workflowStep(canaryJob, "Reset any prior canary residue and replay the reviewed migration");
+    const cleanupStep = workflowStep(canaryJob, "Always remove coach canary schema and rows");
+    expect(replayStep).toContain('-f "$RUNNER_TEMP/coach-migration/rollback.sql"');
+    expect(replayStep).toContain('-f "$RUNNER_TEMP/coach-migration/migration.sql"');
+    expect(cleanupStep).toContain('-f "$RUNNER_TEMP/coach-migration/rollback.sql"');
+
+    // The materialize step must run before anything that consumes its
+    // output — it has no credential dependency, so nothing else forces
+    // this ordering.
+    expect(canaryJob.indexOf(materializeStep)).toBeLessThan(canaryJob.indexOf(replayStep));
+    expect(canaryJob.indexOf(materializeStep)).toBeLessThan(canaryJob.indexOf(cleanupStep));
+  });
+
+  it("the SQL embedded in the workflow is byte-identical to the real migration/rollback files — the two can't silently drift apart", () => {
+    const embeddedMigrationSql = extractHeredoc(coachWorkflow, "MIGRATION_SQL");
+    const embeddedRollbackSql = extractHeredoc(coachWorkflow, "ROLLBACK_SQL");
+    expect(embeddedMigrationSql).toBe(migrationSql);
+    expect(embeddedRollbackSql).toBe(rollbackSql);
   });
 });
