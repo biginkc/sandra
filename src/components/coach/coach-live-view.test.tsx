@@ -186,8 +186,9 @@ describe("<CoachLiveView />", () => {
   });
 
   it("in the Close phase, shows no tone chip rather than presenting a strategy note as tone", async () => {
-    // The Close phase's dominant branch has no genuine `tone` field on its
-    // selected variant — only general phase_enter coach notes ("Never
+    // The Close phase's dominant branch's spoken line ("There is one
+    // program I can check...") carries no inline {{tone:...}} segment —
+    // only the phase's general phase_enter coach notes exist ("Never
     // negotiate live...", "Ask for the close multiple times..."), none of
     // which are tonal instructions. The card must render no chip at all
     // rather than repurposing one of those notes as if it were tone

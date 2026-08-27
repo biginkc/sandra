@@ -600,12 +600,20 @@ function ScriptPanel({
     ? (dominantBranch.selected.lines.find((line) => line.type === "say") ?? dominantBranch.selected.lines[0] ?? null)
     : null;
   // The standalone tone chip must be a genuine tonal instruction (how to
-  // say it — e.g. "concerned / curious tone"), not an arbitrary phase-level
-  // strategy note. `selected.tone` is the script's dedicated field for
-  // that (see script-block.ts's ResolvedVariant.tone doc comment); most
-  // variants don't set one, and when none exists the card correctly shows
-  // no chip rather than repurposing an unrelated opening cue.
-  const currentTone = dominantBranch?.selected.tone ?? null;
+  // say THIS line — e.g. "playful tone"), not an arbitrary phase-level
+  // strategy note. Genuine tone guidance is authored inline in the script
+  // as {{tone:...}} markup, which resolveDisplayText already turns into
+  // `kind: "tone"` segments within a line's own segments array — the same
+  // segments LineSegments/ToneChip already render elsewhere. So the
+  // spoken line's own tone segments are the correct source, extracted out
+  // of the inline flow and shown as the standalone chip below it (never
+  // duplicated in both places). Most lines carry none, and when a line
+  // has none the card correctly shows no chip rather than repurposing an
+  // unrelated opening cue or the phase's general strategy notes.
+  const spokenToneLabels = spokenLine
+    ? spokenLine.segments.filter((segment) => segment.kind === "tone").map((segment) => segment.label)
+    : [];
+  const spokenLineSegments = spokenLine ? spokenLine.segments.filter((segment) => segment.kind !== "tone") : [];
   return (
     <main
       hidden={suppressed}
@@ -689,12 +697,14 @@ function ScriptPanel({
                     spokenLine.type === "note" && "text-xs text-muted-foreground italic",
                   )}
                 >
-                  <LineSegments segments={spokenLine.segments} onEditEntry={onEditEntry} onBeginEntryEdit={onBeginEntryEdit} />
+                  <LineSegments segments={spokenLineSegments} onEditEntry={onEditEntry} onBeginEntryEdit={onBeginEntryEdit} />
                 </p>
               ) : null}
-              {currentTone ? (
-                <div className="mt-4" data-testid="say-this-tone">
-                  <ToneChip text={currentTone} />
+              {spokenToneLabels.length > 0 ? (
+                <div className="mt-4 flex flex-wrap gap-1.5" data-testid="say-this-tone">
+                  {spokenToneLabels.map((label, index) => (
+                    <ToneChip key={index} text={label} />
+                  ))}
                 </div>
               ) : null}
               <details data-testid="full-phase-script" className="mt-5 border-t border-border/70 pt-4 text-muted-foreground">
