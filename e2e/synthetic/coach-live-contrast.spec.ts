@@ -94,46 +94,48 @@ type PixelMeasurement = { ratio: number; fg: [number, number, number]; bg: [numb
 
 /**
  * Measures the real, on-screen contrast between an element's text and its
- * composited background by screenshotting the element TWICE: once as
- * normally rendered, and once with the element's own `color` forced to
- * `transparent` (an inline style always wins over a class, so this reliably
- * hides only the text, leaving every ancestor's opacity/tint/background
- * exactly as painted).
+ * composited background, from actual rendered pixels.
  *
- * The two screenshots are then differenced PER COORDINATE. A pixel that is
- * identical in both passes cannot be text — only text disappears when
- * `color` goes transparent — so every unchanged coordinate is discarded,
- * and each surviving coordinate is compared against ITS OWN background
- * pixel from the second screenshot rather than against one sampled point.
+ * The hard part is knowing which pixels ARE text. This builds a complete
+ * glyph mask by rendering the element three times: once with every
+ * descendant's `color` forced BLACK, once forced WHITE, and once with the
+ * text hidden entirely. Any coordinate that differs between the black and
+ * white passes is covered by a glyph — that holds no matter what colour the
+ * text actually is or what sits behind it. Coordinates that are FULLY black
+ * in one pass and FULLY white in the other are solid glyph core rather than
+ * anti-aliased edge, and only those are measured.
  *
- * That per-coordinate rule is the whole correctness argument, and an
- * earlier version of this file got it wrong in a way that silently
- * defeated the entire test. It compared every candidate pixel against a
- * SINGLE center background pixel, which let anything merely different from
- * that one point pose as text: the Live badge's emerald border outranked
- * the badge's own glyphs, so the probe reported the border's contrast and
- * passed at 13.67:1 while the actual text sat at 3.26:1. Differencing the
- * two passes excludes borders, tints and decorations by construction,
- * because none of them change when the text is hidden.
+ * Contrast is then evaluated PER COORDINATE — foreground from the normal
+ * render, background from the hidden-text render at that same point — and
+ * the WORST ratio found is what gets reported. Never an average: averaging
+ * across a split background reports a comfortable mean for text that is
+ * illegible over half its own run.
  *
- * Among the surviving text pixels, the solid glyph fill is the most
- * frequent quantized color — anti-aliased edge blends are numerous but
- * spread thinly across many buckets, while the true ink color repeats
- * exactly. Rare stray glyphs (the phase rail's trailing "✓" renders a
- * handful of near-white pixels outside the normal text pipeline) are
- * outvoted rather than allowed to dominate, which a "most extreme pixel"
- * search could not do.
+ * Two earlier versions of this file were defeated by real mutations, and
+ * both failures are why it now works this way:
+ *
+ *   1. Comparing every candidate pixel against a SINGLE centre background
+ *      pixel let anything different from that one point pose as text. The
+ *      Live badge's emerald border outvoted its own glyphs, so degrading
+ *      that text to 3.26:1 still reported the border's 13.67:1 and passed.
+ *
+ *   2. Treating "unchanged when the text is hidden" as "not text" discarded
+ *      precisely the worst case: text already invisible against its
+ *      background does not change when you hide it. Black text over a
+ *      black-and-white split had its invisible half thrown away and passed
+ *      at 21:1. Forcing black and white passes finds glyphs by their shape
+ *      instead of by their visibility, so invisible text is still measured
+ *      — and measured at the ratio it deserves.
+ *
+ * Descendants are included via `* { color: ... !important }` scoped to the
+ * element, so text whose colour is set on a child is masked too rather than
+ * being silently skipped.
  */
 async function measureRenderedContrast(locator: Locator): Promise<PixelMeasurement> {
-  // Decorative `aria-hidden` descendants are not text and are exempt from
-  // the 4.5:1 text-contrast rule (they fall under non-text contrast, and a
-  // purely decorative graphic is exempt outright). Hide them before
-  // sampling: the Live badge's `bg-emerald-500` dot pulses, so its pixels
-  // differ between the two passes and would otherwise survive the
-  // difference test and be counted as text. `visibility: hidden` (not
-  // `display: none`) so layout — and therefore glyph position — is
-  // identical across both passes; `animations: "disabled"` on the
-  // screenshots keeps any remaining motion from making readings drift.
+  // Decorative `aria-hidden` descendants are exempt from the text-contrast
+  // rule and must not enter the mask. `visibility: hidden` (not `display:
+  // none`) so layout — and therefore glyph position — is byte-identical
+  // across all passes.
   await locator.evaluate((el) => {
     el.querySelectorAll<HTMLElement>('[aria-hidden="true"]').forEach((node, index) => {
       node.dataset.contrastProbeOrigVisibility = node.style.visibility;
@@ -142,96 +144,82 @@ async function measureRenderedContrast(locator: Locator): Promise<PixelMeasureme
     });
   });
 
-  const withText = await locator.screenshot({ animations: "disabled" });
+  const applyColor = (color: string | null) =>
+    locator.evaluate((el, value) => {
+      const id = "contrast-probe-style";
+      document.getElementById(id)?.remove();
+      if (value === null) return;
+      el.setAttribute("data-contrast-probe-target", "");
+      const style = document.createElement("style");
+      style.id = id;
+      // Descendants included: text coloured by a child element must be
+      // masked too, or it is measured as background and silently passes.
+      style.textContent = `[data-contrast-probe-target], [data-contrast-probe-target] * { color: ${value} !important; }`;
+      document.head.appendChild(style);
+    }, color);
+
+  const shot = () => locator.screenshot({ animations: "disabled" });
+
+  const normal = await shot();
+  await applyColor("#000000");
+  const blackPass = await shot();
+  await applyColor("#ffffff");
+  const whitePass = await shot();
+  await applyColor("transparent");
+  const hidden = await shot();
+  await applyColor(null);
 
   await locator.evaluate((el) => {
-    const node = el as HTMLElement;
-    node.dataset.contrastProbeOrigColor = node.style.color;
-    node.style.color = "transparent";
-  });
-  const bgOnly = await locator.screenshot({ animations: "disabled" });
-  await locator.evaluate((el) => {
-    const node = el as HTMLElement;
-    node.style.color = node.dataset.contrastProbeOrigColor ?? "";
-    delete node.dataset.contrastProbeOrigColor;
-    el.querySelectorAll<HTMLElement>("[data-contrast-probe-hidden]").forEach((hidden) => {
-      hidden.style.visibility = hidden.dataset.contrastProbeOrigVisibility ?? "";
-      delete hidden.dataset.contrastProbeOrigVisibility;
-      delete hidden.dataset.contrastProbeHidden;
+    el.removeAttribute("data-contrast-probe-target");
+    el.querySelectorAll<HTMLElement>("[data-contrast-probe-hidden]").forEach((node) => {
+      node.style.visibility = node.dataset.contrastProbeOrigVisibility ?? "";
+      delete node.dataset.contrastProbeOrigVisibility;
+      delete node.dataset.contrastProbeHidden;
     });
   });
 
-  const [fgImg, bgImg] = await Promise.all([
-    sharp(withText).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
-    sharp(bgOnly).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
-  ]);
-  if (fgImg.info.width !== bgImg.info.width || fgImg.info.height !== bgImg.info.height) {
-    throw new Error("contrast probe screenshots changed size between passes — element must have resized");
-  }
-  const { width, height, channels } = bgImg.info;
-  // Difference the two passes per coordinate. Only text changes when the
-  // element's own `color` is forced transparent, so an unchanged pixel is
-  // by definition not text: borders, translucent tints, decorative fills
-  // and corner-clip leakage all cancel out here, with no geometric
-  // guesswork about where the glyphs might be.
-  const CHANGE_THRESHOLD = 8; // per-channel noise floor for the rasteriser
-  const textPixels: { fr: number; fg_: number; fb: number; br: number; bg_: number; bb: number }[] = [];
-  for (let i = 0; i < width * height; i++) {
-    const idx = i * channels;
-    const fr = fgImg.data[idx];
-    const fg_ = fgImg.data[idx + 1];
-    const fb = fgImg.data[idx + 2];
-    const br = bgImg.data[idx];
-    const bg_ = bgImg.data[idx + 1];
-    const bb = bgImg.data[idx + 2];
-    const changed =
-      Math.abs(fr - br) > CHANGE_THRESHOLD ||
-      Math.abs(fg_ - bg_) > CHANGE_THRESHOLD ||
-      Math.abs(fb - bb) > CHANGE_THRESHOLD;
-    if (!changed) continue;
-    textPixels.push({ fr, fg_, fb, br, bg_, bb });
-  }
-
-  if (textPixels.length === 0) {
-    throw new Error("contrast probe found no text pixels — the element rendered no visible text to measure");
-  }
-
-  // The solid glyph fill is the most frequent quantised colour among the
-  // text pixels. Anti-aliased edge blends are plentiful but scatter across
-  // many buckets; the true ink colour repeats exactly, so it wins on count.
-  const buckets = new Map<string, { count: number; fr: number; fg_: number; fb: number; br: number; bg_: number; bb: number }>();
-  const quant = 8;
-  for (const px of textPixels) {
-    const key = `${Math.round(px.fr / quant)},${Math.round(px.fg_ / quant)},${Math.round(px.fb / quant)}`;
-    const existing = buckets.get(key);
-    if (existing) {
-      existing.count += 1;
-      existing.fr += px.fr;
-      existing.fg_ += px.fg_;
-      existing.fb += px.fb;
-      existing.br += px.br;
-      existing.bg_ += px.bg_;
-      existing.bb += px.bb;
-    } else {
-      buckets.set(key, { count: 1, ...px });
+  const [normalImg, blackImg, whiteImg, hiddenImg] = await Promise.all(
+    [normal, blackPass, whitePass, hidden].map((buf) =>
+      sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
+    ),
+  );
+  const { width, height, channels } = normalImg.info;
+  for (const img of [blackImg, whiteImg, hiddenImg]) {
+    if (img.info.width !== width || img.info.height !== height) {
+      throw new Error("contrast probe screenshots changed size between passes — element must have resized");
     }
   }
-  const best = [...buckets.values()].sort((a, b2) => b2.count - a.count)[0];
-  const fg: [number, number, number] = [
-    Math.round(best.fr / best.count),
-    Math.round(best.fg_ / best.count),
-    Math.round(best.fb / best.count),
-  ];
-  // Background taken from the SAME coordinates the winning glyph pixels
-  // occupy, so a gradient or tint behind the text is measured where the
-  // text actually sits rather than wherever a single probe point landed.
-  const bg: [number, number, number] = [
-    Math.round(best.br / best.count),
-    Math.round(best.bg_ / best.count),
-    Math.round(best.bb / best.count),
-  ];
 
-  return { ratio: contrastRatio(fg, bg), fg, bg };
+  // Solid glyph core: fully inked in both forced passes. An anti-aliased
+  // edge pixel is a partial blend and fails this, which is what we want —
+  // WCAG applies to the text colour, not to the rasteriser's edge fade.
+  const SOLID = 12; // tolerance for "fully black" / "fully white"
+  let worst: { ratio: number; fg: [number, number, number]; bg: [number, number, number] } | null = null;
+  let solidCount = 0;
+
+  for (let i = 0; i < width * height; i++) {
+    const idx = i * channels;
+    const isBlack =
+      blackImg.data[idx] <= SOLID && blackImg.data[idx + 1] <= SOLID && blackImg.data[idx + 2] <= SOLID;
+    const isWhite =
+      whiteImg.data[idx] >= 255 - SOLID &&
+      whiteImg.data[idx + 1] >= 255 - SOLID &&
+      whiteImg.data[idx + 2] >= 255 - SOLID;
+    if (!isBlack || !isWhite) continue;
+    solidCount += 1;
+
+    const fg: [number, number, number] = [normalImg.data[idx], normalImg.data[idx + 1], normalImg.data[idx + 2]];
+    const bg: [number, number, number] = [hiddenImg.data[idx], hiddenImg.data[idx + 1], hiddenImg.data[idx + 2]];
+    const ratio = contrastRatio(fg, bg);
+    if (!worst || ratio < worst.ratio) worst = { ratio, fg, bg };
+  }
+
+  if (!worst || solidCount === 0) {
+    throw new Error(
+      "contrast probe found no solid glyph pixels — the element rendered no measurable text (check the locator)",
+    );
+  }
+  return worst;
 }
 
 // Sample at 3x device pixel ratio. At 1x, 10px UI text (the Live badge, the
@@ -386,3 +374,82 @@ for (const mode of [
     assertAA("held-call timer", await measureRenderedContrast(timer));
   });
 }
+
+// ---------------------------------------------------------------------------
+// Negative controls for the probe itself.
+//
+// A contrast test that cannot fail is worse than no contrast test, because it
+// converts an unmeasured risk into a false assurance. Two earlier versions of
+// this file passed while the text they were pointed at was genuinely
+// unreadable, and both were caught by an outside reviewer mutating the source
+// rather than by anything committed here. These fixtures encode the four ways
+// the probe has been — or could plausibly be — defeated, so a future change
+// that reintroduces any of them fails immediately and locally.
+//
+// Each control asserts the probe REPORTS A LOW RATIO for text that is in fact
+// unreadable. They are deliberately not assertions about the product.
+// ---------------------------------------------------------------------------
+async function mountProbeFixture(page: Page, html: string): Promise<void> {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.setContent(`<style>${compiledCss}</style><div id="fixture">${html}</div>`);
+}
+
+test.describe("contrast probe negative controls", () => {
+  test("detects text that is invisible against its own background", async ({ page }) => {
+    await mountProbeFixture(
+      page,
+      `<div data-testid="probe" style="background:#ffffff;color:#ffffff;font-size:20px;padding:12px">Invisible</div>`,
+    );
+    const { ratio } = await measureRenderedContrast(page.getByTestId("probe"));
+    expect(ratio).toBeLessThan(1.5);
+  });
+
+  test("detects the unreadable half of a split background", async ({ page }) => {
+    // Black text over a half-black/half-white background. An averaging probe,
+    // or one that discards pixels which do not change when the text is
+    // hidden, reports a comfortable pass here — the black-on-black half is
+    // exactly the half it throws away.
+    await mountProbeFixture(
+      page,
+      `<div data-testid="probe" style="background:linear-gradient(90deg,#000 0 50%,#fff 50% 100%);color:#000000;font-size:20px;padding:12px">Half of this is invisible</div>`,
+    );
+    const { ratio } = await measureRenderedContrast(page.getByTestId("probe"));
+    expect(ratio).toBeLessThan(1.5);
+  });
+
+  test("detects low-contrast text whose colour is set on a descendant", async ({ page }) => {
+    // The wrapper is perfectly readable; the inner span is not. A probe that
+    // only forces `color` on the element itself never masks the child's
+    // glyphs and silently reports the wrapper.
+    await mountProbeFixture(
+      page,
+      `<div data-testid="probe" style="background:#ffffff;color:#111111;font-size:20px;padding:12px">Readable <span style="color:#eeeeee">unreadable</span></div>`,
+    );
+    const { ratio } = await measureRenderedContrast(page.getByTestId("probe"));
+    expect(ratio).toBeLessThan(4.5);
+  });
+
+  test("is not fooled by a high-contrast decorative pseudo-element", async ({ page }) => {
+    // Generated content in `currentColor` is a decoration, not text. A probe
+    // that measures whatever is most colourful reports the decoration's
+    // contrast and passes while the real text is illegible.
+    await mountProbeFixture(
+      page,
+      `<style>#deco::before{content:"";display:inline-block;width:40px;height:20px;background:#000000;vertical-align:middle}</style>
+       <div data-testid="probe" id="deco" style="background:#ffffff;color:#f0f0f0;font-size:20px;padding:12px">Faint text</div>`,
+    );
+    const { ratio } = await measureRenderedContrast(page.getByTestId("probe"));
+    expect(ratio).toBeLessThan(4.5);
+  });
+
+  test("passes genuinely readable text (guards against always-fail)", async ({ page }) => {
+    // The complement of the controls above: a probe wired to fail everything
+    // would satisfy all four and still be useless.
+    await mountProbeFixture(
+      page,
+      `<div data-testid="probe" style="background:#ffffff;color:#1c1917;font-size:20px;padding:12px">Clearly readable</div>`,
+    );
+    const { ratio } = await measureRenderedContrast(page.getByTestId("probe"));
+    expect(ratio).toBeGreaterThanOrEqual(4.5);
+  });
+});
