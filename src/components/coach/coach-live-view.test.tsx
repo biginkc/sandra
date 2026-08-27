@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CLOSR_SCRIPT } from "@/lib/coach/script-block";
@@ -117,6 +118,22 @@ function CollapsibleHarness({
   return <CoachLiveView session={session} {...rest} />;
 }
 
+function DialogLifecycleHarness() {
+  const [open, setOpen] = useState(false);
+  const session = useCoachSession("call-1", "lead-1", "+18165559876", "+18165551234");
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>Open live coach</button>
+      {open ? (
+        <CoachLiveView
+          session={session}
+          {...baseProps({ onCollapse: () => setOpen(false) })}
+        />
+      ) : null}
+    </>
+  );
+}
+
 function baseProps(overrides: Partial<HarnessProps> = {}): HarnessProps {
   return {
     callName: "Jane Homeowner",
@@ -190,6 +207,25 @@ describe("<CoachLiveView />", () => {
     expect(onCollapse).toHaveBeenCalledTimes(1);
   });
 
+  it("uses the shared modal primitive to enter, contain, and restore keyboard focus", async () => {
+    const user = userEvent.setup();
+    render(<DialogLifecycleHarness />);
+    const trigger = screen.getByRole("button", { name: "Open live coach" });
+    trigger.focus();
+    await user.click(trigger);
+
+    const dialog = await screen.findByRole("dialog", { name: "Live call coach" });
+    await waitFor(() => expect(dialog).toContainElement(document.activeElement as HTMLElement));
+    expect(dialog).toHaveAttribute("data-slot", "dialog-content");
+
+    for (let index = 0; index < 8; index += 1) await user.tab();
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Live call coach" })).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
+  });
+
   it("calls onCollapse from the collapse button", async () => {
     const onCollapse = vi.fn();
     render(<Harness {...baseProps({ onCollapse })} />);
@@ -233,6 +269,21 @@ describe("<CoachLiveView />", () => {
     await userEvent.type(input, "$210,000");
     await userEvent.tab();
     expect(screen.getAllByTestId("entry-chip-offer_price")[0]).toHaveTextContent("$210,000");
+  });
+
+  it("keeps editor Escape local instead of collapsing the entire coach dialog", async () => {
+    const onCollapse = vi.fn();
+    render(<Harness {...baseProps({ onCollapse })} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
+    await userEvent.click(screen.getAllByTestId("entry-chip-offer_price")[0]);
+    const input = screen.getByTestId("entry-input-offer_price");
+
+    await userEvent.type(input, "{Escape}");
+
+    expect(screen.queryByTestId("entry-input-offer_price")).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Live call coach" })).toBeInTheDocument();
+    expect(onCollapse).not.toHaveBeenCalled();
   });
 
   it("lets the rep manually switch a branch's variant", async () => {
@@ -374,6 +425,54 @@ describe("<CoachLiveView />", () => {
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
     broadcast({ type: "coach_note", text: "Say their name twice in the first line.", phaseId: "introduction", ts: "t1" });
     expect(screen.getByTestId("coach-nudge")).toHaveTextContent("Say their name twice in the first line.");
+  });
+
+  it("keeps an empty live region mounted before announcing useful nudge and objection guidance", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    const announcer = screen.getByTestId("coach-guidance-announcer");
+    expect(announcer).toBeEmptyDOMElement();
+
+    broadcast({ type: "coach_note", text: "Slow down and mirror the seller.", phaseId: "introduction", ts: "t1" });
+    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
+
+    // role="alert" carries an implicit aria-live="assertive" — distinct
+    // from the softphone toast's role="status" so the two never collide
+    // under the same accessible-role query.
+    expect(announcer).toHaveAttribute("role", "alert");
+    expect(announcer).toHaveTextContent("Slow down and mirror the seller.");
+    expect(announcer).toHaveTextContent("Acknowledge: *Sighhh* Yeah…");
+    expect(announcer).toHaveTextContent("Overcome: What were you hoping I was AT LEAST going to say?");
+    expect(announcer).not.toHaveTextContent("price_too_low");
+  });
+
+  it("stacks simultaneous nudge and objection guidance without overlap at 375px", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
+    window.dispatchEvent(new Event("resize"));
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    broadcast({ type: "coach_note", text: "Ask one more question.", phaseId: "reveal", ts: "t1" });
+    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
+
+    const stack = screen.getByTestId("coach-guidance-stack");
+    expect(stack).toContainElement(screen.getByTestId("coach-nudge"));
+    expect(stack).toContainElement(screen.getByTestId("objection-card"));
+    expect(stack.className).toMatch(/flex-col/);
+    expect(stack.className).toMatch(/max-w-\[calc\(100vw-2rem\)\]/);
+  });
+
+  it("keeps every call action, including Hang up, in the 375px responsive control grid", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
+    window.dispatchEvent(new Event("resize"));
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+    const controls = screen.getByTestId("coach-call-controls");
+    expect(controls.className).toMatch(/grid-cols-2/);
+    expect(controls).toContainElement(screen.getByTestId("coach-mute"));
+    expect(controls).toContainElement(screen.getByTestId("coach-keypad-toggle"));
+    expect(controls).toContainElement(screen.getByTestId("coach-hold"));
+    expect(controls).toContainElement(screen.getByTestId("coach-hangup"));
   });
 
   it("dismisses a nudge on tap, independent of any objection cards showing", async () => {

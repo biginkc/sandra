@@ -83,6 +83,7 @@
     "husky": "^9.1.7",
     "jsdom": "^29.1.0",
     "pg": "^8.21.0",
+    "postcss": "^8.5.10",
     "tailwindcss": "^4",
     "tsx": "^4.21.0",
     "typescript": "^5",

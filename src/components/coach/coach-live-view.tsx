@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PhoneKeypad } from "@/components/softphone/phone-keypad";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { DtmfDigit } from "@/lib/dialer/transport";
 import {
   buildPhaseScriptBlock,
@@ -104,14 +105,6 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     setEntryField,
   } = session;
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onCollapse();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onCollapse]);
-
   // The script must always render, even mid-load or after a failed context
   // fetch — a static, all-placeholder script is still useful, and never an
   // infinite spinner.
@@ -141,13 +134,27 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   const onSelectVariant = useCallback((tag: string, key: string) => selectVariant(tag, key), [selectVariant]);
 
   return (
-    <div
-      role="dialog"
-      aria-label="Live call coach"
-      aria-modal="true"
-      data-testid="coach-live-view"
-      className="fixed inset-0 z-[80] flex flex-col bg-background text-foreground"
+    <Dialog
+      open
+      onOpenChange={(open, details) => {
+        if (open) return;
+        if (
+          details.reason === "escape-key" &&
+          details.event.target instanceof Element &&
+          details.event.target.closest("[data-coach-entry-editor]")
+        ) {
+          details.cancel();
+          return;
+        }
+        onCollapse();
+      }}
     >
+      <DialogContent
+        showCloseButton={false}
+        data-testid="coach-live-view"
+        className="inset-0 top-0 left-0 z-[80] flex h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none bg-background p-0 text-foreground ring-0 sm:max-w-none"
+      >
+      <DialogTitle className="sr-only">Live call coach</DialogTitle>
       <CoachTopBar
         currentPhaseId={state.currentPhaseId}
         displayedPhaseId={displayedPhaseId}
@@ -199,15 +206,19 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           onSelectVariant={onSelectVariant}
         />
       </div>
-      <NudgeOverlay
+      <GuidanceAnnouncer
         nudges={state.nudges}
-        onDismiss={(nudgeId) => dispatch({ type: "dismiss_nudge", nudgeId })}
-      />
-      <ObjectionOverlay
         cards={state.objectionCards}
         tokens={tokens}
         occupancy={activeContext.occupancy}
-        onDismiss={(cardId) => dispatch({ type: "dismiss_objection", cardId })}
+      />
+      <GuidanceOverlay
+        nudges={state.nudges}
+        cards={state.objectionCards}
+        tokens={tokens}
+        occupancy={activeContext.occupancy}
+        onDismissNudge={(nudgeId) => dispatch({ type: "dismiss_nudge", nudgeId })}
+        onDismissObjection={(cardId) => dispatch({ type: "dismiss_objection", cardId })}
       />
       <CallControlDock
         callName={callName}
@@ -222,6 +233,61 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         onHangup={onHangup}
         onCollapse={onCollapse}
       />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function resolvedTextForAnnouncement(text: string, tokens: ResolvedTokens): string {
+  return resolveDisplayText(text, tokens)
+    .map((segment) => {
+      if (segment.kind === "text") return segment.value;
+      if (segment.kind === "tone") return segment.label;
+      return segment.resolved.value;
+    })
+    .join("");
+}
+
+/** Stays mounted before the first event so assistive technology observes
+ * each nudge/card being inserted into an existing live region. */
+function GuidanceAnnouncer({
+  nudges,
+  cards,
+  tokens,
+  occupancy,
+}: {
+  nudges: CoachNudge[];
+  cards: CoachObjectionCard[];
+  tokens: ResolvedTokens;
+  occupancy: CoachCallContext["occupancy"];
+}) {
+  return (
+    <div
+      // role="alert" (not "status"): this is time-sensitive coaching, not a
+      // routine status update, and its implicit aria-live="assertive"
+      // matches that. Also keeps it a DISTINCT role from the softphone
+      // toast's role="status" — the two are visually and semantically
+      // different surfaces and must never collide under the same
+      // accessible-role query.
+      role="alert"
+      aria-atomic="false"
+      aria-relevant="additions text"
+      data-testid="coach-guidance-announcer"
+      className="sr-only"
+    >
+      {nudges.map((nudge) => (
+        <span key={nudge.id}>{`Coach nudge: ${nudge.text}`}</span>
+      ))}
+      {cards.map((card) => {
+        const objection = getScriptObjection(card.objectionId);
+        const overcome = objection ? resolveObjectionOvercome(objection, occupancy) : null;
+        if (!objection || !overcome) return <span key={card.id}>New objection guidance.</span>;
+        return (
+          <span key={card.id}>
+            {`New objection guidance. Acknowledge: ${resolvedTextForAnnouncement(objection.display.acknowledge, tokens)} Disarm: ${resolvedTextForAnnouncement(objection.display.disarm, tokens)} Overcome: ${resolvedTextForAnnouncement(overcome, tokens)}`}
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -628,6 +694,7 @@ function EntryTokenChip({
     return (
       <input
         autoFocus
+        data-coach-entry-editor
         data-testid={`entry-input-${token}`}
         aria-label={ENTRY_TOKEN_LABEL[token]}
         value={draft}
@@ -641,7 +708,11 @@ function EntryTokenChip({
             onCommit(draft);
             setEditing(false);
           }
-          if (event.key === "Escape") setEditing(false);
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            setEditing(false);
+          }
         }}
         className="mx-0.5 inline-block w-28 rounded border border-primary bg-background px-1.5 py-0 text-[12px] outline-none"
       />
@@ -668,11 +739,35 @@ function EntryTokenChip({
   );
 }
 
-/** Coaching nudges (phase-entry rules, pain-word prompts) the producer
- * pushes live via coach_note events — same transient-guidance treatment as
- * objection cards (slide in, own auto-dismiss timer, tap to dismiss, never
- * modal), rendered in their own top-left area so they never collide with
- * objection cards at top-right. */
+/** Coaching nudges and objection cards share one responsive stack so they
+ * cannot collide when both arrive on a narrow call screen. */
+function GuidanceOverlay({
+  nudges,
+  cards,
+  tokens,
+  occupancy,
+  onDismissNudge,
+  onDismissObjection,
+}: {
+  nudges: CoachNudge[];
+  cards: CoachObjectionCard[];
+  tokens: ResolvedTokens;
+  occupancy: CoachCallContext["occupancy"];
+  onDismissNudge: (nudgeId: string) => void;
+  onDismissObjection: (cardId: string) => void;
+}) {
+  if (nudges.length === 0 && cards.length === 0) return null;
+  return (
+    <div
+      data-testid="coach-guidance-stack"
+      className="pointer-events-none fixed top-20 right-4 z-[90] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2"
+    >
+      <NudgeOverlay nudges={nudges} onDismiss={onDismissNudge} />
+      <ObjectionOverlay cards={cards} tokens={tokens} occupancy={occupancy} onDismiss={onDismissObjection} />
+    </div>
+  );
+}
+
 function NudgeOverlay({
   nudges,
   onDismiss,
@@ -682,7 +777,7 @@ function NudgeOverlay({
 }) {
   if (nudges.length === 0) return null;
   return (
-    <div className="pointer-events-none fixed top-20 left-4 z-[90] flex w-[min(320px,calc(100vw-32px))] flex-col gap-2">
+    <div className="flex flex-col gap-2">
       {nudges.map((nudge) => (
         <NudgeCard key={nudge.id} nudge={nudge} onDismiss={() => onDismiss(nudge.id)} />
       ))}
@@ -737,7 +832,7 @@ function ObjectionOverlay({
 }) {
   if (cards.length === 0) return null;
   return (
-    <div className="pointer-events-none fixed top-20 right-4 z-[90] flex w-[min(360px,calc(100vw-32px))] flex-col gap-2">
+    <div className="flex flex-col gap-2">
       {cards.map((card) => (
         <ObjectionCard key={card.id} card={card} tokens={tokens} occupancy={occupancy} onDismiss={() => onDismiss(card.id)} />
       ))}
@@ -866,8 +961,11 @@ function CallControlDock({
   return (
     <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-card px-4 py-3">
       {keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={held || holdPending || !live} /> : null}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
+      <div
+        data-testid="coach-call-dock-row"
+        className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between"
+      >
+        <div className="flex min-w-0 items-center gap-3">
           <Button
             type="button"
             variant="ghost"
@@ -888,7 +986,7 @@ function CallControlDock({
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div data-testid="coach-call-controls" className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
           <Button
             type="button"
             variant={muted ? "default" : "outline"}
