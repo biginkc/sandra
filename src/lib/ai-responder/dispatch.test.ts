@@ -77,14 +77,18 @@ type MessageRow = {
 };
 
 type AiClaimRow = {
+  error_message?: string | null;
   id: string;
   inbound_message_id: string;
   lease_expires_at: string;
+  outcome?: string | null;
   response_kind: string;
   status: string;
 };
 
 type MockState = {
+  aiDispositionRpcCalls: number;
+  aiDispositionRpcErrorsRemaining: number;
   aiDispoReviews: Array<{
     conversationId: string;
     disposition: string;
@@ -140,6 +144,8 @@ const HAPPY_REPLY: AiStructuredOutput = {
 
 function createMockState(): MockState {
   return {
+    aiDispositionRpcCalls: 0,
+    aiDispositionRpcErrorsRemaining: 0,
     aiDispoReviews: [],
     config: {
       active: true,
@@ -212,7 +218,11 @@ function createMockSupabase(state: MockState) {
         return false;
       }
       const record = cell as Record<string, unknown>;
-      if (Object.entries(value).some(([key, expected]) => record[key] !== expected)) {
+      if (
+        Object.entries(value).some(
+          ([key, expected]) => record[key] !== expected,
+        )
+      ) {
         return false;
       }
     }
@@ -245,23 +255,21 @@ function createMockSupabase(state: MockState) {
       let rows = state.messages.filter((row) => matchesMessage(row, filters));
       if (orderBy) {
         const { ascending, field } = orderBy;
-        rows = rows
-          .slice()
-          .sort((left, right) => {
-            const leftValue = String(left[field] ?? "");
-            const rightValue = String(right[field] ?? "");
-            return ascending
-              ? leftValue < rightValue
-                ? -1
-                : leftValue > rightValue
-                  ? 1
-                  : 0
+        rows = rows.slice().sort((left, right) => {
+          const leftValue = String(left[field] ?? "");
+          const rightValue = String(right[field] ?? "");
+          return ascending
+            ? leftValue < rightValue
+              ? -1
               : leftValue > rightValue
-                ? -1
-                : leftValue < rightValue
-                  ? 1
-                  : 0;
-          });
+                ? 1
+                : 0
+            : leftValue > rightValue
+              ? -1
+              : leftValue < rightValue
+                ? 1
+                : 0;
+        });
       }
       if (typeof limitCount === "number") {
         rows = rows.slice(0, limitCount);
@@ -312,9 +320,14 @@ function createMockSupabase(state: MockState) {
       },
       then<TResult1 = unknown, TResult2 = never>(
         onfulfilled?:
-          | ((value: { count?: number | null; data: MessageRow[] | null; error: null }) => TResult1 | PromiseLike<TResult1>)
+          | ((value: {
+              count?: number | null;
+              data: MessageRow[] | null;
+              error: null;
+            }) => TResult1 | PromiseLike<TResult1>)
           | null,
-        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+        onrejected?:
+          ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
       ) {
         return Promise.resolve(execute()).then(onfulfilled, onrejected);
       },
@@ -373,9 +386,7 @@ function createMockSupabase(state: MockState) {
       or(filter: string) {
         allowsNullDispo = filter.includes("outreach_dispo.is.null");
         const match = filter.match(/outreach_dispo\.in\.\(([^)]*)\)/);
-        allowedDispos = match?.[1]
-          ? match[1].split(",").filter(Boolean)
-          : null;
+        allowedDispos = match?.[1] ? match[1].split(",").filter(Boolean) : null;
         return query;
       },
       update(value: Partial<MockState["property"]>) {
@@ -384,9 +395,12 @@ function createMockSupabase(state: MockState) {
       },
       then<TResult1 = unknown, TResult2 = never>(
         onfulfilled?:
-          | ((value: ReturnType<typeof execute>) => TResult1 | PromiseLike<TResult1>)
+          | ((
+              value: ReturnType<typeof execute>,
+            ) => TResult1 | PromiseLike<TResult1>)
           | null,
-        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+        onrejected?:
+          ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
       ) {
         return Promise.resolve(execute()).then(onfulfilled, onrejected);
       },
@@ -516,12 +530,47 @@ function createMockSupabase(state: MockState) {
       single() {
         return Promise.resolve(execute());
       },
+      then<TResult1 = ReturnType<typeof execute>, TResult2 = never>(
+        onfulfilled?:
+          | ((
+              value: ReturnType<typeof execute>,
+            ) => TResult1 | PromiseLike<TResult1>)
+          | null,
+        onrejected?:
+          ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+      ) {
+        return Promise.resolve(execute()).then(onfulfilled, onrejected);
+      },
       update(value: Partial<AiClaimRow>) {
         updateData = value;
         return query;
       },
     };
 
+    return query;
+  }
+
+  function buildAiDispositionReviewsQuery() {
+    const eqFilters = new Map<string, unknown>();
+    const query = {
+      eq(field: string, value: unknown) {
+        eqFilters.set(field, value);
+        return query;
+      },
+      maybeSingle() {
+        const inboundMessageId = eqFilters.get("source_inbound_message_id");
+        const review = state.aiDispoReviews.find(
+          (row) => row.inboundMessageId === inboundMessageId,
+        );
+        return Promise.resolve({
+          data: review ? { disposition: review.disposition } : null,
+          error: null,
+        });
+      },
+      select() {
+        return query;
+      },
+    };
     return query;
   }
 
@@ -542,6 +591,9 @@ function createMockSupabase(state: MockState) {
       if (table === "ai_response_claims") {
         return buildAiClaimsQuery();
       }
+      if (table === "ai_disposition_reviews") {
+        return buildAiDispositionReviewsQuery();
+      }
       throw new Error(`Unexpected table: ${table}`);
     },
     rpc(name: string, args: Record<string, unknown>) {
@@ -549,7 +601,26 @@ function createMockSupabase(state: MockState) {
         throw new Error(`Unexpected RPC: ${name}`);
       }
 
+      state.aiDispositionRpcCalls += 1;
+      if (state.aiDispositionRpcErrorsRemaining > 0) {
+        state.aiDispositionRpcErrorsRemaining -= 1;
+        return Promise.resolve({
+          data: null,
+          error: { message: "transient disposition RPC failure" },
+        });
+      }
+
       const disposition = String(args.p_disposition);
+      const inboundMessageId = String(args.p_source_inbound_message_id);
+      const existingReview = state.aiDispoReviews.find(
+        (row) => row.inboundMessageId === inboundMessageId,
+      );
+      if (existingReview) {
+        return Promise.resolve({
+          data: { status: "replayed", reviewId: "review-existing" },
+          error: null,
+        });
+      }
       const current = state.property.outreach_dispo;
       const humanOwned = new Set([
         "bad_number",
@@ -584,7 +655,7 @@ function createMockSupabase(state: MockState) {
       state.aiDispoReviews.push({
         conversationId: String(args.p_conversation_id),
         disposition,
-        inboundMessageId: String(args.p_source_inbound_message_id),
+        inboundMessageId,
         reason: String(args.p_ai_reason),
       });
       return Promise.resolve({
@@ -608,7 +679,9 @@ function installSendMock(state: MockState) {
       created_at: timestamp,
       direction: "outbound",
       metadata:
-        input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
+        input.metadata &&
+        typeof input.metadata === "object" &&
+        !Array.isArray(input.metadata)
           ? (input.metadata as Record<string, unknown>)
           : null,
       property_id: input.propertyId,
@@ -1007,6 +1080,180 @@ describe("dispatchAiResponse debounce", () => {
     expect(state.property.needs_human_attention).toBe(true);
     expect(state.aiDispoReviews).toEqual([]);
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("retries one transient disposition RPC failure and creates exactly one review", async () => {
+    const state = createMockState();
+    state.aiDispositionRpcErrorsRemaining = 1;
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "close_not_interested",
+      confidence: 0.9,
+      sentiment: "neutral",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "not interested",
+        inboundMessageId: "inbound-transient-dispo",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "auto_closed",
+      reason: "model:not_interested",
+    });
+    expect(state.aiDispositionRpcCalls).toBe(2);
+    expect(state.aiDispoReviews).toHaveLength(1);
+    expect(state.aiClaims[0]).toMatchObject({ status: "completed" });
+  });
+
+  it("leaves a persistent disposition failure visible and retryable", async () => {
+    const state = createMockState();
+    state.aiDispositionRpcErrorsRemaining = 2;
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "close_not_interested",
+      confidence: 0.9,
+      sentiment: "neutral",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "not interested",
+        inboundMessageId: "inbound-persistent-dispo",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "disposition_write_failed",
+    });
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.aiDispoReviews).toEqual([]);
+    expect(state.aiClaims[0]).toMatchObject({
+      error_message: "disposition_write_failed",
+      status: "error",
+    });
+  });
+
+  it("keeps opt-out suppression while surfacing a persistent review-write failure", async () => {
+    const state = createMockState();
+    state.aiDispositionRpcErrorsRemaining = 2;
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "opt_out",
+      confidence: 0.9,
+      sentiment: "frustrated",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "stop texting me",
+        inboundFromPhone: "+18165550001",
+        inboundMessageId: "inbound-persistent-opt-out",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledTimes(1);
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "disposition_write_failed",
+    });
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.aiClaims[0]).toMatchObject({ status: "error" });
+  });
+
+  it("keeps DNC suppression while surfacing a persistent review-write failure", async () => {
+    const state = createMockState();
+    state.aiDispositionRpcErrorsRemaining = 2;
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "close_dnc",
+      confidence: 0.9,
+      sentiment: "hostile",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "do not contact me",
+        inboundFromPhone: "+18165550001",
+        inboundMessageId: "inbound-persistent-dnc",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledTimes(1);
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "disposition_write_failed",
+    });
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.aiClaims[0]).toMatchObject({ status: "error" });
+  });
+
+  it("does not apply drifted wrong-number side effects when a retry preserved not-interested", async () => {
+    const state = createMockState();
+    state.property.outreach_dispo = "not_interested";
+    state.aiDispoReviews.push({
+      conversationId: CONVERSATION_ID,
+      disposition: "not_interested",
+      inboundMessageId: "inbound-drifted-retry",
+      reason: "model:not_interested",
+    });
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "close_wrong_number",
+      wrong_scope: "all",
+      confidence: 0.9,
+      sentiment: "neutral",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "wrong number",
+        inboundFromPhone: "+18165550001",
+        inboundMessageId: "inbound-drifted-retry",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "skipped",
+      reason: "replayed_other_disposition",
+    });
+    expect(state.property.outreach_dispo).toBe("not_interested");
+    expect(state.aiDispositionRpcCalls).toBe(0);
+    expect(vi.mocked(applyPhoneLevelOptOut)).not.toHaveBeenCalled();
+    expect(state.aiClaims[0]).toMatchObject({ status: "completed" });
   });
 
   it("low-confidence opt_out still suppresses the phone and marks the property opted out", async () => {
