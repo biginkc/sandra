@@ -119,16 +119,19 @@ const guidanceOverlayHtml = renderToStaticMarkup(
   }),
 );
 
-/** Mirrors CoachLiveView's own layout: a flex-column full-height view with a
- * flex-1 filler standing in for the transcript/script area, so the dock
- * ends up genuinely pinned to the real viewport bottom, exactly like
- * production. */
-function pageShell(...sections: string[]): string {
+/** Mirrors CoachLiveView's own layout exactly, including nesting: a
+ * flex-column full-height view with a `relative` flex-1 filler standing in
+ * for the topbar/transcript/script area, with the guidance overlay as its
+ * CHILD (not a sibling before the dock) — that nesting is what makes the
+ * overlay's absolute inset-y-4 anchor to this filler's real bottom edge,
+ * which the browser computes as "whatever's left over above the dock",
+ * automatically adapting to viewport height and dock height alike. */
+function pageShell(dockHtml: string, guidanceHtml = ""): string {
   return `
     <style>${compiledCss}</style>
     <div class="flex h-dvh flex-col">
-      <div class="min-h-0 flex-1"></div>
-      ${sections.join("\n")}
+      <div class="relative min-h-0 flex-1">${guidanceHtml}</div>
+      ${dockHtml}
     </div>
   `;
 }
@@ -155,46 +158,49 @@ test("keeps every call control, including Hang up, inside the 375px viewport and
   await page.getByTestId("coach-hangup").click();
 });
 
-test("keeps the call dock genuinely clickable and never covered by the guidance stack at 375x812, even with all 3 objection cards, all 3 nudges, and the keypad open", async ({ page }) => {
-  const dockOpenHtml = renderToStaticMarkup(createElement(CallControlDock, { ...dockProps, initialKeypadOpen: true }));
-  await page.setContent(pageShell(guidanceOverlayHtml, dockOpenHtml));
+// 375x812 (iPhone-sized, tall) and 375x667 (iPhone SE-sized, the shortest
+// commonly supported viewport) — the round-6 fixed vh-budget version
+// (top-20 + max-h-[40vh]) passed at 812 but overlapped the dock by ~18px
+// at 667, since the budget scaled with viewport height while the dock's
+// real height didn't. Both must hold for containment to be genuinely
+// structural rather than tuned to one screen size.
+for (const viewportHeight of [812, 667]) {
+  test(`keeps the call dock genuinely clickable and never covered by the guidance stack at 375x${viewportHeight}, even with all 3 objection cards, all 3 nudges, and the keypad open`, async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: viewportHeight });
+    const dockOpenHtml = renderToStaticMarkup(createElement(CallControlDock, { ...dockProps, initialKeypadOpen: true }));
+    await page.setContent(pageShell(dockOpenHtml, guidanceOverlayHtml));
 
-  expect(await page.getByTestId("objection-card").count()).toBe(MAX_OBJECTION_CARDS);
-  expect(await page.getByTestId("coach-nudge").count()).toBe(MAX_NUDGES);
+    expect(await page.getByTestId("objection-card").count()).toBe(MAX_OBJECTION_CARDS);
+    expect(await page.getByTestId("coach-nudge").count()).toBe(MAX_NUDGES);
 
-  const stack = await page.getByTestId("coach-guidance-stack").boundingBox();
-  const dockRow = await page.getByTestId("coach-call-dock-row").boundingBox();
-  const keypad = await page.getByTestId("phone-keypad").boundingBox();
-  expect(stack).not.toBeNull();
-  expect(dockRow).not.toBeNull();
-  expect(keypad).not.toBeNull();
+    const stack = await page.getByTestId("coach-guidance-stack").boundingBox();
+    const dockRow = await page.getByTestId("coach-call-dock-row").boundingBox();
+    const keypad = await page.getByTestId("phone-keypad").boundingBox();
+    expect(stack).not.toBeNull();
+    expect(dockRow).not.toBeNull();
+    expect(keypad).not.toBeNull();
 
-  // The stack's own budget (top-20 + max-h-[40vh]) is what actually
-  // guarantees this, independent of how much content is inside it.
-  const viewportHeight = 812;
-  expect(stack!.height).toBeLessThanOrEqual(viewportHeight * 0.4 + 1);
-  expect(stack!.y + stack!.height).toBeLessThanOrEqual(80 + viewportHeight * 0.4 + 1);
+    // Structural containment: the stack's bottom edge is bound to the real
+    // dock's top edge (via the shared relative ancestor), not computed from
+    // a viewport-height percentage — this must hold at both heights above.
+    expect(stack!.y + stack!.height).toBeLessThanOrEqual(keypad!.y);
+    expect(stack!.y + stack!.height).toBeLessThanOrEqual(dockRow!.y);
 
-  // Bottom containment: fully loaded, the stack still never reaches down
-  // into the dock — keypad included, since an open keypad is the tallest
-  // the dock ever gets.
-  expect(stack!.y + stack!.height).toBeLessThanOrEqual(keypad!.y);
-  expect(stack!.y + stack!.height).toBeLessThanOrEqual(dockRow!.y);
+    for (const testId of ["coach-mute", "coach-keypad-toggle", "coach-hold", "coach-hangup"]) {
+      const el = page.getByTestId(testId);
+      await expect(el).toBeInViewport();
+      const box = await el.boundingBox();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(375);
+    }
 
-  for (const testId of ["coach-mute", "coach-keypad-toggle", "coach-hold", "coach-hangup"]) {
-    const el = page.getByTestId(testId);
-    await expect(el).toBeInViewport();
-    const box = await el.boundingBox();
-    expect(box!.x).toBeGreaterThanOrEqual(0);
-    expect(box!.x + box!.width).toBeLessThanOrEqual(375);
-  }
-
-  // Real clicks on the dock controls AND on keypad digits at the far
-  // corners of its grid — if the guidance stack's containment regressed
-  // and grew tall enough to overlap, these would time out as intercepted.
-  await page.getByTestId("coach-mute").click();
-  await page.getByTestId("coach-hold").click();
-  await page.getByTestId("coach-hangup").click();
-  await page.getByRole("button", { name: "Keypad 1" }).click();
-  await page.getByRole("button", { name: "Keypad #" }).click();
-});
+    // Real clicks on the dock controls AND on keypad digits at the far
+    // corners of its grid — if the guidance stack's containment regressed
+    // and grew tall enough to overlap, these would time out as intercepted.
+    await page.getByTestId("coach-mute").click();
+    await page.getByTestId("coach-hold").click();
+    await page.getByTestId("coach-hangup").click();
+    await page.getByRole("button", { name: "Keypad 1" }).click();
+    await page.getByRole("button", { name: "Keypad #" }).click();
+  });
+}

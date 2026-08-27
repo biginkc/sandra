@@ -510,11 +510,25 @@ describe("<CoachLiveView />", () => {
     expect(stack).toContainElement(screen.getByTestId("objection-card"));
     expect(stack.className).toMatch(/flex-col/);
     expect(stack.className).toMatch(/max-w-\[calc\(100vw-2rem\)\]/);
-    // The stack's own max-height + internal scroll is what actually
-    // guarantees it can never grow tall enough to cover the call dock,
-    // regardless of how many cards/nudges are showing.
-    expect(stack.className).toMatch(/max-h-\[40vh\]/);
-    expect(stack.className).toMatch(/overflow-y-auto/);
+    // absolute + inset-y (bounded by the relative parent that sits between
+    // the topbar and the call dock) is what structurally guarantees the
+    // stack's bottom edge can never pass the dock's top edge, at any
+    // viewport height — not a fixed viewport-relative max-height, which
+    // drifted out of sync with the dock's real height on a shorter screen.
+    expect(stack.className).toMatch(/absolute/);
+    expect(stack.className).toMatch(/inset-y-4/);
+    expect(stack.className).not.toMatch(/\bfixed\b/);
+    expect(stack.className).not.toMatch(/max-h-\[40vh\]/);
+    // pointer-events-none on the (full-height-forced) outer box, so its
+    // empty space can't swallow clicks meant for the script panel behind
+    // it — only the inner content wrapper, which shrinks to its own
+    // content and scrolls (the real backstop) once it doesn't fit, is
+    // actually clickable.
+    expect(stack.className).toMatch(/pointer-events-none/);
+    const innerWrapper = stack.firstElementChild as HTMLElement;
+    expect(innerWrapper.className).toMatch(/pointer-events-auto/);
+    expect(innerWrapper.className).toMatch(/overflow-y-auto/);
+    expect(innerWrapper.className).toMatch(/max-h-full/);
   });
 
   it("never renders more than the capped number of cards/nudges, even during a rapid-fire burst — the stack's scroll is a backstop, not the only guard", async () => {

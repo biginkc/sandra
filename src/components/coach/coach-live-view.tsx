@@ -207,7 +207,17 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           </button>
         </div>
       ) : null}
-      <div className="flex min-h-0 flex-1">
+      {/* relative: this is the guidance stack's real containing block. It's
+          the flex-1 middle region between the (shrink-0) topbar/banners
+          above and the (shrink-0) call dock below — the browser computes
+          its height as whatever's actually left over, automatically
+          shrinking it when the dock grows (e.g. the keypad opening) and
+          expanding it on a taller viewport. Anchoring the guidance stack's
+          top/right/BOTTOM insets to THIS box, rather than to the viewport,
+          is what makes containment structural: its bottom edge is always
+          exactly the dock's top edge, with no top-offset-plus-max-height
+          arithmetic that can drift out of sync at a shorter viewport. */}
+      <div className="relative flex min-h-0 flex-1">
         <TranscriptFeed lines={state.transcript} />
         <ScriptPanel
           block={scriptBlock}
@@ -218,20 +228,20 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           onEditEntry={onEditEntry}
           onSelectVariant={onSelectVariant}
         />
+        <GuidanceOverlay
+          nudges={state.nudges}
+          cards={state.objectionCards}
+          tokens={tokens}
+          occupancy={activeContext.occupancy}
+          onDismissNudge={(nudgeId) => dispatch({ type: "dismiss_nudge", nudgeId })}
+          onDismissObjection={(cardId) => dispatch({ type: "dismiss_objection", cardId })}
+        />
       </div>
       <GuidanceAnnouncer
         nudges={state.nudges}
         cards={state.objectionCards}
         tokens={tokens}
         occupancy={activeContext.occupancy}
-      />
-      <GuidanceOverlay
-        nudges={state.nudges}
-        cards={state.objectionCards}
-        tokens={tokens}
-        occupancy={activeContext.occupancy}
-        onDismissNudge={(nudgeId) => dispatch({ type: "dismiss_nudge", nudgeId })}
-        onDismissObjection={(cardId) => dispatch({ type: "dismiss_objection", cardId })}
       />
       <CallControlDock
         callName={callName}
@@ -779,21 +789,34 @@ export function GuidanceOverlay({
   return (
     <div
       data-testid="coach-guidance-stack"
-      // max-h + overflow-y-auto is what actually guarantees this stack can
-      // never cover the call dock, regardless of how many cards exist —
-      // the reducer-level MAX_OBJECTION_CARDS/MAX_NUDGES cap (event-
-      // reducer.ts) bounds how much there normally is TO scroll, but this
-      // is the real containment. 40vh is a deliberately generous fixed
-      // budget rather than a dock-height measurement: at the narrowest
-      // supported viewport (375x812) it leaves the topbar and the dock —
-      // even with its keypad open, the tallest the dock ever gets — clear
-      // underneath. pointer-events-auto (not -none) so the stack itself
-      // can receive wheel/touch scroll input; each card is still the only
-      // actually-clickable content within it.
-      className="pointer-events-auto fixed top-20 right-4 z-[90] flex max-h-[40vh] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto overscroll-contain"
+      // absolute + inset-y-4, NOT fixed + top-offset + a vh-based max-height.
+      // The parent (the flex-1 region between the topbar and the call dock —
+      // see CoachLiveView) is `relative` and its height is whatever's
+      // actually left over once the browser lays out the shrink-0 topbar/
+      // banners above and the shrink-0 dock below. Anchoring both `top` AND
+      // `bottom` to THAT box makes this box's bottom edge structurally equal
+      // to the dock's top edge, in every case — a taller keypad, a shorter
+      // viewport, an extra banner — with no fixed vh budget to silently fall
+      // out of sync with the dock's real height (as the prior top-20 +
+      // max-h-[40vh] version did: at 375x667 the dock's actual top sat
+      // higher than 40vh of that shorter viewport predicted, so the stack
+      // overlapped it by ~18px).
+      //
+      // pointer-events-none here, not -auto: setting BOTH top and bottom
+      // insets with no explicit height forces this box to span the FULL
+      // available region regardless of how little content is inside it —
+      // without pointer-events-none, that empty space would sit in front
+      // of (and swallow clicks meant for) the script panel underneath.
+      // Only the inner wrapper below, which shrinks to its own content (or
+      // scrolls once it doesn't fit), re-enables pointer events — the same
+      // pattern each individual card/nudge already uses to stay clickable
+      // inside a pointer-events-none ancestor.
+      className="pointer-events-none absolute inset-y-4 right-4 z-[90] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col"
     >
-      <NudgeOverlay nudges={nudges} onDismiss={onDismissNudge} />
-      <ObjectionOverlay cards={cards} tokens={tokens} occupancy={occupancy} onDismiss={onDismissObjection} />
+      <div className="pointer-events-auto flex max-h-full flex-col gap-2 overflow-y-auto overscroll-contain">
+        <NudgeOverlay nudges={nudges} onDismiss={onDismissNudge} />
+        <ObjectionOverlay cards={cards} tokens={tokens} occupancy={occupancy} onDismiss={onDismissObjection} />
+      </div>
     </div>
   );
 }
