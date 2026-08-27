@@ -26,6 +26,11 @@ jobs:
       - name: Run verify
         run: npm run verify
 
+      - name: Run database-free synthetic Playwright gates
+        env:
+          PLAYWRIGHT_BROWSER_CHANNEL: chrome
+        run: npm run test:e2e:synthetic
+
   hugo-postgres:
     name: Hugo lifecycle migrations on PostgreSQL 17
     runs-on: ubuntu-24.04
