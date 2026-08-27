@@ -55,6 +55,7 @@ export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"
     holdTimer: null,
     lastEventAt: null,
     entryFields: { ...EMPTY_ENTRY_FIELDS },
+    cursor: null,
   };
 }
 
@@ -109,7 +110,14 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         lastEventAt: action.ts,
         transcript: upsertTranscriptLine(state.transcript, action),
       };
-    case "phase":
+    case "phase": {
+      // A cursor is only ever stored for the phase it was validated
+      // against (see the "cursor" case below) — once the server actually
+      // moves to a different phase, that stored cursor describes a phase
+      // the call has left behind and must not keep being applied. Guarded
+      // on an actual change (not just a redundant re-broadcast of the same
+      // phaseId) so a duplicate phase event can't wipe a still-valid cursor.
+      const phaseChanged = action.phaseId !== state.currentPhaseId;
       return {
         ...state,
         connected: true,
@@ -117,7 +125,9 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         currentPhaseId: action.phaseId,
         // Server truth always wins over a manual rail tap.
         overriddenPhaseId: null,
+        cursor: phaseChanged ? null : state.cursor,
       };
+    }
     case "objection": {
       objectionCardSeq += 1;
       const nextObjectionCards = [
@@ -176,6 +186,26 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         connected: true,
         lastEventAt: action.ts,
         nudges: nextNudges.length > MAX_NUDGES ? nextNudges.slice(nextNudges.length - MAX_NUDGES) : nextNudges,
+      };
+    }
+    case "cursor": {
+      // Phase is authoritative: a cursor for any phase other than the one
+      // the reducer currently considers live is stale by construction
+      // (either it lagged behind a phase advance, or arrived out of order)
+      // and must be ignored outright rather than applied — never stored,
+      // never allowed to move the rep's script position.
+      if (action.phaseId !== state.currentPhaseId) return state;
+      return {
+        ...state,
+        connected: true,
+        lastEventAt: action.ts,
+        cursor: {
+          phaseId: action.phaseId,
+          branchTag: action.branchTag,
+          variantKey: action.variantKey,
+          lineIndex: action.lineIndex,
+          ts: action.ts,
+        },
       };
     }
     case "dismiss_objection":

@@ -119,6 +119,24 @@ export type CoachNoteEvent = CoachEventVersions & {
   ts: string;
 };
 
+/** The rep's exact live position in the script, as tracked by the coach
+ * service's follower — not just which phase, but which branch/variant/line
+ * within it. Exact shape per the producer's verbatim wire contract
+ * (src/coach/wire-contract.ts in the Jitter repo): `lineIndex` indexes into
+ * the selected variant's `lines` array. `branchTag`/`variantKey` are
+ * resolved against the client's own closr-script-v0.json — see
+ * resolveCursorLine in script-block.ts for the defensive lookup, since a
+ * value the producer emits is not guaranteed to still exist in whatever
+ * script version this client has loaded. */
+export type CoachCursorEvent = CoachEventVersions & {
+  type: "cursor";
+  phaseId: CoachPhaseId;
+  branchTag: string;
+  variantKey: string;
+  lineIndex: number;
+  ts: string;
+};
+
 export type CoachEvent =
   | CoachTranscriptEvent
   | CoachPhaseEvent
@@ -126,7 +144,8 @@ export type CoachEvent =
   | CoachCounterEvent
   | CoachGateEvent
   | CoachTimerEvent
-  | CoachNoteEvent;
+  | CoachNoteEvent
+  | CoachCursorEvent;
 
 // ---- Token resolution ----
 
@@ -216,6 +235,19 @@ export type CoachHoldTimer = {
   durationS: number;
 };
 
+/** The latest cursor position accepted into state — only ever stored when
+ * its phaseId matched state.currentPhaseId at the moment it arrived (phase
+ * is authoritative; see coachReducer's "cursor" case), and cleared whenever
+ * a later "phase" event actually changes the current phase, so this can
+ * never linger as stale guidance for a phase the call has moved past. */
+export type CoachCursor = {
+  phaseId: CoachPhaseId;
+  branchTag: string;
+  variantKey: string;
+  lineIndex: number;
+  ts: string;
+};
+
 export type CoachNudge = {
   /** Instance id — generated (the wire contract has no id field on
    * coach_note). Unique per occurrence, even for a repeated nudge. */
@@ -244,4 +276,9 @@ export type CoachState = {
   lastEventAt: string | null;
   /** Rep-entered deal-panel values (closing_date/offer_price/net_to_seller). */
   entryFields: CoachEntryFields;
+  /** The rep's live script position, or null when no cursor has arrived yet
+   * (including every call before the producer ships this event) — the
+   * render path falls back to today's branch-0/first-say-line behavior
+   * whenever this is null. */
+  cursor: CoachCursor | null;
 };

@@ -104,6 +104,120 @@ describe("coachReducer — phase advance", () => {
   });
 });
 
+describe("coachReducer — cursor", () => {
+  it("starts with no cursor", () => {
+    expect(initialCoachState().cursor).toBeNull();
+  });
+
+  it("stores a cursor whose phaseId matches the current phase", () => {
+    const state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Frame the call",
+      variantKey: "default",
+      lineIndex: 2,
+      ts: "t1",
+      ...V,
+    });
+    expect(state.cursor).toEqual({
+      phaseId: "introduction",
+      branchTag: "Frame the call",
+      variantKey: "default",
+      lineIndex: 2,
+      ts: "t1",
+    });
+    expect(state.connected).toBe(true);
+  });
+
+  it("ignores a cursor whose phaseId does not match the current phase — phase is authoritative", () => {
+    const state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "reveal",
+      branchTag: "Entry",
+      variantKey: "unknown",
+      lineIndex: 0,
+      ts: "t1",
+      ...V,
+    });
+    expect(state.cursor).toBeNull();
+    // Nothing else about state should move either — this is a full ignore,
+    // not a partial apply.
+    expect(state.connected).toBe(false);
+  });
+
+  it("a later, non-matching cursor never overwrites a previously stored valid one", () => {
+    let state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      ts: "t1",
+      ...V,
+    });
+    state = coachReducer(state, {
+      type: "cursor",
+      phaseId: "reveal",
+      branchTag: "Entry",
+      variantKey: "unknown",
+      lineIndex: 0,
+      ts: "t2",
+      ...V,
+    });
+    expect(state.cursor).toEqual({
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      ts: "t1",
+    });
+  });
+
+  it("clears the cursor once a phase event actually advances the current phase", () => {
+    let state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      ts: "t1",
+      ...V,
+    });
+    expect(state.cursor).not.toBeNull();
+    state = coachReducer(state, { type: "phase", phaseId: "reveal", ts: "t2", ...V });
+    expect(state.cursor).toBeNull();
+    expect(state.currentPhaseId).toBe("reveal");
+  });
+
+  it("keeps a valid cursor through a redundant phase event that repeats the SAME phaseId", () => {
+    let state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      ts: "t1",
+      ...V,
+    });
+    state = coachReducer(state, { type: "phase", phaseId: "introduction", ts: "t2", ...V });
+    expect(state.cursor).not.toBeNull();
+  });
+
+  it("clears the cursor on reset, same as the rest of session state", () => {
+    let state = coachReducer(initialCoachState(), {
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      ts: "t1",
+      ...V,
+    });
+    state = coachReducer(state, { type: "reset", startingPhaseId: "introduction" });
+    expect(state.cursor).toBeNull();
+  });
+});
+
 describe("coachReducer — objection card lifecycle", () => {
   it("adds a card on an objection event and removes it on dismissal", () => {
     let state = coachReducer(initialCoachState(), {

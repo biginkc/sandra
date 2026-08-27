@@ -1,7 +1,7 @@
 import scriptJson from "./closr-script-v0.json";
 import { assertValidClosrScript, type ClosrScript, type ScriptBranch, type ScriptObjection, type ScriptPhase, type ScriptVariant } from "./script-schema";
 import { resolveDisplayText, type DisplayTextSegment } from "./token-resolver";
-import type { CoachCallContext, CoachOccupancy, CoachPhaseId, ResolvedTokens } from "./types";
+import type { CoachCallContext, CoachCursor, CoachOccupancy, CoachPhaseId, ResolvedTokens } from "./types";
 import { COACH_PHASE_ORDER } from "./types";
 
 // Fail loud at load rather than let a malformed script produce silent
@@ -175,4 +175,51 @@ export function buildPhaseScriptBlock(
     counter,
     gates,
   };
+}
+
+/**
+ * Resolves a cursor's (branchTag, variantKey, lineIndex) against the RAW
+ * script — not against a pre-built PhaseScriptBlock — because a
+ * PhaseScriptBlock's `branch.selected` is the auto/override-picked variant,
+ * which is not necessarily the variant the cursor names. The cursor is
+ * authoritative on which variant is live; this looks that variant up
+ * directly.
+ *
+ * Defensive by construction: an unknown phaseId/branchTag/variantKey or an
+ * out-of-range lineIndex returns null so the caller can fall back to
+ * today's branch-0/first-say-line behavior instead of crashing or
+ * rendering blank — the producer's script version and this client's loaded
+ * script are never guaranteed to agree on every branch/variant/line.
+ *
+ * A cursor landing on (or advancing through) a "note" line — a rep-facing
+ * stage direction, never meant to be read aloud — scans forward within the
+ * SAME variant for the next "say" line, so this never presents a note as
+ * speech, matching the rule selectSpokenLine already enforces for the
+ * no-cursor path. Returns null (triggering the same fallback) if the
+ * variant has no "say" line at or after lineIndex.
+ */
+export function resolveCursorLine(cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex">, tokens: ResolvedTokens): DisplayLine | null {
+  const phase = getScriptPhase(cursor.phaseId);
+  if (!phase) return null;
+  const branch = phase.display.branches.find((candidate) => candidate.tag === cursor.branchTag);
+  if (!branch) return null;
+  const variant = branch.variants.find((candidate) => candidate.key === cursor.variantKey);
+  if (!variant) return null;
+  if (cursor.lineIndex < 0 || cursor.lineIndex >= variant.lines.length) return null;
+
+  for (let index = cursor.lineIndex; index < variant.lines.length; index += 1) {
+    const line = variant.lines[index];
+    if (line.type === "say") {
+      return { type: "say", segments: resolveDisplayText(line.text, tokens) };
+    }
+  }
+  return null;
+}
+
+/** Same resolution/fallback rules as resolveCursorLine, one line further —
+ * used for the "Coming next" preview when a cursor is active, so the
+ * preview shows the next line within the CURRENT phase instead of jumping
+ * to the next phase. */
+export function resolveCursorNextLine(cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex">, tokens: ResolvedTokens): DisplayLine | null {
+  return resolveCursorLine({ ...cursor, lineIndex: cursor.lineIndex + 1 }, tokens);
 }

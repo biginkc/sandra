@@ -227,6 +227,122 @@ describe("<CoachLiveView />", () => {
     expect(previewBody).not.toHaveTextContent(/novation prices on the calculator/i);
   });
 
+  describe("cursor — the Say This card follows the rep's exact live script position", () => {
+    it("moves the dominant card to the exact branch/variant/line the coach reports", async () => {
+      render(<Harness {...baseProps()} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+      // Baseline (no cursor yet): branch-0's greeting.
+      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
+
+      broadcast({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 2,
+        ts: "t1",
+      });
+
+      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/add some sort of value to the property/i);
+    });
+
+    it("ignores a cursor for a phase other than the current one — phase is authoritative", async () => {
+      render(<Harness {...baseProps()} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+      // Current phase is "introduction" (the default starting phase); this
+      // cursor names "reveal" and must be dropped by the reducer, never
+      // reaching the render path.
+      broadcast({
+        type: "cursor",
+        phaseId: "reveal",
+        branchTag: "Entry",
+        variantKey: "unknown",
+        lineIndex: 0,
+        ts: "t1",
+      });
+
+      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
+    });
+
+    it("falls back to today's branch-0 behavior when the cursor names an unknown branch, unknown variant, or out-of-range line — never crashes, never renders blank", async () => {
+      render(<Harness {...baseProps()} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+      broadcast({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Not A Real Branch",
+        variantKey: "default",
+        lineIndex: 0,
+        ts: "t1",
+      });
+      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
+
+      broadcast({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Opener",
+        variantKey: "not_a_real_variant",
+        lineIndex: 0,
+        ts: "t2",
+      });
+      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
+
+      broadcast({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 999,
+        ts: "t3",
+      });
+      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
+      expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument();
+    });
+
+    it("shows the NEXT line within the current phase in the Coming Next preview, not the next phase, while a cursor is active", async () => {
+      render(<Harness {...baseProps()} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+      // Baseline (no cursor): the preview jumps to the next PHASE.
+      expect(screen.getByTestId("next-phase-preview")).toHaveTextContent(/Coming next · Reveal/i);
+
+      broadcast({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 0,
+        ts: "t1",
+      });
+
+      const preview = screen.getByTestId("next-phase-preview");
+      expect(preview).toHaveTextContent(/Coming next · Introduction/i);
+      expect(screen.getByTestId("next-phase-preview-body")).toHaveTextContent(/Cool, so how we work is very simple/i);
+    });
+
+    it("survives collapse/reopen — the cursor lives in session state owned outside CoachLiveView", async () => {
+      const { rerender } = render(<CollapsibleHarness {...baseProps()} collapsed={false} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+      broadcast({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 2,
+        ts: "t1",
+      });
+      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/add some sort of value to the property/i);
+
+      rerender(<CollapsibleHarness {...baseProps()} collapsed={true} />);
+      rerender(<CollapsibleHarness {...baseProps()} collapsed={false} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/add some sort of value to the property/i);
+    });
+  });
+
   it("keeps the full two-speaker transcript surface and interim/final semantics beside focus mode", async () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());

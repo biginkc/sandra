@@ -14,6 +14,8 @@ import {
   getScriptObjection,
   getScriptPhase,
   nextPhaseId,
+  resolveCursorLine,
+  resolveCursorNextLine,
   resolveObjectionOvercome,
   type BranchSelectContext,
   type DisplayLine,
@@ -23,6 +25,7 @@ import {
 import { resolveCoachTokens, resolveDisplayText, type DisplayTextSegment } from "@/lib/coach/token-resolver";
 import type {
   CoachCallContext,
+  CoachCursor,
   CoachEntryToken,
   CoachHoldTimer,
   CoachNudge,
@@ -156,6 +159,21 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   const scriptBlock = buildPhaseScriptBlock(displayedPhaseId, tokens, selectCtx, branchOverrides);
   const upcomingId = nextPhaseId(displayedPhaseId);
   const nextBlock = upcomingId ? buildPhaseScriptBlock(upcomingId, tokens, selectCtx, branchOverrides) : null;
+  // A stored cursor is only ever for state.currentPhaseId (the reducer
+  // enforces that), so this additionally guards against the DISPLAYED phase
+  // — the rep manually browsing the rail to a different phase via
+  // overriddenPhaseId must see that phase's default branch-0 content, not
+  // the live cursor for whatever phase the call is actually in.
+  const activeCursor: CoachCursor | null =
+    state.cursor && state.cursor.phaseId === displayedPhaseId ? state.cursor : null;
+  const cursorSpokenLine = useMemo(
+    () => (activeCursor ? resolveCursorLine(activeCursor, tokens) : null),
+    [activeCursor, tokens],
+  );
+  const cursorNextLine = useMemo(
+    () => (activeCursor ? resolveCursorNextLine(activeCursor, tokens) : null),
+    [activeCursor, tokens],
+  );
   const gateEntries = (scriptBlock?.gates ?? []).map((gate) => ({
     ...gate,
     cleared: state.gates[gate.id] ?? false,
@@ -263,6 +281,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           <ScriptPanel
             block={scriptBlock}
             nextBlock={nextBlock}
+            cursorSpokenLine={cursorSpokenLine}
+            cursorNextLine={cursorNextLine}
             degraded={degraded}
             suppressed={showGuidance}
             contextLoad={contextLoad}
@@ -570,6 +590,8 @@ function TranscriptFeed({ lines }: { lines: CoachTranscriptLine[] }) {
 function ScriptPanel({
   block,
   nextBlock,
+  cursorSpokenLine,
+  cursorNextLine,
   degraded,
   suppressed,
   contextLoad,
@@ -580,6 +602,16 @@ function ScriptPanel({
 }: {
   block: PhaseScriptBlock | null;
   nextBlock: PhaseScriptBlock | null;
+  /** The line at the rep's live cursor, already resolved and skip-past any
+   * leading "note" lines — null whenever there is no cursor, it's stale
+   * (wrong phase), or it can't be resolved against this client's script.
+   * The dominant card falls back to today's branch-0/first-say-line
+   * behavior whenever this is null. */
+  cursorSpokenLine: DisplayLine | null;
+  /** Same resolution, one line further — the line immediately after the
+   * cursor, within the SAME phase. Drives the "Coming next" preview when
+   * present; null falls back to today's next-phase preview. */
+  cursorNextLine: DisplayLine | null;
   degraded: boolean;
   suppressed: boolean;
   contextLoad: ContextLoadState;
@@ -605,12 +637,23 @@ function ScriptPanel({
     );
   }
   const dominantBranch = block.branches[0] ?? null;
-  const spokenLine = selectSpokenLine(dominantBranch);
+  // The live cursor, when resolved, wins outright — it's the rep's ACTUAL
+  // position, more accurate than the branch-0 heuristic. Falls back to
+  // today's behavior whenever there's no cursor, it's stale, or it can't be
+  // resolved (unknown branch/variant, out-of-range line, or no "say" line
+  // left in that variant).
+  const spokenLine = cursorSpokenLine ?? selectSpokenLine(dominantBranch);
   // Same rule for the "Coming next" preview — it was still blindly reading
   // lines[0] and could surface a note as the next thing to say (repro: with
   // Offer as the current phase, Close's dominant branch leads with a note).
   // A glanced-at preview makes that worse than the main card, not better.
-  const nextSpokenLine = nextBlock ? selectSpokenLine(nextBlock.branches[0] ?? null) : null;
+  // With an active cursor, "next" means the next line within THIS phase
+  // (cursorNextLine) rather than jumping ahead to the next phase — the
+  // label below follows the same source, so it never says "Coming next ·
+  // Close" while actually showing an Offer-phase line.
+  const fallbackNextSpokenLine = nextBlock ? selectSpokenLine(nextBlock.branches[0] ?? null) : null;
+  const nextSpokenLine = cursorNextLine ?? fallbackNextSpokenLine;
+  const nextPreviewPhaseName = cursorNextLine ? block.phaseName : (nextBlock?.phaseName ?? null);
   // The standalone tone chip must be a genuine tonal instruction (how to
   // say THIS line — e.g. "playful tone"), not an arbitrary phase-level
   // strategy note. Genuine tone guidance is authored inline in the script
@@ -763,7 +806,7 @@ function ScriptPanel({
             </>
           )}
         </section>
-        {nextBlock ? (
+        {nextPreviewPhaseName && nextSpokenLine ? (
           // De-emphasized on purpose (this is a preview, not the active
           // card) but via an opaque mid-tone color rather than ancestor
           // `opacity`, which was multiplying every descendant's alpha
@@ -775,10 +818,10 @@ function ScriptPanel({
               data-testid="next-phase-preview-label"
               className="mb-1 text-[10px] font-bold tracking-[0.12em] text-stone-600 uppercase dark:text-stone-300"
             >
-              Coming next · {nextBlock.phaseName}
+              Coming next · {nextPreviewPhaseName}
             </div>
             <p data-testid="next-phase-preview-body" className="text-base leading-relaxed text-stone-600 dark:text-stone-300">
-              {nextSpokenLine?.segments
+              {nextSpokenLine.segments
                 .map((segment) => (segment.kind === "tone" ? "" : segment.kind === "text" ? segment.value : segment.resolved.value))
                 .join("")}
             </p>

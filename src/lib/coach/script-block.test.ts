@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { buildPhaseScriptBlock, getScriptObjection, getScriptPhase, nextPhaseId, resolveObjectionOvercome, selectBranchVariantKey } from "./script-block";
+import {
+  buildPhaseScriptBlock,
+  getScriptObjection,
+  getScriptPhase,
+  nextPhaseId,
+  resolveCursorLine,
+  resolveCursorNextLine,
+  resolveObjectionOvercome,
+  selectBranchVariantKey,
+} from "./script-block";
 import { CLOSR_SCRIPT } from "./script-block";
 import { resolveCoachTokens } from "./token-resolver";
 import type { CoachCallContext } from "./types";
@@ -238,5 +247,109 @@ describe("coach_notes fidelity — every phase carries its full rule set from th
     expect(notes.some((text) => text.includes("contract to sign"))).toBe(true);
     expect(notes.some((text) => text.includes("attorney"))).toBe(true);
     expect(notes.some((text) => text.includes("never fake pressure"))).toBe(true);
+  });
+});
+
+describe("resolveCursorLine — resolves against the raw script, not a pre-built block", () => {
+  it("resolves the exact line the cursor names, with tokens filled in", () => {
+    const line = resolveCursorLine(
+      { phaseId: "introduction", branchTag: "Frame the call", variantKey: "default", lineIndex: 2 },
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(line!.type).toBe("say");
+    expect(allText(line!.segments)).toContain("add some sort of value to the property");
+  });
+
+  it("resolves against the variant the cursor names, not the block's auto/override-selected variant", () => {
+    // The Opener branch auto-selects by lead_source; this context has none
+    // set, so the block's `selected` variant would be "default". A cursor
+    // naming "cold_call" explicitly must still resolve to cold_call's line,
+    // proving this reads the named variant, not whatever the block picked.
+    const line = resolveCursorLine(
+      { phaseId: "introduction", branchTag: "Opener", variantKey: "cold_call", lineIndex: 1 },
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("Rose");
+  });
+
+  it("skips forward past a leading note line to the next actual 'say' line — never presents a note as speech", () => {
+    // Reveal's "Example probes — goal 7+" branch, vacant variant: index 4
+    // is a type:"note" line ("Add up everything they've paid so far."), a
+    // rep-facing instruction, not something to say aloud.
+    const noteLine = getScriptPhase("reveal")!.display.branches
+      .find((b) => b.tag === "Example probes — goal 7+")!
+      .variants.find((v) => v.key === "vacant")!.lines[4];
+    expect(noteLine.type).toBe("note");
+
+    const line = resolveCursorLine(
+      { phaseId: "reveal", branchTag: "Example probes — goal 7+", variantKey: "vacant", lineIndex: 4 },
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(line!.type).toBe("say");
+    expect(allText(line!.segments)).toContain("So when you sell");
+  });
+
+  it("returns null for an unknown branchTag rather than crashing", () => {
+    expect(
+      resolveCursorLine({ phaseId: "introduction", branchTag: "Not A Real Branch", variantKey: "default", lineIndex: 0 }, tokens),
+    ).toBeNull();
+  });
+
+  it("returns null for an unknown variantKey rather than crashing", () => {
+    expect(
+      resolveCursorLine({ phaseId: "introduction", branchTag: "Opener", variantKey: "not_a_real_variant", lineIndex: 0 }, tokens),
+    ).toBeNull();
+  });
+
+  it("returns null for an out-of-range lineIndex rather than crashing", () => {
+    expect(
+      resolveCursorLine({ phaseId: "introduction", branchTag: "Opener", variantKey: "default", lineIndex: 99 }, tokens),
+    ).toBeNull();
+    expect(
+      resolveCursorLine({ phaseId: "introduction", branchTag: "Opener", variantKey: "default", lineIndex: -1 }, tokens),
+    ).toBeNull();
+  });
+
+  it("returns null for an unknown phaseId rather than crashing", () => {
+    expect(
+      // @ts-expect-error deliberately invalid phase id
+      resolveCursorLine({ phaseId: "not_a_phase", branchTag: "Opener", variantKey: "default", lineIndex: 0 }, tokens),
+    ).toBeNull();
+  });
+});
+
+describe("resolveCursorNextLine — one line further, same defensive rules", () => {
+  it("resolves the line immediately after the cursor", () => {
+    const line = resolveCursorNextLine(
+      { phaseId: "introduction", branchTag: "Frame the call", variantKey: "default", lineIndex: 1 },
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("add some sort of value to the property");
+  });
+
+  it("skips forward past a note the same way resolveCursorLine does", () => {
+    const line = resolveCursorNextLine(
+      { phaseId: "reveal", branchTag: "Example probes — goal 7+", variantKey: "vacant", lineIndex: 3 },
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("So when you sell");
+  });
+
+  it("returns null when the cursor is already on the variant's last line", () => {
+    const lines = getScriptPhase("introduction")!.display.branches
+      .find((b) => b.tag === "Frame the call")!
+      .variants.find((v) => v.key === "default")!.lines;
+    const lastIndex = lines.length - 1;
+
+    const line = resolveCursorNextLine(
+      { phaseId: "introduction", branchTag: "Frame the call", variantKey: "default", lineIndex: lastIndex },
+      tokens,
+    );
+    expect(line).toBeNull();
   });
 });

@@ -42,6 +42,43 @@ describe("parseCoachEvent — valid events", () => {
     });
   });
 
+  it("parses a cursor event", () => {
+    const result = parseCoachEvent({
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Frame the call",
+      variantKey: "default",
+      lineIndex: 2,
+      ts: "t1",
+      ...V,
+    });
+    expect(result).toEqual({
+      ok: true,
+      event: {
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 2,
+        ts: "t1",
+        ...V,
+      },
+    });
+  });
+
+  it("parses a cursor event with lineIndex 0", () => {
+    const result = parseCoachEvent({
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Opener",
+      variantKey: "cold_call",
+      lineIndex: 0,
+      ts: "t1",
+      ...V,
+    });
+    expect(result.ok).toBe(true);
+  });
+
   it("parses a coach_note event — first-class, not a forward-compat unknown type", () => {
     const result = parseCoachEvent({
       type: "coach_note",
@@ -146,6 +183,53 @@ describe("parseCoachEvent — malformed known-type events are dropped and counte
   it("rejects a coach_note event with an unrecognized phaseId", () => {
     const result = parseCoachEvent({ type: "coach_note", text: "hi", phaseId: "not_a_real_phase", ts: "t1", ...V });
     expect(result).toEqual({ ok: false, reason: "malformed", rawType: "coach_note" });
+  });
+
+  it("rejects a cursor event with an unrecognized phaseId", () => {
+    const result = parseCoachEvent({
+      type: "cursor",
+      phaseId: "not_a_real_phase",
+      branchTag: "Opener",
+      variantKey: "default",
+      lineIndex: 0,
+      ts: "t1",
+      ...V,
+    });
+    expect(result).toEqual({ ok: false, reason: "malformed", rawType: "cursor" });
+  });
+
+  it("rejects a cursor event missing branchTag or variantKey", () => {
+    expect(
+      parseCoachEvent({ type: "cursor", phaseId: "introduction", variantKey: "default", lineIndex: 0, ts: "t1", ...V }).ok,
+    ).toBe(false);
+    expect(
+      parseCoachEvent({ type: "cursor", phaseId: "introduction", branchTag: "Opener", lineIndex: 0, ts: "t1", ...V }).ok,
+    ).toBe(false);
+  });
+
+  it("rejects a cursor event with a negative or fractional lineIndex", () => {
+    expect(
+      parseCoachEvent({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Opener",
+        variantKey: "default",
+        lineIndex: -1,
+        ts: "t1",
+        ...V,
+      }).ok,
+    ).toBe(false);
+    expect(
+      parseCoachEvent({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Opener",
+        variantKey: "default",
+        lineIndex: 1.5,
+        ts: "t1",
+        ...V,
+      }).ok,
+    ).toBe(false);
   });
 
   it("rejects a non-object payload", () => {
