@@ -140,6 +140,20 @@ describe("coachReducer — objection card lifecycle", () => {
     );
   });
 
+  it("gives every card a unique id even when five events share the exact same objectionId and ts — a length-based id would repeat once the cap starts dropping the oldest, and dismiss would remove more than one", () => {
+    let state = initialCoachState();
+    for (let i = 0; i < 5; i += 1) {
+      state = coachReducer(state, { type: "objection", objectionId: "price_too_low", ts: "same-ts", ...V });
+    }
+    expect(state.objectionCards).toHaveLength(MAX_OBJECTION_CARDS);
+    const ids = state.objectionCards.map((card) => card.id);
+    expect(new Set(ids).size).toBe(ids.length);
+
+    const [first] = state.objectionCards;
+    state = coachReducer(state, { type: "dismiss_objection", cardId: first.id });
+    expect(state.objectionCards).toHaveLength(MAX_OBJECTION_CARDS - 1);
+  });
+
   describe("expiresAt — an absolute timestamp, not a relative TTL a remount could restart", () => {
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());
@@ -270,6 +284,21 @@ describe("coachReducer — coach_note nudges", () => {
     expect(texts.length).toBeGreaterThan(MAX_NUDGES); // the test actually exercises the cap
     expect(state.nudges).toHaveLength(MAX_NUDGES);
     expect(state.nudges.map((nudge) => nudge.text)).toEqual(texts.slice(texts.length - MAX_NUDGES));
+  });
+
+  it("gives every nudge a unique id even when five events share the exact same ts and phaseId — a length-based id would repeat once the cap starts dropping the oldest, and dismiss would remove more than one", () => {
+    let state = initialCoachState();
+    const texts = ["A", "B", "C", "D", "E"];
+    for (const text of texts) {
+      state = coachReducer(state, { type: "coach_note", text, phaseId: "introduction", ts: "same-ts", ...V });
+    }
+    expect(state.nudges).toHaveLength(MAX_NUDGES);
+    const ids = state.nudges.map((nudge) => nudge.id);
+    expect(new Set(ids).size).toBe(ids.length);
+
+    const [first] = state.nudges;
+    state = coachReducer(state, { type: "dismiss_nudge", nudgeId: first.id });
+    expect(state.nudges).toHaveLength(MAX_NUDGES - 1);
   });
 
   describe("expiresAt — an absolute timestamp, not a relative TTL a remount could restart", () => {

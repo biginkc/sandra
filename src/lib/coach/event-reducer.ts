@@ -59,6 +59,15 @@ export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"
 }
 
 let transcriptSeq = 0;
+/** Monotonic, module-scoped — NOT derived from the post-cap array length.
+ * Two objection/coach_note events sharing a timestamp (the producer's ts
+ * granularity doesn't guarantee uniqueness) previously collided on
+ * `${id}-${ts}-${state.cards.length}` once the cap started dropping the
+ * oldest card each insert, since the length recycles back to the same
+ * value — two cards could land on the exact same id, so dismissing one
+ * removed both. A counter that only ever increments can't repeat. */
+let objectionCardSeq = 0;
+let nudgeSeq = 0;
 
 /** A live interim result replaces THAT SPEAKER's still-open interim line in
  * place; a final either commits that line or, if the speaker's most recent
@@ -110,10 +119,11 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         overriddenPhaseId: null,
       };
     case "objection": {
+      objectionCardSeq += 1;
       const nextObjectionCards = [
         ...state.objectionCards,
         {
-          id: `${action.objectionId}-${action.ts}-${state.objectionCards.length}`,
+          id: `${action.objectionId}-${action.ts}-${objectionCardSeq}`,
           objectionId: action.objectionId,
           ts: action.ts,
           expiresAt: Date.now() + OBJECTION_CARD_TTL_MS,
@@ -150,10 +160,11 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
         holdTimer: { timerId: action.timerId, startedAt: action.startedAt, durationS: action.durationS },
       };
     case "coach_note": {
+      nudgeSeq += 1;
       const nextNudges = [
         ...state.nudges,
         {
-          id: `${action.phaseId}-${action.ts}-${state.nudges.length}`,
+          id: `${action.phaseId}-${action.ts}-${nudgeSeq}`,
           text: action.text,
           phaseId: action.phaseId,
           ts: action.ts,
