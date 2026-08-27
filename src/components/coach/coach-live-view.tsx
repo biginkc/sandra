@@ -421,7 +421,7 @@ function CoachTopBar({
                     : isComplete
                       ? "text-emerald-700 dark:text-emerald-400"
                       : isCurrent
-                        ? "bg-emerald-600 text-white"
+                        ? "bg-emerald-700 text-white"
                         : "text-muted-foreground hover:bg-muted",
                 )}
               >
@@ -645,11 +645,20 @@ function ScriptPanel({
           ) : null}
         </section>
         {nextBlock ? (
-          <div className="px-6 pt-5 opacity-45" data-testid="next-phase-preview">
-            <div className="mb-1 text-[10px] font-bold tracking-[0.12em] text-muted-foreground uppercase">
+          // De-emphasized on purpose (this is a preview, not the active
+          // card) but via an opaque mid-tone color rather than ancestor
+          // `opacity`, which was multiplying every descendant's alpha
+          // against the real page background and dropped both lines below
+          // WCAG AA. Solid stone-600/stone-300 keeps the same "quieter than
+          // the Say This card" hierarchy while staying readable.
+          <div className="px-6 pt-5" data-testid="next-phase-preview">
+            <div
+              data-testid="next-phase-preview-label"
+              className="mb-1 text-[10px] font-bold tracking-[0.12em] text-stone-600 uppercase dark:text-stone-300"
+            >
               Coming next · {nextBlock.phaseName}
             </div>
-            <p className="text-base leading-relaxed">
+            <p data-testid="next-phase-preview-body" className="text-base leading-relaxed text-stone-600 dark:text-stone-300">
               {nextBlock.branches[0]?.selected.lines[0]?.segments
                 .map((segment) => (segment.kind === "tone" ? "" : segment.kind === "text" ? segment.value : segment.resolved.value))
                 .join("")}
@@ -1011,7 +1020,10 @@ function NudgeCard({ nudge, active, onDismiss }: { nudge: CoachNudge; active: bo
       onClick={onDismiss}
       className="animate-in slide-in-from-left-4 w-full rounded-2xl border border-amber-300/60 border-l-4 border-l-amber-500 bg-card px-5 py-5 text-left shadow-sm md:px-8 md:py-7"
     >
-      <span className="block text-[11px] font-extrabold tracking-[0.14em] text-amber-700 uppercase dark:text-amber-300">
+      <span
+        data-testid="coach-nudge-label"
+        className="block text-[11px] font-extrabold tracking-[0.14em] text-amber-700 uppercase dark:text-amber-300"
+      >
         Coach nudge
       </span>
       <span className="mt-3 block text-2xl leading-relaxed font-semibold text-foreground">{nudge.text}</span>

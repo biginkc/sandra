@@ -65,7 +65,7 @@ declare global {
   }
 }
 
-function Harness({ withGuidance }: { withGuidance: boolean }) {
+function Harness({ withGuidance, held = false }: { withGuidance: boolean; held?: boolean }) {
   const [state, dispatch] = useReducer(coachReducer, withGuidance, harnessState);
   const [reconnectGap, setReconnectGap] = useState(true);
   const digitsRef = useRef<DtmfDigit[]>([]);
@@ -116,7 +116,7 @@ function Harness({ withGuidance }: { withGuidance: boolean }) {
       callStatus="live"
       seconds={83}
       muted={false}
-      held={false}
+      held={held}
       holdPending={false}
       onDigit={(digit) => digitsRef.current.push(digit)}
       onMute={() => {}}
@@ -129,4 +129,6 @@ function Harness({ withGuidance }: { withGuidance: boolean }) {
 
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("Missing #root for coach live responsive harness");
-createRoot(rootElement).render(<Harness withGuidance={rootElement.dataset.guidance === "true"} />);
+createRoot(rootElement).render(
+  <Harness withGuidance={rootElement.dataset.guidance === "true"} held={rootElement.dataset.held === "true"} />,
+);
