@@ -165,37 +165,38 @@ function isFiniteNumber(value: unknown): value is number {
 const SPEAKERS: ReadonlySet<string> = new Set(["rep", "seller"]);
 const OCCUPANCY_KEYS: ReadonlySet<string> = new Set(["owner_occupied", "tenant_occupied", "vacant", "unknown"]);
 
-/** Matches ANY single-brace `{...}` span, but not `{{tone:...}}` (tone cues
- * are a separate, deliberately different markup — resolveDisplayText's own
- * DISPLAY_PATTERN checks the tone alternative first for the same reason).
- * Deliberately `[^{}]+`, not `\w+` — round-3 hardening used `\w+` and it
- * missed the exact bug it was meant to catch: `{year built}` (a space, not
- * an underscore) never matched `\w+` at all, so it wasn't treated as a
- * placeholder attempt and passed straight through as literal text. Any
- * text between single braces is either a real `{token}` or a mistake; both
- * cases belong here, not in a silently-ignored bucket.
- * `{n}`/`{remaining}` in counter.display/timer.display are NOT scanned by
- * this — those fields are never run through resolveDisplayText (the UI
- * builds "Probes N/goal" and "Hold MM:SS" itself from live state), so a
- * placeholder there isn't part of the {token} contract at all. */
-const PLACEHOLDER_PATTERN = /\{\{tone:[^}]+\}\}|\{([^{}]+)\}/g;
-
-/** Collects any `{token}` in `text` that isn't in `knownTokens` — the exact
- * failure mode that let `{year built}` (a typo'd space instead of an
- * underscore) render as literal, unresolved braces in the UI instead of
- * either resolving or failing script validation. */
-function unknownPlaceholders(text: string, knownTokens: ReadonlySet<string>): string[] {
-  const unknown: string[] = [];
-  for (const match of text.matchAll(PLACEHOLDER_PATTERN)) {
-    const token = match[1];
-    if (token && !knownTokens.has(token)) unknown.push(token);
-  }
-  return unknown;
-}
-
 function assertKnownPlaceholders(text: unknown, knownTokens: ReadonlySet<string>, where: string): void {
   if (typeof text !== "string") return; // shape errors are reported by the caller's own check
-  const unknown = unknownPlaceholders(text, knownTokens);
+  const unknown: string[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const open = text.indexOf("{", cursor);
+    const strayClose = text.indexOf("}", cursor);
+    if (strayClose >= 0 && (open < 0 || strayClose < open)) {
+      throw new Error(`closr-script: ${where} has unmatched brace markup`);
+    }
+    if (open < 0) break;
+
+    if (text.startsWith("{{", open)) {
+      const close = text.indexOf("}}", open + 2);
+      if (close < 0) throw new Error(`closr-script: ${where} has unmatched brace markup`);
+      const markup = text.slice(open + 2, close);
+      if (!/^tone:[^{}]+$/.test(markup)) {
+        throw new Error(`closr-script: ${where} has invalid double-brace markup (only {{tone:...}} is supported)`);
+      }
+      cursor = close + 2;
+      continue;
+    }
+
+    const close = text.indexOf("}", open + 1);
+    if (close < 0) throw new Error(`closr-script: ${where} has unmatched brace markup`);
+    const token = text.slice(open + 1, close);
+    if (!token || token.includes("{") || token.includes("}")) {
+      throw new Error(`closr-script: ${where} has invalid placeholder brace markup`);
+    }
+    if (!knownTokens.has(token)) unknown.push(token);
+    cursor = close + 1;
+  }
   if (unknown.length > 0) {
     throw new Error(`closr-script: ${where} references unknown placeholder(s) {${unknown.join("}, {")}}`);
   }
@@ -332,6 +333,12 @@ export function assertValidClosrScript(data: unknown): asserts data is ClosrScri
       throw new Error(`closr-script: missing required phase '${requiredPhaseId}' (every id in COACH_PHASE_ORDER must exist)`);
     }
   }
+  if (
+    data.phases.length !== COACH_PHASE_ORDER.length ||
+    data.phases.some((phase, index) => !isRecord(phase) || phase.id !== COACH_PHASE_ORDER[index])
+  ) {
+    throw new Error("closr-script: phases[] must exactly match COACH_PHASE_ORDER (same ids, order, and length)");
+  }
 
   for (const phase of data.phases) {
     if (!isRecord(phase)) throw new Error("closr-script: a phase entry is not an object");
@@ -342,10 +349,13 @@ export function assertValidClosrScript(data: unknown): asserts data is ClosrScri
     if (!isRecord(phase.display) || !Array.isArray(phase.display.branches)) {
       throw new Error(`closr-script: ${phaseLabel} missing display.branches[]`);
     }
+    const branchTags = new Set<string>();
     for (const branch of phase.display.branches) {
       if (!isRecord(branch) || !isNonEmptyString(branch.tag) || !Array.isArray(branch.variants) || branch.variants.length === 0) {
         throw new Error(`closr-script: ${phaseLabel} has a malformed branch`);
       }
+      if (branchTags.has(branch.tag)) throw new Error(`closr-script: ${phaseLabel} has duplicate branch tag '${branch.tag}'`);
+      branchTags.add(branch.tag);
       const branchLabel = `${phaseLabel} branch '${String(branch.tag)}'`;
       if (branch.auto_select_by !== null && branch.auto_select_by !== undefined && typeof branch.auto_select_by !== "string") {
         throw new Error(`closr-script: ${branchLabel} has a non-string auto_select_by`);
@@ -360,10 +370,13 @@ export function assertValidClosrScript(data: unknown): asserts data is ClosrScri
         if (typeof branch.trailing_note !== "string") throw new Error(`closr-script: ${branchLabel} has a non-string trailing_note`);
         assertKnownPlaceholders(branch.trailing_note, knownTokens, `${branchLabel} trailing_note`);
       }
+      const variantKeys = new Set<string>();
       for (const variant of branch.variants) {
         if (!isRecord(variant) || !isNonEmptyString(variant.key) || !Array.isArray(variant.lines) || variant.lines.length === 0) {
           throw new Error(`closr-script: ${branchLabel} has a malformed variant`);
         }
+        if (variantKeys.has(variant.key)) throw new Error(`closr-script: ${branchLabel} has duplicate variant key '${variant.key}'`);
+        variantKeys.add(variant.key);
         if (variant.tone !== undefined && typeof variant.tone !== "string") {
           throw new Error(`closr-script: ${branchLabel} variant '${String(variant.key)}' has a non-string tone`);
         }

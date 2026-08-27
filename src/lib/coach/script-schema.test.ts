@@ -97,6 +97,15 @@ describe("assertValidClosrScript", () => {
     expect(() => assertValidClosrScript(script)).not.toThrow();
   });
 
+  it("rejects double-brace token bypasses plus empty and unmatched braces", () => {
+    for (const text of ["Hello {{seller_name}}.", "Hello {}.", "Hello {seller_name.", "Hello seller_name}."]) {
+      const script = validScript();
+      const phases = script.phases as { display: { branches: { variants: { lines: Record<string, unknown>[] }[] }[] } }[];
+      phases[0].display.branches[0].variants[0].lines[0].text = text;
+      expect(() => assertValidClosrScript(script), text).toThrow(/brace|placeholder/i);
+    }
+  });
+
   it("rejects an unknown placeholder inside an objection's display.overcome", () => {
     const script = validScript();
     const objection = (script.objections as { display: Record<string, unknown> }[])[0];
@@ -180,6 +189,32 @@ describe("assertValidClosrScript", () => {
       const phases = script.phases as { id: string }[];
       phases[1].id = phases[0].id;
       expect(() => assertValidClosrScript(script)).toThrow(/duplicate phase id/);
+    });
+
+    it("rejects reordered or extra phases so producer and client start/progress through the exact same contract", () => {
+      const reordered = validScript();
+      const reorderedPhases = reordered.phases as Record<string, unknown>[];
+      [reorderedPhases[0], reorderedPhases[1]] = [reorderedPhases[1], reorderedPhases[0]];
+      expect(() => assertValidClosrScript(reordered)).toThrow(/exactly match COACH_PHASE_ORDER/);
+
+      const extra = validScript();
+      (extra.phases as Record<string, unknown>[]).push({
+        ...(extra.phases as Record<string, unknown>[])[0],
+        id: "bonus_phase",
+      });
+      expect(() => assertValidClosrScript(extra)).toThrow(/exactly match COACH_PHASE_ORDER/);
+    });
+
+    it("rejects duplicate branch tags and duplicate variant keys", () => {
+      const duplicateTag = validScript();
+      const tagBranches = (duplicateTag.phases as { display: { branches: Record<string, unknown>[] } }[])[0].display.branches;
+      tagBranches.push(JSON.parse(JSON.stringify(tagBranches[0])));
+      expect(() => assertValidClosrScript(duplicateTag)).toThrow(/duplicate branch tag/);
+
+      const duplicateVariant = validScript();
+      const variants = (duplicateVariant.phases as { display: { branches: { variants: Record<string, unknown>[] }[] } }[])[0].display.branches[0].variants;
+      variants.push(JSON.parse(JSON.stringify(variants[0])));
+      expect(() => assertValidClosrScript(duplicateVariant)).toThrow(/duplicate variant key/);
     });
 
     it("rejects a phase's match.exit_to pointing at a phase id that doesn't exist", () => {
