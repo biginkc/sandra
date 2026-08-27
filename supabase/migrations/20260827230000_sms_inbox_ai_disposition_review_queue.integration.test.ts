@@ -19,7 +19,7 @@ const foundationSql = readFileSync(
   .replace(/\nbegin;\s*/i, "\n")
   .replace(/\s*commit;\s*$/i, "");
 const inboxSql = readFileSync(
-  "supabase/migrations/20260827120000_sms_inbox_ai_disposition_review_queue.sql",
+  "supabase/migrations/20260827230000_sms_inbox_ai_disposition_review_queue.sql",
   "utf8",
 );
 
