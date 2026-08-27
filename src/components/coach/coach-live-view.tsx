@@ -19,7 +19,7 @@ import {
   type PhaseScriptBlock,
   type ScriptBranchBlock,
 } from "@/lib/coach/script-block";
-import { resolveCoachTokens, resolveDisplayText } from "@/lib/coach/token-resolver";
+import { resolveCoachTokens, resolveDisplayText, type DisplayTextSegment } from "@/lib/coach/token-resolver";
 import type {
   CoachCallContext,
   CoachEntryToken,
@@ -580,20 +580,7 @@ function ScriptPanel({
           data-testid="say-this-card"
           className="rounded-2xl border border-border border-l-4 border-l-primary bg-card px-5 py-5 shadow-sm md:px-8 md:py-7"
         >
-          <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <div className="text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Say this</div>
-              <div className="mt-1 text-xs font-bold tracking-wide text-muted-foreground uppercase">{block.phaseName}</div>
-            </div>
-            {block.openingCues.length > 0 ? (
-              <div className="flex flex-wrap justify-end gap-1.5">
-                {block.openingCues.map((cue, index) => (
-                  <ToneChip key={index} text={cue} />
-                ))}
-              </div>
-            ) : null}
-          </div>
-          <p className="mb-3 text-sm text-muted-foreground italic">{block.purpose}</p>
+          <div className="mb-4 text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Say this</div>
           {degraded ? (
             <div className="divide-y divide-border/70" data-testid="full-phase-script">
               {block.branches.map((branch) => (
@@ -607,47 +594,71 @@ function ScriptPanel({
                 />
               ))}
             </div>
-          ) : block.branches[0] ? (
-            <BranchCard
-              branch={block.branches[0]}
-              onEditEntry={onEditEntry}
-              onBeginEntryEdit={onBeginEntryEdit}
-              onSelectVariant={(key) => onSelectVariant(block.branches[0].tag, key)}
-            />
-          ) : null}
-          {!degraded && block.branches.length > 1 ? (
-            <details data-testid="full-phase-script" className="mt-5 border-t border-border/70 pt-4 text-muted-foreground">
-              <summary className="cursor-pointer text-xs font-bold tracking-wide uppercase">
-                {`Full ${block.phaseName} script · ${block.branches.length - 1} more ${block.branches.length === 2 ? "section" : "sections"}`}
-              </summary>
-              <div className="mt-3 divide-y divide-border/70">
-                {block.branches.slice(1).map((branch) => (
-                  <BranchCard
-                    key={branch.tag}
-                    branch={branch}
-                    compact
+          ) : (
+            <>
+              {block.branches[0]?.selected.lines[0] ? (
+                <p
+                  data-testid="say-this-line"
+                  className={cn(
+                    "text-2xl leading-relaxed font-medium md:text-[26px]",
+                    block.branches[0].selected.lines[0].type === "note" && "text-xs text-muted-foreground italic",
+                  )}
+                >
+                  <LineSegments
+                    segments={block.branches[0].selected.lines[0].segments}
                     onEditEntry={onEditEntry}
                     onBeginEntryEdit={onBeginEntryEdit}
-                    onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
                   />
-                ))}
-              </div>
-            </details>
-          ) : null}
-          {block.situationalCues.length > 0 ? (
-            <div className="mt-5 rounded-xl border border-dashed border-border p-3">
-              <div className="mb-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
-                If this happens…
-              </div>
-              <ul className="space-y-1">
-                {block.situationalCues.map((cue) => (
-                  <li key={cue.trigger} className="text-xs text-muted-foreground">
-                    {cue.text}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
+                </p>
+              ) : null}
+              {block.openingCues[0] ? (
+                <div className="mt-4">
+                  <ToneChip text={block.openingCues[0]} />
+                </div>
+              ) : null}
+              <details data-testid="full-phase-script" className="mt-5 border-t border-border/70 pt-4 text-muted-foreground">
+                <summary className="cursor-pointer text-xs font-bold tracking-wide uppercase">
+                  {`Full ${block.phaseName} script`}
+                </summary>
+                <div className="mt-3 space-y-4">
+                  <p className="text-sm text-muted-foreground italic">{block.purpose}</p>
+                  {block.openingCues.length > 1 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {block.openingCues.slice(1).map((cue, index) => (
+                        <ToneChip key={index} text={cue} />
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="divide-y divide-border/70">
+                    {block.branches.map((branch) => (
+                      <BranchCard
+                        key={branch.tag}
+                        branch={branch}
+                        compact
+                        onEditEntry={onEditEntry}
+                        onBeginEntryEdit={onBeginEntryEdit}
+                        onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
+                      />
+                    ))}
+                  </div>
+                  {block.situationalCues.length > 0 ? (
+                    <div className="rounded-xl border border-dashed border-border p-3">
+                      <div className="mb-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
+                        If this happens…
+                      </div>
+                      <ul className="space-y-1">
+                        {block.situationalCues.map((cue) => (
+                          <li key={cue.trigger} className="text-xs text-muted-foreground">
+                            {cue.text}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+              </details>
+            </>
+          )}
         </section>
         {nextBlock ? (
           // De-emphasized on purpose (this is a preview, not the active
@@ -742,19 +753,7 @@ function BranchCard({
               line.type === "note" && "text-xs text-muted-foreground italic",
             )}
           >
-            {line.segments.map((segment, segIndex) => {
-              if (segment.kind === "text") return <span key={segIndex}>{segment.value}</span>;
-              if (segment.kind === "tone") return <ToneChip key={segIndex} text={segment.label} />;
-              return (
-                <TokenChip
-                  key={segIndex}
-                  token={segment.token}
-                  resolved={segment.resolved}
-                  onEditEntry={onEditEntry}
-                  onBeginEntryEdit={onBeginEntryEdit}
-                />
-              );
-            })}
+            <LineSegments segments={line.segments} onEditEntry={onEditEntry} onBeginEntryEdit={onBeginEntryEdit} />
           </p>
         ))}
       </div>
@@ -783,6 +782,39 @@ function BranchCard({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** Shared segment renderer for a single script line — text runs, inline
+ * tone chips, and token chips (including the editable entry-token pills).
+ * Used by both the trimmed "current line" in the Say This card and the
+ * full-detail BranchCard inside the script expander, so the two never
+ * drift out of sync on how a line's segments render. */
+function LineSegments({
+  segments,
+  onEditEntry,
+  onBeginEntryEdit,
+}: {
+  segments: DisplayTextSegment[];
+  onEditEntry: (field: CoachEntryToken, value: string) => void;
+  onBeginEntryEdit: () => void;
+}) {
+  return (
+    <>
+      {segments.map((segment, index) => {
+        if (segment.kind === "text") return <span key={index}>{segment.value}</span>;
+        if (segment.kind === "tone") return <ToneChip key={index} text={segment.label} />;
+        return (
+          <TokenChip
+            key={index}
+            token={segment.token}
+            resolved={segment.resolved}
+            onEditEntry={onEditEntry}
+            onBeginEntryEdit={onBeginEntryEdit}
+          />
+        );
+      })}
+    </>
   );
 }
 

@@ -435,12 +435,17 @@ describe("<CoachLiveView />", () => {
     expect(onCollapse).not.toHaveBeenCalled();
   });
 
-  it("lets the rep manually switch a branch's variant", async () => {
+  it("lets the rep manually switch a branch's variant from the full-script expander", async () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+    // The variant switcher moved into the full-script disclosure along with
+    // the rest of the branch detail — the trimmed "say this" line no longer
+    // carries it directly.
+    await userEvent.click(screen.getByText(/Full Introduction script/i));
     const fsboTab = screen.getByTestId("variant-Opener-fsbo");
     await userEvent.click(fsboTab);
     expect(fsboTab).toHaveAttribute("aria-selected", "true");
+    // The trimmed "say this" line re-resolves against the new variant too.
     expect(screen.getAllByText(/For Sale by Owner/).length).toBeGreaterThan(0);
     // Restructured opener variants still lead with the shared greeting.
     expect(screen.getAllByText(/Alex Rep/).length).toBeGreaterThan(0);
