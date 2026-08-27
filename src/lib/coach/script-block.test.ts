@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   branchSayIndex,
   buildPhaseScriptBlock,
+  findNextSayAcrossBranches,
   getScriptObjection,
   getScriptPhase,
   nextPhaseId,
@@ -573,32 +574,15 @@ describe("resolveCursorNextLine — one line further than whatever resolveCursor
     expect(allText(line!.segments)).toContain("pull out a pen and paper");
   });
 
-  it("skips over a branch with NO spoken line at all when continuing to the next branch (never presents a note as the preview)", () => {
-    // Reveal's branches: Entry, "Example probes — goal 7+", Motivation. A
-    // cursor exhausting Entry must land on Example probes' own first say
-    // line, not a note and not a blank preview.
-    const revealBlock = buildPhaseScriptBlock("reveal", tokens)!;
-    const entryLines = getScriptPhase("reveal")!.display.branches
-      .find((b) => b.tag === "Entry")!
-      .variants.find((v) => v.key === "unknown")!.lines; // Sandra's own default selection (occupancy unset)
-    const lastIndex = entryLines.length - 1;
-
-    const line = resolveCursorNextLine(
-      {
-        phaseId: "reveal",
-        branchTag: "Entry",
-        variantKey: "unknown",
-        lineIndex: lastIndex,
-        lineText: entryLines[lastIndex].text,
-        scriptVersion: CLOSR_SCRIPT.version,
-      },
-      revealBlock,
-      NO_OVERRIDES,
-      tokens,
-    );
-    expect(line).not.toBeNull();
-    expect(line!.type).toBe("say");
-  });
+  // NOTE: cross-branch continuation landing on the next REAL branch's
+  // content is already proven end-to-end by the "BLOCKER REPRO" test above
+  // (Frame the call -> Pen & paper, both real). What's tested here
+  // specifically is the SKIP: a branch with no spoken line at all must be
+  // passed over, not stopped at. The real script has no all-note branch
+  // today (every branch has a "say" line), so that specific behavior
+  // cannot be exercised end-to-end through real data without a
+  // hand-built fixture — see the findNextSayAcrossBranches suite below,
+  // which tests the actual skip mechanism resolveCursorNextLine calls.
 
   it("returns null only once EVERY remaining branch in the phase is exhausted — the true 'let the caller fall to the next phase' case", () => {
     // "Pen & paper — contact details" is Introduction's LAST branch; its
@@ -670,5 +654,56 @@ describe("branchSayIndex — never presents a note as speech, even for a synthet
   it("returns index 0 directly when the first line is already a say", () => {
     const lines: { type: "say" | "note"; text: string }[] = [{ type: "say", text: "Say this first." }];
     expect(branchSayIndex(lines)).toBe(0);
+  });
+});
+
+describe("findNextSayAcrossBranches — the cross-branch continuation SKIP, proven against a synthetic all-note branch", () => {
+  // resolveCursorNextLine's cross-branch continuation (BLOCKER 1) must
+  // skip PAST a branch with no spoken line at all, not stop there or
+  // return it. The real script has no such branch today (every branch has
+  // a "say" line), so this specific skip cannot be exercised end-to-end
+  // through real data — that's exactly why this logic was extracted into
+  // its own pure, exported function: so the skip itself is directly
+  // provable against a hand-built fixture.
+  it("skips a branch with NO spoken line at all and lands on the next branch that has one", () => {
+    const branches = [
+      { tag: "All-note branch", lines: [{ type: "note" as const, text: "Internal-only reminder." }] },
+      { tag: "Has content", lines: [{ type: "say" as const, text: "The actual next thing to say." }] },
+    ];
+    expect(findNextSayAcrossBranches(branches)).toEqual({ tag: "Has content", lineIndex: 0 });
+  });
+
+  it("skips MULTIPLE consecutive all-note branches, not just one", () => {
+    const branches = [
+      { tag: "First all-note", lines: [{ type: "note" as const, text: "Note 1." }] },
+      { tag: "Second all-note", lines: [{ type: "note" as const, text: "Note 2." }] },
+      { tag: "Finally has content", lines: [{ type: "say" as const, text: "Here it is." }] },
+    ];
+    expect(findNextSayAcrossBranches(branches)).toEqual({ tag: "Finally has content", lineIndex: 0 });
+  });
+
+  it("finds a say line at a non-zero index within a branch, not just index 0", () => {
+    const branches = [
+      {
+        tag: "Mixed",
+        lines: [
+          { type: "note" as const, text: "setup note" },
+          { type: "say" as const, text: "the actual spoken line" },
+        ],
+      },
+    ];
+    expect(findNextSayAcrossBranches(branches)).toEqual({ tag: "Mixed", lineIndex: 1 });
+  });
+
+  it("returns null when EVERY remaining branch is entirely notes — nothing left to preview", () => {
+    const branches = [
+      { tag: "A", lines: [{ type: "note" as const, text: "note A" }] },
+      { tag: "B", lines: [{ type: "note" as const, text: "note B" }] },
+    ];
+    expect(findNextSayAcrossBranches(branches)).toBeNull();
+  });
+
+  it("returns null for an empty branch list", () => {
+    expect(findNextSayAcrossBranches([])).toBeNull();
   });
 });

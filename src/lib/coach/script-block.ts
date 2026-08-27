@@ -385,16 +385,44 @@ export function resolveCursorNextLine(
 
   const branchIndex = block.branches.findIndex((candidate) => candidate.tag === position.branchTag);
   if (branchIndex < 0) return null;
-  for (let index = branchIndex + 1; index < block.branches.length; index += 1) {
-    const nextBranch = block.branches[index];
+
+  const remainingBranches: BranchLineSource[] = block.branches.slice(branchIndex + 1).flatMap((candidate) => {
     const nextVariant = rawPhase.display.branches
-      .find((candidate) => candidate.tag === nextBranch.tag)
-      ?.variants.find((candidate) => candidate.key === nextBranch.selected.key); // Sandra's own selection for THIS branch
-    if (!nextVariant) continue;
-    const sayIndex = branchSayIndex(nextVariant.lines);
-    if (sayIndex !== null) {
-      return { type: "say", segments: resolveDisplayText(nextVariant.lines[sayIndex].text, tokens) };
-    }
+      .find((raw) => raw.tag === candidate.tag)
+      ?.variants.find((raw) => raw.key === candidate.selected.key); // Sandra's own selection for THIS branch
+    return nextVariant ? [{ tag: candidate.tag, lines: nextVariant.lines }] : [];
+  });
+
+  const next = findNextSayAcrossBranches(remainingBranches);
+  if (!next) return null;
+  const nextLine = remainingBranches.find((candidate) => candidate.tag === next.tag)!.lines[next.lineIndex];
+  return { type: "say", segments: resolveDisplayText(nextLine.text, tokens) };
+}
+
+/** One phase branch's spoken candidate for cross-branch continuation: its
+ * tag (for identification) and the raw lines of whichever variant is
+ * actually in play for it (always Sandra's own selection — the cursor has
+ * no opinion on a branch it didn't name). Deliberately data-only, not
+ * derived from live script/block state, so the skip logic below is
+ * directly testable against a synthetic fixture. */
+export type BranchLineSource = { tag: string; lines: ScriptLineBlock[] };
+
+/** Scans `branches` IN ORDER (already the remaining branches of the
+ * current phase, after the one the cursor resolved to) for the first
+ * branch with at least one "say" line, skipping over any branch that is
+ * entirely notes — never returns a branch with no spoken line, and never
+ * blindly returns the first branch in the list regardless of its content.
+ * Used by resolveCursorNextLine for cross-branch continuation (a cursor
+ * exhausting one branch's lines must preview the NEXT branch in the
+ * phase, not jump straight to the next phase — see that function's docs).
+ * Exported and pure specifically so this skip behavior can be proven
+ * against a synthetic all-note branch: the real script has a "say" line
+ * in every branch today, so this exact skip can't be exercised end-to-end
+ * through real data. */
+export function findNextSayAcrossBranches(branches: BranchLineSource[]): { tag: string; lineIndex: number } | null {
+  for (const branch of branches) {
+    const sayIndex = branchSayIndex(branch.lines);
+    if (sayIndex !== null) return { tag: branch.tag, lineIndex: sayIndex };
   }
   return null;
 }

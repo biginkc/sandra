@@ -111,18 +111,24 @@ function timerText(seconds: number): string {
 }
 
 /** Selects the line to present as "the thing to say" for a branch: the
- * first line whose type is "say", or — only if the branch has no "say"
- * line at all — the literal first line, so a caller never renders fully
- * blank. Every call site that needs to show a branch's spoken content
- * (the dominant Say This line, the Coming Next preview) must go through
- * this, rather than indexing lines[0] directly — a blind lines[0] can
- * land on an internal type:"note" line (e.g. Close's "If far apart —
- * program pivot" branch leads with one: "Only for novation prices on the
- * calculator.", a note for the rep, not something to say) and present it
- * to the rep as speech. */
-function selectSpokenLine(branch: ScriptBranchBlock | null | undefined): DisplayLine | null {
+ * first line whose type is "say" — or null when the branch's selected
+ * variant has NO "say" line at all. Every call site that needs to show a
+ * branch's spoken content (the dominant Say This line, the Coming Next
+ * preview) must go through this, rather than indexing lines[0] directly —
+ * a blind lines[0] can land on an internal type:"note" line (e.g. Close's
+ * "If far apart — program pivot" branch leads with one: "Only for
+ * novation prices on the calculator.", a note for the rep, not something
+ * to say) and present it to the rep as speech.
+ *
+ * Deliberately does NOT fall back to lines[0] when no "say" line exists —
+ * an all-note variant is not something the schema forbids (it only
+ * requires >=1 line, not >=1 spoken one), so that fallback would still be
+ * a live path to rendering a note as speech, just relocated rather than
+ * fixed. Every caller must treat null as "nothing to show" and render
+ * nothing, never substitute the first line regardless of its type. */
+export function selectSpokenLine(branch: ScriptBranchBlock | null | undefined): DisplayLine | null {
   if (!branch) return null;
-  return branch.selected.lines.find((line) => line.type === "say") ?? branch.selected.lines[0] ?? null;
+  return branch.selected.lines.find((line) => line.type === "say") ?? null;
 }
 
 export function CoachLiveView(props: CoachLiveViewProps) {

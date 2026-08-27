@@ -53,7 +53,7 @@ vi.mock("@/lib/supabase/client", () => ({
   }),
 }));
 
-import { CoachLiveView, type CoachLiveViewProps } from "./coach-live-view";
+import { CoachLiveView, selectSpokenLine, type CoachLiveViewProps } from "./coach-live-view";
 
 function latestChannel(): MockChannel {
   const channel = channels[channels.length - 1];
@@ -1199,5 +1199,46 @@ describe("<CoachLiveView />", () => {
 
     broadcast({ type: "counter", probeCount: 2, ts: "t2", scriptVersion: CLOSR_SCRIPT.version });
     expect(screen.queryByTestId("coach-version-mismatch")).not.toBeInTheDocument();
+  });
+});
+
+describe("selectSpokenLine — never falls back to a note, even for a synthetic all-note branch", () => {
+  // The real, currently-loaded script has a "say" line in every branch —
+  // this exact failure mode (an all-note branch's selected variant
+  // silently defaulting to its first line, which could be a note) can't
+  // be reproduced end-to-end through real data, and the schema validator
+  // doesn't forbid an all-note variant either. Proven directly against a
+  // synthetic fixture instead.
+  function branchWithLines(lines: { type: "say" | "note"; segments: [] }[]) {
+    return {
+      tag: "Synthetic",
+      critical: false,
+      holdAfter: null,
+      trailingNote: null,
+      variantOptions: [{ key: "default", label: null }],
+      autoSelected: false,
+      selected: { key: "default", label: null, tone: null, lines },
+    };
+  }
+
+  it("returns null for a branch whose selected variant is entirely notes — never its first line", () => {
+    const branch = branchWithLines([
+      { type: "note", segments: [] },
+      { type: "note", segments: [] },
+    ]);
+    expect(selectSpokenLine(branch)).toBeNull();
+  });
+
+  it("returns the first say line when one exists, not necessarily index 0", () => {
+    const branch = branchWithLines([
+      { type: "note", segments: [] },
+      { type: "say", segments: [] },
+    ]);
+    expect(selectSpokenLine(branch)?.type).toBe("say");
+  });
+
+  it("returns null for a null/undefined branch", () => {
+    expect(selectSpokenLine(null)).toBeNull();
+    expect(selectSpokenLine(undefined)).toBeNull();
   });
 });
