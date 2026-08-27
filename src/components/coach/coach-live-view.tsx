@@ -14,14 +14,18 @@ import {
   getScriptObjection,
   getScriptPhase,
   nextPhaseId,
+  resolveCursorLine,
+  resolveCursorNextLine,
   resolveObjectionOvercome,
   type BranchSelectContext,
+  type DisplayLine,
   type PhaseScriptBlock,
   type ScriptBranchBlock,
 } from "@/lib/coach/script-block";
-import { resolveCoachTokens, resolveDisplayText } from "@/lib/coach/token-resolver";
+import { resolveCoachTokens, resolveDisplayText, type DisplayTextSegment } from "@/lib/coach/token-resolver";
 import type {
   CoachCallContext,
+  CoachCursor,
   CoachEntryToken,
   CoachHoldTimer,
   CoachNudge,
@@ -77,6 +81,23 @@ const EMPTY_CALL_CONTEXT: CoachCallContext = {
 
 const ENTRY_TOKEN_SET: ReadonlySet<string> = new Set(COACH_ENTRY_TOKENS);
 
+/** Display-only shorthand for the phase rail — the mock's rail reads INTRO
+ * · REVEAL · ASSESS · POSITION · OFFER · CLOSE, six short labels that leave
+ * room on the top edge instead of the full phase.display names ("Secure
+ * Positioning") crowding it. This is purely cosmetic: the underlying phase
+ * id, `phaseName` (used for the Say This card / aria-labels elsewhere), and
+ * the rail button's own accessible name all keep the full phase name — only
+ * the rail button's VISIBLE text is shortened. Falls back to the full name
+ * for any phase id not listed here, so a future phase never renders blank. */
+const RAIL_LABEL: Partial<Record<CoachPhaseId, string>> = {
+  introduction: "Intro",
+  reveal: "Reveal",
+  assessment: "Assess",
+  secure_positioning: "Position",
+  offer: "Offer",
+  close: "Close",
+};
+
 const ENTRY_TOKEN_LABEL: Record<CoachEntryToken, string> = {
   closing_date: "closing date",
   offer_price: "offer price",
@@ -87,6 +108,27 @@ const MAX_RENDERED_TRANSCRIPT_LINES = 200;
 
 function timerText(seconds: number): string {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** Selects the line to present as "the thing to say" for a branch: the
+ * first line whose type is "say" — or null when the branch's selected
+ * variant has NO "say" line at all. Every call site that needs to show a
+ * branch's spoken content (the dominant Say This line, the Coming Next
+ * preview) must go through this, rather than indexing lines[0] directly —
+ * a blind lines[0] can land on an internal type:"note" line (e.g. Close's
+ * "If far apart — program pivot" branch leads with one: "Only for
+ * novation prices on the calculator.", a note for the rep, not something
+ * to say) and present it to the rep as speech.
+ *
+ * Deliberately does NOT fall back to lines[0] when no "say" line exists —
+ * an all-note variant is not something the schema forbids (it only
+ * requires >=1 line, not >=1 spoken one), so that fallback would still be
+ * a live path to rendering a note as speech, just relocated rather than
+ * fixed. Every caller must treat null as "nothing to show" and render
+ * nothing, never substitute the first line regardless of its type. */
+export function selectSpokenLine(branch: ScriptBranchBlock | null | undefined): DisplayLine | null {
+  if (!branch) return null;
+  return branch.selected.lines.find((line) => line.type === "say") ?? null;
 }
 
 export function CoachLiveView(props: CoachLiveViewProps) {
@@ -104,6 +146,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     selectVariant,
     setEntryField,
   } = session;
+  const [keypadOpen, setKeypadOpen] = useState(false);
 
   // The script must always render, even mid-load or after a failed context
   // fetch — a static, all-placeholder script is still useful, and never an
@@ -122,10 +165,35 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   const scriptBlock = buildPhaseScriptBlock(displayedPhaseId, tokens, selectCtx, branchOverrides);
   const upcomingId = nextPhaseId(displayedPhaseId);
   const nextBlock = upcomingId ? buildPhaseScriptBlock(upcomingId, tokens, selectCtx, branchOverrides) : null;
+  // A stored cursor is only ever for state.currentPhaseId (the reducer
+  // enforces that), so this additionally guards against the DISPLAYED phase
+  // — the rep manually browsing the rail to a different phase via
+  // overriddenPhaseId must see that phase's default branch-0 content, not
+  // the live cursor for whatever phase the call is actually in.
+  const activeCursor: CoachCursor | null =
+    state.cursor && state.cursor.phaseId === displayedPhaseId ? state.cursor : null;
+  // resolveCursorLine/resolveCursorNextLine need the resolved PhaseScriptBlock
+  // (not just tokens) — resolution defers to SANDRA'S OWN selected variant
+  // per branch, which only exists on the built block. scriptBlock is null
+  // only for a genuinely unrecognized phase id, in which case there's no
+  // cursor content to resolve either.
+  const cursorSpokenLine = useMemo(
+    () => (activeCursor && scriptBlock ? resolveCursorLine(activeCursor, scriptBlock, branchOverrides, tokens) : null),
+    [activeCursor, scriptBlock, branchOverrides, tokens],
+  );
+  const cursorNextLine = useMemo(
+    () => (activeCursor && scriptBlock ? resolveCursorNextLine(activeCursor, scriptBlock, branchOverrides, tokens) : null),
+    [activeCursor, scriptBlock, branchOverrides, tokens],
+  );
   const gateEntries = (scriptBlock?.gates ?? []).map((gate) => ({
     ...gate,
     cleared: state.gates[gate.id] ?? false,
   }));
+  const latestObjection = state.objectionCards.at(-1);
+  const hasActionableGuidance = latestObjection
+    ? isActionableObjection(latestObjection, activeContext.occupancy)
+    : state.nudges.length > 0;
+  const showGuidance = !degraded && hasActionableGuidance;
 
   const onEditEntry = useCallback(
     (field: CoachEntryToken, value: string) => setEntryField(field, value),
@@ -182,6 +250,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         gates={gateEntries}
         degraded={degraded}
         callStatus={callStatus}
+        seconds={seconds}
+        held={held}
       />
       {scriptOutOfSync ? (
         <div
@@ -207,35 +277,32 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           </button>
         </div>
       ) : null}
-      {/* relative: this is the guidance stack's real containing block. It's
-          the flex-1 middle region between the (shrink-0) topbar/banners
-          above and the (shrink-0) call dock below — the browser computes
-          its height as whatever's actually left over, automatically
-          shrinking it when the dock grows (e.g. the keypad opening) and
-          expanding it on a taller viewport. Anchoring the guidance stack's
-          top/right/BOTTOM insets to THIS box, rather than to the viewport,
-          is what makes containment structural: its bottom edge is always
-          exactly the dock's top edge, with no top-offset-plus-max-height
-          arithmetic that can drift out of sync at a shorter viewport. */}
-      <div className="relative flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1">
         <TranscriptFeed lines={state.transcript} />
-        <ScriptPanel
-          block={scriptBlock}
-          nextBlock={nextBlock}
-          degraded={degraded}
-          contextLoad={contextLoad}
-          onRetryContext={retryContext}
-          onEditEntry={onEditEntry}
-          onSelectVariant={onSelectVariant}
-        />
-        <GuidanceOverlay
-          nudges={state.nudges}
-          cards={state.objectionCards}
-          tokens={tokens}
-          occupancy={activeContext.occupancy}
-          onDismissNudge={(nudgeId) => dispatch({ type: "dismiss_nudge", nudgeId })}
-          onDismissObjection={(cardId) => dispatch({ type: "dismiss_objection", cardId })}
-        />
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="coach-focus-stage">
+          <GuidanceOverlay
+            nudges={state.nudges}
+            cards={state.objectionCards}
+            tokens={tokens}
+            occupancy={activeContext.occupancy}
+            visible={!degraded}
+            onDismissNudge={(nudgeId) => dispatch({ type: "dismiss_nudge", nudgeId })}
+            onDismissObjection={(cardId) => dispatch({ type: "dismiss_objection", cardId })}
+          />
+          <ScriptPanel
+            block={scriptBlock}
+            nextBlock={nextBlock}
+            cursorSpokenLine={cursorSpokenLine}
+            cursorNextLine={cursorNextLine}
+            degraded={degraded}
+            suppressed={showGuidance}
+            contextLoad={contextLoad}
+            onRetryContext={retryContext}
+            onEditEntry={onEditEntry}
+            onBeginEntryEdit={() => setKeypadOpen(false)}
+            onSelectVariant={onSelectVariant}
+          />
+        </div>
       </div>
       <GuidanceAnnouncer
         nudges={state.nudges}
@@ -246,7 +313,6 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       <CallControlDock
         callName={callName}
         callStatus={callStatus}
-        seconds={seconds}
         muted={muted}
         held={held}
         holdPending={holdPending}
@@ -255,6 +321,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         onHold={onHold}
         onHangup={onHangup}
         onCollapse={onCollapse}
+        keypadOpen={keypadOpen}
+        onKeypadOpenChange={setKeypadOpen}
       />
       </DialogContent>
     </Dialog>
@@ -304,7 +372,9 @@ function GuidanceAnnouncer({
       {cards.map((card) => {
         const objection = getScriptObjection(card.objectionId);
         const overcome = objection ? resolveObjectionOvercome(objection, occupancy) : null;
-        if (!objection || !overcome) return <span key={card.id}>New objection guidance.</span>;
+        if (!objection || !overcome) {
+          return <span key={card.id}>New objection detected. Continue following the live script.</span>;
+        }
         return (
           <span key={card.id}>
             {`New objection guidance. Acknowledge: ${resolvedTextForAnnouncement(objection.display.acknowledge, tokens)} Disarm: ${resolvedTextForAnnouncement(objection.display.disarm, tokens)} Overcome: ${resolvedTextForAnnouncement(overcome, tokens)}`}
@@ -325,6 +395,8 @@ function CoachTopBar({
   gates,
   degraded,
   callStatus,
+  seconds,
+  held,
 }: {
   currentPhaseId: CoachPhaseId;
   displayedPhaseId: CoachPhaseId;
@@ -335,51 +407,50 @@ function CoachTopBar({
   gates: { id: string; display: string; cleared: boolean }[];
   degraded: boolean;
   callStatus: CoachCallStatus;
+  seconds: number;
+  held: boolean;
 }) {
   const preConnectLabel = callStatus === "connecting" ? "Connecting…" : callStatus === "ringing" ? "Ringing…" : null;
+  const timerLabel = held ? "On hold" : preConnectLabel ?? timerText(seconds);
+  const currentPhaseIndex = COACH_PHASE_ORDER.indexOf(currentPhaseId);
+  const currentPhaseName = getScriptPhase(currentPhaseId)?.name ?? currentPhaseId;
+  const displayedPhaseName = getScriptPhase(displayedPhaseId)?.name ?? displayedPhaseId;
   return (
-    <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-card px-4 py-3">
-      <ol className="flex flex-1 flex-wrap items-center gap-1.5" aria-label="Call phases">
-        {COACH_PHASE_ORDER.map((phaseId) => {
-          const phase = getScriptPhase(phaseId);
-          const isCurrent = phaseId === currentPhaseId;
-          const isDisplayed = phaseId === displayedPhaseId;
-          return (
-            <li key={phaseId}>
-              <button
-                type="button"
-                data-testid={`phase-rail-${phaseId}`}
-                aria-current={isDisplayed ? "step" : undefined}
-                onClick={() => onSelectPhase(phaseId)}
-                className={cn(
-                  "rounded-full border px-3 py-1.5 text-xs font-bold transition-colors",
-                  isCurrent
-                    ? "border-emerald-600 bg-emerald-600 text-white"
-                    : isDisplayed
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border bg-background text-muted-foreground hover:bg-muted",
-                )}
-              >
-                {phase?.name ?? phaseId}
-              </button>
-            </li>
-          );
-        })}
-      </ol>
-      <div className="flex flex-wrap items-center gap-2">
-        {preConnectLabel ? (
-          <Badge variant="outline" data-testid="call-status-pill" className="text-muted-foreground">
-            {preConnectLabel}
-          </Badge>
-        ) : null}
-        {degraded ? (
-          <Badge variant="outline" data-testid="coach-connecting-pill" className="text-muted-foreground">
-            Coach connecting…
+    <div className="shrink-0 border-b border-border bg-card">
+      <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs" data-testid="coach-status-strip">
+        <Badge variant="secondary" data-testid="coach-current-phase" className="h-5 text-[10px]">
+          {`Phase · ${currentPhaseName}`}
+        </Badge>
+        {displayedPhaseId !== currentPhaseId ? (
+          <Badge variant="outline" data-testid="coach-viewing-phase" className="h-5 text-[10px]">
+            {`Viewing · ${displayedPhaseName}`}
           </Badge>
         ) : null}
         {counter ? (
-          <Badge variant="secondary" data-testid="probe-counter">
+          <Badge variant="secondary" data-testid="probe-counter" className="h-5 text-[10px]">
             {`Probes ${probeCount}/${counter.goal}`}
+          </Badge>
+        ) : null}
+        <span
+          className={cn("font-mono text-xs tabular-nums", held ? "font-semibold text-amber-700 dark:text-amber-400" : "text-muted-foreground")}
+          data-testid="coach-call-timer"
+        >
+          {timerLabel}
+        </span>
+        {preConnectLabel ? (
+          <Badge variant="outline" data-testid="call-status-pill" className="h-5 text-[10px] text-muted-foreground">
+            {preConnectLabel}
+          </Badge>
+        ) : null}
+        {callStatus === "live" && !held ? (
+          <Badge variant="outline" data-testid="coach-live-pill" className="h-5 gap-1 border-emerald-200 text-[10px] text-emerald-700 dark:text-emerald-400">
+            <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" aria-hidden />
+            Live
+          </Badge>
+        ) : null}
+        {degraded ? (
+          <Badge variant="outline" data-testid="coach-connecting-pill" className="h-5 text-[10px] text-muted-foreground">
+            Coach connecting…
           </Badge>
         ) : null}
         {holdTimer ? <HoldTimerChip timer={holdTimer} /> : null}
@@ -388,11 +459,56 @@ function CoachTopBar({
             key={gate.id}
             data-testid={`gate-${gate.id}`}
             variant={gate.cleared ? "secondary" : "destructive"}
+            className="h-5 text-[10px]"
           >
             {gate.cleared ? "Concerns cleared" : gate.display}
           </Badge>
         ))}
       </div>
+      <ol className="flex min-w-0 items-center gap-1 overflow-x-auto px-4 pb-2" aria-label="Call phases" data-testid="coach-phase-scroller">
+        {COACH_PHASE_ORDER.map((phaseId) => {
+          const phase = getScriptPhase(phaseId);
+          const fullName = phase?.name ?? phaseId;
+          const isCurrent = phaseId === currentPhaseId;
+          const isDisplayed = phaseId === displayedPhaseId;
+          const isComplete = COACH_PHASE_ORDER.indexOf(phaseId) < currentPhaseIndex;
+          const suffix = isComplete ? " ✓" : "";
+          return (
+            <li key={phaseId}>
+              <button
+                type="button"
+                data-testid={`phase-rail-${phaseId}`}
+                aria-current={isDisplayed ? "step" : undefined}
+                // Accessible name stays the full phase name (matching the
+                // Say This card and the top-strip phase badges) even though
+                // the visible label below is shortened.
+                aria-label={`${fullName}${suffix}`}
+                onClick={() => onSelectPhase(phaseId)}
+                className={cn(
+                  "rounded-full px-2.5 py-1 text-[11px] font-bold tracking-wide whitespace-nowrap uppercase transition-colors",
+                  isDisplayed
+                    ? "bg-primary text-primary-foreground"
+                    : isComplete
+                      ? "text-emerald-700 dark:text-emerald-400"
+                      : isCurrent
+                        ? "bg-emerald-700 text-white"
+                        // `hover:text-foreground` is load-bearing, not decoration:
+                        // muted-foreground on the hover `bg-muted` surface measures
+                        // 4.40:1, just under AA for this 11px label. Darkening the
+                        // text on hover keeps the hover affordance while staying
+                        // readable.
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+              >
+                <span>
+                  {RAIL_LABEL[phaseId] ?? fullName}
+                  {suffix}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }
@@ -406,7 +522,7 @@ function HoldTimerChip({ timer }: { timer: CoachHoldTimer }) {
   const elapsed = Math.max(0, Math.floor((now - new Date(timer.startedAt).getTime()) / 1000));
   const remaining = Math.max(0, timer.durationS - elapsed);
   return (
-    <Badge variant={remaining <= 30 ? "destructive" : "outline"} data-testid="hold-timer">
+    <Badge variant={remaining <= 30 ? "destructive" : "outline"} data-testid="hold-timer" className="h-5 text-[10px]">
       {`Hold ${timerText(remaining)}`}
     </Badge>
   );
@@ -459,7 +575,19 @@ function TranscriptFeed({ lines }: { lines: CoachTranscriptLine[] }) {
               !line.isFinal && "text-muted-foreground italic",
             )}
           >
-            <span className="mr-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
+            <span
+              data-testid="transcript-speaker-label"
+              className={cn(
+                "mr-1.5 text-[10px] font-bold tracking-wide uppercase",
+                // Two-tone speaker labels (mock parity): rep in the same
+                // emerald accent used for resolved tokens/Live pill
+                // elsewhere in this view, seller in the amber already
+                // measured safe for coach-nudge-label. Reused, not invented
+                // — see coach-live-contrast.spec.ts for both measurements
+                // against this transcript's actual bg-muted/30 background.
+                line.speaker === "rep" ? "text-emerald-700 dark:text-emerald-400" : "text-amber-700 dark:text-amber-300",
+              )}
+            >
               {line.speaker === "rep" ? "Rep" : "Seller"}
             </span>
             {line.text}
@@ -473,18 +601,34 @@ function TranscriptFeed({ lines }: { lines: CoachTranscriptLine[] }) {
 function ScriptPanel({
   block,
   nextBlock,
+  cursorSpokenLine,
+  cursorNextLine,
   degraded,
+  suppressed,
   contextLoad,
   onRetryContext,
   onEditEntry,
+  onBeginEntryEdit,
   onSelectVariant,
 }: {
   block: PhaseScriptBlock | null;
   nextBlock: PhaseScriptBlock | null;
+  /** The line at the rep's live cursor, already resolved and skip-past any
+   * leading "note" lines — null whenever there is no cursor, it's stale
+   * (wrong phase), or it can't be resolved against this client's script.
+   * The dominant card falls back to today's branch-0/first-say-line
+   * behavior whenever this is null. */
+  cursorSpokenLine: DisplayLine | null;
+  /** Same resolution, one line further — the line immediately after the
+   * cursor, within the SAME phase. Drives the "Coming next" preview when
+   * present; null falls back to today's next-phase preview. */
+  cursorNextLine: DisplayLine | null;
   degraded: boolean;
+  suppressed: boolean;
   contextLoad: ContextLoadState;
   onRetryContext: () => void;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  onBeginEntryEdit: () => void;
   onSelectVariant: (tag: string, key: string) => void;
 }) {
   if (!block) {
@@ -494,7 +638,7 @@ function ScriptPanel({
     // here would imply something is still loading, which is false: nothing
     // will ever resolve this. Say so plainly instead of wedging silently.
     return (
-      <main className="flex flex-1 items-center justify-center overflow-y-auto p-6">
+      <main hidden={suppressed} className="flex flex-1 items-center justify-center overflow-y-auto p-6">
         <div className="max-w-sm text-center">
           <Loader2Icon className="mx-auto mb-3 size-5 text-muted-foreground" aria-hidden />
           <p className="text-sm font-semibold text-destructive">This call phase isn&apos;t recognized.</p>
@@ -503,18 +647,51 @@ function ScriptPanel({
       </main>
     );
   }
+  const dominantBranch = block.branches[0] ?? null;
+  // The live cursor, when resolved, wins outright — it's the rep's ACTUAL
+  // position, more accurate than the branch-0 heuristic. Falls back to
+  // today's behavior whenever there's no cursor, it's stale, or it can't be
+  // resolved (unknown branch/variant, out-of-range line, or no "say" line
+  // left in that variant).
+  const spokenLine = cursorSpokenLine ?? selectSpokenLine(dominantBranch);
+  // Same rule for the "Coming next" preview — it was still blindly reading
+  // lines[0] and could surface a note as the next thing to say (repro: with
+  // Offer as the current phase, Close's dominant branch leads with a note).
+  // A glanced-at preview makes that worse than the main card, not better.
+  // With an active cursor, "next" means the next line within THIS phase
+  // (cursorNextLine) rather than jumping ahead to the next phase — the
+  // label below follows the same source, so it never says "Coming next ·
+  // Close" while actually showing an Offer-phase line.
+  const fallbackNextSpokenLine = nextBlock ? selectSpokenLine(nextBlock.branches[0] ?? null) : null;
+  const nextSpokenLine = cursorNextLine ?? fallbackNextSpokenLine;
+  const nextPreviewPhaseName = cursorNextLine ? block.phaseName : (nextBlock?.phaseName ?? null);
+  // The standalone tone chip must be a genuine tonal instruction (how to
+  // say THIS line — e.g. "playful tone"), not an arbitrary phase-level
+  // strategy note. Genuine tone guidance is authored inline in the script
+  // as {{tone:...}} markup, which resolveDisplayText already turns into
+  // `kind: "tone"` segments within a line's own segments array — the same
+  // segments LineSegments/ToneChip already render elsewhere. So the
+  // spoken line's own tone segments are the correct source, extracted out
+  // of the inline flow and shown as the standalone chip below it (never
+  // duplicated in both places). Most lines carry none, and when a line
+  // has none the card correctly shows no chip rather than repurposing an
+  // unrelated opening cue or the phase's general strategy notes.
+  const spokenToneLabels = spokenLine
+    ? spokenLine.segments.filter((segment) => segment.kind === "tone").map((segment) => segment.label)
+    : [];
+  const spokenLineSegments = spokenLine ? spokenLine.segments.filter((segment) => segment.kind !== "tone") : [];
   return (
-    <main className="flex-1 overflow-y-auto p-6 md:p-10" data-testid="coach-script-panel">
-      <div className="mx-auto max-w-2xl">
-        <div className="mb-1 text-xs font-bold tracking-wide text-muted-foreground uppercase">
-          {block.phaseName}
-        </div>
-        <p className="mb-4 text-sm text-muted-foreground italic">{block.purpose}</p>
+    <main
+      hidden={suppressed}
+      className="flex-1 overflow-y-auto px-5 py-6 md:px-10 md:py-8"
+      data-testid="coach-script-panel"
+    >
+      <div className={cn("mx-auto flex min-h-full max-w-4xl flex-col py-3", degraded ? "justify-start" : "justify-center")}>
         {contextLoad.status === "error" ? (
           <div
             role="alert"
             data-testid="coach-context-error"
-            className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
           >
             <span>Couldn&apos;t load lead details — showing the script with placeholders.</span>
             <Button type="button" variant="outline" size="xs" data-testid="coach-context-retry" onClick={onRetryContext}>
@@ -527,44 +704,135 @@ function ScriptPanel({
             Live coaching hasn&apos;t connected yet — here&apos;s the full script, scroll manually.
           </p>
         ) : null}
-        {block.openingCues.length > 0 ? (
-          <div className="mb-4 flex flex-wrap gap-1.5">
-            {block.openingCues.map((cue, index) => (
-              <ToneChip key={index} text={cue} />
-            ))}
-          </div>
-        ) : null}
-        <div className="space-y-4">
-          {block.branches.map((branch) => (
-            <BranchCard
-              key={branch.tag}
-              branch={branch}
-              onEditEntry={onEditEntry}
-              onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
-            />
-          ))}
-        </div>
-        {block.situationalCues.length > 0 ? (
-          <div className="mt-5 rounded-xl border border-dashed border-border p-3">
-            <div className="mb-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
-              If this happens…
+        <section
+          aria-label={`Say this — ${block.phaseName}`}
+          data-testid="say-this-card"
+          className="rounded-2xl border border-border border-l-4 border-l-primary bg-card px-5 py-5 shadow-sm md:px-8 md:py-7"
+        >
+          <div className="mb-4 text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Say this</div>
+          {degraded ? (
+            // Degraded = "everything, scroll it yourself": the coach isn't
+            // connected, so this is the only guidance the rep has. Every
+            // authored signal the phase carries (purpose, ALL opening cues,
+            // every branch, situational cues) must render here — the
+            // restrained single-line/single-chip treatment below is only
+            // for the LIVE, coach-connected view.
+            <>
+              {block.purpose ? <p className="mb-3 text-sm text-muted-foreground italic">{block.purpose}</p> : null}
+              {block.openingCues.length > 0 ? (
+                <div className="mb-4 flex flex-wrap gap-1.5">
+                  {block.openingCues.map((cue, index) => (
+                    <ToneChip key={index} text={cue} />
+                  ))}
+                </div>
+              ) : null}
+              <div className="divide-y divide-border/70" data-testid="full-phase-script">
+                {block.branches.map((branch) => (
+                  <BranchCard
+                    key={branch.tag}
+                    branch={branch}
+                    compact
+                    onEditEntry={onEditEntry}
+                    onBeginEntryEdit={onBeginEntryEdit}
+                    onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
+                  />
+                ))}
+              </div>
+              {block.situationalCues.length > 0 ? (
+                <div className="mt-5 rounded-xl border border-dashed border-border p-3">
+                  <div className="mb-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
+                    If this happens…
+                  </div>
+                  <ul className="space-y-1">
+                    {block.situationalCues.map((cue) => (
+                      <li key={cue.trigger} className="text-xs text-muted-foreground">
+                        {cue.text}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <>
+              {spokenLine ? (
+                <p
+                  data-testid="say-this-line"
+                  className={cn(
+                    "text-2xl leading-relaxed font-medium md:text-[26px]",
+                    spokenLine.type === "note" && "text-xs text-muted-foreground italic",
+                  )}
+                >
+                  <LineSegments segments={spokenLineSegments} onEditEntry={onEditEntry} onBeginEntryEdit={onBeginEntryEdit} />
+                </p>
+              ) : null}
+              {spokenToneLabels.length > 0 ? (
+                <div className="mt-4 flex flex-wrap gap-1.5" data-testid="say-this-tone">
+                  {spokenToneLabels.map((label, index) => (
+                    <ToneChip key={index} text={label} />
+                  ))}
+                </div>
+              ) : null}
+              <details data-testid="full-phase-script" className="mt-5 border-t border-border/70 pt-4 text-muted-foreground">
+                <summary className="cursor-pointer text-xs font-bold tracking-wide uppercase">
+                  {`Full ${block.phaseName} script`}
+                </summary>
+                <div className="mt-3 space-y-4">
+                  <p className="text-sm text-muted-foreground italic">{block.purpose}</p>
+                  {block.openingCues.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {block.openingCues.map((cue, index) => (
+                        <ToneChip key={index} text={cue} />
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="divide-y divide-border/70">
+                    {block.branches.map((branch) => (
+                      <BranchCard
+                        key={branch.tag}
+                        branch={branch}
+                        compact
+                        onEditEntry={onEditEntry}
+                        onBeginEntryEdit={onBeginEntryEdit}
+                        onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
+                      />
+                    ))}
+                  </div>
+                  {block.situationalCues.length > 0 ? (
+                    <div className="rounded-xl border border-dashed border-border p-3">
+                      <div className="mb-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
+                        If this happens…
+                      </div>
+                      <ul className="space-y-1">
+                        {block.situationalCues.map((cue) => (
+                          <li key={cue.trigger} className="text-xs text-muted-foreground">
+                            {cue.text}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+              </details>
+            </>
+          )}
+        </section>
+        {nextPreviewPhaseName && nextSpokenLine ? (
+          // De-emphasized on purpose (this is a preview, not the active
+          // card) but via an opaque mid-tone color rather than ancestor
+          // `opacity`, which was multiplying every descendant's alpha
+          // against the real page background and dropped both lines below
+          // WCAG AA. Solid stone-600/stone-300 keeps the same "quieter than
+          // the Say This card" hierarchy while staying readable.
+          <div className="px-6 pt-5" data-testid="next-phase-preview">
+            <div
+              data-testid="next-phase-preview-label"
+              className="mb-1 text-[10px] font-bold tracking-[0.12em] text-stone-600 uppercase dark:text-stone-300"
+            >
+              Coming next · {nextPreviewPhaseName}
             </div>
-            <ul className="space-y-1">
-              {block.situationalCues.map((cue) => (
-                <li key={cue.trigger} className="text-xs text-muted-foreground">
-                  {cue.text}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-        {nextBlock ? (
-          <div className="mt-8 opacity-45" data-testid="next-phase-preview">
-            <div className="mb-1 text-xs font-bold tracking-wide text-muted-foreground uppercase">
-              Next: {nextBlock.phaseName}
-            </div>
-            <p className="text-sm">
-              {nextBlock.branches[0]?.selected.lines[0]?.segments
+            <p data-testid="next-phase-preview-body" className="text-base leading-relaxed text-stone-600 dark:text-stone-300">
+              {nextSpokenLine.segments
                 .map((segment) => (segment.kind === "tone" ? "" : segment.kind === "text" ? segment.value : segment.resolved.value))
                 .join("")}
             </p>
@@ -577,19 +845,23 @@ function ScriptPanel({
 
 function BranchCard({
   branch,
+  compact = false,
   onEditEntry,
+  onBeginEntryEdit,
   onSelectVariant,
 }: {
   branch: ScriptBranchBlock;
+  compact?: boolean;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  onBeginEntryEdit: () => void;
   onSelectVariant: (key: string) => void;
 }) {
   return (
     <div
       data-testid="script-branch"
       className={cn(
-        "rounded-xl border px-4 py-3",
-        branch.critical ? "border-2 border-primary bg-primary/5" : "border-border bg-card",
+        "py-4 first:pt-0 last:pb-0",
+        branch.critical && "my-3 rounded-xl bg-primary/5 px-3 first:mt-0 last:mb-0",
       )}
     >
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -634,15 +906,11 @@ function BranchCard({
           <p
             key={index}
             className={cn(
-              "text-[15px] leading-relaxed",
+              compact ? "text-[15px] leading-relaxed" : "text-2xl leading-relaxed font-medium md:text-[26px]",
               line.type === "note" && "text-xs text-muted-foreground italic",
             )}
           >
-            {line.segments.map((segment, segIndex) => {
-              if (segment.kind === "text") return <span key={segIndex}>{segment.value}</span>;
-              if (segment.kind === "tone") return <ToneChip key={segIndex} text={segment.label} />;
-              return <TokenChip key={segIndex} token={segment.token} resolved={segment.resolved} onEditEntry={onEditEntry} />;
-            })}
+            <LineSegments segments={line.segments} onEditEntry={onEditEntry} onBeginEntryEdit={onBeginEntryEdit} />
           </p>
         ))}
       </div>
@@ -654,7 +922,13 @@ function BranchCard({
             ) : segment.kind === "tone" ? (
               <ToneChip key={index} text={segment.label} />
             ) : (
-              <TokenChip key={index} token={segment.token} resolved={segment.resolved} onEditEntry={onEditEntry} />
+              <TokenChip
+                key={index}
+                token={segment.token}
+                resolved={segment.resolved}
+                onEditEntry={onEditEntry}
+                onBeginEntryEdit={onBeginEntryEdit}
+              />
             ),
           )}
         </p>
@@ -668,9 +942,45 @@ function BranchCard({
   );
 }
 
+/** Shared segment renderer for a single script line — text runs, inline
+ * tone chips, and token chips (including the editable entry-token pills).
+ * Used by both the trimmed "current line" in the Say This card and the
+ * full-detail BranchCard inside the script expander, so the two never
+ * drift out of sync on how a line's segments render. */
+function LineSegments({
+  segments,
+  onEditEntry,
+  onBeginEntryEdit,
+}: {
+  segments: DisplayTextSegment[];
+  onEditEntry: (field: CoachEntryToken, value: string) => void;
+  onBeginEntryEdit: () => void;
+}) {
+  return (
+    <>
+      {segments.map((segment, index) => {
+        if (segment.kind === "text") return <span key={index}>{segment.value}</span>;
+        if (segment.kind === "tone") return <ToneChip key={index} text={segment.label} />;
+        return (
+          <TokenChip
+            key={index}
+            token={segment.token}
+            resolved={segment.resolved}
+            onEditEntry={onEditEntry}
+            onBeginEntryEdit={onBeginEntryEdit}
+          />
+        );
+      })}
+    </>
+  );
+}
+
 function ToneChip({ text }: { text: string }) {
   return (
-    <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-900">
+    <span
+      data-testid="tone-chip"
+      className="inline-flex items-center rounded-full border border-amber-300/60 bg-amber-400/15 px-2.5 py-0.5 text-[11px] font-semibold text-amber-800 dark:text-amber-300"
+    >
       {text}
     </span>
   );
@@ -680,13 +990,22 @@ function TokenChip({
   token,
   resolved,
   onEditEntry,
+  onBeginEntryEdit,
 }: {
   token: CoachToken;
   resolved: ResolvedToken;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  onBeginEntryEdit: () => void;
 }) {
   if (ENTRY_TOKEN_SET.has(token)) {
-    return <EntryTokenChip token={token as CoachEntryToken} resolved={resolved} onCommit={(value) => onEditEntry(token as CoachEntryToken, value)} />;
+    return (
+      <EntryTokenChip
+        token={token as CoachEntryToken}
+        resolved={resolved}
+        onBeginEdit={onBeginEntryEdit}
+        onCommit={(value) => onEditEntry(token as CoachEntryToken, value)}
+      />
+    );
   }
   if (resolved.isPlaceholder) {
     return (
@@ -698,16 +1017,22 @@ function TokenChip({
       </span>
     );
   }
-  return <span className="font-semibold">{resolved.value}</span>;
+  return (
+    <span data-testid="token-resolved" className="font-bold text-emerald-700 dark:text-emerald-400">
+      {resolved.value}
+    </span>
+  );
 }
 
 function EntryTokenChip({
   token,
   resolved,
+  onBeginEdit,
   onCommit,
 }: {
   token: CoachEntryToken;
   resolved: ResolvedToken;
+  onBeginEdit: () => void;
   onCommit: (value: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -747,6 +1072,7 @@ function EntryTokenChip({
       type="button"
       data-testid={`entry-chip-${token}`}
       onClick={() => {
+        onBeginEdit();
         setDraft(resolved.isPlaceholder ? "" : resolved.value);
         setEditing(true);
       }}
@@ -754,7 +1080,7 @@ function EntryTokenChip({
         "mx-0.5 inline-flex items-center rounded-full border px-1.5 py-0 text-[11px] font-semibold",
         resolved.isPlaceholder
           ? "border-dashed border-primary/50 text-primary"
-          : "border-primary/40 bg-primary/10 text-primary",
+          : "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
       )}
     >
       {resolved.isPlaceholder ? `+ ${ENTRY_TOKEN_LABEL[token]}` : resolved.value}
@@ -762,19 +1088,12 @@ function EntryTokenChip({
   );
 }
 
-/** Coaching nudges and objection cards share one responsive stack so they
- * cannot collide when both arrive on a narrow call screen. */
-/** Exported (only these two subcomponents, not the rest) so the
- * database-free synthetic Playwright spec (e2e/synthetic/
- * coach-live-responsive-layout.spec.ts) can server-render the REAL
- * guidance-stack and call-dock markup via react-dom/server, instead of a
- * hand-copied HTML approximation that can silently drift from the actual
- * component. */
-export function GuidanceOverlay({
+function GuidanceOverlay({
   nudges,
   cards,
   tokens,
   occupancy,
+  visible = true,
   onDismissNudge,
   onDismissObjection,
 }: {
@@ -782,57 +1101,83 @@ export function GuidanceOverlay({
   cards: CoachObjectionCard[];
   tokens: ResolvedTokens;
   occupancy: CoachCallContext["occupancy"];
+  visible?: boolean;
   onDismissNudge: (nudgeId: string) => void;
   onDismissObjection: (cardId: string) => void;
 }) {
   if (nudges.length === 0 && cards.length === 0) return null;
-  return (
-    <div
-      data-testid="coach-guidance-stack"
-      // absolute + inset-y-4, NOT fixed + top-offset + a vh-based max-height.
-      // The parent (the flex-1 region between the topbar and the call dock —
-      // see CoachLiveView) is `relative` and its height is whatever's
-      // actually left over once the browser lays out the shrink-0 topbar/
-      // banners above and the shrink-0 dock below. Anchoring both `top` AND
-      // `bottom` to THAT box makes this box's bottom edge structurally equal
-      // to the dock's top edge, in every case — a taller keypad, a shorter
-      // viewport, an extra banner — with no fixed vh budget to silently fall
-      // out of sync with the dock's real height (as the prior top-20 +
-      // max-h-[40vh] version did: at 375x667 the dock's actual top sat
-      // higher than 40vh of that shorter viewport predicted, so the stack
-      // overlapped it by ~18px).
-      //
-      // pointer-events-none here, not -auto: setting BOTH top and bottom
-      // insets with no explicit height forces this box to span the FULL
-      // available region regardless of how little content is inside it —
-      // without pointer-events-none, that empty space would sit in front
-      // of (and swallow clicks meant for) the script panel underneath.
-      // Only the inner wrapper below, which shrinks to its own content (or
-      // scrolls once it doesn't fit), re-enables pointer events — the same
-      // pattern each individual card/nudge already uses to stay clickable
-      // inside a pointer-events-none ancestor.
-      className="pointer-events-none absolute inset-y-4 right-4 z-[90] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col"
-    >
-      <div className="pointer-events-auto flex max-h-full flex-col gap-2 overflow-y-auto overscroll-contain">
-        <NudgeOverlay nudges={nudges} onDismiss={onDismissNudge} />
-        <ObjectionOverlay cards={cards} tokens={tokens} occupancy={occupancy} onDismiss={onDismissObjection} />
+  // Objections are the most specific live-call intervention, so the newest
+  // objection wins. With no objection, the newest coaching nudge wins. Every
+  // non-dominant item remains MOUNTED (only visually hidden): each owns an
+  // absolute-expiry timer effect, and unmounting a queued item would freeze
+  // that timer and let stale guidance resurface later.
+  const latestObjection = cards.at(-1);
+  const activeObjectionId = visible && latestObjection && isActionableObjection(latestObjection, occupancy)
+    ? latestObjection.id
+    : null;
+  const activeNudgeId = visible && !latestObjection ? (nudges.at(-1)?.id ?? null) : null;
+  const hasVisibleGuidance = activeObjectionId !== null || activeNudgeId !== null;
+
+  if (!hasVisibleGuidance) {
+    return (
+      <div hidden aria-hidden="true" data-testid="coach-guidance-timers">
+        <ObjectionOverlay
+          cards={cards}
+          activeCardId={null}
+          tokens={tokens}
+          occupancy={occupancy}
+          onDismiss={onDismissObjection}
+        />
+        <NudgeOverlay nudges={nudges} activeNudgeId={null} onDismiss={onDismissNudge} />
       </div>
-    </div>
+    );
+  }
+  return (
+    <section
+      data-testid="coach-guidance-stack"
+      aria-label="Active coaching guidance"
+      className="min-h-0 flex-1 overflow-y-auto px-5 py-6 md:px-10 md:py-8"
+    >
+      <div className="mx-auto flex min-h-full max-w-4xl items-center py-3">
+        <div className="w-full">
+          <ObjectionOverlay
+            cards={cards}
+            activeCardId={activeObjectionId}
+            tokens={tokens}
+            occupancy={occupancy}
+            onDismiss={onDismissObjection}
+          />
+          <NudgeOverlay nudges={nudges} activeNudgeId={activeNudgeId} onDismiss={onDismissNudge} />
+        </div>
+      </div>
+    </section>
   );
+}
+
+function isActionableObjection(card: CoachObjectionCard, occupancy: CoachCallContext["occupancy"]): boolean {
+  const objection = getScriptObjection(card.objectionId);
+  return objection !== undefined && resolveObjectionOvercome(objection, occupancy) !== null;
 }
 
 function NudgeOverlay({
   nudges,
+  activeNudgeId,
   onDismiss,
 }: {
   nudges: CoachNudge[];
+  activeNudgeId: string | null;
   onDismiss: (nudgeId: string) => void;
 }) {
   if (nudges.length === 0) return null;
   return (
     <div className="flex flex-col gap-2">
       {nudges.map((nudge) => (
-        <NudgeCard key={nudge.id} nudge={nudge} onDismiss={() => onDismiss(nudge.id)} />
+        <NudgeCard
+          key={nudge.id}
+          nudge={nudge}
+          active={nudge.id === activeNudgeId}
+          onDismiss={() => onDismiss(nudge.id)}
+        />
       ))}
     </div>
   );
@@ -845,7 +1190,7 @@ function NudgeOverlay({
  * than a fixed TTL, so a remount — collapsing and reopening the coach view
  * unmounts every card — picks up the correctly-shrunk remaining time
  * instead of restarting the full duration. */
-function NudgeCard({ nudge, onDismiss }: { nudge: CoachNudge; onDismiss: () => void }) {
+function NudgeCard({ nudge, active, onDismiss }: { nudge: CoachNudge; active: boolean; onDismiss: () => void }) {
   const onDismissRef = useRef(onDismiss);
   useEffect(() => {
     onDismissRef.current = onDismiss;
@@ -864,21 +1209,32 @@ function NudgeCard({ nudge, onDismiss }: { nudge: CoachNudge; onDismiss: () => v
     <button
       type="button"
       data-testid="coach-nudge"
+      data-active={active}
+      hidden={!active}
       onClick={onDismiss}
-      className="animate-in slide-in-from-left-4 pointer-events-auto rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-left text-sm text-amber-900 shadow-lg"
+      className="animate-in slide-in-from-left-4 w-full rounded-2xl border border-amber-300/60 border-l-4 border-l-amber-500 bg-card px-5 py-5 text-left shadow-sm md:px-8 md:py-7"
     >
-      {nudge.text}
+      <span
+        data-testid="coach-nudge-label"
+        className="block text-[11px] font-extrabold tracking-[0.14em] text-amber-700 uppercase dark:text-amber-300"
+      >
+        Coach nudge
+      </span>
+      <span className="mt-3 block text-2xl leading-relaxed font-semibold text-foreground">{nudge.text}</span>
+      <span className="mt-5 block text-xs text-muted-foreground">Tap to dismiss and return to the script.</span>
     </button>
   );
 }
 
 function ObjectionOverlay({
   cards,
+  activeCardId,
   tokens,
   occupancy,
   onDismiss,
 }: {
   cards: CoachObjectionCard[];
+  activeCardId: string | null;
   tokens: ResolvedTokens;
   occupancy: CoachCallContext["occupancy"];
   onDismiss: (cardId: string) => void;
@@ -887,7 +1243,14 @@ function ObjectionOverlay({
   return (
     <div className="flex flex-col gap-2">
       {cards.map((card) => (
-        <ObjectionCard key={card.id} card={card} tokens={tokens} occupancy={occupancy} onDismiss={() => onDismiss(card.id)} />
+        <ObjectionCard
+          key={card.id}
+          card={card}
+          active={card.id === activeCardId}
+          tokens={tokens}
+          occupancy={occupancy}
+          onDismiss={() => onDismiss(card.id)}
+        />
       ))}
     </div>
   );
@@ -905,7 +1268,11 @@ function ObjectionLine({ label, text, tokens }: { label: string; text: string; t
         // fall back to plain-value rendering (no inline editor here) if
         // the script ever adds one — the card is transient, not the right
         // place to capture a deal value.
-        return <span key={index} className="font-semibold">{segment.resolved.value}</span>;
+        return (
+          <span key={index} data-testid="token-resolved" className="font-bold text-emerald-700 dark:text-emerald-400">
+            {segment.resolved.value}
+          </span>
+        );
       })}
     </p>
   );
@@ -919,11 +1286,13 @@ function ObjectionLine({ label, text, tokens }: { label: string; text: string; t
  * the correctly-shrunk remaining time instead of restarting the full 45s. */
 function ObjectionCard({
   card,
+  active,
   tokens,
   occupancy,
   onDismiss,
 }: {
   card: CoachObjectionCard;
+  active: boolean;
   tokens: ResolvedTokens;
   occupancy: CoachCallContext["occupancy"];
   onDismiss: () => void;
@@ -951,15 +1320,17 @@ function ObjectionCard({
     <button
       type="button"
       data-testid="objection-card"
+      data-active={active}
+      hidden={!active}
       onClick={onDismiss}
-      className="animate-in slide-in-from-right-4 pointer-events-auto rounded-2xl border border-border bg-card p-3.5 text-left shadow-lg"
+      className="animate-in slide-in-from-right-4 w-full rounded-2xl border border-border border-l-4 border-l-primary bg-card px-5 py-5 text-left shadow-sm md:px-8 md:py-7"
     >
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="text-xs font-bold tracking-wide text-muted-foreground uppercase">Objection</span>
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <span className="text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Handle this objection</span>
         {objection?.display.tonality ? <ToneChip text={objection.display.tonality} /> : null}
       </div>
       {objection && overcomeText ? (
-        <div className="space-y-1.5 text-sm">
+        <div className="space-y-3 text-base leading-relaxed md:text-lg">
           <ObjectionLine label="Acknowledge" text={objection.display.acknowledge} tokens={tokens} />
           <ObjectionLine label="Disarm" text={objection.display.disarm} tokens={tokens} />
           <ObjectionLine label="Overcome" text={overcomeText} tokens={tokens} />
@@ -970,16 +1341,16 @@ function ObjectionCard({
           ) : null}
         </div>
       ) : (
-        <p className="text-sm text-muted-foreground">{card.objectionId}</p>
+        <p className="text-sm text-muted-foreground">Keep following the live script while coaching refreshes.</p>
       )}
+      <span className="mt-5 block text-xs text-muted-foreground">Tap to dismiss and return to the script.</span>
     </button>
   );
 }
 
-export function CallControlDock({
+function CallControlDock({
   callName,
   callStatus,
-  seconds,
   muted,
   held,
   holdPending,
@@ -988,18 +1359,11 @@ export function CallControlDock({
   onHold,
   onHangup,
   onCollapse,
-  // Purely additive, defaults to the existing behavior: the keypad is
-  // internal, uncontrolled state everywhere in the app, toggled only by
-  // the Keypad button. This only exists so the database-free synthetic
-  // Playwright spec (e2e/synthetic/coach-live-responsive-layout.spec.tsx)
-  // can server-render the REAL keypad-open layout via react-dom/server —
-  // that spec has no JS runtime to click the toggle with, since it sets
-  // static HTML directly rather than hydrating a bundle.
-  initialKeypadOpen = false,
+  keypadOpen,
+  onKeypadOpenChange,
 }: {
   callName: string;
   callStatus: CoachCallStatus;
-  seconds: number;
   muted: boolean;
   held: boolean;
   holdPending: boolean;
@@ -1008,17 +1372,10 @@ export function CallControlDock({
   onHold: () => void;
   onHangup: () => void;
   onCollapse: () => void;
-  initialKeypadOpen?: boolean;
+  keypadOpen: boolean;
+  onKeypadOpenChange: (open: boolean) => void;
 }) {
-  const [keypadOpen, setKeypadOpen] = useState(initialKeypadOpen);
   const live = callStatus === "live";
-  const timerLabel = held
-    ? "On hold"
-    : callStatus === "connecting"
-      ? "Connecting…"
-      : callStatus === "ringing"
-        ? "Ringing…"
-        : timerText(seconds);
 
   // Parity with the classic popover's LiveView (softphone-provider.tsx),
   // which has had this since before the coach view existed. Guards against
@@ -1033,6 +1390,12 @@ export function CallControlDock({
     const onKeyDown = (event: KeyboardEvent) => {
       if (!/^[0-9*#]$/.test(event.key) || event.repeat) return;
       if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true']")) return;
+      // Guidance can hide the script and move focus to the dialog between
+      // offer-entry keystrokes. The editor itself remains mounted under the
+      // hidden script panel so its draft and blur/commit lifecycle survive;
+      // use that mounted editor as the source of truth instead of trusting
+      // only the key event's newly-moved target.
+      if (document.querySelector("[data-coach-entry-editor]")) return;
       event.preventDefault();
       onDigit(event.key as DtmfDigit);
     };
@@ -1047,26 +1410,19 @@ export function CallControlDock({
         data-testid="coach-call-dock-row"
         className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between"
       >
-        <div className="flex min-w-0 items-center gap-3">
+        <div className="flex min-w-0 items-center gap-2">
           <Button
             type="button"
-            variant="ghost"
-            size="icon-sm"
+            variant="outline"
+            size="sm"
             aria-label="Collapse to popover"
             data-testid="coach-collapse"
             onClick={onCollapse}
           >
             <XIcon className="size-4" aria-hidden />
+            Collapse
           </Button>
-          <div>
-            <div className="text-sm font-bold">{callName}</div>
-            <div
-              className={cn("font-mono text-xs", live || held ? "text-muted-foreground" : "text-blue-700")}
-              data-testid="coach-call-timer"
-            >
-              {timerLabel}
-            </div>
-          </div>
+          <div className="truncate text-sm font-bold">{callName}</div>
         </div>
         <div data-testid="coach-call-controls" className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
           <Button
@@ -1087,7 +1443,7 @@ export function CallControlDock({
             aria-expanded={keypadOpen}
             disabled={held || holdPending || !live}
             data-testid="coach-keypad-toggle"
-            onClick={() => setKeypadOpen((value) => !value)}
+            onClick={() => onKeypadOpenChange(!keypadOpen)}
           >
             Keypad
           </Button>

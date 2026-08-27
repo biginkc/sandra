@@ -1,7 +1,7 @@
 "use client";
 
 import { REALTIME_SUBSCRIBE_STATES } from "@supabase/supabase-js";
-import { useEffect, useReducer, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
 import { coachReducer, initialCoachState } from "./event-reducer";
@@ -48,12 +48,33 @@ const RESUBSCRIBE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
  * event carries scriptVersion (required by the wire contract), so this is
  * checked on every dispatch, not conditionally.
  */
-export function useCoachChannel(callId: string | null, startingPhaseId: CoachPhaseId = "introduction") {
+export function useCoachChannel(
+  callId: string | null,
+  startingPhaseId: CoachPhaseId = "introduction",
+  livenessActive = true,
+) {
   const [state, dispatch] = useReducer(coachReducer, startingPhaseId, initialCoachState);
   const [degraded, setDegraded] = useState(false);
   const [reconnectGap, setReconnectGap] = useState(false);
   const [malformedEventCount, setMalformedEventCount] = useState(0);
   const [scriptOutOfSync, setScriptOutOfSync] = useState<string | null>(null);
+  const livenessActiveRef = useRef(livenessActive);
+  const livenessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearLivenessTimer = useCallback(() => {
+    if (livenessTimerRef.current !== null) {
+      clearTimeout(livenessTimerRef.current);
+      livenessTimerRef.current = null;
+    }
+  }, []);
+
+  const armLiveness = useCallback(() => {
+    clearLivenessTimer();
+    if (!callId || !livenessActiveRef.current) return;
+    livenessTimerRef.current = setTimeout(() => {
+      if (livenessActiveRef.current) setDegraded(true);
+    }, LIVENESS_WINDOW_MS);
+  }, [callId, clearLivenessTimer]);
 
   // A new call (different callId, including a transition to/from null)
   // must start from a clean coach state — this hook lives at the
@@ -73,22 +94,30 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
     setScriptOutOfSync(null);
   }
 
+  const [trackedLivenessActive, setTrackedLivenessActive] = useState(livenessActive);
+  if (livenessActive !== trackedLivenessActive) {
+    setTrackedLivenessActive(livenessActive);
+    setDegraded(false);
+  }
+  // Subscribe as soon as the server has created the call identity, but do
+  // not treat ordinary connecting/ringing time as missing coach data. Once
+  // the call becomes live, start a fresh full liveness window without
+  // tearing down or recreating the already-authorized channel.
+  useEffect(() => {
+    livenessActiveRef.current = livenessActive;
+    clearLivenessTimer();
+    if (livenessActive) armLiveness();
+    return clearLivenessTimer;
+  }, [armLiveness, clearLivenessTimer, livenessActive]);
+
   useEffect(() => {
     if (!callId) return;
     let mounted = true;
     let generation = 0;
     let channel: ReturnType<ReturnType<typeof createClient>["channel"]> | null = null;
-    let livenessTimer: ReturnType<typeof setTimeout> | null = null;
     let resubscribeTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
     const supabase = createClient();
-
-    const armLiveness = () => {
-      if (livenessTimer !== null) clearTimeout(livenessTimer);
-      livenessTimer = setTimeout(() => {
-        if (mounted) setDegraded(true);
-      }, LIVENESS_WINDOW_MS);
-    };
 
     const clearResubscribeTimer = () => {
       if (resubscribeTimer !== null) {
@@ -199,7 +228,7 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
             status === REALTIME_SUBSCRIBE_STATES.TIMED_OUT ||
             status === REALTIME_SUBSCRIBE_STATES.CLOSED
           ) {
-            setDegraded(true);
+            if (livenessActiveRef.current) setDegraded(true);
             scheduleResubscribe();
           }
         });
@@ -209,7 +238,7 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
     void start();
     return () => {
       mounted = false;
-      if (livenessTimer !== null) clearTimeout(livenessTimer);
+      clearLivenessTimer();
       clearResubscribeTimer();
       // Unmounting (or callId changing, since this effect's cleanup runs
       // on every dependency change too) doesn't need to await the removal
@@ -217,7 +246,7 @@ export function useCoachChannel(callId: string | null, startingPhaseId: CoachPha
       // synchronously the way scheduleResubscribe's continuation does.
       void teardownChannel();
     };
-  }, [callId]);
+  }, [armLiveness, callId, clearLivenessTimer]);
 
   return {
     state,

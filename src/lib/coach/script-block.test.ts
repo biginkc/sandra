@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { buildPhaseScriptBlock, getScriptObjection, getScriptPhase, nextPhaseId, resolveObjectionOvercome, selectBranchVariantKey } from "./script-block";
+import {
+  branchSayIndex,
+  buildPhaseScriptBlock,
+  findNextSayAcrossBranches,
+  getScriptObjection,
+  getScriptPhase,
+  nextPhaseId,
+  resolveCursorLine,
+  resolveCursorNextLine,
+  resolveObjectionOvercome,
+  selectBranchVariantKey,
+} from "./script-block";
 import { CLOSR_SCRIPT } from "./script-block";
 import { resolveCoachTokens } from "./token-resolver";
 import type { CoachCallContext } from "./types";
@@ -238,5 +249,461 @@ describe("coach_notes fidelity — every phase carries its full rule set from th
     expect(notes.some((text) => text.includes("contract to sign"))).toBe(true);
     expect(notes.some((text) => text.includes("attorney"))).toBe(true);
     expect(notes.some((text) => text.includes("never fake pressure"))).toBe(true);
+  });
+});
+
+describe("resolveCursorLine — revised wire contract, exact fall-through order", () => {
+  // Both blocks below use the file's default selectCtx ({ leadSource: null,
+  // occupancy: null }), so branch-level variant selection always falls back
+  // to each branch's default/first variant unless a test overrides it via
+  // buildPhaseScriptBlock's branchOverrides argument (mirroring a rep's
+  // manual variant switch) — that's what makes "Sandra's own selected
+  // variant" a fixed, known quantity per test rather than something that
+  // shifts with live call context.
+  const introBlock = buildPhaseScriptBlock("introduction", tokens)!;
+  const revealBlock = buildPhaseScriptBlock("reveal", tokens)!;
+  const NO_OVERRIDES: Record<string, string> = {};
+
+  it("step 4: resolves via lineText when it matches a line in Sandra's own selected variant — wins even over a garbage variantKey/lineIndex", () => {
+    const line = resolveCursorLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "not-a-real-variant", // advisory only, must be ignored
+        lineIndex: 999, // would be out of range if consulted
+        lineText: "• To add some sort of value to the property so we can resell it on the market, or",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("add some sort of value to the property");
+  });
+
+  it("step 5 (rescue): lineText absent from Sandra's auto-selected variant, but present in the cursor's named variant, resolves there — real evidence the auto-select guessed wrong", () => {
+    // Reveal's Entry branch: with occupancy unset and no manual override,
+    // Sandra's own selection falls back to variants[0] ("unknown"). All
+    // four variants share line 0 verbatim but diverge at line 1. The
+    // cursor claims "vacant" and hands over VACANT's own line-1 text —
+    // genuinely absent from "unknown" — so the rescue must resolve to
+    // vacant's line, proving Jitter's guess earns priority ONLY on real
+    // textual evidence.
+    const line = resolveCursorLine(
+      {
+        phaseId: "reveal",
+        branchTag: "Entry",
+        variantKey: "vacant",
+        lineIndex: 1,
+        lineText: "I know it's been vacant for a little bit, but what made you decide to go ahead and sell it now?",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      revealBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("vacant for a little bit");
+  });
+
+  it("a REP MANUAL OVERRIDE always wins — the rescue never fires when this branch has one, even if the cursor's variant has a genuine lineText match", () => {
+    // Same Entry branch/vacant-lineText setup as the rescue test above, but
+    // now the rep has manually switched Entry to "owner_occupied" — the
+    // concrete harm scenario: rep taps a variant tab, Jitter (blind to
+    // that tap) guesses a different one. The override must resolve inside
+    // OWNER_OCCUPIED, never switching to vacant no matter how well the
+    // cursor's lineText matches there.
+    const overriddenBlock = buildPhaseScriptBlock("reveal", tokens, { leadSource: null, occupancy: null }, {
+      Entry: "owner_occupied",
+    })!;
+    const line = resolveCursorLine(
+      {
+        phaseId: "reveal",
+        branchTag: "Entry",
+        variantKey: "vacant",
+        lineIndex: 1,
+        lineText: "I know it's been vacant for a little bit, but what made you decide to go ahead and sell it now?",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      overriddenBlock,
+      { Entry: "owner_occupied" },
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    // Falls through to lineIndex within owner_occupied (the override), NOT
+    // vacant's text.
+    expect(allText(line!.segments)).toContain("I know you live here and all");
+    expect(allText(line!.segments)).not.toContain("vacant for a little bit");
+  });
+
+  it("falls back to lineIndex within Sandra's own variant when lineText matches NEITHER Sandra's variant nor the cursor's named variant", () => {
+    const line = resolveCursorLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default", // Frame the call has only one variant — nowhere else for lineText to hide
+        lineIndex: 3,
+        lineText: "this text does not appear anywhere in the script",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("Buy the property to rent it to someone");
+  });
+
+  it("step 7: falls back to THIS branch's own first spoken line (not branch 0) when nothing else resolves", () => {
+    const line = resolveCursorLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call", // not the phase's dominant branch (Opener)
+        variantKey: "default",
+        lineIndex: 999,
+        lineText: "this text does not appear anywhere in the script",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    // "Frame the call"'s own first say line, not Opener's greeting.
+    expect(allText(line!.segments)).toContain("reason for my call today");
+  });
+
+  it("skips forward past a leading note line to the next actual 'say' line — never presents a note as speech", () => {
+    // Reveal's "Example probes — goal 7+" branch has no auto_select_by, so
+    // it needs a manual override to land Sandra's own selection on
+    // "vacant" (branchOverrides mirrors the rep's manual variant switch).
+    // Index 4 in that variant is a type:"note" line ("Add up everything
+    // they've paid so far."), a rep-facing instruction, not speech.
+    const overrides = { "Example probes — goal 7+": "vacant" };
+    const block = buildPhaseScriptBlock("reveal", tokens, { leadSource: null, occupancy: null }, overrides)!;
+    const noteLine = getScriptPhase("reveal")!.display.branches
+      .find((b) => b.tag === "Example probes — goal 7+")!
+      .variants.find((v) => v.key === "vacant")!.lines[4];
+    expect(noteLine.type).toBe("note");
+
+    const line = resolveCursorLine(
+      {
+        phaseId: "reveal",
+        branchTag: "Example probes — goal 7+",
+        variantKey: "vacant",
+        lineIndex: 4,
+        lineText: noteLine.text, // raw-text match lands exactly on the note
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      block,
+      overrides,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(line!.type).toBe("say");
+    expect(allText(line!.segments)).toContain("So when you sell");
+  });
+
+  it("returns null (full branch-0 fallback territory) for an unknown branchTag rather than crashing", () => {
+    expect(
+      resolveCursorLine(
+        {
+          phaseId: "introduction",
+          branchTag: "Not A Real Branch",
+          variantKey: "default",
+          lineIndex: 0,
+          lineText: "irrelevant",
+          scriptVersion: CLOSR_SCRIPT.version,
+        },
+        introBlock,
+        NO_OVERRIDES,
+        tokens,
+      ),
+    ).toBeNull();
+  });
+
+  it("never looks a branchTag up across phases — a tag from another phase's branches must not resolve", () => {
+    // "Entry" only exists on Reveal's branches, not Introduction's — even
+    // though the cursor's own phaseId matches the block, the tag must be
+    // scoped to THIS phase's branches only.
+    expect(
+      resolveCursorLine(
+        {
+          phaseId: "introduction",
+          branchTag: "Entry",
+          variantKey: "unknown",
+          lineIndex: 0,
+          lineText: "irrelevant",
+          scriptVersion: CLOSR_SCRIPT.version,
+        },
+        introBlock,
+        NO_OVERRIDES,
+        tokens,
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null when the cursor's scriptVersion doesn't match this client's loaded script — discarded, not clamped", () => {
+    expect(
+      resolveCursorLine(
+        {
+          phaseId: "introduction",
+          branchTag: "Frame the call",
+          variantKey: "default",
+          lineIndex: 2,
+          lineText: "• To add some sort of value to the property so we can resell it on the market, or",
+          scriptVersion: "0.0.1-not-the-loaded-script",
+        },
+        introBlock,
+        NO_OVERRIDES,
+        tokens,
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null when the cursor's phaseId doesn't match the displayed block's phase", () => {
+    expect(
+      resolveCursorLine(
+        {
+          phaseId: "reveal",
+          branchTag: "Entry",
+          variantKey: "unknown",
+          lineIndex: 0,
+          lineText: "irrelevant",
+          scriptVersion: CLOSR_SCRIPT.version,
+        },
+        introBlock, // introduction block, cursor claims reveal
+        NO_OVERRIDES,
+        tokens,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("resolveCursorNextLine — one line further than whatever resolveCursorLine actually resolved", () => {
+  const introBlock = buildPhaseScriptBlock("introduction", tokens)!;
+  const NO_OVERRIDES: Record<string, string> = {};
+
+  it("resolves the line immediately after the matched position", () => {
+    const line = resolveCursorNextLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 1,
+        lineText: "Cool, so how we work is very simple. We buy properties for a couple reasons:",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("add some sort of value to the property");
+  });
+
+  it("uses the ACTUAL resolved position, not the raw cursor.lineIndex, when resolution fell back", () => {
+    // lineText doesn't match anything, so resolution falls back to
+    // lineIndex 1 — "next" must be line 2, not line cursor.lineIndex+1
+    // blindly re-derived from a lineText that never actually matched.
+    const line = resolveCursorNextLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 1,
+        lineText: "this text does not appear anywhere in the script",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("add some sort of value to the property");
+  });
+
+  it("skips forward past a note the same way resolveCursorLine does", () => {
+    const overrides = { "Example probes — goal 7+": "vacant" };
+    const block = buildPhaseScriptBlock("reveal", tokens, { leadSource: null, occupancy: null }, overrides)!;
+    const line = resolveCursorNextLine(
+      {
+        phaseId: "reveal",
+        branchTag: "Example probes — goal 7+",
+        variantKey: "vacant",
+        lineIndex: 3,
+        lineText: "How long have you been paying that?",
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      block,
+      overrides,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("So when you sell");
+  });
+
+  it("BLOCKER REPRO: continues into the NEXT BRANCH within the same phase when the current variant is exhausted, instead of skipping to the next phase", () => {
+    // A cursor on Introduction's "Frame the call" (its last line) must
+    // preview Introduction's OWN "Pen & paper — contact details" branch
+    // next — not Reveal. Concrete harm this reproduces: the old
+    // implementation only ever searched within the resolved variant, so
+    // running out of lines there fell straight through to the caller's
+    // next-PHASE fallback, telling the rep the wrong thing to say at
+    // exactly the moment they're about to move on.
+    const lines = getScriptPhase("introduction")!.display.branches
+      .find((b) => b.tag === "Frame the call")!
+      .variants.find((v) => v.key === "default")!.lines;
+    const lastIndex = lines.length - 1;
+
+    const line = resolveCursorNextLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: lastIndex,
+        lineText: lines[lastIndex].text,
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("pull out a pen and paper");
+  });
+
+  // NOTE: cross-branch continuation landing on the next REAL branch's
+  // content is already proven end-to-end by the "BLOCKER REPRO" test above
+  // (Frame the call -> Pen & paper, both real). What's tested here
+  // specifically is the SKIP: a branch with no spoken line at all must be
+  // passed over, not stopped at. The real script has no all-note branch
+  // today (every branch has a "say" line), so that specific behavior
+  // cannot be exercised end-to-end through real data without a
+  // hand-built fixture — see the findNextSayAcrossBranches suite below,
+  // which tests the actual skip mechanism resolveCursorNextLine calls.
+
+  it("returns null only once EVERY remaining branch in the phase is exhausted — the true 'let the caller fall to the next phase' case", () => {
+    // "Pen & paper — contact details" is Introduction's LAST branch; its
+    // last line has nothing after it anywhere in this phase.
+    const lines = getScriptPhase("introduction")!.display.branches
+      .find((b) => b.tag === "Pen & paper — contact details")!
+      .variants.find((v) => v.key === "default")!.lines;
+    const lastIndex = lines.length - 1;
+
+    const line = resolveCursorNextLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Pen & paper — contact details",
+        variantKey: "default",
+        lineIndex: lastIndex,
+        lineText: lines[lastIndex].text,
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).toBeNull();
+  });
+
+  it("returns null when the underlying position can't be resolved at all (e.g. version mismatch)", () => {
+    const line = resolveCursorNextLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 0,
+        lineText: "irrelevant",
+        scriptVersion: "0.0.1-not-the-loaded-script",
+      },
+      introBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).toBeNull();
+  });
+});
+
+describe("branchSayIndex — never presents a note as speech, even for a synthetic all-note variant", () => {
+  // The real, currently-loaded script has a "say" line in every variant —
+  // this class of bug (an all-note variant silently defaulting to index 0,
+  // which could land on a note) cannot be reproduced end-to-end through
+  // real data, and the schema validator does not forbid an all-note
+  // variant either (script-schema.ts only requires >=1 line, not >=1
+  // "say" line). So this is proven directly against a synthetic fixture —
+  // the exact scenario the fix exists for.
+  it("returns null for a variant that is entirely notes — never index 0", () => {
+    const allNotes: { type: "say" | "note"; text: string }[] = [
+      { type: "note", text: "Internal reminder — do not read this aloud." },
+      { type: "note", text: "Another internal-only stage direction." },
+    ];
+    expect(branchSayIndex(allNotes)).toBeNull();
+  });
+
+  it("returns the first say index when one exists, regardless of how many notes precede it", () => {
+    const lines: { type: "say" | "note"; text: string }[] = [
+      { type: "note", text: "Setup note." },
+      { type: "note", text: "Another setup note." },
+      { type: "say", text: "The actual thing to say." },
+    ];
+    expect(branchSayIndex(lines)).toBe(2);
+  });
+
+  it("returns index 0 directly when the first line is already a say", () => {
+    const lines: { type: "say" | "note"; text: string }[] = [{ type: "say", text: "Say this first." }];
+    expect(branchSayIndex(lines)).toBe(0);
+  });
+});
+
+describe("findNextSayAcrossBranches — the cross-branch continuation SKIP, proven against a synthetic all-note branch", () => {
+  // resolveCursorNextLine's cross-branch continuation (BLOCKER 1) must
+  // skip PAST a branch with no spoken line at all, not stop there or
+  // return it. The real script has no such branch today (every branch has
+  // a "say" line), so this specific skip cannot be exercised end-to-end
+  // through real data — that's exactly why this logic was extracted into
+  // its own pure, exported function: so the skip itself is directly
+  // provable against a hand-built fixture.
+  it("skips a branch with NO spoken line at all and lands on the next branch that has one", () => {
+    const branches = [
+      { tag: "All-note branch", lines: [{ type: "note" as const, text: "Internal-only reminder." }] },
+      { tag: "Has content", lines: [{ type: "say" as const, text: "The actual next thing to say." }] },
+    ];
+    expect(findNextSayAcrossBranches(branches)).toEqual({ tag: "Has content", lineIndex: 0 });
+  });
+
+  it("skips MULTIPLE consecutive all-note branches, not just one", () => {
+    const branches = [
+      { tag: "First all-note", lines: [{ type: "note" as const, text: "Note 1." }] },
+      { tag: "Second all-note", lines: [{ type: "note" as const, text: "Note 2." }] },
+      { tag: "Finally has content", lines: [{ type: "say" as const, text: "Here it is." }] },
+    ];
+    expect(findNextSayAcrossBranches(branches)).toEqual({ tag: "Finally has content", lineIndex: 0 });
+  });
+
+  it("finds a say line at a non-zero index within a branch, not just index 0", () => {
+    const branches = [
+      {
+        tag: "Mixed",
+        lines: [
+          { type: "note" as const, text: "setup note" },
+          { type: "say" as const, text: "the actual spoken line" },
+        ],
+      },
+    ];
+    expect(findNextSayAcrossBranches(branches)).toEqual({ tag: "Mixed", lineIndex: 1 });
+  });
+
+  it("returns null when EVERY remaining branch is entirely notes — nothing left to preview", () => {
+    const branches = [
+      { tag: "A", lines: [{ type: "note" as const, text: "note A" }] },
+      { tag: "B", lines: [{ type: "note" as const, text: "note B" }] },
+    ];
+    expect(findNextSayAcrossBranches(branches)).toBeNull();
+  });
+
+  it("returns null for an empty branch list", () => {
+    expect(findNextSayAcrossBranches([])).toBeNull();
   });
 });
