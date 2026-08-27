@@ -227,6 +227,17 @@ describe("<CockpitView /> DNC toggle", () => {
     expect(toggle).toHaveTextContent("Showing all");
   });
 
+  it("explains the fixed compliance visibility rule on Sandra Dispo", () => {
+    render(
+      <CockpitView {...baseProps} filter="dispo" threads={[]} hideDnc={true} />,
+    );
+
+    expect(screen.queryByTestId("dnc-toggle")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("sandra-dispo-compliance-note"),
+    ).toHaveTextContent("Compliance reviews shown · tests hidden");
+  });
+
   it("shows hidden-count hint when hideDnc=true and DNC threads exist", () => {
     render(
       <CockpitView

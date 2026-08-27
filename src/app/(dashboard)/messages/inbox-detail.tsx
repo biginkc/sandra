@@ -339,6 +339,14 @@ function SandraDispoReviewBanner({
             <p className="mt-0.5 text-xs text-[#7c2d12]">
               Why: {review.reason}
             </p>
+            {review.sourceMessageBody ? (
+              <blockquote
+                className="mt-1.5 border-l-2 border-[#fdba74] pl-2 text-xs italic text-[#7c2d12]"
+                data-testid="sandra-dispo-source-message"
+              >
+                Reviewed message: “{review.sourceMessageBody}”
+              </blockquote>
+            ) : null}
             {keepsRestrictions ? (
               <p className="mt-1 text-[11px] font-medium text-[#7c2d12]">
                 Confirming this review does not remove contact restrictions.

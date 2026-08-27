@@ -126,8 +126,13 @@ export async function fetchInboxDetail(
     [...messages].reverse().find((message) => message.property_id !== null)
       ?.property_id ??
     null;
+  const sourceMessageInWindow = reviewRes.data
+    ? messages.find(
+        (message) => message.id === reviewRes.data!.source_inbound_message_id,
+      )
+    : null;
 
-  const [contactRes, propertyRes] = await Promise.all([
+  const [contactRes, propertyRes, sourceMessageRes] = await Promise.all([
     supabase
       .from("contacts")
       .select(
@@ -146,6 +151,17 @@ export async function fetchInboxDetail(
           .eq("org_id", conversationOrgId)
           .maybeSingle()
       : Promise.resolve({ data: null, error: null }),
+    reviewRes.data && !sourceMessageInWindow
+      ? supabase
+          .from("messages")
+          .select("id, body")
+          .eq("id", reviewRes.data.source_inbound_message_id)
+          .eq("org_id", conversationOrgId)
+          .eq("conversation_id", conversationId)
+          .eq("channel", "sms")
+          .eq("direction", "inbound")
+          .maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
   ]);
 
   if (contactRes.error) {
@@ -153,6 +169,11 @@ export async function fetchInboxDetail(
   }
   if (propertyRes.error) {
     throw new Error(`fetchInboxDetail property: ${propertyRes.error.message}`);
+  }
+  if (sourceMessageRes.error) {
+    throw new Error(
+      `fetchInboxDetail AI review source: ${sourceMessageRes.error.message}`,
+    );
   }
   const c = contactRes.data;
   const p = propertyRes.data;
@@ -221,6 +242,8 @@ export async function fetchInboxDetail(
           reason: reviewRes.data.ai_reason,
           sourceInboundMessageId:
             reviewRes.data.source_inbound_message_id,
+          sourceMessageBody:
+            sourceMessageInWindow?.body ?? sourceMessageRes.data?.body ?? null,
           createdAt: reviewRes.data.created_at,
         }
       : null,

@@ -1575,6 +1575,7 @@ describe("<InboxDetail />", () => {
         disposition: "not_interested",
         reason: "Homeowner said they are not selling",
         sourceInboundMessageId: "message-1",
+        sourceMessageBody: "Please stop asking. I am not selling.",
         createdAt: "2026-08-27T14:00:00.000Z",
       },
     });
@@ -1593,6 +1594,9 @@ describe("<InboxDetail />", () => {
     );
     expect(screen.getByTestId("sandra-dispo-review-banner")).toHaveTextContent(
       "Homeowner said they are not selling",
+    );
+    expect(screen.getByTestId("sandra-dispo-source-message")).toHaveTextContent(
+      "Please stop asking. I am not selling.",
     );
     await user.click(screen.getByTestId("confirm-sandra-dispo"));
 

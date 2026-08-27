@@ -11,6 +11,9 @@ export type AiDispositionReview = {
   disposition: string;
   reason: string;
   sourceInboundMessageId: string;
+  /** Present on detail hydration so the operator can see the exact inbound
+   *  text Sandra classified even when it falls outside the timeline slice. */
+  sourceMessageBody?: string | null;
   createdAt: string;
 };
 

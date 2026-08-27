@@ -156,11 +156,20 @@ export function InboxFilters({
         onClick={() => setFilter("dismissed")}
         testId="filter-dismissed"
       />
-      <DncToggle
-        hideDnc={hideDnc}
-        hiddenDncCount={hiddenDncCount}
-        onToggle={toggleHideDnc}
-      />
+      {active === "dispo" ? (
+        <span
+          className="ml-auto text-[12px] font-medium text-[#78716c]"
+          data-testid="sandra-dispo-compliance-note"
+        >
+          Compliance reviews shown · tests hidden
+        </span>
+      ) : (
+        <DncToggle
+          hideDnc={hideDnc}
+          hiddenDncCount={hiddenDncCount}
+          onToggle={toggleHideDnc}
+        />
+      )}
     </div>
   );
 }

@@ -415,6 +415,7 @@ describe("fetchInboxDetail", () => {
       id: "review-outside-window",
       disposition: "nurture",
       sourceInboundMessageId: "older-reviewed-source",
+      sourceMessageBody: "hello",
     });
   });
 
@@ -514,6 +515,7 @@ describe("fetchInboxDetail", () => {
       disposition: "not_interested",
       reason: "Homeowner said no",
       sourceInboundMessageId: "message-with-review",
+      sourceMessageBody: "hello",
       createdAt: "2026-08-27T14:00:00.000Z",
     });
   });
