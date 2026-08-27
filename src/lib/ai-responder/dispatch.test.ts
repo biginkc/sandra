@@ -1256,6 +1256,93 @@ describe("dispatchAiResponse debounce", () => {
     expect(state.aiClaims[0]).toMatchObject({ status: "completed" });
   });
 
+  it("still suppresses opt-out when a retry preserves an earlier not-interested review", async () => {
+    const state = createMockState();
+    state.property.outreach_dispo = "not_interested";
+    state.aiDispoReviews.push({
+      conversationId: CONVERSATION_ID,
+      disposition: "not_interested",
+      inboundMessageId: "inbound-drifted-opt-out",
+      reason: "model:not_interested",
+    });
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "opt_out",
+      confidence: 0.9,
+      sentiment: "frustrated",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "stop texting me",
+        inboundFromPhone: "+18165550001",
+        inboundMessageId: "inbound-drifted-opt-out",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "skipped",
+      reason: "replayed_other_disposition",
+    });
+    expect(state.property.outreach_dispo).toBe("not_interested");
+    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
+      supabase,
+      expect.objectContaining({ source: "ai_responder", surface: "stop" }),
+    );
+    expect(state.aiDispositionRpcCalls).toBe(1);
+  });
+
+  it("still suppresses DNC when a retry preserves an earlier not-interested review", async () => {
+    const state = createMockState();
+    state.property.outreach_dispo = "not_interested";
+    state.aiDispoReviews.push({
+      conversationId: CONVERSATION_ID,
+      disposition: "not_interested",
+      inboundMessageId: "inbound-drifted-dnc",
+      reason: "model:not_interested",
+    });
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "close_dnc",
+      confidence: 0.9,
+      sentiment: "hostile",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "do not contact me",
+        inboundFromPhone: "+18165550001",
+        inboundMessageId: "inbound-drifted-dnc",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "skipped",
+      reason: "replayed_other_disposition",
+    });
+    expect(state.property.outreach_dispo).toBe("not_interested");
+    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
+      supabase,
+      expect.objectContaining({
+        source: "ai_responder_threat",
+        surface: "dnc",
+      }),
+    );
+    expect(state.aiDispositionRpcCalls).toBe(1);
+  });
+
   it("low-confidence opt_out still suppresses the phone and marks the property opted out", async () => {
     const state = createMockState();
     const supabase = createMockSupabase(state);

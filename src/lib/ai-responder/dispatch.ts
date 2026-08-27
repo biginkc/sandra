@@ -383,7 +383,9 @@ export async function dispatchAiResponse(
     if (
       existingReview.ok &&
       existingReview.disposition &&
-      existingReview.disposition !== expectedDisposition
+      existingReview.disposition !== expectedDisposition &&
+      expectedDisposition !== "opted_out" &&
+      expectedDisposition !== "dnc"
     ) {
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
