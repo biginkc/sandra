@@ -63,6 +63,15 @@ on:
       - "scripts/assert-ref-is-main-or-ancestor.sh"
   workflow_dispatch: {}
 
+# The protected coach authorization canary temporarily replays unmerged DDL
+# against this same hosted test project. Queue both workflows in the shared
+# project mutex so the main-branch migration pipeline can never race that
+# canary's apply/assert/rollback lifecycle.
+concurrency:
+  group: e2e-shared-test-project
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   migrate-test:
     name: Apply migrations to test
