@@ -430,15 +430,16 @@ export function SoftphoneProvider({ children }: Props) {
     const finishTerminal = (kind: "ended" | "failed") => {
       if (terminalPromise) return terminalPromise;
       terminalHandledRef.current = true;
+      // Terminal state must win synchronously, before hangup/recovery awaits.
+      // Otherwise a still-pending transport.start() can resolve inside that
+      // gap and publish coachCallId for a call that has already ended.
+      attemptGenerationRef.current += 1;
+      setCoachCallId(null);
       terminalPromise = (async () => {
         const terminalResult = await transport.hangup();
         setCallOutcome(kind === "failed" ? "failed" : terminalResult.outcome);
         setFinalSeconds(terminalResult.durationSeconds);
         setWrapToken((value) => value ?? crypto.randomUUID());
-        // The call is over — the coach subscription must tear down with
-        // it, not linger for the whole wrap-up phase. wrapToken stays set
-        // (wrap-up/dedup still needs it); coachCallId does not.
-        setCoachCallId(null);
         if (kind === "failed" && result.data.propertyId) {
           try {
             await resumeFailedSoftphoneCall(result.data.propertyId);
@@ -474,6 +475,11 @@ export function SoftphoneProvider({ children }: Props) {
         status === "caller_id_inventory_unavailable"
       ) {
         terminalHandledRef.current = true;
+        // Refusal is terminal even when the recovery RPC is slow or loses
+        // its response. Invalidate the pending start commit and coaching
+        // identity before entering that awaited path.
+        attemptGenerationRef.current += 1;
+        setCoachCallId(null);
         void (async () => {
           try {
             if (result.data.propertyId) {
@@ -488,7 +494,6 @@ export function SoftphoneProvider({ children }: Props) {
             setTarget(null);
             setStartedAt(null);
             setWrapToken(null);
-            setCoachCallId(null);
             setCallStatus(null);
             setPhone("idle");
             if (
@@ -594,6 +599,7 @@ export function SoftphoneProvider({ children }: Props) {
     // superseded rather than resurrecting a coach subscription for a call
     // that's being hung up right now.
     attemptGenerationRef.current += 1;
+    setCoachCallId(null);
     manualHangupRef.current = true;
     terminalHandledRef.current = true;
     try {
@@ -602,9 +608,6 @@ export function SoftphoneProvider({ children }: Props) {
       setFinalSeconds(result.durationSeconds);
       setCallStatus("ended");
       setWrapToken((value) => value ?? crypto.randomUUID());
-      // Same reasoning as finishTerminal: the call is over, the coach
-      // subscription must not linger through wrap-up.
-      setCoachCallId(null);
       transition({ type: "hangup" });
     } finally {
       manualHangupRef.current = false;

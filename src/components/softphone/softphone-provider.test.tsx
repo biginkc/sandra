@@ -1110,4 +1110,88 @@ describe("SoftphoneProvider coach UI flag", () => {
     act(() => listener.current?.("operator_busy"));
     await waitFor(() => expect(removeCoachChannel).toHaveBeenCalled());
   });
+
+  it("invalidates coaching synchronously when a terminal callback beats a deferred transport start", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const listener: { current: ((state: "connecting" | "failed") => void) | null } = { current: null };
+    let resolveStart!: (value: { id: string }) => void;
+    let resolveHangup!: (value: { durationSeconds: number; outcome: "failed" }) => void;
+    const deferredHangup = new Promise<{ durationSeconds: number; outcome: "failed" }>((resolve) => {
+      resolveHangup = resolve;
+    });
+    createTransport.mockReturnValue({
+      onStateChange: vi.fn((cb) => { listener.current = cb; }),
+      start: vi.fn(() => new Promise<{ id: string }>((resolve) => {
+        resolveStart = resolve;
+        listener.current?.("connecting");
+      })),
+      mute: vi.fn(),
+      hold: vi.fn(async () => true),
+      sendDigit: vi.fn(async () => true),
+      hangup: vi.fn(() => deferredHangup),
+    });
+
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalled());
+
+    act(() => listener.current?.("failed"));
+    act(() => resolveStart({ id: "late-session" }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(coachChannels).toHaveLength(0);
+
+    await act(async () => {
+      resolveHangup({ durationSeconds: 0, outcome: "failed" });
+      await Promise.resolve();
+    });
+  });
+
+  it("invalidates coaching synchronously when an operator-busy refusal beats a deferred transport start and recovery", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const listener: { current: ((state: "connecting" | "operator_busy") => void) | null } = { current: null };
+    let resolveStart!: (value: { id: string }) => void;
+    let resolveRecovery!: () => void;
+    resumeFailedSoftphoneCall.mockReturnValue(new Promise<void>((resolve) => {
+      resolveRecovery = resolve;
+    }));
+    createTransport.mockReturnValue({
+      onStateChange: vi.fn((cb) => { listener.current = cb; }),
+      start: vi.fn(() => new Promise<{ id: string }>((resolve) => {
+        resolveStart = resolve;
+        listener.current?.("connecting");
+      })),
+      mute: vi.fn(),
+      hold: vi.fn(async () => true),
+      sendDigit: vi.fn(async () => true),
+      hangup: vi.fn(async () => ({ durationSeconds: 0, outcome: "failed" as const })),
+    });
+
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalled());
+
+    act(() => listener.current?.("operator_busy"));
+    act(() => resolveStart({ id: "late-session" }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(coachChannels).toHaveLength(0);
+
+    await act(async () => {
+      resolveRecovery();
+      await Promise.resolve();
+    });
+  });
 });
