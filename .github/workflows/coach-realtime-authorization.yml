@@ -7,416 +7,69 @@ on:
 permissions:
   contents: read
 
-# This lock covers setup, the unprivileged test, and cleanup as one lifecycle.
-# `queue: max` retains pending main/E2E/canary runs instead of silently evicting
-# the older pending run, which is GitHub's default single-slot behavior.
+# This lock covers the whole canary lifecycle so it can't race the real
+# migration pipeline against the same shared test project. `queue: max`
+# retains pending main/E2E/canary runs instead of silently evicting the
+# older pending run, which is GitHub's default single-slot behavior.
 concurrency:
   group: e2e-shared-test-project
   cancel-in-progress: false
   queue: max
 
-env:
-  TEST_PROJECT_REF: ncsngxlcyxylaeskiteu
-
 jobs:
-  # A single job, not three. Earlier revisions split provisioning, the test,
-  # and cleanup into separate jobs — each one referencing the protected
-  # `coach-realtime-authorization` environment triggers its OWN reviewer
-  # approval gate, since GitHub Actions environment protection is per-job,
-  # not per-environment-name. Cleanup was a THIRD job, `needs:` on the first
-  # two, so its approval request only appeared once setup+test had already
-  # finished — by which point a reviewer who approved the first gate has
-  # typically moved on. A stalled/never-approved cleanup gate meant the
-  # canary's schema changes, ownership rows, and temporary users could
-  # outlive the run indefinitely.
+  # Round-8 rewrite. Two prior reviews (round-6, round-7) kept hardening
+  # this job's PRIVILEGE ISOLATION — step-scoped secrets, then materializing
+  # reviewed SQL outside the PR's own checkout to stop a privileged step
+  # from reading PR-tampered SQL. The final review correctly called that
+  # fight unwinnable: this job still runs `npm ci` and the PR's own test
+  # file on the SAME runner, in the SAME process tree, as any privileged
+  # step — a PR-controlled process can mutate a materialized file, or
+  # simply observe env vars set in a later step, regardless of how
+  # carefully the workflow YAML scopes things. No amount of file
+  # materialization or env scoping makes that isolation real.
   #
-  # One job means one approval for the whole lifecycle. Provisioning (needs
-  # privileged secrets), the test run (`npm ci` + vitest — untrusted,
-  # PR-controlled code), and cleanup (needs privileged secrets again) are
-  # all STEPS in this one job, ordered so cleanup runs last via `if:
-  # always()` — the try/finally semantics GitHub Actions doesn't give you
-  # across job boundaries, but does give you across steps in one job.
+  # The actual fix: stop holding anything worth protecting. This job now
+  # authenticates ONLY as two permanent, narrowly-scoped Supabase Auth
+  # users (seeded once, directly on the TEST project, outside any CI
+  # pipeline — never as a supabase/migrations/ file, so they can never
+  # reach production) whose entire capability is calling two SECURITY
+  # DEFINER RPCs — coach_ci_seed_ownership / coach_ci_delete_own_ownership
+  # — that check auth.uid() against exactly those two accounts and let
+  # each seed/delete only its OWN row in public.coach_call_index. There is
+  # no service-role key, no database password, and no Supabase account
+  # token anywhere in this workflow. If a PR-controlled process on this
+  # runner does anything at all with these credentials, the worst case is
+  # still "insert/delete one row it already owns" — nothing a compromised
+  # runtime could do with them is worth protecting against in the first
+  # place. coach-ci-contract.test.ts asserts none of those three secret
+  # families are referenced here.
   #
-  # This does not reopen the credential-exposure problem the job split was
-  # originally built to close: GitHub Actions does not ambiently inject
-  # `secrets.*` into a job's shared process environment — each step only
-  # sees what its OWN `env:` block references. The "Install dependencies"
-  # and "Run the coach realtime authorization canary" steps below have no
-  # `env:` entry for SUPABASE_ACCESS_TOKEN, TEST_SUPABASE_DB_PASSWORD, or
-  # TEST_SUPABASE_SERVICE_ROLE_KEY — a PR-modified package.json's
-  # postinstall script, or the test file itself, genuinely cannot read
-  # them, regardless of being in the same job as steps that do.
+  # This also eliminates the entire migration-replay/rollback apparatus
+  # from earlier rounds: public.coach_call_index and its realtime.messages
+  # policies are now PERMANENT fixtures on the TEST project (applied
+  # directly, the same way the production canary migration was applied),
+  # so this job never creates or drops schema — only two test users' own
+  # rows, via the RPCs above.
   coach-realtime-canary:
-    name: Coach realtime authorization canary (provision, test, cleanup)
+    name: Coach realtime authorization canary
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 8
 
-    # REQUIRED REPO SETTING (code cannot create this protection): create the
-    # `coach-realtime-authorization` GitHub Environment and move these five
-    # values there: SUPABASE_ACCESS_TOKEN, TEST_SUPABASE_DB_PASSWORD,
-    # TEST_SUPABASE_URL, TEST_SUPABASE_ANON_KEY, and
-    # TEST_SUPABASE_SERVICE_ROLE_KEY. Require a maintainer reviewer, enable
-    # "Prevent self-review", disable administrator bypass, and allow the
-    # protected pull-request ref pattern `refs/pull/*/merge`. Do not keep the
-    # privileged values as unrestricted repository-level Actions secrets.
+    # REQUIRED REPO SETTING (code cannot create this protection, and as of
+    # this rewrite it has NOT yet been configured — see PR discussion):
+    # the `coach-realtime-authorization` GitHub Environment exists but has
+    # no protection rules. Require a maintainer reviewer, enable "Prevent
+    # self-review", disable administrator bypass, and allow the protected
+    # pull-request ref pattern `refs/pull/*/merge`. Lower-stakes than
+    # before this rewrite (no secret here can do more than touch two test
+    # users' own rows), but still worth gating — defense in depth against
+    # a compromised same-repo branch, at effectively no ongoing cost now
+    # that there's nothing sensitive left to review.
     environment: coach-realtime-authorization
 
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      # Pin both the action commit and CLI release: this runner receives
-      # privileged credentials later and must not execute a moving action.
-      - uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1
-        with:
-          version: 2.116.0
-
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
-
-      # Round-7 trust-boundary fix: every privileged step below (replay,
-      # cleanup) used to run `psql -f supabase/migrations/...sql`, reading
-      # SQL straight out of THIS job's checkout of the PR's own tree — the
-      # exact tree a same-repo PR controls. That's the file the environment-
-      # protection reviewer is trusting to be unmodified when they approve
-      # this job, but nothing enforces that beyond their own diligence in
-      # re-reading it. A trusted-base-ref checkout (actions/checkout of
-      # github.event.pull_request.base.sha into a separate directory) is the
-      # usual fix, but doesn't work here: this migration and its rollback
-      # are typically introduced in the SAME PR as this workflow file, so
-      # base.sha (main, pre-merge) never has them yet — the trusted checkout
-      # would just be missing the file for every pre-merge run.
-      #
-      # Instead: the reviewed migration/rollback SQL is embedded directly in
-      # THIS workflow file's own text (below), written out here to a path
-      # OUTSIDE the checked-out repo ($RUNNER_TEMP, never `supabase/
-      # migrations/`), before any privileged credential is loaded. Every
-      # later privileged step reads SQL from that materialized path, never
-      # from `supabase/migrations/*.sql` in the PR's checkout — so no
-      # privileged step's behavior can be changed by editing those files
-      # without also editing (and re-triggering review of) this workflow
-      # file itself. coach-ci-contract.test.ts asserts the embedded SQL
-      # below is byte-identical to the real migration/rollback files, so the
-      # two can't silently drift apart, and separately asserts no privileged
-      # step references a `supabase/migrations/` path.
-      - name: Materialize the reviewed migration/rollback SQL outside the PR checkout
-        run: |
-          mkdir -p "$RUNNER_TEMP/coach-migration"
-          cat > "$RUNNER_TEMP/coach-migration/migration.sql" <<'MIGRATION_SQL'
-          -- ============================================================================
-          -- Migration: coach_call_index
-          -- Created: 2026-08-26
-          -- Purpose: Realtime Broadcast Authorization for the live-call coach channel.
-          --
-          -- The coach UI subscribes to a PRIVATE Supabase Realtime Broadcast channel
-          -- named `coach:{client_call_id}` (client_call_id is the softphone's wrap
-          -- token — the idempotency key Sandra mints and sends to Jitter on every
-          -- start-call request; see src/lib/dialer/jitter-server.ts). Jitter's own
-          -- softphone ledger (jitter_sandra_softphone_calls) lives in a SEPARATE
-          -- Supabase project from Sandra's — broadcasts land in Sandra's project, so
-          -- ownership for the realtime.messages RLS policy must be recorded here,
-          -- not traced through Jitter's tables.
-          --
-          -- coach_call_index is a small, purpose-built ownership index: one row per
-          -- call, written by Sandra's server (service-role only — no client INSERT
-          -- policy) at call-start time, read only by the realtime.messages policy's
-          -- ownership check (and, transitively, by that same operator via their own
-          -- SELECT policy below, since a Postgres RLS policy's subquery against
-          -- another table is itself subject to that table's RLS for the querying
-          -- role — see https://supabase.com/docs/guides/realtime/authorization).
-          -- ============================================================================
-
-          begin;
-
-          create table if not exists public.coach_call_index (
-            client_call_id text primary key,
-            operator_user_id uuid not null references auth.users(id) on delete cascade,
-            property_id uuid references public.properties(id) on delete set null,
-            created_at timestamptz not null default now()
-          );
-
-          comment on table public.coach_call_index is
-            'Ownership index for the live-call coach realtime channel (coach:{client_call_id}). Written server-side at call start; read by the realtime.messages RLS policy below to authorize broadcast subscription. Small and retention-friendly — safe to purge alongside old calls.';
-
-          create index if not exists coach_call_index_operator_created_idx
-            on public.coach_call_index (operator_user_id, created_at desc);
-
-          alter table public.coach_call_index enable row level security;
-
-          -- The operator who owns a call can see their own index row. This is the
-          -- minimum read surface needed for the realtime.messages policy below to
-          -- evaluate correctly for the legitimate owner — RLS on this table applies
-          -- to that policy's subquery too, so without this, the EXISTS(...) check
-          -- would return false for everyone, including the true owner.
-          drop policy if exists coach_call_index_owner_select on public.coach_call_index;
-          create policy coach_call_index_owner_select on public.coach_call_index
-            for select
-            to authenticated
-            using (operator_user_id = auth.uid());
-
-          -- RLS policies restrict which ROWS a grant already permitting SELECT can
-          -- see — they don't substitute for the grant itself. Without this, the
-          -- `authenticated` role has no privilege on the table at all and every
-          -- query (including the realtime.messages policy's EXISTS subquery below)
-          -- fails outright rather than returning zero rows. Supabase's documented
-          -- RLS pattern is always grant + policy together, never policy alone.
-          grant select on public.coach_call_index to authenticated;
-
-          -- No insert/update/delete policy or grant for `authenticated` — rows are
-          -- written exclusively by the service-role client from the
-          -- server-authenticated start-call path (src/lib/dialer/jitter-server.ts),
-          -- never by the browser. A rep must not be able to claim ownership of an
-          -- arbitrary call id.
-
-          -- ----------------------------------------------------------------------------
-          -- Realtime Broadcast Authorization: coach:{client_call_id}
-          -- ----------------------------------------------------------------------------
-          -- Client channels must be created with `{ config: { private: true } }` for
-          -- this policy to be enforced (already the case in
-          -- src/lib/coach/use-coach-channel.ts). No insert policy — broadcasts are
-          -- published exclusively by the coach ingest service's service-role client.
-
-          drop policy if exists coach_broadcast_owner_select on realtime.messages;
-          create policy coach_broadcast_owner_select on realtime.messages
-            for select
-            to authenticated
-            using (
-              realtime.messages.extension = 'broadcast'
-              and realtime.topic() like 'coach:%'
-              and exists (
-                select 1
-                from public.coach_call_index cci
-                where cci.client_call_id = split_part(realtime.topic(), ':', 2)
-                  and cci.operator_user_id = (select auth.uid())
-              )
-            );
-
-          -- PostgreSQL ORs together every PERMISSIVE policy that applies to a row —
-          -- so the ownership check above is only as strong as "no other permissive
-          -- policy on realtime.messages ever grants a broader read". Policy
-          -- inventory as of this migration: coach_broadcast_owner_select above is
-          -- the ONLY policy on realtime.messages in this project (confirmed —
-          -- grep supabase/migrations for `realtime.messages` turns up nothing else).
-          -- That's fragile by construction: a future migration could add a
-          -- permissive policy for an unrelated topic namespace that's written too
-          -- broadly (e.g. omits its own topic-prefix guard) and silently widen
-          -- access to `coach:%` too, since permissive policies OR together with no
-          -- guard against that here.
-          --
-          -- RESTRICTIVE policies are ANDed with the permissive result instead of
-          -- ORed, so this one holds regardless of what permissive policies exist
-          -- now or get added later: for any `coach:%` topic, the ownership check
-          -- must pass no matter how permissively some other policy grants access.
-          -- Rows outside the `coach:%` namespace are untouched by this policy (the
-          -- `not like` branch is unconditionally true for them), so it never
-          -- narrows access this project doesn't own a stake in.
-          drop policy if exists coach_topics_require_ownership on realtime.messages;
-          create policy coach_topics_require_ownership on realtime.messages
-            as restrictive
-            for select
-            to authenticated
-            using (
-              realtime.topic() not like 'coach:%'
-              or (
-                realtime.messages.extension = 'broadcast'
-                and exists (
-                  select 1
-                  from public.coach_call_index cci
-                  where cci.client_call_id = split_part(realtime.topic(), ':', 2)
-                    and cci.operator_user_id = (select auth.uid())
-                )
-              )
-            );
-
-          commit;
-          MIGRATION_SQL
-          cat > "$RUNNER_TEMP/coach-migration/rollback.sql" <<'ROLLBACK_SQL'
-          begin;
-
-          drop policy if exists coach_topics_require_ownership on realtime.messages;
-          drop policy if exists coach_broadcast_owner_select on realtime.messages;
-          drop table if exists public.coach_call_index;
-
-          commit;
-          ROLLBACK_SQL
-
-      - name: Link to test project
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-        run: supabase link --project-ref "$TEST_PROJECT_REF"
-
-      - name: Resolve session-pooler host port and user
-        id: pooler
-        run: |
-          node -e '
-            const fs = require("node:fs");
-            const raw = fs.readFileSync("supabase/.temp/pooler-url", "utf8").trim();
-            const url = new URL(raw);
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, [
-              `host=${url.hostname}`,
-              "port=5432",
-              `user=${decodeURIComponent(url.username)}`,
-            ].join("\n") + "\n");
-          '
-
-      - name: Check whether the coach schema already exists in the database
-        id: coach_schema_state
-        # Queries the ACTUAL database state rather than inferring it from
-        # whether the migration file is present on the PR's base ref. The
-        # file-presence proxy has a real gap: a migration can land on `main`
-        # before db-migrate-test.yml has actually applied it to this shared
-        # project, in which case "the file is on main" and "the schema
-        # exists here" briefly disagree. Querying to_regclass() directly
-        # can't have that gap — it answers the only question that matters:
-        # would applying this migration again be creating something new, or
-        # touching something this run doesn't own.
-        env:
-          TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
-        run: |
-          echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
-          export PGHOST="${{ steps.pooler.outputs.host }}"
-          export PGPORT="${{ steps.pooler.outputs.port }}"
-          export PGDATABASE="postgres"
-          export PGUSER="${{ steps.pooler.outputs.user }}"
-          export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
-          export PGSSLMODE="require"
-          exists="$(psql -tAc "select to_regclass('public.coach_call_index') is not null")"
-          if [ "$exists" = "t" ]; then
-            echo "needs_replay=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "needs_replay=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Reset any prior canary residue and replay the reviewed migration
-        if: steps.coach_schema_state.outputs.needs_replay == 'true'
-        env:
-          TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
-        run: |
-          echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
-          export PGHOST="${{ steps.pooler.outputs.host }}"
-          export PGPORT="${{ steps.pooler.outputs.port }}"
-          export PGDATABASE="postgres"
-          export PGUSER="${{ steps.pooler.outputs.user }}"
-          export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
-          export PGSSLMODE="require"
-          for attempt in 1 2 3; do
-            if psql -v ON_ERROR_STOP=1 -f "$RUNNER_TEMP/coach-migration/rollback.sql" \
-              && psql -v ON_ERROR_STOP=1 -f "$RUNNER_TEMP/coach-migration/migration.sql"; then
-              exit 0
-            fi
-            if [ "$attempt" = "3" ]; then
-              echo "Migration reset/replay failed after 3 attempts" >&2
-              exit 1
-            fi
-            sleep "$((attempt * 2))"
-          done
-
-      - name: Provision temporary least-privilege canary users
-        id: canary
-        env:
-          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
-          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
-        run: |
-          marker="$GITHUB_RUN_ID"
-          owner_email="coach-realtime-${marker}-owner@bmhgroupkc.com"
-          foreign_email="coach-realtime-${marker}-foreign@bmhgroupkc.com"
-          owner_password="$(openssl rand -hex 24)"
-          foreign_password="$(openssl rand -hex 24)"
-          owner_id=""
-          foreign_id=""
-
-          delete_user() {
-            curl --fail-with-body --silent --show-error --request DELETE \
-              "$TEST_SUPABASE_URL/auth/v1/admin/users/$1" \
-              --header "apikey: $TEST_SUPABASE_SERVICE_ROLE_KEY" \
-              --header "Authorization: Bearer $TEST_SUPABASE_SERVICE_ROLE_KEY" \
-              --output /dev/null
-          }
-          delete_matching_users() {
-            ids_file="$(mktemp)"
-            page=1
-            while true; do
-              response_file="$(mktemp)"
-              curl --fail-with-body --silent --show-error \
-                "$TEST_SUPABASE_URL/auth/v1/admin/users?page=$page&per_page=1000" \
-                --header "apikey: $TEST_SUPABASE_SERVICE_ROLE_KEY" \
-                --header "Authorization: Bearer $TEST_SUPABASE_SERVICE_ROLE_KEY" \
-                --output "$response_file"
-              jq -r '.users[] | select(.email | startswith("coach-realtime-")) | .id' "$response_file" >> "$ids_file"
-              user_count="$(jq '.users | length' "$response_file")"
-              rm -f "$response_file"
-              [ "$user_count" -lt 1000 ] && break
-              page="$((page + 1))"
-            done
-            while IFS= read -r user_id; do
-              [ -z "$user_id" ] || delete_user "$user_id"
-            done < "$ids_file"
-            rm -f "$ids_file"
-          }
-          create_user() {
-            response_file="$(mktemp)"
-            payload="$(jq -nc --arg email "$1" --arg password "$2" '{email: $email, password: $password, email_confirm: true}')"
-            curl --fail-with-body --silent --show-error --request POST \
-              "$TEST_SUPABASE_URL/auth/v1/admin/users" \
-              --header "apikey: $TEST_SUPABASE_SERVICE_ROLE_KEY" \
-              --header "Authorization: Bearer $TEST_SUPABASE_SERVICE_ROLE_KEY" \
-              --header "Content-Type: application/json" \
-              --data "$payload" \
-              --output "$response_file"
-            jq -er '.id' "$response_file"
-            rm -f "$response_file"
-          }
-          cleanup_partial() {
-            [ -z "$owner_id" ] || delete_user "$owner_id" || true
-            [ -z "$foreign_id" ] || delete_user "$foreign_id" || true
-          }
-          trap cleanup_partial ERR
-
-          delete_matching_users
-          owner_id="$(create_user "$owner_email" "$owner_password")"
-          foreign_id="$(create_user "$foreign_email" "$foreign_password")"
-          owned_call_id="$(node -p 'crypto.randomUUID()')"
-          foreign_call_id="$(node -p 'crypto.randomUUID()')"
-          trap - ERR
-
-          {
-            echo "owner_email=$owner_email"
-            echo "owner_password=$owner_password"
-            echo "owner_id=$owner_id"
-            echo "foreign_id=$foreign_id"
-            echo "owned_call_id=$owned_call_id"
-            echo "foreign_call_id=$foreign_call_id"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Seed the two ownership rows
-        env:
-          TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
-          COACH_CANARY_OWNER_ID: ${{ steps.canary.outputs.owner_id }}
-          COACH_CANARY_FOREIGN_ID: ${{ steps.canary.outputs.foreign_id }}
-          COACH_CANARY_OWNED_CALL_ID: ${{ steps.canary.outputs.owned_call_id }}
-          COACH_CANARY_FOREIGN_CALL_ID: ${{ steps.canary.outputs.foreign_call_id }}
-        run: |
-          echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
-          export PGHOST="${{ steps.pooler.outputs.host }}"
-          export PGPORT="${{ steps.pooler.outputs.port }}"
-          export PGDATABASE="postgres"
-          export PGUSER="${{ steps.pooler.outputs.user }}"
-          export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
-          export PGSSLMODE="require"
-          psql -v ON_ERROR_STOP=1 \
-            -v owned_call_id="$COACH_CANARY_OWNED_CALL_ID" \
-            -v owner_id="$COACH_CANARY_OWNER_ID" \
-            -v foreign_call_id="$COACH_CANARY_FOREIGN_CALL_ID" \
-            -v foreign_id="$COACH_CANARY_FOREIGN_ID" <<'SQL'
-          insert into public.coach_call_index (client_call_id, operator_user_id)
-          values
-            (:'owned_call_id', :'owner_id'::uuid),
-            (:'foreign_call_id', :'foreign_id'::uuid)
-          on conflict (client_call_id) do update
-          set operator_user_id = excluded.operator_user_id;
-          SQL
 
       - uses: actions/setup-node@v5
         with:
@@ -425,90 +78,68 @@ jobs:
 
       # No `env:` here — this step installs dependencies from a
       # PR-controlled package.json/lockfile, which can execute arbitrary
-      # postinstall scripts. Those scripts see only this step's own (empty)
-      # env, never the privileged secrets used in earlier/later steps.
+      # postinstall scripts.
       - name: Install coach canary dependencies
         run: npm ci
 
+      - name: Generate this run's two ephemeral call ids
+        id: call_ids
+        run: |
+          {
+            echo "owned_call_id=$(node -p 'crypto.randomUUID()')"
+            echo "foreign_call_id=$(node -p 'crypto.randomUUID()')"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run the coach realtime authorization canary
         env:
-          # URL and anon key are browser-public. The remaining values belong
-          # only to temporary, unprivileged users and synthetic call rows —
-          # none of SUPABASE_ACCESS_TOKEN, TEST_SUPABASE_DB_PASSWORD, or
-          # TEST_SUPABASE_SERVICE_ROLE_KEY appear in this step's env, so the
-          # PR-controlled test file being executed here cannot read them.
           TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
           TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
-          COACH_CANARY_OWNER_EMAIL: ${{ steps.canary.outputs.owner_email }}
-          COACH_CANARY_OWNER_PASSWORD: ${{ steps.canary.outputs.owner_password }}
-          COACH_CANARY_OWNED_CALL_ID: ${{ steps.canary.outputs.owned_call_id }}
-          COACH_CANARY_FOREIGN_CALL_ID: ${{ steps.canary.outputs.foreign_call_id }}
-        run: |
-          echo "::add-mask::$COACH_CANARY_OWNER_PASSWORD"
-          npx vitest run --config vitest.coach-realtime.config.ts
+          COACH_CI_OWNER_EMAIL: ${{ secrets.COACH_CI_OWNER_EMAIL }}
+          COACH_CI_OWNER_PASSWORD: ${{ secrets.COACH_CI_OWNER_PASSWORD }}
+          COACH_CI_FOREIGN_EMAIL: ${{ secrets.COACH_CI_FOREIGN_EMAIL }}
+          COACH_CI_FOREIGN_PASSWORD: ${{ secrets.COACH_CI_FOREIGN_PASSWORD }}
+          COACH_CANARY_OWNED_CALL_ID: ${{ steps.call_ids.outputs.owned_call_id }}
+          COACH_CANARY_FOREIGN_CALL_ID: ${{ steps.call_ids.outputs.foreign_call_id }}
+        run: npx vitest run --config vitest.coach-realtime.config.ts
 
-      # Everything from here on runs regardless of whether any step above
-      # (including the test itself) failed — this job's try/finally. Since
-      # this is one job, cleanup needs no cross-job `needs.*.outputs`
-      # indirection and no separate environment approval to actually run.
-      - name: Always remove coach canary schema and rows
-        if: always()
-        env:
-          TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
-          COACH_SCHEMA_NEEDS_REPLAY: ${{ steps.coach_schema_state.outputs.needs_replay }}
-          COACH_CANARY_OWNED_CALL_ID: ${{ steps.canary.outputs.owned_call_id }}
-          COACH_CANARY_FOREIGN_CALL_ID: ${{ steps.canary.outputs.foreign_call_id }}
-        run: |
-          echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
-          export PGHOST="${{ steps.pooler.outputs.host }}"
-          export PGPORT="${{ steps.pooler.outputs.port }}"
-          export PGDATABASE="postgres"
-          export PGUSER="${{ steps.pooler.outputs.user }}"
-          export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
-          export PGSSLMODE="require"
-          cleanup_failed=0
-          if [ -n "$COACH_CANARY_OWNED_CALL_ID" ] && [ -n "$COACH_CANARY_FOREIGN_CALL_ID" ]; then
-            psql -v ON_ERROR_STOP=1 \
-              -v owned_call_id="$COACH_CANARY_OWNED_CALL_ID" \
-              -v foreign_call_id="$COACH_CANARY_FOREIGN_CALL_ID" <<'SQL' || cleanup_failed=1
-          delete from public.coach_call_index
-          where client_call_id in (:'owned_call_id', :'foreign_call_id');
-          SQL
-          fi
-          if [ "$COACH_SCHEMA_NEEDS_REPLAY" = "true" ]; then
-            psql -v ON_ERROR_STOP=1 -f "$RUNNER_TEMP/coach-migration/rollback.sql" || cleanup_failed=1
-          fi
-          exit "$cleanup_failed"
-
-      - name: Always delete temporary canary users
+      # Redundant with the test file's own afterAll cleanup — this is the
+      # defense-in-depth layer for a hard process kill (OOM, timeout) that
+      # skips afterAll entirely. Both RPCs are self-scoped (each of the two
+      # static users can only delete its OWN row) and idempotent, so
+      # running this even when the test's own cleanup already succeeded is
+      # harmless.
+      - name: Always clean up this run's ownership rows
         if: always()
         env:
           TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
-          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+          TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+          COACH_CI_OWNER_EMAIL: ${{ secrets.COACH_CI_OWNER_EMAIL }}
+          COACH_CI_OWNER_PASSWORD: ${{ secrets.COACH_CI_OWNER_PASSWORD }}
+          COACH_CI_FOREIGN_EMAIL: ${{ secrets.COACH_CI_FOREIGN_EMAIL }}
+          COACH_CI_FOREIGN_PASSWORD: ${{ secrets.COACH_CI_FOREIGN_PASSWORD }}
+          COACH_CANARY_OWNED_CALL_ID: ${{ steps.call_ids.outputs.owned_call_id }}
+          COACH_CANARY_FOREIGN_CALL_ID: ${{ steps.call_ids.outputs.foreign_call_id }}
         run: |
-          marker="$GITHUB_RUN_ID"
-          ids_file="$(mktemp)"
-          page=1
-          while true; do
-            response_file="$(mktemp)"
-            curl --fail-with-body --silent --show-error \
-              "$TEST_SUPABASE_URL/auth/v1/admin/users?page=$page&per_page=1000" \
-              --header "apikey: $TEST_SUPABASE_SERVICE_ROLE_KEY" \
-              --header "Authorization: Bearer $TEST_SUPABASE_SERVICE_ROLE_KEY" \
-              --output "$response_file"
-            jq -r --arg marker "$marker" '.users[] | select(.email == ("coach-realtime-" + $marker + "-owner@bmhgroupkc.com") or .email == ("coach-realtime-" + $marker + "-foreign@bmhgroupkc.com")) | .id' "$response_file" >> "$ids_file"
-            user_count="$(jq '.users | length' "$response_file")"
-            rm -f "$response_file"
-            [ "$user_count" -lt 1000 ] && break
-            page="$((page + 1))"
-          done
+          sign_in() {
+            curl --fail-with-body --silent --show-error --request POST \
+              "$TEST_SUPABASE_URL/auth/v1/token?grant_type=password" \
+              --header "apikey: $TEST_SUPABASE_ANON_KEY" \
+              --header "Content-Type: application/json" \
+              --data "$(jq -nc --arg email "$1" --arg password "$2" '{email: $email, password: $password}')" \
+              | jq -er '.access_token'
+          }
+          delete_own_row() {
+            curl --fail-with-body --silent --show-error --request POST \
+              "$TEST_SUPABASE_URL/rest/v1/rpc/coach_ci_delete_own_ownership" \
+              --header "apikey: $TEST_SUPABASE_ANON_KEY" \
+              --header "Authorization: Bearer $1" \
+              --header "Content-Type: application/json" \
+              --data "$(jq -nc --arg call_id "$2" '{p_call_id: $call_id}')" \
+              --output /dev/null
+          }
           cleanup_failed=0
-          while IFS= read -r user_id; do
-            curl --fail-with-body --silent --show-error --request DELETE \
-              "$TEST_SUPABASE_URL/auth/v1/admin/users/$user_id" \
-              --header "apikey: $TEST_SUPABASE_SERVICE_ROLE_KEY" \
-              --header "Authorization: Bearer $TEST_SUPABASE_SERVICE_ROLE_KEY" \
-              --output /dev/null || cleanup_failed=1
-          done < "$ids_file"
-          rm -f "$ids_file"
+          owner_token="$(sign_in "$COACH_CI_OWNER_EMAIL" "$COACH_CI_OWNER_PASSWORD")" || cleanup_failed=1
+          [ -z "$owner_token" ] || delete_own_row "$owner_token" "$COACH_CANARY_OWNED_CALL_ID" || cleanup_failed=1
+          foreign_token="$(sign_in "$COACH_CI_FOREIGN_EMAIL" "$COACH_CI_FOREIGN_PASSWORD")" || cleanup_failed=1
+          [ -z "$foreign_token" ] || delete_own_row "$foreign_token" "$COACH_CANARY_FOREIGN_CALL_ID" || cleanup_failed=1
           exit "$cleanup_failed"

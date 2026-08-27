@@ -20,12 +20,8 @@ const localIntegrationTest = readFileSync(
   path.join(repoRoot, "supabase/migrations/20260826170000_coach_call_index.integration.test.ts"),
   "utf8",
 );
-const migrationSql = readFileSync(
-  path.join(repoRoot, "supabase/migrations/20260826170000_coach_call_index.sql"),
-  "utf8",
-);
-const rollbackSql = readFileSync(
-  path.join(repoRoot, "supabase/migrations/20260826170000_coach_call_index.rollback.sql"),
+const ciTestProjectSetup = readFileSync(
+  path.join(repoRoot, "supabase/ci/coach_ci_test_project_setup.sql"),
   "utf8",
 );
 
@@ -50,8 +46,8 @@ function workflowStep(job: string, name: string): string {
 }
 
 /** Strips `#`-comment lines before a secret-name scan — this file's own
- * explanatory YAML comments mention secret names (to document why a step
- * DOESN'T have them), which would otherwise false-positive a naive
+ * explanatory YAML comments mention secret names (to document why they
+ * DON'T appear elsewhere), which would otherwise false-positive a naive
  * substring check against actual `env:`/`${{ secrets.X }}` usage. */
 function withoutComments(yaml: string): string {
   return yaml
@@ -60,92 +56,78 @@ function withoutComments(yaml: string): string {
     .join("\n");
 }
 
-/** Extracts a `cat > file <<'DELIMITER' ... DELIMITER` heredoc body embedded
- * in the workflow's YAML block-literal `run:` text, undoing the uniform
- * indentation the surrounding YAML block scalar requires every line to
- * carry (bare `<<'DELIMITER'`, unlike `<<-`, does NOT strip that
- * indentation itself at shell-execution time — the terminator line's own
- * leading whitespace is what the workflow's indentation actually is, so
- * that's what gets stripped from every body line here too). */
-function extractHeredoc(source: string, delimiter: string): string {
-  const openMarker = `<<'${delimiter}'`;
-  const openIdx = source.indexOf(openMarker);
-  if (openIdx < 0) throw new Error(`heredoc open marker not found: ${delimiter}`);
-  const bodyStart = source.indexOf("\n", openIdx) + 1;
-  const lines = source.slice(bodyStart).split("\n");
-  const bodyLines: string[] = [];
-  let indent: string | null = null;
-  for (const line of lines) {
-    if (line.trim() === delimiter) {
-      indent = line.slice(0, line.indexOf(delimiter));
-      break;
-    }
-    bodyLines.push(line);
-  }
-  if (indent === null) throw new Error(`heredoc terminator not found: ${delimiter}`);
-  const stripped = bodyLines.map((line) => {
-    if (line === "") return "";
-    if (line.startsWith(indent as string)) return line.slice((indent as string).length);
-    throw new Error(`heredoc body line does not match the terminator's indentation: ${JSON.stringify(line)}`);
-  });
-  return `${stripped.join("\n")}\n`;
-}
-
 describe("coach realtime authorization CI security contract", () => {
   it("is a single job — not split across jobs that would each need their own environment approval", () => {
-    // Round-6 finding: three separate jobs (setup/test/cleanup) each
-    // referencing the same protected environment each triggered their OWN
-    // reviewer approval gate (GitHub environment protection is per-job, not
-    // per-environment-name). Cleanup's approval request only appeared after
-    // setup+test had already finished, by which point a reviewer who
-    // approved the first gate had typically moved on — an unapproved
-    // cleanup job means the canary's schema changes, rows, and temporary
-    // users could outlive the run indefinitely. One job means one approval
-    // for the whole provision -> test -> cleanup lifecycle.
     const jobsBlockStart = coachWorkflow.indexOf("\njobs:\n");
     expect(jobsBlockStart).toBeGreaterThan(0);
     const jobsBlock = coachWorkflow.slice(jobsBlockStart);
     const jobNameLines = jobsBlock.match(/^  [a-z][a-z0-9_-]*:\s*$/gm) ?? [];
     expect(jobNameLines).toHaveLength(1);
     expect(coachWorkflow).toContain("coach-realtime-canary:");
-    expect(coachWorkflow).not.toContain("coach-realtime-setup:");
-    expect(coachWorkflow).not.toContain("coach-realtime-test:");
-    expect(coachWorkflow).not.toContain("coach-realtime-cleanup:");
   });
 
-  it("never exposes privileged Supabase credentials to the PR-controlled npm install/test steps", () => {
-    // Step-level isolation, not job-level: `npm ci` (which can execute a
-    // PR-modified package.json's postinstall scripts) and the actual test
-    // run share a job with steps that DO hold privileged secrets, but
-    // neither of THESE two steps' own env: blocks reference them — GitHub
-    // Actions doesn't ambiently inject secrets into a job's shared process
-    // environment, only into the specific step that references them.
+  it("round 8 — never references a service-role key, database password, or Supabase account token anywhere in this workflow", () => {
+    // Rounds 6-7 kept hardening privilege ISOLATION on a shared runner
+    // (step-scoped env, then materializing reviewed SQL outside the PR's
+    // own checkout). The final review called that fight unwinnable: a
+    // PR-controlled process (npm ci, the test file itself) runs on the
+    // SAME runner as any privileged step, in the same process tree — it
+    // can mutate a materialized file or simply observe a later step's env
+    // vars, regardless of how carefully the YAML scopes things.
+    //
+    // The actual fix: hold nothing worth protecting. This workflow now
+    // authenticates only as two permanent, narrowly-scoped Supabase Auth
+    // users via two SECURITY DEFINER RPCs that let each seed/delete only
+    // its OWN row in coach_call_index — no service-role key, no database
+    // password, no Supabase account token, anywhere. If a compromised
+    // runtime does anything at all with these credentials, the worst case
+    // is "touch a row it already owns" — nothing worth defending against.
+    const withoutCommentary = withoutComments(coachWorkflow);
+    expect(withoutCommentary).not.toMatch(/SUPABASE_ACCESS_TOKEN/);
+    expect(withoutCommentary).not.toMatch(/SERVICE_ROLE/);
+    expect(withoutCommentary).not.toMatch(/DB_PASSWORD/);
+    expect(withoutCommentary).not.toMatch(/supabase\/setup-cli/);
+    expect(withoutCommentary).not.toMatch(/supabase\s+link/);
+    // No more raw Postgres connection at all — psql/pooler are gone along
+    // with the credential that justified them.
+    expect(withoutCommentary).not.toMatch(/psql/);
+    expect(withoutCommentary).not.toMatch(/postgresql-client/);
+    // No more admin-API user provisioning (auth/v1/admin/users) — the two
+    // test identities are permanent and pre-provisioned, not created or
+    // deleted at runtime.
+    expect(withoutCommentary).not.toMatch(/auth\/v1\/admin\/users/);
+  });
+
+  it("authenticates only as the two static test users and the anon key — nothing else — in the test run and cleanup steps", () => {
     const canaryJob = workflowJob("coach-realtime-canary");
     const installStep = workflowStep(canaryJob, "Install coach canary dependencies");
     const testStep = withoutComments(workflowStep(canaryJob, "Run the coach realtime authorization canary"));
+    const cleanupStep = withoutComments(workflowStep(canaryJob, "Always clean up this run's ownership rows"));
+
+    // Step-level isolation still matters even though the credential is
+    // low-stakes now: `npm ci` (which can execute a PR-modified
+    // package.json's postinstall scripts) gets no env at all.
     expect(installStep).toContain("run: npm ci");
     expect(installStep).not.toMatch(/env:/);
-    expect(testStep).toContain("TEST_SUPABASE_URL");
-    expect(testStep).toContain("TEST_SUPABASE_ANON_KEY");
-    expect(testStep).not.toMatch(/SUPABASE_ACCESS_TOKEN|SERVICE_ROLE|DB_PASSWORD/);
+
+    for (const step of [testStep, cleanupStep]) {
+      expect(step).toContain("TEST_SUPABASE_URL");
+      expect(step).toContain("TEST_SUPABASE_ANON_KEY");
+      expect(step).toContain("COACH_CI_OWNER_EMAIL");
+      expect(step).toContain("COACH_CI_OWNER_PASSWORD");
+      expect(step).toContain("COACH_CI_FOREIGN_EMAIL");
+      expect(step).toContain("COACH_CI_FOREIGN_PASSWORD");
+      expect(step).not.toMatch(/SUPABASE_ACCESS_TOKEN|SERVICE_ROLE|DB_PASSWORD/);
+    }
   });
 
-  it("keeps the whole canary job behind the protected environment, gated to same-repo PRs, with the required repo setting documented", () => {
+  it("keeps the whole canary job behind the protected environment, gated to same-repo PRs", () => {
     const canaryJob = workflowJob("coach-realtime-canary");
     expect(canaryJob).toMatch(/environment:\s*coach-realtime-authorization/);
     expect(canaryJob).toContain("github.event.pull_request.head.repo.full_name == github.repository");
-    expect(canaryJob).toContain("SUPABASE_ACCESS_TOKEN");
-    expect(canaryJob).toContain("TEST_SUPABASE_DB_PASSWORD");
-    expect(coachWorkflow).toContain("REQUIRED REPO SETTING");
-    expect(coachWorkflow).toContain("refs/pull/*/merge");
-    expect(coachWorkflow).toMatch(/disable administrator bypass/i);
   });
 
-  it("always rolls back unmerged DDL and serializes with the migration and E2E workflows", () => {
-    const canaryJob = workflowJob("coach-realtime-canary");
-    const cleanupStep = workflowStep(canaryJob, "Always remove coach canary schema and rows");
-    expect(cleanupStep).toMatch(/if:\s*always\(\)/);
-    expect(cleanupStep).toContain("$RUNNER_TEMP/coach-migration/rollback.sql");
+  it("serializes with the migration and E2E workflows against the shared test project", () => {
     expect(coachWorkflow).toContain("group: e2e-shared-test-project");
     expect(migrationWorkflow).toContain("group: e2e-shared-test-project");
     for (const workflow of [coachWorkflow, migrationWorkflow, e2eWorkflow]) {
@@ -153,70 +135,59 @@ describe("coach realtime authorization CI security contract", () => {
     }
   });
 
-  it("cleanup steps run unconditionally within the job — no separate approval gate can stall them", () => {
+  it("cleanup runs unconditionally in the same job — no separate approval gate, and no schema DDL left to protect", () => {
     const canaryJob = workflowJob("coach-realtime-canary");
-    const schemaCleanupStep = workflowStep(canaryJob, "Always remove coach canary schema and rows");
-    const usersCleanupStep = workflowStep(canaryJob, "Always delete temporary canary users");
-    // Both cleanup steps are steps in the SAME job as provisioning/test, not
-    // a separate job with its own `needs:`/environment reference — the
-    // `if: always()` guarantee only holds within one job's step sequence.
-    expect(schemaCleanupStep).toMatch(/if:\s*always\(\)/);
-    expect(usersCleanupStep).toMatch(/if:\s*always\(\)/);
+    const cleanupStep = workflowStep(canaryJob, "Always clean up this run's ownership rows");
+    expect(cleanupStep).toMatch(/if:\s*always\(\)/);
+    // Both RPCs this step (and the test's own afterAll) call are
+    // self-scoped deletes — cleanup can never need to touch schema,
+    // because this job never creates or drops any.
+    expect(cleanupStep).toContain("coach_ci_delete_own_ownership");
   });
 
-  it("checks actual database schema state, not merely whether the migration file is on the PR's base ref", () => {
-    // A migration file being present on `main` doesn't guarantee
-    // db-migrate-test.yml has actually applied it to this shared project
-    // yet — querying to_regclass() directly checks ground truth instead of
-    // inferring it from git history.
+  it("generates a fresh pair of call ids per run, not a stable/reused identifier", () => {
     const canaryJob = workflowJob("coach-realtime-canary");
-    const schemaCheckStep = workflowStep(canaryJob, "Check whether the coach schema already exists in the database");
-    expect(schemaCheckStep).toContain("to_regclass('public.coach_call_index')");
-    expect(schemaCheckStep).not.toMatch(/git cat-file/);
+    const callIdStep = workflowStep(canaryJob, "Generate this run's two ephemeral call ids");
+    expect(callIdStep).toContain("crypto.randomUUID()");
+    expect(callIdStep).toContain("owned_call_id");
+    expect(callIdStep).toContain("foreign_call_id");
   });
 
-  it("does not drop an already-merged coach schema on later pull-request reruns", () => {
-    const canaryJob = workflowJob("coach-realtime-canary");
-    const replayStep = workflowStep(canaryJob, "Reset any prior canary residue and replay the reviewed migration");
-    const cleanupStep = workflowStep(canaryJob, "Always remove coach canary schema and rows");
+  it("requires a same-client owned-channel success control before the non-owner denial, seeded via the narrow RPCs", () => {
+    expect(realtimeTest).toContain("coach_ci_seed_ownership");
+    expect(realtimeTest).toContain("coach_ci_delete_own_ownership");
+    // Each of the two static users signs in and seeds/deletes only its own
+    // row — never a client-supplied operator id the caller could spoof.
+    expect(realtimeTest.match(/createClient\(/g)?.length).toBe(2);
 
-    expect(coachWorkflow).toContain("id: coach_schema_state");
-    expect(replayStep).toContain("steps.coach_schema_state.outputs.needs_replay == 'true'");
-    expect(cleanupStep).toContain("delete from public.coach_call_index");
-    expect(cleanupStep).toContain("steps.coach_schema_state.outputs.needs_replay");
-  });
-
-  it("retries the migration reset/replay instead of leaving the run red on one transient failure", () => {
-    const canaryJob = workflowJob("coach-realtime-canary");
-    const replayStep = workflowStep(canaryJob, "Reset any prior canary residue and replay the reviewed migration");
-    expect(replayStep).toMatch(/for attempt in 1 2 3/);
-  });
-
-  it("reuses a stable run marker so a rerun removes residue from an earlier attempt", () => {
-    const canaryJob = workflowJob("coach-realtime-canary");
-    const provisionStep = workflowStep(canaryJob, "Provision temporary least-privilege canary users");
-    const deleteStep = workflowStep(canaryJob, "Always delete temporary canary users");
-
-    expect(provisionStep).toContain('marker="$GITHUB_RUN_ID"');
-    expect(deleteStep).toContain('marker="$GITHUB_RUN_ID"');
-    expect(provisionStep).not.toContain("GITHUB_RUN_ATTEMPT");
-    expect(deleteStep).not.toContain("GITHUB_RUN_ATTEMPT");
-  });
-
-  it("requires the setup write to succeed and a same-client owned-channel success control before the non-owner denial", () => {
-    const canaryJob = workflowJob("coach-realtime-canary");
-    const seedStep = workflowStep(canaryJob, "Seed the two ownership rows");
-    expect(seedStep).toContain("ON_ERROR_STOP=1");
-    expect(seedStep).toContain("insert into public.coach_call_index");
-    expect(seedStep).toContain("COACH_CANARY_OWNED_CALL_ID");
-    expect(seedStep).toContain("COACH_CANARY_FOREIGN_CALL_ID");
-
-    expect(realtimeTest.match(/const client = createClient/g)).toHaveLength(1);
     const ownedSuccess = realtimeTest.indexOf("expect(owned.status).toBe(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED)");
     const foreignDenial = realtimeTest.indexOf("expect(foreign.status).toBe(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR)");
     expect(ownedSuccess).toBeGreaterThan(0);
     expect(foreignDenial).toBeGreaterThan(ownedSuccess);
     expect(realtimeTest).toContain("expect(foreign.error).toBeInstanceOf(Error)");
+  });
+
+  it("the CI test-fixture setup script lives outside supabase/migrations/ — it must never reach production", () => {
+    // supabase/ci/ (not supabase/migrations/) is deliberate: db-migrate-
+    // test.yml and db-migrate-prod.yml only ever apply files under
+    // supabase/migrations/, so this reference copy of the two static test
+    // users + the narrow RPCs can't be picked up by either pipeline —
+    // these fixtures have no reason to exist anywhere near production.
+    expect(ciTestProjectSetup).toContain("TEST PROJECT ONLY");
+    expect(ciTestProjectSetup).toContain("coach_ci_seed_ownership");
+    expect(ciTestProjectSetup).toContain("coach_ci_delete_own_ownership");
+    expect(ciTestProjectSetup).toContain("revoke all on function public.coach_ci_seed_ownership(text) from anon");
+
+    // The RPC names the workflow and test actually call must match what
+    // this reference script defines, so the two can't silently diverge.
+    // Seeding only ever happens inside the test file itself (each of the
+    // two users seeds its own row); the workflow's own cleanup step only
+    // ever needs the delete RPC.
+    for (const rpcName of ["coach_ci_seed_ownership", "coach_ci_delete_own_ownership"]) {
+      expect(realtimeTest).toContain(rpcName);
+      expect(ciTestProjectSetup).toContain(`create or replace function public.${rpcName}`);
+    }
+    expect(coachWorkflow).toContain("coach_ci_delete_own_ownership");
   });
 
   it("the local integration test never re-applies or drops schema it didn't create this run", () => {
@@ -233,40 +204,5 @@ describe("coach realtime authorization CI security contract", () => {
     expect(localIntegrationTest).toContain("to_regclass('public.coach_call_index')");
     expect(localIntegrationTest).toMatch(/if\s*\(!createdSchemaThisRun\)\s*return;/);
     expect(localIntegrationTest).not.toMatch(/beforeAll\([\s\S]{0,80}rollback/);
-  });
-
-  it("no privileged step reads migration/rollback SQL from the PR's own checkout", () => {
-    // Round-7 finding: the replay and cleanup steps used to run `psql -f
-    // supabase/migrations/...sql`, reading SQL straight out of this job's
-    // checkout of the PR's own tree — content a same-repo PR fully
-    // controls. Both privileged steps now read from a path materialized
-    // OUTSIDE the checkout ($RUNNER_TEMP) from SQL embedded directly in
-    // this workflow file's own text, so editing the PR's migration files
-    // alone can no longer change what a privileged step executes.
-    const canaryJob = workflowJob("coach-realtime-canary");
-    expect(withoutComments(canaryJob)).not.toMatch(/supabase\/migrations\//);
-
-    const materializeStep = workflowStep(canaryJob, "Materialize the reviewed migration/rollback SQL outside the PR checkout");
-    expect(materializeStep).not.toMatch(/env:/);
-    expect(materializeStep).toContain("$RUNNER_TEMP/coach-migration");
-
-    const replayStep = workflowStep(canaryJob, "Reset any prior canary residue and replay the reviewed migration");
-    const cleanupStep = workflowStep(canaryJob, "Always remove coach canary schema and rows");
-    expect(replayStep).toContain('-f "$RUNNER_TEMP/coach-migration/rollback.sql"');
-    expect(replayStep).toContain('-f "$RUNNER_TEMP/coach-migration/migration.sql"');
-    expect(cleanupStep).toContain('-f "$RUNNER_TEMP/coach-migration/rollback.sql"');
-
-    // The materialize step must run before anything that consumes its
-    // output — it has no credential dependency, so nothing else forces
-    // this ordering.
-    expect(canaryJob.indexOf(materializeStep)).toBeLessThan(canaryJob.indexOf(replayStep));
-    expect(canaryJob.indexOf(materializeStep)).toBeLessThan(canaryJob.indexOf(cleanupStep));
-  });
-
-  it("the SQL embedded in the workflow is byte-identical to the real migration/rollback files — the two can't silently drift apart", () => {
-    const embeddedMigrationSql = extractHeredoc(coachWorkflow, "MIGRATION_SQL");
-    const embeddedRollbackSql = extractHeredoc(coachWorkflow, "ROLLBACK_SQL");
-    expect(embeddedMigrationSql).toBe(migrationSql);
-    expect(embeddedRollbackSql).toBe(rollbackSql);
   });
 });
