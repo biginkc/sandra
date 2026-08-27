@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  branchSayIndex,
   buildPhaseScriptBlock,
   getScriptObjection,
   getScriptPhase,
@@ -542,7 +543,14 @@ describe("resolveCursorNextLine — one line further than whatever resolveCursor
     expect(allText(line!.segments)).toContain("So when you sell");
   });
 
-  it("returns null when the cursor is already on the variant's last line", () => {
+  it("BLOCKER REPRO: continues into the NEXT BRANCH within the same phase when the current variant is exhausted, instead of skipping to the next phase", () => {
+    // A cursor on Introduction's "Frame the call" (its last line) must
+    // preview Introduction's OWN "Pen & paper — contact details" branch
+    // next — not Reveal. Concrete harm this reproduces: the old
+    // implementation only ever searched within the resolved variant, so
+    // running out of lines there fell straight through to the caller's
+    // next-PHASE fallback, telling the rep the wrong thing to say at
+    // exactly the moment they're about to move on.
     const lines = getScriptPhase("introduction")!.display.branches
       .find((b) => b.tag === "Frame the call")!
       .variants.find((v) => v.key === "default")!.lines;
@@ -552,6 +560,58 @@ describe("resolveCursorNextLine — one line further than whatever resolveCursor
       {
         phaseId: "introduction",
         branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: lastIndex,
+        lineText: lines[lastIndex].text,
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      introBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(allText(line!.segments)).toContain("pull out a pen and paper");
+  });
+
+  it("skips over a branch with NO spoken line at all when continuing to the next branch (never presents a note as the preview)", () => {
+    // Reveal's branches: Entry, "Example probes — goal 7+", Motivation. A
+    // cursor exhausting Entry must land on Example probes' own first say
+    // line, not a note and not a blank preview.
+    const revealBlock = buildPhaseScriptBlock("reveal", tokens)!;
+    const entryLines = getScriptPhase("reveal")!.display.branches
+      .find((b) => b.tag === "Entry")!
+      .variants.find((v) => v.key === "unknown")!.lines; // Sandra's own default selection (occupancy unset)
+    const lastIndex = entryLines.length - 1;
+
+    const line = resolveCursorNextLine(
+      {
+        phaseId: "reveal",
+        branchTag: "Entry",
+        variantKey: "unknown",
+        lineIndex: lastIndex,
+        lineText: entryLines[lastIndex].text,
+        scriptVersion: CLOSR_SCRIPT.version,
+      },
+      revealBlock,
+      NO_OVERRIDES,
+      tokens,
+    );
+    expect(line).not.toBeNull();
+    expect(line!.type).toBe("say");
+  });
+
+  it("returns null only once EVERY remaining branch in the phase is exhausted — the true 'let the caller fall to the next phase' case", () => {
+    // "Pen & paper — contact details" is Introduction's LAST branch; its
+    // last line has nothing after it anywhere in this phase.
+    const lines = getScriptPhase("introduction")!.display.branches
+      .find((b) => b.tag === "Pen & paper — contact details")!
+      .variants.find((v) => v.key === "default")!.lines;
+    const lastIndex = lines.length - 1;
+
+    const line = resolveCursorNextLine(
+      {
+        phaseId: "introduction",
+        branchTag: "Pen & paper — contact details",
         variantKey: "default",
         lineIndex: lastIndex,
         lineText: lines[lastIndex].text,
@@ -579,5 +639,36 @@ describe("resolveCursorNextLine — one line further than whatever resolveCursor
       tokens,
     );
     expect(line).toBeNull();
+  });
+});
+
+describe("branchSayIndex — never presents a note as speech, even for a synthetic all-note variant", () => {
+  // The real, currently-loaded script has a "say" line in every variant —
+  // this class of bug (an all-note variant silently defaulting to index 0,
+  // which could land on a note) cannot be reproduced end-to-end through
+  // real data, and the schema validator does not forbid an all-note
+  // variant either (script-schema.ts only requires >=1 line, not >=1
+  // "say" line). So this is proven directly against a synthetic fixture —
+  // the exact scenario the fix exists for.
+  it("returns null for a variant that is entirely notes — never index 0", () => {
+    const allNotes: { type: "say" | "note"; text: string }[] = [
+      { type: "note", text: "Internal reminder — do not read this aloud." },
+      { type: "note", text: "Another internal-only stage direction." },
+    ];
+    expect(branchSayIndex(allNotes)).toBeNull();
+  });
+
+  it("returns the first say index when one exists, regardless of how many notes precede it", () => {
+    const lines: { type: "say" | "note"; text: string }[] = [
+      { type: "note", text: "Setup note." },
+      { type: "note", text: "Another setup note." },
+      { type: "say", text: "The actual thing to say." },
+    ];
+    expect(branchSayIndex(lines)).toBe(2);
+  });
+
+  it("returns index 0 directly when the first line is already a say", () => {
+    const lines: { type: "say" | "note"; text: string }[] = [{ type: "say", text: "Say this first." }];
+    expect(branchSayIndex(lines)).toBe(0);
   });
 });

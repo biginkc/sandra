@@ -178,8 +178,9 @@ export function buildPhaseScriptBlock(
 }
 
 /** A resolved cursor position, expressed as an index into the RAW variant
- * `lines` array — always a "say" line unless the variant genuinely has none
- * at all (see findSayIndexFrom/branchFallbackIndex), so it's safe to
+ * `lines` array — ALWAYS a "say" line (see findSayIndexFrom/branchSayIndex,
+ * and resolveCursorPosition's step 7, which returns null rather than ever
+ * constructing a position from a note-only variant), so it's safe to
  * resolve directly and to compute "the next line" as lineIndex+1 within
  * that SAME lines array without re-deriving anything. */
 type ResolvedCursorPosition = { branchTag: string; variantKey: string; lineIndex: number };
@@ -195,11 +196,20 @@ function findSayIndexFrom(lines: ScriptLineBlock[], fromIndex: number): number |
   return null;
 }
 
-/** Mirrors selectSpokenLine's own last-resort fallback: the first "say"
- * line in the variant, or — only if the variant has no "say" line
- * whatsoever — literal index 0, so a caller is guaranteed *some* line. */
-function branchFallbackIndex(lines: ScriptLineBlock[]): number {
-  return findSayIndexFrom(lines, 0) ?? 0;
+/** The variant's first "say" line, or null when the variant genuinely has
+ * NONE at all. An all-note variant is not something the schema validator
+ * forbids (script-schema.ts only requires a variant to have >=1 line, not
+ * >=1 "say" line) — this must be able to signal "nothing spoken here"
+ * rather than silently defaulting to index 0, which could be a "note"
+ * line. Every caller of this MUST treat null as total resolution failure
+ * and fall through to something else entirely — never construct a
+ * position from a null result, which would let a rep-facing stage
+ * direction render under "Say this". Exported so its all-note behavior can
+ * be proven directly against a synthetic fixture: the real script has a
+ * "say" line in every variant today, so this specific failure mode cannot
+ * be reproduced end-to-end through the real data. */
+export function branchSayIndex(lines: ScriptLineBlock[]): number | null {
+  return findSayIndexFrom(lines, 0);
 }
 
 /**
@@ -237,16 +247,21 @@ function branchFallbackIndex(lines: ScriptLineBlock[]): number {
  *     lineText match already resolved step 5), use it.
  *  7. Else fall back to that SAME branch's own first spoken line, within
  *     Sandra's own selected variant (mirrors selectSpokenLine, applied to
- *     the branch the cursor named — not branch 0).
- * Steps 4-7 all resolve via findSayIndexFrom, so a match landing on (or
- * advancing through) a "note" line is skipped forward to the next "say"
- * line, never rendered as speech.
+ *     the branch the cursor named — not branch 0). If that variant has NO
+ *     "say" line at all (an all-note variant — the schema permits this;
+ *     it only requires >=1 line, not >=1 spoken one), there is nothing
+ *     safe to show: this returns null rather than ever presenting a note
+ *     as "the thing to say".
+ * Steps 4-7 all resolve via findSayIndexFrom/branchSayIndex, so a match
+ * landing on (or advancing through) a "note" line is skipped forward to
+ * the next "say" line, never rendered as speech.
  *
- * Returns null only when the branch itself can't be found in this phase, or
- * the version/phase gate fails (step 1/2/3) — at that point there is no
- * "this branch" to fall back within, so the caller's job is today's FULL
- * fallback (branch 0, first say line), which this function deliberately
- * does not attempt on its own.
+ * Returns null when the branch itself can't be found in this phase, the
+ * version/phase gate fails (step 1/2/3), or step 7's own variant has no
+ * spoken line to fall back to — in every case there is nothing this
+ * function can safely resolve, so the caller's job is today's FULL
+ * fallback (branch 0, first say line via selectSpokenLine), which this
+ * function deliberately does not attempt on its own.
  */
 function resolveCursorPosition(
   cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex" | "lineText" | "scriptVersion">,
@@ -288,8 +303,15 @@ function resolveCursorPosition(
     if (resolved !== null) return { branchTag: branch.tag, variantKey: sandraVariant.key, lineIndex: resolved };
   }
 
-  // 7 — this branch's own fallback, within Sandra's own variant, never branch 0.
-  return { branchTag: branch.tag, variantKey: sandraVariant.key, lineIndex: branchFallbackIndex(sandraVariant.lines) };
+  // 7 — this branch's own fallback, within Sandra's own variant, never
+  // branch 0. If the variant genuinely has no "say" line at all (an
+  // all-note variant — not something the schema forbids), there is
+  // nothing safe to show here: return null so the caller falls all the
+  // way through to today's full branch-0/selectSpokenLine fallback,
+  // rather than ever constructing a position that points at a note.
+  const fallbackIndex = branchSayIndex(sandraVariant.lines);
+  if (fallbackIndex === null) return null;
+  return { branchTag: branch.tag, variantKey: sandraVariant.key, lineIndex: fallbackIndex };
 }
 
 function displayLineAt(branchTag: string, variantKey: string, lineIndex: number, phaseId: CoachPhaseId, tokens: ResolvedTokens): DisplayLine | null {
@@ -321,13 +343,25 @@ export function resolveCursorLine(
   return displayLineAt(position.branchTag, position.variantKey, position.lineIndex, cursor.phaseId, tokens);
 }
 
-/** Same resolution as resolveCursorLine, one line further within the SAME
- * resolved branch/variant — used for the "Coming next" preview when a
- * cursor is active, so the preview shows the next line within the CURRENT
- * phase instead of jumping to the next phase. Built on the position
- * resolveCursorPosition actually landed on (which may differ from the raw
- * cursor.lineIndex, e.g. after a step-7 fallback), not on the cursor's own
- * lineIndex+1, so "next" is always relative to what's actually showing. */
+/** Same resolution as resolveCursorLine, one line further — used for the
+ * "Coming next" preview when a cursor is active, so the preview shows the
+ * next line within the CURRENT PHASE instead of jumping to the next phase.
+ * Built on the position resolveCursorPosition actually landed on (which may
+ * differ from the raw cursor.lineIndex, e.g. after a step-7 fallback), not
+ * on the cursor's own lineIndex+1, so "next" is always relative to what's
+ * actually showing.
+ *
+ * First looks within the SAME resolved branch/variant. If that variant is
+ * exhausted (the cursor is on its last spoken line), continues into the
+ * NEXT BRANCH within the same phase — in phase order, using THAT branch's
+ * own Sandra-selected variant (never the cursor's, which has no opinion on
+ * a branch it didn't name) — so the preview never silently skips ahead to
+ * the next PHASE while branches still remain in this one (e.g. a cursor on
+ * Introduction's "Frame the call" must preview "Pen & paper — contact
+ * details" next, not jump to Reveal). A branch with no "say" line at all
+ * is skipped over entirely, never presented as the preview. Only when
+ * every remaining branch in this phase has nothing to say does this return
+ * null, letting the caller fall through to its own next-PHASE preview. */
 export function resolveCursorNextLine(
   cursor: Pick<CoachCursor, "phaseId" | "branchTag" | "variantKey" | "lineIndex" | "lineText" | "scriptVersion">,
   block: PhaseScriptBlock,
@@ -337,11 +371,30 @@ export function resolveCursorNextLine(
   const position = resolveCursorPosition(cursor, block, branchOverrides);
   if (!position) return null;
   const rawPhase = getScriptPhase(cursor.phaseId);
-  const variant = rawPhase?.display.branches
+  if (!rawPhase) return null;
+
+  const variant = rawPhase.display.branches
     .find((candidate) => candidate.tag === position.branchTag)
     ?.variants.find((candidate) => candidate.key === position.variantKey);
-  if (!variant) return null;
-  const nextIndex = findSayIndexFrom(variant.lines, position.lineIndex + 1);
-  if (nextIndex === null) return null;
-  return { type: "say", segments: resolveDisplayText(variant.lines[nextIndex].text, tokens) };
+  if (variant) {
+    const withinVariant = findSayIndexFrom(variant.lines, position.lineIndex + 1);
+    if (withinVariant !== null) {
+      return { type: "say", segments: resolveDisplayText(variant.lines[withinVariant].text, tokens) };
+    }
+  }
+
+  const branchIndex = block.branches.findIndex((candidate) => candidate.tag === position.branchTag);
+  if (branchIndex < 0) return null;
+  for (let index = branchIndex + 1; index < block.branches.length; index += 1) {
+    const nextBranch = block.branches[index];
+    const nextVariant = rawPhase.display.branches
+      .find((candidate) => candidate.tag === nextBranch.tag)
+      ?.variants.find((candidate) => candidate.key === nextBranch.selected.key); // Sandra's own selection for THIS branch
+    if (!nextVariant) continue;
+    const sayIndex = branchSayIndex(nextVariant.lines);
+    if (sayIndex !== null) {
+      return { type: "say", segments: resolveDisplayText(nextVariant.lines[sayIndex].text, tokens) };
+    }
+  }
+  return null;
 }

@@ -419,6 +419,49 @@ describe("<CoachLiveView />", () => {
       expect(screen.getByTestId("next-phase-preview-body")).toHaveTextContent(/Cool, so how we work is very simple/i);
     });
 
+    it("BLOCKER REPRO: at a branch boundary, Coming Next previews the SAME PHASE's next branch, not the next phase — a cursor exhausting Frame the call must show Pen & paper, not Reveal", async () => {
+      render(<Harness {...baseProps()} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+      // Put the cursor on the LAST line of "Frame the call" — the current
+      // variant has nothing after it, but Introduction still has one more
+      // branch ("Pen & paper — contact details").
+      broadcast({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Frame the call",
+        variantKey: "default",
+        lineIndex: 5,
+        lineText:
+          "Perfect — and are you in a position to be able to move forward once we find the solution that makes sense for you?",
+        ts: "t1",
+      });
+
+      const preview = screen.getByTestId("next-phase-preview");
+      expect(preview).toHaveTextContent(/Coming next · Introduction/i);
+      expect(preview).not.toHaveTextContent(/Coming next · Reveal/i);
+      expect(screen.getByTestId("next-phase-preview-body")).toHaveTextContent(/pull out a pen and paper/i);
+    });
+
+    it("only falls through to the next-phase preview once every branch in the current phase is truly exhausted", async () => {
+      render(<Harness {...baseProps()} />);
+      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
+
+      // "Pen & paper — contact details" is Introduction's LAST branch —
+      // its last line genuinely has nothing after it in this phase.
+      broadcast({
+        type: "cursor",
+        phaseId: "introduction",
+        branchTag: "Pen & paper — contact details",
+        variantKey: "default",
+        lineIndex: 6,
+        lineText: "You got it? Awesome.",
+        ts: "t1",
+      });
+
+      expect(screen.getByTestId("next-phase-preview")).toHaveTextContent(/Coming next · Reveal/i);
+    });
+
     it("survives collapse/reopen — the cursor lives in session state owned outside CoachLiveView", async () => {
       const { rerender } = render(<CollapsibleHarness {...baseProps()} collapsed={false} />);
       await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
