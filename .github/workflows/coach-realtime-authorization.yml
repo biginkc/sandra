@@ -1,0 +1,359 @@
+name: Coach Realtime authorization
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# This lock covers setup, the unprivileged test, and cleanup as one lifecycle.
+# `queue: max` retains pending main/E2E/canary runs instead of silently evicting
+# the older pending run, which is GitHub's default single-slot behavior.
+concurrency:
+  group: e2e-shared-test-project
+  cancel-in-progress: false
+  queue: max
+
+env:
+  TEST_PROJECT_REF: ncsngxlcyxylaeskiteu
+
+jobs:
+  coach-realtime-setup:
+    name: Provision protected coach canary
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    # REQUIRED REPO SETTING (code cannot create this protection): create the
+    # `coach-realtime-authorization` GitHub Environment and move these five
+    # values there: SUPABASE_ACCESS_TOKEN, TEST_SUPABASE_DB_PASSWORD,
+    # TEST_SUPABASE_URL, TEST_SUPABASE_ANON_KEY, and
+    # TEST_SUPABASE_SERVICE_ROLE_KEY. Require a maintainer reviewer, enable
+    # "Prevent self-review", disable administrator bypass, and allow the
+    # protected pull-request ref pattern `refs/pull/*/merge`. Do not keep the
+    # privileged values as unrestricted repository-level Actions secrets.
+    environment: coach-realtime-authorization
+
+    outputs:
+      needs_replay: ${{ steps.coach_schema_state.outputs.needs_replay }}
+      owner_email: ${{ steps.canary.outputs.owner_email }}
+      owner_password: ${{ steps.canary.outputs.owner_password }}
+      owner_id: ${{ steps.canary.outputs.owner_id }}
+      foreign_id: ${{ steps.canary.outputs.foreign_id }}
+      owned_call_id: ${{ steps.canary.outputs.owned_call_id }}
+      foreign_call_id: ${{ steps.canary.outputs.foreign_call_id }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Pin both the action commit and CLI release: this runner receives
+      # privileged credentials later and must not execute a moving action.
+      - uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1
+        with:
+          version: 2.116.0
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+
+      - name: Link to test project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase link --project-ref "$TEST_PROJECT_REF"
+
+      - name: Resolve session-pooler host port and user
+        id: pooler
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const raw = fs.readFileSync("supabase/.temp/pooler-url", "utf8").trim();
+            const url = new URL(raw);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, [
+              `host=${url.hostname}`,
+              "port=5432",
+              `user=${decodeURIComponent(url.username)}`,
+            ].join("\n") + "\n");
+          '
+
+      - name: Check whether the coach schema is already on main
+        id: coach_schema_state
+        run: |
+          if git cat-file -e "origin/${GITHUB_BASE_REF}:supabase/migrations/20260826170000_coach_call_index.sql"; then
+            echo "needs_replay=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_replay=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reset any prior canary residue and replay the reviewed migration
+        if: steps.coach_schema_state.outputs.needs_replay == 'true'
+        env:
+          TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
+        run: |
+          echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
+          export PGHOST="${{ steps.pooler.outputs.host }}"
+          export PGPORT="${{ steps.pooler.outputs.port }}"
+          export PGDATABASE="postgres"
+          export PGUSER="${{ steps.pooler.outputs.user }}"
+          export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
+          export PGSSLMODE="require"
+          for attempt in 1 2 3; do
+            if psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260826170000_coach_call_index.rollback.sql \
+              && psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260826170000_coach_call_index.sql; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "Migration reset/replay failed after 3 attempts" >&2
+              exit 1
+            fi
+            sleep "$((attempt * 2))"
+          done
+
+      - name: Provision temporary least-privilege canary users
+        id: canary
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          marker="$GITHUB_RUN_ID"
+          owner_email="coach-realtime-${marker}-owner@bmhgroupkc.com"
+          foreign_email="coach-realtime-${marker}-foreign@bmhgroupkc.com"
+          owner_password="$(openssl rand -hex 24)"
+          foreign_password="$(openssl rand -hex 24)"
+          owner_id=""
+          foreign_id=""
+
+          delete_user() {
+            curl --fail-with-body --silent --show-error --request DELETE \
+              "$TEST_SUPABASE_URL/auth/v1/admin/users/$1" \
+              --header "apikey: $TEST_SUPABASE_SERVICE_ROLE_KEY" \
+              --header "Authorization: Bearer $TEST_SUPABASE_SERVICE_ROLE_KEY" \
+              --output /dev/null
+          }
+          delete_matching_users() {
+            ids_file="$(mktemp)"
+            page=1
+            while true; do
+              response_file="$(mktemp)"
+              curl --fail-with-body --silent --show-error \
+                "$TEST_SUPABASE_URL/auth/v1/admin/users?page=$page&per_page=1000" \
+                --header "apikey: $TEST_SUPABASE_SERVICE_ROLE_KEY" \
+                --header "Authorization: Bearer $TEST_SUPABASE_SERVICE_ROLE_KEY" \
+                --output "$response_file"
+              jq -r '.users[] | select(.email | startswith("coach-realtime-")) | .id' "$response_file" >> "$ids_file"
+              user_count="$(jq '.users | length' "$response_file")"
+              rm -f "$response_file"
+              [ "$user_count" -lt 1000 ] && break
+              page="$((page + 1))"
+            done
+            while IFS= read -r user_id; do
+              [ -z "$user_id" ] || delete_user "$user_id"
+            done < "$ids_file"
+            rm -f "$ids_file"
+          }
+          create_user() {
+            response_file="$(mktemp)"
+            payload="$(jq -nc --arg email "$1" --arg password "$2" '{email: $email, password: $password, email_confirm: true}')"
+            curl --fail-with-body --silent --show-error --request POST \
+              "$TEST_SUPABASE_URL/auth/v1/admin/users" \
+              --header "apikey: $TEST_SUPABASE_SERVICE_ROLE_KEY" \
+              --header "Authorization: Bearer $TEST_SUPABASE_SERVICE_ROLE_KEY" \
+              --header "Content-Type: application/json" \
+              --data "$payload" \
+              --output "$response_file"
+            jq -er '.id' "$response_file"
+            rm -f "$response_file"
+          }
+          cleanup_partial() {
+            [ -z "$owner_id" ] || delete_user "$owner_id" || true
+            [ -z "$foreign_id" ] || delete_user "$foreign_id" || true
+          }
+          trap cleanup_partial ERR
+
+          delete_matching_users
+          owner_id="$(create_user "$owner_email" "$owner_password")"
+          foreign_id="$(create_user "$foreign_email" "$foreign_password")"
+          owned_call_id="$(node -p 'crypto.randomUUID()')"
+          foreign_call_id="$(node -p 'crypto.randomUUID()')"
+          trap - ERR
+
+          {
+            echo "owner_email=$owner_email"
+            echo "owner_password=$owner_password"
+            echo "owner_id=$owner_id"
+            echo "foreign_id=$foreign_id"
+            echo "owned_call_id=$owned_call_id"
+            echo "foreign_call_id=$foreign_call_id"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Seed the two ownership rows
+        env:
+          TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
+          COACH_CANARY_OWNER_ID: ${{ steps.canary.outputs.owner_id }}
+          COACH_CANARY_FOREIGN_ID: ${{ steps.canary.outputs.foreign_id }}
+          COACH_CANARY_OWNED_CALL_ID: ${{ steps.canary.outputs.owned_call_id }}
+          COACH_CANARY_FOREIGN_CALL_ID: ${{ steps.canary.outputs.foreign_call_id }}
+        run: |
+          echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
+          export PGHOST="${{ steps.pooler.outputs.host }}"
+          export PGPORT="${{ steps.pooler.outputs.port }}"
+          export PGDATABASE="postgres"
+          export PGUSER="${{ steps.pooler.outputs.user }}"
+          export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
+          export PGSSLMODE="require"
+          psql -v ON_ERROR_STOP=1 \
+            -v owned_call_id="$COACH_CANARY_OWNED_CALL_ID" \
+            -v owner_id="$COACH_CANARY_OWNER_ID" \
+            -v foreign_call_id="$COACH_CANARY_FOREIGN_CALL_ID" \
+            -v foreign_id="$COACH_CANARY_FOREIGN_ID" <<'SQL'
+          insert into public.coach_call_index (client_call_id, operator_user_id)
+          values
+            (:'owned_call_id', :'owner_id'::uuid),
+            (:'foreign_call_id', :'foreign_id'::uuid)
+          on conflict (client_call_id) do update
+          set operator_user_id = excluded.operator_user_id;
+          SQL
+
+  coach-realtime-test:
+    name: Test coach authorization as temporary user
+    needs: coach-realtime-setup
+    if: needs.coach-realtime-setup.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: coach-realtime-authorization
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install coach canary dependencies
+        run: npm ci
+
+      - name: Run the coach realtime authorization canary
+        env:
+          # URL and anon key are browser-public. The remaining values belong
+          # only to temporary, unprivileged users and synthetic call rows.
+          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+          COACH_CANARY_OWNER_EMAIL: ${{ needs.coach-realtime-setup.outputs.owner_email }}
+          COACH_CANARY_OWNER_PASSWORD: ${{ needs.coach-realtime-setup.outputs.owner_password }}
+          COACH_CANARY_OWNED_CALL_ID: ${{ needs.coach-realtime-setup.outputs.owned_call_id }}
+          COACH_CANARY_FOREIGN_CALL_ID: ${{ needs.coach-realtime-setup.outputs.foreign_call_id }}
+        run: |
+          echo "::add-mask::$COACH_CANARY_OWNER_PASSWORD"
+          npx vitest run --config vitest.coach-realtime.config.ts
+
+  coach-realtime-cleanup:
+    name: Always clean protected coach canary
+    needs: [coach-realtime-setup, coach-realtime-test]
+    if: always() && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: coach-realtime-authorization
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1
+        with:
+          version: 2.116.0
+
+      - name: Install PostgreSQL client for cleanup
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+
+      - name: Link to test project for cleanup
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase link --project-ref "$TEST_PROJECT_REF"
+
+      - name: Resolve cleanup session-pooler host port and user
+        id: cleanup_pooler
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const raw = fs.readFileSync("supabase/.temp/pooler-url", "utf8").trim();
+            const url = new URL(raw);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, [
+              `host=${url.hostname}`,
+              "port=5432",
+              `user=${decodeURIComponent(url.username)}`,
+            ].join("\n") + "\n");
+          '
+
+      - name: Check cleanup schema state
+        id: coach_schema_state
+        run: |
+          if git cat-file -e "origin/${GITHUB_BASE_REF}:supabase/migrations/20260826170000_coach_call_index.sql"; then
+            echo "needs_replay=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_replay=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Always remove coach canary schema and rows
+        if: always() && steps.cleanup_pooler.outcome == 'success'
+        env:
+          TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
+          COACH_SCHEMA_NEEDS_REPLAY: ${{ steps.coach_schema_state.outputs.needs_replay }}
+          COACH_CANARY_OWNED_CALL_ID: ${{ needs.coach-realtime-setup.outputs.owned_call_id }}
+          COACH_CANARY_FOREIGN_CALL_ID: ${{ needs.coach-realtime-setup.outputs.foreign_call_id }}
+        run: |
+          echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
+          export PGHOST="${{ steps.cleanup_pooler.outputs.host }}"
+          export PGPORT="${{ steps.cleanup_pooler.outputs.port }}"
+          export PGDATABASE="postgres"
+          export PGUSER="${{ steps.cleanup_pooler.outputs.user }}"
+          export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
+          export PGSSLMODE="require"
+          cleanup_failed=0
+          if [ -n "$COACH_CANARY_OWNED_CALL_ID" ] && [ -n "$COACH_CANARY_FOREIGN_CALL_ID" ]; then
+            psql -v ON_ERROR_STOP=1 \
+              -v owned_call_id="$COACH_CANARY_OWNED_CALL_ID" \
+              -v foreign_call_id="$COACH_CANARY_FOREIGN_CALL_ID" <<'SQL' || cleanup_failed=1
+          delete from public.coach_call_index
+          where client_call_id in (:'owned_call_id', :'foreign_call_id');
+          SQL
+          fi
+          if [ "$COACH_SCHEMA_NEEDS_REPLAY" = "true" ]; then
+            psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260826170000_coach_call_index.rollback.sql || cleanup_failed=1
+          fi
+          exit "$cleanup_failed"
+
+      - name: Always delete temporary canary users
+        if: always()
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          marker="$GITHUB_RUN_ID"
+          ids_file="$(mktemp)"
+          page=1
+          while true; do
+            response_file="$(mktemp)"
+            curl --fail-with-body --silent --show-error \
+              "$TEST_SUPABASE_URL/auth/v1/admin/users?page=$page&per_page=1000" \
+              --header "apikey: $TEST_SUPABASE_SERVICE_ROLE_KEY" \
+              --header "Authorization: Bearer $TEST_SUPABASE_SERVICE_ROLE_KEY" \
+              --output "$response_file"
+            jq -r --arg marker "$marker" '.users[] | select(.email == ("coach-realtime-" + $marker + "-owner@bmhgroupkc.com") or .email == ("coach-realtime-" + $marker + "-foreign@bmhgroupkc.com")) | .id' "$response_file" >> "$ids_file"
+            user_count="$(jq '.users | length' "$response_file")"
+            rm -f "$response_file"
+            [ "$user_count" -lt 1000 ] && break
+            page="$((page + 1))"
+          done
+          cleanup_failed=0
+          while IFS= read -r user_id; do
+            curl --fail-with-body --silent --show-error --request DELETE \
+              "$TEST_SUPABASE_URL/auth/v1/admin/users/$user_id" \
+              --header "apikey: $TEST_SUPABASE_SERVICE_ROLE_KEY" \
+              --header "Authorization: Bearer $TEST_SUPABASE_SERVICE_ROLE_KEY" \
+              --output /dev/null || cleanup_failed=1
+          done < "$ids_file"
+          rm -f "$ids_file"
+          exit "$cleanup_failed"

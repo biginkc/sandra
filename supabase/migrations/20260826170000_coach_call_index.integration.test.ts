@@ -8,6 +8,7 @@ import type { Database } from "@/lib/supabase/types";
 import { createTestClient } from "@tests/integration/client";
 import { BMH_ORG_ID, clientForUser, createOrgUser, seedTwoOrgs } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
+import { retryTestSetup } from "@tests/integration/retry";
 
 const serviceClient = createTestClient();
 const createdUserIds: string[] = [];
@@ -42,8 +43,19 @@ const createdUserIds: string[] = [];
  * this replay is therefore serialized against every other integration/E2E
  * run against the same shared project, not a free-for-all schema change
  * racing concurrent test runs.
+ *
+ * Unconditional, not opt-in: this file only ever runs via a developer's own
+ * `npm run test:integration` (never wired into any CI job — the dedicated
+ * .github/workflows/coach-realtime-authorization.yml canary replays this
+ * same SQL itself, independently, and is the one that actually gates PRs).
+ * A developer choosing to run this locally has already opted into touching
+ * the shared project; gating replay behind an undocumented env var would
+ * just mean the Realtime-authorization tests below fail with "relation
+ * does not exist" instead of running. `afterAll` always rolls the schema
+ * back afterward — this file's own contamination footprint on the shared
+ * project never outlives one local run.
  */
-async function replayMigration(): Promise<void> {
+async function runSqlFile(filename: string): Promise<void> {
   const dbUrl = process.env.TEST_SUPABASE_DB_URL;
   if (!dbUrl) {
     throw new Error(
@@ -51,7 +63,7 @@ async function replayMigration(): Promise<void> {
         "See tests/integration/README.md.",
     );
   }
-  const sql = readFileSync(path.resolve(__dirname, "20260826170000_coach_call_index.sql"), "utf8");
+  const sql = readFileSync(path.resolve(__dirname, filename), "utf8");
   const client = new Client({ connectionString: dbUrl });
   await client.connect();
   try {
@@ -59,6 +71,17 @@ async function replayMigration(): Promise<void> {
   } finally {
     await client.end();
   }
+}
+
+async function replayMigration(): Promise<void> {
+  // Start from the declared baseline so a prior canceled/killed run cannot
+  // make this run test whatever schema happened to survive.
+  await runSqlFile("20260826170000_coach_call_index.rollback.sql");
+  await runSqlFile("20260826170000_coach_call_index.sql");
+}
+
+async function rollbackMigration(): Promise<void> {
+  await runSqlFile("20260826170000_coach_call_index.rollback.sql");
 }
 
 // coach_call_index isn't in the generated Database type yet (it can only be
@@ -112,19 +135,31 @@ async function insertProperty(): Promise<string> {
 
 beforeAll(async () => {
   await replayMigration();
-  await resetTenantTables(serviceClient);
+  await retryTestSetup(() => resetTenantTables(serviceClient));
   await seedTwoOrgs(serviceClient);
 });
 
 beforeEach(async () => {
-  await resetTenantTables(serviceClient);
+  await retryTestSetup(() => resetTenantTables(serviceClient));
 });
 
 afterAll(async () => {
+  const cleanupErrors: string[] = [];
   for (const userId of createdUserIds) {
-    await serviceClient.auth.admin.deleteUser(userId);
+    const { error } = await serviceClient.auth.admin.deleteUser(userId);
+    if (error) cleanupErrors.push(`delete auth user ${userId}: ${error.message}`);
   }
-  await resetTenantTables(serviceClient);
+  try {
+    await retryTestSetup(() => resetTenantTables(serviceClient));
+  } catch (error) {
+    cleanupErrors.push(`reset tenant tables: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    await rollbackMigration();
+  } catch (error) {
+    cleanupErrors.push(`rollback coach migration: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (cleanupErrors.length > 0) throw new Error(`coach authorization cleanup failed: ${cleanupErrors.join("; ")}`);
 });
 
 describe("Migration 20260826170000 — coach_call_index (coach realtime authorization)", () => {
@@ -152,9 +187,10 @@ describe("Migration 20260826170000 — coach_call_index (coach realtime authoriz
     const other = await createUser("other");
     const clientCallId = crypto.randomUUID();
 
-    await asIndexClient(serviceClient)
+    const { error: upsertError } = await asIndexClient(serviceClient)
       .from("coach_call_index")
       .upsert({ client_call_id: clientCallId, operator_user_id: owner.userId, property_id: propertyId });
+    expect(upsertError).toBeNull();
 
     const { data, error } = await asIndexClient(other.client)
       .from("coach_call_index")
@@ -179,9 +215,10 @@ describe("Migration 20260826170000 — coach_call_index (coach realtime authoriz
     const owner = await createUser("owner");
     const clientCallId = crypto.randomUUID();
 
-    await asIndexClient(serviceClient)
+    const { error: firstUpsertError } = await asIndexClient(serviceClient)
       .from("coach_call_index")
       .upsert({ client_call_id: clientCallId, operator_user_id: owner.userId, property_id: propertyA });
+    expect(firstUpsertError).toBeNull();
     const { error } = await asIndexClient(serviceClient)
       .from("coach_call_index")
       .upsert({ client_call_id: clientCallId, operator_user_id: owner.userId, property_id: propertyB });
@@ -206,19 +243,20 @@ describe("Migration 20260826170000 — coach_call_index (coach realtime authoriz
 // just a Postgres query.
 //
 // NOT run by the pre-commit hook or the default `npm run verify` — only by
-// `npm run test:integration`. It IS wired into pre-merge CI (see
-// .github/workflows/verify.yml's `coach-realtime-authorization` job, added
-// alongside this test) specifically because an authorization regression
-// here is exactly the class of bug that must never reach `main` unreviewed.
+// `npm run test:integration`. A minimal equivalent is wired into pre-merge
+// CI by .github/workflows/coach-realtime-authorization.yml specifically
+// because an authorization regression here is exactly the class of bug that
+// must never reach `main` unreviewed.
 // ----------------------------------------------------------------------------
 describe("Migration 20260826170000 — coach:{client_call_id} Realtime Broadcast Authorization", () => {
   it("lets the owning operator join the private coach:{client_call_id} channel", async () => {
     const propertyId = await insertProperty();
     const owner = await createUser("owner");
     const clientCallId = crypto.randomUUID();
-    await asIndexClient(serviceClient)
+    const { error: upsertError } = await asIndexClient(serviceClient)
       .from("coach_call_index")
       .upsert({ client_call_id: clientCallId, operator_user_id: owner.userId, property_id: propertyId });
+    expect(upsertError).toBeNull();
 
     // REST calls (asIndexClient above) authorize via the Authorization
     // header baked into clientForUser. The Realtime websocket is a
@@ -234,13 +272,25 @@ describe("Migration 20260826170000 — coach:{client_call_id} Realtime Broadcast
     const propertyId = await insertProperty();
     const owner = await createUser("owner");
     const other = await createUser("other");
-    const clientCallId = crypto.randomUUID();
-    await asIndexClient(serviceClient)
+    const foreignCallId = crypto.randomUUID();
+    const ownedCallId = crypto.randomUUID();
+    const { error: foreignUpsertError } = await asIndexClient(serviceClient)
       .from("coach_call_index")
-      .upsert({ client_call_id: clientCallId, operator_user_id: owner.userId, property_id: propertyId });
+      .upsert({ client_call_id: foreignCallId, operator_user_id: owner.userId, property_id: propertyId });
+    expect(foreignUpsertError).toBeNull();
+    const { error: ownedUpsertError } = await asIndexClient(serviceClient)
+      .from("coach_call_index")
+      .upsert({ client_call_id: ownedCallId, operator_user_id: other.userId, property_id: propertyId });
+    expect(ownedUpsertError).toBeNull();
 
     other.client.realtime.setAuth(other.jwt);
-    const { status, err } = await subscribeAndWaitForStatus(other.client, `coach:${clientCallId}`);
+    // Positive control on the same client and websocket: a generic channel,
+    // socket, or auth failure would make CHANNEL_ERROR meaningless as RLS
+    // evidence. Keep this owned channel open while joining the foreign one.
+    const owned = await subscribeAndWaitForStatus(other.client, `coach:${ownedCallId}`);
+    expect(owned.status).toBe(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED);
+
+    const { status, err } = await subscribeAndWaitForStatus(other.client, `coach:${foreignCallId}`);
     // Require the SPECIFIC authorization-denied shape, not any non-
     // SUBSCRIBED status. TIMED_OUT/CLOSED are network/timing failures a
     // flaky run could produce for unrelated reasons and would pass this
