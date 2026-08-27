@@ -234,10 +234,6 @@ export function SoftphoneProvider({ children }: Props) {
     return request;
   }, []);
 
-  useEffect(() => {
-    if (callingEnabled) void loadCallerIds();
-  }, [callingEnabled, loadCallerIds]);
-
   const showToast = useCallback((message: string) => {
     setToast(message);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -584,11 +580,12 @@ export function SoftphoneProvider({ children }: Props) {
   const openIdle = useCallback(() => {
     if (phone === "closed") {
       transition({ type: "open" });
+      if (callingEnabled) void loadCallerIds();
     } else if (phone === "idle") {
       resetIdle();
       setPhone("closed");
     }
-  }, [phone, resetIdle, transition]);
+  }, [callingEnabled, loadCallerIds, phone, resetIdle, transition]);
 
   const hangup = useCallback(async () => {
     const transport = transportRef.current;
