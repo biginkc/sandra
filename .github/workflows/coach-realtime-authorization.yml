@@ -19,11 +19,38 @@ env:
   TEST_PROJECT_REF: ncsngxlcyxylaeskiteu
 
 jobs:
-  coach-realtime-setup:
-    name: Provision protected coach canary
+  # A single job, not three. Earlier revisions split provisioning, the test,
+  # and cleanup into separate jobs — each one referencing the protected
+  # `coach-realtime-authorization` environment triggers its OWN reviewer
+  # approval gate, since GitHub Actions environment protection is per-job,
+  # not per-environment-name. Cleanup was a THIRD job, `needs:` on the first
+  # two, so its approval request only appeared once setup+test had already
+  # finished — by which point a reviewer who approved the first gate has
+  # typically moved on. A stalled/never-approved cleanup gate meant the
+  # canary's schema changes, ownership rows, and temporary users could
+  # outlive the run indefinitely.
+  #
+  # One job means one approval for the whole lifecycle. Provisioning (needs
+  # privileged secrets), the test run (`npm ci` + vitest — untrusted,
+  # PR-controlled code), and cleanup (needs privileged secrets again) are
+  # all STEPS in this one job, ordered so cleanup runs last via `if:
+  # always()` — the try/finally semantics GitHub Actions doesn't give you
+  # across job boundaries, but does give you across steps in one job.
+  #
+  # This does not reopen the credential-exposure problem the job split was
+  # originally built to close: GitHub Actions does not ambiently inject
+  # `secrets.*` into a job's shared process environment — each step only
+  # sees what its OWN `env:` block references. The "Install dependencies"
+  # and "Run the coach realtime authorization canary" steps below have no
+  # `env:` entry for SUPABASE_ACCESS_TOKEN, TEST_SUPABASE_DB_PASSWORD, or
+  # TEST_SUPABASE_SERVICE_ROLE_KEY — a PR-modified package.json's
+  # postinstall script, or the test file itself, genuinely cannot read
+  # them, regardless of being in the same job as steps that do.
+  coach-realtime-canary:
+    name: Coach realtime authorization canary (provision, test, cleanup)
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
 
     # REQUIRED REPO SETTING (code cannot create this protection): create the
     # `coach-realtime-authorization` GitHub Environment and move these five
@@ -34,15 +61,6 @@ jobs:
     # protected pull-request ref pattern `refs/pull/*/merge`. Do not keep the
     # privileged values as unrestricted repository-level Actions secrets.
     environment: coach-realtime-authorization
-
-    outputs:
-      needs_replay: ${{ steps.coach_schema_state.outputs.needs_replay }}
-      owner_email: ${{ steps.canary.outputs.owner_email }}
-      owner_password: ${{ steps.canary.outputs.owner_password }}
-      owner_id: ${{ steps.canary.outputs.owner_id }}
-      foreign_id: ${{ steps.canary.outputs.foreign_id }}
-      owned_call_id: ${{ steps.canary.outputs.owned_call_id }}
-      foreign_call_id: ${{ steps.canary.outputs.foreign_call_id }}
 
     steps:
       - uses: actions/checkout@v5
@@ -77,10 +95,29 @@ jobs:
             ].join("\n") + "\n");
           '
 
-      - name: Check whether the coach schema is already on main
+      - name: Check whether the coach schema already exists in the database
         id: coach_schema_state
+        # Queries the ACTUAL database state rather than inferring it from
+        # whether the migration file is present on the PR's base ref. The
+        # file-presence proxy has a real gap: a migration can land on `main`
+        # before db-migrate-test.yml has actually applied it to this shared
+        # project, in which case "the file is on main" and "the schema
+        # exists here" briefly disagree. Querying to_regclass() directly
+        # can't have that gap — it answers the only question that matters:
+        # would applying this migration again be creating something new, or
+        # touching something this run doesn't own.
+        env:
+          TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
         run: |
-          if git cat-file -e "origin/${GITHUB_BASE_REF}:supabase/migrations/20260826170000_coach_call_index.sql"; then
+          echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
+          export PGHOST="${{ steps.pooler.outputs.host }}"
+          export PGPORT="${{ steps.pooler.outputs.port }}"
+          export PGDATABASE="postgres"
+          export PGUSER="${{ steps.pooler.outputs.user }}"
+          export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
+          export PGSSLMODE="require"
+          exists="$(psql -tAc "select to_regclass('public.coach_call_index') is not null")"
+          if [ "$exists" = "t" ]; then
             echo "needs_replay=false" >> "$GITHUB_OUTPUT"
           else
             echo "needs_replay=true" >> "$GITHUB_OUTPUT"
@@ -215,100 +252,52 @@ jobs:
           set operator_user_id = excluded.operator_user_id;
           SQL
 
-  coach-realtime-test:
-    name: Test coach authorization as temporary user
-    needs: coach-realtime-setup
-    if: needs.coach-realtime-setup.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment: coach-realtime-authorization
-
-    steps:
-      - uses: actions/checkout@v5
-
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
           cache: "npm"
 
+      # No `env:` here — this step installs dependencies from a
+      # PR-controlled package.json/lockfile, which can execute arbitrary
+      # postinstall scripts. Those scripts see only this step's own (empty)
+      # env, never the privileged secrets used in earlier/later steps.
       - name: Install coach canary dependencies
         run: npm ci
 
       - name: Run the coach realtime authorization canary
         env:
           # URL and anon key are browser-public. The remaining values belong
-          # only to temporary, unprivileged users and synthetic call rows.
+          # only to temporary, unprivileged users and synthetic call rows —
+          # none of SUPABASE_ACCESS_TOKEN, TEST_SUPABASE_DB_PASSWORD, or
+          # TEST_SUPABASE_SERVICE_ROLE_KEY appear in this step's env, so the
+          # PR-controlled test file being executed here cannot read them.
           TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
           TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
-          COACH_CANARY_OWNER_EMAIL: ${{ needs.coach-realtime-setup.outputs.owner_email }}
-          COACH_CANARY_OWNER_PASSWORD: ${{ needs.coach-realtime-setup.outputs.owner_password }}
-          COACH_CANARY_OWNED_CALL_ID: ${{ needs.coach-realtime-setup.outputs.owned_call_id }}
-          COACH_CANARY_FOREIGN_CALL_ID: ${{ needs.coach-realtime-setup.outputs.foreign_call_id }}
+          COACH_CANARY_OWNER_EMAIL: ${{ steps.canary.outputs.owner_email }}
+          COACH_CANARY_OWNER_PASSWORD: ${{ steps.canary.outputs.owner_password }}
+          COACH_CANARY_OWNED_CALL_ID: ${{ steps.canary.outputs.owned_call_id }}
+          COACH_CANARY_FOREIGN_CALL_ID: ${{ steps.canary.outputs.foreign_call_id }}
         run: |
           echo "::add-mask::$COACH_CANARY_OWNER_PASSWORD"
           npx vitest run --config vitest.coach-realtime.config.ts
 
-  coach-realtime-cleanup:
-    name: Always clean protected coach canary
-    needs: [coach-realtime-setup, coach-realtime-test]
-    if: always() && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment: coach-realtime-authorization
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1
-        with:
-          version: 2.116.0
-
-      - name: Install PostgreSQL client for cleanup
-        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
-
-      - name: Link to test project for cleanup
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-        run: supabase link --project-ref "$TEST_PROJECT_REF"
-
-      - name: Resolve cleanup session-pooler host port and user
-        id: cleanup_pooler
-        run: |
-          node -e '
-            const fs = require("node:fs");
-            const raw = fs.readFileSync("supabase/.temp/pooler-url", "utf8").trim();
-            const url = new URL(raw);
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, [
-              `host=${url.hostname}`,
-              "port=5432",
-              `user=${decodeURIComponent(url.username)}`,
-            ].join("\n") + "\n");
-          '
-
-      - name: Check cleanup schema state
-        id: coach_schema_state
-        run: |
-          if git cat-file -e "origin/${GITHUB_BASE_REF}:supabase/migrations/20260826170000_coach_call_index.sql"; then
-            echo "needs_replay=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "needs_replay=true" >> "$GITHUB_OUTPUT"
-          fi
-
+      # Everything from here on runs regardless of whether any step above
+      # (including the test itself) failed — this job's try/finally. Since
+      # this is one job, cleanup needs no cross-job `needs.*.outputs`
+      # indirection and no separate environment approval to actually run.
       - name: Always remove coach canary schema and rows
-        if: always() && steps.cleanup_pooler.outcome == 'success'
+        if: always()
         env:
           TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
           COACH_SCHEMA_NEEDS_REPLAY: ${{ steps.coach_schema_state.outputs.needs_replay }}
-          COACH_CANARY_OWNED_CALL_ID: ${{ needs.coach-realtime-setup.outputs.owned_call_id }}
-          COACH_CANARY_FOREIGN_CALL_ID: ${{ needs.coach-realtime-setup.outputs.foreign_call_id }}
+          COACH_CANARY_OWNED_CALL_ID: ${{ steps.canary.outputs.owned_call_id }}
+          COACH_CANARY_FOREIGN_CALL_ID: ${{ steps.canary.outputs.foreign_call_id }}
         run: |
           echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
-          export PGHOST="${{ steps.cleanup_pooler.outputs.host }}"
-          export PGPORT="${{ steps.cleanup_pooler.outputs.port }}"
+          export PGHOST="${{ steps.pooler.outputs.host }}"
+          export PGPORT="${{ steps.pooler.outputs.port }}"
           export PGDATABASE="postgres"
-          export PGUSER="${{ steps.cleanup_pooler.outputs.user }}"
+          export PGUSER="${{ steps.pooler.outputs.user }}"
           export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
           export PGSSLMODE="require"
           cleanup_failed=0

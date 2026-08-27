@@ -14,74 +14,133 @@ const serviceClient = createTestClient();
 const createdUserIds: string[] = [];
 
 /**
- * Replays this migration's own SQL directly against the shared
+ * Ensures this migration's schema exists against the shared
  * sandra-crm-test project before any test runs, rather than trusting
- * whatever schema the project already has.
+ * whatever schema the project already has — WITHOUT ever dropping a
+ * schema this run didn't create itself.
  *
  * db-migrate-test.yml only applies migrations on push to `main` (after
- * review) — a branch's own migration file, like this one before it
- * merges, is never applied there. Without this, the pre-merge CI job that
- * runs this test file would exercise stale SQL: the `coach_call_index`
- * table and its RLS/restrictive policies as they existed the last time
- * `main` touched this area (possibly not at all), silently passing or
- * failing for the wrong reasons.
+ * review). Before this branch merges, that schema doesn't exist there yet
+ * and this file needs to create it. AFTER this branch merges,
+ * db-migrate-test.yml applies it for real and it becomes PERMANENT shared
+ * schema — at that point this file must treat it exactly like any other
+ * pre-existing table it didn't create, never drop/recreate it. A
+ * round-5 version of this file rollback-then-replayed unconditionally on
+ * every run and dropped the schema again in `afterAll`; post-merge, a
+ * routine `npm run test:integration` run would have deleted the real
+ * permanent `coach_call_index` table and its realtime.messages policies
+ * from the shared project. That bug is exactly what the existence check
+ * below exists to close.
+ *
+ * `ensureMigrationSchema()` checks whether `public.coach_call_index`
+ * already exists. If it does, this run did NOT create it (either it's
+ * already merged into `main` and permanent, or a prior run left it behind
+ * intentionally) — assert its RLS/policy shape matches what this file
+ * expects and STOP: never touch it further. If it doesn't exist, apply
+ * this migration's SQL (idempotent — `create table if not exists`,
+ * `drop policy if exists` before every `create policy` — safe even if
+ * something partially applied it before) and remember that THIS run is
+ * responsible for it, so `afterAll` knows it's safe (and correct) to roll
+ * it back.
  *
  * Deliberately NOT `supabase db push` — that registers the migration in
  * `schema_migrations` and runs the full ordered migration-safety gate
  * (scripts/check-migration-safety.mjs), which is reserved for the real
  * post-merge pipeline and would let an unmerged branch's migration
  * silently take a permanent slot in the shared project's migration
- * history. This SQL file is deliberately idempotent (`create table if not
- * exists`, `drop policy if exists` before every `create policy`) so a
- * raw, repeated replay is safe — CI runs it on every PR, and any
- * developer running `npm run test:integration` locally gets the same
- * replay, so nobody needs a manual step to keep their local shared
- * project in sync with this branch's schema.
+ * history.
  *
  * Runs inside a test file's beforeAll (a worker process), which always
  * executes after global-setup.ts has acquired the suite's advisory lock —
- * this replay is therefore serialized against every other integration/E2E
- * run against the same shared project, not a free-for-all schema change
- * racing concurrent test runs.
+ * this check-then-apply is therefore serialized against every other
+ * integration/E2E run against the same shared project, not a free-for-all
+ * schema change racing concurrent test runs.
  *
- * Unconditional, not opt-in: this file only ever runs via a developer's own
- * `npm run test:integration` (never wired into any CI job — the dedicated
- * .github/workflows/coach-realtime-authorization.yml canary replays this
- * same SQL itself, independently, and is the one that actually gates PRs).
- * A developer choosing to run this locally has already opted into touching
- * the shared project; gating replay behind an undocumented env var would
- * just mean the Realtime-authorization tests below fail with "relation
- * does not exist" instead of running. `afterAll` always rolls the schema
- * back afterward — this file's own contamination footprint on the shared
- * project never outlives one local run.
+ * This file only ever runs via a developer's own `npm run test:integration`
+ * — never wired into any CI job. The dedicated
+ * .github/workflows/coach-realtime-authorization.yml canary applies (and,
+ * pre-merge only, always rolls back) this same SQL independently, and is
+ * the one that actually gates PRs.
  */
-async function runSqlFile(filename: string): Promise<void> {
+let createdSchemaThisRun = false;
+
+async function withDbClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
   const dbUrl = process.env.TEST_SUPABASE_DB_URL;
   if (!dbUrl) {
     throw new Error(
-      "Missing TEST_SUPABASE_DB_URL — required to replay this migration before the authorization tests run. " +
+      "Missing TEST_SUPABASE_DB_URL — required to check/apply this migration before the authorization tests run. " +
         "See tests/integration/README.md.",
     );
   }
-  const sql = readFileSync(path.resolve(__dirname, filename), "utf8");
   const client = new Client({ connectionString: dbUrl });
   await client.connect();
   try {
-    await client.query(sql);
+    return await fn(client);
   } finally {
     await client.end();
   }
 }
 
-async function replayMigration(): Promise<void> {
-  // Start from the declared baseline so a prior canceled/killed run cannot
-  // make this run test whatever schema happened to survive.
-  await runSqlFile("20260826170000_coach_call_index.rollback.sql");
-  await runSqlFile("20260826170000_coach_call_index.sql");
+async function runSqlFile(client: Client, filename: string): Promise<void> {
+  const sql = readFileSync(path.resolve(__dirname, filename), "utf8");
+  await client.query(sql);
 }
 
-async function rollbackMigration(): Promise<void> {
-  await runSqlFile("20260826170000_coach_call_index.rollback.sql");
+async function schemaAlreadyExists(client: Client): Promise<boolean> {
+  const { rows } = await client.query<{ exists: boolean }>(
+    "select to_regclass('public.coach_call_index') is not null as exists",
+  );
+  return rows[0]?.exists ?? false;
+}
+
+/** Structural sanity check for schema this run did NOT create (so it's
+ * never re-applied or dropped) — fails loudly rather than silently letting
+ * the tests below run against a table that's missing its RLS/policies for
+ * some unrelated reason. */
+async function assertMigrationSchemaShape(client: Client): Promise<void> {
+  const { rows } = await client.query<{
+    table_rls_enabled: boolean;
+    owner_select_policy_count: number;
+    realtime_permissive_policy_count: number;
+    realtime_restrictive_policy_count: number;
+  }>(`
+    select
+      (select relrowsecurity from pg_class where oid = 'public.coach_call_index'::regclass) as table_rls_enabled,
+      (select count(*)::int from pg_policies where schemaname = 'public' and tablename = 'coach_call_index' and policyname = 'coach_call_index_owner_select') as owner_select_policy_count,
+      (select count(*)::int from pg_policies where schemaname = 'realtime' and tablename = 'messages' and policyname = 'coach_broadcast_owner_select' and permissive = 'PERMISSIVE') as realtime_permissive_policy_count,
+      (select count(*)::int from pg_policies where schemaname = 'realtime' and tablename = 'messages' and policyname = 'coach_topics_require_ownership' and permissive = 'RESTRICTIVE') as realtime_restrictive_policy_count
+  `);
+  const shape = rows[0];
+  if (
+    !shape?.table_rls_enabled ||
+    shape.owner_select_policy_count !== 1 ||
+    shape.realtime_permissive_policy_count !== 1 ||
+    shape.realtime_restrictive_policy_count !== 1
+  ) {
+    throw new Error(
+      `coach_call_index already exists but its RLS/policy shape doesn't match this migration file: ${JSON.stringify(shape)}. ` +
+        "This test never touches (re-applies or drops) schema it didn't create this run — fix the shared project's schema directly instead.",
+    );
+  }
+}
+
+async function ensureMigrationSchema(): Promise<void> {
+  await withDbClient(async (client) => {
+    if (await schemaAlreadyExists(client)) {
+      // Not created by this run — permanent (post-merge) or intentionally
+      // left by someone else. Verify it, then never touch it again.
+      await assertMigrationSchemaShape(client);
+      createdSchemaThisRun = false;
+      return;
+    }
+    await runSqlFile(client, "20260826170000_coach_call_index.sql");
+    createdSchemaThisRun = true;
+  });
+}
+
+async function rollbackMigrationIfCreatedThisRun(): Promise<void> {
+  if (!createdSchemaThisRun) return; // never drop schema this run didn't create
+  await withDbClient((client) => runSqlFile(client, "20260826170000_coach_call_index.rollback.sql"));
 }
 
 // coach_call_index isn't in the generated Database type yet (it can only be
@@ -134,7 +193,7 @@ async function insertProperty(): Promise<string> {
 }
 
 beforeAll(async () => {
-  await replayMigration();
+  await ensureMigrationSchema();
   await retryTestSetup(() => resetTenantTables(serviceClient));
   await seedTwoOrgs(serviceClient);
 });
@@ -155,7 +214,7 @@ afterAll(async () => {
     cleanupErrors.push(`reset tenant tables: ${error instanceof Error ? error.message : String(error)}`);
   }
   try {
-    await rollbackMigration();
+    await rollbackMigrationIfCreatedThisRun();
   } catch (error) {
     cleanupErrors.push(`rollback coach migration: ${error instanceof Error ? error.message : String(error)}`);
   }
