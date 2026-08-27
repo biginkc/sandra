@@ -139,6 +139,17 @@ type SeedData = {
   messages: MessageRow[];
   contacts: ContactRow[];
   properties: PropertyRow[];
+  ai_disposition_reviews?: Array<{
+    id: string;
+    org_id: string;
+    property_id: string;
+    conversation_id: string;
+    source_inbound_message_id: string;
+    disposition: string;
+    ai_reason: string;
+    status: string;
+    created_at: string;
+  }>;
   consent_events?: Array<{
     contact_id: string;
     channel: string;
@@ -352,6 +363,61 @@ describe("fetchInboxDetail", () => {
     ).rejects.toThrow("SMS_CONVERSATION_ORG_AMBIGUOUS");
   });
 
+  it("hydrates a pending Sandra review whose property message is outside the 100-message window", async () => {
+    const recentPropertyless = Array.from({ length: 100 }, (_, index) =>
+      makeMessage({
+        id: `recent-propertyless-${index}`,
+        contact_id: CONTACT_ID,
+        property_id: null,
+        conversation_id: CONVERSATION_ID,
+        created_at: new Date(
+          Date.UTC(2026, 7, 27, 18, 0, 0) - index * 1_000,
+        ).toISOString(),
+      }),
+    );
+    const sourceMessage = makeMessage({
+      id: "older-reviewed-source",
+      contact_id: CONTACT_ID,
+      property_id: OLDER_PROPERTY_ID,
+      conversation_id: CONVERSATION_ID,
+      created_at: "2026-08-26T18:00:00.000Z",
+    });
+    const supabase = makeSupabaseStub({
+      messages: [...recentPropertyless, sourceMessage],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [
+        makeProperty({ id: OLDER_PROPERTY_ID, outreach_dispo: "nurture" }),
+      ],
+      ai_disposition_reviews: [
+        {
+          id: "review-outside-window",
+          org_id: "org-1",
+          property_id: OLDER_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          source_inbound_message_id: sourceMessage.id,
+          disposition: "nurture",
+          ai_reason: "Homeowner asked to talk next month",
+          status: "pending",
+          created_at: "2026-08-26T18:00:01.000Z",
+        },
+      ],
+    });
+
+    const detail = await fetchInboxDetail(
+      supabase as never,
+      CONVERSATION_ID,
+    );
+
+    expect(detail?.initialMessages).toHaveLength(100);
+    expect(detail?.propertyId).toBe(OLDER_PROPERTY_ID);
+    expect(detail?.propertyAddress).toBe("123 Main St, Albany, NY");
+    expect(detail?.aiDispositionReview).toMatchObject({
+      id: "review-outside-window",
+      disposition: "nurture",
+      sourceInboundMessageId: "older-reviewed-source",
+    });
+  });
+
   it("returns null when the conversation has no messages", async () => {
     const supabase = makeSupabaseStub({
       messages: [
@@ -400,6 +466,56 @@ describe("fetchInboxDetail", () => {
     expect(detail?.phoneSuppressed).toBe(false);
     expect(detail?.smsSafetyReadFailed).toBe(false);
     expect(detail?.isDncLocked).toBe(false);
+  });
+
+  it("hydrates only the pending Sandra AI review for the exact conversation and property", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "message-with-review",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+        }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      ai_disposition_reviews: [
+        {
+          id: "review-exact",
+          org_id: "org-1",
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          source_inbound_message_id: "message-with-review",
+          disposition: "not_interested",
+          ai_reason: "Homeowner said no",
+          status: "pending",
+          created_at: "2026-08-27T14:00:00.000Z",
+        },
+        {
+          id: "review-confirmed",
+          org_id: "org-1",
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          source_inbound_message_id: "older-message",
+          disposition: "wrong_number",
+          ai_reason: "Historical",
+          status: "confirmed",
+          created_at: "2026-08-26T14:00:00.000Z",
+        },
+      ],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.aiDispositionReview).toEqual({
+      id: "review-exact",
+      status: "pending",
+      disposition: "not_interested",
+      reason: "Homeowner said no",
+      sourceInboundMessageId: "message-with-review",
+      createdAt: "2026-08-27T14:00:00.000Z",
+    });
   });
 
   it("surfaces an authoritative phone-suppression read failure", async () => {

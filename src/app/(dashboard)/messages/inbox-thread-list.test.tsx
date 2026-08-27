@@ -69,6 +69,7 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
     ...overrides,
     propertyStatus: overrides.propertyStatus ?? null,
     outreachDispo: overrides.outreachDispo ?? null,
+    aiDispositionReview: overrides.aiDispositionReview ?? null,
     isDncLocked: overrides.isDncLocked ?? false,
     needsOutcome: overrides.needsOutcome ?? false,
     aiResponderStatus: overrides.aiResponderStatus ?? null,
@@ -177,7 +178,7 @@ describe("<InboxThreadList /> realtime subscriptions", () => {
     ).toHaveTextContent("+1 (555) 000-0002");
   });
 
-  it("refreshes on message_threads changes so Sandra delivery state does not stay stale", async () => {
+  it("refreshes on thread and AI-review changes so Sandra state does not stay stale", async () => {
     render(
       <InboxThreadList
         initial={[]}
@@ -203,12 +204,51 @@ describe("<InboxThreadList /> realtime subscriptions", () => {
             table: "message_threads",
           },
         }),
+        expect.objectContaining({
+          type: "postgres_changes",
+          filter: {
+            event: "*",
+            schema: "public",
+            table: "ai_disposition_reviews",
+          },
+        }),
       ]),
     );
   });
 });
 
 describe("<InboxThreadList /> Sandra state", () => {
+  it("shows a distinct Sandra marker for a pending disposition review", () => {
+    render(
+      <InboxThreadList
+        initial={[
+          makeThread({
+            threadId: "thread-ai-dispo-review",
+            contactName: "Review Lead",
+            outreachDispo: "not_interested",
+            aiDispositionReview: {
+              id: "review-marker",
+              status: "pending",
+              disposition: "not_interested",
+              reason: "AI classified reply",
+              sourceInboundMessageId: "message-marker",
+              createdAt: "2026-08-27T14:00:00.000Z",
+            },
+          }),
+        ]}
+        selectedThreadId={null}
+        currentUserId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByTestId(
+        "inbox-thread-thread-ai-dispo-review-sandra-dispo-review",
+      ),
+    ).toHaveAccessibleName("Sandra disposition needs review");
+  });
+
   it("shows the real pipeline stage and an explicit escalation tag", () => {
     render(
       <InboxThreadList

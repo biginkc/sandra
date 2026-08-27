@@ -46,6 +46,53 @@ export type SetDispoResult =
   | { ok: true }
   | { ok: false; error: string };
 
+export type ConfirmAiDispositionReviewResult =
+  | { ok: true; status: "confirmed" | "superseded" }
+  | { ok: false; error: string };
+
+export async function confirmAiDispositionReview(
+  reviewId: string,
+): Promise<ConfirmAiDispositionReviewResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "Not signed in" };
+
+  const { data, error } = await supabase.rpc(
+    "fn_confirm_ai_disposition_review",
+    { p_review_id: reviewId },
+  );
+  if (error) return { ok: false, error: error.message };
+
+  const status = readReviewResolutionStatus(data);
+  if (!status) {
+    reportError(new Error("Unexpected AI disposition confirmation response"), {
+      tags: { surface: "confirm_ai_disposition_review" },
+      extra: { reviewId, response: data },
+    });
+    return { ok: false, error: "Could not confirm Sandra's disposition" };
+  }
+
+  try {
+    revalidatePath("/messages");
+  } catch (revalidateError) {
+    reportError(revalidateError, {
+      tags: { surface: "confirm_ai_disposition_review_revalidate" },
+      extra: { reviewId, status },
+    });
+  }
+  return { ok: true, status };
+}
+
+function readReviewResolutionStatus(
+  value: unknown,
+): "confirmed" | "superseded" | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const status = (value as Record<string, unknown>).status;
+  return status === "confirmed" || status === "superseded" ? status : null;
+}
+
 export async function setOutreachDispo(
   propertyId: string,
   dispo: OutreachDispo,
@@ -99,13 +146,23 @@ export async function setOutreachDispo(
   }
 
   if (prop.outreach_dispo !== dispo) {
-    await recordLeadEvent({
-      propertyId,
-      eventType: LEAD_EVENT_TYPES.DISPO_SET,
-      actorType: "user",
-      actorId: user.id,
-      payload: { from: prop.outreach_dispo, to: dispo },
-    });
+    try {
+      await recordLeadEvent({
+        propertyId,
+        eventType: LEAD_EVENT_TYPES.DISPO_SET,
+        actorType: "user",
+        actorId: user.id,
+        payload: { from: prop.outreach_dispo, to: dispo },
+      });
+    } catch (eventError) {
+      // The property update (and the database trigger that supersedes any AI
+      // review) already committed. Do not tell the operator the correction
+      // failed because a secondary activity-feed append had trouble.
+      reportError(eventError, {
+        tags: { surface: "manual_dispo_event_after_commit" },
+        extra: { propertyId, dispo, userId: user.id },
+      });
+    }
   }
 
   // TCPA suppression — fire consent event + flip boolean + pause enrollments.

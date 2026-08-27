@@ -29,7 +29,11 @@ vi.mock("@/lib/messaging/consent", () => ({ recordConsentEvent }));
 vi.mock("@/lib/sequences/enrollment", () => ({ pauseContactEnrollments }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 
-import { moveMessageThreadToLead, setOutreachDispo } from "./dispo-actions";
+import {
+  confirmAiDispositionReview,
+  moveMessageThreadToLead,
+  setOutreachDispo,
+} from "./dispo-actions";
 
 type Response = { data?: unknown; error?: { message: string } | null };
 
@@ -50,6 +54,42 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
+});
+
+describe("confirmAiDispositionReview", () => {
+  it("confirms through the authenticated RPC and refreshes Messages", async () => {
+    responseQueue = [{ data: { status: "confirmed", reviewId: "review-1" } }];
+
+    const result = await confirmAiDispositionReview("review-1");
+
+    expect(result).toEqual({ ok: true, status: "confirmed" });
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+  });
+
+  it("reports a stale review as superseded without pretending it was confirmed", async () => {
+    responseQueue = [{ data: { status: "superseded", reviewId: "review-1" } }];
+
+    const result = await confirmAiDispositionReview("review-1");
+
+    expect(result).toEqual({ ok: true, status: "superseded" });
+  });
+
+  it("does not claim confirmation failed when cache revalidation throws after commit", async () => {
+    responseQueue = [{ data: { status: "confirmed", reviewId: "review-1" } }];
+    revalidatePath.mockImplementationOnce(() => {
+      throw new Error("revalidate failed");
+    });
+
+    const result = await confirmAiDispositionReview("review-1");
+
+    expect(result).toEqual({ ok: true, status: "confirmed" });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "revalidate failed" }),
+      expect.objectContaining({
+        tags: { surface: "confirm_ai_disposition_review_revalidate" },
+      }),
+    );
+  });
 });
 
 describe("setOutreachDispo", () => {
@@ -161,6 +201,24 @@ describe("setOutreachDispo", () => {
       }),
     );
     expect(revalidatePath).toHaveBeenCalledWith("/properties");
+  });
+
+  it("does not claim the correction failed when the post-commit activity event fails", async () => {
+    responseQueue = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+    ];
+    recordLeadEvent.mockRejectedValueOnce(new Error("event append failed"));
+
+    const result = await setOutreachDispo("property-1", "not_interested");
+
+    expect(result).toEqual({ ok: true });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "event append failed" }),
+      expect.objectContaining({
+        tags: { surface: "manual_dispo_event_after_commit" },
+      }),
+    );
   });
 
   it("keeps DNC and opt-out safety side effects", async () => {
@@ -295,6 +353,10 @@ function makeSupabase(userId: string) {
         data: { user: { id: userId } },
       })),
     },
+    rpc: vi.fn(async () => {
+      const response = responseQueue.shift();
+      return { data: response?.data ?? null, error: response?.error ?? null };
+    }),
     from: vi.fn((table: string) => {
       const builder = {
         select: vi.fn(() => builder),

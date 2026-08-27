@@ -119,7 +119,7 @@ export function InboxFilters({
         />
       ) : null}
       <FilterChip
-        label="Dispo"
+        label="Sandra Dispo"
         icon="mascot"
         active={active === "dispo"}
         count={filterCounts.dispo}

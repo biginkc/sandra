@@ -78,6 +78,7 @@ function makeThread(
     propertyAddress: overrides.propertyAddress ?? "123 Main St",
     propertyStatus: overrides.propertyStatus ?? "prospect",
     outreachDispo: overrides.outreachDispo ?? null,
+    aiDispositionReview: overrides.aiDispositionReview ?? null,
     isDncLocked: overrides.isDncLocked ?? false,
     lastMessageAt: overrides.lastMessageAt ?? "2026-04-29T12:00:00Z",
     lastMessageBody: overrides.lastMessageBody ?? "hello",
@@ -366,7 +367,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     ).toHaveClass("bg-[#f59e0b]");
   });
 
-  it("renders chips in priority order: Unread, Needs Outcome, Mine, Sandra Escalated, Dispo, then the rest", () => {
+  it("renders chips in priority order: Unread, Needs Outcome, Mine, Sandra Escalated, Sandra Dispo, then the rest", () => {
     render(<CockpitView {...baseProps} filter="all" threads={[]} />);
 
     const chips = screen
@@ -391,7 +392,9 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     expect(
       screen.getByTestId("filter-dispo").querySelector("img"),
     ).toHaveAttribute("src", "/icon.png");
-    expect(screen.getByTestId("filter-dispo")).toHaveTextContent("Dispo");
+    expect(screen.getByTestId("filter-dispo")).toHaveTextContent(
+      "Sandra Dispo",
+    );
     expect(screen.queryByTestId("filter-handled")).not.toBeInTheDocument();
   });
 
@@ -488,7 +491,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     expect(mine).toHaveTextContent("2");
     expect(escalated).toHaveTextContent("Escalated");
     expect(escalated).toHaveTextContent("4");
-    expect(dispo).toHaveTextContent("Dispo");
+    expect(dispo).toHaveTextContent("Sandra Dispo");
     expect(dispo).toHaveTextContent("5");
     expect(unassigned).toHaveTextContent("No owner");
     expect(unassigned).toHaveTextContent("1");
@@ -606,11 +609,19 @@ describe("<CockpitView /> escalated chip", () => {
     expect(screen.getByTestId("filter-escalated")).toBeInTheDocument();
   });
 
-  it("Dispo chip is active and renders dispositioned threads", () => {
+  it("Sandra Dispo chip is active and renders pending AI review threads", () => {
     const dispo = makeThread({
       contactId: "dispo-2",
       contactName: "Dispo Thread",
       outreachDispo: "not_interested",
+      aiDispositionReview: {
+        id: "review-filter",
+        status: "pending",
+        disposition: "not_interested",
+        reason: "AI classified reply",
+        sourceInboundMessageId: "message-filter",
+        createdAt: "2026-08-27T14:00:00.000Z",
+      },
     });
 
     render(<CockpitView {...baseProps} filter="dispo" threads={[dispo]} />);

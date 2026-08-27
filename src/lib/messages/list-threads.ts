@@ -5,6 +5,15 @@ import type { Database } from "@/lib/supabase/types";
 import type { AiResponderThreadStatus } from "./ai-responder-thread-state";
 import { deriveSmsParties } from "./sms-parties";
 
+export type AiDispositionReview = {
+  id: string;
+  status: "pending";
+  disposition: string;
+  reason: string;
+  sourceInboundMessageId: string;
+  createdAt: string;
+};
+
 export type Thread = {
   /** The conversation UUID — the one and only thread identity since
    *  migration 081. */
@@ -21,6 +30,9 @@ export type Thread = {
   propertyAddress: string | null;
   propertyStatus: string | null;
   outreachDispo: string | null;
+  /** Pending, conversation-scoped disposition decision made by Sandra AI.
+   *  This is separate from the already-applied property outcome. */
+  aiDispositionReview: AiDispositionReview | null;
   /** Permanent property-level DNC lock. This is independent of which
    * contact (homeowner or agent) owns the visible conversation. */
   isDncLocked: boolean;
@@ -181,6 +193,12 @@ type ThreadSnapshotRow = {
   ai_responder_status_at: string | null;
   ai_last_delivery_status: string | null;
   ai_last_delivery_error: string | null;
+  ai_disposition_review_id?: string | null;
+  ai_disposition_review_status?: string | null;
+  ai_disposition_review_disposition?: string | null;
+  ai_disposition_review_reason?: string | null;
+  ai_disposition_review_source_inbound_message_id?: string | null;
+  ai_disposition_review_created_at?: string | null;
 };
 
 /**
@@ -380,6 +398,7 @@ export async function listThreads(
         : null,
       propertyStatus: p?.status ?? null,
       outreachDispo: p?.outreach_dispo ?? null,
+      aiDispositionReview: null,
       isDncLocked: p?.is_dnc_locked ?? false,
       assigneeId: p?.assigned_user_id ?? null,
       lastMessageBody: bucket.latest.body,
@@ -737,7 +756,30 @@ function isThreadSnapshotRow(value: unknown): value is ThreadSnapshotRow {
     typeof row.has_inbound === "boolean" &&
     typeof row.is_dnc_locked === "boolean" &&
     typeof row.needs_human_attention === "boolean" &&
-    typeof row.is_opted_out === "boolean"
+    typeof row.is_opted_out === "boolean" &&
+    hasValidAiDispositionReviewFields(row)
+  );
+}
+
+function hasValidAiDispositionReviewFields(
+  row: Record<string, unknown>,
+): boolean {
+  if (row.ai_disposition_review_id == null) {
+    return [
+      row.ai_disposition_review_status,
+      row.ai_disposition_review_disposition,
+      row.ai_disposition_review_reason,
+      row.ai_disposition_review_source_inbound_message_id,
+      row.ai_disposition_review_created_at,
+    ].every((value) => value == null);
+  }
+  return (
+    typeof row.ai_disposition_review_id === "string" &&
+    row.ai_disposition_review_status === "pending" &&
+    typeof row.ai_disposition_review_disposition === "string" &&
+    typeof row.ai_disposition_review_reason === "string" &&
+    typeof row.ai_disposition_review_source_inbound_message_id === "string" &&
+    typeof row.ai_disposition_review_created_at === "string"
   );
 }
 
@@ -780,6 +822,7 @@ function mapThreadSnapshot(
       propertyAddress: row.property_address,
       propertyStatus: row.property_status,
       outreachDispo: row.outreach_dispo,
+      aiDispositionReview: mapAiDispositionReview(row),
       isDncLocked: row.is_dnc_locked,
       assigneeId: row.assignee_id,
       lastMessageBody: row.last_message_body,
@@ -803,6 +846,21 @@ function mapThreadSnapshot(
   }
   threads.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
   return threads;
+}
+
+function mapAiDispositionReview(
+  row: ThreadSnapshotRow,
+): AiDispositionReview | null {
+  if (!row.ai_disposition_review_id) return null;
+  return {
+    id: row.ai_disposition_review_id,
+    status: "pending",
+    disposition: row.ai_disposition_review_disposition!,
+    reason: row.ai_disposition_review_reason!,
+    sourceInboundMessageId:
+      row.ai_disposition_review_source_inbound_message_id!,
+    createdAt: row.ai_disposition_review_created_at!,
+  };
 }
 
 /**

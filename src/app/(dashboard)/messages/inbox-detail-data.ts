@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   findLatestAuthoritativeSmsRoute,
 } from "@/lib/messages/sms-parties";
+import type { AiDispositionReview } from "@/lib/messages/list-threads";
 import {
   computeConsentState,
   type ConsentState,
@@ -42,6 +43,8 @@ export type InboxDetail = {
   propertyStatus: string | null;
   /** Current outreach disposition, if any. */
   outreachDispo: string | null;
+  /** Current conversation-scoped Sandra AI disposition awaiting review. */
+  aiDispositionReview: AiDispositionReview | null;
   /** Existing contact-level suppression fields. These are channel/contact
    * restrictions, not proof that the property has the permanent DNC lock. */
   contactDoNotContact: boolean;
@@ -74,17 +77,32 @@ export async function fetchInboxDetail(
   );
   if (!conversationOrgId) return null;
 
-  const { data: newestMessages, error } = await supabase
-    .from("messages")
-    .select("*")
-    .eq("channel", "sms")
-    .eq("conversation_id", conversationId)
-    .eq("org_id", conversationOrgId)
-    .order("created_at", { ascending: false })
-    .limit(100);
-  if (error) {
-    throw new Error(`fetchInboxDetail messages: ${error.message}`);
+  const [messagesRes, reviewRes] = await Promise.all([
+    supabase
+      .from("messages")
+      .select("*")
+      .eq("channel", "sms")
+      .eq("conversation_id", conversationId)
+      .eq("org_id", conversationOrgId)
+      .order("created_at", { ascending: false })
+      .limit(100),
+    supabase
+      .from("ai_disposition_reviews")
+      .select(
+        "id, property_id, status, disposition, ai_reason, source_inbound_message_id, created_at",
+      )
+      .eq("org_id", conversationOrgId)
+      .eq("conversation_id", conversationId)
+      .eq("status", "pending")
+      .maybeSingle(),
+  ]);
+  if (messagesRes.error) {
+    throw new Error(`fetchInboxDetail messages: ${messagesRes.error.message}`);
   }
+  if (reviewRes.error) {
+    throw new Error(`fetchInboxDetail AI review: ${reviewRes.error.message}`);
+  }
+  const newestMessages = messagesRes.data;
   if (!newestMessages || newestMessages.length === 0) return null;
 
   if (newestMessages.some((message) => message.org_id !== conversationOrgId)) {
@@ -100,9 +118,14 @@ export async function fetchInboxDetail(
   )?.contact_id;
   if (!contactId) return null;
 
+  // A pending Sandra review can legitimately point at an older source message
+  // outside the 100-message display window. Prefer that review's property so
+  // the queue item always opens with the controls needed to resolve it.
   const propertyId =
+    reviewRes.data?.property_id ??
     [...messages].reverse().find((message) => message.property_id !== null)
-      ?.property_id ?? null;
+      ?.property_id ??
+    null;
 
   const [contactRes, propertyRes] = await Promise.all([
     supabase
@@ -131,7 +154,6 @@ export async function fetchInboxDetail(
   if (propertyRes.error) {
     throw new Error(`fetchInboxDetail property: ${propertyRes.error.message}`);
   }
-
   const c = contactRes.data;
   const p = propertyRes.data;
   const authoritativeRoute = findLatestAuthoritativeSmsRoute(messages);
@@ -191,6 +213,17 @@ export async function fetchInboxDetail(
     assigneeId: p?.assigned_user_id ?? null,
     propertyStatus: p?.status ?? null,
     outreachDispo: p?.outreach_dispo ?? null,
+    aiDispositionReview: reviewRes.data
+      ? {
+          id: reviewRes.data.id,
+          status: "pending",
+          disposition: reviewRes.data.disposition,
+          reason: reviewRes.data.ai_reason,
+          sourceInboundMessageId:
+            reviewRes.data.source_inbound_message_id,
+          createdAt: reviewRes.data.created_at,
+        }
+      : null,
     contactDoNotContact: c?.do_not_contact ?? false,
     contactSmsOptedOut: c?.sms_opted_out ?? false,
     smsConsentState,
