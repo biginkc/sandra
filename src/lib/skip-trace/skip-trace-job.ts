@@ -317,9 +317,33 @@ export async function runSkipTraceEnrichment(
   };
 
   const attemptToken = crypto.randomUUID();
+  // The persisted authorization is the source of truth. Callers may pass a
+  // refreshed audience/audit, but they may not manufacture or raise the
+  // approved credit ceiling in memory. This read also keeps direct recovery
+  // callers from accidentally erasing the cap when they omit inputParams.
+  const { data: persistedJob, error: persistedJobError } = await supabase
+    .from("jobs")
+    .select("input_params")
+    .eq("id", params.jobId)
+    .eq("org_id", params.orgId)
+    .eq("type", "skip_trace")
+    .eq("status", "queued")
+    .maybeSingle();
+  if (persistedJobError) {
+    reportError(persistedJobError, {
+      tags: { surface: "skip_trace_runner_authorization_read" },
+      extra: { jobId: params.jobId, orgId: params.orgId },
+    });
+    return { claimed: false };
+  }
+  if (!persistedJob) return { claimed: false };
+  const persistedInputParams = jsonRecord(persistedJob.input_params);
   const claimedInputParams = {
+    ...persistedInputParams,
     ...jsonRecord(params.inputParams),
     property_ids: propertyIds,
+    authorized_max_credits: persistedInputParams.authorized_max_credits,
+    provider_pricing_version: persistedInputParams.provider_pricing_version,
     submission_attempt_token: attemptToken,
   } as unknown as Json;
   const claimTime = new Date().toISOString();
@@ -749,7 +773,20 @@ export async function runSkipTraceEnrichment(
     const authorizedMaxCredits =
       jsonRecord(claimedInputParams).authorized_max_credits;
     if (
-      typeof authorizedMaxCredits === "number" &&
+      typeof authorizedMaxCredits !== "number" ||
+      !Number.isFinite(authorizedMaxCredits) ||
+      authorizedMaxCredits < 0
+    ) {
+      await markJobFailed(
+        supabase,
+        params.jobId,
+        "Provider submission is missing an approved credit ceiling. Run skip-trace preflight again before retrying.",
+        params.orgId,
+        attemptToken,
+      );
+      return summary;
+    }
+    if (
       plannedCredits > authorizedMaxCredits
     ) {
       await markJobFailed(
@@ -1442,13 +1479,7 @@ async function finalizeClaimed(
     cached_hits: prior.cached_hits ?? 0,
     api_hits: params.results.length,
     total_credits: params.results.reduce(
-      (total, result) =>
-        total +
-        (result.creditsDeducted > 0
-          ? result.creditsDeducted
-          : typeof prior.credits_per_lead === "number"
-            ? prior.credits_per_lead
-            : 0),
+      (total, result) => total + providerCreditsForResult(result, prior),
       0,
     ),
     ...(typeof prior.credits_per_lead === "number"
@@ -1477,12 +1508,7 @@ async function finalizeClaimed(
   const unmatchedResults: SkipTraceResult[] = [];
 
   for (const result of params.results) {
-    const providerCredits =
-      result.creditsDeducted > 0
-        ? result.creditsDeducted
-        : typeof prior.credits_per_lead === "number"
-          ? prior.credits_per_lead
-          : 0;
+    const providerCredits = providerCreditsForResult(result, prior);
     const creditedResult = { ...result, creditsDeducted: providerCredits };
     let bucket: string[] | null = null;
     if (addressMap) {
@@ -1766,6 +1792,20 @@ async function finalizeClaimed(
 }
 
 // ---------- helpers ----------------------------------------------------
+
+function providerCreditsForResult(
+  result: SkipTraceResult,
+  summary: Record<string, unknown>,
+): number {
+  if (result.creditsDeducted > 0) return result.creditsDeducted;
+  // Tracerfy's flat queue rows omit per-row credit fields. Current provider
+  // pricing charges only hits, never misses, so the submitted per-hit rate is
+  // the honest fallback only when this row actually returned usable contact
+  // data. The UI labels the aggregate as an estimate for this reason.
+  return result.hit && typeof summary.credits_per_lead === "number"
+    ? summary.credits_per_lead
+    : 0;
+}
 
 function classifyContactKind(
   result: SkipTraceResult,

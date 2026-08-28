@@ -307,9 +307,9 @@ describe("<JobDetail /> skip-trace metrics", () => {
     expect(screen.getByText("Email only").parentElement).toHaveTextContent(
       "23",
     );
-    expect(screen.getByText("Credits used").parentElement).toHaveTextContent(
-      "0",
-    );
+    expect(
+      screen.getByText("Credits used (estimated)").parentElement,
+    ).toHaveTextContent("0");
     expect(
       screen.getByText(/Mobile classification does not mean DNC-cleared/),
     ).toBeInTheDocument();

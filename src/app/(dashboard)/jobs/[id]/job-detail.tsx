@@ -565,7 +565,7 @@ function SkipTracePanel({ job }: { job: Job }) {
           value={`${(summary.no_match as number | undefined) ?? "—"}`}
         />
         <DetailRow
-          label="Credits used"
+          label="Credits used (estimated)"
           value={`${(summary.total_credits as number | undefined) ?? "—"}`}
         />
         <DetailRow

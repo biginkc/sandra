@@ -69,7 +69,8 @@ Make cached Tracefy results replayable without losing provider-returned phone da
 - The adapter now rehydrates preserved raw rows through the current parser, recovers `primary_phone` / `primary_phone_type`, prefers classified mobile numbers, rejects malformed or name-only positives, and preserves explicit provider no-data.
 - Preflight and runtime now use owner names where available: Normal costs 1 credit per provider hit; Advanced costs 2; a true one-record synchronous lookup costs 5.
 - Every new/approved job stores an immutable maximum-credit authorization. The runner recomputes the unique provider-bound plan and live balance immediately before submission and stops if either gate changed.
-- Batch credits are counted once per unique provider result, not once per property fan-out, and the submitted trace type survives finalization.
+- Retry children also run a fresh preflight and persist their own credit ceiling before the workflow starts; the runner refuses every paid call when the persisted ceiling is absent or invalid.
+- Batch credits are estimated once per unique provider hit, never per miss or property fan-out, and the submitted trace type survives finalization.
 - Cache lookups are bounded-concurrent so a later 16K preflight does not serialize roughly 107 cache requests.
 - Full verification: 256 unit files / 2,807 tests and 93 RTL files / 929 tests passed; typecheck passed.
 - Read-only production projection on the current code: 130/130 tag rows reusable, zero provider-bound, with 55 mobile, 31 landline-only, 23 email-only, and 21 explicit no-data results. No production row or provider state was changed.
@@ -77,10 +78,13 @@ Make cached Tracefy results replayable without losing provider-returned phone da
 ## Manual review reconciliation
 
 - Three independent reviews found credit drift, malformed-cache, fan-out/resume accounting, metrics, phone dedupe, trace-type, bulk latency, and DNC/TCPA parsing risks. The code and regression suite now cover the first seven and parse every explicit compliance flag surfaced in the provider payload.
+- Claude iteration 2 at `9bad021` returned `NEXT_STEP`: it confirmed the cache repair and SMS/DNC separation, then found that flat batch misses were being charged in the displayed credit estimate. The repair now applies the per-hit rate only to `result.hit`, labels the UI metric estimated, and regression-tests one paid hit plus three free misses as 2 credits rather than 8.
+- A read-only production query found zero active (`queued` or `pending_approval`) skip-trace jobs and zero active jobs missing a credit ceiling. No backfill or cancellation was needed.
+- Codex additionally found the retry RPC created queued children without a ceiling. Retry now preflights and stamps the cap before workflow start, while the runner independently fails closed if any paid path still reaches it without a persisted cap.
 - Residual hard gate: the historical queue rows contain no DNC/TCPA fields even though current Tracerfy documentation says new skip-trace results include inline flags. Mobile classification is not registry-grade DNC clearance. Do not launch SMS from the 55 recovered mobile numbers until a separately authorized DNC scrub or equivalent verified compliance source is applied.
 
 ## Research agents
 
 - `cache_code_audit`: confirmed the cache/runner/persistence semantic contradiction and identified regression surfaces.
 - `tracerfy_docs`: confirmed first-party provider semantics, response fields, pricing, retry limits, and absence of an idempotency key.
-- `cache_fix_design`: independent remediation design in progress; must be reconciled with the raw `primary_phone` recovery evidence.
+- `cache_fix_design`: independently confirmed that raw-payload rehydration, semantic cache validity, immutable spend ceilings, and honest outcome accounting are the smallest safe repair; those recommendations are reconciled in the implementation above.
