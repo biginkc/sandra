@@ -52,6 +52,7 @@ export function useCoachChannel(
   callId: string | null,
   startingPhaseId: CoachPhaseId = "introduction",
   livenessActive = true,
+  sessionKey: string | null = callId,
 ) {
   const [state, dispatch] = useReducer(coachReducer, startingPhaseId, initialCoachState);
   const [degraded, setDegraded] = useState(false);
@@ -76,17 +77,20 @@ export function useCoachChannel(
     }, LIVENESS_WINDOW_MS);
   }, [callId, clearLivenessTimer]);
 
-  // A new call (different callId, including a transition to/from null)
-  // must start from a clean coach state — this hook lives at the
+  // A new attempt (different stable sessionKey) must start from a clean
+  // coach state — this hook lives at the
   // SoftphoneProvider level and outlives any single call, so without this
   // a second call would silently inherit the first call's transcript,
-  // phase, gates, objection cards, and entered deal values. Adjusted
+  // phase, gates, objection cards, and entered deal values. callId is kept
+  // separate because it changes from null to the authorized Realtime id
+  // during one attempt and must not erase fields entered while connecting.
+  // Adjusted
   // during render (React's documented pattern for resetting state when a
   // prop changes — already used the same way in use-coach-session.ts)
   // rather than in an effect, so this can't render one stale frame first.
-  const [trackedCallId, setTrackedCallId] = useState(callId);
-  if (callId !== trackedCallId) {
-    setTrackedCallId(callId);
+  const [trackedSessionKey, setTrackedSessionKey] = useState(sessionKey);
+  if (sessionKey !== trackedSessionKey) {
+    setTrackedSessionKey(sessionKey);
     dispatch({ type: "reset", startingPhaseId });
     setDegraded(false);
     setReconnectGap(false);

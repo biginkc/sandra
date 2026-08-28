@@ -82,10 +82,12 @@ describe("useCoachSession", () => {
     expect(createCoachChannel).not.toHaveBeenCalled();
 
     act(() => result.current.goNextSection());
+    act(() => result.current.setEntryField("motivation", "sell before winter"));
     const selectedSection = result.current.activeSectionId;
     rerender({ callId: "call-token" });
 
     expect(result.current.activeSectionId).toBe(selectedSection);
+    expect(result.current.state.entryFields.motivation).toBe("sell before winter");
     expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(createCoachChannel).toHaveBeenCalledTimes(1));
   });
@@ -118,6 +120,8 @@ describe("useCoachSession", () => {
       },
     );
 
+    act(() => result.current.setEntryField("offer_price", "$200,000"));
+
     rerender({
       sessionKey: "call-two",
       repName: "Morgan",
@@ -133,6 +137,7 @@ describe("useCoachSession", () => {
         propertyAddress: "2 Second St",
       }),
     });
+    expect(result.current.state.entryFields.offer_price).toBeNull();
   });
 
   it("loads context once and exposes it as ready", async () => {

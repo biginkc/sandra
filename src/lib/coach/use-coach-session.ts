@@ -99,7 +99,7 @@ export function useCoachSession(
   preparedTarget: PreparedCoachTarget | null = null,
   sessionKey: string | null = callId,
 ) {
-  const { dispatch, ...channel } = useCoachChannel(callId, "introduction", livenessActive);
+  const { dispatch, ...channel } = useCoachChannel(callId, "introduction", livenessActive, sessionKey);
   const [contextLoad, setContextLoad] = useState<ContextLoadState>(() => ({
     status: "loading",
     context: preparedTargetErrorContext(
