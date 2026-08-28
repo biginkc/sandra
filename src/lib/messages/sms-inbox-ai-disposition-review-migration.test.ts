@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const sql = readFileSync(
   new URL(
-    "../../../supabase/migrations/20260827230000_sms_inbox_ai_disposition_review_queue.sql",
+    "../../../supabase/migrations/20260828022800_sms_inbox_ai_disposition_review_queue_timeout_recovery.sql",
     import.meta.url,
   ),
   "utf8",
@@ -20,9 +20,7 @@ describe("Sandra Dispo pending AI review migration", () => {
     expect(sql).toContain(
       "when 'dispo' then c.ai_disposition_review_id is not null",
     );
-    expect(sql).not.toContain(
-      "when 'dispo' then c.outreach_dispo is not null",
-    );
+    expect(sql).not.toContain("when 'dispo' then c.outreach_dispo is not null");
   });
 
   it("keeps list and count on the same pending-review predicate", () => {
@@ -35,21 +33,26 @@ describe("Sandra Dispo pending AI review migration", () => {
     expect(sql).toContain("when 'dispo' then not active.is_test_traffic");
   });
 
-  it("admits old pending conversations through a separate narrow branch", () => {
-    const pendingBranch = sql.slice(sql.indexOf("union all"), sql.indexOf("ranked as materialized"));
-
+  it("admits old-only pending conversations without re-ranking or rescanning recent conversations", () => {
     expect(sql).toContain("pending_reviews as materialized");
-    expect(sql).toContain("m.created_at >= (select cutoff from bounds)");
-    expect(pendingBranch).toContain("from pending_reviews review");
-    expect(pendingBranch).toContain("m.org_id = review.org_id");
-    expect(pendingBranch).toContain(
-      "m.conversation_id = review.conversation_id",
-    );
-    expect(pendingBranch).toContain(
-      "m.created_at < (select cutoff from bounds)",
-    );
-    expect(sql).toContain("bool_or(e.is_recent) as has_recent");
+    expect(sql).toContain("recent_eligible as materialized");
+    expect(sql).toContain("recent_grouped as materialized");
+    expect(sql).toContain("old_review_conversations as materialized");
+    expect(sql).toContain("old_review_eligible as materialized");
+    expect(sql).toContain("old_review_grouped as materialized");
+    expect(sql).toContain("from old_review_conversations review");
+    expect(sql).toContain("m.org_id = review.org_id");
+    expect(sql).toContain("m.conversation_id = review.conversation_id");
+    expect(sql).toContain("recent.conversation_id = review.conversation_id");
+    expect(sql).toContain("false as has_recent");
+    expect(sql).toContain("select recent.*");
+    expect(sql).toContain("select review.*");
+    expect(sql).toContain("from old_review_grouped review");
     expect(sql).toContain("else c.has_recent");
+    expect(sql).not.toContain("ranked as materialized");
+    expect(sql).not.toContain(
+      "from pending_reviews review\n    join public.messages",
+    );
     expect(sql).not.toMatch(
       /m\.created_at\s*>=\s*\(select cutoff from bounds\)\s+or/i,
     );
@@ -73,9 +76,7 @@ describe("Sandra Dispo pending AI review migration", () => {
       "coalesce(r.is_dnc_locked, false) or r.is_opted_out or r.is_test_traffic as is_noise",
     );
     expect(sql).toContain("when 'dispo' then not active.is_test_traffic");
-    expect(sql).toContain(
-      "else not p_hide_noise or not active.is_noise",
-    );
+    expect(sql).toContain("else not p_hide_noise or not active.is_noise");
     expect(sql).toContain(
       "count(*) filter (where c.has_recent and (not p_hide_noise or not c.is_noise))::integer as all_count",
     );
