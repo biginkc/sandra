@@ -250,3 +250,23 @@
 - Production preflight found the Jitter stream-wide both-track fix already deployed and healthy, with prior post-deploy rep and seller finals and zero active taps. One cross-service acceptance risk remains under review: production coaching currently has a 60-minute stream cap while normal calls may exceed one hour.
 - Final current-diff adversarial re-review found no remaining code findings after the first-paint placeholder fix. Production-only Runtime Cache and real audio/Realtime behavior remain acceptance gaps.
 - Status: local implementation and browser suites are clean; the long-call cap fix, exact committed-head Claude review, PR/CI, candidate deployment, and production browser/audio proof remain.
+
+### Iteration 6 - exact-main rebase and review-gap closure
+
+- Rebasing onto Sandra `origin/main` at `77afb648fafdd3ab470b51981b8ed91d3ef6e68f` completed without conflicts after PR #424 merged. No earlier SHA approval is being reused.
+- Exact-head review approved the implementation but surfaced one material browser-proof gap and three small product weaknesses. All actionable findings are closed:
+  - The synthetic Chrome harness now mounts the real `useCoachSession`, Realtime channel hook, and reducer. Only external context I/O, transport, audio, and provider inputs are stubbed.
+  - Prepared homeowner/address values are proven on deferred first paint, context failure/retry, trusted-context replacement, and synchronous new-call replacement.
+  - Late responses carry real call/section identity and are proven unable to overwrite newer visible advice; this cannot pass merely because navigation clears the panel.
+  - Twenty Follow-up Questions clicks produce twenty provider requests; the twenty-first is blocked client-side without an extra request.
+  - Whitespace-only trusted motivation/caller values no longer shadow typed entries.
+  - A hung recommendation request now times out after 20 seconds, preserves prior valid output, releases the busy slot, and permits retry.
+  - Exhausted per-call request-cap state remains visible across section navigation.
+- The review's phone-redaction false-positive observation was not expanded into speculative parsing logic. Phone exclusion remains fail-safe, and no approved-flow test demonstrated a defect.
+- Final post-rebase local evidence:
+  - Sequential `npm run verify` passes: typecheck, 256 unit files / 2,791 tests, and 93 RTL files / 924 tests.
+  - Full synthetic Chromium passes 37/37, including all 14 coach user journeys, responsive layout, keypad/editor isolation, and WCAG contrast.
+  - One Prospects menu timing test failed only while full RTL and Playwright ran concurrently. The exact test passed on clean `origin/main`, passed on this branch, and the sequential full verification passed 924/924; release evidence uses the clean sequential run.
+  - Typecheck, scoped lint, and `git diff --check` pass.
+- Shared telephony readiness is tracked in Jitter PR #227. Its exact tree passed 93 focused tests, all typechecks, independent exact-head review, GitHub verification, database/audio safety, and a Vercel preview build. Railway `coach-ingest` is staged at `COACH_MAX_CALL_MINUTES=120` with no deployment/restart; the live service remains unchanged until merge.
+- Status: exact final Claude review, Sandra PR/CI, production-configured candidate, merges, and controlled short plus over-60-minute production calls remain.
