@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -168,7 +168,7 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
       "Loading No owner messages",
     );
     expect(results).toHaveAttribute("aria-busy", "true");
-    expect(results).toHaveClass("opacity-60");
+    expect(results).toHaveClass("ring-1");
 
     // The loading chip ignores duplicate clicks while the first server
     // navigation is still pending.
@@ -183,9 +183,11 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
       />,
     );
 
-    expect(await screen.findByTestId("filter-unassigned")).toHaveAttribute(
-      "aria-busy",
-      "false",
+    await waitFor(() =>
+      expect(screen.getByTestId("filter-unassigned")).toHaveAttribute(
+        "aria-busy",
+        "false",
+      ),
     );
     expect(
       screen.queryByTestId("filter-unassigned-spinner"),
@@ -194,8 +196,79 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
       "aria-busy",
       "false",
     );
-    expect(screen.getByTestId("inbox-filter-results")).toHaveClass(
-      "opacity-100",
+    expect(screen.getByTestId("inbox-filter-results")).toHaveClass("ring-0");
+  });
+
+  it("replaces or cancels pending feedback when the operator changes direction", async () => {
+    replaceCalls.length = 0;
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <CockpitView {...baseProps} activeTab="inbox" />,
+    );
+
+    await user.click(screen.getByTestId("filter-unassigned"));
+    expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(
+      "inert",
+    );
+
+    await user.click(screen.getByTestId("dnc-toggle"));
+    expect(screen.queryByTestId("filter-unassigned-spinner")).toBeNull();
+    expect(screen.getByTestId("dnc-toggle-spinner")).toBeVisible();
+    expect(screen.getByTestId("dnc-toggle")).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Updating DNC visibility",
+    );
+
+    rerender(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        hideDnc={false}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(
+        "aria-busy",
+        "false",
+      ),
+    );
+
+    await user.click(screen.getByTestId("filter-unassigned"));
+    await user.click(screen.getByTestId("tab-outbox"));
+    expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(
+      "aria-busy",
+      "false",
+    );
+
+    rerender(
+      <CockpitView
+        {...baseProps}
+        activeTab="outbox"
+        hideDnc={false}
+      />,
+    );
+    rerender(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        hideDnc={false}
+      />,
+    );
+    expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(
+      "aria-busy",
+      "false",
+    );
+
+    await user.click(screen.getByTestId("filter-unassigned"));
+    act(() => window.dispatchEvent(new PopStateEvent("popstate")));
+    await waitFor(() =>
+      expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(
+        "aria-busy",
+        "false",
+      ),
     );
   });
 

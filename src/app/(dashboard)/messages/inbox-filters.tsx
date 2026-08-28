@@ -1,8 +1,6 @@
 "use client";
 
 import { Loader2Icon } from "lucide-react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
 
 export type InboxFilter =
   | "all"
@@ -17,6 +15,10 @@ export type InboxFilter =
 
 export type InboxFilterCounts = Record<InboxFilter, number>;
 
+export type PendingInboxChange =
+  | { kind: "filter"; value: InboxFilter }
+  | { kind: "hideDnc"; value: boolean };
+
 type Props = {
   active: InboxFilter;
   filterCounts: InboxFilterCounts;
@@ -28,8 +30,9 @@ type Props = {
   /** Count of DNC threads that the current filter set would have shown
    *  if the toggle were OFF. Surfaced as a tiny hint next to the toggle. */
   hiddenDncCount: number;
-  /** Notifies the result region while a filter's server data is catching up. */
-  onPendingChange?: (pending: boolean) => void;
+  pendingChange: PendingInboxChange | null;
+  onFilterChange: (filter: InboxFilter) => void;
+  onHideDncChange: (hideDnc: boolean) => void;
 };
 
 const FILTER_LABELS: Record<InboxFilter, string> = {
@@ -55,57 +58,16 @@ export function InboxFilters({
   showAssignmentChips,
   hideDnc,
   hiddenDncCount,
-  onPendingChange,
+  pendingChange,
+  onFilterChange,
+  onHideDncChange,
 }: Props) {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const [pendingFilter, setPendingFilter] = useState<InboxFilter | null>(null);
-
-  const setFilter = (next: InboxFilter) => {
-    if (pendingFilter === null && next === active) return;
-    if (next === pendingFilter) return;
-
-    // This high-priority local update commits before the RSC request returns,
-    // so a slow filter navigation always acknowledges the click immediately.
-    setPendingFilter(next);
-    onPendingChange?.(true);
-
-    const sp = new URLSearchParams(searchParams.toString());
-    if (next === "all") sp.delete("filter");
-    else sp.set("filter", next);
-    sp.delete("thread"); // clear selection when switching filters
-    sp.delete("inboxPage");
-    const qs = sp.toString();
-    router.replace(qs ? `/messages?${qs}` : "/messages");
-  };
-
-  // `active` is server-resolved. Once it matches the requested filter, the
-  // replacement rows have arrived and the pending feedback can disappear.
-  useEffect(() => {
-    if (pendingFilter === null || pendingFilter !== active) return undefined;
-    const timeout = window.setTimeout(() => {
-      setPendingFilter(null);
-      onPendingChange?.(false);
-    }, 0);
-    return () => window.clearTimeout(timeout);
-  }, [active, onPendingChange, pendingFilter]);
-
+  const pendingFilter =
+    pendingChange?.kind === "filter" ? pendingChange.value : null;
+  const pendingHideDnc = pendingChange?.kind === "hideDnc";
   const displayedActive = pendingFilter ?? active;
-
-  const toggleHideDnc = () => {
-    const sp = new URLSearchParams(searchParams.toString());
-    if (hideDnc) {
-      // Currently hidden -> show them. Set explicit hideDnc=0.
-      sp.set("hideDnc", "0");
-    } else {
-      // Currently shown -> hide. Default state, so just remove the param.
-      sp.delete("hideDnc");
-    }
-    sp.delete("thread");
-    sp.delete("inboxPage");
-    const qs = sp.toString();
-    router.replace(qs ? `/messages?${qs}` : "/messages");
-  };
+  const displayedHideDnc =
+    pendingChange?.kind === "hideDnc" ? pendingChange.value : hideDnc;
 
   return (
     <div
@@ -119,7 +81,7 @@ export function InboxFilters({
         active={displayedActive === "unread"}
         pending={pendingFilter === "unread"}
         count={filterCounts.unread}
-        onClick={() => setFilter("unread")}
+        onClick={() => onFilterChange("unread")}
         testId="filter-unread"
       />
       <FilterChip
@@ -127,7 +89,7 @@ export function InboxFilters({
         active={displayedActive === "needs_outcome"}
         pending={pendingFilter === "needs_outcome"}
         count={filterCounts.needs_outcome}
-        onClick={() => setFilter("needs_outcome")}
+        onClick={() => onFilterChange("needs_outcome")}
         testId="filter-needs-outcome"
       />
       {showAssignmentChips && (
@@ -137,7 +99,7 @@ export function InboxFilters({
             active={displayedActive === "mine"}
             pending={pendingFilter === "mine"}
             count={filterCounts.mine}
-            onClick={() => setFilter("mine")}
+            onClick={() => onFilterChange("mine")}
             testId="filter-mine"
           />
           <FilterChip
@@ -146,7 +108,7 @@ export function InboxFilters({
             active={displayedActive === "escalated"}
             pending={pendingFilter === "escalated"}
             count={filterCounts.escalated}
-            onClick={() => setFilter("escalated")}
+            onClick={() => onFilterChange("escalated")}
             testId="filter-escalated"
           />
         </>
@@ -158,7 +120,7 @@ export function InboxFilters({
           active={displayedActive === "escalated"}
           pending={pendingFilter === "escalated"}
           count={filterCounts.escalated}
-          onClick={() => setFilter("escalated")}
+          onClick={() => onFilterChange("escalated")}
           testId="filter-escalated"
         />
       ) : null}
@@ -168,7 +130,7 @@ export function InboxFilters({
         active={displayedActive === "dispo"}
         pending={pendingFilter === "dispo"}
         count={filterCounts.dispo}
-        onClick={() => setFilter("dispo")}
+        onClick={() => onFilterChange("dispo")}
         testId="filter-dispo"
       />
       {showAssignmentChips && (
@@ -177,7 +139,7 @@ export function InboxFilters({
           active={displayedActive === "unassigned"}
           pending={pendingFilter === "unassigned"}
           count={filterCounts.unassigned}
-          onClick={() => setFilter("unassigned")}
+          onClick={() => onFilterChange("unassigned")}
           testId="filter-unassigned"
         />
       )}
@@ -186,7 +148,7 @@ export function InboxFilters({
         active={displayedActive === "all"}
         pending={pendingFilter === "all"}
         count={filterCounts.all}
-        onClick={() => setFilter("all")}
+        onClick={() => onFilterChange("all")}
         testId="filter-all"
       />
       <FilterChip
@@ -194,7 +156,7 @@ export function InboxFilters({
         active={displayedActive === "unknown"}
         pending={pendingFilter === "unknown"}
         count={filterCounts.unknown}
-        onClick={() => setFilter("unknown")}
+        onClick={() => onFilterChange("unknown")}
         testId="filter-unknown"
       />
       <FilterChip
@@ -202,10 +164,10 @@ export function InboxFilters({
         active={displayedActive === "dismissed"}
         pending={pendingFilter === "dismissed"}
         count={filterCounts.dismissed}
-        onClick={() => setFilter("dismissed")}
+        onClick={() => onFilterChange("dismissed")}
         testId="filter-dismissed"
       />
-      {active === "dispo" ? (
+      {displayedActive === "dispo" ? (
         <span
           className="ml-auto text-[12px] font-medium text-[#78716c]"
           data-testid="sandra-dispo-compliance-note"
@@ -214,15 +176,18 @@ export function InboxFilters({
         </span>
       ) : (
         <DncToggle
-          hideDnc={hideDnc}
+          hideDnc={displayedHideDnc}
           hiddenDncCount={hiddenDncCount}
-          onToggle={toggleHideDnc}
+          pending={pendingHideDnc}
+          onToggle={() => onHideDncChange(!displayedHideDnc)}
         />
       )}
       <span className="sr-only" role="status" aria-live="polite">
         {pendingFilter
           ? `Loading ${FILTER_LABELS[pendingFilter]} messages`
-          : ""}
+          : pendingHideDnc
+            ? "Updating DNC visibility"
+            : ""}
       </span>
     </div>
   );
@@ -240,10 +205,12 @@ export function InboxFilters({
 function DncToggle({
   hideDnc,
   hiddenDncCount,
+  pending,
   onToggle,
 }: {
   hideDnc: boolean;
   hiddenDncCount: number;
+  pending: boolean;
   onToggle: () => void;
 }) {
   const label = hideDnc ? "Hide DNC & tests" : "Showing all";
@@ -253,9 +220,11 @@ function DncToggle({
       onClick={onToggle}
       role="switch"
       aria-checked={hideDnc}
+      aria-busy={pending}
+      disabled={pending}
       data-testid="dnc-toggle"
       data-active={hideDnc || undefined}
-      className="ml-auto inline-flex min-h-11 items-center gap-2 text-[12px] text-[#78716c] hover:text-[#1c1917]"
+      className="relative ml-auto inline-flex min-h-11 items-center gap-2 text-[12px] text-[#78716c] hover:text-[#1c1917]"
     >
       <span
         className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
@@ -270,6 +239,13 @@ function DncToggle({
         />
       </span>
       <span className="font-medium">{label}</span>
+      <Loader2Icon
+        className={`absolute right-0 top-0 h-3.5 w-3.5 motion-safe:animate-spin ${
+          pending ? "visible opacity-100" : "invisible opacity-0"
+        }`}
+        aria-hidden="true"
+        data-testid={pending ? "dnc-toggle-spinner" : undefined}
+      />
       {hideDnc && hiddenDncCount > 0 ? (
         <span
           className="text-[11px] text-[#a8a29e]"
@@ -310,9 +286,10 @@ function FilterChip({
       aria-label={ariaLabel}
       aria-pressed={active}
       aria-busy={pending}
+      disabled={pending}
       data-testid={testId}
       data-active={active || undefined}
-      className={`inline-flex min-h-11 items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${
+      className={`relative inline-flex min-h-11 items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${
         active
           ? "bg-primary text-primary-foreground"
           : "border border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4] hover:text-[#1c1917]"
@@ -328,13 +305,13 @@ function FilterChip({
         />
       ) : null}
       <span>{label}</span>
-      {pending ? (
-        <Loader2Icon
-          className="h-3.5 w-3.5 shrink-0 animate-spin"
-          aria-hidden="true"
-          data-testid={`${testId}-spinner`}
-        />
-      ) : null}
+      <Loader2Icon
+        className={`absolute right-1 top-1 h-3.5 w-3.5 motion-safe:animate-spin ${
+          pending ? "visible opacity-100" : "invisible opacity-0"
+        }`}
+        aria-hidden="true"
+        data-testid={pending ? `${testId}-spinner` : undefined}
+      />
       {showCount ? (
         <span
           data-testid={`${testId}-count`}

@@ -16,6 +16,7 @@ import {
   InboxFilters,
   type InboxFilter,
   type InboxFilterCounts,
+  type PendingInboxChange,
 } from "./inbox-filters";
 import { InboxThreadList } from "./inbox-thread-list";
 import { QueuePanel, type QueuedRow } from "./queue-panel";
@@ -95,6 +96,8 @@ export function CockpitView({
   const searchParams = useSearchParams();
   const liveNowMs = useLiveNow(nowMs);
   const inboxTotalPages = Math.max(Math.ceil(inboxTotal / inboxPageSize), 1);
+  const [pendingInboxChange, setPendingInboxChange] =
+    useState<PendingInboxChange | null>(null);
 
   // One live stats source for the Outbox tab badge + the stats banner,
   // so the two never show different numbers. Seeds from the server
@@ -128,6 +131,7 @@ export function CockpitView({
   });
 
   const setTab = (next: string) => {
+    setPendingInboxChange(null);
     const sp = new URLSearchParams(searchParams.toString());
     if (next === "inbox") {
       sp.delete("tab");
@@ -139,6 +143,7 @@ export function CockpitView({
   };
   const setInboxPage = useCallback(
     (nextPage: number) => {
+      setPendingInboxChange(null);
       const sp = new URLSearchParams(searchParams.toString());
       if (nextPage <= 1) sp.delete("inboxPage");
       else sp.set("inboxPage", String(nextPage));
@@ -176,7 +181,6 @@ export function CockpitView({
   // visible during transitions, so isPending never flips in the tree
   // the user is looking at.
   const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
-  const [isFilterPending, setIsFilterPending] = useState(false);
   const serverSelectedThreadId =
     selectedThreadId ?? threadDetail?.threadId ?? null;
   const previousServerSelection = useRef(serverSelectedThreadId);
@@ -189,6 +193,7 @@ export function CockpitView({
 
   const handleSelectThread = useCallback(
     (threadId: string) => {
+      setPendingInboxChange(null);
       setPendingThreadId(threadId);
       setMobileShowsDetail(true);
       setFocusReturnThreadId(null);
@@ -206,6 +211,7 @@ export function CockpitView({
   }, [serverSelectedThreadId]);
 
   const handleBackToList = useCallback(() => {
+    setPendingInboxChange(null);
     const returningThreadId =
       pendingThreadId ?? threadDetail?.threadId ?? selectedThreadId ?? null;
     setPendingThreadId(null);
@@ -282,6 +288,74 @@ export function CockpitView({
   const isLoadingThread =
     pendingThreadId !== null && selectedThreadId !== pendingThreadId;
 
+  const handleInboxFilterChange = useCallback(
+    (next: InboxFilter) => {
+      if (
+        (pendingInboxChange?.kind === "filter" &&
+          pendingInboxChange.value === next) ||
+        (pendingInboxChange === null && next === filter)
+      ) {
+        return;
+      }
+
+      setPendingInboxChange({ kind: "filter", value: next });
+      setPendingThreadId(null);
+      setMobileShowsDetail(false);
+      const sp = new URLSearchParams(searchParams.toString());
+      if (next === "all") sp.delete("filter");
+      else sp.set("filter", next);
+      sp.delete("thread");
+      sp.delete("inboxPage");
+      const qs = sp.toString();
+      router.replace(qs ? `/messages?${qs}` : "/messages");
+    },
+    [filter, pendingInboxChange, router, searchParams],
+  );
+
+  const handleHideDncChange = useCallback(
+    (nextHideDnc: boolean) => {
+      if (
+        pendingInboxChange?.kind === "hideDnc" &&
+        pendingInboxChange.value === nextHideDnc
+      ) {
+        return;
+      }
+
+      setPendingInboxChange({ kind: "hideDnc", value: nextHideDnc });
+      setPendingThreadId(null);
+      setMobileShowsDetail(false);
+      const sp = new URLSearchParams(searchParams.toString());
+      if (nextHideDnc) sp.delete("hideDnc");
+      else sp.set("hideDnc", "0");
+      sp.delete("thread");
+      sp.delete("inboxPage");
+      const qs = sp.toString();
+      router.replace(qs ? `/messages?${qs}` : "/messages");
+    },
+    [pendingInboxChange, router, searchParams],
+  );
+
+  useEffect(() => {
+    if (pendingInboxChange === null) return undefined;
+    const settled =
+      pendingInboxChange.kind === "filter"
+        ? pendingInboxChange.value === filter
+        : pendingInboxChange.value === hideDnc;
+    if (!settled) return undefined;
+    const timeout = window.setTimeout(() => setPendingInboxChange(null), 0);
+    return () => window.clearTimeout(timeout);
+  }, [filter, hideDnc, pendingInboxChange]);
+
+  useEffect(() => {
+    const cancelPendingOnHistoryNavigation = () =>
+      setPendingInboxChange(null);
+    window.addEventListener("popstate", cancelPendingOnHistoryNavigation);
+    return () =>
+      window.removeEventListener("popstate", cancelPendingOnHistoryNavigation);
+  }, []);
+
+  const isFilterPending = pendingInboxChange !== null;
+
   return (
     <Page className="pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-8">
       <PageHeader
@@ -342,13 +416,16 @@ export function CockpitView({
             showAssignmentChips={currentUserId !== null}
             hideDnc={hideDnc}
             hiddenDncCount={hiddenDncCount}
-            onPendingChange={setIsFilterPending}
+            pendingChange={pendingInboxChange}
+            onFilterChange={handleInboxFilterChange}
+            onHideDncChange={handleHideDncChange}
           />
 
           <div
             aria-busy={isFilterPending}
-            className={`transition-opacity duration-150 ${
-              isFilterPending ? "opacity-60" : "opacity-100"
+            inert={isFilterPending}
+            className={`rounded-lg transition-shadow duration-150 motion-reduce:transition-none ${
+              isFilterPending ? "cursor-wait ring-1 ring-primary/20" : "ring-0"
             }`}
             data-testid="inbox-filter-results"
           >
