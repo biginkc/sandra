@@ -227,6 +227,22 @@ describe("Sandra Dispo inbox queue migration", () => {
       label: "Pending",
       reviewStatus: "pending",
     });
+    await pg.query(
+      `insert into public.messages (
+         id, org_id, channel, direction, status, property_id, contact_id,
+         conversation_id, from_address, to_address, body, created_at
+       ) values (
+         $1, $2, 'sms', 'outbound', 'sent', null, $3, $4,
+         '+18162804181', '+18165550101', 'Pending propertyless latest',
+         now() + interval '1 second'
+       )`,
+      [
+        crypto.randomUUID(),
+        BMH_ORG_ID,
+        pending.contactId,
+        pending.conversationId,
+      ],
+    );
     const oldPropertyId = crypto.randomUUID();
     await pg.query(
       `insert into public.properties (
@@ -301,7 +317,7 @@ describe("Sandra Dispo inbox queue migration", () => {
     );
     expect(pendingRow).toMatchObject({
       property_id: pending.propertyId,
-      last_message_body: "Pending inbox fixture",
+      last_message_body: "Pending propertyless latest",
       unread_count: 1,
     });
 
@@ -355,7 +371,7 @@ describe("Sandra Dispo inbox queue migration", () => {
     const all = await snapshot("all", true);
     expect(all.rows.map((row) => row.last_message_body)).toEqual(
       expect.arrayContaining([
-        "Pending inbox fixture",
+        "Pending propertyless latest",
         "Historical inbox fixture",
         "Confirmed inbox fixture",
       ]),
@@ -366,7 +382,7 @@ describe("Sandra Dispo inbox queue migration", () => {
 
     const unread = await snapshot("unread", true);
     expect(unread.rows.map((row) => row.last_message_body)).toContain(
-      "Pending inbox fixture",
+      "Pending propertyless latest",
     );
   });
 });

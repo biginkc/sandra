@@ -44,6 +44,8 @@ describe("Sandra Dispo pending AI review migration", () => {
     expect(sql).toContain("m.org_id = review.org_id");
     expect(sql).toContain("m.conversation_id = review.conversation_id");
     expect(sql).toContain("recent.conversation_id = review.conversation_id");
+    expect(sql).toContain("select review.property_id");
+    expect(sql).toContain("review.conversation_id = e.conversation_id");
     expect(sql).toContain("false as has_recent");
     expect(sql).toContain("select recent.*");
     expect(sql).toContain("select review.*");

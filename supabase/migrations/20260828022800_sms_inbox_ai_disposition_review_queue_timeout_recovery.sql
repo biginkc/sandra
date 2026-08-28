@@ -101,8 +101,18 @@ as $$
       e.conversation_id,
       (array_agg(e.id order by e.created_at desc, e.id desc))[1] as last_message_id,
       (array_agg(e.contact_id order by e.created_at desc, e.id desc))[1] as contact_id,
-      (array_agg(e.property_id order by e.created_at desc, e.id desc)
-        filter (where e.property_id is not null))[1] as property_id,
+      coalesce(
+        (array_agg(e.property_id order by e.created_at desc, e.id desc)
+          filter (where e.property_id is not null))[1],
+        (
+          select review.property_id
+          from pending_reviews review
+          where review.org_id = e.org_id
+            and review.conversation_id = e.conversation_id
+          order by review.created_at desc, review.id desc
+          limit 1
+        )
+      ) as property_id,
       count(*) filter (
         where e.direction = 'inbound' and e.read_at is null
       )::integer as unread_count,
