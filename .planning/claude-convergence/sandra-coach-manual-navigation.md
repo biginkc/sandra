@@ -7,8 +7,8 @@
 - Plan source: Jarrad-approved plan in the active Codex thread on 2026-08-27.
 - Original baseline: Sandra `origin/main` at `c8b24a9a8a16bb4506dbb94b88067d1362959ff0`.
 - Final integration baseline: cleanly rebased onto Sandra `origin/main` at `8e5d313d3e2f1d824235651b773cedd912e76367`; upstream-only changes were unrelated Messages work.
-- Authority profile: Production-aware. No real call, provider spend, production mutation, deploy, or merge before all gates.
-- Dependencies: none. Open PRs #422, #418, #408, and #337 do not supply code required by this implementation.
+- Authority profile: Production-authorized. On 2026-08-28 Jarrad explicitly authorized exhaustive browser/audio testing, in-scope fixes, PR creation/merge, deployment, provider-backed controlled QA calls, and production verification without another human gate. Compliance rules and unrelated-customer/data boundaries remain mandatory.
+- Dependencies: none. Open PRs #424, #418, #408, and #337 do not supply code required by this implementation.
 
 ## Plan alignment
 
@@ -30,7 +30,9 @@
 - [x] Focused unit/RTL tests, typecheck, lint for changed files, synthetic responsive/contrast tests, and full repository verification pass.
 - [ ] Exhaustive Codex manual review and Claude adversarial review are clean for the final head.
 - [x] Fresh visible Chrome proof covers desktop and mobile layout without a real outbound call.
-- [ ] A controlled human call remains an explicit post-implementation gate requiring Jarrad's authorization.
+- [ ] Exhaustive click-driven Chrome proof covers all manual sections, known token population, dynamic audio-shaped transcript events, recommendation timing/failure/staleness, persistence/reset, responsive layout, reconnect states, and call controls.
+- [ ] Production-configured proof confirms Runtime Cache permits real recommendation generation instead of failing closed.
+- [ ] A controlled QA robot call with deterministic browser-microphone audio proves both speaker tracks, Deepgram finals/interims, private Realtime delivery, automatic advice, exactly three follow-ups, manual-only navigation, call controls, wrap-up, and new-call reset in production.
 
 ## Tool preflight
 
@@ -202,3 +204,49 @@
   - Synthetic Chromium: 15/15 responsive, keypad/editor isolation, and WCAG contrast tests pass.
   - Changed-file lint and `git diff origin/main...HEAD --check` pass; worktree is clean.
 - Status: final Claude exact-head re-review pending. The pre-rebase approval is supporting evidence only and cannot authorize the PR by itself.
+
+### Iteration 4 - exhaustive browser and production acceptance expansion
+
+- Jarrad expanded the acceptance requirement after the corrected implementation review: drive the feature through the browser as a user, emulate the audio path, populate every placeholder backed by known call/lead/property data, fix all in-scope issues, and continue through production verification without another human gate.
+- Exact-head Claude review at `5ab887d2795901f2f7ea785d1eb6bd679c28c972` returned `NEXT_STEP` / `APPROVE_PR: YES` and independently reconfirmed the two prior blocking fixes. It also found:
+  - A medium regression-coverage gap: the production call-identity key was not directly protected by a remount test.
+  - A medium production-only uncertainty: Runtime Cache must prove immediate read-after-write freshness and latency in Vercel rather than merely in local fallback tests.
+  - A low usability issue: an in-flight automatic request disabled the deliberate Follow-up Questions action.
+  - Two non-actionable observations: mutually exclusive offer/close tracks intentionally remain together per the approved section contract, and spelled-out phone digits are an obscure input Deepgram does not currently emit.
+- Accepted fixes in progress:
+  - Extract the exact keyed production view boundary and regression-test call-identity remounting.
+  - Let deliberate Follow-up Questions supersede background automatic advice while preserving stale-response isolation and single-manual-request behavior.
+- Browser proof plan:
+  - Durable click-driven Playwright harness for the full 26-section walk, all phase jumps, known token resolution and editable deal values, dynamic rep/seller interim/final transcript events, recommendation debounce/failure/staleness/caps, legacy-event inertness, persistence/new-call reset, reconnect/context failures, responsive layout, and call controls.
+  - Fresh visible Chrome walkthrough using the same user-facing controls; external event injection is allowed only to emulate audio/provider/fault inputs.
+  - Production telephony proof uses a deterministic WAV as Chrome's real WebRTC microphone plus Jitter's owned proof-answer QA robot as the homeowner leg. This exercises Telnyx both-track capture, stream-wide ordering, Deepgram, private Realtime, Sandra, and the real recommendation boundary.
+- Release constraints/evidence:
+  - PR previews do not receive the production-only coach/Jitter flags and cannot prove the live call path.
+  - A production-configured `--prod --skip-domain` deployment is the safest pre-merge provider surface; canonical production still requires exact merged-SHA verification.
+  - The current rollback deployment is `dpl_5rLoCHJUrGqis6s3h5GcRhpnAVyv` at Sandra SHA `8e5d313d3e2f1d824235651b773cedd912e76367`; re-record immediately before merge because main may advance.
+  - The owned robot must be attached only to clearly labeled QA data. No compliance quiet-hour bypass is permitted; at 01:25 CDT the earliest ordinary Eastern-time call window was 07:00 CDT.
+- Status: expanded browser harness and accepted fixes in progress. The prior exact-head approval is invalidated by these changes.
+
+### Iteration 5 - browser-runtime hardening and known placeholder population
+
+- Known values now populate before the rep has to type anything:
+  - Trusted server-loaded lead/rep context remains authoritative.
+  - The already-prepared call target fills a missing homeowner/address on the first live paint, while lookup is still loading, and during a retryable context-load failure.
+  - Manual-dial sentinel labels, raw phone values, and formatted phone labels are explicitly rejected as homeowner names.
+  - Motivation and cold-caller name use trusted context when present; otherwise they become session-owned editable chips. Offer price, net, and closing date remain deliberately live-entered.
+  - Prepared-target state is replaced on call identity changes and is never sent through the recommendation request or trusted AI server boundary.
+- Accepted exact-head review fixes are complete:
+  - The production call-identity keyed boundary has a mutation-proven remount regression.
+  - Follow-up Questions remains available during background automatic advice, supersedes it, rejects duplicate manual requests, and ignores the stale automatic completion.
+- Click-driven browser testing exposed a Chrome-only crash that unit/jsdom tests missed: native browser timer functions had been detached onto a plain object, so meaningful finalized seller speech threw `Illegal invocation` when starting the 1.5-second debounce. The default timer API now calls bound `globalThis` wrappers.
+- Final local verification after those fixes:
+  - `npm run verify`: 2,788/2,788 unit tests and 920/920 RTL browser-component tests pass; typecheck passes.
+  - Full synthetic Playwright suite: 33/33 passes, including the 10 new user-journey cases.
+  - The new browser journey walks all 26 sections both directions, every phase jump, populated known tokens, editable live values, transcript final/interim semantics, recommendation debounce/failure/staleness, follow-up supersession/exactly-three results, legacy-event inertness, collapse/reopen/new-call reset, reconnect/context degradation, call controls, and desktop/mobile ordering.
+  - The user-facing actions are real browser clicks. A small harness bridge is limited to external audio/provider/network stimuli so the coach stays mounted exactly as it does during a live call.
+- Build evidence:
+  - The normal local Turbopack build cannot follow this worktree's shared `node_modules` symlink.
+  - A webpack fallback compiled the application successfully, then stopped at an existing `campaigns/page.tsx` invalid Page export on unchanged `origin/main`. This branch does not modify that page. CI and the production-configured Vercel candidate remain the release authority.
+- Production preflight found the Jitter stream-wide both-track fix already deployed and healthy, with prior post-deploy rep and seller finals and zero active taps. One cross-service acceptance risk remains under review: production coaching currently has a 60-minute stream cap while normal calls may exceed one hour.
+- Final current-diff adversarial re-review found no remaining code findings after the first-paint placeholder fix. Production-only Runtime Cache and real audio/Realtime behavior remain acceptance gaps.
+- Status: local implementation and browser suites are clean; the long-call cap fix, exact committed-head Claude review, PR/CI, candidate deployment, and production browser/audio proof remain.

@@ -913,6 +913,43 @@ describe("SoftphoneProvider coach UI flag", () => {
     expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument();
   });
 
+  it("keeps the prepared homeowner and address in the script when live context loading fails", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    loadCoachCallContext.mockRejectedValue(new Error("network unavailable"));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeVisible());
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("Hey Softphone?");
+    await user.click(screen.getByTestId("variant-Opener-cold_call"));
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("1 Main St");
+  });
+
+  it("shows the prepared homeowner and address on the first live paint while context is still loading", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    loadCoachCallContext.mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeVisible());
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("Hey Softphone?");
+    await user.click(screen.getByTestId("variant-Opener-cold_call"));
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("1 Main St");
+    expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the classic popover as the only live view when the flag is off (default)", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "");

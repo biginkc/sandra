@@ -4,7 +4,7 @@
   "source": "BMH CLOSR Call Script — Content Spec v1 (JT's Official CLOSR Sales Process, Jarrad-approved draft 2026-08-26). display content transcribed line-for-line from bmh-closr-call-script.html; match data carried forward from schema v1 (version 0.1.0). v1.0.1: full fidelity pass — greeting line restored to every Opener variant, complete coach_notes per phase, corrected file_number fallback, restored {year built} wording, occupancy-keyed 'not in a rush' objection tracks. v1.0.2: fixed the {year built} token — v1.0.1's restoration used a space instead of an underscore, so it never actually resolved (rendered as literal unresolved braces); corrected to {year_built} and added year_built to tokens[].",
   "brand": { "company": "BMH Group", "website": "bmhgroupkc.com" },
   "tokens": ["seller_name", "rep_name", "property_address", "motivation", "rep_phone", "file_number", "cold_caller_name", "year_built", "closing_date", "offer_price", "net_to_seller"],
-  "entry_tokens": ["closing_date", "offer_price", "net_to_seller"],
+  "entry_tokens": ["motivation", "cold_caller_name", "closing_date", "offer_price", "net_to_seller"],
   "file_number_rule": {
     "format": "{county_first2_upper}-{lead_id_last4}",
     "note": "Per the approved script's token legend: 'First 2 letters of county + last 4 of lead ID... Fallback if county missing: last 4 of seller's phone.' The fallback triggers when COUNTY is unavailable (not when the lead id is), and its value is the phone digits ALONE — no county prefix, since county is exactly what's missing. When county is present but the lead id isn't, the county prefix is kept and the seller's phone last 4 is used as the suffix instead.",

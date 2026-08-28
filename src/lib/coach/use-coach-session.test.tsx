@@ -56,10 +56,156 @@ describe("useCoachSession", () => {
     });
   });
 
+  it("fills missing seller and address tokens from the already-prepared call target", async () => {
+    loadCoachCallContext.mockResolvedValue({
+      ...sampleContext,
+      sellerName: null,
+      propertyAddress: null,
+    });
+    const { result } = renderHook(() =>
+      useCoachSession(
+        "call-1",
+        "lead-1",
+        "+18165559876",
+        "+18165551234",
+        true,
+        {
+          sellerName: "Prepared Homeowner",
+          propertyAddress: "55 Oak Ave",
+          sellerPhoneE164: "+18165559876",
+          maskedSellerPhone: "+1 (816) 555-9876",
+        },
+      ),
+    );
+
+    await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
+    expect(result.current.contextLoad).toEqual({
+      status: "ready",
+      context: expect.objectContaining({
+        sellerName: "Prepared Homeowner",
+        propertyAddress: "55 Oak Ave",
+      }),
+    });
+  });
+
+  it("keeps the trusted property context ahead of prepared-target fallbacks", async () => {
+    const { result } = renderHook(() =>
+      useCoachSession(
+        "call-1",
+        "lead-1",
+        null,
+        null,
+        true,
+        {
+          sellerName: "Stale Name",
+          propertyAddress: "Old Address",
+          sellerPhoneE164: null,
+          maskedSellerPhone: null,
+        },
+      ),
+    );
+
+    await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
+    expect(result.current.contextLoad).toEqual({
+      status: "ready",
+      context: expect.objectContaining({
+        sellerName: "Jane",
+        propertyAddress: "1 Main St",
+      }),
+    });
+  });
+
+  it("does not turn a manual-dial phone-number label into a homeowner token", async () => {
+    loadCoachCallContext.mockResolvedValue({
+      ...sampleContext,
+      sellerName: null,
+      propertyAddress: null,
+    });
+    const { result } = renderHook(() =>
+      useCoachSession(
+        "call-1",
+        null,
+        null,
+        null,
+        true,
+        {
+          sellerName: "+1 (816) 555-9876",
+          propertyAddress: null,
+          sellerPhoneE164: "+18165559876",
+          maskedSellerPhone: "+1 (816) 555-9876",
+        },
+      ),
+    );
+
+    await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
+    expect(result.current.contextLoad).toEqual({
+      status: "ready",
+      context: expect.objectContaining({ sellerName: null, propertyAddress: null }),
+    });
+  });
+
+  it("replaces prepared-target fallbacks when a second call starts", async () => {
+    loadCoachCallContext.mockResolvedValue({
+      ...sampleContext,
+      sellerName: null,
+      propertyAddress: null,
+    });
+    const { result, rerender } = renderHook(
+      ({ callId, name, address }: { callId: string; name: string; address: string }) =>
+        useCoachSession(
+          callId,
+          "lead-1",
+          null,
+          null,
+          true,
+          {
+            sellerName: name,
+            propertyAddress: address,
+            sellerPhoneE164: null,
+            maskedSellerPhone: null,
+          },
+        ),
+      { initialProps: { callId: "call-1", name: "Seller One", address: "1 First St" } },
+    );
+
+    await waitFor(() => expect(result.current.contextLoad).toEqual({
+      status: "ready",
+      context: expect.objectContaining({ sellerName: "Seller One", propertyAddress: "1 First St" }),
+    }));
+
+    rerender({ callId: "call-2", name: "Seller Two", address: "2 Second St" });
+    await waitFor(() => expect(result.current.contextLoad).toEqual({
+      status: "ready",
+      context: expect.objectContaining({ sellerName: "Seller Two", propertyAddress: "2 Second St" }),
+    }));
+  });
+
   it("moves to error state when context loading rejects, and retryContext re-fetches", async () => {
     loadCoachCallContext.mockReset().mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce(sampleContext);
-    const { result } = renderHook(() => useCoachSession("call-1", "lead-1", null, null));
+    const { result } = renderHook(() => useCoachSession(
+      "call-1",
+      "lead-1",
+      "+18165559876",
+      "+18165551234",
+      true,
+      {
+        sellerName: "Prepared Homeowner",
+        propertyAddress: "55 Oak Ave",
+        sellerPhoneE164: "+18165559876",
+        maskedSellerPhone: "+1 (816) 555-9876",
+      },
+    ));
     await waitFor(() => expect(result.current.contextLoad.status).toBe("error"));
+    expect(result.current.contextLoad).toEqual({
+      status: "error",
+      context: expect.objectContaining({
+        sellerName: "Prepared Homeowner",
+        propertyAddress: "55 Oak Ave",
+        leadId: "lead-1",
+        sellerPhoneE164: "+18165559876",
+        repPhoneE164: "+18165551234",
+      }),
+    });
 
     act(() => result.current.retryContext());
     await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
@@ -129,6 +275,8 @@ describe("useCoachSession", () => {
     await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
     act(() => result.current.selectVariant("Opener", "fsbo"));
     act(() => result.current.goNextSection());
+    act(() => result.current.setEntryField("motivation", "move closer to family"));
+    act(() => result.current.setEntryField("cold_caller_name", "Morgan"));
     const firstContinuity = result.current.recommendationContinuity;
     firstContinuity.state = {
       ...firstContinuity.state,
@@ -145,6 +293,8 @@ describe("useCoachSession", () => {
     expect(result.current.recommendationContinuity.state.followUpQuestions).toEqual([]);
     rerender({ callId: "call-2" });
     expect(result.current.branchOverrides).toEqual({});
+    expect(result.current.state.entryFields.motivation).toBeNull();
+    expect(result.current.state.entryFields.cold_caller_name).toBeNull();
     expect(result.current.canGoPrevious).toBe(false);
     expect(result.current.activeSectionId).toBe("introduction.opener");
     await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));

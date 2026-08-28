@@ -89,6 +89,38 @@ describe("CoachRecommendationController", () => {
     await expect(first).resolves.toBe(true);
   });
 
+  it("lets a deliberate follow-up request supersede background automatic advice", async () => {
+    const resolvers: Array<(value: CoachRecommendationResult) => void> = [];
+    const request = vi.fn((input: CoachRecommendationRequest) => new Promise<CoachRecommendationResult>((resolve) => {
+      void input;
+      resolvers.push(resolve);
+    }));
+    const controller = makeController(request);
+    const transcript = [meaningfulTurn("seller-1")];
+
+    expect(controller.considerAutomatic(transcript)).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(controller.getSnapshot().loadingMode).toBe("automatic");
+
+    const followUp = controller.requestFollowUp(transcript);
+    await Promise.resolve();
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(controller.getSnapshot().loadingMode).toBe("follow_up");
+
+    resolvers[0](success(request.mock.calls[0][0]));
+    await Promise.resolve();
+    expect(controller.getSnapshot()).toMatchObject({ loadingMode: "follow_up", recommendations: [] });
+
+    resolvers[1](success(request.mock.calls[1][0]));
+    await expect(followUp).resolves.toBe(true);
+    expect(controller.getSnapshot()).toMatchObject({
+      loadingMode: null,
+      recommendations: [],
+      followUpQuestions: expect.any(Array),
+    });
+    expect(controller.getSnapshot().followUpQuestions).toHaveLength(3);
+  });
+
   it("preserves previous valid output on provider error and a client cap", async () => {
     let fail = false;
     const request = vi.fn(async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> =>

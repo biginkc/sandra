@@ -164,6 +164,8 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getByTestId("next-section-preview")).toHaveTextContent("Set the qualification frame");
     expect(screen.getByTestId("current-section-script")).toHaveTextContent("Alex Rep");
     expect(screen.getByTestId("current-section-script")).toHaveTextContent("spoke to one of my assistants Taylor");
+    expect(screen.queryByTestId("entry-chip-motivation")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("entry-chip-cold_caller_name")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Live transcript")).not.toHaveAttribute("hidden");
     expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
   });
@@ -349,6 +351,30 @@ describe("<CoachLiveView /> manual navigation", () => {
 
     expect(screen.getByTestId("variant-Opener-fsbo")).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("current-section-script")).toHaveTextContent("For Sale by Owner");
+  });
+
+  it("lets the rep fill motivation and cold-caller placeholders when context cannot", async () => {
+    loadCoachCallContext.mockResolvedValueOnce({
+      ...sampleContext,
+      motivation: null,
+      coldCallerName: null,
+    });
+    const user = userEvent.setup();
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+
+    await user.click(screen.getAllByTestId("entry-chip-cold_caller_name")[0]);
+    await user.type(screen.getByTestId("entry-input-cold_caller_name"), "Morgan");
+    await user.tab();
+    await user.click(screen.getAllByTestId("entry-chip-motivation")[0]);
+    await user.type(screen.getByTestId("entry-input-motivation"), "move closer to family");
+    await user.tab();
+
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("assistants Morgan");
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("help with move closer to family");
+    await user.click(screen.getByTestId("coach-next"));
+    await user.click(screen.getByTestId("coach-back"));
+    expect(screen.getAllByTestId("entry-chip-motivation")[0]).toHaveTextContent("move closer to family");
   });
 
   it("disables Next at the final manual section and removes the preview", async () => {

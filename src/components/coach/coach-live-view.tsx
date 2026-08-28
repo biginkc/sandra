@@ -21,7 +21,6 @@ import {
 } from "@/lib/coach/script-block";
 import { resolveCoachTokens, type DisplayTextSegment } from "@/lib/coach/token-resolver";
 import type {
-  CoachCallContext,
   CoachEntryToken,
   CoachPhaseId,
   CoachToken,
@@ -60,22 +59,12 @@ export type CoachLiveViewProps = {
   recommendationRequest?: CoachRecommendationRequestFn;
 };
 
-const EMPTY_CALL_CONTEXT: CoachCallContext = {
-  sellerName: null,
-  propertyAddress: null,
-  propertyCounty: null,
-  repName: null,
-  repPhoneE164: null,
-  motivation: null,
-  leadId: null,
-  sellerPhoneE164: null,
-  coldCallerName: null,
-  yearBuilt: null,
-  leadSource: null,
-  occupancy: null,
-};
-
 const ENTRY_TOKEN_SET: ReadonlySet<string> = new Set(COACH_ENTRY_TOKENS);
+const ALWAYS_EDITABLE_ENTRY_TOKEN_SET: ReadonlySet<CoachEntryToken> = new Set([
+  "closing_date",
+  "offer_price",
+  "net_to_seller",
+]);
 
 /** Display-only shorthand for the phase rail — the mock's rail reads INTRO
  * · REVEAL · ASSESS · POSITION · OFFER · CLOSE, six short labels that leave
@@ -95,6 +84,8 @@ const RAIL_LABEL: Partial<Record<CoachPhaseId, string>> = {
 };
 
 const ENTRY_TOKEN_LABEL: Record<CoachEntryToken, string> = {
+  motivation: "seller motivation",
+  cold_caller_name: "cold caller name",
   closing_date: "closing date",
   offer_price: "offer price",
   net_to_seller: "net to seller",
@@ -164,9 +155,9 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   const [keypadOpen, setKeypadOpen] = useState(false);
 
   // The script must always render, even mid-load or after a failed context
-  // fetch — a static, all-placeholder script is still useful, and never an
-  // infinite spinner.
-  const activeContext = contextLoad.status === "ready" ? contextLoad.context : EMPTY_CALL_CONTEXT;
+  // fetch. Failure state keeps any prepared call identity the dialer already
+  // knew and leaves only genuinely unavailable values as placeholders.
+  const activeContext = contextLoad.context;
   const tokens: ResolvedTokens = useMemo(
     () => resolveCoachTokens(activeContext, state.entryFields),
     [activeContext, state.entryFields],
@@ -204,6 +195,13 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   const onEditEntry = useCallback(
     (field: CoachEntryToken, value: string) => setEntryField(field, value),
     [setEntryField],
+  );
+  const isEntryTokenEditable = useCallback(
+    (token: CoachEntryToken) =>
+      ALWAYS_EDITABLE_ENTRY_TOKEN_SET.has(token) ||
+      (token === "motivation" && !activeContext.motivation?.trim()) ||
+      (token === "cold_caller_name" && !activeContext.coldCallerName?.trim()),
+    [activeContext.coldCallerName, activeContext.motivation],
   );
   const onSelectVariant = useCallback((tag: string, key: string) => selectVariant(tag, key), [selectVariant]);
 
@@ -275,6 +273,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           onNext={goNextSection}
           onRetryContext={retryContext}
           onEditEntry={onEditEntry}
+          isEntryTokenEditable={isEntryTokenEditable}
           onBeginEntryEdit={() => setKeypadOpen(false)}
           onSelectVariant={onSelectVariant}
         />
@@ -471,6 +470,7 @@ function ScriptPanel({
   onNext,
   onRetryContext,
   onEditEntry,
+  isEntryTokenEditable,
   onBeginEntryEdit,
   onSelectVariant,
 }: {
@@ -484,6 +484,7 @@ function ScriptPanel({
   onNext: () => void;
   onRetryContext: () => void;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
   onSelectVariant: (tag: string, key: string) => void;
 }) {
@@ -540,6 +541,7 @@ function ScriptPanel({
                 branch={branch}
                 compact
                 onEditEntry={onEditEntry}
+                isEntryTokenEditable={isEntryTokenEditable}
                 onBeginEntryEdit={onBeginEntryEdit}
                 onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
               />
@@ -586,7 +588,7 @@ function RecommendationsPanel({
   hasFinalSellerTranscript,
   requestFollowUp,
 }: ReturnType<typeof useCoachRecommendations> & { hasFinalSellerTranscript: boolean }) {
-  const busy = loadingMode !== null;
+  const followUpBusy = loadingMode === "follow_up";
   const failureMessage =
     error === "rate_limited"
       ? "The recommendation limit for this call has been reached."
@@ -622,7 +624,7 @@ function RecommendationsPanel({
         type="button"
         variant="outline"
         className="mt-5 w-full"
-        disabled={busy || !hasFinalSellerTranscript || followUpLimitReached}
+        disabled={followUpBusy || !hasFinalSellerTranscript || followUpLimitReached}
         data-testid="follow-up-questions"
         onClick={() => void requestFollowUp()}
       >
@@ -663,12 +665,14 @@ function BranchCard({
   branch,
   compact = false,
   onEditEntry,
+  isEntryTokenEditable,
   onBeginEntryEdit,
   onSelectVariant,
 }: {
   branch: ScriptBranchBlock;
   compact?: boolean;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
   onSelectVariant: (key: string) => void;
 }) {
@@ -726,7 +730,12 @@ function BranchCard({
               line.type === "note" && "text-xs text-muted-foreground italic",
             )}
           >
-            <LineSegments segments={line.segments} onEditEntry={onEditEntry} onBeginEntryEdit={onBeginEntryEdit} />
+            <LineSegments
+              segments={line.segments}
+              onEditEntry={onEditEntry}
+              isEntryTokenEditable={isEntryTokenEditable}
+              onBeginEntryEdit={onBeginEntryEdit}
+            />
           </p>
         ))}
       </div>
@@ -743,6 +752,7 @@ function BranchCard({
                 token={segment.token}
                 resolved={segment.resolved}
                 onEditEntry={onEditEntry}
+                isEntryTokenEditable={isEntryTokenEditable}
                 onBeginEntryEdit={onBeginEntryEdit}
               />
             ),
@@ -766,10 +776,12 @@ function BranchCard({
 function LineSegments({
   segments,
   onEditEntry,
+  isEntryTokenEditable,
   onBeginEntryEdit,
 }: {
   segments: DisplayTextSegment[];
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
 }) {
   return (
@@ -783,6 +795,7 @@ function LineSegments({
             token={segment.token}
             resolved={segment.resolved}
             onEditEntry={onEditEntry}
+            isEntryTokenEditable={isEntryTokenEditable}
             onBeginEntryEdit={onBeginEntryEdit}
           />
         );
@@ -806,14 +819,16 @@ function TokenChip({
   token,
   resolved,
   onEditEntry,
+  isEntryTokenEditable,
   onBeginEntryEdit,
 }: {
   token: CoachToken;
   resolved: ResolvedToken;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
 }) {
-  if (ENTRY_TOKEN_SET.has(token)) {
+  if (ENTRY_TOKEN_SET.has(token) && isEntryTokenEditable(token as CoachEntryToken)) {
     return (
       <EntryTokenChip
         token={token as CoachEntryToken}

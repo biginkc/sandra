@@ -40,6 +40,17 @@ type TimerApi = {
   clearTimeout(handle: ReturnType<typeof setTimeout>): void;
 };
 
+// Browser timer functions are Web IDL methods, not safely detachable plain
+// functions. Keeping them directly on an object and later calling
+// `timer.setTimeout(...)` changes `this` from Window to that object, which
+// Chrome rejects with "Illegal invocation" as soon as finalized seller
+// speech starts the debounce. Wrappers preserve the native receiver in the
+// browser and still work in Node-based tests.
+const DEFAULT_TIMER_API: TimerApi = {
+  setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle),
+};
+
 export type CoachRecommendationControllerOptions = {
   request: CoachRecommendationRequestFn;
   debounceMs?: number;
@@ -95,6 +106,7 @@ export class CoachRecommendationController {
   private branchOverrides: Record<string, string> = {};
   private generation = 0;
   private activeRequestToken: symbol | null = null;
+  private activeRequestMode: CoachRecommendationMode | null = null;
   private debounceHandle: ReturnType<typeof setTimeout> | null = null;
   private pendingAutomatic: { fingerprint: string; transcript: CoachRecommendationTranscriptLine[] } | null = null;
   private lastAutomaticFingerprint: string | null = null;
@@ -104,7 +116,7 @@ export class CoachRecommendationController {
   constructor(options: CoachRecommendationControllerOptions) {
     this.request = options.request;
     this.debounceMs = options.debounceMs ?? AUTOMATIC_RECOMMENDATION_DEBOUNCE_MS;
-    this.timer = options.timer ?? { setTimeout, clearTimeout };
+    this.timer = options.timer ?? DEFAULT_TIMER_API;
     this.continuity = options.continuity ?? createCoachRecommendationContinuity(null);
     // A view can collapse while a server action is still pending. The old
     // controller invalidates that result on dispose, so a newly mounted view
@@ -191,9 +203,22 @@ export class CoachRecommendationController {
 
   async requestFollowUp(transcript: readonly CoachRecommendationTranscriptLine[]): Promise<boolean> {
     if (this.activeRequestToken) {
-      this.publish({ error: "busy" });
-      return false;
+      if (this.activeRequestMode !== "automatic") {
+        this.publish({ error: "busy" });
+        return false;
+      }
+
+      // A deliberate rep action outranks background advice. The provider call
+      // already in flight cannot be cancelled, but its token and generation
+      // are invalidated before the follow-up request starts, so it can never
+      // replace the rep-requested result when it eventually resolves.
+      this.generation += 1;
+      this.activeRequestToken = null;
+      this.activeRequestMode = null;
     }
+    this.pendingAutomatic = null;
+    if (this.debounceHandle) this.timer.clearTimeout(this.debounceHandle);
+    this.debounceHandle = null;
     return this.startRequest("follow_up", [...transcript]);
   }
 
@@ -226,6 +251,7 @@ export class CoachRecommendationController {
     const generation = this.generation;
     const requestToken = Symbol(requestId);
     this.activeRequestToken = requestToken;
+    this.activeRequestMode = mode;
     this.publish({ loadingMode: mode, error: null });
 
     let result: CoachRecommendationResult;
@@ -241,7 +267,10 @@ export class CoachRecommendationController {
     } catch {
       result = { ok: false, requestId, callId, activeSectionId, mode, code: "provider_error" };
     } finally {
-      if (this.activeRequestToken === requestToken) this.activeRequestToken = null;
+      if (this.activeRequestToken === requestToken) {
+        this.activeRequestToken = null;
+        this.activeRequestMode = null;
+      }
     }
 
     const stale =
