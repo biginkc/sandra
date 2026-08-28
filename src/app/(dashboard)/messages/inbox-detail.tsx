@@ -36,6 +36,7 @@ import { MessagesThread } from "../leads/[id]/messages-thread";
 
 import { AssignDropdown } from "./assign-dropdown";
 import {
+  confirmAiDispositionReview,
   moveMessageThreadToLead,
   setOutreachDispo,
   type OutreachDispo,
@@ -107,6 +108,7 @@ function DispoBar({
   initialDispo,
   propertyStatus,
   currentUserId,
+  onDispositionChanged,
 }: {
   propertyId: string;
   contactId: string;
@@ -114,6 +116,7 @@ function DispoBar({
   initialDispo: string | null;
   propertyStatus: string | null;
   currentUserId: string | null;
+  onDispositionChanged?: () => void;
 }) {
   const router = useRouter();
   const [dispo, setDispo] = useState<string | null>(initialDispo);
@@ -123,6 +126,7 @@ function DispoBar({
 
   function apply(newDispo: OutreachDispo) {
     startTransition(async () => {
+      const previousDispo = dispo;
       const result = await setOutreachDispo(propertyId, newDispo);
       if (result.ok) {
         setDispo(newDispo);
@@ -131,6 +135,7 @@ function DispoBar({
             "Marked wrong number — consider skip-tracing a new number.",
           );
         }
+        if (previousDispo !== newDispo) onDispositionChanged?.();
       } else {
         toast.error(result.error);
       }
@@ -233,7 +238,10 @@ function DispoBar({
         currentUserId={currentUserId}
         triggerLabel="Book appt"
         disabled={pending}
-        onBooked={() => setDispo("booked_appointment")}
+        onBooked={() => {
+          setDispo("booked_appointment");
+          onDispositionChanged?.();
+        }}
       />
 
       <DropdownMenu>
@@ -282,6 +290,85 @@ function DispoBar({
   );
 }
 
+function SandraDispoReviewBanner({
+  review,
+  onResolved,
+}: {
+  review: NonNullable<InboxDetailData["aiDispositionReview"]>;
+  onResolved: (status: "confirmed" | "superseded") => void;
+}) {
+  const [pending, startTransition] = useTransition();
+  const label = DISPO_LABELS[review.disposition] ?? review.disposition;
+  const keepsRestrictions =
+    review.disposition === "dnc" || review.disposition === "opted_out";
+
+  const confirm = () => {
+    startTransition(async () => {
+      const result = await confirmAiDispositionReview(review.id);
+      if (!result.ok) {
+        toast.error(result.error);
+        return;
+      }
+      if (result.status === "confirmed") {
+        toast.success("Sandra disposition confirmed");
+      } else {
+        toast.info("This Sandra disposition was already replaced");
+      }
+      onResolved(result.status);
+    });
+  };
+
+  return (
+    <div
+      className="border-b border-[#fed7aa] bg-[#fff7ed] px-4 py-3 sm:px-6"
+      data-testid="sandra-dispo-review-banner"
+    >
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-start gap-2.5">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/icon.png"
+            alt=""
+            aria-hidden="true"
+            className="mt-0.5 h-5 w-5 shrink-0"
+          />
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-[#9a3412]">
+              Sandra marked this: {label}
+            </p>
+            <p className="mt-0.5 text-xs text-[#7c2d12]">
+              Why: {review.reason}
+            </p>
+            {review.sourceMessageBody ? (
+              <blockquote
+                className="mt-1.5 border-l-2 border-[#fdba74] pl-2 text-xs italic text-[#7c2d12]"
+                data-testid="sandra-dispo-source-message"
+              >
+                Reviewed message: “{review.sourceMessageBody}”
+              </blockquote>
+            ) : null}
+            {keepsRestrictions ? (
+              <p className="mt-1 text-[11px] font-medium text-[#7c2d12]">
+                Confirming this review does not remove contact restrictions.
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <Button
+          type="button"
+          size="sm"
+          className="min-h-11 shrink-0 bg-[#9a3412] text-white hover:bg-[#7c2d12]"
+          disabled={pending}
+          onClick={confirm}
+          data-testid="confirm-sandra-dispo"
+        >
+          {pending ? "Confirming…" : "Confirm Sandra disposition"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Right-side detail panel of the cockpit. Renders the existing
  * MessagesThread + InlineReply components — same building blocks as the
@@ -325,6 +412,14 @@ export function InboxDetail({
     router.replace(qs ? `/messages?${qs}` : "/messages", { scroll: false });
     router.refresh();
   }, [onBackToList, router, searchParams]);
+
+  const refreshAfterReviewResolution = useCallback(() => {
+    if (searchParams.get("filter") === "dispo") {
+      closeDetail();
+      return;
+    }
+    router.refresh();
+  }, [closeDetail, router, searchParams]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -758,6 +853,12 @@ export function InboxDetail({
           .
         </RestrictionNotice>
       ) : null}
+      {data.aiDispositionReview ? (
+        <SandraDispoReviewBanner
+          review={data.aiDispositionReview}
+          onResolved={refreshAfterReviewResolution}
+        />
+      ) : null}
       <div
         className="flex-1 overflow-y-auto px-6 py-5 bg-[#faf9f8]"
         data-testid="inbox-detail-scroll"
@@ -786,6 +887,11 @@ export function InboxDetail({
                 initialDispo={data.outreachDispo}
                 propertyStatus={data.propertyStatus}
                 currentUserId={currentUserId}
+                onDispositionChanged={
+                  data.aiDispositionReview
+                    ? refreshAfterReviewResolution
+                    : undefined
+                }
               />
             </div>
           ) : null}

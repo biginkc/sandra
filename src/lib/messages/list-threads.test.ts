@@ -174,7 +174,7 @@ describe("listThreads — chunking", () => {
             property_id: "33333333-3333-4333-8333-333333333333",
             property_address: "123 Main St, Kansas City, MO",
             property_status: "prospect",
-            outreach_dispo: null,
+            outreach_dispo: "not_interested",
             is_dnc_locked: false,
             assignee_id: "44444444-4444-4444-8444-444444444444",
             last_message_body: "Hello",
@@ -186,12 +186,20 @@ describe("listThreads — chunking", () => {
             escalation_reason: null,
             is_opted_out: false,
             is_test_traffic: false,
-            needs_outcome: true,
+            needs_outcome: false,
             ai_responder_status: null,
             ai_responder_reason: null,
             ai_responder_status_at: null,
             ai_last_delivery_status: null,
             ai_last_delivery_error: null,
+            ai_disposition_review_id:
+              "55555555-5555-4555-8555-555555555555",
+            ai_disposition_review_status: "pending",
+            ai_disposition_review_disposition: "not_interested",
+            ai_disposition_review_reason: "Homeowner said no",
+            ai_disposition_review_source_inbound_message_id:
+              "66666666-6666-4666-8666-666666666666",
+            ai_disposition_review_created_at: "2026-08-17T12:01:00.000Z",
           },
         ],
         counts: {
@@ -224,7 +232,15 @@ describe("listThreads — chunking", () => {
     expect(page.total).toBe(45);
     expect(page.hiddenCount).toBe(8);
     expect(page.threads).toHaveLength(1);
-    expect(page.threads[0].needsOutcome).toBe(true);
+    expect(page.threads[0].needsOutcome).toBe(false);
+    expect(page.threads[0].aiDispositionReview).toEqual({
+      id: "55555555-5555-4555-8555-555555555555",
+      status: "pending",
+      disposition: "not_interested",
+      reason: "Homeowner said no",
+      sourceInboundMessageId: "66666666-6666-4666-8666-666666666666",
+      createdAt: "2026-08-17T12:01:00.000Z",
+    });
     expect(rpc).toHaveBeenCalledWith(
       "sms_inbox_thread_page_snapshot",
       expect.objectContaining({

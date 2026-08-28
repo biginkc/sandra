@@ -16,8 +16,10 @@ type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 const replaceCalls: string[] = [];
 const refreshCalls: number[] = [];
 const pushCalls: string[] = [];
+let navigationSearch = "";
 const setOutreachDispoMock = vi.hoisted(() => vi.fn());
 const moveMessageThreadToLeadMock = vi.hoisted(() => vi.fn());
+const confirmAiDispositionReviewMock = vi.hoisted(() => vi.fn());
 const supabaseMock = vi.hoisted(() => {
   const subscriptions: Array<{
     type: string;
@@ -67,11 +69,12 @@ vi.mock("next/navigation", () => ({
     forward: vi.fn(),
     prefetch: vi.fn(),
   }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(navigationSearch),
   usePathname: () => "/messages",
 }));
 
 vi.mock("./dispo-actions", () => ({
+  confirmAiDispositionReview: confirmAiDispositionReviewMock,
   setOutreachDispo: setOutreachDispoMock,
   moveMessageThreadToLead: moveMessageThreadToLeadMock,
 }));
@@ -103,6 +106,20 @@ vi.mock("sonner", () => ({
     warning: vi.fn(),
     error: vi.fn(),
   },
+}));
+
+vi.mock("@/components/appointments/book-appointment-popover", () => ({
+  BookAppointmentPopover: ({
+    onBooked,
+    triggerLabel,
+  }: {
+    onBooked: () => void;
+    triggerLabel: string;
+  }) => (
+    <button data-testid="book-appointment" onClick={onBooked}>
+      {triggerLabel}
+    </button>
+  ),
 }));
 
 function makeMessage(
@@ -178,6 +195,7 @@ function makeData(
     assigneeId: overrides.assigneeId ?? null,
     propertyStatus: overrides.propertyStatus ?? "prospect",
     outreachDispo: overrides.outreachDispo ?? null,
+    aiDispositionReview: overrides.aiDispositionReview ?? null,
     contactDoNotContact: overrides.contactDoNotContact ?? false,
     contactSmsOptedOut: overrides.contactSmsOptedOut ?? false,
     smsConsentState: Object.hasOwn(overrides, "smsConsentState")
@@ -224,12 +242,18 @@ describe("<InboxDetail />", () => {
     pushCalls.length = 0;
     replaceCalls.length = 0;
     refreshCalls.length = 0;
+    navigationSearch = "";
     setOutreachDispoMock.mockClear();
     moveMessageThreadToLeadMock.mockClear();
+    confirmAiDispositionReviewMock.mockClear();
     setOutreachDispoMock.mockResolvedValue({ ok: true });
     moveMessageThreadToLeadMock.mockResolvedValue({
       ok: true,
       alreadyQualified: false,
+    });
+    confirmAiDispositionReviewMock.mockResolvedValue({
+      ok: true,
+      status: "confirmed",
     });
     supabaseMock.subscriptions.length = 0;
     supabaseMock.client.channel.mockClear();
@@ -1536,6 +1560,141 @@ describe("<InboxDetail />", () => {
     expect(setOutreachDispoMock).not.toHaveBeenCalled();
     expect(screen.getByTestId("assign-dropdown-trigger")).toBeInTheDocument();
     expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
+  });
+
+  it("confirms a pending Sandra disposition and leaves the Sandra Dispo queue", async () => {
+    navigationSearch = "filter=dispo&thread=conv-contact-ai-review";
+    const onBackToList = vi.fn();
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-ai-review",
+      outreachDispo: "not_interested",
+      aiDispositionReview: {
+        id: "review-1",
+        status: "pending",
+        disposition: "not_interested",
+        reason: "Homeowner said they are not selling",
+        sourceInboundMessageId: "message-1",
+        sourceMessageBody: "Please stop asking. I am not selling.",
+        createdAt: "2026-08-27T14:00:00.000Z",
+      },
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+        onBackToList={onBackToList}
+      />,
+    );
+
+    expect(screen.getByTestId("sandra-dispo-review-banner")).toHaveTextContent(
+      "Sandra marked this: Not interested",
+    );
+    expect(screen.getByTestId("sandra-dispo-review-banner")).toHaveTextContent(
+      "Homeowner said they are not selling",
+    );
+    expect(screen.getByTestId("sandra-dispo-source-message")).toHaveTextContent(
+      "Please stop asking. I am not selling.",
+    );
+    await user.click(screen.getByTestId("confirm-sandra-dispo"));
+
+    expect(confirmAiDispositionReviewMock).toHaveBeenCalledWith("review-1");
+    await waitFor(() => expect(onBackToList).toHaveBeenCalledOnce());
+  });
+
+  it("keeps the Sandra review control visible on permanently locked DNC history", () => {
+    const data = makeData({
+      contactId: "contact-locked-review",
+      propertyId: "prop-locked-review",
+      outreachDispo: "dnc",
+      isDncLocked: true,
+      contactDoNotContact: true,
+      contactSmsOptedOut: true,
+      aiDispositionReview: {
+        id: "review-dnc",
+        status: "pending",
+        disposition: "dnc",
+        reason: "Threatening response",
+        sourceInboundMessageId: "message-dnc",
+        createdAt: "2026-08-27T14:00:00.000Z",
+      },
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(screen.getByTestId("messages-permanent-dnc-lock")).toBeInTheDocument();
+    expect(screen.getByTestId("confirm-sandra-dispo")).toBeInTheDocument();
+    expect(screen.getByTestId("sandra-dispo-review-banner")).toHaveTextContent(
+      "does not remove contact restrictions",
+    );
+    expect(screen.queryByTestId("dispo-wrong-number")).not.toBeInTheDocument();
+  });
+
+  it("treats a different manual outcome as correction but not a same-state click", async () => {
+    navigationSearch = "filter=dispo&thread=conv-contact-review-correction";
+    const onBackToList = vi.fn();
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-review-correction",
+      outreachDispo: "not_interested",
+      aiDispositionReview: {
+        id: "review-correction",
+        status: "pending",
+        disposition: "not_interested",
+        reason: "AI classification",
+        sourceInboundMessageId: "message-correction",
+        createdAt: "2026-08-27T14:00:00.000Z",
+      },
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+        onBackToList={onBackToList}
+      />,
+    );
+
+    await user.click(screen.getByTestId("dispo-not-interested"));
+    expect(onBackToList).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("dispo-wrong-number"));
+    await waitFor(() => expect(onBackToList).toHaveBeenCalledOnce());
+  });
+
+  it("leaves Sandra Dispo after an appointment is booked", async () => {
+    navigationSearch = "filter=dispo&thread=conv-contact-review-booked";
+    const onBackToList = vi.fn();
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-review-booked",
+      outreachDispo: "nurture",
+      aiDispositionReview: {
+        id: "review-booked",
+        status: "pending",
+        disposition: "nurture",
+        reason: "Homeowner requested a follow-up",
+        sourceInboundMessageId: "message-booked",
+        createdAt: "2026-08-27T14:00:00.000Z",
+      },
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+        onBackToList={onBackToList}
+      />,
+    );
+
+    await user.click(screen.getByTestId("book-appointment"));
+    expect(onBackToList).toHaveBeenCalledOnce();
   });
 
   it("Move to Lead promotes then opens the lead page", async () => {

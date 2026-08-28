@@ -117,6 +117,11 @@ export function InboxThreadList({
           { event: "*", schema: "public", table: "message_threads" },
           () => requestRefresh(),
         )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "ai_disposition_reviews" },
+          () => requestRefresh(),
+        )
         .subscribe();
     })();
 
@@ -179,6 +184,9 @@ export function InboxThreadList({
                   <span className="min-w-0 truncate text-sm font-bold text-[#1c1917]">
                     {t.contactName ?? t.contactPhone ?? "Unknown contact"}
                   </span>
+                  {t.aiDispositionReview ? (
+                    <SandraDispoReviewMarker threadId={t.threadId} />
+                  ) : null}
                   <ThreadDispositionPill
                     dispo={t.outreachDispo}
                     threadId={t.threadId}
@@ -264,6 +272,21 @@ export function InboxThreadList({
         })}
       </div>
     </div>
+  );
+}
+
+function SandraDispoReviewMarker({ threadId }: { threadId: string }) {
+  return (
+    <span
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-[#fdba74] bg-[#fff7ed]"
+      data-testid={`inbox-thread-${threadId}-sandra-dispo-review`}
+      aria-label="Sandra disposition needs review"
+      title="Sandra disposition needs review"
+      role="img"
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/icon.png" alt="" aria-hidden="true" className="h-3 w-3" />
+    </span>
   );
 }
 
