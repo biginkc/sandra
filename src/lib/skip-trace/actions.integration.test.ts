@@ -401,7 +401,7 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     expect(result.data.estimatedCassVerificationCostUsd).toBeCloseTo(0.03);
   });
 
-  it("preflight prices full-name batch rows at 1 Tracefy credit each", async () => {
+  it("preflight reserves the proven advanced price even for full-name rows", async () => {
     const ids = await Promise.all([
       seedProperty({ address: "1 Named Batch Ln", cassStatus: "verified" }),
       seedProperty({ address: "2 Named Batch Ln", cassStatus: "verified" }),
@@ -412,7 +412,7 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     const result = await preflightSkipTrace(ids);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.data.tracefyCreditsRequired).toBe(2);
+    expect(result.data.tracefyCreditsRequired).toBe(4);
   });
 
   it("preflight does not double-reserve a deduplicated shared address", async () => {

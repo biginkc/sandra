@@ -121,7 +121,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(observedPhase).toBe("prepared");
   });
 
-  it("refuses provider spend above the immutable approved credit cap", async () => {
+  it("refuses a caller attempt to raise the immutable approved credit cap", async () => {
     const { propertyId } = await seedProperty({
       address: "Expired Cache Cap Ln",
     });
@@ -145,7 +145,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       propertyIds: [propertyId],
       inputParams: {
         property_ids: [propertyId],
-        authorized_max_credits: 0,
+        authorized_max_credits: 100_000,
         provider_pricing_version: "tracerfy-2026-08",
       },
     });

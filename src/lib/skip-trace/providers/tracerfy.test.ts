@@ -452,13 +452,13 @@ describe("TracerfyProvider — submitBatch", () => {
     expect(headers["Content-Type"]).toBeUndefined();
   });
 
-  it("uses the one-credit normal mode when every row has a full owner name", async () => {
+  it("keeps the proven advanced mode when every row has a full owner name", async () => {
     mockFetch({
       status: 200,
       body: {
         queue_id: 43,
-        trace_type: "normal",
-        credits_per_lead: 1,
+        trace_type: "advanced",
+        credits_per_lead: 2,
         estimated_wait_seconds: 30,
       },
     });
@@ -484,9 +484,9 @@ describe("TracerfyProvider — submitBatch", () => {
     const init = (global.fetch as ReturnType<typeof vi.fn>).mock
       .calls[0][1] as RequestInit;
     const form = init.body as FormData;
-    expect(form.get("trace_type")).toBe("normal");
-    expect(ticket.creditsPerLead).toBe(1);
-    expect(ticket.traceType).toBe("normal");
+    expect(form.get("trace_type")).toBe("advanced");
+    expect(ticket.creditsPerLead).toBe(2);
+    expect(ticket.traceType).toBe("advanced");
   });
 });
 

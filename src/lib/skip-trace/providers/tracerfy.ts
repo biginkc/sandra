@@ -41,21 +41,16 @@ const BALANCE_REQUEST_TIMEOUT_MS = 8_000;
 
 export type TracerfyBatchTraceType = "normal" | "advanced";
 
-function tracerfyBatchTraceType(
-  inputs: Array<Pick<SkipTraceInput, "firstName" | "lastName">>,
-): TracerfyBatchTraceType {
-  return inputs.every(
-    (input) => input.firstName?.trim() && input.lastName?.trim(),
-  )
-    ? "normal"
-    : "advanced";
-}
-
 export function tracerfyBatchCreditLimit(
   inputs: Array<Pick<SkipTraceInput, "firstName" | "lastName">>,
 ): number {
   if (inputs.length === 0) return 0;
-  return inputs.length * (tracerfyBatchTraceType(inputs) === "normal" ? 1 : 2);
+  // Sandra has production evidence for Advanced's address-owned lookup shape.
+  // Normal is cheaper when every submitted owner name is accurate, but it has
+  // not been canaried here and a low-yield run would turn vendor misses into
+  // 90-day reusable negatives. Reserve the proven Advanced ceiling until a
+  // separately approved Normal-mode canary also defines safe miss fallback.
+  return inputs.length * 2;
 }
 
 type TracerfyPhone = {
@@ -284,13 +279,12 @@ export class TracerfyProvider implements SkipTraceProvider {
     form.append("mail_zip_column", "mail_zip");
     form.append("first_name_column", "first_name");
     form.append("last_name_column", "last_name");
-    // Normal is the correct 1-credit mode only when every row has the first
-    // and last name Tracerfy requires. Otherwise use the 2-credit advanced
-    // owner-discovery mode for the whole batch. The runner partitions jobs,
-    // so this remains deterministic and never sends an invalid mixed batch.
+    // Keep the proven 2-credit Advanced owner-discovery mode even when owner
+    // names are present. A Normal-mode rollout needs a separate canary plus a
+    // safe fallback for misses before it can create reusable negative cache.
     // NB: the API enum is `advanced` — `enhanced` (the marketing name)
     // returns 400 "not a valid choice" (hit live 2026-06-12).
-    const traceType = tracerfyBatchTraceType(inputs);
+    const traceType: TracerfyBatchTraceType = "advanced";
     form.append("trace_type", traceType);
 
     const data = await this.requestForm<TracerfyBatchResponse>("/trace/", form);
@@ -298,7 +292,7 @@ export class TracerfyProvider implements SkipTraceProvider {
     return {
       queueId: String(data.queue_id),
       estimatedWaitSeconds: data.estimated_wait_seconds ?? 0,
-      creditsPerLead: data.credits_per_lead ?? (traceType === "normal" ? 1 : 2),
+      creditsPerLead: data.credits_per_lead ?? 2,
       traceType,
     };
   }
