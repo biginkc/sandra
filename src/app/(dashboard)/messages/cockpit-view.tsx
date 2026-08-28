@@ -176,6 +176,7 @@ export function CockpitView({
   // visible during transitions, so isPending never flips in the tree
   // the user is looking at.
   const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
+  const [isFilterPending, setIsFilterPending] = useState(false);
   const serverSelectedThreadId =
     selectedThreadId ?? threadDetail?.threadId ?? null;
   const previousServerSelection = useRef(serverSelectedThreadId);
@@ -341,94 +342,106 @@ export function CockpitView({
             showAssignmentChips={currentUserId !== null}
             hideDnc={hideDnc}
             hiddenDncCount={hiddenDncCount}
+            onPendingChange={setIsFilterPending}
           />
 
-          {showThreadList && (
-            <div
-              className="grid min-h-[500px] grid-cols-1 gap-3 md:h-[calc(100vh-260px)] md:grid-cols-[minmax(280px,360px)_1fr] md:gap-6"
-              data-testid="inbox-cockpit-grid"
-            >
+          <div
+            aria-busy={isFilterPending}
+            className={`transition-opacity duration-150 ${
+              isFilterPending ? "opacity-60" : "opacity-100"
+            }`}
+            data-testid="inbox-filter-results"
+          >
+            {showThreadList && (
               <div
-                className={`${mobileShowsDetail ? "hidden" : "block"} min-h-0 md:block`}
-                data-testid="inbox-list-view"
+                className="grid min-h-[500px] grid-cols-1 gap-3 md:h-[calc(100vh-260px)] md:grid-cols-[minmax(280px,360px)_1fr] md:gap-6"
+                data-testid="inbox-cockpit-grid"
               >
-                <div className="flex h-full min-h-0 flex-col gap-2">
-                  <div className="min-h-0 flex-1">
-                    <InboxThreadList
-                      initial={threads}
-                      selectedThreadId={
-                        pendingThreadId ??
-                        threadDetail?.threadId ??
-                        selectedThreadId ??
-                        null
-                      }
-                      currentUserId={currentUserId}
-                      onSelectThread={handleSelectThread}
-                      emptyMessage={emptyInboxMessage(filter, hiddenDncCount)}
-                      nowMs={liveNowMs}
-                    />
+                <div
+                  className={`${mobileShowsDetail ? "hidden" : "block"} min-h-0 md:block`}
+                  data-testid="inbox-list-view"
+                >
+                  <div className="flex h-full min-h-0 flex-col gap-2">
+                    <div className="min-h-0 flex-1">
+                      <InboxThreadList
+                        initial={threads}
+                        selectedThreadId={
+                          pendingThreadId ??
+                          threadDetail?.threadId ??
+                          selectedThreadId ??
+                          null
+                        }
+                        currentUserId={currentUserId}
+                        onSelectThread={handleSelectThread}
+                        emptyMessage={emptyInboxMessage(
+                          filter,
+                          hiddenDncCount,
+                        )}
+                        nowMs={liveNowMs}
+                      />
+                    </div>
+                    {inboxTotalPages > 1 ? (
+                      <nav
+                        aria-label="Inbox pages"
+                        className="flex min-h-11 items-center justify-between gap-2 text-xs text-muted-foreground"
+                        data-testid="inbox-pagination"
+                      >
+                        <button
+                          type="button"
+                          className="min-h-11 rounded-md border px-3 font-semibold disabled:opacity-40"
+                          disabled={inboxPage <= 1}
+                          onClick={() => setInboxPage(inboxPage - 1)}
+                        >
+                          Previous
+                        </button>
+                        <span className="text-center" aria-live="polite">
+                          Page {inboxPage} of {inboxTotalPages} ·{" "}
+                          {inboxTotal.toLocaleString()} conversations
+                        </span>
+                        <button
+                          type="button"
+                          className="min-h-11 rounded-md border px-3 font-semibold disabled:opacity-40"
+                          disabled={inboxPage >= inboxTotalPages}
+                          onClick={() => setInboxPage(inboxPage + 1)}
+                        >
+                          Next
+                        </button>
+                      </nav>
+                    ) : null}
                   </div>
-                  {inboxTotalPages > 1 ? (
-                    <nav
-                      aria-label="Inbox pages"
-                      className="flex min-h-11 items-center justify-between gap-2 text-xs text-muted-foreground"
-                      data-testid="inbox-pagination"
-                    >
-                      <button
-                        type="button"
-                        className="min-h-11 rounded-md border px-3 font-semibold disabled:opacity-40"
-                        disabled={inboxPage <= 1}
-                        onClick={() => setInboxPage(inboxPage - 1)}
-                      >
-                        Previous
-                      </button>
-                      <span className="text-center" aria-live="polite">
-                        Page {inboxPage} of {inboxTotalPages} ·{" "}
-                        {inboxTotal.toLocaleString()} conversations
-                      </span>
-                      <button
-                        type="button"
-                        className="min-h-11 rounded-md border px-3 font-semibold disabled:opacity-40"
-                        disabled={inboxPage >= inboxTotalPages}
-                        onClick={() => setInboxPage(inboxPage + 1)}
-                      >
-                        Next
-                      </button>
-                    </nav>
-                  ) : null}
+                </div>
+                <div
+                  className={`${mobileShowsDetail ? "block" : "hidden"} min-h-0 md:block`}
+                  data-testid="inbox-detail-view"
+                >
+                  <InboxDetail
+                    data={threadDetail}
+                    isLoading={isLoadingThread}
+                    assigneeEmails={assigneeEmails}
+                    currentUserId={currentUserId}
+                    onBackToList={handleBackToList}
+                    nowMs={liveNowMs}
+                  />
                 </div>
               </div>
-              <div
-                className={`${mobileShowsDetail ? "block" : "hidden"} min-h-0 md:block`}
-                data-testid="inbox-detail-view"
-              >
-                <InboxDetail
-                  data={threadDetail}
-                  isLoading={isLoadingThread}
-                  assigneeEmails={assigneeEmails}
-                  currentUserId={currentUserId}
-                  onBackToList={handleBackToList}
-                  nowMs={liveNowMs}
-                />
-              </div>
-            </div>
-          )}
+            )}
 
-          {filter === "unknown" && (
-            <UnknownSenderList
-              senders={unknownSenders}
-              showRestore={false}
-              nowMs={liveNowMs}
-            />
-          )}
+            {filter === "unknown" && (
+              <UnknownSenderList
+                senders={unknownSenders}
+                showRestore={false}
+                nowMs={liveNowMs}
+              />
+            )}
 
-          {filter === "dismissed" && (
-            <UnknownSenderList
-              senders={unknownSenders}
-              showRestore={true}
-              nowMs={liveNowMs}
-            />
-          )}
+            {filter === "dismissed" && (
+              <UnknownSenderList
+                senders={unknownSenders}
+                showRestore={true}
+                nowMs={liveNowMs}
+              />
+            )}
+          </div>
         </div>
       ) : (
         <div

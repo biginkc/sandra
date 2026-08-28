@@ -145,6 +145,60 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
     expect(replaceCalls).toContain("/messages?tab=outbox");
   });
 
+  it("acknowledges a slow inbox filter immediately and clears when server rows arrive", async () => {
+    replaceCalls.length = 0;
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <CockpitView {...baseProps} activeTab="inbox" />,
+    );
+
+    const noOwner = screen.getByTestId("filter-unassigned");
+    const results = screen.getByTestId("inbox-filter-results");
+    await user.click(noOwner);
+
+    expect(replaceCalls).toEqual(["/messages?filter=unassigned"]);
+    expect(noOwner).toHaveAttribute("aria-pressed", "true");
+    expect(noOwner).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByTestId("filter-all")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByTestId("filter-unassigned-spinner")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Loading No owner messages",
+    );
+    expect(results).toHaveAttribute("aria-busy", "true");
+    expect(results).toHaveClass("opacity-60");
+
+    // The loading chip ignores duplicate clicks while the first server
+    // navigation is still pending.
+    await user.click(noOwner);
+    expect(replaceCalls).toHaveLength(1);
+
+    rerender(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        filter="unassigned"
+      />,
+    );
+
+    expect(await screen.findByTestId("filter-unassigned")).toHaveAttribute(
+      "aria-busy",
+      "false",
+    );
+    expect(
+      screen.queryByTestId("filter-unassigned-spinner"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(
+      "aria-busy",
+      "false",
+    );
+    expect(screen.getByTestId("inbox-filter-results")).toHaveClass(
+      "opacity-100",
+    );
+  });
+
   it("Outbox tab renders the queue panel cadence controls (regression guard, test 13)", () => {
     render(<CockpitView {...baseProps} activeTab="outbox" />);
 

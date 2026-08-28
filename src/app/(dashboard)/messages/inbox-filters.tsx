@@ -1,6 +1,8 @@
 "use client";
 
+import { Loader2Icon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useState } from "react";
 
 export type InboxFilter =
   | "all"
@@ -26,6 +28,20 @@ type Props = {
   /** Count of DNC threads that the current filter set would have shown
    *  if the toggle were OFF. Surfaced as a tiny hint next to the toggle. */
   hiddenDncCount: number;
+  /** Notifies the result region while a filter's server data is catching up. */
+  onPendingChange?: (pending: boolean) => void;
+};
+
+const FILTER_LABELS: Record<InboxFilter, string> = {
+  all: "All",
+  mine: "Mine",
+  unassigned: "No owner",
+  unknown: "Unknown",
+  dismissed: "Dismissed",
+  unread: "Unread",
+  escalated: "Escalated",
+  dispo: "Sandra Dispo",
+  needs_outcome: "Needs Outcome",
 };
 
 /**
@@ -39,11 +55,21 @@ export function InboxFilters({
   showAssignmentChips,
   hideDnc,
   hiddenDncCount,
+  onPendingChange,
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const [pendingFilter, setPendingFilter] = useState<InboxFilter | null>(null);
 
   const setFilter = (next: InboxFilter) => {
+    if (pendingFilter === null && next === active) return;
+    if (next === pendingFilter) return;
+
+    // This high-priority local update commits before the RSC request returns,
+    // so a slow filter navigation always acknowledges the click immediately.
+    setPendingFilter(next);
+    onPendingChange?.(true);
+
     const sp = new URLSearchParams(searchParams.toString());
     if (next === "all") sp.delete("filter");
     else sp.set("filter", next);
@@ -52,6 +78,19 @@ export function InboxFilters({
     const qs = sp.toString();
     router.replace(qs ? `/messages?${qs}` : "/messages");
   };
+
+  // `active` is server-resolved. Once it matches the requested filter, the
+  // replacement rows have arrived and the pending feedback can disappear.
+  useEffect(() => {
+    if (pendingFilter === null || pendingFilter !== active) return undefined;
+    const timeout = window.setTimeout(() => {
+      setPendingFilter(null);
+      onPendingChange?.(false);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [active, onPendingChange, pendingFilter]);
+
+  const displayedActive = pendingFilter ?? active;
 
   const toggleHideDnc = () => {
     const sp = new URLSearchParams(searchParams.toString());
@@ -77,14 +116,16 @@ export function InboxFilters({
          then the broader catch-all buckets. */}
       <FilterChip
         label="Unread"
-        active={active === "unread"}
+        active={displayedActive === "unread"}
+        pending={pendingFilter === "unread"}
         count={filterCounts.unread}
         onClick={() => setFilter("unread")}
         testId="filter-unread"
       />
       <FilterChip
         label="Needs Outcome"
-        active={active === "needs_outcome"}
+        active={displayedActive === "needs_outcome"}
+        pending={pendingFilter === "needs_outcome"}
         count={filterCounts.needs_outcome}
         onClick={() => setFilter("needs_outcome")}
         testId="filter-needs-outcome"
@@ -93,7 +134,8 @@ export function InboxFilters({
         <>
           <FilterChip
             label="Mine"
-            active={active === "mine"}
+            active={displayedActive === "mine"}
+            pending={pendingFilter === "mine"}
             count={filterCounts.mine}
             onClick={() => setFilter("mine")}
             testId="filter-mine"
@@ -101,7 +143,8 @@ export function InboxFilters({
           <FilterChip
             label="Escalated"
             icon="mascot"
-            active={active === "escalated"}
+            active={displayedActive === "escalated"}
+            pending={pendingFilter === "escalated"}
             count={filterCounts.escalated}
             onClick={() => setFilter("escalated")}
             testId="filter-escalated"
@@ -112,7 +155,8 @@ export function InboxFilters({
         <FilterChip
           label="Escalated"
           icon="mascot"
-          active={active === "escalated"}
+          active={displayedActive === "escalated"}
+          pending={pendingFilter === "escalated"}
           count={filterCounts.escalated}
           onClick={() => setFilter("escalated")}
           testId="filter-escalated"
@@ -121,7 +165,8 @@ export function InboxFilters({
       <FilterChip
         label="Sandra Dispo"
         icon="mascot"
-        active={active === "dispo"}
+        active={displayedActive === "dispo"}
+        pending={pendingFilter === "dispo"}
         count={filterCounts.dispo}
         onClick={() => setFilter("dispo")}
         testId="filter-dispo"
@@ -129,7 +174,8 @@ export function InboxFilters({
       {showAssignmentChips && (
         <FilterChip
           label="No owner"
-          active={active === "unassigned"}
+          active={displayedActive === "unassigned"}
+          pending={pendingFilter === "unassigned"}
           count={filterCounts.unassigned}
           onClick={() => setFilter("unassigned")}
           testId="filter-unassigned"
@@ -137,21 +183,24 @@ export function InboxFilters({
       )}
       <FilterChip
         label="All"
-        active={active === "all"}
+        active={displayedActive === "all"}
+        pending={pendingFilter === "all"}
         count={filterCounts.all}
         onClick={() => setFilter("all")}
         testId="filter-all"
       />
       <FilterChip
         label="Unknown"
-        active={active === "unknown"}
+        active={displayedActive === "unknown"}
+        pending={pendingFilter === "unknown"}
         count={filterCounts.unknown}
         onClick={() => setFilter("unknown")}
         testId="filter-unknown"
       />
       <FilterChip
         label="Dismissed"
-        active={active === "dismissed"}
+        active={displayedActive === "dismissed"}
+        pending={pendingFilter === "dismissed"}
         count={filterCounts.dismissed}
         onClick={() => setFilter("dismissed")}
         testId="filter-dismissed"
@@ -170,6 +219,11 @@ export function InboxFilters({
           onToggle={toggleHideDnc}
         />
       )}
+      <span className="sr-only" role="status" aria-live="polite">
+        {pendingFilter
+          ? `Loading ${FILTER_LABELS[pendingFilter]} messages`
+          : ""}
+      </span>
     </div>
   );
 }
@@ -232,6 +286,7 @@ function FilterChip({
   label,
   icon,
   active,
+  pending = false,
   onClick,
   count,
   testId,
@@ -239,12 +294,14 @@ function FilterChip({
   label: string;
   icon?: "mascot";
   active: boolean;
+  pending?: boolean;
   onClick: () => void;
   count?: number;
   testId: string;
 }) {
   const showCount = typeof count === "number" && count > 0;
-  const ariaLabel = showCount ? `${label} (${count})` : label;
+  const countLabel = showCount ? `${label} (${count})` : label;
+  const ariaLabel = pending ? `${countLabel}, loading` : countLabel;
 
   return (
     <button
@@ -252,6 +309,7 @@ function FilterChip({
       onClick={onClick}
       aria-label={ariaLabel}
       aria-pressed={active}
+      aria-busy={pending}
       data-testid={testId}
       data-active={active || undefined}
       className={`inline-flex min-h-11 items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${
@@ -270,6 +328,13 @@ function FilterChip({
         />
       ) : null}
       <span>{label}</span>
+      {pending ? (
+        <Loader2Icon
+          className="h-3.5 w-3.5 shrink-0 animate-spin"
+          aria-hidden="true"
+          data-testid={`${testId}-spinner`}
+        />
+      ) : null}
       {showCount ? (
         <span
           data-testid={`${testId}-count`}
