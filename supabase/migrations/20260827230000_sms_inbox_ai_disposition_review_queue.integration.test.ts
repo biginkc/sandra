@@ -27,7 +27,11 @@ const assignmentFiltersSql = readFileSync(
   "supabase/migrations/20260828053000_messages_assignment_filters_leads_only.sql",
   "utf8",
 );
-const rollbackSql = readFileSync(
+const assignmentFiltersRollbackSql = readFileSync(
+  "supabase/rollbacks/20260828053000_messages_assignment_filters_leads_only.sql",
+  "utf8",
+);
+const timeoutRecoveryRollbackSql = readFileSync(
   "supabase/rollbacks/20260828022800_sms_inbox_ai_disposition_review_queue_timeout_recovery.sql",
   "utf8",
 );
@@ -473,10 +477,37 @@ describe("Sandra Dispo inbox queue migration", () => {
       unassignedLead.conversationId,
     );
     expect(mine.counts.mine).toBe(mine.total);
+
+    await pg.query(assignmentFiltersRollbackSql);
+
+    const noOwnerAfterRollback = await snapshot(
+      "unassigned",
+      false,
+      viewerId,
+    );
+    expect(noOwnerAfterRollback.rows.map((row) => row.thread_id)).toEqual(
+      expect.arrayContaining([
+        unassignedLead.conversationId,
+        unassignedProspect.conversationId,
+        propertylessConversationId,
+      ]),
+    );
+    expect(noOwnerAfterRollback.counts.unassigned).toBe(
+      noOwnerAfterRollback.total,
+    );
+
+    const mineAfterRollback = await snapshot("mine", false, viewerId);
+    expect(mineAfterRollback.rows.map((row) => row.thread_id)).toEqual(
+      expect.arrayContaining([
+        assignedLead.conversationId,
+        assignedProspect.conversationId,
+      ]),
+    );
+    expect(mineAfterRollback.counts.mine).toBe(mineAfterRollback.total);
   });
 
-  it("rehearses the manual forward rollback and restores ordinary inbox access", async () => {
-    const executableRollback = rollbackSql
+  it("rehearses the timeout-recovery rollback and restores ordinary inbox access", async () => {
+    const executableRollback = timeoutRecoveryRollbackSql
       .replace(/\nbegin;\n\nset local lock_timeout/, "\nset local lock_timeout")
       .replace(/\ncommit;\s*$/, "\n");
 
