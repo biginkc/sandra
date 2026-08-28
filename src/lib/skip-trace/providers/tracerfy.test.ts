@@ -137,7 +137,7 @@ describe("TracerfyProvider — lookupSingle", () => {
     expect(body.find_owner).toBe(true);
   });
 
-  it("sets find_owner=false when first/last name supplied", async () => {
+  it("keeps address-owned lookup when first/last name are supplied", async () => {
     mockFetch({
       status: 200,
       body: { hit: false, persons_count: 0, credits_deducted: 0, persons: [] },
@@ -154,9 +154,9 @@ describe("TracerfyProvider — lookupSingle", () => {
     const init = (global.fetch as ReturnType<typeof vi.fn>).mock
       .calls[0][1] as RequestInit;
     const body = JSON.parse(init.body as string);
-    expect(body.find_owner).toBe(false);
-    expect(body.first_name).toBe("Jane");
-    expect(body.last_name).toBe("Doe");
+    expect(body.find_owner).toBe(true);
+    expect(body.first_name).toBeUndefined();
+    expect(body.last_name).toBeUndefined();
   });
 
   it("maps a hit response into SkipTraceResult shape", async () => {
@@ -572,7 +572,7 @@ describe("TracerfyProvider — pollBatch", () => {
     });
   });
 
-  it("does not count a name-only row as a usable contact hit", async () => {
+  it("keeps a paid name-only advanced row as an owner-resolution hit", async () => {
     mockFetch({
       status: 200,
       body: [
@@ -590,7 +590,7 @@ describe("TracerfyProvider — pollBatch", () => {
     });
     const p = new TracerfyProvider("k");
     const result = await p.pollBatch("42");
-    expect(result![0].hit).toBe(false);
+    expect(result![0].hit).toBe(true);
     expect(result![0].persons).toHaveLength(1);
     expect(result![0].persons[0].lastName).toBe("Owner");
     expect(result![0].persons[0].phones).toHaveLength(0);

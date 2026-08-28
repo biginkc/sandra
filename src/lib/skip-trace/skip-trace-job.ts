@@ -474,33 +474,6 @@ export async function runSkipTraceEnrichment(
 
   const mailingByContact = new Map(homeowners.map((h) => [h.contact_id, h]));
 
-  const ownerNames: Array<{
-    id: string;
-    first_name: string | null;
-    last_name: string | null;
-  }> = [];
-  for (const ids of chunked(homeownerIds, IN_CHUNK)) {
-    const { data, error } = await supabase
-      .from("contacts")
-      .select("id, first_name, last_name")
-      .eq("org_id", params.orgId)
-      .in("id", ids);
-    if (error) {
-      await markJobFailed(
-        supabase,
-        params.jobId,
-        `Owner-name lookup failed before provider submission: ${error.message}`,
-        params.orgId,
-        attemptToken,
-      );
-      return summary;
-    }
-    if (data) ownerNames.push(...data);
-  }
-  const ownerNameByContact = new Map(
-    ownerNames.map((owner) => [owner.id, owner]),
-  );
-
   let cachedResults: SkipTraceResult[] = [];
   let misses: SkipTraceInput[] = [];
   const propsById = new Map(properties.map((p) => [p.id, p]));
@@ -596,17 +569,12 @@ export async function runSkipTraceEnrichment(
     const mailing = p.homeowner_contact_id
       ? mailingByContact.get(p.homeowner_contact_id)
       : null;
-    const ownerName = p.homeowner_contact_id
-      ? ownerNameByContact.get(p.homeowner_contact_id)
-      : null;
     misses.push({
       propertyId,
       address: p.address,
       city: p.city ?? "",
       state: p.state,
       zip: p.zip ?? null,
-      firstName: ownerName?.first_name ?? null,
-      lastName: ownerName?.last_name ?? null,
       mailingAddress: mailing?.mailing_address ?? null,
       mailingCity: mailing?.mailing_city ?? null,
       mailingState: mailing?.mailing_state ?? null,

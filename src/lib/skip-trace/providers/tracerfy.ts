@@ -202,15 +202,13 @@ export class TracerfyProvider implements SkipTraceProvider {
       address: input.address,
       city: input.city,
       state: input.state,
+      // Keep the production-proven address-owned lookup. Supplying an existing
+      // contact name switches Tracerfy into a different name-match mode whose
+      // misses would become 90-day reusable negatives before that mode has a
+      // safe canary/fallback contract.
+      find_owner: true,
     };
     if (input.zip) body.zip = input.zip;
-    if (input.firstName && input.lastName) {
-      body.find_owner = false;
-      body.first_name = input.firstName;
-      body.last_name = input.lastName;
-    } else {
-      body.find_owner = true;
-    }
 
     const data = await this.request<TracerfyLookupResponse>(
       "POST",
@@ -432,12 +430,10 @@ export function mapBatchRow(row: TracerfyBatchRow): SkipTraceResult {
   // Respect a provider-declared `hit` when the field is present
   // (lookup-style rows) — overriding an explicit hit:false would promote
   // provider-declared misses to matches. Flat advanced-mode rows carry
-  // no `hit` field at all. In that shape, a name alone is not a usable
-  // contact result and must not suppress a later trace.
-  const hasContact = persons.some(
-    (person) => person.phones.length > 0 || person.emails.length > 0,
-  );
-  const hit = "hit" in row ? !!row.hit && hasContact : hasContact;
+  // no `hit` field at all; there, any extracted person counts as the paid
+  // Advanced owner-resolution hit. Cache validity separately requires a
+  // classified phone or email before that result can suppress a later trace.
+  const hit = "hit" in row ? !!row.hit : persons.length > 0;
   return {
     // Tracerfy doesn't reliably round-trip external_id, so we treat
     // this as a hint at best — finalize matches via matchedAddress.

@@ -435,11 +435,18 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
       skip_trace_disabled: false,
       cass_status: "verified",
     }));
-    const { data, error } = await testClient
-      .from("properties")
-      .insert(rows as never)
-      .select("id");
-    if (error || !data) throw error ?? new Error("bulk seed failed");
+    // Hosted PostgREST can cap rows returned by one INSERT ... SELECT even
+    // though every row was inserted. Seed in bounded chunks so the test always
+    // retains all 4,001 ids it needs to exercise the batch split boundary.
+    const data: Array<{ id: string }> = [];
+    for (let offset = 0; offset < rows.length; offset += 500) {
+      const { data: inserted, error } = await testClient
+        .from("properties")
+        .insert(rows.slice(offset, offset + 500) as never)
+        .select("id");
+      if (error || !inserted) throw error ?? new Error("bulk seed failed");
+      data.push(...inserted);
+    }
 
     const result = await preflightSkipTrace(data.map((row) => row.id));
 

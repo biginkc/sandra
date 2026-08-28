@@ -1719,7 +1719,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     }
   });
 
-  it("passes the stored homeowner name into a fresh provider lookup", async () => {
+  it("does not use a stored homeowner name to narrow a fresh provider lookup", async () => {
     const { propertyId } = await seedProperty({
       address: "Named Owner Lookup Ln",
       withContact: true,
@@ -1733,13 +1733,10 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       propertyIds: [propertyId],
     });
 
-    expect(lookup).toHaveBeenCalledWith(
-      expect.objectContaining({
-        propertyId,
-        firstName: "Existing",
-        lastName: "Owner",
-      }),
-    );
+    expect(lookup).toHaveBeenCalledWith(expect.objectContaining({ propertyId }));
+    const submitted = lookup.mock.calls[0]?.[0];
+    expect(submitted).not.toHaveProperty("firstName");
+    expect(submitted).not.toHaveProperty("lastName");
   });
 
   it("normalizes provider-returned phones to E.164 before persisting", async () => {

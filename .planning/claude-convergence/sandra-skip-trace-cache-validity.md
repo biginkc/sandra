@@ -67,7 +67,7 @@ Make cached Tracefy results replayable without losing provider-returned phone da
 ## Implementation and verification evidence
 
 - The adapter now rehydrates preserved raw rows through the current parser, recovers `primary_phone` / `primary_phone_type`, prefers classified mobile numbers, rejects malformed or name-only positives, and preserves explicit provider no-data.
-- Preflight and runtime keep Tracerfy's production-proven Advanced batch mode at 2 credits per provider hit; a true one-record synchronous lookup costs 5. Owner names are still forwarded, but the uncanaried cheaper Normal mode is not selected because its misses would otherwise become reusable 90-day negatives.
+- Preflight and runtime keep Tracerfy's production-proven address-owned modes: Advanced batch at 2 credits per provider hit and address-owned synchronous lookup at 5. Existing owner names are not sent because Tracerfy treats that as a different, uncanaried name-match mode whose misses would otherwise become reusable 90-day negatives.
 - Every new/approved job stores an immutable maximum-credit authorization. The runner recomputes the unique provider-bound plan and live balance immediately before submission and stops if either gate changed.
 - Retry children also run a fresh preflight and persist their own credit ceiling before the workflow starts; the runner refuses every paid call when the persisted ceiling is absent or invalid.
 - Batch credits are estimated once per unique provider hit, never per miss or property fan-out, and the submitted trace type survives finalization.
@@ -82,6 +82,7 @@ Make cached Tracefy results replayable without losing provider-returned phone da
 - A read-only production query found zero active (`queued` or `pending_approval`) skip-trace jobs and zero active jobs missing a credit ceiling. No backfill or cancellation was needed.
 - Codex additionally found the retry RPC created queued children without a ceiling. Retry now preflights and stamps the cap before workflow start, while the runner independently fails closed if any paid path still reaches it without a persisted cap.
 - Claude iteration 3 at `2eba38a` blocked the uncanaried switch to Normal mode: a low-yield Normal response would have produced reusable negative cache and recreated the original 90-day suppression failure. The adapter and credit ceiling now remain on the production-proven Advanced path, including when names are present; a caller-tries-to-raise-the-cap regression test was added at the same time.
+- Claude iteration 4 at `c9db733` found the same uncanaried mode switch survived in the one-row lookup path and that name-only paid Advanced rows had been mislabeled as free misses. Single lookups now always use address-based owner discovery, stored owner names are no longer queried or forwarded, and Advanced rows keep provider hit semantics while the semantic cache-validity layer independently refuses to reuse name-only rows.
 - Residual hard gate: the historical queue rows contain no DNC/TCPA fields even though current Tracerfy documentation says new skip-trace results include inline flags. Mobile classification is not registry-grade DNC clearance. Do not launch SMS from the 55 recovered mobile numbers until a separately authorized DNC scrub or equivalent verified compliance source is applied.
 
 ## Research agents

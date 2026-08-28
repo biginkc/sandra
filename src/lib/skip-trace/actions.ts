@@ -158,28 +158,6 @@ async function buildSkipTracePreflight(
   );
   const hasMixedOrganizations = eligibleOrgIds.size > 1;
 
-  const ownerIds = [
-    ...new Set(
-      allowed
-        .map((property) => property.homeowner_contact_id)
-        .filter((id): id is string => !!id),
-    ),
-  ];
-  const ownerNames: Array<{
-    id: string;
-    first_name: string | null;
-    last_name: string | null;
-  }> = [];
-  for (let i = 0; i < ownerIds.length; i += 500) {
-    const { data, error } = await supabase
-      .from("contacts")
-      .select("id, first_name, last_name")
-      .in("id", ownerIds.slice(i, i + 500));
-    if (error) throw new Error(error.message);
-    if (data) ownerNames.push(...data);
-  }
-  const ownerNameById = new Map(ownerNames.map((owner) => [owner.id, owner]));
-
   const reusablePropertyIds = new Set<string>();
   const provider = getSkipTraceProvider();
   const eligibleOrgId =
@@ -217,20 +195,13 @@ async function buildSkipTracePreflight(
       allowed
         .slice(i, i + PROVIDER_BATCH_MAX)
         .filter((property) => !reusablePropertyIds.has(property.id))
-        .map((property) => {
-          const owner = property.homeowner_contact_id
-            ? ownerNameById.get(property.homeowner_contact_id)
-            : null;
-          return {
-            propertyId: property.id,
-            address: property.address,
-            city: property.city ?? "",
-            state: property.state,
-            zip: property.zip,
-            firstName: owner?.first_name ?? null,
-            lastName: owner?.last_name ?? null,
-          };
-        }),
+        .map((property) => ({
+          propertyId: property.id,
+          address: property.address,
+          city: property.city ?? "",
+          state: property.state,
+          zip: property.zip,
+        })),
     );
   }
   const required = tracefyCreditsRequired(providerBoundParts);
