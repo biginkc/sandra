@@ -16,7 +16,7 @@ export type InboxFilter =
 export type InboxFilterCounts = Record<InboxFilter, number>;
 
 export type PendingInboxChange =
-  | { kind: "filter"; value: InboxFilter }
+  | { kind: "filter"; value: InboxFilter; resetList?: boolean }
   | { kind: "hideDnc"; value: boolean };
 
 type Props = {
@@ -32,6 +32,7 @@ type Props = {
   hiddenDncCount: number;
   pendingChange: PendingInboxChange | null;
   completedChange: PendingInboxChange | null;
+  errorMessage: string | null;
   onFilterChange: (filter: InboxFilter) => void;
   onHideDncChange: (hideDnc: boolean) => void;
 };
@@ -61,6 +62,7 @@ export function InboxFilters({
   hiddenDncCount,
   pendingChange,
   completedChange,
+  errorMessage,
   onFilterChange,
   onHideDncChange,
 }: Props) {
@@ -196,6 +198,14 @@ export function InboxFilters({
           onToggle={() => onHideDncChange(!displayedHideDnc)}
         />
       )}
+      {errorMessage ? (
+        <span
+          className="text-[12px] font-semibold text-destructive"
+          role="alert"
+        >
+          {errorMessage}
+        </span>
+      ) : null}
       <span className="sr-only" role="status" aria-live="polite">
         {pendingFilter
           ? `Loading ${FILTER_LABELS[pendingFilter]} messages`

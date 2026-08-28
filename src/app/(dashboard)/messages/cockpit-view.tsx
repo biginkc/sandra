@@ -69,6 +69,7 @@ const THREAD_FILTERS = new Set<InboxFilter>([
   "needs_outcome",
 ]);
 const LIVE_CLOCK_INTERVAL_MS = 30_000;
+const INBOX_CHANGE_TIMEOUT_MS = 10_000;
 
 export function CockpitView({
   activeTab,
@@ -100,6 +101,7 @@ export function CockpitView({
     useState<PendingInboxChange | null>(null);
   const [completedInboxChange, setCompletedInboxChange] =
     useState<PendingInboxChange | null>(null);
+  const [inboxChangeError, setInboxChangeError] = useState<string | null>(null);
 
   // One live stats source for the Outbox tab badge + the stats banner,
   // so the two never show different numbers. Seeds from the server
@@ -135,6 +137,7 @@ export function CockpitView({
   const setTab = (next: string) => {
     setPendingInboxChange(null);
     setCompletedInboxChange(null);
+    setInboxChangeError(null);
     const sp = new URLSearchParams(searchParams.toString());
     if (next === "inbox") {
       sp.delete("tab");
@@ -148,6 +151,7 @@ export function CockpitView({
     (nextPage: number) => {
       setPendingInboxChange(null);
       setCompletedInboxChange(null);
+      setInboxChangeError(null);
       const sp = new URLSearchParams(searchParams.toString());
       if (nextPage <= 1) sp.delete("inboxPage");
       else sp.set("inboxPage", String(nextPage));
@@ -199,6 +203,7 @@ export function CockpitView({
     (threadId: string) => {
       setPendingInboxChange(null);
       setCompletedInboxChange(null);
+      setInboxChangeError(null);
       setPendingThreadId(threadId);
       setMobileShowsDetail(true);
       setFocusReturnThreadId(null);
@@ -218,6 +223,7 @@ export function CockpitView({
   const handleBackToList = useCallback(() => {
     setPendingInboxChange(null);
     setCompletedInboxChange(null);
+    setInboxChangeError(null);
     const returningThreadId =
       pendingThreadId ?? threadDetail?.threadId ?? selectedThreadId ?? null;
     setPendingThreadId(null);
@@ -296,12 +302,23 @@ export function CockpitView({
 
   const handleInboxFilterChange = useCallback(
     (next: InboxFilter) => {
-      if (pendingInboxChange !== null || next === filter) {
+      const resetsCurrentList =
+        next === filter &&
+        (searchParams.has("thread") || searchParams.has("inboxPage"));
+      if (
+        pendingInboxChange !== null ||
+        (next === filter && !resetsCurrentList)
+      ) {
         return;
       }
 
-      setPendingInboxChange({ kind: "filter", value: next });
+      setPendingInboxChange({
+        kind: "filter",
+        value: next,
+        resetList: resetsCurrentList,
+      });
       setCompletedInboxChange(null);
+      setInboxChangeError(null);
       setPendingThreadId(null);
       setMobileShowsDetail(false);
       const sp = new URLSearchParams(searchParams.toString());
@@ -323,6 +340,7 @@ export function CockpitView({
 
       setPendingInboxChange({ kind: "hideDnc", value: nextHideDnc });
       setCompletedInboxChange(null);
+      setInboxChangeError(null);
       setPendingThreadId(null);
       setMobileShowsDetail(false);
       const sp = new URLSearchParams(searchParams.toString());
@@ -340,20 +358,35 @@ export function CockpitView({
     if (pendingInboxChange === null) return undefined;
     const settled =
       pendingInboxChange.kind === "filter"
-        ? pendingInboxChange.value === filter
+        ? pendingInboxChange.value === filter &&
+          (!pendingInboxChange.resetList ||
+            (inboxPage === 1 && serverSelectedThreadId === null))
         : pendingInboxChange.value === hideDnc;
-    if (!settled) return undefined;
-    const timeout = window.setTimeout(() => {
-      setPendingInboxChange(null);
-      setCompletedInboxChange(pendingInboxChange);
-    }, 0);
+    const timeout = window.setTimeout(
+      () => {
+        setPendingInboxChange(null);
+        if (settled) {
+          setCompletedInboxChange(pendingInboxChange);
+        } else {
+          setCompletedInboxChange(null);
+          setInboxChangeError("Filter update timed out. Try again.");
+        }
+      },
+      settled ? 0 : INBOX_CHANGE_TIMEOUT_MS,
+    );
     return () => window.clearTimeout(timeout);
-  }, [filter, hideDnc, pendingInboxChange]);
+  }, [filter, hideDnc, inboxPage, pendingInboxChange, serverSelectedThreadId]);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setInboxChangeError(null), 0);
+    return () => window.clearTimeout(timeout);
+  }, [filter, hideDnc, inboxPage, serverSelectedThreadId]);
 
   useEffect(() => {
     const cancelPendingOnHistoryNavigation = () => {
       setPendingInboxChange(null);
       setCompletedInboxChange(null);
+      setInboxChangeError(null);
     };
     window.addEventListener("popstate", cancelPendingOnHistoryNavigation);
     return () =>
@@ -424,6 +457,7 @@ export function CockpitView({
             hiddenDncCount={hiddenDncCount}
             pendingChange={pendingInboxChange}
             completedChange={completedInboxChange}
+            errorMessage={inboxChangeError}
             onFilterChange={handleInboxFilterChange}
             onHideDncChange={handleHideDncChange}
           />
@@ -457,10 +491,7 @@ export function CockpitView({
                         }
                         currentUserId={currentUserId}
                         onSelectThread={handleSelectThread}
-                        emptyMessage={emptyInboxMessage(
-                          filter,
-                          hiddenDncCount,
-                        )}
+                        emptyMessage={emptyInboxMessage(filter, hiddenDncCount)}
                         nowMs={liveNowMs}
                       />
                     </div>

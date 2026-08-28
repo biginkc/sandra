@@ -6,6 +6,7 @@ import { CockpitView } from "./cockpit-view";
 import type { InboxFilterCounts } from "./inbox-filters";
 
 const replaceCalls: string[] = [];
+let searchParamsValue = "";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -18,7 +19,7 @@ vi.mock("next/navigation", () => ({
     forward: vi.fn(),
     prefetch: vi.fn(),
   }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(searchParamsValue),
   usePathname: () => "/messages",
 }));
 
@@ -186,11 +187,7 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
     expect(replaceCalls).toHaveLength(1);
 
     rerender(
-      <CockpitView
-        {...baseProps}
-        activeTab="inbox"
-        filter="unassigned"
-      />,
+      <CockpitView {...baseProps} activeTab="inbox" filter="unassigned" />,
     );
 
     await waitFor(() =>
@@ -223,9 +220,7 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
     );
 
     await user.click(screen.getByTestId("filter-unassigned"));
-    expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(
-      "inert",
-    );
+    expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute("inert");
 
     await user.click(screen.getByTestId("dnc-toggle"));
     expect(replaceCalls).toEqual(["/messages?filter=unassigned"]);
@@ -240,11 +235,7 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
     );
 
     rerender(
-      <CockpitView
-        {...baseProps}
-        activeTab="inbox"
-        filter="unassigned"
-      />,
+      <CockpitView {...baseProps} activeTab="inbox" filter="unassigned" />,
     );
     await waitFor(() =>
       expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(
@@ -323,6 +314,74 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
         "false",
       ),
     );
+  });
+
+  it("unlocks a timed-out filter request and leaves the stale inbox usable", () => {
+    vi.useFakeTimers();
+    try {
+      render(<CockpitView {...baseProps} activeTab="inbox" />);
+
+      act(() => screen.getByTestId("filter-unassigned").click());
+      expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(
+        "inert",
+      );
+
+      act(() => vi.advanceTimersByTime(10_000));
+
+      expect(screen.getByTestId("inbox-filter-results")).not.toHaveAttribute(
+        "inert",
+      );
+      expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(
+        "aria-busy",
+        "false",
+      );
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Filter update timed out. Try again.",
+      );
+      expect(screen.getByTestId("filter-all")).toHaveAttribute(
+        "aria-disabled",
+        "false",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps active-filter clicks able to close a thread and reset pagination", async () => {
+    replaceCalls.length = 0;
+    searchParamsValue = "inboxPage=3&thread=thread-1";
+    const user = userEvent.setup();
+    try {
+      const { rerender } = render(
+        <CockpitView
+          {...baseProps}
+          activeTab="inbox"
+          inboxPage={3}
+          selectedThreadId="thread-1"
+        />,
+      );
+
+      await user.click(screen.getByTestId("filter-all"));
+      expect(replaceCalls).toEqual(["/messages"]);
+      expect(screen.getByTestId("filter-all-spinner")).toBeVisible();
+
+      rerender(
+        <CockpitView
+          {...baseProps}
+          activeTab="inbox"
+          inboxPage={1}
+          selectedThreadId={null}
+        />,
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("filter-all")).toHaveAttribute(
+          "aria-busy",
+          "false",
+        ),
+      );
+    } finally {
+      searchParamsValue = "";
+    }
   });
 
   it("Outbox tab renders the queue panel cadence controls (regression guard, test 13)", () => {
