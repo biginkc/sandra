@@ -12,12 +12,18 @@ import {
 } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
-import { listThreadPage, listThreads } from "./list-threads";
+import {
+  listThreadPage,
+  listThreads,
+  type ThreadPageFilter,
+} from "./list-threads";
 import { ensureConversationIdForThread } from "./threading";
 
 const supabase = createTestClient();
 
-async function readScaleSnapshotUnderStatementTimeout(): Promise<{
+async function readScaleSnapshotUnderStatementTimeout(
+  filter: ThreadPageFilter = "all",
+): Promise<{
   durationMs: number;
   snapshot: {
     rows: unknown[];
@@ -45,14 +51,14 @@ async function readScaleSnapshotUnderStatementTimeout(): Promise<{
     }>(
       `select public.sms_inbox_thread_page_snapshot(
         $1::timestamptz,
-        'all'::text,
+        $2::text,
         null::uuid,
         null::uuid,
         false,
         200,
         0
       ) as snapshot`,
-      [new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString()],
+      [new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString(), filter],
     );
     return {
       durationMs: performance.now() - startedAt,
@@ -240,6 +246,23 @@ describe("listThreads (integration)", () => {
       needs_outcome: total,
     });
 
+    for (const filter of [
+      "unread",
+      "needs_outcome",
+      "mine",
+      "unassigned",
+      "escalated",
+      "dispo",
+    ] satisfies ThreadPageFilter[]) {
+      const filteredSnapshot =
+        await readScaleSnapshotUnderStatementTimeout(filter);
+      expect(
+        filteredSnapshot.durationMs,
+        `${filter} snapshot duration`,
+      ).toBeLessThan(7_000);
+      expect(filteredSnapshot.snapshot.counts.all).toBe(total);
+    }
+
     const firstPageStartedAt = performance.now();
     const page = await listThreadPage(supabase, {
       filter: "all",
@@ -294,9 +317,7 @@ describe("listThreads (integration)", () => {
     const dispositioned = await seedConversation({
       contactName: "Dispositioned",
       phone: "+18165554102",
-      messages: [
-        { direction: "inbound", body: "has outcome", read: true },
-      ],
+      messages: [{ direction: "inbound", body: "has outcome", read: true }],
     });
     const escalated = await seedConversation({
       contactName: "Escalated",
@@ -326,7 +347,9 @@ describe("listThreads (integration)", () => {
         .eq("property_id", escalated.propertyId)
         .single();
     if (escalatedMessageError || !escalatedMessage?.conversation_id) {
-      throw escalatedMessageError ?? new Error("missing escalated conversation");
+      throw (
+        escalatedMessageError ?? new Error("missing escalated conversation")
+      );
     }
     const { error: escalationError } = await supabase
       .from("message_threads")
@@ -352,7 +375,9 @@ describe("listThreads (integration)", () => {
       unassigned: 2,
       unread: 2,
       escalated: 1,
-      dispo: 1,
+      // An applied property outcome is not a pending Sandra Dispo review.
+      // That queue is backed only by ai_disposition_reviews.
+      dispo: 0,
       needs_outcome: 2,
     });
     expect(all.total).toBe(3);
@@ -368,10 +393,8 @@ describe("listThreads (integration)", () => {
       hideNoise: true,
       page: 1,
     });
-    expect(dispositionPage.total).toBe(1);
-    expect(dispositionPage.threads[0]?.contactId).toBe(
-      dispositioned.contactId,
-    );
+    expect(dispositionPage.total).toBe(0);
+    expect(dispositionPage.threads).toEqual([]);
 
     const withRestricted = await listThreadPage(supabase, {
       filter: "all",
