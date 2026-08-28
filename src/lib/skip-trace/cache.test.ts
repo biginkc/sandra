@@ -4,11 +4,13 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import type { Database } from "@/lib/supabase/types";
+import type { SkipTraceProvider, SkipTraceResult } from "./types";
 
 import {
   normalizeAddress,
   readCache,
   readCacheMany,
+  reusableCachedResult,
   writeCache,
 } from "./cache";
 
@@ -25,6 +27,88 @@ const cacheSource = readFileSync(
 );
 
 describe("normalizeAddress", () => {
+  it("replays a valid cache result at zero new credits", () => {
+    const provider = { providerId: "mock" } as SkipTraceProvider;
+    const result: SkipTraceResult = {
+      propertyId: "old-property",
+      hit: true,
+      persons: [
+        {
+          phones: [
+            {
+              number: "+18165550100",
+              type: "Mobile",
+              dnc: false,
+              rank: 1,
+            },
+          ],
+          emails: [],
+        },
+      ],
+      creditsDeducted: 2,
+      raw: { cached: true },
+    };
+    expect(
+      reusableCachedResult(
+        provider,
+        { result, cachedAt: "2026-08-01T00:00:00.000Z" },
+        "current-property",
+      ),
+    ).toMatchObject({
+      propertyId: "current-property",
+      hit: true,
+      creditsDeducted: 0,
+    });
+  });
+
+  it("rejects an ambiguous cached hit that has no classified phone or email", () => {
+    const provider = { providerId: "mock" } as SkipTraceProvider;
+    const result: SkipTraceResult = {
+      propertyId: "property-1",
+      hit: true,
+      persons: [
+        {
+          phones: [
+            {
+              number: "+18165550100",
+              type: "Unknown",
+              dnc: false,
+              rank: 1,
+            },
+          ],
+          emails: [],
+        },
+      ],
+      creditsDeducted: 2,
+      raw: { stale_projection: true },
+    };
+    expect(
+      reusableCachedResult(
+        provider,
+        { result, cachedAt: "2026-08-01T00:00:00.000Z" },
+        "property-1",
+      ),
+    ).toBeNull();
+  });
+
+  it("treats malformed cached arrays as provider-bound instead of throwing", () => {
+    const provider = { providerId: "mock" } as SkipTraceProvider;
+    const malformed = {
+      propertyId: "property-1",
+      hit: true,
+      persons: [{ phones: "not-an-array", emails: null }],
+      creditsDeducted: 2,
+      raw: { malformed: true },
+    } as unknown as SkipTraceResult;
+    expect(
+      reusableCachedResult(
+        provider,
+        { result: malformed, cachedAt: "2026-08-01T00:00:00.000Z" },
+        "property-1",
+      ),
+    ).toBeNull();
+  });
+
   it("scopes every cache read and write to the authoritative organization", () => {
     expect(cacheSource.match(/\.eq\("org_id", orgId\)/g)).toHaveLength(2);
     expect(cacheSource).toContain("org_id: orgId");
@@ -151,6 +235,48 @@ describe("normalizeAddress", () => {
     await expect(
       readCacheMany(client, "org-1", "mock", ["1 main st|kansas city|mo"]),
     ).rejects.toThrow(/bulk read failed/i);
+  });
+
+  it("reads large cache audiences in URL-safe chunks", async () => {
+    const requestedSlices: string[][] = [];
+    const client = {
+      from: vi.fn(() => {
+        let slice: string[] = [];
+        const builder: Record<string, ReturnType<typeof vi.fn>> = {};
+        for (const method of ["select", "eq", "gte"]) {
+          builder[method] = vi.fn(() => builder);
+        }
+        builder.in = vi.fn((_column: string, values: string[]) => {
+          slice = values;
+          requestedSlices.push(values);
+          return builder;
+        });
+        builder.order = vi.fn().mockImplementation(async () => ({
+          data: slice.map((address) => ({
+            address_normalized: address,
+            created_at: "2026-08-28T12:00:00.000Z",
+            result: {
+              propertyId: address,
+              hit: false,
+              persons: [],
+              creditsDeducted: 0,
+              raw: { provider_no_data: true },
+            },
+          })),
+          error: null,
+        }));
+        return builder;
+      }),
+    } as unknown as SupabaseClient<Database>;
+    const addresses = Array.from(
+      { length: 301 },
+      (_, index) => `${index} main st|kansas city|mo`,
+    );
+
+    const result = await readCacheMany(client, "org-1", "tracerfy", addresses);
+
+    expect(requestedSlices.map((slice) => slice.length)).toEqual([150, 150, 1]);
+    expect(result.size).toBe(301);
   });
 
   it("surfaces a failed cache upsert", async () => {

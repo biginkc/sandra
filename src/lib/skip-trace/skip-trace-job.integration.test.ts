@@ -5,6 +5,7 @@ import { createTemporaryOrganizationTracker } from "@tests/integration/fixtures/
 import { resetTenantTables } from "@tests/integration/reset";
 
 import { MockSkipTraceProvider } from "./providers/mock";
+import { normalizeAddress } from "./cache";
 import { persistSkipTraceResult } from "./persist-result";
 import {
   finalizeSkipTraceFromBatch,
@@ -115,6 +116,45 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     });
 
     expect(observedPhase).toBe("prepared");
+  });
+
+  it("refuses provider spend above the immutable approved credit cap", async () => {
+    const { propertyId } = await seedProperty({
+      address: "Expired Cache Cap Ln",
+    });
+    const jobId = await createPendingJob([propertyId]);
+    const { error: updateError } = await supabase
+      .from("jobs")
+      .update({
+        input_params: {
+          property_ids: [propertyId],
+          authorized_max_credits: 0,
+          provider_pricing_version: "tracerfy-2026-08",
+        },
+      })
+      .eq("id", jobId);
+    if (updateError) throw updateError;
+    const lookup = vi.spyOn(MockSkipTraceProvider.prototype, "lookupSingle");
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: await getOrgId(),
+      propertyIds: [propertyId],
+      inputParams: {
+        property_ids: [propertyId],
+        authorized_max_credits: 0,
+        provider_pricing_version: "tracerfy-2026-08",
+      },
+    });
+
+    expect(lookup).not.toHaveBeenCalled();
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("status, error_message")
+      .eq("id", jobId)
+      .single();
+    expect(job!.status).toBe("failed");
+    expect(job!.error_message).toContain("above the approved 0");
   });
 
   it("rechecks a claimed job after a homeowner opts out and makes no provider call", async () => {
@@ -1390,12 +1430,15 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     // Counters reconciled from the ledger: all three count as matched.
     const { data: job } = await supabase
       .from("jobs")
-      .select("status, succeeded_items, failed_items")
+      .select("status, succeeded_items, failed_items, result_summary")
       .eq("id", jobId)
       .single();
     expect(job!.status).toBe("completed");
     expect(job!.succeeded_items).toBe(3);
     expect(job!.failed_items).toBe(0);
+    expect(
+      (job!.result_summary as { total_credits?: number } | null)?.total_credits,
+    ).toBe(3);
     const { data: repairedEvents, error: repairedEventError } = await supabase
       .from("lead_events")
       .select(
@@ -1551,9 +1594,121 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     const summary = job2Row!.result_summary as {
       cached_hits?: number;
       api_hits?: number;
+      total_credits?: number;
     } | null;
     expect(summary?.cached_hits).toBe(1);
     expect(summary?.api_hits).toBe(0);
+    expect(summary?.total_credits).toBe(0);
+  });
+
+  it("rehydrates a legacy Tracerfy primary phone from cache with zero provider spend", async () => {
+    const address = "Legacy Primary Cache Ln";
+    const { propertyId } = await seedProperty({ address });
+    const orgId = await getOrgId();
+    const { error: cacheError } = await supabase
+      .from("skip_trace_cache")
+      .insert({
+        org_id: orgId,
+        provider: "tracerfy",
+        address_normalized: normalizeAddress({
+          address,
+          city: "Kansas City",
+          state: "MO",
+          zip: null,
+        }),
+        match_count: 0,
+        cost_credits: 2,
+        result: {
+          propertyId,
+          hit: true,
+          persons: [
+            {
+              firstName: "Legacy",
+              lastName: "Owner",
+              phones: [],
+              emails: [],
+            },
+          ],
+          creditsDeducted: 2,
+          raw: {
+            address,
+            city: "Kansas City",
+            state: "MO",
+            first_name: "Legacy",
+            last_name: "Owner",
+            primary_phone: "8165550199",
+            primary_phone_type: "Mobile",
+          },
+        },
+      });
+    if (cacheError) throw cacheError;
+
+    const priorProvider = process.env.SKIP_TRACE_PROVIDER;
+    const priorKey = process.env.TRACERFY_API_KEY;
+    process.env.SKIP_TRACE_PROVIDER = "tracerfy";
+    process.env.TRACERFY_API_KEY = "test-only";
+    try {
+      const jobId = await createPendingJob([propertyId]);
+      await runSkipTraceEnrichment(supabase, {
+        jobId,
+        orgId,
+        propertyIds: [propertyId],
+      });
+
+      const { data: property } = await supabase
+        .from("properties")
+        .select("homeowner_contact_id")
+        .eq("id", propertyId)
+        .single();
+      const { data: contact } = await supabase
+        .from("contacts")
+        .select("phone_1, phone_1_type")
+        .eq("id", property!.homeowner_contact_id!)
+        .single();
+      expect(contact).toMatchObject({
+        phone_1: "+18165550199",
+        phone_1_type: "mobile",
+      });
+
+      const { data: job } = await supabase
+        .from("jobs")
+        .select("result_summary")
+        .eq("id", jobId)
+        .single();
+      expect(job!.result_summary).toMatchObject({
+        cached_hits: 1,
+        api_hits: 0,
+        total_credits: 0,
+        mobile_results: 1,
+      });
+    } finally {
+      process.env.SKIP_TRACE_PROVIDER = priorProvider;
+      if (priorKey === undefined) delete process.env.TRACERFY_API_KEY;
+      else process.env.TRACERFY_API_KEY = priorKey;
+    }
+  });
+
+  it("passes the stored homeowner name into a fresh provider lookup", async () => {
+    const { propertyId } = await seedProperty({
+      address: "Named Owner Lookup Ln",
+      withContact: true,
+    });
+    const lookup = vi.spyOn(MockSkipTraceProvider.prototype, "lookupSingle");
+    const jobId = await createPendingJob([propertyId]);
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: await getOrgId(),
+      propertyIds: [propertyId],
+    });
+
+    expect(lookup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        propertyId,
+        firstName: "Existing",
+        lastName: "Owner",
+      }),
+    );
   });
 
   it("normalizes provider-returned phones to E.164 before persisting", async () => {
@@ -1687,8 +1842,9 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
   // ---------------------------------------------------------------
   describe("address fan-out (multi-property + missing rows)", () => {
     it("two properties at the same address: submit dedups, both finalize from one result row", async () => {
-      const a = await seedProperty({ address: "1 Shared Address Ln" });
-      const b = await seedProperty({ address: "1 Shared Address Ln" });
+      const sharedAddress = "1 Shared Address Ln";
+      const a = await seedProperty({ address: sharedAddress });
+      const b = await seedProperty({ address: sharedAddress });
       const ids = [a.propertyId, b.propertyId];
       const jobId = await createPendingJob(ids);
 
@@ -1727,6 +1883,18 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       );
       expect(results).not.toBeNull();
       expect(results).toHaveLength(1);
+      results![0] = { ...results![0], creditsDeducted: 0 };
+      const { error: summaryError } = await supabase
+        .from("jobs")
+        .update({
+          result_summary: {
+            ...(jobAfterSubmit!.result_summary as Record<string, unknown>),
+            credits_per_lead: 2,
+            trace_type: "advanced",
+          },
+        })
+        .eq("id", jobId);
+      if (summaryError) throw summaryError;
 
       await finalizeSkipTraceFromBatch(supabase, {
         jobId,
@@ -1744,7 +1912,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
       const { data: jobRow } = await supabase
         .from("jobs")
-        .select("status, succeeded_items, failed_items")
+        .select("status, succeeded_items, failed_items, result_summary")
         .eq("id", jobId)
         .single();
       expect(jobRow!.status).toBe("completed");
@@ -1752,6 +1920,31 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       // count even though only one result row came back.
       expect(jobRow!.succeeded_items).toBe(2);
       expect(jobRow!.failed_items).toBe(0);
+      expect(
+        (jobRow!.result_summary as { total_credits?: number } | null)
+          ?.total_credits,
+      ).toBe(2);
+      expect(
+        (jobRow!.result_summary as { trace_type?: string } | null)?.trace_type,
+      ).toBe("advanced");
+
+      const { data: cacheRows, error: cacheReadError } = await supabase
+        .from("skip_trace_cache")
+        .select("cost_credits")
+        .eq("org_id", await getOrgId())
+        .eq("provider", "mock")
+        .eq(
+          "address_normalized",
+          normalizeAddress({
+            address: sharedAddress,
+            city: "Kansas City",
+            state: "MO",
+            zip: null,
+          }),
+        );
+      if (cacheReadError) throw cacheReadError;
+      expect(cacheRows).toHaveLength(1);
+      expect(cacheRows![0].cost_credits).toBe(2);
 
       // Per-property job_items should exist for both properties.
       const { data: items } = await supabase

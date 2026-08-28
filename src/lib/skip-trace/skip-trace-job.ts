@@ -14,6 +14,7 @@ import {
   normalizeAddress,
   normalizeAddressForMatch,
   readCacheMany,
+  reusableCachedResult,
   writeCache,
 } from "./cache";
 import {
@@ -25,6 +26,7 @@ import {
   type SkipTraceEligibilityAudit,
 } from "./eligibility";
 import { persistSkipTraceResult, type PersistOutcome } from "./persist-result";
+import { tracerfyBatchCreditLimit } from "./providers/tracerfy";
 import { getSkipTraceProvider } from "./registry";
 import type { SkipTraceInput, SkipTraceResult } from "./types";
 
@@ -61,6 +63,11 @@ export type SkipTraceJobSummary = {
   cached_hits: number;
   api_hits: number;
   total_credits: number;
+  credits_per_lead?: number;
+  trace_type?: string;
+  mobile_results?: number;
+  landline_only_results?: number;
+  email_only_results?: number;
   dnc_skipped?: number;
   dnc_contact_ambiguous?: number;
   eligibility_exclusions?: Json;
@@ -443,6 +450,33 @@ export async function runSkipTraceEnrichment(
 
   const mailingByContact = new Map(homeowners.map((h) => [h.contact_id, h]));
 
+  const ownerNames: Array<{
+    id: string;
+    first_name: string | null;
+    last_name: string | null;
+  }> = [];
+  for (const ids of chunked(homeownerIds, IN_CHUNK)) {
+    const { data, error } = await supabase
+      .from("contacts")
+      .select("id, first_name, last_name")
+      .eq("org_id", params.orgId)
+      .in("id", ids);
+    if (error) {
+      await markJobFailed(
+        supabase,
+        params.jobId,
+        `Owner-name lookup failed before provider submission: ${error.message}`,
+        params.orgId,
+        attemptToken,
+      );
+      return summary;
+    }
+    if (data) ownerNames.push(...data);
+  }
+  const ownerNameByContact = new Map(
+    ownerNames.map((owner) => [owner.id, owner]),
+  );
+
   let cachedResults: SkipTraceResult[] = [];
   let misses: SkipTraceInput[] = [];
   const propsById = new Map(properties.map((p) => [p.id, p]));
@@ -527,26 +561,33 @@ export async function runSkipTraceEnrichment(
     if (!addressNormalized) continue;
     const cached = cacheByAddress.get(addressNormalized) ?? null;
     if (cached) {
-      // Cache row stores the previous result; reuse it but rewrite the
-      // propertyId so persistence targets the *current* row.
-      cachedResults.push({ ...cached.result, propertyId });
-      summary.cached_hits++;
-    } else {
-      const mailing = p.homeowner_contact_id
-        ? mailingByContact.get(p.homeowner_contact_id)
-        : null;
-      misses.push({
-        propertyId,
-        address: p.address,
-        city: p.city ?? "",
-        state: p.state,
-        zip: p.zip ?? null,
-        mailingAddress: mailing?.mailing_address ?? null,
-        mailingCity: mailing?.mailing_city ?? null,
-        mailingState: mailing?.mailing_state ?? null,
-        mailingZip: mailing?.mailing_zip ?? null,
-      });
+      const reusable = reusableCachedResult(provider, cached, propertyId);
+      if (reusable) {
+        cachedResults.push(reusable);
+        summary.cached_hits++;
+        continue;
+      }
     }
+
+    const mailing = p.homeowner_contact_id
+      ? mailingByContact.get(p.homeowner_contact_id)
+      : null;
+    const ownerName = p.homeowner_contact_id
+      ? ownerNameByContact.get(p.homeowner_contact_id)
+      : null;
+    misses.push({
+      propertyId,
+      address: p.address,
+      city: p.city ?? "",
+      state: p.state,
+      zip: p.zip ?? null,
+      firstName: ownerName?.first_name ?? null,
+      lastName: ownerName?.last_name ?? null,
+      mailingAddress: mailing?.mailing_address ?? null,
+      mailingCity: mailing?.mailing_city ?? null,
+      mailingState: mailing?.mailing_state ?? null,
+      mailingZip: mailing?.mailing_zip ?? null,
+    });
   }
 
   // The workflow checked before claiming, but property/cache preparation can
@@ -694,6 +735,53 @@ export async function runSkipTraceEnrichment(
     if (boundaryEligibility.exclusions.length > 0) {
       if ((await reconcileProviderExclusions()) === "stop") return summary;
       continue;
+    }
+
+    const uniquePlannedInputs = new Map<string, SkipTraceInput>();
+    for (const input of misses) {
+      const key = normalizeAddressForMatch(input);
+      if (!uniquePlannedInputs.has(key)) uniquePlannedInputs.set(key, input);
+    }
+    const plannedCredits =
+      misses.length === 1
+        ? 5
+        : tracerfyBatchCreditLimit([...uniquePlannedInputs.values()]);
+    const authorizedMaxCredits =
+      jsonRecord(claimedInputParams).authorized_max_credits;
+    if (
+      typeof authorizedMaxCredits === "number" &&
+      plannedCredits > authorizedMaxCredits
+    ) {
+      await markJobFailed(
+        supabase,
+        params.jobId,
+        `Provider plan now requires up to ${plannedCredits} credits, above the approved ${authorizedMaxCredits}. Review and approve the updated cost before retrying.`,
+        params.orgId,
+        attemptToken,
+      );
+      return summary;
+    }
+    try {
+      const currentBalance = await provider.getBalance();
+      if (currentBalance < plannedCredits) {
+        await markJobFailed(
+          supabase,
+          params.jobId,
+          `Tracefy has ${currentBalance} credits; the current provider plan requires up to ${plannedCredits}.`,
+          params.orgId,
+          attemptToken,
+        );
+        return summary;
+      }
+    } catch (error) {
+      await markJobFailed(
+        supabase,
+        params.jobId,
+        `Could not confirm Tracefy credits immediately before submission: ${error instanceof Error ? error.message : String(error)}`,
+        params.orgId,
+        attemptToken,
+      );
+      return summary;
     }
 
     if (misses.length === 1) {
@@ -920,6 +1008,7 @@ export async function runSkipTraceEnrichment(
             submit_phase_completed_at: new Date().toISOString(),
             estimated_wait_seconds: ticket.estimatedWaitSeconds,
             credits_per_lead: ticket.creditsPerLead,
+            trace_type: ticket.traceType,
           } as unknown as Json,
           worker_heartbeat_at: new Date().toISOString(),
         })
@@ -1063,6 +1152,7 @@ type LedgerEntry = {
   errorClass: string | null;
   noMatch: boolean;
   fromCache: boolean;
+  contactKind: "mobile" | "landline_only" | "email_only" | null;
 };
 
 /** Error classes that are a FINAL answer for this run — resuming must
@@ -1141,6 +1231,17 @@ async function readItemLedger(
           !!row.output_payload &&
           typeof row.output_payload === "object" &&
           (row.output_payload as Record<string, unknown>).from_cache === true,
+        contactKind:
+          !!row.output_payload &&
+          typeof row.output_payload === "object" &&
+          ["mobile", "landline_only", "email_only"].includes(
+            String(
+              (row.output_payload as Record<string, unknown>).contact_kind,
+            ),
+          )
+            ? ((row.output_payload as Record<string, unknown>)
+                .contact_kind as LedgerEntry["contactKind"])
+            : null,
       };
       if (entry.status === "error" && ledgerRank(entry) === 0) {
         retryableErrorItemIds.push(row.id);
@@ -1339,8 +1440,23 @@ async function finalizeClaimed(
     no_match: prior.no_match ?? 0,
     failed: prior.failed ?? 0,
     cached_hits: prior.cached_hits ?? 0,
-    api_hits: prior.api_hits ?? 0,
-    total_credits: prior.total_credits ?? 0,
+    api_hits: params.results.length,
+    total_credits: params.results.reduce(
+      (total, result) =>
+        total +
+        (result.creditsDeducted > 0
+          ? result.creditsDeducted
+          : typeof prior.credits_per_lead === "number"
+            ? prior.credits_per_lead
+            : 0),
+      0,
+    ),
+    ...(typeof prior.credits_per_lead === "number"
+      ? { credits_per_lead: prior.credits_per_lead }
+      : {}),
+    ...(typeof prior.trace_type === "string"
+      ? { trace_type: prior.trace_type }
+      : {}),
     ...(prior.eligibility_exclusions
       ? { eligibility_exclusions: prior.eligibility_exclusions }
       : {}),
@@ -1361,6 +1477,13 @@ async function finalizeClaimed(
   const unmatchedResults: SkipTraceResult[] = [];
 
   for (const result of params.results) {
+    const providerCredits =
+      result.creditsDeducted > 0
+        ? result.creditsDeducted
+        : typeof prior.credits_per_lead === "number"
+          ? prior.credits_per_lead
+          : 0;
+    const creditedResult = { ...result, creditsDeducted: providerCredits };
     let bucket: string[] | null = null;
     if (addressMap) {
       const m = result.matchedAddress;
@@ -1399,7 +1522,10 @@ async function finalizeClaimed(
       satisfiedPropertyIds.add(propertyId);
       fanOut.push({
         propertyId,
-        result: { ...result, propertyId },
+        result: {
+          ...creditedResult,
+          propertyId,
+        },
       });
     }
   }
@@ -1484,6 +1610,7 @@ async function finalizeClaimed(
       {
         requireLedgerWrite: true,
         beforeLedgerWrite: params.beforeLedgerWrite,
+        countProviderMetrics: false,
       },
     );
 
@@ -1606,7 +1733,13 @@ async function finalizeClaimed(
   let matchedTotal = 0;
   let noMatchTotal = 0;
   let failedTotal = 0;
+  let mobileResults = 0;
+  let landlineOnlyResults = 0;
+  let emailOnlyResults = 0;
   for (const entry of endLedger.values()) {
+    if (entry.contactKind === "mobile") mobileResults++;
+    if (entry.contactKind === "landline_only") landlineOnlyResults++;
+    if (entry.contactKind === "email_only") emailOnlyResults++;
     if (entry.status === "success") {
       if (entry.noMatch) noMatchTotal++;
       else matchedTotal++;
@@ -1617,6 +1750,9 @@ async function finalizeClaimed(
   summary.matched = matchedTotal;
   summary.no_match = noMatchTotal;
   summary.failed = failedTotal;
+  summary.mobile_results = mobileResults;
+  summary.landline_only_results = landlineOnlyResults;
+  summary.email_only_results = emailOnlyResults;
   if (endLedger.size !== summary.total) {
     throw new Error(
       `finalize ledger count mismatch: expected ${summary.total}, found ${endLedger.size}`,
@@ -1631,6 +1767,20 @@ async function finalizeClaimed(
 
 // ---------- helpers ----------------------------------------------------
 
+function classifyContactKind(
+  result: SkipTraceResult,
+): "mobile" | "landline_only" | "email_only" | null {
+  const phones = result.persons.flatMap((person) => person.phones);
+  if (phones.some((phone) => phone.type === "Mobile")) return "mobile";
+  if (phones.some((phone) => phone.type === "Landline")) {
+    return "landline_only";
+  }
+  if (result.persons.some((person) => person.emails.length > 0)) {
+    return "email_only";
+  }
+  return null;
+}
+
 async function persistAndRecord(
   supabase: SupabaseClient<Database>,
   orgId: string,
@@ -1641,6 +1791,7 @@ async function persistAndRecord(
   ledger?: {
     requireLedgerWrite?: boolean;
     beforeLedgerWrite?: (propertyId: string) => Promise<void>;
+    countProviderMetrics?: boolean;
   },
 ): Promise<void> {
   // A provider result is not terminal until its per-property ledger row is
@@ -1680,8 +1831,18 @@ async function persistAndRecord(
     return;
   }
 
-  if (!fromCache) summary.api_hits++;
-  summary.total_credits += result.creditsDeducted;
+  if (!fromCache && ledger?.countProviderMetrics !== false) {
+    summary.api_hits++;
+    summary.total_credits += result.creditsDeducted;
+  }
+  const contactKind = classifyContactKind(result);
+  if (contactKind === "mobile") {
+    summary.mobile_results = (summary.mobile_results ?? 0) + 1;
+  } else if (contactKind === "landline_only") {
+    summary.landline_only_results = (summary.landline_only_results ?? 0) + 1;
+  } else if (contactKind === "email_only") {
+    summary.email_only_results = (summary.email_only_results ?? 0) + 1;
+  }
 
   if (outcome.status === "matched") {
     summary.matched++;
@@ -1692,6 +1853,7 @@ async function persistAndRecord(
         credits_deducted: result.creditsDeducted,
         phones_added: outcome.phonesAdded,
         emails_added: outcome.emailsAdded,
+        contact_kind: contactKind,
       },
     });
     if (jobItemId) {
@@ -1716,6 +1878,7 @@ async function persistAndRecord(
         from_cache: fromCache,
         credits_deducted: result.creditsDeducted,
         no_match: true,
+        contact_kind: contactKind,
       },
     });
     if (jobItemId) {
@@ -1746,6 +1909,7 @@ async function persistAndRecord(
         manual_review: true,
         reason: "dnc_contact_ambiguous",
         ambiguous_contact_ids: outcome.ambiguousContactIds ?? [],
+        contact_kind: contactKind,
       },
     });
   } else if (outcome.status === "dnc_skipped") {
@@ -1756,6 +1920,7 @@ async function persistAndRecord(
       error_class: "dnc_locked",
       error_message:
         "Property became permanently DNC before the provider result could be persisted.",
+      result: { contact_kind: contactKind },
     });
   } else {
     summary.failed++;

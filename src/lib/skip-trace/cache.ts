@@ -2,7 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database, Json } from "@/lib/supabase/types";
 
-import type { SkipTraceResult } from "./types";
+import type { SkipTraceProvider, SkipTraceResult } from "./types";
 
 /**
  * Per-provider per-address skip-trace cache. 90-day TTL enforced at
@@ -50,6 +50,63 @@ export type CachedSkipTrace = {
    *  days ago" UI. */
   cachedAt: string;
 };
+
+function hasUsableContact(result: SkipTraceResult): boolean {
+  if (!Array.isArray(result.persons)) return false;
+  return result.persons.some((person) => {
+    if (!Array.isArray(person.emails) || !Array.isArray(person.phones)) {
+      return false;
+    }
+    return (
+      person.emails.some(
+        (email) =>
+          typeof email?.email === "string" && email.email.trim() !== "",
+      ) ||
+      person.phones.some(
+        (phone) =>
+          typeof phone?.number === "string" &&
+          phone.number.trim() !== "" &&
+          (phone.type === "Mobile" || phone.type === "Landline"),
+      )
+    );
+  });
+}
+
+/**
+ * Turn a cache row into a zero-cost result that is safe to reuse. Tracerfy's
+ * raw response is deliberately retained in the cache, so parser fixes can
+ * recover fields that an older projection dropped. A positive row must still
+ * contain a usable, classified phone or email after normalization; otherwise
+ * it goes back through the provider path instead of suppressing a fresh trace.
+ */
+export function reusableCachedResult(
+  provider: SkipTraceProvider,
+  cached: CachedSkipTrace,
+  propertyId: string,
+): SkipTraceResult | null {
+  let normalized: SkipTraceResult | null;
+  try {
+    normalized = provider.normalizeCachedResult
+      ? provider.normalizeCachedResult(cached.result)
+      : cached.result;
+  } catch {
+    return null;
+  }
+  if (!normalized) return null;
+  if (!Array.isArray(normalized.persons)) return null;
+
+  if (normalized.hit) {
+    if (!hasUsableContact(normalized)) return null;
+  } else if (normalized.persons.length > 0) {
+    return null;
+  }
+
+  return {
+    ...normalized,
+    propertyId,
+    creditsDeducted: 0,
+  };
+}
 
 export async function readCache(
   supabase: SupabaseClient<Database>,
@@ -106,29 +163,44 @@ export async function readCacheMany(
   // Addresses ride in the GET query string — keep chunks small enough to
   // stay clear of URL length limits.
   const CHUNK = 150;
+  const CONCURRENCY = 6;
   const unique = Array.from(new Set(addressesNormalized));
+  const slices: string[][] = [];
   for (let i = 0; i < unique.length; i += CHUNK) {
-    const slice = unique.slice(i, i + CHUNK);
-    const { data, error } = await supabase
-      .from("skip_trace_cache")
-      .select("address_normalized, result, created_at")
-      .eq("org_id", orgId)
-      .eq("provider", provider)
-      .in("address_normalized", slice)
-      .gte("created_at", cutoff)
-      .order("created_at", { ascending: false });
+    slices.push(unique.slice(i, i + CHUNK));
+  }
+  // A 16K audience needs roughly 107 URL-safe chunks. Keep a bounded number
+  // in flight so the preflight does not spend its entire request lifetime on
+  // sequential network latency, while still avoiding an unbounded burst at
+  // PostgREST.
+  for (let i = 0; i < slices.length; i += CONCURRENCY) {
+    const responses = await Promise.all(
+      slices.slice(i, i + CONCURRENCY).map((slice) =>
+        supabase
+          .from("skip_trace_cache")
+          .select("address_normalized, result, created_at")
+          .eq("org_id", orgId)
+          .eq("provider", provider)
+          .in("address_normalized", slice)
+          .gte("created_at", cutoff)
+          .order("created_at", { ascending: false }),
+      ),
+    );
 
-    if (error) {
-      throw new Error(`skip-trace cache bulk read failed: ${error.message}`);
-    }
+    for (const { data, error } of responses) {
+      if (error) {
+        throw new Error(`skip-trace cache bulk read failed: ${error.message}`);
+      }
 
-    for (const row of data ?? []) {
-      // Rows arrive newest-first; first write per address wins.
-      if (!out.has(row.address_normalized)) {
-        out.set(row.address_normalized, {
-          result: row.result as unknown as SkipTraceResult,
-          cachedAt: row.created_at,
-        });
+      for (const row of data ?? []) {
+        // Each address appears in exactly one request slice. Rows within that
+        // slice arrive newest-first, so the first write per address wins.
+        if (!out.has(row.address_normalized)) {
+          out.set(row.address_normalized, {
+            result: row.result as unknown as SkipTraceResult,
+            cachedAt: row.created_at,
+          });
+        }
       }
     }
   }
@@ -157,6 +229,7 @@ export async function writeCache(
       result: result as unknown as Json,
       match_count: matchCount,
       cost_credits: result.creditsDeducted,
+      created_at: new Date().toISOString(),
     },
     { onConflict: "org_id,provider,address_normalized" },
   );

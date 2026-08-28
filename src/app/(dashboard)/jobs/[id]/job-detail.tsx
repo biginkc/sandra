@@ -526,9 +526,18 @@ function CassPanel({ job }: { job: Job }) {
         <DetailRow label="Invalid" value={`${summary.invalid ?? 0}`} />
         <DetailRow label="Ambiguous" value={`${summary.ambiguous ?? 0}`} />
         <DetailRow label="Cache hits" value={`${summary.cacheHits ?? 0}`} />
-        <DetailRow label="Retryable" value={`${summary.retryableFailures ?? 0}`} />
-        <DetailRow label="Saved outputs" value={`${summary.savedResultFailures ?? 0}`} />
-        <DetailRow label="Needs review" value={`${summary.manualReconciliation ?? 0}`} />
+        <DetailRow
+          label="Retryable"
+          value={`${summary.retryableFailures ?? 0}`}
+        />
+        <DetailRow
+          label="Saved outputs"
+          value={`${summary.savedResultFailures ?? 0}`}
+        />
+        <DetailRow
+          label="Needs review"
+          value={`${summary.manualReconciliation ?? 0}`}
+        />
       </CardContent>
     </Card>
   );
@@ -542,21 +551,22 @@ function SkipTracePanel({ job }: { job: Job }) {
       <CardHeader className="pb-3">
         <CardTitle className="text-sm">Skip-trace</CardTitle>
         <CardDescription>
-          Owner phone/email lookup via {job.provider ?? "(no provider)"}
+          Owner contact lookup via {job.provider ?? "(no provider)"}. Mobile
+          classification does not mean DNC-cleared.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid grid-cols-2 gap-3 pt-0 md:grid-cols-3">
         <DetailRow
-          label="Hit"
-          value={`${(summary.hits as number | undefined) ?? "—"}`}
+          label="Contact matches"
+          value={`${(summary.matched as number | undefined) ?? "—"}`}
         />
         <DetailRow
           label="No match"
-          value={`${(summary.no_matches as number | undefined) ?? "—"}`}
+          value={`${(summary.no_match as number | undefined) ?? "—"}`}
         />
         <DetailRow
           label="Credits used"
-          value={`${(summary.credits_used as number | undefined) ?? "—"}`}
+          value={`${(summary.total_credits as number | undefined) ?? "—"}`}
         />
         <DetailRow
           label="Provider run id"
@@ -565,10 +575,33 @@ function SkipTracePanel({ job }: { job: Job }) {
         />
         <DetailRow
           label="Trace type"
-          value={(params.trace_type as string) ?? "normal"}
+          value={
+            (summary.trace_type as string | undefined) ??
+            (params.trace_type as string | undefined) ??
+            "—"
+          }
         />
         {(summary.cached_hits as number | undefined) !== undefined && (
           <DetailRow label="Cache hits" value={`${summary.cached_hits ?? 0}`} />
+        )}
+        {(summary.mobile_results as number | undefined) !== undefined && (
+          <DetailRow
+            label="Mobile classified"
+            value={`${summary.mobile_results ?? 0}`}
+          />
+        )}
+        {(summary.landline_only_results as number | undefined) !==
+          undefined && (
+          <DetailRow
+            label="Landline only"
+            value={`${summary.landline_only_results ?? 0}`}
+          />
+        )}
+        {(summary.email_only_results as number | undefined) !== undefined && (
+          <DetailRow
+            label="Email only"
+            value={`${summary.email_only_results ?? 0}`}
+          />
         )}
       </CardContent>
     </Card>

@@ -260,8 +260,59 @@ describe("<JobDetail /> CASS recovery", () => {
     );
 
     expect(screen.getByText("Retryable").parentElement).toHaveTextContent("2");
-    expect(screen.getByText("Saved outputs").parentElement).toHaveTextContent("1");
-    expect(screen.getByText("Needs review").parentElement).toHaveTextContent("3");
+    expect(screen.getByText("Saved outputs").parentElement).toHaveTextContent(
+      "1",
+    );
+    expect(screen.getByText("Needs review").parentElement).toHaveTextContent(
+      "3",
+    );
+  });
+});
+
+describe("<JobDetail /> skip-trace metrics", () => {
+  it("separates mobile, landline-only, email-only, cache, and credit outcomes", () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          type: "skip_trace",
+          provider: "tracerfy",
+          provider_run_id: "queue-1",
+          result_summary: {
+            matched: 109,
+            no_match: 21,
+            total_credits: 0,
+            cached_hits: 130,
+            mobile_results: 55,
+            landline_only_results: 31,
+            email_only_results: 23,
+            trace_type: "advanced",
+          },
+        })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+
+    expect(screen.getByText("Contact matches").parentElement).toHaveTextContent(
+      "109",
+    );
+    expect(
+      screen.getByText("Mobile classified").parentElement,
+    ).toHaveTextContent("55");
+    expect(screen.getByText("Landline only").parentElement).toHaveTextContent(
+      "31",
+    );
+    expect(screen.getByText("Email only").parentElement).toHaveTextContent(
+      "23",
+    );
+    expect(screen.getByText("Credits used").parentElement).toHaveTextContent(
+      "0",
+    );
+    expect(
+      screen.getByText(/Mobile classification does not mean DNC-cleared/),
+    ).toBeInTheDocument();
   });
 });
 
