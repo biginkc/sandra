@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter, useSearchParams } from "next/navigation";
+import { Loader2Icon } from "lucide-react";
 
 export type InboxFilter =
   | "all"
@@ -15,6 +15,10 @@ export type InboxFilter =
 
 export type InboxFilterCounts = Record<InboxFilter, number>;
 
+export type PendingInboxChange =
+  | { kind: "filter"; value: InboxFilter; resetList?: boolean }
+  | { kind: "hideDnc"; value: boolean };
+
 type Props = {
   active: InboxFilter;
   filterCounts: InboxFilterCounts;
@@ -26,6 +30,23 @@ type Props = {
   /** Count of DNC threads that the current filter set would have shown
    *  if the toggle were OFF. Surfaced as a tiny hint next to the toggle. */
   hiddenDncCount: number;
+  pendingChange: PendingInboxChange | null;
+  completedChange: PendingInboxChange | null;
+  errorMessage: string | null;
+  onFilterChange: (filter: InboxFilter) => void;
+  onHideDncChange: (hideDnc: boolean) => void;
+};
+
+const FILTER_LABELS: Record<InboxFilter, string> = {
+  all: "All",
+  mine: "Mine",
+  unassigned: "No owner",
+  unknown: "Unknown",
+  dismissed: "Dismissed",
+  unread: "Unread",
+  escalated: "Escalated",
+  dispo: "Sandra Dispo",
+  needs_outcome: "Needs Outcome",
 };
 
 /**
@@ -39,34 +60,19 @@ export function InboxFilters({
   showAssignmentChips,
   hideDnc,
   hiddenDncCount,
+  pendingChange,
+  completedChange,
+  errorMessage,
+  onFilterChange,
+  onHideDncChange,
 }: Props) {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-
-  const setFilter = (next: InboxFilter) => {
-    const sp = new URLSearchParams(searchParams.toString());
-    if (next === "all") sp.delete("filter");
-    else sp.set("filter", next);
-    sp.delete("thread"); // clear selection when switching filters
-    sp.delete("inboxPage");
-    const qs = sp.toString();
-    router.replace(qs ? `/messages?${qs}` : "/messages");
-  };
-
-  const toggleHideDnc = () => {
-    const sp = new URLSearchParams(searchParams.toString());
-    if (hideDnc) {
-      // Currently hidden -> show them. Set explicit hideDnc=0.
-      sp.set("hideDnc", "0");
-    } else {
-      // Currently shown -> hide. Default state, so just remove the param.
-      sp.delete("hideDnc");
-    }
-    sp.delete("thread");
-    sp.delete("inboxPage");
-    const qs = sp.toString();
-    router.replace(qs ? `/messages?${qs}` : "/messages");
-  };
+  const pendingFilter =
+    pendingChange?.kind === "filter" ? pendingChange.value : null;
+  const pendingHideDnc = pendingChange?.kind === "hideDnc";
+  const controlsPending = pendingChange !== null;
+  const displayedActive = pendingFilter ?? active;
+  const displayedHideDnc =
+    pendingChange?.kind === "hideDnc" ? pendingChange.value : hideDnc;
 
   return (
     <div
@@ -77,33 +83,41 @@ export function InboxFilters({
          then the broader catch-all buckets. */}
       <FilterChip
         label="Unread"
-        active={active === "unread"}
+        active={displayedActive === "unread"}
+        pending={pendingFilter === "unread"}
+        interactionDisabled={controlsPending}
         count={filterCounts.unread}
-        onClick={() => setFilter("unread")}
+        onClick={() => onFilterChange("unread")}
         testId="filter-unread"
       />
       <FilterChip
         label="Needs Outcome"
-        active={active === "needs_outcome"}
+        active={displayedActive === "needs_outcome"}
+        pending={pendingFilter === "needs_outcome"}
+        interactionDisabled={controlsPending}
         count={filterCounts.needs_outcome}
-        onClick={() => setFilter("needs_outcome")}
+        onClick={() => onFilterChange("needs_outcome")}
         testId="filter-needs-outcome"
       />
       {showAssignmentChips && (
         <>
           <FilterChip
             label="Mine"
-            active={active === "mine"}
+            active={displayedActive === "mine"}
+            pending={pendingFilter === "mine"}
+            interactionDisabled={controlsPending}
             count={filterCounts.mine}
-            onClick={() => setFilter("mine")}
+            onClick={() => onFilterChange("mine")}
             testId="filter-mine"
           />
           <FilterChip
             label="Escalated"
             icon="mascot"
-            active={active === "escalated"}
+            active={displayedActive === "escalated"}
+            pending={pendingFilter === "escalated"}
+            interactionDisabled={controlsPending}
             count={filterCounts.escalated}
-            onClick={() => setFilter("escalated")}
+            onClick={() => onFilterChange("escalated")}
             testId="filter-escalated"
           />
         </>
@@ -112,51 +126,63 @@ export function InboxFilters({
         <FilterChip
           label="Escalated"
           icon="mascot"
-          active={active === "escalated"}
+          active={displayedActive === "escalated"}
+          pending={pendingFilter === "escalated"}
+          interactionDisabled={controlsPending}
           count={filterCounts.escalated}
-          onClick={() => setFilter("escalated")}
+          onClick={() => onFilterChange("escalated")}
           testId="filter-escalated"
         />
       ) : null}
       <FilterChip
         label="Sandra Dispo"
         icon="mascot"
-        active={active === "dispo"}
+        active={displayedActive === "dispo"}
+        pending={pendingFilter === "dispo"}
+        interactionDisabled={controlsPending}
         count={filterCounts.dispo}
-        onClick={() => setFilter("dispo")}
+        onClick={() => onFilterChange("dispo")}
         testId="filter-dispo"
       />
       {showAssignmentChips && (
         <FilterChip
           label="No owner"
-          active={active === "unassigned"}
+          active={displayedActive === "unassigned"}
+          pending={pendingFilter === "unassigned"}
+          interactionDisabled={controlsPending}
           count={filterCounts.unassigned}
-          onClick={() => setFilter("unassigned")}
+          onClick={() => onFilterChange("unassigned")}
           testId="filter-unassigned"
         />
       )}
       <FilterChip
         label="All"
-        active={active === "all"}
+        active={displayedActive === "all"}
+        pending={pendingFilter === "all"}
+        interactionDisabled={controlsPending}
         count={filterCounts.all}
-        onClick={() => setFilter("all")}
+        onClick={() => onFilterChange("all")}
         testId="filter-all"
       />
       <FilterChip
         label="Unknown"
-        active={active === "unknown"}
+        active={displayedActive === "unknown"}
+        pending={pendingFilter === "unknown"}
+        interactionDisabled={controlsPending}
         count={filterCounts.unknown}
-        onClick={() => setFilter("unknown")}
+        onClick={() => onFilterChange("unknown")}
         testId="filter-unknown"
       />
       <FilterChip
         label="Dismissed"
-        active={active === "dismissed"}
+        active={displayedActive === "dismissed"}
+        pending={pendingFilter === "dismissed"}
+        interactionDisabled={controlsPending}
         count={filterCounts.dismissed}
-        onClick={() => setFilter("dismissed")}
+        onClick={() => onFilterChange("dismissed")}
         testId="filter-dismissed"
       />
-      {active === "dispo" ? (
+      {displayedActive === "dispo" ? (
         <span
           className="ml-auto text-[12px] font-medium text-[#78716c]"
           data-testid="sandra-dispo-compliance-note"
@@ -165,11 +191,32 @@ export function InboxFilters({
         </span>
       ) : (
         <DncToggle
-          hideDnc={hideDnc}
+          hideDnc={displayedHideDnc}
           hiddenDncCount={hiddenDncCount}
-          onToggle={toggleHideDnc}
+          pending={pendingHideDnc}
+          interactionDisabled={controlsPending}
+          onToggle={() => onHideDncChange(!displayedHideDnc)}
         />
       )}
+      {errorMessage ? (
+        <span
+          className="text-[12px] font-semibold text-destructive"
+          role="alert"
+        >
+          {errorMessage}
+        </span>
+      ) : null}
+      <span className="sr-only" role="status" aria-live="polite">
+        {pendingFilter
+          ? `Loading ${FILTER_LABELS[pendingFilter]} messages`
+          : pendingHideDnc
+            ? "Updating DNC visibility"
+            : completedChange?.kind === "filter"
+              ? `${FILTER_LABELS[completedChange.value]} messages loaded`
+              : completedChange?.kind === "hideDnc"
+                ? "DNC visibility updated"
+                : ""}
+      </span>
     </div>
   );
 }
@@ -186,22 +233,30 @@ export function InboxFilters({
 function DncToggle({
   hideDnc,
   hiddenDncCount,
+  pending,
+  interactionDisabled,
   onToggle,
 }: {
   hideDnc: boolean;
   hiddenDncCount: number;
+  pending: boolean;
+  interactionDisabled: boolean;
   onToggle: () => void;
 }) {
   const label = hideDnc ? "Hide DNC & tests" : "Showing all";
   return (
     <button
       type="button"
-      onClick={onToggle}
+      onClick={interactionDisabled ? undefined : onToggle}
       role="switch"
       aria-checked={hideDnc}
+      aria-busy={pending}
+      aria-disabled={interactionDisabled}
       data-testid="dnc-toggle"
       data-active={hideDnc || undefined}
-      className="ml-auto inline-flex min-h-11 items-center gap-2 text-[12px] text-[#78716c] hover:text-[#1c1917]"
+      className={`relative ml-auto inline-flex min-h-11 items-center gap-2 text-[12px] text-[#78716c] ${
+        interactionDisabled ? "cursor-wait" : "hover:text-[#1c1917]"
+      }`}
     >
       <span
         className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
@@ -216,6 +271,13 @@ function DncToggle({
         />
       </span>
       <span className="font-medium">{label}</span>
+      <Loader2Icon
+        className={`absolute right-0 top-0 h-3.5 w-3.5 motion-safe:animate-spin ${
+          pending ? "visible opacity-100" : "invisible opacity-0"
+        }`}
+        aria-hidden="true"
+        data-testid={pending ? "dnc-toggle-spinner" : undefined}
+      />
       {hideDnc && hiddenDncCount > 0 ? (
         <span
           className="text-[11px] text-[#a8a29e]"
@@ -232,6 +294,8 @@ function FilterChip({
   label,
   icon,
   active,
+  pending = false,
+  interactionDisabled,
   onClick,
   count,
   testId,
@@ -239,25 +303,34 @@ function FilterChip({
   label: string;
   icon?: "mascot";
   active: boolean;
+  pending?: boolean;
+  interactionDisabled: boolean;
   onClick: () => void;
   count?: number;
   testId: string;
 }) {
   const showCount = typeof count === "number" && count > 0;
-  const ariaLabel = showCount ? `${label} (${count})` : label;
+  const countLabel = showCount ? `${label} (${count})` : label;
+  const ariaLabel = pending ? `${countLabel}, loading` : countLabel;
 
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={interactionDisabled ? undefined : onClick}
       aria-label={ariaLabel}
       aria-pressed={active}
+      aria-busy={pending}
+      aria-disabled={interactionDisabled}
       data-testid={testId}
       data-active={active || undefined}
-      className={`inline-flex min-h-11 items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${
+      className={`relative inline-flex min-h-11 items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${
         active
           ? "bg-primary text-primary-foreground"
-          : "border border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4] hover:text-[#1c1917]"
+          : `border border-[#e5e1df] text-[#78716c] ${
+              interactionDisabled
+                ? "cursor-wait"
+                : "hover:bg-[#f5f5f4] hover:text-[#1c1917]"
+            }`
       }`}
     >
       {icon === "mascot" ? (
@@ -270,6 +343,13 @@ function FilterChip({
         />
       ) : null}
       <span>{label}</span>
+      <Loader2Icon
+        className={`absolute right-1 top-1 h-3.5 w-3.5 motion-safe:animate-spin ${
+          pending ? "visible opacity-100" : "invisible opacity-0"
+        }`}
+        aria-hidden="true"
+        data-testid={pending ? `${testId}-spinner` : undefined}
+      />
       {showCount ? (
         <span
           data-testid={`${testId}-count`}
