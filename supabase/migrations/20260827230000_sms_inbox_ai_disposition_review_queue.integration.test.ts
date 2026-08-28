@@ -225,6 +225,7 @@ describe("Sandra Dispo inbox queue migration", () => {
   it("returns only current AI reviews while preserving recency and noise boundaries", async () => {
     const pending = await seedThread({
       label: "Pending",
+      ageDays: 120,
       reviewStatus: "pending",
     });
     await pg.query(
@@ -232,8 +233,8 @@ describe("Sandra Dispo inbox queue migration", () => {
          id, org_id, channel, direction, status, property_id, contact_id,
          conversation_id, from_address, to_address, body, created_at
        ) values (
-         $1, $2, 'sms', 'outbound', 'sent', null, $3, $4,
-         '+18162804181', '+18165550101', 'Pending propertyless latest',
+         $1, $2, 'sms', 'inbound', 'received', null, $3, $4,
+         '+18165550101', '+18162804181', 'Pending propertyless latest',
          now() + interval '1 second'
        )`,
       [
