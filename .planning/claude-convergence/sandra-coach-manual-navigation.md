@@ -270,3 +270,15 @@
   - Typecheck, scoped lint, and `git diff --check` pass.
 - Shared telephony readiness is tracked in Jitter PR #227. Its exact tree passed 93 focused tests, all typechecks, independent exact-head review, GitHub verification, database/audio safety, and a Vercel preview build. Railway `coach-ingest` is staged at `COACH_MAX_CALL_MINUTES=120` with no deployment/restart; the live service remains unchanged until merge.
 - Status: exact final Claude review, Sandra PR/CI, production-configured candidate, merges, and controlled short plus over-60-minute production calls remain.
+
+### Iteration 7 - production rep-name placeholder correction
+
+- Final exact-head review correctly blocked the first PR head because the live Hugo-provisioned rep identity had no display-name metadata and a single-token email fallback would have rendered only `Jarrad`, not the known full rep name `Jarrad Henry`.
+- The correction remains deliberately v1-sized:
+  - Nonblank Auth `user_metadata.display_name` stays authoritative.
+  - BMH's explicit server-only v1 roster supplies `Jarrad Henry` for the known pre-metadata production identity.
+  - Unknown single-token email locals now fail safe to the visible placeholder instead of pretending a likely first name is complete.
+  - Clearly delimited two-part email locals remain a safe last fallback.
+- The misleading comment that reps already had a self-service display-name UI was removed; Sandra has no such UI or separate profile table today.
+- Focused evidence: 21/21 coach-context tests pass, including case-insensitive known-rep population and the unknown single-token fail-safe. Typecheck, focused lint, and `git diff --check` pass.
+- Status: full verification and fresh exact-head reviews required; the blocked head must not merge.

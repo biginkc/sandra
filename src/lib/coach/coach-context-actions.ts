@@ -17,6 +17,16 @@ type CoachLeadRow = {
 };
 
 /**
+ * Explicit v1 roster values supplied by BMH for reps whose Hugo-provisioned
+ * Auth identity predates display-name metadata. This is intentionally small
+ * and server-only; user_metadata.display_name remains authoritative whenever
+ * it exists.
+ */
+const KNOWN_REP_NAMES_BY_EMAIL = new Map<string, string>([
+  ["jarrad@bmhgroupkc.com", "Jarrad Henry"],
+]);
+
+/**
  * Drives the Reveal phase's Entry branch auto-selection. `is_vacant` must
  * be explicitly `false` (positively confirmed, not merely absent/unscored)
  * before `absentee_flag` is trusted to distinguish owner vs tenant —
@@ -33,15 +43,22 @@ function occupancy(lead: CoachLeadRow | null): CoachOccupancy | null {
   return "unknown";
 }
 
-/** Title-cases the auth email's local part ("jane.doe@" -> "Jane Doe") — the
- * fallback used until a rep sets a real display_name. */
+/**
+ * Title-cases a clearly delimited auth email local part
+ * ("jane.doe@" -> "Jane Doe"). A single token such as "jarrad@" is only a
+ * likely first name, so treating it as the rep's complete known name would
+ * silently put incorrect wording into the script. Fail safe to the visible
+ * placeholder until authoritative auth metadata is populated instead.
+ */
 function repNameFallbackFromEmail(email: string | null | undefined): string | null {
   if (!email) return null;
   const localPart = email.split("@")[0];
   if (!localPart) return null;
-  return localPart
+  const parts = localPart
     .split(/[._+-]+/)
-    .filter(Boolean)
+    .filter(Boolean);
+  if (parts.length < 2) return null;
+  return parts
     .map((part) => part[0]!.toUpperCase() + part.slice(1))
     .join(" ") || null;
 }
@@ -50,16 +67,16 @@ function repNameFallbackFromEmail(email: string | null | undefined): string | nu
  * Sandra has no `profiles`/`team_members` table — the only per-user record
  * outside auth.users is `memberships`, which is Hugo's access/role ledger
  * (see admin/users/actions.ts: "Hugo owns account creation and access
- * grants") and isn't the right home for a cosmetic display name. Reps set
- * their own name via `supabase.auth.updateUser({ data: { display_name } })`
- * — the same auth.users user_metadata mechanism the password-reset flow
- * already uses (src/app/auth/set-password/actions.ts) — so it's self-service
- * with no new RLS policy needed. Falls back to the email-derived name until
- * a rep sets one.
+ * grants") and contains no person name. `auth.users.user_metadata.display_name`
+ * is therefore the authoritative existing source, followed by BMH's explicit
+ * v1 roster for pre-metadata accounts. A clearly delimited email can supply a
+ * safe last fallback; ambiguous single-token email locals cannot.
  */
 function repDisplayName(user: Pick<User, "email" | "user_metadata"> | null | undefined): string | null {
   const stored = user?.user_metadata?.display_name;
   if (typeof stored === "string" && stored.trim()) return stored.trim();
+  const known = user?.email ? KNOWN_REP_NAMES_BY_EMAIL.get(user.email.trim().toLowerCase()) : null;
+  if (known) return known;
   return repNameFallbackFromEmail(user?.email);
 }
 
