@@ -98,6 +98,8 @@ export function CockpitView({
   const inboxTotalPages = Math.max(Math.ceil(inboxTotal / inboxPageSize), 1);
   const [pendingInboxChange, setPendingInboxChange] =
     useState<PendingInboxChange | null>(null);
+  const [completedInboxChange, setCompletedInboxChange] =
+    useState<PendingInboxChange | null>(null);
 
   // One live stats source for the Outbox tab badge + the stats banner,
   // so the two never show different numbers. Seeds from the server
@@ -132,6 +134,7 @@ export function CockpitView({
 
   const setTab = (next: string) => {
     setPendingInboxChange(null);
+    setCompletedInboxChange(null);
     const sp = new URLSearchParams(searchParams.toString());
     if (next === "inbox") {
       sp.delete("tab");
@@ -144,6 +147,7 @@ export function CockpitView({
   const setInboxPage = useCallback(
     (nextPage: number) => {
       setPendingInboxChange(null);
+      setCompletedInboxChange(null);
       const sp = new URLSearchParams(searchParams.toString());
       if (nextPage <= 1) sp.delete("inboxPage");
       else sp.set("inboxPage", String(nextPage));
@@ -194,6 +198,7 @@ export function CockpitView({
   const handleSelectThread = useCallback(
     (threadId: string) => {
       setPendingInboxChange(null);
+      setCompletedInboxChange(null);
       setPendingThreadId(threadId);
       setMobileShowsDetail(true);
       setFocusReturnThreadId(null);
@@ -212,6 +217,7 @@ export function CockpitView({
 
   const handleBackToList = useCallback(() => {
     setPendingInboxChange(null);
+    setCompletedInboxChange(null);
     const returningThreadId =
       pendingThreadId ?? threadDetail?.threadId ?? selectedThreadId ?? null;
     setPendingThreadId(null);
@@ -299,6 +305,7 @@ export function CockpitView({
       }
 
       setPendingInboxChange({ kind: "filter", value: next });
+      setCompletedInboxChange(null);
       setPendingThreadId(null);
       setMobileShowsDetail(false);
       const sp = new URLSearchParams(searchParams.toString());
@@ -322,6 +329,7 @@ export function CockpitView({
       }
 
       setPendingInboxChange({ kind: "hideDnc", value: nextHideDnc });
+      setCompletedInboxChange(null);
       setPendingThreadId(null);
       setMobileShowsDetail(false);
       const sp = new URLSearchParams(searchParams.toString());
@@ -342,13 +350,18 @@ export function CockpitView({
         ? pendingInboxChange.value === filter
         : pendingInboxChange.value === hideDnc;
     if (!settled) return undefined;
-    const timeout = window.setTimeout(() => setPendingInboxChange(null), 0);
+    const timeout = window.setTimeout(() => {
+      setPendingInboxChange(null);
+      setCompletedInboxChange(pendingInboxChange);
+    }, 0);
     return () => window.clearTimeout(timeout);
   }, [filter, hideDnc, pendingInboxChange]);
 
   useEffect(() => {
-    const cancelPendingOnHistoryNavigation = () =>
+    const cancelPendingOnHistoryNavigation = () => {
       setPendingInboxChange(null);
+      setCompletedInboxChange(null);
+    };
     window.addEventListener("popstate", cancelPendingOnHistoryNavigation);
     return () =>
       window.removeEventListener("popstate", cancelPendingOnHistoryNavigation);
@@ -417,6 +430,7 @@ export function CockpitView({
             hideDnc={hideDnc}
             hiddenDncCount={hiddenDncCount}
             pendingChange={pendingInboxChange}
+            completedChange={completedInboxChange}
             onFilterChange={handleInboxFilterChange}
             onHideDncChange={handleHideDncChange}
           />

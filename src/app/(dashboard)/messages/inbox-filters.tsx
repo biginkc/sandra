@@ -31,6 +31,7 @@ type Props = {
    *  if the toggle were OFF. Surfaced as a tiny hint next to the toggle. */
   hiddenDncCount: number;
   pendingChange: PendingInboxChange | null;
+  completedChange: PendingInboxChange | null;
   onFilterChange: (filter: InboxFilter) => void;
   onHideDncChange: (hideDnc: boolean) => void;
 };
@@ -59,6 +60,7 @@ export function InboxFilters({
   hideDnc,
   hiddenDncCount,
   pendingChange,
+  completedChange,
   onFilterChange,
   onHideDncChange,
 }: Props) {
@@ -187,7 +189,11 @@ export function InboxFilters({
           ? `Loading ${FILTER_LABELS[pendingFilter]} messages`
           : pendingHideDnc
             ? "Updating DNC visibility"
-            : ""}
+            : completedChange?.kind === "filter"
+              ? `${FILTER_LABELS[completedChange.value]} messages loaded`
+              : completedChange?.kind === "hideDnc"
+                ? "DNC visibility updated"
+                : ""}
       </span>
     </div>
   );
@@ -217,11 +223,11 @@ function DncToggle({
   return (
     <button
       type="button"
-      onClick={onToggle}
+      onClick={pending ? undefined : onToggle}
       role="switch"
       aria-checked={hideDnc}
       aria-busy={pending}
-      disabled={pending}
+      aria-disabled={pending}
       data-testid="dnc-toggle"
       data-active={hideDnc || undefined}
       className="relative ml-auto inline-flex min-h-11 items-center gap-2 text-[12px] text-[#78716c] hover:text-[#1c1917]"
@@ -282,11 +288,11 @@ function FilterChip({
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={pending ? undefined : onClick}
       aria-label={ariaLabel}
       aria-pressed={active}
       aria-busy={pending}
-      disabled={pending}
+      aria-disabled={pending}
       data-testid={testId}
       data-active={active || undefined}
       className={`relative inline-flex min-h-11 items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${

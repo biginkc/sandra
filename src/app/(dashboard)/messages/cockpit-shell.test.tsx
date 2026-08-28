@@ -197,6 +197,9 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
       "false",
     );
     expect(screen.getByTestId("inbox-filter-results")).toHaveClass("ring-0");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "No owner messages loaded",
+    );
   });
 
   it("replaces or cancels pending feedback when the operator changes direction", async () => {
@@ -234,6 +237,9 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
         "aria-busy",
         "false",
       ),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "DNC visibility updated",
     );
 
     await user.click(screen.getByTestId("filter-unassigned"));
