@@ -51,7 +51,13 @@ test.beforeAll(async () => {
     target: "chrome120",
     jsx: "automatic",
     jsxImportSource: "react",
-    alias: { "@": path.resolve(process.cwd(), "src") },
+    alias: {
+      "@/lib/coach/recommendation-action": path.resolve(
+        process.cwd(),
+        "e2e/synthetic/fixtures/coach-recommendation-action-stub.ts",
+      ),
+      "@": path.resolve(process.cwd(), "src"),
+    },
     define: { "process.env.NODE_ENV": '"test"' },
     write: false,
     logLevel: "silent",
@@ -72,7 +78,11 @@ async function mountFullCoach(
   // wrapper div — resolves the dark theme tokens, matching production.
   await page.evaluate((dark) => document.documentElement.classList.toggle("dark", dark), opts.darkMode);
   await page.addScriptTag({ content: harnessBundle });
-  await expect(page.getByTestId("coach-live-view")).toBeVisible();
+  const coach = page.getByTestId("coach-live-view");
+  await expect(coach).toBeVisible();
+  await coach.evaluate(async (element) => {
+    await Promise.allSettled(element.getAnimations().map((animation) => animation.finished));
+  });
 }
 
 function srgbToLin(c: number): number {
@@ -245,15 +255,9 @@ for (const mode of [
   { darkMode: false, label: "light" },
   { darkMode: true, label: "dark" },
 ] as const) {
-  test(`meets WCAG AA (>=4.5:1) for say-this-card, phase rail, and coming-next preview in ${mode.label} mode`, async ({
-    page,
-  }) => {
+  test(`meets WCAG AA for the manual coach surfaces in ${mode.label} mode`, async ({ page }) => {
     await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: false });
 
-    // Two-tone transcript speaker labels (mock parity) — rep in the
-    // emerald accent, seller in amber, against the transcript aside's
-    // actual bg-muted/30 composited background. The harness fixture always
-    // seeds one rep line and one seller line.
     const repLabel = page.getByTestId("transcript-speaker-label").filter({ hasText: "Rep" }).first();
     const sellerLabel = page.getByTestId("transcript-speaker-label").filter({ hasText: "Seller" }).first();
     await expect(repLabel).toBeVisible();
@@ -261,130 +265,57 @@ for (const mode of [
     assertAA("transcript rep speaker label", await measureRenderedContrast(repLabel));
     assertAA("transcript seller speaker label", await measureRenderedContrast(sellerLabel));
 
-    // Live status pill in the topbar (Badge, border-emerald-200 /
-    // text-emerald-700, visible whenever callStatus is "live" and not held
-    // — true by default in this harness).
     const livePill = page.getByTestId("coach-live-pill");
     await expect(livePill).toBeVisible();
-    assertAA("coach-live-pill status badge", await measureRenderedContrast(livePill));
+    assertAA("live status badge", await measureRenderedContrast(livePill));
 
-    // EntryTokenChip's RESOLVED (non-placeholder) state — border-emerald-300
-    // bg-emerald-50 text-emerald-700, a separate component from the plain
-    // TokenChip covered below. Commit a value into offer_price so the chip
-    // renders its resolved styling instead of the dashed placeholder.
-    await page.getByTestId("entry-chip-offer_price").first().click();
+    const currentTitle = page.getByTestId("current-section-title");
+    await expect(currentTitle).toHaveText("Open the call");
+    assertAA("current section title", await measureRenderedContrast(currentTitle));
+
+    const currentScript = page.getByTestId("current-section-script");
+    const tokenValue = currentScript.getByTestId("token-resolved").first();
+    await expect(tokenValue).toBeVisible();
+    assertAA("resolved script token", await measureRenderedContrast(tokenValue));
+
+    const nextPreview = page.getByTestId("next-section-preview");
+    const nextBody = page.getByTestId("next-section-preview-body");
+    await expect(nextPreview).toBeVisible();
+    await expect(nextBody).toBeVisible();
+    assertAA("next section preview", await measureRenderedContrast(nextPreview));
+    assertAA("next section preview body", await measureRenderedContrast(nextBody));
+
+    await page.evaluate(() => window.coachHarness.setPhase("offer"));
+    const entryChip = page.getByTestId("entry-chip-offer_price").first();
+    await entryChip.click();
     const entryInput = page.getByTestId("entry-input-offer_price");
     await entryInput.fill("210000");
     await entryInput.press("Enter");
-    const entryChipResolved = page.getByTestId("entry-chip-offer_price").first();
-    await expect(entryChipResolved).toBeVisible();
-    await expect(entryChipResolved).toHaveText("210000");
-    assertAA("EntryTokenChip resolved value", await measureRenderedContrast(entryChipResolved));
+    await expect(entryChip).toHaveText("210000");
+    assertAA("resolved entry token", await measureRenderedContrast(entryChip));
 
-    // Completed phase label (coach-live-view.tsx CoachTopBar phase rail,
-    // isComplete branch) — "introduction" is behind the harness's current
-    // "offer" phase.
     const completedPhase = page.getByTestId("phase-rail-introduction");
-    await expect(completedPhase).toBeVisible();
     await expect(completedPhase).toHaveText(/✓/);
     assertAA("completed phase label", await measureRenderedContrast(completedPhase));
 
-    // Resolved token value inside the dominant "Say this" card (TokenChip,
-    // the non-entry-token branch) — the offer phase's default "Good news"
-    // branch resolves {seller_name} through this exact component.
-    const sayThisCard = page.getByTestId("say-this-card");
-    await expect(sayThisCard).toBeVisible();
-    const tokenChipValue = sayThisCard.getByTestId("token-resolved").first();
-    await expect(tokenChipValue).toBeVisible();
-    assertAA("TokenChip resolved value in say-this-card", await measureRenderedContrast(tokenChipValue));
-
-    // "Coming next" preview — deliberately de-emphasized relative to the
-    // dominant say-this-card, but with an opaque mid-tone color rather than
-    // the ancestor `opacity-45` that used to sit here.
-    const nextLabel = page.getByTestId("next-phase-preview-label");
-    const nextBody = page.getByTestId("next-phase-preview-body");
-    await expect(nextLabel).toBeVisible();
-    await expect(nextBody).toBeVisible();
-    assertAA("coming-next preview label", await measureRenderedContrast(nextLabel));
-    assertAA("coming-next preview body", await measureRenderedContrast(nextBody));
-
-    // Current-phase pill while VIEWING a different phase (isCurrent &&
-    // !isDisplayed) — override the displayed phase away from "offer" so
-    // the offer pill renders its solid emerald "current" fill instead of
-    // the primary "displayed" fill.
-    await page.getByTestId("phase-rail-reveal").click();
-    await expect(page.getByTestId("coach-viewing-phase")).toHaveText("Viewing · Reveal");
-    // The phase-rail buttons use `transition-colors` — sampling pixels
-    // immediately after the click that flips this button's classes can
-    // land mid-animation (verified: a naive read here measured a real,
-    // reproducible rgb(229,228,228) instead of the settled rgb(255,255,255)
-    // text-white). Wait out Tailwind's default ~150ms transition before
-    // measuring the settled, final color.
+    const activePhase = page.getByTestId("phase-rail-offer");
     await page.waitForTimeout(300);
-    const currentWhileViewingOther = page.getByTestId("phase-rail-offer");
-    await expect(currentWhileViewingOther).toBeVisible();
-    assertAA("current-phase pill while viewing a different phase", await measureRenderedContrast(currentWhileViewingOther));
+    assertAA("active manual phase label", await measureRenderedContrast(activePhase));
 
-    // An INACTIVE phase label while HOVERED. Hover is a distinct rendered
-    // state with its own background (`hover:bg-muted`), and measuring only
-    // the resting state misses it entirely: muted-foreground on the muted
-    // hover surface measured 4.40:1 — passing at rest, failing the moment
-    // a pointer touches it. Every interactive text element whose colours
-    // change on hover needs its hovered state measured too, not just its
-    // default.
     const inactivePhase = page.getByTestId("phase-rail-close");
-    await expect(inactivePhase).toBeVisible();
     await inactivePhase.hover();
-    await page.waitForTimeout(300); // settle `transition-colors`
+    await page.waitForTimeout(300);
     assertAA("inactive phase label while hovered", await measureRenderedContrast(inactivePhase));
   });
 
-  test(`meets WCAG AA (>=4.5:1) for tone cues and resolved guidance values in ${mode.label} mode`, async ({ page }) => {
-    await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: true });
-
-    const activeCard = page.locator('[data-testid="objection-card"][data-active="true"]');
-    await expect(activeCard).toBeVisible();
-
-    // Tone cue — ToneChip rendered inside the active objection card
-    // (amber-400/15 tinted pill background).
-    const toneChip = activeCard.getByTestId("tone-chip");
-    await expect(toneChip).toBeVisible();
-    assertAA("tone cue in active objection card", await measureRenderedContrast(toneChip));
-
-    // Resolved token values inside the active objection card's guidance
-    // text (ObjectionLine's resolved-segment span — a separate code path
-    // from the TokenChip covered above).
-    const resolvedValues = activeCard.getByTestId("token-resolved");
-    const resolvedCount = await resolvedValues.count();
-    expect(resolvedCount, "expected at least one resolved token value in the active objection card").toBeGreaterThan(0);
-    for (let i = 0; i < resolvedCount; i++) {
-      assertAA(`ObjectionLine resolved value #${i}`, await measureRenderedContrast(resolvedValues.nth(i)));
-    }
-
-    // "Coach nudge" label — a nudge only becomes the active/visible focus
-    // surface once every objection card is dismissed (objections preempt
-    // nudges by design), so dismiss all objection cards first.
-    const objectionCards = page.locator('[data-testid="objection-card"]');
-    let remaining = await objectionCards.count();
-    while (remaining > 0) {
-      await page.locator('[data-testid="objection-card"][data-active="true"]').click();
-      remaining = await page.locator('[data-testid="objection-card"]:not([hidden])').count();
-    }
-    const nudge = page.locator('[data-testid="coach-nudge"][data-active="true"]');
-    await expect(nudge).toBeVisible();
-    const nudgeLabel = nudge.getByTestId("coach-nudge-label");
-    await expect(nudgeLabel).toBeVisible();
-    assertAA("coach-nudge label", await measureRenderedContrast(nudgeLabel));
-  });
-
-  test(`meets WCAG AA (>=4.5:1) for the held-call timer in ${mode.label} mode`, async ({ page }) => {
+  test(`meets WCAG AA for the held-call timer in ${mode.label} mode`, async ({ page }) => {
     await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: false, held: true });
     const timer = page.getByTestId("coach-call-timer");
-    await expect(timer).toBeVisible();
     await expect(timer).toHaveText("On hold");
     assertAA("held-call timer", await measureRenderedContrast(timer));
   });
 }
+
 
 // ---------------------------------------------------------------------------
 // Negative controls for the probe itself.

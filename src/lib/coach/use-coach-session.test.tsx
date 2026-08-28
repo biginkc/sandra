@@ -74,17 +74,79 @@ describe("useCoachSession", () => {
     expect(result.current.branchOverrides).toEqual({ Opener: "fsbo" });
   });
 
-  it("resets contextLoad, contextAttempt, and branchOverrides for a new callId", async () => {
+  it("owns manual section navigation independently of realtime state", async () => {
+    const { result } = renderHook(() => useCoachSession("call-1", "lead-1", null, null));
+    await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
+
+    const firstSectionId = result.current.activeSectionId;
+    expect(result.current.canGoPrevious).toBe(false);
+    expect(result.current.canGoNext).toBe(true);
+
+    act(() => result.current.goNextSection());
+    const manuallySelectedSectionId = result.current.activeSectionId;
+    expect(manuallySelectedSectionId).not.toBe(firstSectionId);
+    expect(result.current.canGoPrevious).toBe(true);
+
+    act(() => result.current.dispatch({
+      type: "phase",
+      phaseId: "close",
+      scriptVersion: "1.0.2",
+      matcherVersion: "1.0.0",
+      ts: "t1",
+    }));
+    expect(result.current.activeSectionId).toBe(manuallySelectedSectionId);
+
+    act(() => result.current.goPreviousSection());
+    expect(result.current.activeSectionId).toBe(firstSectionId);
+  });
+
+  it("supports deliberate phase jumps through the phase's first manual section", async () => {
+    const { result } = renderHook(() => useCoachSession("call-1", "lead-1", null, null));
+    await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
+
+    act(() => result.current.goToPhase("reveal"));
+    expect(result.current.activeSectionId).toBe("reveal.situation-rundown");
+  });
+
+  it("ignores an unknown section id instead of stranding navigation", async () => {
+    const { result } = renderHook(() => useCoachSession("call-1", "lead-1", null, null));
+    await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
+    act(() => result.current.goNextSection());
+    const currentSectionId = result.current.activeSectionId;
+
+    act(() => result.current.goToSection("stale.or.invalid"));
+
+    expect(result.current.activeSectionId).toBe(currentSectionId);
+    expect(result.current.canGoPrevious).toBe(true);
+    expect(result.current.canGoNext).toBe(true);
+  });
+
+  it("resets context, branch overrides, and manual section for a new callId", async () => {
     const { result, rerender } = renderHook(
-      ({ callId }: { callId: string }) => useCoachSession(callId, "lead-1", null, null),
-      { initialProps: { callId: "call-1" } },
+      ({ callId }: { callId: string | null }) => useCoachSession(callId, "lead-1", null, null),
+      { initialProps: { callId: "call-1" } as { callId: string | null } },
     );
     await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
     act(() => result.current.selectVariant("Opener", "fsbo"));
+    act(() => result.current.goNextSection());
+    const firstContinuity = result.current.recommendationContinuity;
+    firstContinuity.state = {
+      ...firstContinuity.state,
+      recommendations: ["Seller A recommendation"],
+      followUpQuestions: ["Seller A question?"],
+    };
     expect(result.current.branchOverrides).toEqual({ Opener: "fsbo" });
+    expect(result.current.canGoPrevious).toBe(true);
 
+    rerender({ callId: null });
+    expect(result.current.activeSectionId).toBe("introduction.opener");
+    expect(result.current.recommendationContinuity).not.toBe(firstContinuity);
+    expect(result.current.recommendationContinuity.state.recommendations).toEqual([]);
+    expect(result.current.recommendationContinuity.state.followUpQuestions).toEqual([]);
     rerender({ callId: "call-2" });
     expect(result.current.branchOverrides).toEqual({});
+    expect(result.current.canGoPrevious).toBe(false);
+    expect(result.current.activeSectionId).toBe("introduction.opener");
     await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
     expect(loadCoachCallContext).toHaveBeenCalledTimes(2);
   });

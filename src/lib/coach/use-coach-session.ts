@@ -3,8 +3,17 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { loadCoachCallContext } from "./coach-context-actions";
+import { createCoachRecommendationContinuity } from "./recommendation-client";
+import {
+  FIRST_COACH_SECTION_ID,
+  getFirstCoachSectionIdForPhase,
+  getNextCoachSectionId,
+  getPreviousCoachSectionId,
+  getCoachSectionById,
+  type CoachSectionId,
+} from "./section-manifest";
 import { useCoachChannel } from "./use-coach-channel";
-import type { CoachCallContext, CoachEntryToken } from "./types";
+import type { CoachCallContext, CoachEntryToken, CoachPhaseId } from "./types";
 
 export type ContextLoadState =
   | { status: "loading" }
@@ -32,6 +41,10 @@ export function useCoachSession(
   const [contextLoad, setContextLoad] = useState<ContextLoadState>({ status: "loading" });
   const [contextAttempt, setContextAttempt] = useState(0);
   const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>({});
+  const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(FIRST_COACH_SECTION_ID);
+  const [recommendationContinuity, setRecommendationContinuity] = useState(
+    () => createCoachRecommendationContinuity(callId),
+  );
 
   // A new call (different callId) must start a clean session — stale
   // branch picks and a stale context/attempt count from a prior call must
@@ -44,6 +57,8 @@ export function useCoachSession(
     setContextLoad({ status: "loading" });
     setContextAttempt(0);
     setBranchOverrides({});
+    setActiveSectionId(FIRST_COACH_SECTION_ID);
+    setRecommendationContinuity(createCoachRecommendationContinuity(callId));
   }
 
   useEffect(() => {
@@ -73,8 +88,25 @@ export function useCoachSession(
     (field: CoachEntryToken, value: string) => dispatch({ type: "set_entry_field", field, value }),
     [dispatch],
   );
+  const goToSection = useCallback((sectionId: CoachSectionId) => {
+    if (getCoachSectionById(sectionId)) setActiveSectionId(sectionId);
+  }, []);
+  const goPreviousSection = useCallback(() => {
+    setActiveSectionId((current) => getPreviousCoachSectionId(current) ?? current);
+  }, []);
+  const goNextSection = useCallback(() => {
+    setActiveSectionId((current) => getNextCoachSectionId(current) ?? current);
+  }, []);
+  const goToPhase = useCallback((phaseId: CoachPhaseId) => {
+    setActiveSectionId(getFirstCoachSectionIdForPhase(phaseId));
+  }, []);
+
+  const previousSectionId = getPreviousCoachSectionId(activeSectionId);
+  const nextSectionId = getNextCoachSectionId(activeSectionId);
 
   return {
+    callId,
+    recommendationContinuity,
     ...channel,
     dispatch,
     contextLoad,
@@ -82,6 +114,15 @@ export function useCoachSession(
     branchOverrides,
     selectVariant,
     setEntryField,
+    activeSectionId,
+    previousSectionId,
+    nextSectionId,
+    canGoPrevious: previousSectionId !== null,
+    canGoNext: nextSectionId !== null,
+    goToSection,
+    goPreviousSection,
+    goNextSection,
+    goToPhase,
   };
 }
 

@@ -725,6 +725,7 @@ export function SoftphoneProvider({ children }: Props) {
       {typeof document !== "undefined" && phone !== "closed" && coachUiEnabled && isOnCall && wrapToken && !coachCollapsed
         ? createPortal(
           <CoachLiveView
+            key={coachSession.callId ?? "coach-no-call"}
             session={coachSession}
             callName={callName}
             callStatus={callStatus}

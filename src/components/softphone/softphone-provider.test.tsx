@@ -992,7 +992,7 @@ describe("SoftphoneProvider coach UI flag", () => {
     await waitFor(() => expect(screen.getByTestId("softphone-popover")).toBeVisible());
   });
 
-  it("preserves the coach session across collapse/reopen — phase and transcript survive, only the view unmounts", async () => {
+  it("preserves the coach session across collapse/reopen — exact manual section and transcript survive", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
     const user = userEvent.setup();
@@ -1004,12 +1004,9 @@ describe("SoftphoneProvider coach UI flag", () => {
     await user.click(screen.getByTestId("call-lead-button"));
     await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
 
-    act(() =>
-      latestCoachChannel()._broadcastHandler?.({
-        payload: { type: "phase", phaseId: "reveal", ts: "t1", scriptVersion: "1.0.1", matcherVersion: "3" },
-      }),
-    );
-    expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute("aria-current", "step");
+    await user.click(screen.getByTestId("coach-next"));
+    await user.click(screen.getByTestId("coach-next"));
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Explain how BMH works");
 
     act(() =>
       latestCoachChannel()._broadcastHandler?.({
@@ -1032,7 +1029,7 @@ describe("SoftphoneProvider coach UI flag", () => {
 
     await user.click(screen.getByTestId("reopen-coach"));
     await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
-    expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute("aria-current", "step");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Explain how BMH works");
     expect(screen.getByTestId("coach-transcript")).toHaveTextContent("hello there");
     // The underlying realtime subscription itself was never torn down and
     // recreated by the collapse/reopen — proof the session, not just its

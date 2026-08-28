@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 
-import { assertValidClosrScript } from "./script-schema";
+import { assertValidClosrScript, type ClosrScript } from "./script-schema";
 import scriptJson from "./closr-script-v0.json";
 
 function validScript(): Record<string, unknown> {
@@ -42,6 +43,32 @@ describe("assertValidClosrScript", () => {
     const phases = script.phases as { display: { branches: { variants: { lines: Record<string, unknown>[] }[] }[] } }[];
     phases[0].display.branches[0].variants[0].lines[0].type = "sing";
     expect(() => assertValidClosrScript(script)).toThrow(/malformed line/);
+  });
+
+  it("rejects missing and duplicate stable authored-line ids", () => {
+    const missing = validScript();
+    const missingLines = (missing.phases as { display: { branches: { variants: { lines: Record<string, unknown>[] }[] }[] } }[])[0]
+      .display.branches[0].variants[0].lines;
+    delete missingLines[0].id;
+    expect(() => assertValidClosrScript(missing)).toThrow(/malformed line/);
+
+    const duplicate = validScript();
+    const variants = (duplicate.phases as { display: { branches: { variants: { lines: Record<string, unknown>[] }[] }[] } }[])[0]
+      .display.branches[0].variants;
+    variants[1].lines[0].id = variants[0].lines[0].id;
+    expect(() => assertValidClosrScript(duplicate)).toThrow(/duplicate line id/);
+  });
+
+  it("locks the approved authored line text while ids and grouping evolve independently", () => {
+    const text = (scriptJson as unknown as ClosrScript).phases
+      .flatMap((phase) => phase.display.branches)
+      .flatMap((branch) => branch.variants)
+      .flatMap((variant) => variant.lines)
+      .map((line) => line.text)
+      .join("\u0000");
+    expect(createHash("sha256").update(text).digest("hex")).toBe(
+      "efc46e5bfd66059268b8b981c374b9fa2fa46a7a83f68374286b61873f26e3fe",
+    );
   });
 
   it("rejects a phase missing match.entry_landmarks/advance_landmarks", () => {

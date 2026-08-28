@@ -1,4 +1,5 @@
 import scriptJson from "./closr-script-v0.json";
+import { getCoachSectionById, type CoachSectionId } from "./coach-sections";
 import { assertValidClosrScript, type ClosrScript, type ScriptBranch, type ScriptLineBlock, type ScriptObjection, type ScriptPhase, type ScriptVariant } from "./script-schema";
 import { resolveDisplayText, type DisplayTextSegment } from "./token-resolver";
 import type { CoachCallContext, CoachCursor, CoachOccupancy, CoachPhaseId, ResolvedTokens } from "./types";
@@ -69,7 +70,7 @@ export function selectBranchVariantKey(
   return branch.variants[0]?.key ?? "default";
 }
 
-export type DisplayLine = { type: "say" | "note"; segments: DisplayTextSegment[] };
+export type DisplayLine = { id?: string; type: "say" | "note"; segments: DisplayTextSegment[] };
 
 export type ResolvedVariant = {
   key: string;
@@ -108,7 +109,7 @@ function toVariant(variant: ScriptVariant, tokens: ResolvedTokens): ResolvedVari
     key: variant.key,
     label: variant.label,
     tone: variant.tone ?? null,
-    lines: variant.lines.map((line) => ({ type: line.type, segments: resolveDisplayText(line.text, tokens) })),
+    lines: variant.lines.map((line) => ({ id: line.id, type: line.type, segments: resolveDisplayText(line.text, tokens) })),
   };
 }
 
@@ -174,6 +175,57 @@ export function buildPhaseScriptBlock(
     branches: phase.display.branches.map((branch) => toBranchBlock(branch, tokens, selectCtx, branchOverrides)),
     counter,
     gates,
+  };
+}
+
+export type CoachSectionScriptBlock = {
+  sectionId: CoachSectionId;
+  phaseId: CoachPhaseId;
+  phaseName: string;
+  title: string;
+  branches: ScriptBranchBlock[];
+};
+
+/** Resolves one manual section without copying script text into the manifest. */
+export function buildCoachSectionScriptBlock(
+  sectionId: CoachSectionId,
+  tokens: ResolvedTokens,
+  selectCtx: BranchSelectContext = { leadSource: null, occupancy: null },
+  branchOverrides: Record<string, string> = {},
+): CoachSectionScriptBlock | null {
+  const section = getCoachSectionById(sectionId);
+  if (!section) return null;
+  const phaseBlock = buildPhaseScriptBlock(section.phaseId, tokens, selectCtx, branchOverrides);
+  const rawPhase = getScriptPhase(section.phaseId);
+  if (!phaseBlock || !rawPhase) return null;
+
+  const branches = section.content.flatMap((contentRef) => {
+    const branch = phaseBlock.branches.find((candidate) => candidate.tag === contentRef.branch_tag);
+    const rawBranch = rawPhase.display.branches.find((candidate) => candidate.tag === contentRef.branch_tag);
+    if (!branch || !rawBranch) return [];
+    const variantRef = contentRef.variants.find((candidate) => candidate.variant_key === branch.selected.key);
+    const rawVariant = rawBranch.variants.find((candidate) => candidate.key === branch.selected.key);
+    if (!variantRef || !rawVariant) return [];
+
+    const includedIds = new Set(variantRef.line_ids);
+    const containsLastAuthoredLine = includedIds.has(rawVariant.lines[rawVariant.lines.length - 1].id);
+    return [{
+      ...branch,
+      holdAfter: containsLastAuthoredLine ? branch.holdAfter : null,
+      trailingNote: containsLastAuthoredLine ? branch.trailingNote : null,
+      selected: {
+        ...branch.selected,
+        lines: branch.selected.lines.filter((line) => line.id !== undefined && includedIds.has(line.id)),
+      },
+    }];
+  });
+
+  return {
+    sectionId: section.id,
+    phaseId: section.phaseId,
+    phaseName: phaseBlock.phaseName,
+    title: section.title,
+    branches,
   };
 }
 
@@ -320,7 +372,7 @@ function displayLineAt(branchTag: string, variantKey: string, lineIndex: number,
     .find((candidate) => candidate.tag === branchTag)
     ?.variants.find((candidate) => candidate.key === variantKey)?.lines[lineIndex];
   if (!line) return null;
-  return { type: line.type, segments: resolveDisplayText(line.text, tokens) };
+  return { id: line.id, type: line.type, segments: resolveDisplayText(line.text, tokens) };
 }
 
 /** Resolves a cursor event to the exact line to show as "the thing to
@@ -379,7 +431,7 @@ export function resolveCursorNextLine(
   if (variant) {
     const withinVariant = findSayIndexFrom(variant.lines, position.lineIndex + 1);
     if (withinVariant !== null) {
-      return { type: "say", segments: resolveDisplayText(variant.lines[withinVariant].text, tokens) };
+      return { id: variant.lines[withinVariant].id, type: "say", segments: resolveDisplayText(variant.lines[withinVariant].text, tokens) };
     }
   }
 
@@ -396,7 +448,7 @@ export function resolveCursorNextLine(
   const next = findNextSayAcrossBranches(remainingBranches);
   if (!next) return null;
   const nextLine = remainingBranches.find((candidate) => candidate.tag === next.tag)!.lines[next.lineIndex];
-  return { type: "say", segments: resolveDisplayText(nextLine.text, tokens) };
+  return { id: nextLine.id, type: "say", segments: resolveDisplayText(nextLine.text, tokens) };
 }
 
 /** One phase branch's spoken candidate for cross-branch continuation: its

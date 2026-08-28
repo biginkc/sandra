@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   branchSayIndex,
+  buildCoachSectionScriptBlock,
   buildPhaseScriptBlock,
   findNextSayAcrossBranches,
   getScriptObjection,
@@ -104,6 +105,53 @@ describe("buildPhaseScriptBlock", () => {
   it("returns null for an unknown phase id", () => {
     // @ts-expect-error deliberately invalid phase id
     expect(buildPhaseScriptBlock("not_a_phase", tokens)).toBeNull();
+  });
+});
+
+describe("buildCoachSectionScriptBlock", () => {
+  it("resolves only the authored lines referenced by one conversational section", () => {
+    const qualification = buildCoachSectionScriptBlock("introduction.qualification-frame", tokens);
+    expect(qualification?.title).toBe("Set the qualification frame");
+    expect(qualification?.branches).toHaveLength(1);
+    expect(qualification?.branches[0].selected.lines.map((line) => line.id)).toEqual([
+      "introduction.frame-the-call.default.01",
+    ]);
+
+    const howWeWork = buildCoachSectionScriptBlock("introduction.how-we-work", tokens);
+    expect(howWeWork?.branches[0].selected.lines.map((line) => line.id)).toEqual([
+      "introduction.frame-the-call.default.02",
+      "introduction.frame-the-call.default.03",
+      "introduction.frame-the-call.default.04",
+    ]);
+  });
+
+  it("retains selected conditional variants inside the section", () => {
+    const opener = buildCoachSectionScriptBlock(
+      "introduction.opener",
+      tokens,
+      { leadSource: "cold_call", occupancy: null },
+    );
+    expect(opener?.branches[0].selected.key).toBe("cold_call");
+    expect(opener?.branches[0].selected.lines).toHaveLength(2);
+
+    const offer = buildCoachSectionScriptBlock("offer.outcome-tracks", tokens);
+    expect(offer?.branches.map((branch) => branch.tag)).toEqual([
+      "Good news",
+      "Bad news",
+      "Bad news — below mortgage",
+      "Price too low",
+    ]);
+  });
+
+  it("attaches a branch hold only to the section containing that branch's final authored line", () => {
+    const agreement = buildCoachSectionScriptBlock("secure_positioning.explain-agreement", tokens);
+    const finalHold = buildCoachSectionScriptBlock("secure_positioning.final-concerns-and-hold", tokens);
+    expect(agreement?.branches[0].holdAfter).toBeNull();
+    expect(finalHold?.branches[0].holdAfter).toBe("3-minute hold — write contract");
+  });
+
+  it("returns null for an unknown section", () => {
+    expect(buildCoachSectionScriptBlock("unknown.section", tokens)).toBeNull();
   });
 });
 
@@ -635,24 +683,26 @@ describe("branchSayIndex — never presents a note as speech, even for a synthet
   // "say" line). So this is proven directly against a synthetic fixture —
   // the exact scenario the fix exists for.
   it("returns null for a variant that is entirely notes — never index 0", () => {
-    const allNotes: { type: "say" | "note"; text: string }[] = [
-      { type: "note", text: "Internal reminder — do not read this aloud." },
-      { type: "note", text: "Another internal-only stage direction." },
+    const allNotes: { id: string; type: "say" | "note"; text: string }[] = [
+      { id: "fixture.note.01", type: "note", text: "Internal reminder — do not read this aloud." },
+      { id: "fixture.note.02", type: "note", text: "Another internal-only stage direction." },
     ];
     expect(branchSayIndex(allNotes)).toBeNull();
   });
 
   it("returns the first say index when one exists, regardless of how many notes precede it", () => {
-    const lines: { type: "say" | "note"; text: string }[] = [
-      { type: "note", text: "Setup note." },
-      { type: "note", text: "Another setup note." },
-      { type: "say", text: "The actual thing to say." },
+    const lines: { id: string; type: "say" | "note"; text: string }[] = [
+      { id: "fixture.mixed.01", type: "note", text: "Setup note." },
+      { id: "fixture.mixed.02", type: "note", text: "Another setup note." },
+      { id: "fixture.mixed.03", type: "say", text: "The actual thing to say." },
     ];
     expect(branchSayIndex(lines)).toBe(2);
   });
 
   it("returns index 0 directly when the first line is already a say", () => {
-    const lines: { type: "say" | "note"; text: string }[] = [{ type: "say", text: "Say this first." }];
+    const lines: { id: string; type: "say" | "note"; text: string }[] = [
+      { id: "fixture.say.01", type: "say", text: "Say this first." },
+    ];
     expect(branchSayIndex(lines)).toBe(0);
   });
 });
@@ -667,17 +717,17 @@ describe("findNextSayAcrossBranches — the cross-branch continuation SKIP, prov
   // provable against a hand-built fixture.
   it("skips a branch with NO spoken line at all and lands on the next branch that has one", () => {
     const branches = [
-      { tag: "All-note branch", lines: [{ type: "note" as const, text: "Internal-only reminder." }] },
-      { tag: "Has content", lines: [{ type: "say" as const, text: "The actual next thing to say." }] },
+      { tag: "All-note branch", lines: [{ id: "fixture.branch-a.01", type: "note" as const, text: "Internal-only reminder." }] },
+      { tag: "Has content", lines: [{ id: "fixture.branch-b.01", type: "say" as const, text: "The actual next thing to say." }] },
     ];
     expect(findNextSayAcrossBranches(branches)).toEqual({ tag: "Has content", lineIndex: 0 });
   });
 
   it("skips MULTIPLE consecutive all-note branches, not just one", () => {
     const branches = [
-      { tag: "First all-note", lines: [{ type: "note" as const, text: "Note 1." }] },
-      { tag: "Second all-note", lines: [{ type: "note" as const, text: "Note 2." }] },
-      { tag: "Finally has content", lines: [{ type: "say" as const, text: "Here it is." }] },
+      { tag: "First all-note", lines: [{ id: "fixture.first.01", type: "note" as const, text: "Note 1." }] },
+      { tag: "Second all-note", lines: [{ id: "fixture.second.01", type: "note" as const, text: "Note 2." }] },
+      { tag: "Finally has content", lines: [{ id: "fixture.third.01", type: "say" as const, text: "Here it is." }] },
     ];
     expect(findNextSayAcrossBranches(branches)).toEqual({ tag: "Finally has content", lineIndex: 0 });
   });
@@ -687,8 +737,8 @@ describe("findNextSayAcrossBranches — the cross-branch continuation SKIP, prov
       {
         tag: "Mixed",
         lines: [
-          { type: "note" as const, text: "setup note" },
-          { type: "say" as const, text: "the actual spoken line" },
+          { id: "fixture.mixed-branch.01", type: "note" as const, text: "setup note" },
+          { id: "fixture.mixed-branch.02", type: "say" as const, text: "the actual spoken line" },
         ],
       },
     ];
@@ -697,8 +747,8 @@ describe("findNextSayAcrossBranches — the cross-branch continuation SKIP, prov
 
   it("returns null when EVERY remaining branch is entirely notes — nothing left to preview", () => {
     const branches = [
-      { tag: "A", lines: [{ type: "note" as const, text: "note A" }] },
-      { tag: "B", lines: [{ type: "note" as const, text: "note B" }] },
+      { tag: "A", lines: [{ id: "fixture.a.01", type: "note" as const, text: "note A" }] },
+      { tag: "B", lines: [{ id: "fixture.b.01", type: "note" as const, text: "note B" }] },
     ];
     expect(findNextSayAcrossBranches(branches)).toBeNull();
   });
