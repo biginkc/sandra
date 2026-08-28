@@ -142,6 +142,7 @@ as $$
       m.conversation_id,
       m.contact_id,
       m.property_id,
+      review.property_id as review_property_id,
       m.direction,
       m.read_at,
       m.created_at,
@@ -165,8 +166,7 @@ as $$
       e.conversation_id,
       (array_agg(e.id order by e.created_at desc, e.id desc))[1] as last_message_id,
       (array_agg(e.contact_id order by e.created_at desc, e.id desc))[1] as contact_id,
-      (array_agg(e.property_id order by e.created_at desc, e.id desc)
-        filter (where e.property_id is not null))[1] as property_id,
+      (array_agg(e.review_property_id order by e.created_at desc, e.id desc))[1] as property_id,
       count(*) filter (
         where e.direction = 'inbound' and e.read_at is null
       )::integer as unread_count,

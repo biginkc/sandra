@@ -50,6 +50,10 @@ describe("Sandra Dispo pending AI review migration", () => {
     expect(sql).toContain("select recent.*");
     expect(sql).toContain("select review.*");
     expect(sql).toContain("from old_review_grouped review");
+    expect(sql).toContain("review.property_id as review_property_id");
+    expect(sql).toContain(
+      "array_agg(e.review_property_id order by e.created_at desc, e.id desc)",
+    );
     expect(sql).toContain("else c.has_recent");
     expect(sql).not.toContain("ranked as materialized");
     expect(sql).not.toContain(

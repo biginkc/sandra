@@ -275,6 +275,30 @@ describe("Sandra Dispo inbox queue migration", () => {
       reviewStatus: "pending",
       disposition: "dnc",
     });
+    const oldDncOtherPropertyId = crypto.randomUUID();
+    await pg.query(
+      `insert into public.properties (
+         id, org_id, address, state, status, homeowner_contact_id
+       ) values ($1, $2, 'Old DNC other property', 'MO', 'contacted', $3)`,
+      [oldDncOtherPropertyId, BMH_ORG_ID, oldDnc.contactId],
+    );
+    await pg.query(
+      `insert into public.messages (
+         id, org_id, channel, direction, status, property_id, contact_id,
+         conversation_id, from_address, to_address, body, created_at
+       ) values (
+         $1, $2, 'sms', 'outbound', 'sent', $3, $4, $5,
+         '+18162804181', '+18165550101', 'Old DNC mismatched property',
+         now() - interval '100 days'
+       )`,
+      [
+        crypto.randomUUID(),
+        BMH_ORG_ID,
+        oldDncOtherPropertyId,
+        oldDnc.contactId,
+        oldDnc.conversationId,
+      ],
+    );
     const testTraffic = await seedThread({
       label: "Test",
       testTraffic: true,
@@ -345,6 +369,8 @@ describe("Sandra Dispo inbox queue migration", () => {
       (row) => row.thread_id === oldDnc.conversationId,
     );
     expect(oldDncRow).toMatchObject({
+      property_id: oldDnc.propertyId,
+      last_message_body: "Old DNC mismatched property",
       is_opted_out: true,
       is_test_traffic: false,
       ai_disposition_review_id: oldDnc.reviewId,
