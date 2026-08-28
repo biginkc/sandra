@@ -163,11 +163,13 @@ export function SoftphoneProvider({ children }: Props) {
     target
       ? {
           sellerName: target.name,
+          repName: target.repName ?? null,
           propertyAddress: target.address,
           sellerPhoneE164: target.phoneE164,
           maskedSellerPhone: target.maskedPhone,
         }
       : null,
+    coachUiEnabled ? wrapToken : null,
   );
   const transportRef = useRef<CallTransport | null>(null);
   const callHandleRef = useRef<CallHandle | null>(null);

@@ -27,12 +27,15 @@ function request(overrides: Partial<CoachRecommendationRequest> = {}): CoachReco
 }
 
 function anthropicReturning(input: unknown, capture?: (args: unknown) => void): CoachRecommendationAnthropic {
+  const toolName = typeof input === "object" && input !== null && "questions" in input
+    ? "submit_follow_up_questions"
+    : "submit_coach_recommendations";
   return {
     messages: {
       create: vi.fn(async (args: unknown) => {
         capture?.(args);
         return {
-          content: [{ type: "tool_use", id: "tool-1", name: "submit_coach_recommendations", input }],
+          content: [{ type: "tool_use", id: "tool-1", name: toolName, input }],
         };
       }) as unknown as CoachRecommendationAnthropic["messages"]["create"],
     } as unknown as CoachRecommendationAnthropic["messages"],
@@ -211,7 +214,11 @@ describe("coach recommendation server boundary", () => {
               type: "tool_use",
               id: "tool-1",
               name: "submit_follow_up_questions",
-              input: { questions: ["What repairs concern you most?", "How long has that been a problem?", "What happens if it is not fixed?"] },
+              input: { questions: [
+                { template: "tell_more", groundingPhrase: "repairs are too expensive" },
+                { template: "impact", groundingPhrase: "repairs" },
+                { template: "priority", groundingPhrase: "repairs" },
+              ] },
             }],
           })) as unknown as CoachRecommendationAnthropic["messages"]["create"],
         } as unknown as CoachRecommendationAnthropic["messages"],
@@ -229,13 +236,72 @@ describe("coach recommendation server boundary", () => {
               type: "tool_use",
               id: "tool-1",
               name: "submit_follow_up_questions",
-              input: { questions: ["What happened?", "what happened?", "What happens next?"] },
+              input: { questions: [
+                { template: "tell_more", groundingPhrase: "repairs are too expensive" },
+                { template: "tell_more", groundingPhrase: "repairs are too expensive" },
+                { template: "impact", groundingPhrase: "repairs" },
+              ] },
             }],
           })) as unknown as CoachRecommendationAnthropic["messages"]["create"],
         } as unknown as CoachRecommendationAnthropic["messages"],
       },
     });
     expect(await requestCoachRecommendationsWithDeps(request({ mode: "follow_up" }), duplicate)).toMatchObject({
+      ok: false,
+      code: "provider_error",
+    });
+  });
+
+  it("separates seller grounding from script context and rejects script-only or falsely attributed premises", async () => {
+    let captured: unknown;
+    const transcript = [{ speaker: "seller" as const, text: "Audio check. This line repeats once per minute.", isFinal: true }];
+    const valid = deps({
+      anthropic: anthropicReturning({
+        questions: [
+          { template: "tell_more", groundingPhrase: "audio check" },
+          { template: "why_now", groundingPhrase: "once per minute" },
+          { template: "priority", groundingPhrase: "audio check" },
+        ],
+      }, (args) => { captured = args; }),
+    });
+    expect(await requestCoachRecommendationsWithDeps(request({ mode: "follow_up", transcript }), valid)).toMatchObject({
+      ok: true,
+      followUpQuestions: expect.any(Array),
+    });
+    const serialized = JSON.stringify(captured);
+    expect(serialized).toContain("seller_statements_allowed_for_grounding");
+    expect(serialized).toContain("conversation_planning_context_only");
+    expect(serialized).toContain("Only finalized seller statements may supply a factual premise");
+    expect(serialized).toContain("The server writes the final question from the selected template");
+
+    const scriptOnly = deps({
+      anthropic: anthropicReturning({
+        questions: [
+          { template: "tell_more", groundingPhrase: "structure" },
+          { template: "impact", groundingPhrase: "audio check" },
+          { template: "why_now", groundingPhrase: "once per minute" },
+        ],
+      }),
+    });
+    expect(await requestCoachRecommendationsWithDeps(request({ mode: "follow_up", transcript }), scriptOnly)).toMatchObject({
+      ok: false,
+      code: "provider_error",
+    });
+
+    const mixedInventedPremise = deps({
+      anthropic: anthropicReturning({
+        questions: [
+          {
+            template: "tell_more",
+            groundingPhrase: "audio check",
+            question: "Are there structural areas that concern you beyond the audio check?",
+          },
+          { template: "impact", groundingPhrase: "audio check" },
+          { template: "why_now", groundingPhrase: "once per minute" },
+        ],
+      }),
+    });
+    expect(await requestCoachRecommendationsWithDeps(request({ mode: "follow_up", transcript }), mixedInventedPremise)).toMatchObject({
       ok: false,
       code: "provider_error",
     });

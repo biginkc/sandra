@@ -1,9 +1,8 @@
 "use server";
 
-import type { User } from "@supabase/supabase-js";
-
 import { reportError } from "@/lib/errors/report";
 import { createClient } from "@/lib/supabase/server";
+import { repDisplayName } from "./rep-display-name";
 import type { CoachCallContext, CoachOccupancy } from "./types";
 
 type CoachLeadRow = {
@@ -15,16 +14,6 @@ type CoachLeadRow = {
   county: { name: string } | null;
   homeowner: { first_name: string | null; last_name: string | null; entity_name: string | null } | null;
 };
-
-/**
- * Explicit v1 roster values supplied by BMH for reps whose Hugo-provisioned
- * Auth identity predates display-name metadata. This is intentionally small
- * and server-only; user_metadata.display_name remains authoritative whenever
- * it exists.
- */
-const KNOWN_REP_NAMES_BY_EMAIL = new Map<string, string>([
-  ["jarrad@bmhgroupkc.com", "Jarrad Henry"],
-]);
 
 /**
  * Drives the Reveal phase's Entry branch auto-selection. `is_vacant` must
@@ -41,43 +30,6 @@ function occupancy(lead: CoachLeadRow | null): CoachOccupancy | null {
   if (lead.is_vacant === false && lead.absentee_flag === false) return "owner_occupied";
   if (lead.is_vacant === false && lead.absentee_flag === true) return "tenant_occupied";
   return "unknown";
-}
-
-/**
- * Title-cases a clearly delimited auth email local part
- * ("jane.doe@" -> "Jane Doe"). A single token such as "jarrad@" is only a
- * likely first name, so treating it as the rep's complete known name would
- * silently put incorrect wording into the script. Fail safe to the visible
- * placeholder until authoritative auth metadata is populated instead.
- */
-function repNameFallbackFromEmail(email: string | null | undefined): string | null {
-  if (!email) return null;
-  const localPart = email.split("@")[0];
-  if (!localPart) return null;
-  const parts = localPart
-    .split(/[._+-]+/)
-    .filter(Boolean);
-  if (parts.length < 2) return null;
-  return parts
-    .map((part) => part[0]!.toUpperCase() + part.slice(1))
-    .join(" ") || null;
-}
-
-/**
- * Sandra has no `profiles`/`team_members` table — the only per-user record
- * outside auth.users is `memberships`, which is Hugo's access/role ledger
- * (see admin/users/actions.ts: "Hugo owns account creation and access
- * grants") and contains no person name. `auth.users.user_metadata.display_name`
- * is therefore the authoritative existing source, followed by BMH's explicit
- * v1 roster for pre-metadata accounts. A clearly delimited email can supply a
- * safe last fallback; ambiguous single-token email locals cannot.
- */
-function repDisplayName(user: Pick<User, "email" | "user_metadata"> | null | undefined): string | null {
-  const stored = user?.user_metadata?.display_name;
-  if (typeof stored === "string" && stored.trim()) return stored.trim();
-  const known = user?.email ? KNOWN_REP_NAMES_BY_EMAIL.get(user.email.trim().toLowerCase()) : null;
-  if (known) return known;
-  return repNameFallbackFromEmail(user?.email);
 }
 
 function sellerName(homeowner: CoachLeadRow["homeowner"]): string | null {

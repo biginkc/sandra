@@ -21,6 +21,7 @@ export type ContextLoadState =
   | { status: "error"; context: CoachCallContext };
 
 export type PreparedCoachTarget = {
+  repName?: string | null;
   sellerName: string | null;
   propertyAddress: string | null;
   sellerPhoneE164: string | null;
@@ -50,6 +51,7 @@ function withPreparedTargetFallbacks(
   const preparedAddress = preparedTarget.propertyAddress?.trim() || null;
   return {
     ...context,
+    repName: context.repName ?? (preparedTarget.repName?.trim() || null),
     sellerName: context.sellerName ?? usablePreparedSellerName(preparedTarget.sellerName, preparedTarget),
     propertyAddress: context.propertyAddress ?? preparedAddress,
   };
@@ -65,7 +67,7 @@ function preparedTargetErrorContext(
     sellerName: preparedTarget ? usablePreparedSellerName(preparedTarget.sellerName, preparedTarget) : null,
     propertyAddress: preparedTarget?.propertyAddress?.trim() || null,
     propertyCounty: null,
-    repName: null,
+    repName: preparedTarget?.repName?.trim() || null,
     repPhoneE164,
     motivation: null,
     leadId: propertyId,
@@ -82,10 +84,11 @@ function preparedTargetErrorContext(
  * lead context loading, and manual branch-variant overrides — independent
  * of whether the full-screen coach view is currently mounted or collapsed
  * to the classic popover. Call this once at the SoftphoneProvider level,
- * keyed only on the call's identity (callId), so collapsing the view
+ * so collapsing the view
  * (which unmounts CoachLiveView) never resets the transcript, phase,
  * gates, objection cards, or rep-entered deal values — only the view
- * itself unmounts, not the session data.
+ * itself unmounts, not the session data. The early sessionKey resets local
+ * state while callId remains the later, authorization-safe Realtime key.
  */
 export function useCoachSession(
   callId: string | null,
@@ -94,6 +97,7 @@ export function useCoachSession(
   repPhoneE164: string | null,
   livenessActive = true,
   preparedTarget: PreparedCoachTarget | null = null,
+  sessionKey: string | null = callId,
 ) {
   const { dispatch, ...channel } = useCoachChannel(callId, "introduction", livenessActive);
   const [contextLoad, setContextLoad] = useState<ContextLoadState>(() => ({
@@ -109,17 +113,20 @@ export function useCoachSession(
   const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>({});
   const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(FIRST_COACH_SECTION_ID);
   const [recommendationContinuity, setRecommendationContinuity] = useState(
-    () => createCoachRecommendationContinuity(callId),
+    () => createCoachRecommendationContinuity(sessionKey),
   );
 
-  // A new call (different callId) must start a clean session — stale
+  // A new attempt gets its stable session key before transport.start()
+  // resolves and before callId is safe to use for Realtime. Reset from that
+  // early key so the connecting view cannot show a previous call's context,
+  // while the later null -> callId transition does not reset manual position.
   // branch picks and a stale context/attempt count from a prior call must
   // not leak forward. Adjusted during render (React's documented pattern
   // for resetting state when a prop changes) rather than in an effect, so
   // this doesn't fire an extra render-after-mount for every call.
-  const [trackedCallId, setTrackedCallId] = useState(callId);
-  if (callId !== trackedCallId) {
-    setTrackedCallId(callId);
+  const [trackedSessionKey, setTrackedSessionKey] = useState(sessionKey);
+  if (sessionKey !== trackedSessionKey) {
+    setTrackedSessionKey(sessionKey);
     setContextLoad({
       status: "loading",
       context: preparedTargetErrorContext(
@@ -132,11 +139,11 @@ export function useCoachSession(
     setContextAttempt(0);
     setBranchOverrides({});
     setActiveSectionId(FIRST_COACH_SECTION_ID);
-    setRecommendationContinuity(createCoachRecommendationContinuity(callId));
+    setRecommendationContinuity(createCoachRecommendationContinuity(sessionKey));
   }
 
   useEffect(() => {
-    if (!callId) return;
+    if (!sessionKey) return;
     let mounted = true;
     loadCoachCallContext({ propertyId, sellerPhoneE164, repPhoneE164 })
       .then((loaded) => {
@@ -165,9 +172,10 @@ export function useCoachSession(
     };
     // Resolved once at dial time on purpose — token values shouldn't drift
     // mid-call. contextAttempt is a manual retry knob, not a data
-    // dependency; callId gates the whole session's lifetime.
+    // dependency; sessionKey gates the whole session's lifetime while callId
+    // remains reserved for the later authorized Realtime subscription.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [callId, propertyId, contextAttempt]);
+  }, [sessionKey, propertyId, contextAttempt]);
 
   const retryContext = useCallback(() => setContextAttempt((value) => value + 1), []);
   const selectVariant = useCallback((tag: string, key: string) => {

@@ -244,6 +244,7 @@ describe("SoftphoneProvider transport gate", () => {
         phoneE164: "+18165550123",
         maskedPhone: "(816) 555-0123",
         name: "Softphone Lead",
+        repName: "Mel",
         address: "1 Main St",
         state: "MO",
         startedAt: "2026-08-21T15:00:00.000Z",
@@ -277,6 +278,7 @@ describe("SoftphoneProvider transport gate", () => {
         phoneE164: "+18165550123",
         maskedPhone: "(816) 555-0123",
         name: "Softphone Lead",
+        repName: "Mel",
         address: "1 Main St",
         state: "MO",
         startedAt: "2026-08-21T15:00:00.000Z",
@@ -395,6 +397,7 @@ describe("SoftphoneProvider transport gate", () => {
         phoneE164: "+18165550123",
         maskedPhone: "(816) 555-0123",
         name: "Softphone Lead",
+        repName: "Mel",
         address: "1 Main St",
         state: "MO",
         startedAt: "2026-08-21T15:00:00.000Z",
@@ -892,6 +895,7 @@ describe("SoftphoneProvider coach UI flag", () => {
         phoneE164: "+18165550123",
         maskedPhone: "(816) 555-0123",
         name: "Softphone Lead",
+        repName: "Mel",
         address: "1 Main St",
         state: "MO",
         startedAt: "2026-08-21T15:00:00.000Z",
@@ -947,6 +951,42 @@ describe("SoftphoneProvider coach UI flag", () => {
     expect(screen.getByTestId("current-section-script")).toHaveTextContent("Hey Softphone?");
     await user.click(screen.getByTestId("variant-Opener-cold_call"));
     expect(screen.getByTestId("current-section-script")).toHaveTextContent("1 Main St");
+    expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows every known script token while transport is still connecting", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    loadCoachCallContext.mockReturnValue(new Promise(() => undefined));
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "connecting" | "live") => void) | null = null;
+      return {
+        onStateChange: vi.fn((cb) => { listener = cb; }),
+        start: vi.fn(() => {
+          listener?.("connecting");
+          return new Promise(() => undefined);
+        }),
+        mute: vi.fn(),
+        hold: vi.fn(async () => true),
+        sendDigit: vi.fn(async () => true),
+        hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })),
+      };
+    });
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeVisible());
+    const script = screen.getByTestId("current-section-script");
+    expect(script).toHaveTextContent("Hey Softphone?");
+    expect(script).toHaveTextContent("this is Mel");
+    await user.click(screen.getByTestId("variant-Opener-cold_call"));
+    expect(script).toHaveTextContent("1 Main St");
+    expect(script.querySelectorAll('[data-testid="token-placeholder"]')).toHaveLength(0);
     expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
   });
 
