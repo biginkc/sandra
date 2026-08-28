@@ -31,6 +31,78 @@ describe("TracerfyProvider — constructor", () => {
   });
 });
 
+describe("TracerfyProvider — cached projection repair", () => {
+  it("rehydrates a legacy primary-phone row without carrying historical credits", () => {
+    const p = new TracerfyProvider("k");
+    const repaired = p.normalizeCachedResult({
+      propertyId: "prop-1",
+      hit: true,
+      persons: [
+        {
+          firstName: "Jane",
+          lastName: "Doe",
+          phones: [],
+          emails: [],
+        },
+      ],
+      creditsDeducted: 2,
+      raw: {
+        address: "1 Main",
+        city: "KC",
+        state: "MO",
+        first_name: "Jane",
+        last_name: "Doe",
+        primary_phone: "8165550100",
+        primary_phone_type: "Mobile",
+      },
+    });
+    expect(repaired).toMatchObject({
+      propertyId: "prop-1",
+      hit: true,
+      creditsDeducted: 0,
+    });
+    expect(repaired?.persons[0].phones[0]).toMatchObject({
+      number: "8165550100",
+      type: "Mobile",
+    });
+  });
+
+  it("preserves an explicit provider-no-data cache row as a free miss", () => {
+    const p = new TracerfyProvider("k");
+    expect(
+      p.normalizeCachedResult({
+        propertyId: "prop-1",
+        hit: false,
+        persons: [],
+        creditsDeducted: 0,
+        raw: { provider_no_data: true },
+      }),
+    ).toMatchObject({ hit: false, persons: [], creditsDeducted: 0 });
+  });
+
+  it("rejects an unrecoverable legacy positive instead of turning it into a miss", () => {
+    const p = new TracerfyProvider("k");
+    expect(
+      p.normalizeCachedResult({
+        propertyId: "prop-1",
+        hit: true,
+        persons: [],
+        creditsDeducted: 2,
+        raw: {},
+      }),
+    ).toBeNull();
+    expect(
+      p.normalizeCachedResult({
+        propertyId: "prop-1",
+        hit: true,
+        persons: [],
+        creditsDeducted: 2,
+        raw: { persons: { malformed: true } },
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("tracerfyFromEnv", () => {
   it("throws ConfigurationError when TRACERFY_API_KEY is unset", () => {
     const prev = process.env.TRACERFY_API_KEY;
@@ -65,7 +137,7 @@ describe("TracerfyProvider — lookupSingle", () => {
     expect(body.find_owner).toBe(true);
   });
 
-  it("sets find_owner=false when first/last name supplied", async () => {
+  it("keeps address-owned lookup when first/last name are supplied", async () => {
     mockFetch({
       status: 200,
       body: { hit: false, persons_count: 0, credits_deducted: 0, persons: [] },
@@ -79,11 +151,12 @@ describe("TracerfyProvider — lookupSingle", () => {
       firstName: "Jane",
       lastName: "Doe",
     });
-    const init = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    const init = (global.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as RequestInit;
     const body = JSON.parse(init.body as string);
-    expect(body.find_owner).toBe(false);
-    expect(body.first_name).toBe("Jane");
-    expect(body.last_name).toBe("Doe");
+    expect(body.find_owner).toBe(true);
+    expect(body.first_name).toBeUndefined();
+    expect(body.last_name).toBeUndefined();
   });
 
   it("maps a hit response into SkipTraceResult shape", async () => {
@@ -127,6 +200,49 @@ describe("TracerfyProvider — lookupSingle", () => {
       dnc: false,
     });
     expect(result.persons[0].emails[0].email).toBe("jane@example.com");
+  });
+
+  it("treats nested TCPA and person-litigator flags as suppressed", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        hit: true,
+        persons_count: 1,
+        credits_deducted: 5,
+        persons: [
+          {
+            first_name: "Risk",
+            last_name: "Flag",
+            litigator: true,
+            phones: [
+              {
+                number: "+18165550100",
+                type: "Mobile",
+                dnc: false,
+                tcpa: false,
+                rank: 1,
+              },
+              {
+                number: "+18165550101",
+                type: "Mobile",
+                dnc: false,
+                tcpa: true,
+                rank: 2,
+              },
+            ],
+            emails: [],
+          },
+        ],
+      },
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.lookupSingle({
+      propertyId: "prop-1",
+      address: "1 Main",
+      city: "KC",
+      state: "MO",
+    });
+    expect(result.persons[0].phones.every((phone) => phone.dnc)).toBe(true);
   });
 
   it("throws ProviderError on non-2xx", async () => {
@@ -214,9 +330,7 @@ describe("TracerfyProvider — lookupSingle", () => {
         hit: true,
         persons_count: 1,
         credits_deducted: 5,
-        persons: [
-          { first_name: "Jane", phones: [], emails: [] },
-        ],
+        persons: [{ first_name: "Jane", phones: [], emails: [] }],
       },
     });
     const p = new TracerfyProvider("k");
@@ -251,7 +365,8 @@ describe("TracerfyProvider — submitBatch mailing address", () => {
         mailingZip: "65801",
       },
     ]);
-    const init = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    const init = (global.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as RequestInit;
     const form = init.body as FormData;
     const rows = JSON.parse(form.get("json_data") as string);
     expect(rows[0].mail_address).toBe("PO Box 9000");
@@ -269,7 +384,8 @@ describe("TracerfyProvider — submitBatch mailing address", () => {
     await p.submitBatch([
       { propertyId: "prop-A", address: "1 Main St", city: "KC", state: "MO" },
     ]);
-    const init = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    const init = (global.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as RequestInit;
     const form = init.body as FormData;
     const rows = JSON.parse(form.get("json_data") as string);
     expect(rows[0].mail_address).toBe("1 Main St");
@@ -294,8 +410,8 @@ describe("TracerfyProvider — submitBatch", () => {
         queue_id: 42,
         status: "pending",
         rows_uploaded: 2,
-        trace_type: "normal",
-        credits_per_lead: 1,
+        trace_type: "advanced",
+        credits_per_lead: 2,
         estimated_wait_seconds: 30,
       },
     });
@@ -305,10 +421,12 @@ describe("TracerfyProvider — submitBatch", () => {
       { propertyId: "prop-B", address: "2 Main", city: "KC", state: "MO" },
     ]);
     expect(ticket.queueId).toBe("42");
-    expect(ticket.creditsPerLead).toBe(1);
+    expect(ticket.creditsPerLead).toBe(2);
+    expect(ticket.traceType).toBe("advanced");
     expect(ticket.estimatedWaitSeconds).toBe(30);
 
-    const init = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    const init = (global.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as RequestInit;
     expect(init.body).toBeInstanceOf(FormData);
     const form = init.body as FormData;
 
@@ -332,6 +450,43 @@ describe("TracerfyProvider — submitBatch", () => {
     // boundary or the server can't parse the multipart body.
     const headers = (init.headers ?? {}) as Record<string, string>;
     expect(headers["Content-Type"]).toBeUndefined();
+  });
+
+  it("keeps the proven advanced mode when every row has a full owner name", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        queue_id: 43,
+        trace_type: "advanced",
+        credits_per_lead: 2,
+        estimated_wait_seconds: 30,
+      },
+    });
+    const p = new TracerfyProvider("k");
+    const ticket = await p.submitBatch([
+      {
+        propertyId: "prop-A",
+        address: "1 Main",
+        city: "KC",
+        state: "MO",
+        firstName: "Jane",
+        lastName: "Doe",
+      },
+      {
+        propertyId: "prop-B",
+        address: "2 Main",
+        city: "KC",
+        state: "MO",
+        firstName: "John",
+        lastName: "Smith",
+      },
+    ]);
+    const init = (global.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as RequestInit;
+    const form = init.body as FormData;
+    expect(form.get("trace_type")).toBe("advanced");
+    expect(ticket.creditsPerLead).toBe(2);
+    expect(ticket.traceType).toBe("advanced");
   });
 });
 
@@ -417,10 +572,7 @@ describe("TracerfyProvider — pollBatch", () => {
     });
   });
 
-  it("flat row with name only (no phones/emails) still counts as a hit", async () => {
-    // Owner identity without contact data is still enrichment worth
-    // persisting — hit=false would downgrade it to no_match and drop
-    // the name (Codex review finding on PR #252).
+  it("keeps a paid name-only advanced row as an owner-resolution hit", async () => {
     mockFetch({
       status: 200,
       body: [
@@ -442,6 +594,70 @@ describe("TracerfyProvider — pollBatch", () => {
     expect(result![0].persons).toHaveLength(1);
     expect(result![0].persons[0].lastName).toBe("Owner");
     expect(result![0].persons[0].phones).toHaveLength(0);
+  });
+
+  it("recovers and deduplicates primary_phone from the documented flat row", async () => {
+    mockFetch({
+      status: 200,
+      body: [
+        {
+          address: "8 Primary Phone Rd",
+          city: "KC",
+          state: "MO",
+          first_name: "Primary",
+          last_name: "Owner",
+          primary_phone: "(816) 555-0100",
+          primary_phone_type: "",
+          mobile_1: "8165550100",
+          landline_1: "8165550101",
+        },
+      ],
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result![0].hit).toBe(true);
+    expect(result![0].persons[0].phones).toEqual([
+      {
+        number: "(816) 555-0100",
+        type: "Mobile",
+        dnc: false,
+        carrier: null,
+        rank: 1,
+      },
+      {
+        number: "8165550101",
+        type: "Landline",
+        dnc: false,
+        carrier: null,
+        rank: 2,
+      },
+    ]);
+  });
+
+  it("fails closed on flat DNC and TCPA flags when the provider supplies them", async () => {
+    mockFetch({
+      status: 200,
+      body: [
+        {
+          address: "7 Suppressed Rd",
+          city: "KC",
+          state: "MO",
+          first_name: "Suppressed",
+          last_name: "Owner",
+          primary_phone: "8165550100",
+          primary_phone_type: "mobile",
+          primary_phone_tcpa: true,
+          mobile_1: "8165550101",
+          mobile_1_dnc: "yes",
+        },
+      ],
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result![0].persons[0].phones).toEqual([
+      expect.objectContaining({ number: "8165550100", dnc: true }),
+      expect.objectContaining({ number: "8165550101", dnc: true }),
+    ]);
   });
 
   it("respects provider-declared hit=false on nested-persons rows", async () => {
@@ -612,13 +828,17 @@ describe("TracerfyProvider — getBalance", () => {
     const p = new TracerfyProvider("k");
     const balance = await p.getBalance();
     expect(balance).toBe(1234);
-    const init = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    const init = (global.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as RequestInit;
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("surfaces a bounded timeout as a provider failure", async () => {
     (global.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+      new DOMException(
+        "The operation was aborted due to timeout",
+        "TimeoutError",
+      ),
     );
     const p = new TracerfyProvider("k");
     await expect(p.getBalance()).rejects.toThrow(

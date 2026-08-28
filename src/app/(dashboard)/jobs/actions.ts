@@ -15,6 +15,7 @@ import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { preflightSkipTrace } from "@/lib/skip-trace/actions";
 import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
 
 const JOB_ITEM_PAGE_SIZE = 500;
@@ -460,7 +461,23 @@ export async function retryFailedSkipTraceItems(
       }
     }
 
-    const { data: childRows, error: insertErr } = await createAdminClient().rpc(
+    const preflight = await preflightSkipTrace(propertyIds);
+    if (!preflight.ok) return preflight;
+    if (!preflight.data.canLaunchSkipTrace) {
+      return {
+        ok: false,
+        error: {
+          code: "SKIP_TRACE_PREFLIGHT_BLOCKED",
+          message:
+            preflight.data.eligible === 0
+              ? "No retryable property is currently eligible for skip tracing."
+              : "Tracefy credits could not be confirmed for this retry. Run preflight again before retrying.",
+        },
+      };
+    }
+
+    const adminClient = createAdminClient();
+    const { data: childRows, error: insertErr } = await adminClient.rpc(
       "create_skip_trace_retry_job",
       { p_parent_job_id: failedJobId, p_property_ids: propertyIds },
     );
@@ -476,6 +493,48 @@ export async function retryFailedSkipTraceItems(
     }
 
     if (childRow.created) {
+      const { data: authorizedChild, error: authorizationError } =
+        await adminClient
+          .from("jobs")
+          .update({
+            input_params: {
+              property_ids: propertyIds,
+              authorized_max_credits: preflight.data.tracefyCreditsRequired,
+              provider_pricing_version: "tracerfy-2026-08",
+            },
+          })
+          .eq("id", childRow.job_id)
+          .eq("org_id", parent.org_id)
+          .eq("type", "skip_trace")
+          .eq("status", "queued")
+          .is("provider_run_id", null)
+          .select("id")
+          .maybeSingle();
+      if (authorizationError || !authorizedChild) {
+        await adminClient
+          .from("jobs")
+          .update({
+            status: "failed",
+            error_class: "validation",
+            error_message:
+              "Retry could not persist its approved credit ceiling. Run preflight again before retrying.",
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", childRow.job_id)
+          .eq("org_id", parent.org_id)
+          .eq("status", "queued")
+          .is("provider_run_id", null);
+        return {
+          ok: false,
+          error: {
+            code: "SKIP_TRACE_AUTHORIZATION_FAILED",
+            message:
+              authorizationError?.message ??
+              "Retry job changed before its approved credit ceiling was saved.",
+          },
+        };
+      }
+
       await recordLeadEvents(
         propertyIds.map((propertyId) => ({
           propertyId,

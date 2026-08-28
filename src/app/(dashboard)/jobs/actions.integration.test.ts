@@ -47,7 +47,12 @@ async function getOrgId(): Promise<string> {
 async function seedProperty(address: string): Promise<string> {
   const { data, error } = await testClient
     .from("properties")
-    .insert({ address, state: "MO", status: "prospect" })
+    .insert({
+      address,
+      state: "MO",
+      status: "prospect",
+      cass_status: "verified",
+    })
     .select("id")
     .single();
   if (error || !data) throw error ?? new Error("seed property failed");
@@ -68,6 +73,7 @@ async function seedProperties(
           address: `${prefix} ${offset + index}`,
           state: "MO",
           status: "prospect" as const,
+          cass_status: "verified" as const,
         })),
       )
       .select("id");
@@ -181,9 +187,15 @@ describe("retryFailedSkipTraceItems (integration)", () => {
     expect(child?.type).toBe("skip_trace");
     expect(child?.parent_job_id).toBe(jobId);
     expect(child?.total_items).toBe(1);
-    const ids = (child?.input_params as { property_ids: string[] })
-      .property_ids;
+    const inputParams = child?.input_params as {
+      property_ids: string[];
+      authorized_max_credits: number;
+      provider_pricing_version: string;
+    };
+    const ids = inputParams.property_ids;
     expect(ids).toEqual([p2]);
+    expect(inputParams.authorized_max_credits).toBe(5);
+    expect(inputParams.provider_pricing_version).toBe("tracerfy-2026-08");
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(expect.any(Function), [
       { jobId: result.data.childJobId, orgId: await getOrgId() },
