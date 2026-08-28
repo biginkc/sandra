@@ -145,6 +145,37 @@ describe("CoachRecommendationController", () => {
     expect(controller.getSnapshot()).toMatchObject({ error: "rate_limited", followUpLimitReached: true });
   });
 
+  it("times out a hung provider request, preserves valid output, and accepts the next request", async () => {
+    let hang = false;
+    const request = vi.fn((input: CoachRecommendationRequest): Promise<CoachRecommendationResult> =>
+      hang ? new Promise(() => undefined) : Promise.resolve(success(input)),
+    );
+    const controller = new CoachRecommendationController({ request, requestTimeoutMs: 5_000 });
+    controller.setContext({ callId: "call-1", activeSectionId: "introduction.opener", branchOverrides: {} });
+    const transcript = [meaningfulTurn("seller-1")];
+
+    await controller.requestFollowUp(transcript);
+    expect(controller.getSnapshot().followUpQuestions).toHaveLength(3);
+
+    hang = true;
+    const timedOut = controller.requestFollowUp(transcript);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(controller.getSnapshot().loadingMode).toBe("follow_up");
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(timedOut).resolves.toBe(false);
+    expect(controller.getSnapshot()).toMatchObject({
+      loadingMode: null,
+      error: "provider_error",
+      followUpQuestions: expect.any(Array),
+    });
+    expect(controller.getSnapshot().followUpQuestions).toHaveLength(3);
+
+    hang = false;
+    await expect(controller.requestFollowUp(transcript)).resolves.toBe(true);
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(controller.getSnapshot()).toMatchObject({ loadingMode: null, error: null });
+  });
+
   it("caps automatic generation at 40 requests for one call", async () => {
     const request = vi.fn(async (input: CoachRecommendationRequest) => success(input));
     const controller = makeController(request);
@@ -177,6 +208,34 @@ describe("CoachRecommendationController", () => {
     resolve(success(sent));
     await expect(pending).resolves.toBe(false);
     expect(controller.getSnapshot().followUpQuestions).toEqual([]);
+  });
+
+  it("preserves exhausted per-call caps across section navigation", async () => {
+    const request = vi.fn(async (input: CoachRecommendationRequest) => success(input));
+    const continuity = createCoachRecommendationContinuity("call-1");
+    continuity.automaticCount = 40;
+    continuity.followUpCount = 20;
+    const controller = new CoachRecommendationController({ request, continuity });
+    controller.setContext({ callId: "call-1", activeSectionId: "introduction.opener", branchOverrides: {} });
+
+    expect(controller.getSnapshot()).toMatchObject({
+      error: "rate_limited",
+      automaticLimitReached: true,
+      followUpLimitReached: true,
+    });
+
+    controller.setContext({
+      callId: "call-1",
+      activeSectionId: "introduction.qualification-frame",
+      branchOverrides: {},
+    });
+    expect(controller.getSnapshot()).toMatchObject({
+      error: "rate_limited",
+      automaticLimitReached: true,
+      followUpLimitReached: true,
+    });
+    await expect(controller.requestFollowUp([meaningfulTurn("seller-1")])).resolves.toBe(false);
+    expect(request).not.toHaveBeenCalled();
   });
 
   it("rejects a response whose echoed request identity does not match", async () => {

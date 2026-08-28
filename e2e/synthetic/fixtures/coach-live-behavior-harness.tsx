@@ -1,26 +1,24 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { KeyedCoachLiveView } from "@/components/coach/keyed-coach-live-view";
-import { coachReducer, initialCoachState } from "@/lib/coach/event-reducer";
-import {
-  createCoachRecommendationContinuity,
-  type CoachRecommendationContinuity,
-} from "@/lib/coach/recommendation-client";
 import type {
   CoachRecommendationRequest,
   CoachRecommendationResult,
 } from "@/lib/coach/recommendation-types";
-import {
-  FIRST_COACH_SECTION_ID,
-  getFirstCoachSectionIdForPhase,
-  getNextCoachSectionId,
-  getPreviousCoachSectionId,
-  type CoachSectionId,
-} from "@/lib/coach/section-manifest";
-import type { CoachSession, ContextLoadState } from "@/lib/coach/use-coach-session";
-import type { CoachCallContext, CoachEntryToken, CoachPhaseId } from "@/lib/coach/types";
+import { useCoachSession, type PreparedCoachTarget } from "@/lib/coach/use-coach-session";
+import type { CoachCallContext } from "@/lib/coach/types";
 import type { DtmfDigit } from "@/lib/dialer/transport";
+
+import {
+  configureSyntheticCoachContext,
+  failNextSyntheticCoachContextLoad,
+  rejectSyntheticCoachContextLoads,
+  resolveSyntheticCoachContextLoads,
+  setSyntheticCoachContextMode,
+  type SyntheticContextMode,
+} from "./coach-context-actions-browser-stub";
+import { emitSyntheticCoachStatus } from "./coach-supabase-browser-stub";
 
 const BASE_CONTEXT: CoachCallContext = {
   sellerName: "Jane Homeowner",
@@ -37,7 +35,7 @@ const BASE_CONTEXT: CoachCallContext = {
   occupancy: "owner_occupied",
 };
 
-type ProviderMode = "immediate" | "deferred" | "failure";
+type ProviderMode = "immediate" | "fast" | "deferred" | "failure";
 
 type DelayedRequest = {
   input: CoachRecommendationRequest;
@@ -47,6 +45,7 @@ type DelayedRequest = {
 declare global {
   interface Window {
     coachBehaviorHarness: Record<string, () => void>;
+    coachContextStartupMode?: SyntheticContextMode;
   }
 }
 
@@ -60,7 +59,7 @@ function recommendationSuccess(input: CoachRecommendationRequest): CoachRecommen
     recommendations: input.mode === "automatic"
       ? [
           "Ask how moving closer to family would improve their day-to-day life.",
-          "Explore what makes their preferred timeline important.",
+          `Current advice for ${input.callId} in ${input.activeSectionId}.`,
         ]
       : [],
     followUpQuestions: input.mode === "follow_up"
@@ -80,16 +79,29 @@ function eventVersion() {
 function BehaviorHarness() {
   const [callNumber, setCallNumber] = useState(1);
   const callId = `synthetic-call-${callNumber}`;
-  const [state, dispatch] = useReducer(coachReducer, undefined, () => initialCoachState("introduction"));
-  const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(FIRST_COACH_SECTION_ID);
-  const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>({});
-  const [context, setContext] = useState(BASE_CONTEXT);
-  const contextRef = useRef(BASE_CONTEXT);
-  const [contextLoad, setContextLoad] = useState<ContextLoadState>({ status: "ready", context: BASE_CONTEXT });
-  const [continuity, setContinuity] = useState<CoachRecommendationContinuity>(() => createCoachRecommendationContinuity(callId));
+  const preparedTarget: PreparedCoachTarget = callNumber === 1
+    ? {
+        sellerName: "Prepared Homeowner",
+        propertyAddress: "55 Oak Avenue",
+        sellerPhoneE164: BASE_CONTEXT.sellerPhoneE164,
+        maskedSellerPhone: "+1 (816) 555-9876",
+      }
+    : {
+        sellerName: "Second Prepared Homeowner",
+        propertyAddress: "88 Pine Road",
+        sellerPhoneE164: BASE_CONTEXT.sellerPhoneE164,
+        maskedSellerPhone: "+1 (816) 555-9876",
+      };
+  const session = useCoachSession(
+    callId,
+    BASE_CONTEXT.leadId,
+    BASE_CONTEXT.sellerPhoneE164,
+    BASE_CONTEXT.repPhoneE164,
+    true,
+    preparedTarget,
+  );
+  const context = session.contextLoad.context;
   const [open, setOpen] = useState(true);
-  const [degraded, setDegraded] = useState(false);
-  const [reconnectGap, setReconnectGap] = useState(false);
   const [muted, setMuted] = useState(false);
   const [held, setHeld] = useState(false);
   const [callStatus, setCallStatus] = useState<"live" | "ended">("live");
@@ -112,7 +124,9 @@ function BehaviorHarness() {
     if (providerModeRef.current === "deferred") {
       return new Promise((resolve) => delayedRef.current.push({ input, resolve }));
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (providerModeRef.current !== "fast") {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
     return recommendationSuccess(input);
   }, []);
 
@@ -121,71 +135,16 @@ function BehaviorHarness() {
     setProviderMode(mode);
   }, []);
 
-  const previousSectionId = getPreviousCoachSectionId(activeSectionId);
-  const nextSectionId = getNextCoachSectionId(activeSectionId);
-  const goPreviousSection = useCallback(() => {
-    setActiveSectionId((current) => getPreviousCoachSectionId(current) ?? current);
-  }, []);
-  const goNextSection = useCallback(() => {
-    setActiveSectionId((current) => getNextCoachSectionId(current) ?? current);
-  }, []);
-  const goToPhase = useCallback((phaseId: CoachPhaseId) => {
-    setActiveSectionId(getFirstCoachSectionIdForPhase(phaseId));
-  }, []);
-
-  const session = useMemo<CoachSession>(() => ({
-    callId,
-    recommendationContinuity: continuity,
-    state,
-    dispatch,
-    degraded,
-    reconnectGap,
-    dismissReconnectGap: () => setReconnectGap(false),
-    malformedEventCount: 0,
-    scriptOutOfSync: null,
-    contextLoad,
-    retryContext: () => setContextLoad({ status: "ready", context }),
-    branchOverrides,
-    selectVariant: (tag: string, key: string) => setBranchOverrides((current) => ({ ...current, [tag]: key })),
-    setEntryField: (field: CoachEntryToken, value: string) => dispatch({ type: "set_entry_field", field, value }),
-    activeSectionId,
-    previousSectionId,
-    nextSectionId,
-    canGoPrevious: previousSectionId !== null,
-    canGoNext: nextSectionId !== null,
-    goToSection: setActiveSectionId,
-    goPreviousSection,
-    goNextSection,
-    goToPhase,
-  }), [activeSectionId, branchOverrides, callId, context, contextLoad, continuity, degraded, goNextSection, goPreviousSection, goToPhase, nextSectionId, previousSectionId, reconnectGap, state]);
-
   const emitTranscript = useCallback((speaker: "rep" | "seller", text: string, isFinal: boolean) => {
-    dispatch({ type: "transcript", speaker, text, isFinal, ts: `synthetic-${Date.now()}-${Math.random()}`, ...eventVersion() });
-  }, []);
-
-  const setContextPatch = useCallback((patch: Partial<CoachCallContext>) => {
-    const next = { ...contextRef.current, ...patch };
-    contextRef.current = next;
-    setContext(next);
-    setContextLoad({ status: "ready", context: next });
-  }, []);
+    session.dispatch({ type: "transcript", speaker, text, isFinal, ts: `synthetic-${Date.now()}-${Math.random()}`, ...eventVersion() });
+  }, [session]);
 
   const startNewCall = useCallback(() => {
     const nextCall = callNumber + 1;
-    const nextId = `synthetic-call-${nextCall}`;
     setCallNumber(nextCall);
-    setContinuity(createCoachRecommendationContinuity(nextId));
-    dispatch({ type: "reset", startingPhaseId: "introduction" });
-    setActiveSectionId(FIRST_COACH_SECTION_ID);
-    setBranchOverrides({});
-    contextRef.current = BASE_CONTEXT;
-    setContext(BASE_CONTEXT);
-    setContextLoad({ status: "ready", context: BASE_CONTEXT });
     setMuted(false);
     setHeld(false);
     setCallStatus("live");
-    setDegraded(false);
-    setReconnectGap(false);
     providerModeRef.current = "immediate";
     setProviderMode("immediate");
     setRequestCount(0);
@@ -206,14 +165,14 @@ function BehaviorHarness() {
 
   const emitLegacyBatch = useCallback(() => {
     const common = { ts: `legacy-${Date.now()}`, ...eventVersion() };
-    dispatch({ type: "phase", phaseId: "close", ...common });
-    dispatch({ type: "cursor", phaseId: "introduction", branchTag: "Opener", variantKey: "default", lineIndex: 0, lineText: "legacy", ...common });
-    dispatch({ type: "objection", objectionId: "price", ...common });
-    dispatch({ type: "counter", probeCount: 99, ...common });
-    dispatch({ type: "gate", gateId: "legacy", cleared: true, ...common });
-    dispatch({ type: "timer", timerId: "legacy", startedAt: common.ts, durationS: 999, ...common });
-    dispatch({ type: "coach_note", phaseId: "close", text: "Legacy note must remain invisible.", ...common });
-  }, []);
+    session.dispatch({ type: "phase", phaseId: "close", ...common });
+    session.dispatch({ type: "cursor", phaseId: "introduction", branchTag: "Opener", variantKey: "default", lineIndex: 0, lineText: "legacy", ...common });
+    session.dispatch({ type: "objection", objectionId: "price", ...common });
+    session.dispatch({ type: "counter", probeCount: 99, ...common });
+    session.dispatch({ type: "gate", gateId: "legacy", cleared: true, ...common });
+    session.dispatch({ type: "timer", timerId: "legacy", startedAt: common.ts, durationS: 999, ...common });
+    session.dispatch({ type: "coach_note", phaseId: "close", text: "Legacy note must remain invisible.", ...common });
+  }, [session]);
 
   useEffect(() => {
     window.coachBehaviorHarness = {
@@ -221,22 +180,31 @@ function BehaviorHarness() {
       sellerFillerFinal: () => emitTranscript("seller", "Okay", true),
       sellerMeaningful: () => emitTranscript("seller", "We need to sell before October because the carrying costs are becoming painful.", true),
       sellerSecondMeaningful: () => emitTranscript("seller", "My job is moving and I cannot afford two homes after next month.", true),
+      sellerThirdMeaningful: () => emitTranscript("seller", "The vacant property is draining our savings and we need a clean closing.", true),
       repFinal: () => emitTranscript("rep", "Tell me more about the timing.", true),
       providerImmediate: () => chooseProviderMode("immediate"),
+      providerFast: () => chooseProviderMode("fast"),
       providerDeferred: () => chooseProviderMode("deferred"),
       providerFailure: () => chooseProviderMode("failure"),
       resolveDelayed,
       resolveNewestDelayed,
       legacyBatch: emitLegacyBatch,
-      reconnect: () => setReconnectGap(true),
-      degraded: () => setDegraded(true),
-      contextError: () => setContextLoad({ status: "error", context: contextRef.current }),
-      leadSms: () => setContextPatch({ leadSource: "sms" }),
-      occupancyTenant: () => setContextPatch({ occupancy: "tenant_occupied" }),
-      occupancyVacant: () => setContextPatch({ occupancy: "vacant" }),
+      reconnect: () => {
+        emitSyntheticCoachStatus("CHANNEL_ERROR");
+        emitSyntheticCoachStatus("SUBSCRIBED");
+      },
+      degraded: () => emitSyntheticCoachStatus("CHANNEL_ERROR"),
+      contextError: () => {
+        failNextSyntheticCoachContextLoad();
+        session.retryContext();
+      },
+      contextDeferred: () => setSyntheticCoachContextMode("deferred"),
+      contextImmediate: () => setSyntheticCoachContextMode("immediate"),
+      resolveContext: resolveSyntheticCoachContextLoads,
+      rejectContext: rejectSyntheticCoachContextLoads,
       newCall: startNewCall,
     };
-  }, [chooseProviderMode, emitLegacyBatch, emitTranscript, resolveDelayed, resolveNewestDelayed, setContextPatch, startNewCall]);
+  }, [chooseProviderMode, emitLegacyBatch, emitTranscript, resolveDelayed, resolveNewestDelayed, session, startNewCall]);
 
   return (
     <>
@@ -280,4 +248,5 @@ function BehaviorHarness() {
 
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("Missing #root for coach behavior harness");
+configureSyntheticCoachContext(window.coachContextStartupMode ?? "immediate", BASE_CONTEXT);
 createRoot(rootElement).render(<BehaviorHarness />);

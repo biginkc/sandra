@@ -6,6 +6,7 @@ import path from "node:path";
 import postcss from "postcss";
 
 type Section = { id: string; phase_id: string; title: string };
+type ContextStartupMode = "immediate" | "deferred" | "failure";
 
 let compiledCss = "";
 let harnessBundle = "";
@@ -19,7 +20,7 @@ test.beforeAll(async () => {
     from: path.resolve(process.cwd(), "src/app/globals.css"),
   });
   compiledCss = cssResult.css;
-  const bundleResult = esbuild.buildSync({
+  const bundleResult = await esbuild.build({
     entryPoints: [path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-live-behavior-harness.tsx")],
     bundle: true,
     platform: "browser",
@@ -34,6 +35,25 @@ test.beforeAll(async () => {
       ),
       "@": path.resolve(process.cwd(), "src"),
     },
+    plugins: [
+      {
+        name: "synthetic-coach-browser-boundaries",
+        setup(build) {
+          build.onResolve({ filter: /coach-context-actions$/ }, () => ({
+            path: path.resolve(
+              process.cwd(),
+              "e2e/synthetic/fixtures/coach-context-actions-browser-stub.ts",
+            ),
+          }));
+          build.onResolve({ filter: /supabase\/client$/ }, () => ({
+            path: path.resolve(
+              process.cwd(),
+              "e2e/synthetic/fixtures/coach-supabase-browser-stub.ts",
+            ),
+          }));
+        },
+      },
+    ],
     define: { "process.env.NODE_ENV": '"test"' },
     write: false,
     logLevel: "silent",
@@ -41,9 +61,16 @@ test.beforeAll(async () => {
   harnessBundle = bundleResult.outputFiles[0].text;
 });
 
-async function mountCoach(page: Page, viewport = { width: 1440, height: 900 }): Promise<void> {
+async function mountCoach(
+  page: Page,
+  viewport = { width: 1440, height: 900 },
+  contextStartupMode: ContextStartupMode = "immediate",
+): Promise<void> {
   await page.setViewportSize(viewport);
   await page.setContent(`<style>${compiledCss}</style><div id="root"></div>`);
+  await page.evaluate((mode) => {
+    window.coachContextStartupMode = mode;
+  }, contextStartupMode);
   await page.addScriptTag({ content: harnessBundle });
   const coach = page.getByTestId("coach-live-view");
   await expect(coach).toBeVisible();
@@ -111,9 +138,9 @@ test("populates known lead tokens, selects lead and occupancy variants, and lets
   await expect(script).toContainText("responded to our team's text");
 
   await page.getByTestId("phase-rail-reveal").click();
-  await emitStimulus(page, "occupancyTenant");
+  await page.getByTestId("variant-Entry-tenant_occupied").click();
   await expect(script).toContainText("you have these tenants");
-  await emitStimulus(page, "occupancyVacant");
+  await page.getByTestId("variant-Entry-vacant").click();
   await expect(script).toContainText("it's been vacant");
 
   await page.getByTestId("phase-rail-offer").click();
@@ -127,6 +154,57 @@ test("populates known lead tokens, selects lead and occupancy variants, and lets
     await page.getByTestId(`entry-input-${field}`).press("Enter");
     await expect(page.getByTestId("current-section-script")).toContainText(value);
   }
+});
+
+test("real session hook paints prepared homeowner and address during loading, then trusted context wins", async ({ page }) => {
+  await mountCoach(page, { width: 1440, height: 900 }, "deferred");
+  const script = page.getByTestId("current-section-script");
+
+  await expect(page.getByTestId("current-script-card")).toBeVisible();
+  await page.getByTestId("variant-Opener-cold_call").click();
+  await expect(script).toContainText("Prepared");
+  await expect(script).toContainText("55 Oak Avenue");
+  await expect(page.getByTestId("coach-context-error")).toHaveCount(0);
+
+  await emitStimulus(page, "resolveContext");
+  await expect(script).toContainText("Jane");
+  await expect(script).toContainText("123 Main Street");
+  await expect(script).not.toContainText("Prepared");
+  await expect(script).not.toContainText("55 Oak Avenue");
+});
+
+test("real session hook preserves prepared homeowner and address after context failure and retry", async ({ page }) => {
+  await mountCoach(page, { width: 1440, height: 900 }, "failure");
+  const script = page.getByTestId("current-section-script");
+
+  await expect(page.getByTestId("coach-context-error")).toBeVisible();
+  await page.getByTestId("variant-Opener-cold_call").click();
+  await expect(script).toContainText("Prepared");
+  await expect(script).toContainText("55 Oak Avenue");
+  await expect(page.getByTestId("current-script-card")).toBeVisible();
+
+  await emitStimulus(page, "contextImmediate");
+  await page.getByTestId("coach-context-retry").click();
+  await expect(page.getByTestId("coach-context-error")).toHaveCount(0);
+  await expect(script).toContainText("Jane");
+  await expect(script).toContainText("123 Main Street");
+});
+
+test("real session hook replaces the prior call with the next prepared target on first paint", async ({ page }) => {
+  await mountCoach(page);
+  const script = page.getByTestId("current-section-script");
+  await expect(script).toContainText("Jane");
+
+  await emitStimulus(page, "contextDeferred");
+  await page.getByTestId("coach-collapse").click();
+  await page.getByTestId("collapsed-new-call").click();
+
+  await expect(page.getByTestId("synthetic-active-call")).toHaveText("synthetic-call-2");
+  await page.getByTestId("variant-Opener-cold_call").click();
+  await expect(script).toContainText("Hey Second?");
+  await expect(script).toContainText("88 Pine Road");
+  await expect(script).not.toContainText("Jane");
+  await expect(script).not.toContainText("123 Main Street");
 });
 
 test("emulated audio triggers automatic advice only for meaningful finalized homeowner speech", async ({ page }) => {
@@ -170,7 +248,7 @@ test("follow-up supersedes automatic work, rejects duplicates, and keeps exactly
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2");
 });
 
-test("stale section and call responses are rejected while loading never disables navigation", async ({ page }) => {
+test("late section and call responses cannot overwrite newer visible advice", async ({ page }) => {
   await mountCoach(page);
   await emitStimulus(page, "providerDeferred");
   await emitStimulus(page, "sellerMeaningful");
@@ -178,17 +256,50 @@ test("stale section and call responses are rejected while loading never disables
   await expect(page.getByTestId("automatic-recommendations-loading")).toBeVisible();
   await expect(page.getByTestId("coach-next")).toBeEnabled();
   await page.getByTestId("coach-next").click();
-  await emitStimulus(page, "resolveDelayed");
-  await expect(page.getByTestId("automatic-recommendations")).toHaveCount(0);
-
   await emitStimulus(page, "sellerSecondMeaningful");
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2", { timeout: 3_000 });
   await expect(page.getByTestId("automatic-recommendations-loading")).toBeVisible();
+
+  await emitStimulus(page, "resolveNewestDelayed");
+  const advice = page.getByTestId("automatic-recommendations");
+  await expect(advice).toContainText(`Current advice for synthetic-call-1 in ${sections[1].id}.`);
+  const currentSectionAdvice = await advice.allTextContents();
+  await emitStimulus(page, "resolveDelayed");
+  await expect(advice).toHaveText(currentSectionAdvice);
+
+  await emitStimulus(page, "sellerThirdMeaningful");
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 3", { timeout: 3_000 });
   await emitStimulus(page, "newCall");
   await expect(page.getByTestId("synthetic-active-call")).toHaveText("synthetic-call-2");
-  await emitStimulus(page, "resolveDelayed");
   await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title);
-  await expect(page.getByTestId("automatic-recommendations")).toHaveCount(0);
+  await emitStimulus(page, "providerDeferred");
+  await emitStimulus(page, "sellerMeaningful");
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1", { timeout: 3_000 });
+  await emitStimulus(page, "resolveNewestDelayed");
+  await expect(advice).toContainText(`Current advice for synthetic-call-2 in ${sections[0].id}.`);
+  const currentCallAdvice = await advice.allTextContents();
+  await emitStimulus(page, "resolveDelayed");
+  await expect(advice).toHaveText(currentCallAdvice);
+});
+
+test("follow-up request cap is enforced through repeated user clicks without an extra provider call", async ({ page }) => {
+  await mountCoach(page);
+  await emitStimulus(page, "providerFast");
+  await emitStimulus(page, "sellerFillerFinal");
+  const followUp = page.getByTestId("follow-up-questions");
+  await expect(followUp).toBeEnabled();
+
+  for (let count = 1; count <= 20; count += 1) {
+    await followUp.click();
+    await expect(page.getByTestId("synthetic-request-total")).toHaveText(`Requests: ${count}`);
+    await expect(followUp).toBeEnabled();
+  }
+
+  await followUp.click();
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 20");
+  await expect(followUp).toBeDisabled();
+  await expect(page.getByTestId("recommendation-error")).toContainText("limit for this call has been reached");
+  await expect(page.getByTestId("follow-up-question-options").getByRole("listitem")).toHaveCount(3);
 });
 
 test("provider failure preserves prior valid advice and never takes over script, transcript, or navigation", async ({ page }) => {

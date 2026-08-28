@@ -56,6 +56,13 @@ function resolvedOrPlaceholder(value: string | null): ResolvedToken {
   return trimmed ? { value: trimmed, isPlaceholder: false } : { value: COACH_TOKEN_PLACEHOLDER, isPlaceholder: true };
 }
 
+function trustedValueOrEntry(
+  trustedValue: string | null,
+  entryValue: string | null,
+): string | null {
+  return trustedValue?.trim() ? trustedValue : entryValue;
+}
+
 export const EMPTY_ENTRY_FIELDS: CoachEntryFields = {
   motivation: null,
   cold_caller_name: null,
@@ -87,9 +94,9 @@ export function resolveCoachTokens(
       case "rep_phone":
         return [token, resolvedOrPlaceholder(context.repPhoneE164)];
       case "motivation":
-        return [token, resolvedOrPlaceholder(context.motivation ?? entryFields.motivation)];
+        return [token, resolvedOrPlaceholder(trustedValueOrEntry(context.motivation, entryFields.motivation))];
       case "cold_caller_name":
-        return [token, resolvedOrPlaceholder(context.coldCallerName ?? entryFields.cold_caller_name)];
+        return [token, resolvedOrPlaceholder(trustedValueOrEntry(context.coldCallerName, entryFields.cold_caller_name))];
       case "year_built":
         return [token, resolvedOrPlaceholder(context.yearBuilt)];
       case "closing_date":

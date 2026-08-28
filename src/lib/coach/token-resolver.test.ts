@@ -63,6 +63,16 @@ describe("resolveCoachTokens", () => {
     expect(tokens.cold_caller_name).toEqual({ value: "Morgan", isPlaceholder: false });
   });
 
+  it("uses typed entries when trusted motivation and cold-caller values contain only whitespace", () => {
+    const tokens = resolveCoachTokens(
+      { ...baseContext, motivation: "  \t", coldCallerName: "\n " },
+      { ...entryFields, motivation: "Move closer to family", cold_caller_name: "Morgan" },
+    );
+
+    expect(tokens.motivation).toEqual({ value: "Move closer to family", isPlaceholder: false });
+    expect(tokens.cold_caller_name).toEqual({ value: "Morgan", isPlaceholder: false });
+  });
+
   it("keeps trusted motivation and cold-caller context authoritative over session fallback values", () => {
     const tokens = resolveCoachTokens(baseContext, {
       ...entryFields,

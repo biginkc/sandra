@@ -16,6 +16,7 @@ import {
 } from "./recommendation-policy";
 
 export const AUTOMATIC_RECOMMENDATION_DEBOUNCE_MS = 1_500;
+export const COACH_RECOMMENDATION_REQUEST_TIMEOUT_MS = 20_000;
 
 export type CoachRecommendationClientState = {
   recommendations: string[];
@@ -54,6 +55,7 @@ const DEFAULT_TIMER_API: TimerApi = {
 export type CoachRecommendationControllerOptions = {
   request: CoachRecommendationRequestFn;
   debounceMs?: number;
+  requestTimeoutMs?: number;
   timer?: TimerApi;
   continuity?: CoachRecommendationContinuity;
 };
@@ -97,6 +99,7 @@ function latestTranscriptFingerprint(lines: readonly CoachRecommendationTranscri
 export class CoachRecommendationController {
   private readonly request: CoachRecommendationRequestFn;
   private readonly debounceMs: number;
+  private readonly requestTimeoutMs: number;
   private readonly timer: TimerApi;
   private readonly continuity: CoachRecommendationContinuity;
   private readonly listeners = new Set<() => void>();
@@ -116,6 +119,7 @@ export class CoachRecommendationController {
   constructor(options: CoachRecommendationControllerOptions) {
     this.request = options.request;
     this.debounceMs = options.debounceMs ?? AUTOMATIC_RECOMMENDATION_DEBOUNCE_MS;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? COACH_RECOMMENDATION_REQUEST_TIMEOUT_MS;
     this.timer = options.timer ?? DEFAULT_TIMER_API;
     this.continuity = options.continuity ?? createCoachRecommendationContinuity(null);
     // A view can collapse while a server action is still pending. The old
@@ -175,7 +179,16 @@ export class CoachRecommendationController {
     this.pendingAutomatic = null;
     if (this.debounceHandle) this.timer.clearTimeout(this.debounceHandle);
     this.debounceHandle = null;
-    this.publish({ ...EMPTY_STATE });
+    const automaticLimitReached =
+      (this.automaticCountByCall.get(input.callId ?? "") ?? 0) >= AUTOMATIC_RECOMMENDATION_LIMIT_PER_CALL;
+    const followUpLimitReached =
+      (this.followUpCountByCall.get(input.callId ?? "") ?? 0) >= FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL;
+    this.publish({
+      ...EMPTY_STATE,
+      automaticLimitReached,
+      followUpLimitReached,
+      error: automaticLimitReached || followUpLimitReached ? "rate_limited" : null,
+    });
   }
 
   considerAutomatic(transcript: readonly CoachRecommendationTranscriptLine[]): boolean {
@@ -255,8 +268,9 @@ export class CoachRecommendationController {
     this.publish({ loadingMode: mode, error: null });
 
     let result: CoachRecommendationResult;
+    let requestTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
     try {
-      result = await this.request({
+      const requestPromise = this.request({
         requestId,
         callId,
         activeSectionId,
@@ -264,9 +278,16 @@ export class CoachRecommendationController {
         mode,
         transcript: transcript.filter((line) => line.isFinal),
       });
+      const timeoutPromise = new Promise<CoachRecommendationResult>((resolve) => {
+        requestTimeoutHandle = this.timer.setTimeout(() => {
+          resolve({ ok: false, requestId, callId, activeSectionId, mode, code: "provider_error" });
+        }, this.requestTimeoutMs);
+      });
+      result = await Promise.race([requestPromise, timeoutPromise]);
     } catch {
       result = { ok: false, requestId, callId, activeSectionId, mode, code: "provider_error" };
     } finally {
+      if (requestTimeoutHandle) this.timer.clearTimeout(requestTimeoutHandle);
       if (this.activeRequestToken === requestToken) {
         this.activeRequestToken = null;
         this.activeRequestMode = null;
