@@ -174,12 +174,26 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
       "aria-disabled",
       "true",
     );
-    expect(screen.getByTestId("filter-unassigned-spinner")).toBeVisible();
+    expect(noOwner).not.toHaveAttribute("data-loading-muted");
+    expect(screen.getByTestId("filter-all")).toHaveAttribute(
+      "data-loading-muted",
+      "true",
+    );
+    expect(screen.getByTestId("filter-all")).toHaveClass(
+      "bg-[#f5f5f4]",
+      "text-[#a8a29e]",
+      "cursor-default",
+    );
+    expect(screen.getByTestId("dnc-toggle")).toHaveClass("opacity-50");
+    expect(
+      screen.queryByTestId("filter-unassigned-spinner"),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(
       "Loading No owner messages",
     );
     expect(results).toHaveAttribute("aria-busy", "true");
-    expect(results).toHaveClass("ring-1");
+    expect(results).toHaveClass("ring-0");
+    expect(results).not.toHaveClass("cursor-wait");
 
     // The loading chip ignores duplicate clicks while the first server
     // navigation is still pending.
@@ -204,6 +218,9 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
       "false",
     );
     expect(screen.getByTestId("inbox-filter-results")).toHaveClass("ring-0");
+    expect(screen.getByTestId("filter-all")).not.toHaveAttribute(
+      "data-loading-muted",
+    );
     expect(screen.getByTestId("inbox-filter-results")).not.toHaveAttribute(
       "inert",
     );
@@ -224,7 +241,7 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
 
     await user.click(screen.getByTestId("dnc-toggle"));
     expect(replaceCalls).toEqual(["/messages?filter=unassigned"]);
-    expect(screen.getByTestId("filter-unassigned-spinner")).toBeVisible();
+    expect(screen.queryByTestId("filter-unassigned-spinner")).toBeNull();
     expect(screen.queryByTestId("dnc-toggle-spinner")).toBeNull();
     expect(screen.getByTestId("dnc-toggle")).toHaveAttribute(
       "aria-checked",
@@ -248,14 +265,19 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
     );
 
     await user.click(screen.getByTestId("dnc-toggle"));
-    expect(screen.getByTestId("dnc-toggle-spinner")).toBeVisible();
+    expect(screen.queryByTestId("dnc-toggle-spinner")).toBeNull();
+    expect(screen.getByTestId("dnc-toggle")).toHaveClass("opacity-50");
+    expect(screen.getByTestId("filter-all")).toHaveAttribute(
+      "data-loading-muted",
+      "true",
+    );
     expect(replaceCalls).toHaveLength(2);
 
     // A click on the already-active chip cannot replace the DNC marker
     // and falsely end its loading feedback before the server catches up.
     await user.click(screen.getByTestId("filter-unassigned"));
     expect(replaceCalls).toHaveLength(2);
-    expect(screen.getByTestId("dnc-toggle-spinner")).toBeVisible();
+    expect(screen.queryByTestId("dnc-toggle-spinner")).toBeNull();
     expect(screen.getByRole("status")).toHaveTextContent(
       "Updating DNC visibility",
     );
@@ -363,7 +385,11 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
 
       await user.click(screen.getByTestId("filter-all"));
       expect(replaceCalls).toEqual(["/messages"]);
-      expect(screen.getByTestId("filter-all-spinner")).toBeVisible();
+      expect(screen.queryByTestId("filter-all-spinner")).toBeNull();
+      expect(screen.getByTestId("filter-unassigned")).toHaveAttribute(
+        "data-loading-muted",
+        "true",
+      );
 
       rerender(
         <CockpitView

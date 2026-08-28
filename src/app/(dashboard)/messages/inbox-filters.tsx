@@ -1,7 +1,5 @@
 "use client";
 
-import { Loader2Icon } from "lucide-react";
-
 export type InboxFilter =
   | "all"
   | "mine"
@@ -255,7 +253,9 @@ function DncToggle({
       data-testid="dnc-toggle"
       data-active={hideDnc || undefined}
       className={`relative ml-auto inline-flex min-h-11 items-center gap-2 text-[12px] text-[#78716c] ${
-        interactionDisabled ? "cursor-wait" : "hover:text-[#1c1917]"
+        interactionDisabled
+          ? "cursor-default opacity-50"
+          : "hover:text-[#1c1917]"
       }`}
     >
       <span
@@ -271,13 +271,6 @@ function DncToggle({
         />
       </span>
       <span className="font-medium">{label}</span>
-      <Loader2Icon
-        className={`absolute right-0 top-0 h-3.5 w-3.5 motion-safe:animate-spin ${
-          pending ? "visible opacity-100" : "invisible opacity-0"
-        }`}
-        aria-hidden="true"
-        data-testid={pending ? "dnc-toggle-spinner" : undefined}
-      />
       {hideDnc && hiddenDncCount > 0 ? (
         <span
           className="text-[11px] text-[#a8a29e]"
@@ -323,12 +316,15 @@ function FilterChip({
       aria-disabled={interactionDisabled}
       data-testid={testId}
       data-active={active || undefined}
+      data-loading-muted={interactionDisabled && !active ? "true" : undefined}
       className={`relative inline-flex min-h-11 items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${
         active
-          ? "bg-primary text-primary-foreground"
+          ? `bg-primary text-primary-foreground ${
+              interactionDisabled ? "cursor-default" : ""
+            }`
           : `border border-[#e5e1df] text-[#78716c] ${
               interactionDisabled
-                ? "cursor-wait"
+                ? "cursor-default bg-[#f5f5f4] text-[#a8a29e]"
                 : "hover:bg-[#f5f5f4] hover:text-[#1c1917]"
             }`
       }`}
@@ -339,22 +335,21 @@ function FilterChip({
           src="/icon.png"
           alt=""
           aria-hidden="true"
-          className="h-4 w-4 shrink-0"
+          className={`h-4 w-4 shrink-0 ${
+            interactionDisabled && !active ? "opacity-40" : ""
+          }`}
         />
       ) : null}
       <span>{label}</span>
-      <Loader2Icon
-        className={`absolute right-1 top-1 h-3.5 w-3.5 motion-safe:animate-spin ${
-          pending ? "visible opacity-100" : "invisible opacity-0"
-        }`}
-        aria-hidden="true"
-        data-testid={pending ? `${testId}-spinner` : undefined}
-      />
       {showCount ? (
         <span
           data-testid={`${testId}-count`}
           className={`shrink-0 font-bold ${
-            active ? "text-primary-foreground" : "text-[#1c1917]"
+            active
+              ? "text-primary-foreground"
+              : interactionDisabled
+                ? "text-[#a8a29e]"
+                : "text-[#1c1917]"
           }`}
         >
           {count}

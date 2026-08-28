@@ -465,9 +465,7 @@ export function CockpitView({
           <div
             aria-busy={isFilterPending}
             inert={isFilterPending}
-            className={`rounded-lg transition-shadow duration-150 motion-reduce:transition-none ${
-              isFilterPending ? "cursor-wait ring-1 ring-primary/20" : "ring-0"
-            }`}
+            className="rounded-lg ring-0"
             data-testid="inbox-filter-results"
           >
             {showThreadList && (
