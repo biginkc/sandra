@@ -23,6 +23,10 @@ const inboxSql = readFileSync(
   "supabase/migrations/20260828022800_sms_inbox_ai_disposition_review_queue_timeout_recovery.sql",
   "utf8",
 );
+const assignmentFiltersSql = readFileSync(
+  "supabase/migrations/20260828053000_messages_assignment_filters_leads_only.sql",
+  "utf8",
+);
 const rollbackSql = readFileSync(
   "supabase/rollbacks/20260828022800_sms_inbox_ai_disposition_review_queue_timeout_recovery.sql",
   "utf8",
@@ -46,7 +50,7 @@ type SnapshotRow = {
 
 type Snapshot = {
   rows: SnapshotRow[];
-  counts: { all: number; dispo: number };
+  counts: { all: number; mine: number; unassigned: number; dispo: number };
   total: number;
   hidden_count: number;
 };
@@ -69,6 +73,8 @@ async function seedThread(options: {
   testTraffic?: boolean;
   reviewStatus?: "pending" | "confirmed" | null;
   disposition?: "not_interested" | "dnc";
+  propertyStatus?: "prospect" | "new_lead" | "contacted";
+  assignedUserId?: string | null;
 }): Promise<{
   conversationId: string;
   contactId: string;
@@ -94,16 +100,19 @@ async function seedThread(options: {
   );
   await pg.query(
     `insert into public.properties (
-       id, org_id, address, state, status, homeowner_contact_id, outreach_dispo
-     ) values ($1, $2, $3, 'MO', 'contacted', $4, $5)`,
+       id, org_id, address, state, status, homeowner_contact_id,
+       outreach_dispo, assigned_user_id
+     ) values ($1, $2, $3, 'MO', $4, $5, $6, $7)`,
     [
       propertyId,
       orgId,
       options.testTraffic ? `Jitter ${options.label}` : `${options.label} Ln`,
+      options.propertyStatus ?? "contacted",
       contactId,
       options.reviewStatus || options.label === "Historical"
         ? (options.disposition ?? "not_interested")
         : null,
+      options.assignedUserId ?? null,
     ],
   );
   await pg.query(
@@ -161,8 +170,15 @@ async function seedThread(options: {
 }
 
 async function snapshot(
-  filter: "all" | "unread" | "dispo" | "needs_outcome",
+  filter:
+    | "all"
+    | "mine"
+    | "unassigned"
+    | "unread"
+    | "dispo"
+    | "needs_outcome",
   hideNoise: boolean,
+  assigneeId: string | null = null,
 ) {
   await pg.query("set local role authenticated");
   await pg.query(
@@ -173,9 +189,9 @@ async function snapshot(
   ]);
   const result = await pg.query<{ value: Snapshot }>(
     `select public.sms_inbox_thread_page_snapshot(
-       now() - interval '90 days', $1, null, null, $2, 200, 0
+       now() - interval '90 days', $1, $3, null, $2, 200, 0
      ) as value`,
-    [filter, hideNoise],
+    [filter, hideNoise, assigneeId],
   );
   await pg.query("reset role");
   return result.rows[0]!.value;
@@ -209,6 +225,7 @@ beforeAll(async () => {
   );
   if (!schema.rows[0]!.exists) await pg.query(foundationSql);
   await pg.query(inboxSql);
+  await pg.query(assignmentFiltersSql);
 });
 
 afterAll(async () => {
@@ -386,6 +403,76 @@ describe("Sandra Dispo inbox queue migration", () => {
       testTraffic.conversationId,
     );
     expect(withNoiseRequested.counts.dispo).toBe(withNoiseRequested.total);
+  });
+
+  it("limits Mine and No owner to actual leads", async () => {
+    const propertylessContactId = crypto.randomUUID();
+    const propertylessConversationId = crypto.randomUUID();
+    await pg.query(
+      `insert into public.contacts (id, org_id, first_name, last_name)
+       values ($1, $2, 'Propertyless', 'Thread')`,
+      [propertylessContactId, BMH_ORG_ID],
+    );
+    await pg.query(
+      `insert into public.messages (
+         id, org_id, channel, direction, status, property_id, contact_id,
+         conversation_id, from_address, to_address, body, created_at
+       ) values (
+         $1, $2, 'sms', 'inbound', 'received', null, $3, $4,
+         '+18165550101', '+18162804181', 'Propertyless inbox fixture', now()
+       )`,
+      [
+        crypto.randomUUID(),
+        BMH_ORG_ID,
+        propertylessContactId,
+        propertylessConversationId,
+      ],
+    );
+    const unassignedLead = await seedThread({
+      label: "Unassigned lead",
+      propertyStatus: "new_lead",
+    });
+    const unassignedProspect = await seedThread({
+      label: "Unassigned prospect",
+      propertyStatus: "prospect",
+    });
+    const assignedLead = await seedThread({
+      label: "Assigned lead",
+      propertyStatus: "contacted",
+      assignedUserId: viewerId,
+    });
+    const assignedProspect = await seedThread({
+      label: "Assigned prospect",
+      propertyStatus: "prospect",
+      assignedUserId: viewerId,
+    });
+
+    const noOwner = await snapshot("unassigned", false, viewerId);
+    expect(noOwner.rows.map((row) => row.thread_id)).toContain(
+      unassignedLead.conversationId,
+    );
+    expect(noOwner.rows.map((row) => row.thread_id)).not.toContain(
+      unassignedProspect.conversationId,
+    );
+    expect(noOwner.rows.map((row) => row.thread_id)).not.toContain(
+      assignedLead.conversationId,
+    );
+    expect(noOwner.rows.map((row) => row.thread_id)).not.toContain(
+      propertylessConversationId,
+    );
+    expect(noOwner.counts.unassigned).toBe(noOwner.total);
+
+    const mine = await snapshot("mine", false, viewerId);
+    expect(mine.rows.map((row) => row.thread_id)).toContain(
+      assignedLead.conversationId,
+    );
+    expect(mine.rows.map((row) => row.thread_id)).not.toContain(
+      assignedProspect.conversationId,
+    );
+    expect(mine.rows.map((row) => row.thread_id)).not.toContain(
+      unassignedLead.conversationId,
+    );
+    expect(mine.counts.mine).toBe(mine.total);
   });
 
   it("rehearses the manual forward rollback and restores ordinary inbox access", async () => {
