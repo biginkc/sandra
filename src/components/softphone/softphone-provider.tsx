@@ -31,7 +31,7 @@ import {
 } from "@/lib/dialer/jitter-actions";
 import type { JitterCallerId } from "@/lib/dialer/jitter-contract";
 import { maskPhone } from "@/lib/phone-format";
-import { CoachLiveView } from "@/components/coach/coach-live-view";
+import { KeyedCoachLiveView } from "@/components/coach/keyed-coach-live-view";
 import { PhoneKeypad } from "@/components/softphone/phone-keypad";
 import { isCoachUiEnabled } from "@/lib/coach/flags";
 import { useCoachSession } from "@/lib/coach/use-coach-session";
@@ -160,6 +160,14 @@ export function SoftphoneProvider({ children }: Props) {
     target?.phoneE164 ?? null,
     selectedCallerId,
     callStatus === "live",
+    target
+      ? {
+          sellerName: target.name,
+          propertyAddress: target.address,
+          sellerPhoneE164: target.phoneE164,
+          maskedSellerPhone: target.maskedPhone,
+        }
+      : null,
   );
   const transportRef = useRef<CallTransport | null>(null);
   const callHandleRef = useRef<CallHandle | null>(null);
@@ -724,7 +732,7 @@ export function SoftphoneProvider({ children }: Props) {
       {children}
       {typeof document !== "undefined" && phone !== "closed" && coachUiEnabled && isOnCall && wrapToken && !coachCollapsed
         ? createPortal(
-          <CoachLiveView
+          <KeyedCoachLiveView
             session={coachSession}
             callName={callName}
             callStatus={callStatus}

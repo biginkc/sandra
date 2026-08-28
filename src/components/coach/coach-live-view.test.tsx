@@ -1,25 +1,30 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MAX_NUDGES, MAX_OBJECTION_CARDS } from "@/lib/coach/event-reducer";
 import { CLOSR_SCRIPT } from "@/lib/coach/script-block";
-import { useCoachSession } from "@/lib/coach/use-coach-session";
+import type {
+  CoachRecommendationRequest,
+  CoachRecommendationRequestFn,
+  CoachRecommendationResult,
+} from "@/lib/coach/recommendation-types";
 import type { CoachCallContext } from "@/lib/coach/types";
+import { useCoachSession } from "@/lib/coach/use-coach-session";
+
+import { CoachLiveView, selectSpokenLine, type CoachLiveViewProps } from "./coach-live-view";
 
 type BroadcastHandler = (message: { payload: unknown }) => void;
 type SubscribeCallback = (status: string) => void;
 
 type MockChannel = {
   on: (type: string, filter: unknown, handler: BroadcastHandler) => MockChannel;
-  subscribe: (cb: SubscribeCallback) => MockChannel;
+  subscribe: (callback: SubscribeCallback) => MockChannel;
   _broadcastHandler: BroadcastHandler | null;
   _subscribeCallback: SubscribeCallback | null;
 };
 
 const { loadCoachCallContext } = vi.hoisted(() => ({ loadCoachCallContext: vi.fn() }));
-
 vi.mock("@/lib/coach/coach-context-actions", () => ({ loadCoachCallContext }));
 
 let channels: MockChannel[] = [];
@@ -32,8 +37,8 @@ function makeMockChannel(): MockChannel {
       channel._broadcastHandler = handler;
       return channel;
     },
-    subscribe(cb) {
-      channel._subscribeCallback = cb;
+    subscribe(callback) {
+      channel._subscribeCallback = callback;
       return channel;
     },
   };
@@ -53,93 +58,66 @@ vi.mock("@/lib/supabase/client", () => ({
   }),
 }));
 
-import { CoachLiveView, selectSpokenLine, type CoachLiveViewProps } from "./coach-live-view";
-
-function latestChannel(): MockChannel {
-  const channel = channels[channels.length - 1];
-  if (!channel) throw new Error("No channel created yet");
-  return channel;
-}
-
-/** Every wire event carries both content versions, always — required. Tests
- * that care about a specific version value pass it explicitly and it wins
- * over this default. */
-const DEFAULT_VERSIONS = { scriptVersion: CLOSR_SCRIPT.version, matcherVersion: "3" };
-
-function broadcast(payload: Record<string, unknown>) {
-  act(() => latestChannel()._broadcastHandler?.({ payload: { ...DEFAULT_VERSIONS, ...payload } }));
-}
-
 const sampleContext: CoachCallContext = {
   sellerName: "Jane Homeowner",
   propertyAddress: "123 Main St",
   propertyCounty: "Jackson",
   repName: "Alex Rep",
   repPhoneE164: "+18165551234",
-  motivation: null,
+  motivation: "move closer to family",
   leadId: "lead-1",
   sellerPhoneE164: "+18165559876",
-  coldCallerName: null,
-  yearBuilt: null,
+  coldCallerName: "Taylor",
+  yearBuilt: "1987",
   leadSource: "cold_call",
   occupancy: "owner_occupied",
 };
 
 type HarnessProps = Omit<CoachLiveViewProps, "session"> & {
   callId?: string;
-  propertyId?: string | null;
-  sellerPhoneE164?: string | null;
-  repPhoneE164?: string | null;
 };
 
-/** Mirrors how softphone-provider actually wires this up: the session is
- * owned outside CoachLiveView (via useCoachSession) and passed in as a
- * prop, so it survives the view unmounting on collapse. */
-function Harness({ callId = "call-1", propertyId = "lead-1", sellerPhoneE164 = "+18165559876", repPhoneE164 = "+18165551234", ...rest }: HarnessProps) {
-  const session = useCoachSession(callId, propertyId, sellerPhoneE164, repPhoneE164);
-  return <CoachLiveView session={session} {...rest} />;
+function Harness({ callId = "call-1", ...props }: HarnessProps) {
+  const session = useCoachSession(callId, "lead-1", "+18165559876", "+18165551234");
+  return <CoachLiveView session={session} {...props} />;
 }
 
-/** Same wiring as Harness, but with the session-owning component kept
- * mounted while CoachLiveView itself is conditionally rendered — mirrors
- * softphone-provider.tsx exactly (coachSession lives in the provider;
- * coachCollapsed only toggles whether CoachLiveView is portaled). Lets a
- * test simulate a real collapse/reopen cycle (CoachLiveView unmounts and
- * remounts) without destroying the session state that must survive it. */
-function CollapsibleHarness({
-  collapsed,
-  callId = "call-1",
-  propertyId = "lead-1",
-  sellerPhoneE164 = "+18165559876",
-  repPhoneE164 = "+18165551234",
-  ...rest
-}: HarnessProps & { collapsed: boolean }) {
-  const session = useCoachSession(callId, propertyId, sellerPhoneE164, repPhoneE164);
+function CollapsibleHarness({ collapsed, ...props }: HarnessProps & { collapsed: boolean }) {
+  const session = useCoachSession("call-1", "lead-1", "+18165559876", "+18165551234");
   if (collapsed) return null;
-  return <CoachLiveView session={session} {...rest} />;
+  return <CoachLiveView session={session} {...props} />;
 }
 
 function DialogLifecycleHarness() {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const session = useCoachSession("call-1", "lead-1", "+18165559876", "+18165551234");
   return (
     <>
+      <button type="button" data-testid="header-dialer-button">Dialer</button>
       <button type="button" onClick={() => setOpen(true)}>Open live coach</button>
-      {open ? (
-        <CoachLiveView
-          session={session}
-          {...baseProps({ onCollapse: () => setOpen(false) })}
-        />
-      ) : null}
+      {open ? <CoachLiveView session={session} {...baseProps({ onCollapse: () => setOpen(false) })} /> : null}
     </>
   );
 }
 
 function baseProps(overrides: Partial<HarnessProps> = {}): HarnessProps {
+  const recommendationRequest: CoachRecommendationRequestFn = vi.fn(
+    async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+      ok: true,
+      requestId: input.requestId,
+      callId: input.callId,
+      activeSectionId: input.activeSectionId,
+      mode: input.mode,
+      recommendations: input.mode === "automatic" ? ["Ask how the repair issue affects their timing."] : [],
+      followUpQuestions: input.mode === "follow_up"
+        ? ["What repairs concern you most?", "How long has that been a problem?", "What happens if nothing changes?"]
+        : [],
+    }),
+  );
   return {
     callName: "Jane Homeowner",
     callStatus: "live",
-    seconds: 12,
+    seconds: 83,
     muted: false,
     held: false,
     holdPending: false,
@@ -148,1097 +126,340 @@ function baseProps(overrides: Partial<HarnessProps> = {}): HarnessProps {
     onHold: vi.fn(),
     onHangup: vi.fn(),
     onCollapse: vi.fn(),
+    recommendationRequest,
     ...overrides,
   };
 }
 
-describe("<CoachLiveView />", () => {
+function latestChannel(): MockChannel {
+  const channel = channels.at(-1);
+  if (!channel) throw new Error("No coach channel");
+  return channel;
+}
+
+function broadcast(payload: Record<string, unknown>) {
+  act(() => {
+    latestChannel()._broadcastHandler?.({
+      payload: {
+        scriptVersion: CLOSR_SCRIPT.version,
+        matcherVersion: "3",
+        ...payload,
+      },
+    });
+  });
+}
+
+describe("<CoachLiveView /> manual navigation", () => {
   beforeEach(() => {
     channels = [];
     loadCoachCallContext.mockReset().mockResolvedValue(sampleContext);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("renders the script and phase rail once context resolves", async () => {
+  it("shows the full first section, boundary state, transcript, and next-section preview", async () => {
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    expect(screen.getByTestId("phase-rail-introduction")).toBeInTheDocument();
-    expect(screen.getByTestId("say-this-card")).toBeVisible();
-    expect(screen.getByTestId("next-phase-preview")).toHaveTextContent(/Coming next · Reveal/i);
-    expect(screen.getAllByText(/Alex Rep/).length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+
+    expect(screen.getByTestId("coach-back")).toBeDisabled();
+    expect(screen.getByTestId("coach-next")).toBeEnabled();
+    expect(screen.getByTestId("next-section-preview")).toHaveTextContent("Set the qualification frame");
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("Alex Rep");
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("spoke to one of my assistants Taylor");
+    expect(screen.queryByTestId("entry-chip-motivation")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("entry-chip-cold_caller_name")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Live transcript")).not.toHaveAttribute("hidden");
+    expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
   });
 
-  it("in the Close phase, shows the actual spoken line, not the internal note that leads the branch", async () => {
-    // Regression: the Close phase's dominant branch ("If far apart —
-    // program pivot") leads with a type:"note" line ("Only for novation
-    // prices on the calculator.") — guidance FOR the rep, not something to
-    // say aloud. The card must skip past it to the first real "say" line.
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "phase", phaseId: "close", ts: "t1" });
-
-    const sayThisLine = screen.getByTestId("say-this-line");
-    expect(sayThisLine).toHaveTextContent(/if you had that amount in your pocket/i);
-    expect(sayThisLine).not.toHaveTextContent(/novation prices on the calculator/i);
-  });
-
-  it("in the Close phase, shows no tone chip rather than presenting a strategy note as tone", async () => {
-    // The Close phase's dominant branch's spoken line ("There is one
-    // program I can check...") carries no inline {{tone:...}} segment —
-    // only the phase's general phase_enter coach notes exist ("Never
-    // negotiate live...", "Ask for the close multiple times..."), none of
-    // which are tonal instructions. The card must render no chip at all
-    // rather than repurposing one of those notes as if it were tone
-    // guidance.
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "phase", phaseId: "close", ts: "t1" });
-
-    // Scoped to the standalone tone-chip slot specifically (data-testid
-    // "say-this-tone"). The phase's general opening cues — including
-    // "Never negotiate live…" — correctly still exist somewhere in the
-    // card (inside the full-script expander, per the degraded-mode-parity
-    // fix above); what must NOT happen is one of them masquerading as the
-    // dedicated tone pill.
-    expect(screen.queryByTestId("say-this-tone")).not.toBeInTheDocument();
-  });
-
-  it("in the Coming Next preview, shows the actual next spoken line, not the note that leads that phase's dominant branch", async () => {
-    // Regression: the "Coming next" preview had the identical note-as-speech
-    // bug as the Say This card, but wasn't fixed alongside it — it read
-    // nextBlock.branches[0]?.selected.lines[0] directly instead of going
-    // through the same spoken-line selection rule. Reproducing case: with
-    // Offer as the CURRENT phase, the preview shows Close (the NEXT phase),
-    // whose dominant branch leads with a type:"note" line ("Only for
-    // novation prices on the calculator.") — a glanced-at preview showing
-    // that as the next thing to say is worse than the main card showing it,
-    // since a preview is glanced at, not read carefully.
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
-
-    const preview = screen.getByTestId("next-phase-preview");
-    expect(preview).toHaveTextContent(/Coming next · Close/i);
-    const previewBody = screen.getByTestId("next-phase-preview-body");
-    expect(previewBody).toHaveTextContent(/there is one program i can check/i);
-    expect(previewBody).not.toHaveTextContent(/novation prices on the calculator/i);
-  });
-
-  describe("cursor — the Say This card follows the rep's exact live script position", () => {
-    it("moves the dominant card to the exact branch/variant/line the coach reports, matched by raw lineText", async () => {
-      render(<Harness {...baseProps()} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-      // Baseline (no cursor yet): branch-0's greeting.
-      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
-
-      broadcast({
-        type: "cursor",
-        phaseId: "introduction",
-        branchTag: "Frame the call",
-        variantKey: "default",
-        lineIndex: 2,
-        lineText: "• To add some sort of value to the property so we can resell it on the market, or",
-        ts: "t1",
-      });
-
-      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/add some sort of value to the property/i);
-    });
-
-    it("ignores a cursor for a phase other than the current one — phase is authoritative", async () => {
-      render(<Harness {...baseProps()} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-      // Current phase is "introduction" (the default starting phase); this
-      // cursor names "reveal" and must be dropped by the reducer, never
-      // reaching the render path.
-      broadcast({
-        type: "cursor",
-        phaseId: "reveal",
-        branchTag: "Entry",
-        variantKey: "unknown",
-        lineIndex: 0,
-        lineText: "Ok Jane Homeowner, that should be all you need for now until we find out if we can get you approved for an offer. But until then, could you give me a little bit of a rundown?",
-        ts: "t1",
-      });
-
-      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
-    });
-
-    it("discards a cursor whose scriptVersion doesn't match this client's loaded script — line addressing has no stable identity across a script edit", async () => {
-      render(<Harness {...baseProps()} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-      broadcast({
-        type: "cursor",
-        phaseId: "introduction",
-        branchTag: "Frame the call",
-        variantKey: "default",
-        lineIndex: 2,
-        lineText: "• To add some sort of value to the property so we can resell it on the market, or",
-        ts: "t1",
-        scriptVersion: "0.0.1-not-the-loaded-script", // overrides the broadcast() default
-      });
-
-      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
-    });
-
-    it("falls back to today's branch-0 default entirely when the cursor's branch doesn't exist in this phase — never crashes, never renders blank", async () => {
-      render(<Harness {...baseProps()} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-      broadcast({
-        type: "cursor",
-        phaseId: "introduction",
-        branchTag: "Not A Real Branch",
-        variantKey: "default",
-        lineIndex: 0,
-        lineText: "irrelevant",
-        ts: "t1",
-      });
-      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/Hey Jane/i);
-      expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument();
-    });
-
-    it("falls back to the NAMED branch's own first spoken line — not branch 0 — when neither lineText nor lineIndex resolve within it", async () => {
-      render(<Harness {...baseProps()} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-      broadcast({
-        type: "cursor",
-        phaseId: "introduction",
-        branchTag: "Frame the call", // a real branch, not the phase's dominant one (Opener)
-        variantKey: "default",
-        lineIndex: 999, // out of range
-        lineText: "this text does not appear anywhere in the script",
-        ts: "t1",
-      });
-
-      const sayThisLine = screen.getByTestId("say-this-line");
-      expect(sayThisLine).toHaveTextContent(/reason for my call today/i);
-      expect(sayThisLine).not.toHaveTextContent(/Hey Jane/i);
-    });
-
-    it("resolves via lineIndex when lineText doesn't match, even though the cursor's variantKey is bogus — variantKey is advisory only", async () => {
-      render(<Harness {...baseProps()} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-      broadcast({
-        type: "cursor",
-        phaseId: "introduction",
-        branchTag: "Frame the call",
-        variantKey: "not_a_real_variant",
-        lineIndex: 2,
-        lineText: "this text does not appear anywhere in the script",
-        ts: "t1",
-      });
-
-      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/add some sort of value to the property/i);
-    });
-
-    it("a REP MANUAL VARIANT OVERRIDE always wins over a conflicting cursor — the concrete harm case: rep taps FSBO, Jitter (blind to the tap) guesses cold_call", async () => {
-      render(<Harness {...baseProps()} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-      // The rep manually switches the Opener branch to the FSBO variant —
-      // same interaction as "lets the rep manually switch a branch's
-      // variant" above.
-      await userEvent.click(screen.getByText(/Full Introduction script/i));
-      const fsboTab = screen.getByTestId("variant-Opener-fsbo");
-      await userEvent.click(fsboTab);
-      expect(fsboTab).toHaveAttribute("aria-selected", "true");
-
-      // Jitter's follower has no visibility into that manual tap, so its
-      // cursor keeps guessing cold_call — and hands over cold_call's OWN
-      // line-1 text, which is genuinely absent from fsbo. Even with real
-      // textual evidence for cold_call, the override must not be
-      // second-guessed: resolution stays inside fsbo (falls to lineIndex
-      // there) and must never show cold_call's content.
-      broadcast({
-        type: "cursor",
-        phaseId: "introduction",
-        branchTag: "Opener",
-        variantKey: "cold_call",
-        lineIndex: 1,
-        lineText:
-          "It looks like you spoke to one of my assistants {cold_caller_name} a little bit ago about your property on {property_address} — they said you may need help with {motivation}?",
-        ts: "t1",
-      });
-
-      const sayThisLine = screen.getByTestId("say-this-line");
-      expect(sayThisLine).toHaveTextContent(/For Sale by Owner/i);
-      expect(sayThisLine).not.toHaveTextContent(/spoke to one of my assistants/i);
-    });
-
-    it("rescues into the cursor's named variant when lineText is genuinely absent from Sandra's own AUTO-selected variant (no manual override) — real evidence the auto-select guessed wrong", async () => {
-      // Reveal's Entry branch auto-selects by occupancy; this harness's
-      // sampleContext has occupancy "owner_occupied", so Sandra's own pick
-      // is "owner_occupied" — no rep override exists. The cursor claims
-      // "vacant" and hands over VACANT's own line-1 text, absent from
-      // owner_occupied — real evidence Sandra's auto-selection (or the
-      // occupancy data behind it) doesn't match what the follower actually
-      // heard, so the rescue must apply.
-      render(<Harness {...baseProps()} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-      broadcast({ type: "phase", phaseId: "reveal", ts: "t0" });
-
-      broadcast({
-        type: "cursor",
-        phaseId: "reveal",
-        branchTag: "Entry",
-        variantKey: "vacant",
-        lineIndex: 1,
-        lineText: "I know it's been vacant for a little bit, but what made you decide to go ahead and sell it now?",
-        ts: "t1",
-      });
-
-      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/vacant for a little bit/i);
-    });
-
-    it("shows the NEXT line within the current phase in the Coming Next preview, not the next phase, while a cursor is active", async () => {
-      render(<Harness {...baseProps()} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-      // Baseline (no cursor): the preview jumps to the next PHASE.
-      expect(screen.getByTestId("next-phase-preview")).toHaveTextContent(/Coming next · Reveal/i);
-
-      broadcast({
-        type: "cursor",
-        phaseId: "introduction",
-        branchTag: "Frame the call",
-        variantKey: "default",
-        lineIndex: 0,
-        lineText:
-          "The reason for my call today, {seller_name}, is to see if we can even do anything good for you in the first place. Because at the end of the day not every property does qualify for an offer — but it's up to you and I to convince my underwriting team to get you approved. Sound fair?",
-        ts: "t1",
-      });
-
-      const preview = screen.getByTestId("next-phase-preview");
-      expect(preview).toHaveTextContent(/Coming next · Introduction/i);
-      expect(screen.getByTestId("next-phase-preview-body")).toHaveTextContent(/Cool, so how we work is very simple/i);
-    });
-
-    it("BLOCKER REPRO: at a branch boundary, Coming Next previews the SAME PHASE's next branch, not the next phase — a cursor exhausting Frame the call must show Pen & paper, not Reveal", async () => {
-      render(<Harness {...baseProps()} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-      // Put the cursor on the LAST line of "Frame the call" — the current
-      // variant has nothing after it, but Introduction still has one more
-      // branch ("Pen & paper — contact details").
-      broadcast({
-        type: "cursor",
-        phaseId: "introduction",
-        branchTag: "Frame the call",
-        variantKey: "default",
-        lineIndex: 5,
-        lineText:
-          "Perfect — and are you in a position to be able to move forward once we find the solution that makes sense for you?",
-        ts: "t1",
-      });
-
-      const preview = screen.getByTestId("next-phase-preview");
-      expect(preview).toHaveTextContent(/Coming next · Introduction/i);
-      expect(preview).not.toHaveTextContent(/Coming next · Reveal/i);
-      expect(screen.getByTestId("next-phase-preview-body")).toHaveTextContent(/pull out a pen and paper/i);
-    });
-
-    it("only falls through to the next-phase preview once every branch in the current phase is truly exhausted", async () => {
-      render(<Harness {...baseProps()} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-      // "Pen & paper — contact details" is Introduction's LAST branch —
-      // its last line genuinely has nothing after it in this phase.
-      broadcast({
-        type: "cursor",
-        phaseId: "introduction",
-        branchTag: "Pen & paper — contact details",
-        variantKey: "default",
-        lineIndex: 6,
-        lineText: "You got it? Awesome.",
-        ts: "t1",
-      });
-
-      expect(screen.getByTestId("next-phase-preview")).toHaveTextContent(/Coming next · Reveal/i);
-    });
-
-    it("survives collapse/reopen — the cursor lives in session state owned outside CoachLiveView", async () => {
-      const { rerender } = render(<CollapsibleHarness {...baseProps()} collapsed={false} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-      broadcast({
-        type: "cursor",
-        phaseId: "introduction",
-        branchTag: "Frame the call",
-        variantKey: "default",
-        lineIndex: 2,
-        lineText: "• To add some sort of value to the property so we can resell it on the market, or",
-        ts: "t1",
-      });
-      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/add some sort of value to the property/i);
-
-      rerender(<CollapsibleHarness {...baseProps()} collapsed={true} />);
-      rerender(<CollapsibleHarness {...baseProps()} collapsed={false} />);
-      await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-      expect(screen.getByTestId("say-this-line")).toHaveTextContent(/add some sort of value to the property/i);
-    });
-  });
-
-  it("keeps the full two-speaker transcript surface and interim/final semantics beside focus mode", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-    broadcast({ type: "transcript", speaker: "seller", text: "The yard is getting expensive.", isFinal: true, ts: "t1" });
-    broadcast({ type: "transcript", speaker: "rep", text: "Who has been maintaining it?", isFinal: false, ts: "t2" });
-
-    const transcript = screen.getByTestId("coach-transcript");
-    expect(transcript.closest("aside")).toHaveAttribute("aria-label", "Live transcript");
-    expect(transcript).toHaveTextContent("Seller");
-    expect(transcript).toHaveTextContent("The yard is getting expensive.");
-    expect(transcript).toHaveTextContent("Rep");
-    expect(transcript).toHaveTextContent("Who has been maintaining it?");
-    expect(screen.getAllByTestId("transcript-line").map((line) => line.getAttribute("data-final"))).toEqual(["true", "false"]);
-  });
-
-  it("keeps one authored branch dominant while retaining the rest of the phase in an on-demand full-script disclosure", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-    const disclosure = screen.getByTestId("full-phase-script");
-    expect(disclosure).not.toHaveAttribute("open");
-    expect(disclosure).toHaveTextContent("Frame the call");
-    expect(disclosure).toHaveTextContent("Pen & paper — contact details");
-
-    await userEvent.click(screen.getByText(/Full Introduction script/i));
-    expect(disclosure).toHaveAttribute("open");
-  });
-
-  it("shows Ringing… (not a 00:00 timer) and a pre-connect pill while the call is still ringing", async () => {
-    render(<Harness {...baseProps({ callStatus: "ringing", seconds: 0 })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    expect(screen.getByTestId("coach-call-timer")).toHaveTextContent("Ringing…");
-    expect(screen.getByTestId("call-status-pill")).toHaveTextContent("Ringing…");
-  });
-
-  it("shows Connecting… while the call is connecting", async () => {
-    render(<Harness {...baseProps({ callStatus: "connecting", seconds: 0 })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    expect(screen.getByTestId("coach-call-timer")).toHaveTextContent("Connecting…");
-  });
-
-  it("shows the running mm:ss timer once live", async () => {
-    render(<Harness {...baseProps({ callStatus: "live", seconds: 65 })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    expect(screen.getByTestId("coach-call-timer")).toHaveTextContent("01:05");
-    expect(screen.getByTestId("coach-live-pill")).toHaveTextContent(/Live/i);
-    expect(screen.queryByTestId("call-status-pill")).not.toBeInTheDocument();
-  });
-
-  it("disables Hold whenever the call isn't actually live yet (connecting/ringing)", async () => {
-    render(<Harness {...baseProps({ callStatus: "connecting" })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    expect(screen.getByTestId("coach-hold")).toBeDisabled();
-  });
-
-  it("enables Hold once the call is live", async () => {
-    render(<Harness {...baseProps({ callStatus: "live" })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    expect(screen.getByTestId("coach-hold")).toBeEnabled();
-  });
-
-  it("calls onCollapse on Escape", async () => {
-    const onCollapse = vi.fn();
-    render(<Harness {...baseProps({ onCollapse })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    await userEvent.keyboard("{Escape}");
-    expect(onCollapse).toHaveBeenCalledTimes(1);
-  });
-
-  it("uses the shared modal primitive to enter and contain keyboard focus, and closes on Escape", async () => {
-    // Focus-RESTORATION is intentionally NOT asserted here. This harness's
-    // own "Open live coach" button stays mounted for the harness's whole
-    // lifetime — the exact "kept-alive button" shape production doesn't
-    // have (the real launch control unmounts along with the rest of the
-    // dialer popover once the coach view takes over). The dialog's
-    // finalFocus now targets the always-mounted header dialer button
-    // instead of whatever triggered the open, so a real-mount-lifecycle
-    // restoration test belongs in softphone-provider.test.tsx, against the
-    // actual SoftphoneProvider/SoftphoneHeaderButton wiring, not here.
+  it("moves only when the rep uses Next, Back, or deliberate phase selection", async () => {
     const user = userEvent.setup();
-    render(<DialogLifecycleHarness />);
-    const trigger = screen.getByRole("button", { name: "Open live coach" });
-    trigger.focus();
-    await user.click(trigger);
-
-    const dialog = await screen.findByRole("dialog", { name: "Live call coach" });
-    await waitFor(() => expect(dialog).toContainElement(document.activeElement as HTMLElement));
-    expect(dialog).toHaveAttribute("data-slot", "dialog-content");
-
-    for (let index = 0; index < 8; index += 1) await user.tab();
-    expect(dialog).toContainElement(document.activeElement as HTMLElement);
-
-    await user.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Live call coach" })).not.toBeInTheDocument());
-  });
-
-  it("calls onCollapse from the collapse button", async () => {
-    const onCollapse = vi.fn();
-    render(<Harness {...baseProps({ onCollapse })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    await userEvent.click(screen.getByTestId("coach-collapse"));
-    expect(onCollapse).toHaveBeenCalledTimes(1);
-  });
-
-  it("dials DTMF via the keyboard once the keypad is open during a live call — parity with the classic popover", async () => {
-    const onDigit = vi.fn();
-    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    await userEvent.click(screen.getByTestId("coach-keypad-toggle"));
-
-    await userEvent.keyboard("5*#");
-
-    expect(onDigit).toHaveBeenNthCalledWith(1, "5");
-    expect(onDigit).toHaveBeenNthCalledWith(2, "*");
-    expect(onDigit).toHaveBeenNthCalledWith(3, "#");
-  });
-
-  it("ignores keyboard digits while the keypad is closed", async () => {
-    const onDigit = vi.fn();
-    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-    await userEvent.keyboard("5");
-
-    expect(onDigit).not.toHaveBeenCalled();
-  });
-
-  it("never dials DTMF from keystrokes typed into the entry-token editor, even with the keypad open", async () => {
-    // The popover never needed this guard — it has no free-text fields.
-    // This dialog's EntryTokenChip does, so typing an offer price like
-    // "210000" must land in the field, not also dial touch-tones into the
-    // live call.
-    const onDigit = vi.fn();
-    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    await userEvent.click(screen.getByTestId("coach-keypad-toggle"));
-    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
-    await userEvent.click(screen.getAllByTestId("entry-chip-offer_price")[0]);
-    const input = screen.getByTestId("entry-input-offer_price");
-    expect(screen.getByTestId("coach-keypad-toggle")).toHaveAttribute("aria-expanded", "false");
-
-    await userEvent.type(input, "210000");
-
-    expect(onDigit).not.toHaveBeenCalled();
-    expect(input).toHaveValue("210000");
-  });
-
-  it("keeps intentional keyboard DTMF working when guidance appears without an active editor", async () => {
-    const onDigit = vi.fn();
-    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    await userEvent.click(screen.getByTestId("coach-keypad-toggle"));
-    broadcast({ type: "coach_note", text: "Slow down.", phaseId: "introduction", ts: "t1" });
-
-    await userEvent.keyboard("5");
-
-    expect(onDigit).toHaveBeenCalledWith("5");
-  });
-
-  it("keeps offer-entry digits out of DTMF while the keypad is genuinely open and the editor is genuinely mounted", async () => {
-    // Regression for a false-pass a merge-gate review caught: the previous
-    // version of this test opened the keypad, then opened the entry
-    // editor — but EntryTokenChip's onBeginEdit always closes the keypad
-    // the instant editing starts (onBeginEntryEdit={() => setKeypadOpen(false)}),
-    // so keypadOpen was false for the rest of that test. The digit
-    // listener bails on `!keypadOpen` before it ever reaches the
-    // mounted-editor guard at coach-live-view.tsx (`document.querySelector
-    // ("[data-coach-entry-editor]")`) — so the old test passed even with
-    // that guard deleted entirely (confirmed while writing this fix).
-    //
-    // This version reopens the keypad with `fireEvent.click` instead of
-    // `userEvent.click`. userEvent fully simulates a real pointer
-    // click, which focuses the clicked button and — via the input's
-    // onBlur — commits and closes the still-open editor. fireEvent.click
-    // dispatches only the click event, without moving focus, so the
-    // editor stays mounted while the keypad reopens. This isn't a test
-    // artifact: real-world cross-browser click focus behavior varies (e.g.
-    // Safari/Firefox on macOS don't always focus a clicked button), so a
-    // rep can genuinely end up with the keypad open and an editor still
-    // mounted. The digit keydown is then dispatched on the dialog rather
-    // than typed via the (still-focused) input, so `event.target` is
-    // outside any editable field — isolating the mounted-editor guard from
-    // both the keypad-closed guard and the target-is-input guard.
-    const onDigit = vi.fn();
-    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    await userEvent.click(screen.getByTestId("coach-keypad-toggle"));
-    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
-    await userEvent.click(screen.getAllByTestId("entry-chip-offer_price")[0]);
-    const input = screen.getByTestId("entry-input-offer_price");
-    expect(screen.getByTestId("coach-keypad-toggle")).toHaveAttribute("aria-expanded", "false");
-    await userEvent.type(input, "210");
-
-    fireEvent.click(screen.getByTestId("coach-keypad-toggle"));
-    expect(screen.getByTestId("coach-keypad-toggle")).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByTestId("entry-input-offer_price")).toBeInTheDocument();
-    expect(document.querySelector("[data-coach-entry-editor]")).not.toBeNull();
-
-    const dialog = screen.getByRole("dialog", { name: "Live call coach" });
-    fireEvent.keyDown(dialog, { key: "5" });
-
-    expect(onDigit).not.toHaveBeenCalled();
-    // The editor guard didn't merely no-op the keypress — the value typed
-    // before reopening the keypad is still intact.
-    expect(screen.getByTestId("entry-input-offer_price")).toHaveValue("210");
-  });
-
-  it("keeps offer-entry digits out of DTMF after a phase replacement removes the editor", async () => {
-    const onDigit = vi.fn();
-    render(<Harness {...baseProps({ onDigit, callStatus: "live" })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    await userEvent.click(screen.getByTestId("coach-keypad-toggle"));
-    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
-    await userEvent.click(screen.getAllByTestId("entry-chip-offer_price")[0]);
-    await userEvent.type(screen.getByTestId("entry-input-offer_price"), "210");
-
-    broadcast({ type: "phase", phaseId: "reveal", ts: "t2" });
-    act(() => screen.getByRole("dialog", { name: "Live call coach" }).focus());
-    await userEvent.keyboard("5");
-
-    expect(onDigit).not.toHaveBeenCalled();
-  });
-
-  it("reacts to a phase event by advancing the rail", async () => {
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "phase", phaseId: "reveal", ts: "t1" });
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+
+    await user.click(screen.getByTestId("coach-next"));
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Set the qualification frame");
+    expect(screen.getByTestId("coach-back")).toBeEnabled();
+
+    await user.click(screen.getByTestId("coach-back"));
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
+
+    await user.click(screen.getByTestId("phase-rail-reveal"));
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the seller situation");
     expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute("aria-current", "step");
     expect(screen.getByTestId("coach-current-phase")).toHaveTextContent("Phase · Reveal");
   });
 
-  it("keeps the server's current phase pinned while labeling a manual viewing override separately", async () => {
+  it("keeps section, preview, and rail inert when legacy phase and cursor events arrive", async () => {
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    const preview = screen.getByTestId("next-section-preview").textContent;
 
-    await userEvent.click(screen.getByTestId("phase-rail-reveal"));
+    broadcast({ type: "phase", phaseId: "close", ts: "phase-1" });
+    broadcast({
+      type: "cursor",
+      phaseId: "introduction",
+      branchTag: "Frame the call",
+      variantKey: "default",
+      lineIndex: 3,
+      lineText: "legacy cursor text",
+      ts: "cursor-1",
+    });
 
-    expect(screen.getByTestId("coach-current-phase")).toHaveTextContent("Phase · Offer");
-    expect(screen.getByTestId("coach-viewing-phase")).toHaveTextContent("Viewing · Reveal");
-    expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute("aria-current", "step");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
+    expect(screen.getByTestId("next-section-preview").textContent).toBe(preview);
+    expect(screen.getByTestId("phase-rail-introduction")).toHaveAttribute("aria-current", "step");
+    expect(screen.getByTestId("phase-rail-close")).not.toHaveAttribute("aria-current");
   });
 
-  it("shows a static, all-placeholder script and never an infinite spinner when context load fails", async () => {
+  it("renders both speakers and preserves final versus interim transcript state", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
+
+    broadcast({ type: "transcript", speaker: "seller", text: "The roof needs work.", isFinal: true, ts: "seller-final" });
+    broadcast({ type: "transcript", speaker: "rep", text: "Tell me more about", isFinal: false, ts: "rep-interim" });
+
+    const lines = screen.getAllByTestId("transcript-line");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toHaveTextContent("Seller");
+    expect(lines[0]).toHaveTextContent("The roof needs work.");
+    expect(lines[0]).toHaveAttribute("data-final", "true");
+    expect(lines[1]).toHaveTextContent("Rep");
+    expect(lines[1]).toHaveTextContent("Tell me more about");
+    expect(lines[1]).toHaveAttribute("data-final", "false");
+  });
+
+  it("enables follow-up questions only after a finalized homeowner turn and sends one grounded request per click", async () => {
+    const user = userEvent.setup();
+    const recommendationRequest = vi.fn(
+      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true,
+        requestId: input.requestId,
+        callId: input.callId,
+        activeSectionId: input.activeSectionId,
+        mode: input.mode,
+        recommendations: [],
+        followUpQuestions: [
+          "Which repair is weighing on you the most?",
+          "How has that affected your moving timeline?",
+          "What happens if the property stays as-is?",
+        ],
+      }),
+    );
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+
+    broadcast({
+      type: "transcript",
+      speaker: "rep",
+      text: "Tell me more about the condition.",
+      isFinal: true,
+      ts: "rep-final",
+    });
+    expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
+
+    broadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "The roof and furnace repairs are becoming too expensive.",
+      isFinal: true,
+      ts: "seller-final",
+    });
+    expect(screen.getByTestId("follow-up-questions")).toBeEnabled();
+
+    await user.click(screen.getByTestId("follow-up-questions"));
+
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
+    expect(recommendationRequest.mock.calls[0][0]).toMatchObject({
+      callId: "call-1",
+      activeSectionId: "introduction.opener",
+      mode: "follow_up",
+      transcript: [
+        expect.objectContaining({ speaker: "rep", isFinal: true }),
+        expect.objectContaining({ speaker: "seller", isFinal: true }),
+      ],
+    });
+    expect(screen.getByTestId("follow-up-question-options").children).toHaveLength(3);
+    expect(screen.getByText("Which repair is weighing on you the most?")).toBeVisible();
+    expect(screen.getByText("How has that affected your moving timeline?")).toBeVisible();
+    expect(screen.getByText("What happens if the property stays as-is?")).toBeVisible();
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
+  });
+
+  it("parses legacy guidance events without rendering them or covering the script", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+
+    broadcast({ type: "coach_note", text: "Legacy nudge", phaseId: "introduction", ts: "n1" });
+    broadcast({ type: "objection", objectionId: "price_too_low", ts: "o1" });
+    broadcast({ type: "counter", probeCount: 6, ts: "c1" });
+    broadcast({ type: "gate", gateId: "no_concerns", cleared: false, ts: "g1" });
+    broadcast({ type: "timer", timerId: "hold", startedAt: "2026-08-27T20:00:00.000Z", durationS: 300, ts: "t1" });
+
+    expect(screen.getByTestId("current-script-card")).toBeVisible();
+    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("coach-nudge")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("objection-card")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("probe-counter")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("hold-timer")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("gate-no_concerns")).not.toBeInTheDocument();
+  });
+
+  it("keeps the exact manually selected section and transcript across collapse and reopen", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<CollapsibleHarness {...baseProps()} collapsed={false} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+
+    await user.click(screen.getByTestId("coach-next"));
+    await user.click(screen.getByTestId("coach-next"));
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Explain how BMH works");
+
+    broadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "We need to move before winter.",
+      isFinal: true,
+      ts: "transcript-1",
+    });
+    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("We need to move before winter.");
+
+    rerender(<CollapsibleHarness {...baseProps()} collapsed />);
+    expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
+    rerender(<CollapsibleHarness {...baseProps()} collapsed={false} />);
+
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Explain how BMH works");
+    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("We need to move before winter.");
+    expect(channels).toHaveLength(1);
+    expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the active script visible during context failure and listener degradation", async () => {
     loadCoachCallContext.mockReset().mockRejectedValue(new Error("network"));
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeInTheDocument());
-    expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument();
+
+    await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeVisible());
+    expect(screen.getByTestId("current-script-card")).toBeVisible();
+    act(() => latestChannel()._subscribeCallback?.("CHANNEL_ERROR"));
+    expect(screen.getByTestId("coach-degraded-note")).toHaveTextContent("your place is saved");
     expect(screen.getAllByTestId("token-placeholder").length).toBeGreaterThan(0);
   });
 
-  it("retries context loading from the error banner", async () => {
-    loadCoachCallContext.mockReset().mockRejectedValueOnce(new Error("network")).mockResolvedValueOnce(sampleContext);
+  it("keeps conditional variants inside the visible section", async () => {
+    const user = userEvent.setup();
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeInTheDocument());
-    await userEvent.click(screen.getByTestId("coach-context-retry"));
-    await waitFor(() => expect(screen.queryByTestId("coach-context-error")).not.toBeInTheDocument());
-    expect(loadCoachCallContext).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.getByTestId("variant-Opener-fsbo")).toBeVisible());
+
+    await user.click(screen.getByTestId("variant-Opener-fsbo"));
+
+    expect(screen.getByTestId("variant-Opener-fsbo")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("For Sale by Owner");
   });
 
-  it("lets the rep fill an entry-token chip (e.g. offer price) inline", async () => {
+  it("lets the rep fill motivation and cold-caller placeholders when context cannot", async () => {
+    loadCoachCallContext.mockResolvedValueOnce({
+      ...sampleContext,
+      motivation: null,
+      coldCallerName: null,
+    });
+    const user = userEvent.setup();
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
-    const chip = screen.getAllByTestId("entry-chip-offer_price")[0];
-    expect(chip).toHaveTextContent("offer price");
-    await userEvent.click(chip);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+
+    await user.click(screen.getAllByTestId("entry-chip-cold_caller_name")[0]);
+    await user.type(screen.getByTestId("entry-input-cold_caller_name"), "Morgan");
+    await user.tab();
+    await user.click(screen.getAllByTestId("entry-chip-motivation")[0]);
+    await user.type(screen.getByTestId("entry-input-motivation"), "move closer to family");
+    await user.tab();
+
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("assistants Morgan");
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("help with move closer to family");
+    await user.click(screen.getByTestId("coach-next"));
+    await user.click(screen.getByTestId("coach-back"));
+    expect(screen.getAllByTestId("entry-chip-motivation")[0]).toHaveTextContent("move closer to family");
+  });
+
+  it("disables Next at the final manual section and removes the preview", async () => {
+    const user = userEvent.setup();
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
+
+    await user.click(screen.getByTestId("phase-rail-close"));
+    await user.click(screen.getByTestId("coach-next"));
+    await user.click(screen.getByTestId("coach-next"));
+
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Complete e-signing and wrap the call");
+    expect(screen.getByTestId("coach-next")).toBeDisabled();
+    expect(screen.queryByTestId("next-section-preview")).not.toBeInTheDocument();
+  });
+
+  it("preserves inline deal-entry editing without sending keypad tones", async () => {
+    const user = userEvent.setup();
+    const onDigit = vi.fn();
+    render(<Harness {...baseProps({ onDigit })} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
+
+    await user.click(screen.getByTestId("phase-rail-offer"));
+    await user.click(screen.getAllByTestId("entry-chip-offer_price")[0]);
     const input = screen.getByTestId("entry-input-offer_price");
-    await userEvent.type(input, "$210,000");
-    await userEvent.tab();
+    await user.type(input, "$210,000");
+    await user.tab();
+
     expect(screen.getAllByTestId("entry-chip-offer_price")[0]).toHaveTextContent("$210,000");
+    expect(onDigit).not.toHaveBeenCalled();
   });
 
-  it("keeps editor Escape local instead of collapsing the entire coach dialog", async () => {
+  it("preserves mute, hold, hangup, collapse, and keypad controls", async () => {
+    const user = userEvent.setup();
+    const onMute = vi.fn();
+    const onHold = vi.fn();
+    const onHangup = vi.fn();
     const onCollapse = vi.fn();
-    render(<Harness {...baseProps({ onCollapse })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "phase", phaseId: "offer", ts: "t1" });
-    await userEvent.click(screen.getAllByTestId("entry-chip-offer_price")[0]);
-    const input = screen.getByTestId("entry-input-offer_price");
+    const onDigit = vi.fn();
+    render(<Harness {...baseProps({ onMute, onHold, onHangup, onCollapse, onDigit })} />);
+    await waitFor(() => expect(screen.getByTestId("coach-call-controls")).toBeVisible());
 
-    await userEvent.type(input, "{Escape}");
+    await user.click(screen.getByTestId("coach-mute"));
+    await user.click(screen.getByTestId("coach-hold"));
+    await user.click(screen.getByTestId("coach-keypad-toggle"));
+    await user.click(screen.getByLabelText("Keypad 5"));
+    await user.click(screen.getByTestId("coach-hangup"));
+    await user.click(screen.getByTestId("coach-collapse"));
 
-    expect(screen.queryByTestId("entry-input-offer_price")).not.toBeInTheDocument();
-    expect(screen.getByRole("dialog", { name: "Live call coach" })).toBeInTheDocument();
-    expect(onCollapse).not.toHaveBeenCalled();
+    expect(onMute).toHaveBeenCalledOnce();
+    expect(onHold).toHaveBeenCalledOnce();
+    expect(onDigit).toHaveBeenCalledWith("5");
+    expect(onHangup).toHaveBeenCalledOnce();
+    expect(onCollapse).toHaveBeenCalledOnce();
   });
 
-  it("lets the rep manually switch a branch's variant from the full-script expander", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    // The variant switcher moved into the full-script disclosure along with
-    // the rest of the branch detail — the trimmed "say this" line no longer
-    // carries it directly. Open the disclosure BEFORE switching, so the
-    // FSBO variant's second line ("For Sale by Owner…") is genuinely
-    // visible when asserted below, not just present-but-hidden inside a
-    // closed <details> — getAllByText does not filter by visibility, so an
-    // assertion made against closed content would keep passing even if the
-    // rep could never actually see what they switched to.
-    await userEvent.click(screen.getByText(/Full Introduction script/i));
-    const fsboTab = screen.getByTestId("variant-Opener-fsbo");
-    await userEvent.click(fsboTab);
-    expect(fsboTab).toHaveAttribute("aria-selected", "true");
-    // The FSBO variant's second line only exists inside the (now open)
-    // full-script disclosure — the trimmed "say this" line still shows
-    // only line 1 of the greeting. Assert real visibility, not just
-    // presence in the DOM.
-    const fsboMatches = screen.getAllByText(/For Sale by Owner/);
-    expect(fsboMatches.length).toBeGreaterThan(0);
-    for (const match of fsboMatches) expect(match).toBeVisible();
-    // Restructured opener variants still lead with the shared greeting,
-    // visible both in the trimmed line and the expanded detail.
-    const repMatches = screen.getAllByText(/Alex Rep/);
-    expect(repMatches.length).toBeGreaterThan(0);
-    for (const match of repMatches) expect(match).toBeVisible();
+  it("shows connecting and ringing status without enabling call-only controls", async () => {
+    const { rerender } = render(<Harness {...baseProps({ callStatus: "connecting" })} />);
+    await waitFor(() => expect(screen.getByTestId("coach-call-timer")).toHaveTextContent("Connecting"));
+    expect(screen.getByTestId("coach-keypad-toggle")).toBeDisabled();
+    expect(screen.getByTestId("coach-hold")).toBeDisabled();
+
+    rerender(<Harness {...baseProps({ callStatus: "ringing" })} />);
+    expect(screen.getByTestId("coach-call-timer")).toHaveTextContent("Ringing");
   });
 
-  it("shows the reconnect-gap banner after a real reconnect, and dismiss clears it", async () => {
-    const { REALTIME_SUBSCRIBE_STATES } = await import("@supabase/supabase-js");
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    expect(screen.queryByTestId("coach-reconnect-gap")).not.toBeInTheDocument();
+  it("collapses on Escape and returns focus to the stable header dialer", async () => {
+    const user = userEvent.setup();
+    render(<DialogLifecycleHarness />);
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Live call coach" })).toBeVisible());
 
-    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
-    expect(screen.queryByTestId("coach-reconnect-gap")).not.toBeInTheDocument(); // first subscribe isn't a reconnect
+    await user.keyboard("{Escape}");
 
-    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
-    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
-    expect(screen.getByTestId("coach-reconnect-gap")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByTestId("dismiss-reconnect-gap"));
-    expect(screen.queryByTestId("coach-reconnect-gap")).not.toBeInTheDocument();
-  });
-
-  it("keeps every objection card's dismiss timer independent — a second card doesn't reset the first's", async () => {
-    vi.useFakeTimers();
-    render(<Harness {...baseProps()} />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-
-    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t1" });
-    expect(screen.getAllByTestId("objection-card")).toHaveLength(1);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(40_000);
-    });
-    broadcast({ type: "objection", objectionId: "not_in_rush", ts: "t2" });
-    expect(screen.getAllByTestId("objection-card")).toHaveLength(2);
-
-    // 5s later: 45s have elapsed for card 1 (40s + 5s) — it should have
-    // auto-dismissed. Only 5s have elapsed for card 2 — it must remain,
-    // proving card 2 arriving didn't reset or clear card 1's own timer.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_000);
-    });
-    expect(screen.getAllByTestId("objection-card")).toHaveLength(1);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(40_000);
-    });
-    expect(screen.queryAllByTestId("objection-card")).toHaveLength(0);
-  });
-
-  it("an objection card dismisses at its ORIGINAL deadline even after a collapse/reopen — remounting must not restart its 45s clock", async () => {
-    // The bug this guards: before absolute expiresAt, each card's dismiss
-    // timer was scheduled for a fixed 45s from MOUNT. A collapse/reopen
-    // unmounts and remounts every card (CoachLiveView itself unmounts on
-    // collapse), so a fixed-TTL-per-mount card would silently get a fresh
-    // 45s on every reopen — staying on screen indefinitely across enough
-    // collapse/reopen cycles. None of the OTHER TTL tests in this file
-    // would catch that regression, since none of them ever unmount
-    // CoachLiveView mid-countdown.
-    vi.useFakeTimers();
-    const { rerender } = render(<CollapsibleHarness {...baseProps()} collapsed={false} />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t1" });
-    expect(screen.getAllByTestId("objection-card")).toHaveLength(1);
-
-    // 30s into the 45s TTL: collapse (unmount CoachLiveView, session
-    // persists via CollapsibleHarness staying mounted), wait 10s while
-    // collapsed, then reopen.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(30_000);
-    });
-    rerender(<CollapsibleHarness {...baseProps()} collapsed={true} />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000);
-    });
-    rerender(<CollapsibleHarness {...baseProps()} collapsed={false} />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    // 40s total have elapsed (30s + 10s) — 5s remain on the ORIGINAL
-    // deadline. The card must still be there (proves it wasn't dismissed
-    // early) but dismiss on the next 5s, not 45s from this reopen.
-    expect(screen.getAllByTestId("objection-card")).toHaveLength(1);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_000);
-    });
-    expect(screen.queryAllByTestId("objection-card")).toHaveLength(0);
-  });
-
-  it("dismisses an objection card on tap", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t1" });
-    const card = screen.getByTestId("objection-card");
-    await userEvent.click(card);
-    expect(screen.queryByTestId("objection-card")).not.toBeInTheDocument();
-  });
-
-  it("resolves tokens in objection card text — no raw {seller_name} braces on screen", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "objection", objectionId: "end_buyer", ts: "t1" });
-    const card = screen.getByTestId("objection-card");
-    expect(card).toHaveTextContent("Jane, that's a fantastic question");
-    expect(card).not.toHaveTextContent("{seller_name}");
-  });
-
-  it("auto-selects the not_in_rush objection's owner_occupied overcome track from context occupancy", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "objection", objectionId: "not_in_rush", ts: "t1" });
-    const card = screen.getByTestId("objection-card");
-    expect(card).toHaveTextContent("where do you plan on going next");
-  });
-
-  it("renders the zillow_worth objection's live-math template guidance", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "objection", objectionId: "zillow_worth", ts: "t1" });
-    const card = screen.getByTestId("objection-card");
-    expect(card).toHaveTextContent(/live worked example/i);
-  });
-
-  it("renders a coach_note as a nudge card and never counts it as a dropped/unknown event", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "coach_note", text: "Say their name twice in the first line.", phaseId: "introduction", ts: "t1" });
-    expect(screen.getByTestId("coach-nudge")).toHaveTextContent("Say their name twice in the first line.");
-  });
-
-  it("keeps an empty live region mounted before announcing useful nudge and objection guidance", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    const announcer = screen.getByTestId("coach-guidance-announcer");
-    expect(announcer).toBeEmptyDOMElement();
-
-    broadcast({ type: "coach_note", text: "Slow down and mirror the seller.", phaseId: "introduction", ts: "t1" });
-    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
-
-    // role="alert" carries an implicit aria-live="assertive" — distinct
-    // from the softphone toast's role="status" so the two never collide
-    // under the same accessible-role query.
-    expect(announcer).toHaveAttribute("role", "alert");
-    expect(announcer).toHaveTextContent("Slow down and mirror the seller.");
-    expect(announcer).toHaveTextContent("Acknowledge: *Sighhh* Yeah…");
-    expect(announcer).toHaveTextContent("Overcome: What were you hoping I was AT LEAST going to say?");
-    expect(announcer).not.toHaveTextContent("price_too_low");
-  });
-
-  it("uses one focus surface: objection preempts nudge, then dismissals restore nudge and script in order", async () => {
-    Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
-    window.dispatchEvent(new Event("resize"));
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-    broadcast({ type: "coach_note", text: "Ask one more question.", phaseId: "reveal", ts: "t1" });
-    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("data-active", "true");
-    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
-
-    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
-    const stack = screen.getByTestId("coach-guidance-stack");
-    expect(stack).toContainElement(screen.getByTestId("coach-nudge"));
-    expect(stack).toContainElement(screen.getByTestId("objection-card"));
-    expect(stack.className).toMatch(/overflow-y-auto/);
-    expect(stack.className).not.toMatch(/\babsolute\b|\bfixed\b/);
-    expect(screen.getByTestId("objection-card")).toHaveAttribute("data-active", "true");
-    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("data-active", "false");
-
-    await userEvent.click(screen.getByTestId("objection-card"));
-    expect(screen.queryByTestId("objection-card")).not.toBeInTheDocument();
-    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("data-active", "true");
-    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
-
-    await userEvent.click(screen.getByTestId("coach-nudge"));
-    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
-    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
-    expect(screen.getByTestId("say-this-card")).toBeVisible();
-  });
-
-  it("keeps the full manual script visible in degraded mode while queued guidance timers stay mounted", async () => {
-    const { REALTIME_SUBSCRIBE_STATES } = await import("@supabase/supabase-js");
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-    broadcast({ type: "coach_note", text: "This must not hide the fallback script.", phaseId: "introduction", ts: "t1" });
-    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
-    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
-
-    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
-
-    expect(screen.getByTestId("coach-degraded-note")).toBeVisible();
-    expect(screen.getByTestId("full-phase-script")).toBeVisible();
-    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
-    expect(screen.getByTestId("coach-guidance-timers")).toBeInTheDocument();
-    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
-    expect(screen.getByTestId("objection-card")).toHaveAttribute("hidden");
-    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("hidden");
-
-    // Regression: degraded mode is the only guidance a rep has while the
-    // coach is down, so it must not lose any authored signal the live view
-    // now trims away — the phase's purpose, every opening cue, and every
-    // situational cue must all still render here, not just the branches.
-    const sayThisCard = screen.getByTestId("say-this-card");
-    expect(sayThisCard).toHaveTextContent(/build minor rapport/i);
-    expect(sayThisCard).toHaveTextContent(/say their name twice in the first line/i);
-    expect(sayThisCard).toHaveTextContent(/never open with .how are you doing today/i);
-    expect(sayThisCard).toHaveTextContent(/catch you at a bad time/i);
-
-    // The assertions above only prove the phase-level guidance survived.
-    // They would ALL still pass if degraded silently trimmed to the first
-    // branch — which is precisely the regression this test exists to
-    // catch, since the live view now shows exactly one branch's one line.
-    // So assert content that exists ONLY in later branches: "The reason
-    // for my call today" opens introduction branch 1, and the contact
-    // details in branch 2 are the last thing a rep would still need while
-    // reading manually through an outage.
-    expect(sayThisCard).toHaveTextContent(/the reason for my call today/i);
-    expect(sayThisCard).toHaveTextContent(/our company is bmh group/i);
-    expect(sayThisCard).toHaveTextContent(/your file number is/i);
-  });
-
-  it("keeps useful script coaching visible for an unknown but valid objection id", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-    broadcast({ type: "objection", objectionId: "seller_mentions_new_market_term", ts: "t1" });
-
-    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
-    expect(screen.getByTestId("say-this-card")).toBeVisible();
-    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
-    expect(screen.getByTestId("coach-guidance-timers")).toBeInTheDocument();
-    expect(screen.getByTestId("objection-card")).toHaveAttribute("hidden");
-    expect(screen.getByTestId("coach-live-view")).not.toHaveTextContent("seller_mentions_new_market_term");
-    expect(screen.getByTestId("coach-guidance-announcer")).toHaveTextContent(
-      "New objection detected. Continue following the live script.",
-    );
-  });
-
-  it("lets the newest unknown objection restore the script instead of resurfacing an older known card", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t1" });
-    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
-
-    broadcast({ type: "objection", objectionId: "seller_mentions_new_market_term", ts: "t2" });
-
-    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
-    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
-    expect(screen.getAllByTestId("objection-card")).toHaveLength(2);
-    for (const card of screen.getAllByTestId("objection-card")) expect(card).toHaveAttribute("hidden");
-  });
-
-  it("lets the newest unknown objection restore the script instead of resurfacing an older nudge", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "coach_note", text: "Ask one more question.", phaseId: "reveal", ts: "t1" });
-    expect(screen.getByTestId("coach-script-panel")).toHaveAttribute("hidden");
-
-    broadcast({ type: "objection", objectionId: "seller_mentions_new_market_term", ts: "t2" });
-
-    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
-    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
-    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("hidden");
-  });
-
-  it("keeps hidden queued guidance mounted so its absolute expiry still runs before focus returns to it", async () => {
-    vi.useFakeTimers();
-    render(<Harness {...baseProps()} />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-
-    broadcast({ type: "coach_note", text: "This nudge must expire while hidden.", phaseId: "reveal", ts: "t1" });
-    broadcast({ type: "objection", objectionId: "price_too_low", ts: "t2" });
-    expect(screen.getByTestId("coach-nudge")).toHaveAttribute("data-active", "false");
-    expect(screen.getByTestId("objection-card")).toHaveAttribute("data-active", "true");
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(20_000);
-    });
-    expect(screen.queryByTestId("coach-nudge")).not.toBeInTheDocument();
-
-    act(() => screen.getByTestId("objection-card").click());
-    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
-    expect(screen.getByTestId("coach-script-panel")).not.toHaveAttribute("hidden");
-  });
-
-  it("never renders more than the capped number of cards/nudges, even during a rapid-fire burst — the stack's scroll is a backstop, not the only guard", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-    const objectionIds = ["price_too_low", "not_in_rush", "end_buyer", "zillow_worth", "list_with_realtor"];
-    for (const [index, objectionId] of objectionIds.entries()) {
-      broadcast({ type: "objection", objectionId, ts: `obj-${index}` });
-    }
-    const nudgeTexts = ["A", "B", "C", "D", "E"];
-    for (const [index, text] of nudgeTexts.entries()) {
-      broadcast({ type: "coach_note", text, phaseId: "introduction", ts: `nudge-${index}` });
-    }
-
-    expect(objectionIds.length).toBeGreaterThan(MAX_OBJECTION_CARDS);
-    expect(nudgeTexts.length).toBeGreaterThan(MAX_NUDGES);
-    expect(screen.getAllByTestId("objection-card")).toHaveLength(MAX_OBJECTION_CARDS);
-    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(MAX_NUDGES);
-  });
-
-  it("keeps every call action, including Hang up, in the 375px responsive control grid", async () => {
-    Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
-    window.dispatchEvent(new Event("resize"));
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-
-    const controls = screen.getByTestId("coach-call-controls");
-    expect(controls.className).toMatch(/grid-cols-2/);
-    expect(controls).toContainElement(screen.getByTestId("coach-mute"));
-    expect(controls).toContainElement(screen.getByTestId("coach-keypad-toggle"));
-    expect(controls).toContainElement(screen.getByTestId("coach-hold"));
-    expect(controls).toContainElement(screen.getByTestId("coach-hangup"));
-  });
-
-  it("dismisses a nudge on tap, independent of any objection cards showing", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    broadcast({ type: "coach_note", text: "Pain word — go deeper.", phaseId: "reveal", ts: "t1" });
-    const nudge = screen.getByTestId("coach-nudge");
-    await userEvent.click(nudge);
-    expect(screen.queryByTestId("coach-nudge")).not.toBeInTheDocument();
-  });
-
-  it("keeps every nudge's dismiss timer independent, same as objection cards", async () => {
-    vi.useFakeTimers();
-    render(<Harness {...baseProps()} />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-
-    broadcast({ type: "coach_note", text: "First nudge.", phaseId: "introduction", ts: "t1" });
-    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(1);
-
-    // 15s in, first nudge has 5s left on its 20s TTL.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(15_000);
-    });
-    broadcast({ type: "coach_note", text: "Second nudge.", phaseId: "introduction", ts: "t2" });
-    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(2);
-
-    // 6s later: 21s elapsed for the first nudge — it should have
-    // auto-dismissed. Only 6s elapsed for the second — it must remain,
-    // proving the second nudge arriving didn't reset the first's timer.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(6_000);
-    });
-    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(1);
-    expect(screen.getByTestId("coach-nudge")).toHaveTextContent("Second nudge.");
-  });
-
-  it("a nudge dismisses at its ORIGINAL deadline even after a collapse/reopen — remounting must not restart its 20s clock", async () => {
-    vi.useFakeTimers();
-    const { rerender } = render(<CollapsibleHarness {...baseProps()} collapsed={false} />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    broadcast({ type: "coach_note", text: "Say their name twice.", phaseId: "introduction", ts: "t1" });
-    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(1);
-
-    // 12s into the 20s TTL: collapse, wait 5s while collapsed, reopen.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(12_000);
-    });
-    rerender(<CollapsibleHarness {...baseProps()} collapsed={true} />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_000);
-    });
-    rerender(<CollapsibleHarness {...baseProps()} collapsed={false} />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    // 17s total elapsed — 3s remain on the ORIGINAL deadline.
-    expect(screen.getAllByTestId("coach-nudge")).toHaveLength(1);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_000);
-    });
-    expect(screen.queryAllByTestId("coach-nudge")).toHaveLength(0);
-  });
-
-  it("shows the 'coach out of sync' banner when an event reports a different script version, and clears it once versions match again", async () => {
-    render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("coach-script-panel")).toBeInTheDocument());
-    expect(screen.queryByTestId("coach-version-mismatch")).not.toBeInTheDocument();
-
-    broadcast({ type: "counter", probeCount: 1, ts: "t1", scriptVersion: "0.9.0" });
-    expect(screen.getByTestId("coach-version-mismatch")).toHaveTextContent("0.9.0");
-
-    broadcast({ type: "counter", probeCount: 2, ts: "t2", scriptVersion: CLOSR_SCRIPT.version });
-    expect(screen.queryByTestId("coach-version-mismatch")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Live call coach" })).not.toBeInTheDocument());
+    expect(screen.getByTestId("header-dialer-button")).toHaveFocus();
   });
 });
 
-describe("selectSpokenLine — never falls back to a note, even for a synthetic all-note branch", () => {
-  // The real, currently-loaded script has a "say" line in every branch —
-  // this exact failure mode (an all-note branch's selected variant
-  // silently defaulting to its first line, which could be a note) can't
-  // be reproduced end-to-end through real data, and the schema validator
-  // doesn't forbid an all-note variant either. Proven directly against a
-  // synthetic fixture instead.
-  function branchWithLines(lines: { type: "say" | "note"; segments: [] }[]) {
-    return {
-      tag: "Synthetic",
-      critical: false,
-      holdAfter: null,
-      trailingNote: null,
-      variantOptions: [{ key: "default", label: null }],
-      autoSelected: false,
-      selected: { key: "default", label: null, tone: null, lines },
-    };
-  }
-
-  it("returns null for a branch whose selected variant is entirely notes — never its first line", () => {
-    const branch = branchWithLines([
-      { type: "note", segments: [] },
-      { type: "note", segments: [] },
-    ]);
-    expect(selectSpokenLine(branch)).toBeNull();
+describe("selectSpokenLine", () => {
+  it("skips internal notes and returns the first spoken line", () => {
+    const spoken = { type: "say" as const, segments: [], id: "say-1" };
+    expect(selectSpokenLine({ selected: { lines: [{ type: "note", segments: [], id: "note-1" }, spoken] } } as never)).toBe(spoken);
   });
 
-  it("returns the first say line when one exists, not necessarily index 0", () => {
-    const branch = branchWithLines([
-      { type: "note", segments: [] },
-      { type: "say", segments: [] },
-    ]);
-    expect(selectSpokenLine(branch)?.type).toBe("say");
-  });
-
-  it("returns null for a null/undefined branch", () => {
-    expect(selectSpokenLine(null)).toBeNull();
-    expect(selectSpokenLine(undefined)).toBeNull();
+  it("returns null for an all-note branch", () => {
+    expect(selectSpokenLine({ selected: { lines: [{ type: "note", segments: [], id: "note-1" }] } } as never)).toBeNull();
   });
 });

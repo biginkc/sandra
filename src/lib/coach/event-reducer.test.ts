@@ -389,6 +389,8 @@ describe("coachReducer — manual override", () => {
 describe("coachReducer — entry fields (deal-panel tokens)", () => {
   it("starts with every entry field unset", () => {
     expect(initialCoachState().entryFields).toEqual({
+      motivation: null,
+      cold_caller_name: null,
       closing_date: null,
       offer_price: null,
       net_to_seller: null,
@@ -401,7 +403,13 @@ describe("coachReducer — entry fields (deal-panel tokens)", () => {
     expect(state.entryFields.closing_date).toBeNull();
 
     state = coachReducer(state, { type: "set_entry_field", field: "closing_date", value: "Sept 15" });
-    expect(state.entryFields).toEqual({ closing_date: "Sept 15", offer_price: "$210,000", net_to_seller: null });
+    expect(state.entryFields).toEqual({
+      motivation: null,
+      cold_caller_name: null,
+      closing_date: "Sept 15",
+      offer_price: "$210,000",
+      net_to_seller: null,
+    });
   });
 
   it("trims whitespace and treats a blank value as clearing the field", () => {

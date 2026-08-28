@@ -402,6 +402,27 @@ describe("useCoachChannel", () => {
     expect(result.current.reconnectGap).toBe(true);
   });
 
+  it("clears degraded on reconnect, then requires a fresh 15 seconds of silence before degrading again", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-reconnect-liveness"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR));
+    expect(result.current.degraded).toBe(true);
+
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    expect(result.current.degraded).toBe(false);
+    expect(result.current.reconnectGap).toBe(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14_999);
+    });
+    expect(result.current.degraded).toBe(false);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2);
+    });
+    expect(result.current.degraded).toBe(true);
+  });
+
   it("marks reconnectGap even on the VERY FIRST join, when that join only succeeded after an initial failure — the coach_call_index write race", async () => {
     // Regression: the ownership row the RLS policy checks is written via
     // after() (jitter-server.ts) and isn't guaranteed to exist yet when

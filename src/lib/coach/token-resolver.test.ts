@@ -19,6 +19,8 @@ const baseContext: CoachCallContext = {
 };
 
 const entryFields: CoachEntryFields = {
+  motivation: null,
+  cold_caller_name: null,
   closing_date: "Sept 15",
   offer_price: "$210,000",
   net_to_seller: "$180,000",
@@ -49,6 +51,37 @@ describe("resolveCoachTokens", () => {
     expect(tokens.closing_date).toEqual({ value: "Sept 15", isPlaceholder: false });
     expect(tokens.offer_price).toEqual({ value: "$210,000", isPlaceholder: false });
     expect(tokens.net_to_seller).toEqual({ value: "$180,000", isPlaceholder: false });
+  });
+
+  it("lets the rep fill motivation and cold-caller name when trusted context does not have them", () => {
+    const tokens = resolveCoachTokens(
+      { ...baseContext, motivation: null, coldCallerName: null },
+      { ...entryFields, motivation: "Move closer to family", cold_caller_name: "Morgan" },
+    );
+
+    expect(tokens.motivation).toEqual({ value: "Move closer to family", isPlaceholder: false });
+    expect(tokens.cold_caller_name).toEqual({ value: "Morgan", isPlaceholder: false });
+  });
+
+  it("uses typed entries when trusted motivation and cold-caller values contain only whitespace", () => {
+    const tokens = resolveCoachTokens(
+      { ...baseContext, motivation: "  \t", coldCallerName: "\n " },
+      { ...entryFields, motivation: "Move closer to family", cold_caller_name: "Morgan" },
+    );
+
+    expect(tokens.motivation).toEqual({ value: "Move closer to family", isPlaceholder: false });
+    expect(tokens.cold_caller_name).toEqual({ value: "Morgan", isPlaceholder: false });
+  });
+
+  it("keeps trusted motivation and cold-caller context authoritative over session fallback values", () => {
+    const tokens = resolveCoachTokens(baseContext, {
+      ...entryFields,
+      motivation: "stale manual motivation",
+      cold_caller_name: "Stale Caller",
+    });
+
+    expect(tokens.motivation).toEqual({ value: "Job relocation", isPlaceholder: false });
+    expect(tokens.cold_caller_name).toEqual({ value: "Rose", isPlaceholder: false });
   });
 
   it("treats every deal-panel token as an unset placeholder when entryFields is omitted", () => {

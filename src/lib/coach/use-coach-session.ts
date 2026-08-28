@@ -3,13 +3,79 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { loadCoachCallContext } from "./coach-context-actions";
+import { createCoachRecommendationContinuity } from "./recommendation-client";
+import {
+  FIRST_COACH_SECTION_ID,
+  getFirstCoachSectionIdForPhase,
+  getNextCoachSectionId,
+  getPreviousCoachSectionId,
+  getCoachSectionById,
+  type CoachSectionId,
+} from "./section-manifest";
 import { useCoachChannel } from "./use-coach-channel";
-import type { CoachCallContext, CoachEntryToken } from "./types";
+import type { CoachCallContext, CoachEntryToken, CoachPhaseId } from "./types";
 
 export type ContextLoadState =
-  | { status: "loading" }
+  | { status: "loading"; context: CoachCallContext }
   | { status: "ready"; context: CoachCallContext }
-  | { status: "error" };
+  | { status: "error"; context: CoachCallContext };
+
+export type PreparedCoachTarget = {
+  sellerName: string | null;
+  propertyAddress: string | null;
+  sellerPhoneE164: string | null;
+  maskedSellerPhone: string | null;
+};
+
+function usablePreparedSellerName(
+  value: string | null,
+  preparedTarget: PreparedCoachTarget,
+): string | null {
+  const trimmed = value?.trim();
+  if (
+    !trimmed
+    || trimmed === "Manual dial"
+    || trimmed === "Unknown homeowner"
+    || trimmed === preparedTarget.sellerPhoneE164?.trim()
+    || trimmed === preparedTarget.maskedSellerPhone?.trim()
+  ) return null;
+  return trimmed;
+}
+
+function withPreparedTargetFallbacks(
+  context: CoachCallContext,
+  preparedTarget: PreparedCoachTarget | null,
+): CoachCallContext {
+  if (!preparedTarget) return context;
+  const preparedAddress = preparedTarget.propertyAddress?.trim() || null;
+  return {
+    ...context,
+    sellerName: context.sellerName ?? usablePreparedSellerName(preparedTarget.sellerName, preparedTarget),
+    propertyAddress: context.propertyAddress ?? preparedAddress,
+  };
+}
+
+function preparedTargetErrorContext(
+  propertyId: string | null,
+  sellerPhoneE164: string | null,
+  repPhoneE164: string | null,
+  preparedTarget: PreparedCoachTarget | null,
+): CoachCallContext {
+  return {
+    sellerName: preparedTarget ? usablePreparedSellerName(preparedTarget.sellerName, preparedTarget) : null,
+    propertyAddress: preparedTarget?.propertyAddress?.trim() || null,
+    propertyCounty: null,
+    repName: null,
+    repPhoneE164,
+    motivation: null,
+    leadId: propertyId,
+    sellerPhoneE164,
+    coldCallerName: null,
+    yearBuilt: null,
+    leadSource: null,
+    occupancy: null,
+  };
+}
 
 /**
  * Owns the entire coach session — realtime subscription/reducer state,
@@ -27,11 +93,24 @@ export function useCoachSession(
   sellerPhoneE164: string | null,
   repPhoneE164: string | null,
   livenessActive = true,
+  preparedTarget: PreparedCoachTarget | null = null,
 ) {
   const { dispatch, ...channel } = useCoachChannel(callId, "introduction", livenessActive);
-  const [contextLoad, setContextLoad] = useState<ContextLoadState>({ status: "loading" });
+  const [contextLoad, setContextLoad] = useState<ContextLoadState>(() => ({
+    status: "loading",
+    context: preparedTargetErrorContext(
+      propertyId,
+      sellerPhoneE164,
+      repPhoneE164,
+      preparedTarget,
+    ),
+  }));
   const [contextAttempt, setContextAttempt] = useState(0);
   const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>({});
+  const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(FIRST_COACH_SECTION_ID);
+  const [recommendationContinuity, setRecommendationContinuity] = useState(
+    () => createCoachRecommendationContinuity(callId),
+  );
 
   // A new call (different callId) must start a clean session — stale
   // branch picks and a stale context/attempt count from a prior call must
@@ -41,9 +120,19 @@ export function useCoachSession(
   const [trackedCallId, setTrackedCallId] = useState(callId);
   if (callId !== trackedCallId) {
     setTrackedCallId(callId);
-    setContextLoad({ status: "loading" });
+    setContextLoad({
+      status: "loading",
+      context: preparedTargetErrorContext(
+        propertyId,
+        sellerPhoneE164,
+        repPhoneE164,
+        preparedTarget,
+      ),
+    });
     setContextAttempt(0);
     setBranchOverrides({});
+    setActiveSectionId(FIRST_COACH_SECTION_ID);
+    setRecommendationContinuity(createCoachRecommendationContinuity(callId));
   }
 
   useEffect(() => {
@@ -51,10 +140,25 @@ export function useCoachSession(
     let mounted = true;
     loadCoachCallContext({ propertyId, sellerPhoneE164, repPhoneE164 })
       .then((loaded) => {
-        if (mounted) setContextLoad({ status: "ready", context: loaded });
+        if (mounted) {
+          setContextLoad({
+            status: "ready",
+            context: withPreparedTargetFallbacks(loaded, preparedTarget),
+          });
+        }
       })
       .catch(() => {
-        if (mounted) setContextLoad({ status: "error" });
+        if (mounted) {
+          setContextLoad({
+            status: "error",
+            context: preparedTargetErrorContext(
+              propertyId,
+              sellerPhoneE164,
+              repPhoneE164,
+              preparedTarget,
+            ),
+          });
+        }
       });
     return () => {
       mounted = false;
@@ -73,8 +177,25 @@ export function useCoachSession(
     (field: CoachEntryToken, value: string) => dispatch({ type: "set_entry_field", field, value }),
     [dispatch],
   );
+  const goToSection = useCallback((sectionId: CoachSectionId) => {
+    if (getCoachSectionById(sectionId)) setActiveSectionId(sectionId);
+  }, []);
+  const goPreviousSection = useCallback(() => {
+    setActiveSectionId((current) => getPreviousCoachSectionId(current) ?? current);
+  }, []);
+  const goNextSection = useCallback(() => {
+    setActiveSectionId((current) => getNextCoachSectionId(current) ?? current);
+  }, []);
+  const goToPhase = useCallback((phaseId: CoachPhaseId) => {
+    setActiveSectionId(getFirstCoachSectionIdForPhase(phaseId));
+  }, []);
+
+  const previousSectionId = getPreviousCoachSectionId(activeSectionId);
+  const nextSectionId = getNextCoachSectionId(activeSectionId);
 
   return {
+    callId,
+    recommendationContinuity,
     ...channel,
     dispatch,
     contextLoad,
@@ -82,6 +203,15 @@ export function useCoachSession(
     branchOverrides,
     selectVariant,
     setEntryField,
+    activeSectionId,
+    previousSectionId,
+    nextSectionId,
+    canGoPrevious: previousSectionId !== null,
+    canGoNext: nextSectionId !== null,
+    goToSection,
+    goPreviousSection,
+    goNextSection,
+    goToPhase,
   };
 }
 

@@ -56,15 +56,24 @@ function resolvedOrPlaceholder(value: string | null): ResolvedToken {
   return trimmed ? { value: trimmed, isPlaceholder: false } : { value: COACH_TOKEN_PLACEHOLDER, isPlaceholder: true };
 }
 
+function trustedValueOrEntry(
+  trustedValue: string | null,
+  entryValue: string | null,
+): string | null {
+  return trustedValue?.trim() ? trustedValue : entryValue;
+}
+
 export const EMPTY_ENTRY_FIELDS: CoachEntryFields = {
+  motivation: null,
+  cold_caller_name: null,
   closing_date: null,
   offer_price: null,
   net_to_seller: null,
 };
 
 /** Fills every token the script can reference — 6 from live lead/rep
- * context at dial time, plus the 3 deal-panel tokens the rep types in
- * during the call (entryFields; omit to treat them all as unset). Never
+ * context at dial time, plus session-owned values the rep types in during
+ * the call (entryFields; omit to treat them all as unset). Never
  * returns a blank string for a missing value — callers render
  * `isPlaceholder` tokens as a subtle (or, for entry tokens, editable) chip
  * instead. */
@@ -85,9 +94,9 @@ export function resolveCoachTokens(
       case "rep_phone":
         return [token, resolvedOrPlaceholder(context.repPhoneE164)];
       case "motivation":
-        return [token, resolvedOrPlaceholder(context.motivation)];
+        return [token, resolvedOrPlaceholder(trustedValueOrEntry(context.motivation, entryFields.motivation))];
       case "cold_caller_name":
-        return [token, resolvedOrPlaceholder(context.coldCallerName)];
+        return [token, resolvedOrPlaceholder(trustedValueOrEntry(context.coldCallerName, entryFields.cold_caller_name))];
       case "year_built":
         return [token, resolvedOrPlaceholder(context.yearBuilt)];
       case "closing_date":

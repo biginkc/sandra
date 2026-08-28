@@ -175,9 +175,17 @@ export const COACH_TOKENS = [
 
 export type CoachToken = (typeof COACH_TOKENS)[number];
 
-/** The three deal-panel tokens the rep types in live during the call —
- * never known at dial time, so they can't come from CoachCallContext. */
-export const COACH_ENTRY_TOKENS = ["closing_date", "offer_price", "net_to_seller"] as const;
+/** Values a rep may need to capture during the call. Motivation and the
+ * cold-caller name use trusted dial-time context when available, with this
+ * session-owned input as a fallback; the three deal values are always
+ * entered live. */
+export const COACH_ENTRY_TOKENS = [
+  "motivation",
+  "cold_caller_name",
+  "closing_date",
+  "offer_price",
+  "net_to_seller",
+] as const;
 
 export type CoachEntryToken = (typeof COACH_ENTRY_TOKENS)[number];
 
@@ -210,8 +218,8 @@ export type ResolvedToken = { value: string; isPlaceholder: boolean };
 
 export type ResolvedTokens = Record<CoachToken, ResolvedToken>;
 
-/** Rep-entered deal-panel values, keyed by entry token. Null/unset renders
- * as an editable placeholder chip in the script panel. */
+/** Rep-entered call values, keyed by entry token. Null/unset renders as an
+ * editable placeholder chip when trusted context cannot resolve it. */
 export type CoachEntryFields = Record<CoachEntryToken, string | null>;
 
 // ---- Reducer state ----

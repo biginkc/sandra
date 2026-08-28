@@ -219,6 +219,11 @@ export function useCoachChannel(
             // hide that from the rep instead of surfacing it.
             const hadFailedAttempt = attempt > 0;
             attempt = 0;
+            // A successful join is fresh transport-health evidence. Give it
+            // the same full liveness grace window as the initial join so the
+            // UI never claims both "Reconnected" and "reconnecting" while
+            // waiting for the next speaker turn.
+            setDegraded(false);
             armLiveness();
             if (hadFailedAttempt) setReconnectGap(true);
             return;

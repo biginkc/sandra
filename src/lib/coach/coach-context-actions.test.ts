@@ -64,6 +64,18 @@ describe("loadCoachCallContext — rep display name", () => {
     expect(context.repName).toBe("Alex Rep");
   });
 
+  it("populates the known production rep whose Hugo identity predates display-name metadata", async () => {
+    mockSupabase({ email: "JARRAD@BMHGROUPKC.COM", user_metadata: {} });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.repName).toBe("Jarrad Henry");
+  });
+
+  it("does not pretend a single-token email local part is the rep's complete known name", async () => {
+    mockSupabase({ email: "unknown@bmhgroupkc.com", user_metadata: {} });
+    const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.repName).toBeNull();
+  });
+
   it("never blanks rep name entirely — null when there's no user", async () => {
     mockSupabase(null);
     const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });

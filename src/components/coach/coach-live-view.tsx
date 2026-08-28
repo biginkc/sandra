@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2Icon, MicIcon, MicOffIcon, PauseIcon, PhoneOffIcon, PlayIcon, XIcon } from "lucide-react";
+import { ChevronLeftIcon, ChevronRightIcon, Loader2Icon, MicIcon, MicOffIcon, PauseIcon, PhoneOffIcon, PlayIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PhoneKeypad } from "@/components/softphone/phone-keypad";
@@ -8,28 +8,20 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { DtmfDigit } from "@/lib/dialer/transport";
+import { requestCoachRecommendations } from "@/lib/coach/recommendation-action";
+import { useCoachRecommendations } from "@/lib/coach/recommendation-client";
+import type { CoachRecommendationRequestFn } from "@/lib/coach/recommendation-types";
 import {
-  buildPhaseScriptBlock,
-  CLOSR_SCRIPT,
-  getScriptObjection,
+  buildCoachSectionScriptBlock,
   getScriptPhase,
-  nextPhaseId,
-  resolveCursorLine,
-  resolveCursorNextLine,
-  resolveObjectionOvercome,
   type BranchSelectContext,
+  type CoachSectionScriptBlock,
   type DisplayLine,
-  type PhaseScriptBlock,
   type ScriptBranchBlock,
 } from "@/lib/coach/script-block";
-import { resolveCoachTokens, resolveDisplayText, type DisplayTextSegment } from "@/lib/coach/token-resolver";
+import { resolveCoachTokens, type DisplayTextSegment } from "@/lib/coach/token-resolver";
 import type {
-  CoachCallContext,
-  CoachCursor,
   CoachEntryToken,
-  CoachHoldTimer,
-  CoachNudge,
-  CoachObjectionCard,
   CoachPhaseId,
   CoachToken,
   CoachTranscriptLine,
@@ -62,24 +54,17 @@ export type CoachLiveViewProps = {
    * coach session itself (transcript, phase, gates, cards, entered
    * values) lives in the provider and is unaffected by this. */
   onCollapse: () => void;
-};
-
-const EMPTY_CALL_CONTEXT: CoachCallContext = {
-  sellerName: null,
-  propertyAddress: null,
-  propertyCounty: null,
-  repName: null,
-  repPhoneE164: null,
-  motivation: null,
-  leadId: null,
-  sellerPhoneE164: null,
-  coldCallerName: null,
-  yearBuilt: null,
-  leadSource: null,
-  occupancy: null,
+  /** Test/synthetic injection only. Production uses the authenticated
+   * Sandra server action above. */
+  recommendationRequest?: CoachRecommendationRequestFn;
 };
 
 const ENTRY_TOKEN_SET: ReadonlySet<string> = new Set(COACH_ENTRY_TOKENS);
+const ALWAYS_EDITABLE_ENTRY_TOKEN_SET: ReadonlySet<CoachEntryToken> = new Set([
+  "closing_date",
+  "offer_price",
+  "net_to_seller",
+]);
 
 /** Display-only shorthand for the phase rail — the mock's rail reads INTRO
  * · REVEAL · ASSESS · POSITION · OFFER · CLOSE, six short labels that leave
@@ -99,6 +84,8 @@ const RAIL_LABEL: Partial<Record<CoachPhaseId, string>> = {
 };
 
 const ENTRY_TOKEN_LABEL: Record<CoachEntryToken, string> = {
+  motivation: "seller motivation",
+  cold_caller_name: "cold caller name",
   closing_date: "closing date",
   offer_price: "offer price",
   net_to_seller: "net to seller",
@@ -132,26 +119,45 @@ export function selectSpokenLine(branch: ScriptBranchBlock | null | undefined): 
 }
 
 export function CoachLiveView(props: CoachLiveViewProps) {
-  const { session, callName, callStatus, seconds, muted, held, holdPending, onDigit, onMute, onHold, onHangup, onCollapse } = props;
+  const {
+    session,
+    callName,
+    callStatus,
+    seconds,
+    muted,
+    held,
+    holdPending,
+    onDigit,
+    onMute,
+    onHold,
+    onHangup,
+    onCollapse,
+    recommendationRequest = requestCoachRecommendations,
+  } = props;
   const {
     state,
-    dispatch,
     degraded,
     reconnectGap,
     dismissReconnectGap,
-    scriptOutOfSync,
     contextLoad,
     retryContext,
     branchOverrides,
     selectVariant,
     setEntryField,
+    activeSectionId,
+    nextSectionId,
+    canGoPrevious,
+    canGoNext,
+    goPreviousSection,
+    goNextSection,
+    goToPhase,
   } = session;
   const [keypadOpen, setKeypadOpen] = useState(false);
 
   // The script must always render, even mid-load or after a failed context
-  // fetch — a static, all-placeholder script is still useful, and never an
-  // infinite spinner.
-  const activeContext = contextLoad.status === "ready" ? contextLoad.context : EMPTY_CALL_CONTEXT;
+  // fetch. Failure state keeps any prepared call identity the dialer already
+  // knew and leaves only genuinely unavailable values as placeholders.
+  const activeContext = contextLoad.context;
   const tokens: ResolvedTokens = useMemo(
     () => resolveCoachTokens(activeContext, state.entryFields),
     [activeContext, state.entryFields],
@@ -161,43 +167,41 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     [activeContext.leadSource, activeContext.occupancy],
   );
 
-  const displayedPhaseId = state.overriddenPhaseId ?? state.currentPhaseId;
-  const scriptBlock = buildPhaseScriptBlock(displayedPhaseId, tokens, selectCtx, branchOverrides);
-  const upcomingId = nextPhaseId(displayedPhaseId);
-  const nextBlock = upcomingId ? buildPhaseScriptBlock(upcomingId, tokens, selectCtx, branchOverrides) : null;
-  // A stored cursor is only ever for state.currentPhaseId (the reducer
-  // enforces that), so this additionally guards against the DISPLAYED phase
-  // — the rep manually browsing the rail to a different phase via
-  // overriddenPhaseId must see that phase's default branch-0 content, not
-  // the live cursor for whatever phase the call is actually in.
-  const activeCursor: CoachCursor | null =
-    state.cursor && state.cursor.phaseId === displayedPhaseId ? state.cursor : null;
-  // resolveCursorLine/resolveCursorNextLine need the resolved PhaseScriptBlock
-  // (not just tokens) — resolution defers to SANDRA'S OWN selected variant
-  // per branch, which only exists on the built block. scriptBlock is null
-  // only for a genuinely unrecognized phase id, in which case there's no
-  // cursor content to resolve either.
-  const cursorSpokenLine = useMemo(
-    () => (activeCursor && scriptBlock ? resolveCursorLine(activeCursor, scriptBlock, branchOverrides, tokens) : null),
-    [activeCursor, scriptBlock, branchOverrides, tokens],
+  const { scriptBlock, selectedVariants } = useMemo(() => {
+    const block = buildCoachSectionScriptBlock(activeSectionId, tokens, selectCtx, branchOverrides);
+    return {
+      scriptBlock: block,
+      selectedVariants: Object.fromEntries(
+        (block?.branches ?? []).map((branch) => [branch.tag, branch.selected.key]),
+      ),
+    };
+  }, [activeSectionId, branchOverrides, selectCtx, tokens]);
+  const nextBlock = useMemo(
+    () => nextSectionId
+      ? buildCoachSectionScriptBlock(nextSectionId, tokens, selectCtx, branchOverrides)
+      : null,
+    [branchOverrides, nextSectionId, selectCtx, tokens],
   );
-  const cursorNextLine = useMemo(
-    () => (activeCursor && scriptBlock ? resolveCursorNextLine(activeCursor, scriptBlock, branchOverrides, tokens) : null),
-    [activeCursor, scriptBlock, branchOverrides, tokens],
-  );
-  const gateEntries = (scriptBlock?.gates ?? []).map((gate) => ({
-    ...gate,
-    cleared: state.gates[gate.id] ?? false,
-  }));
-  const latestObjection = state.objectionCards.at(-1);
-  const hasActionableGuidance = latestObjection
-    ? isActionableObjection(latestObjection, activeContext.occupancy)
-    : state.nudges.length > 0;
-  const showGuidance = !degraded && hasActionableGuidance;
+  const activePhaseId = scriptBlock?.phaseId ?? "introduction";
+  const recommendations = useCoachRecommendations({
+    callId: session.callId,
+    activeSectionId,
+    branchOverrides: selectedVariants,
+    transcript: state.transcript,
+    request: recommendationRequest,
+    continuity: session.recommendationContinuity,
+  });
 
   const onEditEntry = useCallback(
     (field: CoachEntryToken, value: string) => setEntryField(field, value),
     [setEntryField],
+  );
+  const isEntryTokenEditable = useCallback(
+    (token: CoachEntryToken) =>
+      ALWAYS_EDITABLE_ENTRY_TOKEN_SET.has(token) ||
+      (token === "motivation" && !activeContext.motivation?.trim()) ||
+      (token === "cold_caller_name" && !activeContext.coldCallerName?.trim()),
+    [activeContext.coldCallerName, activeContext.motivation],
   );
   const onSelectVariant = useCallback((tag: string, key: string) => selectVariant(tag, key), [selectVariant]);
 
@@ -237,34 +241,13 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       >
       <DialogTitle className="sr-only">Live call coach</DialogTitle>
       <CoachTopBar
-        currentPhaseId={state.currentPhaseId}
-        displayedPhaseId={displayedPhaseId}
-        onSelectPhase={(phaseId) => {
-          // Local display jump only — logged for now, not sent to the server.
-          console.info("[coach] manual phase override", { phaseId });
-          dispatch({ type: "override_phase", phaseId });
-        }}
-        counter={scriptBlock?.counter ?? null}
-        probeCount={state.probeCount}
-        holdTimer={state.holdTimer}
-        gates={gateEntries}
+        activePhaseId={activePhaseId}
+        onSelectPhase={goToPhase}
         degraded={degraded}
         callStatus={callStatus}
         seconds={seconds}
         held={held}
       />
-      {scriptOutOfSync ? (
-        <div
-          role="alert"
-          data-testid="coach-version-mismatch"
-          className="flex shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/10 px-4 py-1.5 text-xs text-destructive"
-        >
-          <span>
-            Coach out of sync — the live coach is running script {scriptOutOfSync}, this view is on {CLOSR_SCRIPT.version}.
-            Script lines below may not match what the coach is tracking.
-          </span>
-        </div>
-      ) : null}
       {reconnectGap ? (
         <div
           role="status"
@@ -277,39 +260,28 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           </button>
         </div>
       ) : null}
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto xl:grid xl:grid-cols-[minmax(250px,0.8fr)_minmax(500px,2fr)_minmax(280px,0.9fr)] xl:overflow-hidden">
         <TranscriptFeed lines={state.transcript} />
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="coach-focus-stage">
-          <GuidanceOverlay
-            nudges={state.nudges}
-            cards={state.objectionCards}
-            tokens={tokens}
-            occupancy={activeContext.occupancy}
-            visible={!degraded}
-            onDismissNudge={(nudgeId) => dispatch({ type: "dismiss_nudge", nudgeId })}
-            onDismissObjection={(cardId) => dispatch({ type: "dismiss_objection", cardId })}
-          />
-          <ScriptPanel
-            block={scriptBlock}
-            nextBlock={nextBlock}
-            cursorSpokenLine={cursorSpokenLine}
-            cursorNextLine={cursorNextLine}
-            degraded={degraded}
-            suppressed={showGuidance}
-            contextLoad={contextLoad}
-            onRetryContext={retryContext}
-            onEditEntry={onEditEntry}
-            onBeginEntryEdit={() => setKeypadOpen(false)}
-            onSelectVariant={onSelectVariant}
-          />
-        </div>
+        <ScriptPanel
+          block={scriptBlock}
+          nextBlock={nextBlock}
+          degraded={degraded}
+          contextLoad={contextLoad}
+          canGoPrevious={canGoPrevious}
+          canGoNext={canGoNext}
+          onPrevious={goPreviousSection}
+          onNext={goNextSection}
+          onRetryContext={retryContext}
+          onEditEntry={onEditEntry}
+          isEntryTokenEditable={isEntryTokenEditable}
+          onBeginEntryEdit={() => setKeypadOpen(false)}
+          onSelectVariant={onSelectVariant}
+        />
+        <RecommendationsPanel
+          {...recommendations}
+          hasFinalSellerTranscript={state.transcript.some((line) => line.isFinal && line.speaker === "seller")}
+        />
       </div>
-      <GuidanceAnnouncer
-        nudges={state.nudges}
-        cards={state.objectionCards}
-        tokens={tokens}
-        occupancy={activeContext.occupancy}
-      />
       <CallControlDock
         callName={callName}
         callStatus={callStatus}
@@ -329,82 +301,16 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   );
 }
 
-function resolvedTextForAnnouncement(text: string, tokens: ResolvedTokens): string {
-  return resolveDisplayText(text, tokens)
-    .map((segment) => {
-      if (segment.kind === "text") return segment.value;
-      if (segment.kind === "tone") return segment.label;
-      return segment.resolved.value;
-    })
-    .join("");
-}
-
-/** Stays mounted before the first event so assistive technology observes
- * each nudge/card being inserted into an existing live region. */
-function GuidanceAnnouncer({
-  nudges,
-  cards,
-  tokens,
-  occupancy,
-}: {
-  nudges: CoachNudge[];
-  cards: CoachObjectionCard[];
-  tokens: ResolvedTokens;
-  occupancy: CoachCallContext["occupancy"];
-}) {
-  return (
-    <div
-      // role="alert" (not "status"): this is time-sensitive coaching, not a
-      // routine status update, and its implicit aria-live="assertive"
-      // matches that. Also keeps it a DISTINCT role from the softphone
-      // toast's role="status" — the two are visually and semantically
-      // different surfaces and must never collide under the same
-      // accessible-role query.
-      role="alert"
-      aria-atomic="false"
-      aria-relevant="additions text"
-      data-testid="coach-guidance-announcer"
-      className="sr-only"
-    >
-      {nudges.map((nudge) => (
-        <span key={nudge.id}>{`Coach nudge: ${nudge.text}`}</span>
-      ))}
-      {cards.map((card) => {
-        const objection = getScriptObjection(card.objectionId);
-        const overcome = objection ? resolveObjectionOvercome(objection, occupancy) : null;
-        if (!objection || !overcome) {
-          return <span key={card.id}>New objection detected. Continue following the live script.</span>;
-        }
-        return (
-          <span key={card.id}>
-            {`New objection guidance. Acknowledge: ${resolvedTextForAnnouncement(objection.display.acknowledge, tokens)} Disarm: ${resolvedTextForAnnouncement(objection.display.disarm, tokens)} Overcome: ${resolvedTextForAnnouncement(overcome, tokens)}`}
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
 function CoachTopBar({
-  currentPhaseId,
-  displayedPhaseId,
+  activePhaseId,
   onSelectPhase,
-  counter,
-  probeCount,
-  holdTimer,
-  gates,
   degraded,
   callStatus,
   seconds,
   held,
 }: {
-  currentPhaseId: CoachPhaseId;
-  displayedPhaseId: CoachPhaseId;
+  activePhaseId: CoachPhaseId;
   onSelectPhase: (phaseId: CoachPhaseId) => void;
-  counter: { label: string; goal: number } | null;
-  probeCount: number;
-  holdTimer: CoachHoldTimer | null;
-  gates: { id: string; display: string; cleared: boolean }[];
   degraded: boolean;
   callStatus: CoachCallStatus;
   seconds: number;
@@ -412,25 +318,14 @@ function CoachTopBar({
 }) {
   const preConnectLabel = callStatus === "connecting" ? "Connecting…" : callStatus === "ringing" ? "Ringing…" : null;
   const timerLabel = held ? "On hold" : preConnectLabel ?? timerText(seconds);
-  const currentPhaseIndex = COACH_PHASE_ORDER.indexOf(currentPhaseId);
-  const currentPhaseName = getScriptPhase(currentPhaseId)?.name ?? currentPhaseId;
-  const displayedPhaseName = getScriptPhase(displayedPhaseId)?.name ?? displayedPhaseId;
+  const currentPhaseIndex = COACH_PHASE_ORDER.indexOf(activePhaseId);
+  const currentPhaseName = getScriptPhase(activePhaseId)?.name ?? activePhaseId;
   return (
     <div className="shrink-0 border-b border-border bg-card">
       <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs" data-testid="coach-status-strip">
         <Badge variant="secondary" data-testid="coach-current-phase" className="h-5 text-[10px]">
           {`Phase · ${currentPhaseName}`}
         </Badge>
-        {displayedPhaseId !== currentPhaseId ? (
-          <Badge variant="outline" data-testid="coach-viewing-phase" className="h-5 text-[10px]">
-            {`Viewing · ${displayedPhaseName}`}
-          </Badge>
-        ) : null}
-        {counter ? (
-          <Badge variant="secondary" data-testid="probe-counter" className="h-5 text-[10px]">
-            {`Probes ${probeCount}/${counter.goal}`}
-          </Badge>
-        ) : null}
         <span
           className={cn("font-mono text-xs tabular-nums", held ? "font-semibold text-amber-700 dark:text-amber-400" : "text-muted-foreground")}
           data-testid="coach-call-timer"
@@ -450,27 +345,15 @@ function CoachTopBar({
         ) : null}
         {degraded ? (
           <Badge variant="outline" data-testid="coach-connecting-pill" className="h-5 text-[10px] text-muted-foreground">
-            Coach connecting…
+            Transcript connecting…
           </Badge>
         ) : null}
-        {holdTimer ? <HoldTimerChip timer={holdTimer} /> : null}
-        {gates.map((gate) => (
-          <Badge
-            key={gate.id}
-            data-testid={`gate-${gate.id}`}
-            variant={gate.cleared ? "secondary" : "destructive"}
-            className="h-5 text-[10px]"
-          >
-            {gate.cleared ? "Concerns cleared" : gate.display}
-          </Badge>
-        ))}
       </div>
       <ol className="flex min-w-0 items-center gap-1 overflow-x-auto px-4 pb-2" aria-label="Call phases" data-testid="coach-phase-scroller">
         {COACH_PHASE_ORDER.map((phaseId) => {
           const phase = getScriptPhase(phaseId);
           const fullName = phase?.name ?? phaseId;
-          const isCurrent = phaseId === currentPhaseId;
-          const isDisplayed = phaseId === displayedPhaseId;
+          const isCurrent = phaseId === activePhaseId;
           const isComplete = COACH_PHASE_ORDER.indexOf(phaseId) < currentPhaseIndex;
           const suffix = isComplete ? " ✓" : "";
           return (
@@ -478,7 +361,7 @@ function CoachTopBar({
               <button
                 type="button"
                 data-testid={`phase-rail-${phaseId}`}
-                aria-current={isDisplayed ? "step" : undefined}
+                aria-current={isCurrent ? "step" : undefined}
                 // Accessible name stays the full phase name (matching the
                 // Say This card and the top-strip phase badges) even though
                 // the visible label below is shortened.
@@ -486,18 +369,11 @@ function CoachTopBar({
                 onClick={() => onSelectPhase(phaseId)}
                 className={cn(
                   "rounded-full px-2.5 py-1 text-[11px] font-bold tracking-wide whitespace-nowrap uppercase transition-colors",
-                  isDisplayed
+                  isCurrent
                     ? "bg-primary text-primary-foreground"
                     : isComplete
                       ? "text-emerald-700 dark:text-emerald-400"
-                      : isCurrent
-                        ? "bg-emerald-700 text-white"
-                        // `hover:text-foreground` is load-bearing, not decoration:
-                        // muted-foreground on the hover `bg-muted` surface measures
-                        // 4.40:1, just under AA for this 11px label. Darkening the
-                        // text on hover keeps the hover affordance while staying
-                        // readable.
-                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
               >
                 <span>
@@ -510,21 +386,6 @@ function CoachTopBar({
         })}
       </ol>
     </div>
-  );
-}
-
-function HoldTimerChip({ timer }: { timer: CoachHoldTimer }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const interval = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(interval);
-  }, []);
-  const elapsed = Math.max(0, Math.floor((now - new Date(timer.startedAt).getTime()) / 1000));
-  const remaining = Math.max(0, timer.durationS - elapsed);
-  return (
-    <Badge variant={remaining <= 30 ? "destructive" : "outline"} data-testid="hold-timer" className="h-5 text-[10px]">
-      {`Hold ${timerText(remaining)}`}
-    </Badge>
   );
 }
 
@@ -555,7 +416,7 @@ function TranscriptFeed({ lines }: { lines: CoachTranscriptLine[] }) {
   return (
     <aside
       aria-label="Live transcript"
-      className="hidden w-full max-w-xs shrink-0 flex-col overflow-hidden border-r border-border bg-muted/30 md:flex"
+      className="flex h-48 w-full shrink-0 flex-col overflow-hidden border-b border-border bg-muted/30 xl:h-auto xl:min-h-0 xl:border-r xl:border-b-0"
     >
       <div className="border-b border-border px-4 py-2.5 text-xs font-bold tracking-wide text-muted-foreground uppercase">
         Transcript
@@ -601,33 +462,29 @@ function TranscriptFeed({ lines }: { lines: CoachTranscriptLine[] }) {
 function ScriptPanel({
   block,
   nextBlock,
-  cursorSpokenLine,
-  cursorNextLine,
   degraded,
-  suppressed,
   contextLoad,
+  canGoPrevious,
+  canGoNext,
+  onPrevious,
+  onNext,
   onRetryContext,
   onEditEntry,
+  isEntryTokenEditable,
   onBeginEntryEdit,
   onSelectVariant,
 }: {
-  block: PhaseScriptBlock | null;
-  nextBlock: PhaseScriptBlock | null;
-  /** The line at the rep's live cursor, already resolved and skip-past any
-   * leading "note" lines — null whenever there is no cursor, it's stale
-   * (wrong phase), or it can't be resolved against this client's script.
-   * The dominant card falls back to today's branch-0/first-say-line
-   * behavior whenever this is null. */
-  cursorSpokenLine: DisplayLine | null;
-  /** Same resolution, one line further — the line immediately after the
-   * cursor, within the SAME phase. Drives the "Coming next" preview when
-   * present; null falls back to today's next-phase preview. */
-  cursorNextLine: DisplayLine | null;
+  block: CoachSectionScriptBlock | null;
+  nextBlock: CoachSectionScriptBlock | null;
   degraded: boolean;
-  suppressed: boolean;
   contextLoad: ContextLoadState;
+  canGoPrevious: boolean;
+  canGoNext: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
   onRetryContext: () => void;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
   onSelectVariant: (tag: string, key: string) => void;
 }) {
@@ -638,55 +495,21 @@ function ScriptPanel({
     // here would imply something is still loading, which is false: nothing
     // will ever resolve this. Say so plainly instead of wedging silently.
     return (
-      <main hidden={suppressed} className="flex flex-1 items-center justify-center overflow-y-auto p-6">
+      <main className="flex flex-1 items-center justify-center overflow-y-auto p-6">
         <div className="max-w-sm text-center">
-          <Loader2Icon className="mx-auto mb-3 size-5 text-muted-foreground" aria-hidden />
-          <p className="text-sm font-semibold text-destructive">This call phase isn&apos;t recognized.</p>
-          <p className="mt-1 text-xs text-muted-foreground">Use the phase rail above to jump to a known phase.</p>
+          <p className="text-sm font-semibold text-destructive">This script section isn&apos;t recognized.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Use the phase rail above to return to a known section.</p>
         </div>
       </main>
     );
   }
-  const dominantBranch = block.branches[0] ?? null;
-  // The live cursor, when resolved, wins outright — it's the rep's ACTUAL
-  // position, more accurate than the branch-0 heuristic. Falls back to
-  // today's behavior whenever there's no cursor, it's stale, or it can't be
-  // resolved (unknown branch/variant, out-of-range line, or no "say" line
-  // left in that variant).
-  const spokenLine = cursorSpokenLine ?? selectSpokenLine(dominantBranch);
-  // Same rule for the "Coming next" preview — it was still blindly reading
-  // lines[0] and could surface a note as the next thing to say (repro: with
-  // Offer as the current phase, Close's dominant branch leads with a note).
-  // A glanced-at preview makes that worse than the main card, not better.
-  // With an active cursor, "next" means the next line within THIS phase
-  // (cursorNextLine) rather than jumping ahead to the next phase — the
-  // label below follows the same source, so it never says "Coming next ·
-  // Close" while actually showing an Offer-phase line.
-  const fallbackNextSpokenLine = nextBlock ? selectSpokenLine(nextBlock.branches[0] ?? null) : null;
-  const nextSpokenLine = cursorNextLine ?? fallbackNextSpokenLine;
-  const nextPreviewPhaseName = cursorNextLine ? block.phaseName : (nextBlock?.phaseName ?? null);
-  // The standalone tone chip must be a genuine tonal instruction (how to
-  // say THIS line — e.g. "playful tone"), not an arbitrary phase-level
-  // strategy note. Genuine tone guidance is authored inline in the script
-  // as {{tone:...}} markup, which resolveDisplayText already turns into
-  // `kind: "tone"` segments within a line's own segments array — the same
-  // segments LineSegments/ToneChip already render elsewhere. So the
-  // spoken line's own tone segments are the correct source, extracted out
-  // of the inline flow and shown as the standalone chip below it (never
-  // duplicated in both places). Most lines carry none, and when a line
-  // has none the card correctly shows no chip rather than repurposing an
-  // unrelated opening cue or the phase's general strategy notes.
-  const spokenToneLabels = spokenLine
-    ? spokenLine.segments.filter((segment) => segment.kind === "tone").map((segment) => segment.label)
-    : [];
-  const spokenLineSegments = spokenLine ? spokenLine.segments.filter((segment) => segment.kind !== "tone") : [];
+  const nextSpokenLine = nextBlock ? selectSpokenLine(nextBlock.branches[0] ?? null) : null;
   return (
     <main
-      hidden={suppressed}
-      className="flex-1 overflow-y-auto px-5 py-6 md:px-10 md:py-8"
+      className="min-h-[28rem] flex-1 overflow-y-auto border-b border-border px-4 py-5 md:px-8 xl:min-h-0 xl:border-r xl:border-b-0"
       data-testid="coach-script-panel"
     >
-      <div className={cn("mx-auto flex min-h-full max-w-4xl flex-col py-3", degraded ? "justify-start" : "justify-center")}>
+      <div className="mx-auto flex min-h-full max-w-4xl flex-col py-2">
         {contextLoad.status === "error" ? (
           <div
             role="alert"
@@ -700,146 +523,141 @@ function ScriptPanel({
           </div>
         ) : null}
         {degraded ? (
-          <p className="mb-4 text-xs text-muted-foreground" data-testid="coach-degraded-note">
-            Live coaching hasn&apos;t connected yet — here&apos;s the full script, scroll manually.
+          <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900" data-testid="coach-degraded-note">
+            Live transcript is reconnecting. Keep following the current script — your place is saved.
           </p>
         ) : null}
         <section
-          aria-label={`Say this — ${block.phaseName}`}
-          data-testid="say-this-card"
+          aria-label={`Current script — ${block.title}`}
+          data-testid="current-script-card"
           className="rounded-2xl border border-border border-l-4 border-l-primary bg-card px-5 py-5 shadow-sm md:px-8 md:py-7"
         >
-          <div className="mb-4 text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Say this</div>
-          {degraded ? (
-            // Degraded = "everything, scroll it yourself": the coach isn't
-            // connected, so this is the only guidance the rep has. Every
-            // authored signal the phase carries (purpose, ALL opening cues,
-            // every branch, situational cues) must render here — the
-            // restrained single-line/single-chip treatment below is only
-            // for the LIVE, coach-connected view.
-            <>
-              {block.purpose ? <p className="mb-3 text-sm text-muted-foreground italic">{block.purpose}</p> : null}
-              {block.openingCues.length > 0 ? (
-                <div className="mb-4 flex flex-wrap gap-1.5">
-                  {block.openingCues.map((cue, index) => (
-                    <ToneChip key={index} text={cue} />
-                  ))}
-                </div>
-              ) : null}
-              <div className="divide-y divide-border/70" data-testid="full-phase-script">
-                {block.branches.map((branch) => (
-                  <BranchCard
-                    key={branch.tag}
-                    branch={branch}
-                    compact
-                    onEditEntry={onEditEntry}
-                    onBeginEntryEdit={onBeginEntryEdit}
-                    onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
-                  />
-                ))}
-              </div>
-              {block.situationalCues.length > 0 ? (
-                <div className="mt-5 rounded-xl border border-dashed border-border p-3">
-                  <div className="mb-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
-                    If this happens…
-                  </div>
-                  <ul className="space-y-1">
-                    {block.situationalCues.map((cue) => (
-                      <li key={cue.trigger} className="text-xs text-muted-foreground">
-                        {cue.text}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-            </>
-          ) : (
-            <>
-              {spokenLine ? (
-                <p
-                  data-testid="say-this-line"
-                  className={cn(
-                    "text-2xl leading-relaxed font-medium md:text-[26px]",
-                    spokenLine.type === "note" && "text-xs text-muted-foreground italic",
-                  )}
-                >
-                  <LineSegments segments={spokenLineSegments} onEditEntry={onEditEntry} onBeginEntryEdit={onBeginEntryEdit} />
-                </p>
-              ) : null}
-              {spokenToneLabels.length > 0 ? (
-                <div className="mt-4 flex flex-wrap gap-1.5" data-testid="say-this-tone">
-                  {spokenToneLabels.map((label, index) => (
-                    <ToneChip key={index} text={label} />
-                  ))}
-                </div>
-              ) : null}
-              <details data-testid="full-phase-script" className="mt-5 border-t border-border/70 pt-4 text-muted-foreground">
-                <summary className="cursor-pointer text-xs font-bold tracking-wide uppercase">
-                  {`Full ${block.phaseName} script`}
-                </summary>
-                <div className="mt-3 space-y-4">
-                  <p className="text-sm text-muted-foreground italic">{block.purpose}</p>
-                  {block.openingCues.length > 0 ? (
-                    <div className="flex flex-wrap gap-1.5">
-                      {block.openingCues.map((cue, index) => (
-                        <ToneChip key={index} text={cue} />
-                      ))}
-                    </div>
-                  ) : null}
-                  <div className="divide-y divide-border/70">
-                    {block.branches.map((branch) => (
-                      <BranchCard
-                        key={branch.tag}
-                        branch={branch}
-                        compact
-                        onEditEntry={onEditEntry}
-                        onBeginEntryEdit={onBeginEntryEdit}
-                        onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
-                      />
-                    ))}
-                  </div>
-                  {block.situationalCues.length > 0 ? (
-                    <div className="rounded-xl border border-dashed border-border p-3">
-                      <div className="mb-1.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
-                        If this happens…
-                      </div>
-                      <ul className="space-y-1">
-                        {block.situationalCues.map((cue) => (
-                          <li key={cue.trigger} className="text-xs text-muted-foreground">
-                            {cue.text}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
-                </div>
-              </details>
-            </>
-          )}
-        </section>
-        {nextPreviewPhaseName && nextSpokenLine ? (
-          // De-emphasized on purpose (this is a preview, not the active
-          // card) but via an opaque mid-tone color rather than ancestor
-          // `opacity`, which was multiplying every descendant's alpha
-          // against the real page background and dropped both lines below
-          // WCAG AA. Solid stone-600/stone-300 keeps the same "quieter than
-          // the Say This card" hierarchy while staying readable.
-          <div className="px-6 pt-5" data-testid="next-phase-preview">
-            <div
-              data-testid="next-phase-preview-label"
-              className="mb-1 text-[10px] font-bold tracking-[0.12em] text-stone-600 uppercase dark:text-stone-300"
-            >
-              Coming next · {nextPreviewPhaseName}
-            </div>
-            <p data-testid="next-phase-preview-body" className="text-base leading-relaxed text-stone-600 dark:text-stone-300">
-              {nextSpokenLine.segments
-                .map((segment) => (segment.kind === "tone" ? "" : segment.kind === "text" ? segment.value : segment.resolved.value))
-                .join("")}
-            </p>
+          <div className="mb-1 text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Current script</div>
+          <h2 className="text-xl font-bold" data-testid="current-section-title">{block.title}</h2>
+          <div className="mt-5 divide-y divide-border/70" data-testid="current-section-script">
+            {block.branches.map((branch) => (
+              <BranchCard
+                key={branch.tag}
+                branch={branch}
+                compact
+                onEditEntry={onEditEntry}
+                isEntryTokenEditable={isEntryTokenEditable}
+                onBeginEntryEdit={onBeginEntryEdit}
+                onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
+              />
+            ))}
           </div>
+        </section>
+        {nextBlock ? (
+          <section className="mx-2 mt-4 rounded-xl border border-dashed border-border bg-muted/30 px-4 py-3" data-testid="next-section-preview">
+            <div className="text-[10px] font-bold tracking-[0.12em] text-muted-foreground uppercase">
+              Up next · {nextBlock.phaseName}
+            </div>
+            <h3 className="mt-1 text-sm font-semibold">{nextBlock.title}</h3>
+            {nextSpokenLine ? (
+              <p data-testid="next-section-preview-body" className="mt-1 line-clamp-2 text-sm leading-relaxed text-muted-foreground">
+                {nextSpokenLine.segments
+                  .map((segment) => (segment.kind === "tone" ? "" : segment.kind === "text" ? segment.value : segment.resolved.value))
+                  .join("")}
+              </p>
+            ) : null}
+          </section>
         ) : null}
+        <div className="sticky bottom-0 mt-auto flex items-center justify-between gap-3 bg-background/95 pt-5 pb-1 backdrop-blur" data-testid="section-navigation">
+          <Button type="button" variant="outline" disabled={!canGoPrevious} onClick={onPrevious} data-testid="coach-back">
+            <ChevronLeftIcon className="size-4" aria-hidden />
+            Back
+          </Button>
+          <Button type="button" disabled={!canGoNext} onClick={onNext} data-testid="coach-next">
+            Next
+            <ChevronRightIcon className="size-4" aria-hidden />
+          </Button>
+        </div>
       </div>
     </main>
+  );
+}
+
+function RecommendationsPanel({
+  recommendations,
+  followUpQuestions,
+  loadingMode,
+  error,
+  automaticLimitReached,
+  followUpLimitReached,
+  hasFinalSellerTranscript,
+  requestFollowUp,
+}: ReturnType<typeof useCoachRecommendations> & { hasFinalSellerTranscript: boolean }) {
+  const followUpBusy = loadingMode === "follow_up";
+  const failureMessage =
+    error === "rate_limited"
+      ? "The recommendation limit for this call has been reached."
+      : error === "busy"
+        ? "Sandra is already preparing a recommendation."
+        : error
+          ? "Recommendations are temporarily unavailable. Your script and transcript are unaffected."
+          : null;
+  return (
+    <aside
+      aria-label="Live recommendations"
+      data-testid="coach-recommendations"
+      className="min-h-64 shrink-0 bg-muted/20 px-4 py-5 md:px-6 xl:min-h-0 xl:overflow-y-auto"
+    >
+      <div className="text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Recommendations</div>
+      <h2 className="mt-1 text-lg font-bold">Helpful ways to go deeper</h2>
+      <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+        Sandra is listening for a meaningful homeowner response. Suggestions will appear here without changing your place in the script.
+      </p>
+      {recommendations.length > 0 ? (
+        <div className="mt-5" data-testid="automatic-recommendations">
+          <div className="text-[10px] font-bold tracking-wide text-muted-foreground uppercase">Consider saying</div>
+          <ul className="mt-2 space-y-2">
+            {recommendations.map((recommendation) => (
+              <li key={recommendation} className="rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed">
+                {recommendation}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      <Button
+        type="button"
+        variant="outline"
+        className="mt-5 w-full"
+        disabled={followUpBusy || !hasFinalSellerTranscript || followUpLimitReached}
+        data-testid="follow-up-questions"
+        onClick={() => void requestFollowUp()}
+      >
+        {loadingMode === "follow_up" ? <Loader2Icon className="size-4 animate-spin" aria-hidden /> : null}
+        Follow-up Questions
+      </Button>
+      {!hasFinalSellerTranscript ? (
+        <p className="mt-2 text-xs text-muted-foreground">Available after the homeowner has spoken.</p>
+      ) : null}
+      {followUpQuestions.length > 0 ? (
+        <ol className="mt-4 space-y-2" data-testid="follow-up-question-options">
+          {followUpQuestions.map((question) => (
+            <li key={question} className="rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed">
+              {question}
+            </li>
+          ))}
+        </ol>
+      ) : null}
+      {loadingMode === "automatic" ? (
+        <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground" data-testid="automatic-recommendations-loading">
+          <Loader2Icon className="size-3.5 animate-spin" aria-hidden />
+          Preparing suggestions…
+        </p>
+      ) : null}
+      {automaticLimitReached ? (
+        <p className="mt-3 text-xs text-muted-foreground">Automatic suggestions have reached their limit for this call.</p>
+      ) : null}
+      {failureMessage ? (
+        <p role="status" className="mt-3 text-xs text-muted-foreground" data-testid="recommendation-error">
+          {failureMessage}
+        </p>
+      ) : null}
+    </aside>
   );
 }
 
@@ -847,12 +665,14 @@ function BranchCard({
   branch,
   compact = false,
   onEditEntry,
+  isEntryTokenEditable,
   onBeginEntryEdit,
   onSelectVariant,
 }: {
   branch: ScriptBranchBlock;
   compact?: boolean;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
   onSelectVariant: (key: string) => void;
 }) {
@@ -910,7 +730,12 @@ function BranchCard({
               line.type === "note" && "text-xs text-muted-foreground italic",
             )}
           >
-            <LineSegments segments={line.segments} onEditEntry={onEditEntry} onBeginEntryEdit={onBeginEntryEdit} />
+            <LineSegments
+              segments={line.segments}
+              onEditEntry={onEditEntry}
+              isEntryTokenEditable={isEntryTokenEditable}
+              onBeginEntryEdit={onBeginEntryEdit}
+            />
           </p>
         ))}
       </div>
@@ -927,6 +752,7 @@ function BranchCard({
                 token={segment.token}
                 resolved={segment.resolved}
                 onEditEntry={onEditEntry}
+                isEntryTokenEditable={isEntryTokenEditable}
                 onBeginEntryEdit={onBeginEntryEdit}
               />
             ),
@@ -950,10 +776,12 @@ function BranchCard({
 function LineSegments({
   segments,
   onEditEntry,
+  isEntryTokenEditable,
   onBeginEntryEdit,
 }: {
   segments: DisplayTextSegment[];
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
 }) {
   return (
@@ -967,6 +795,7 @@ function LineSegments({
             token={segment.token}
             resolved={segment.resolved}
             onEditEntry={onEditEntry}
+            isEntryTokenEditable={isEntryTokenEditable}
             onBeginEntryEdit={onBeginEntryEdit}
           />
         );
@@ -990,14 +819,16 @@ function TokenChip({
   token,
   resolved,
   onEditEntry,
+  isEntryTokenEditable,
   onBeginEntryEdit,
 }: {
   token: CoachToken;
   resolved: ResolvedToken;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
+  isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
 }) {
-  if (ENTRY_TOKEN_SET.has(token)) {
+  if (ENTRY_TOKEN_SET.has(token) && isEntryTokenEditable(token as CoachEntryToken)) {
     return (
       <EntryTokenChip
         token={token as CoachEntryToken}
@@ -1088,266 +919,6 @@ function EntryTokenChip({
   );
 }
 
-function GuidanceOverlay({
-  nudges,
-  cards,
-  tokens,
-  occupancy,
-  visible = true,
-  onDismissNudge,
-  onDismissObjection,
-}: {
-  nudges: CoachNudge[];
-  cards: CoachObjectionCard[];
-  tokens: ResolvedTokens;
-  occupancy: CoachCallContext["occupancy"];
-  visible?: boolean;
-  onDismissNudge: (nudgeId: string) => void;
-  onDismissObjection: (cardId: string) => void;
-}) {
-  if (nudges.length === 0 && cards.length === 0) return null;
-  // Objections are the most specific live-call intervention, so the newest
-  // objection wins. With no objection, the newest coaching nudge wins. Every
-  // non-dominant item remains MOUNTED (only visually hidden): each owns an
-  // absolute-expiry timer effect, and unmounting a queued item would freeze
-  // that timer and let stale guidance resurface later.
-  const latestObjection = cards.at(-1);
-  const activeObjectionId = visible && latestObjection && isActionableObjection(latestObjection, occupancy)
-    ? latestObjection.id
-    : null;
-  const activeNudgeId = visible && !latestObjection ? (nudges.at(-1)?.id ?? null) : null;
-  const hasVisibleGuidance = activeObjectionId !== null || activeNudgeId !== null;
-
-  if (!hasVisibleGuidance) {
-    return (
-      <div hidden aria-hidden="true" data-testid="coach-guidance-timers">
-        <ObjectionOverlay
-          cards={cards}
-          activeCardId={null}
-          tokens={tokens}
-          occupancy={occupancy}
-          onDismiss={onDismissObjection}
-        />
-        <NudgeOverlay nudges={nudges} activeNudgeId={null} onDismiss={onDismissNudge} />
-      </div>
-    );
-  }
-  return (
-    <section
-      data-testid="coach-guidance-stack"
-      aria-label="Active coaching guidance"
-      className="min-h-0 flex-1 overflow-y-auto px-5 py-6 md:px-10 md:py-8"
-    >
-      <div className="mx-auto flex min-h-full max-w-4xl items-center py-3">
-        <div className="w-full">
-          <ObjectionOverlay
-            cards={cards}
-            activeCardId={activeObjectionId}
-            tokens={tokens}
-            occupancy={occupancy}
-            onDismiss={onDismissObjection}
-          />
-          <NudgeOverlay nudges={nudges} activeNudgeId={activeNudgeId} onDismiss={onDismissNudge} />
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function isActionableObjection(card: CoachObjectionCard, occupancy: CoachCallContext["occupancy"]): boolean {
-  const objection = getScriptObjection(card.objectionId);
-  return objection !== undefined && resolveObjectionOvercome(objection, occupancy) !== null;
-}
-
-function NudgeOverlay({
-  nudges,
-  activeNudgeId,
-  onDismiss,
-}: {
-  nudges: CoachNudge[];
-  activeNudgeId: string | null;
-  onDismiss: (nudgeId: string) => void;
-}) {
-  if (nudges.length === 0) return null;
-  return (
-    <div className="flex flex-col gap-2">
-      {nudges.map((nudge) => (
-        <NudgeCard
-          key={nudge.id}
-          nudge={nudge}
-          active={nudge.id === activeNudgeId}
-          onDismiss={() => onDismiss(nudge.id)}
-        />
-      ))}
-    </div>
-  );
-}
-
-/** Owns its own auto-dismiss timer, scoped to this nudge's mount lifetime —
- * a sibling nudge appearing or disappearing never resets or cancels it
- * (same pattern as ObjectionCard). The timer's duration is computed from
- * `nudge.expiresAt` (set once, at insert time, in event-reducer.ts) rather
- * than a fixed TTL, so a remount — collapsing and reopening the coach view
- * unmounts every card — picks up the correctly-shrunk remaining time
- * instead of restarting the full duration. */
-function NudgeCard({ nudge, active, onDismiss }: { nudge: CoachNudge; active: boolean; onDismiss: () => void }) {
-  const onDismissRef = useRef(onDismiss);
-  useEffect(() => {
-    onDismissRef.current = onDismiss;
-  });
-
-  useEffect(() => {
-    const remaining = Math.max(0, nudge.expiresAt - Date.now());
-    const timer = setTimeout(() => onDismissRef.current(), remaining);
-    return () => clearTimeout(timer);
-    // Intentionally mount-once — same pattern as ObjectionCard. expiresAt
-    // itself never changes after insert, so there's nothing to re-derive.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  return (
-    <button
-      type="button"
-      data-testid="coach-nudge"
-      data-active={active}
-      hidden={!active}
-      onClick={onDismiss}
-      className="animate-in slide-in-from-left-4 w-full rounded-2xl border border-amber-300/60 border-l-4 border-l-amber-500 bg-card px-5 py-5 text-left shadow-sm md:px-8 md:py-7"
-    >
-      <span
-        data-testid="coach-nudge-label"
-        className="block text-[11px] font-extrabold tracking-[0.14em] text-amber-700 uppercase dark:text-amber-300"
-      >
-        Coach nudge
-      </span>
-      <span className="mt-3 block text-2xl leading-relaxed font-semibold text-foreground">{nudge.text}</span>
-      <span className="mt-5 block text-xs text-muted-foreground">Tap to dismiss and return to the script.</span>
-    </button>
-  );
-}
-
-function ObjectionOverlay({
-  cards,
-  activeCardId,
-  tokens,
-  occupancy,
-  onDismiss,
-}: {
-  cards: CoachObjectionCard[];
-  activeCardId: string | null;
-  tokens: ResolvedTokens;
-  occupancy: CoachCallContext["occupancy"];
-  onDismiss: (cardId: string) => void;
-}) {
-  if (cards.length === 0) return null;
-  return (
-    <div className="flex flex-col gap-2">
-      {cards.map((card) => (
-        <ObjectionCard
-          key={card.id}
-          card={card}
-          active={card.id === activeCardId}
-          tokens={tokens}
-          occupancy={occupancy}
-          onDismiss={() => onDismiss(card.id)}
-        />
-      ))}
-    </div>
-  );
-}
-
-function ObjectionLine({ label, text, tokens }: { label: string; text: string; tokens: ResolvedTokens }) {
-  const segments = resolveDisplayText(text, tokens);
-  return (
-    <p>
-      <span className="font-bold">{label} — </span>
-      {segments.map((segment, index) => {
-        if (segment.kind === "text") return <span key={index}>{segment.value}</span>;
-        if (segment.kind === "tone") return <ToneChip key={index} text={segment.label} />;
-        // Objection text never contains the 3 rep-entry tokens today, but
-        // fall back to plain-value rendering (no inline editor here) if
-        // the script ever adds one — the card is transient, not the right
-        // place to capture a deal value.
-        return (
-          <span key={index} data-testid="token-resolved" className="font-bold text-emerald-700 dark:text-emerald-400">
-            {segment.resolved.value}
-          </span>
-        );
-      })}
-    </p>
-  );
-}
-
-/** Owns its own auto-dismiss timer, scoped to this card's mount lifetime —
- * a sibling card appearing or disappearing never resets or cancels it. The
- * timer's duration is computed from `card.expiresAt` (set once, at insert
- * time, in event-reducer.ts) rather than a fixed TTL, so a remount —
- * collapsing and reopening the coach view unmounts every card — picks up
- * the correctly-shrunk remaining time instead of restarting the full 45s. */
-function ObjectionCard({
-  card,
-  active,
-  tokens,
-  occupancy,
-  onDismiss,
-}: {
-  card: CoachObjectionCard;
-  active: boolean;
-  tokens: ResolvedTokens;
-  occupancy: CoachCallContext["occupancy"];
-  onDismiss: () => void;
-}) {
-  const onDismissRef = useRef(onDismiss);
-  // Keeps the ref current after every render — refs must not be written
-  // during render itself, only in an effect or event handler.
-  useEffect(() => {
-    onDismissRef.current = onDismiss;
-  });
-
-  useEffect(() => {
-    const remaining = Math.max(0, card.expiresAt - Date.now());
-    const timer = setTimeout(() => onDismissRef.current(), remaining);
-    return () => clearTimeout(timer);
-    // Intentionally mount-once: this card's lifetime timer must not be
-    // rearmed or cleared by anything other than its own unmount/dismiss.
-    // expiresAt never changes after insert, so there's nothing to re-derive.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const objection = getScriptObjection(card.objectionId);
-  const overcomeText = objection ? resolveObjectionOvercome(objection, occupancy) : null;
-  return (
-    <button
-      type="button"
-      data-testid="objection-card"
-      data-active={active}
-      hidden={!active}
-      onClick={onDismiss}
-      className="animate-in slide-in-from-right-4 w-full rounded-2xl border border-border border-l-4 border-l-primary bg-card px-5 py-5 text-left shadow-sm md:px-8 md:py-7"
-    >
-      <div className="mb-4 flex items-center justify-between gap-2">
-        <span className="text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Handle this objection</span>
-        {objection?.display.tonality ? <ToneChip text={objection.display.tonality} /> : null}
-      </div>
-      {objection && overcomeText ? (
-        <div className="space-y-3 text-base leading-relaxed md:text-lg">
-          <ObjectionLine label="Acknowledge" text={objection.display.acknowledge} tokens={tokens} />
-          <ObjectionLine label="Disarm" text={objection.display.disarm} tokens={tokens} />
-          <ObjectionLine label="Overcome" text={overcomeText} tokens={tokens} />
-          {objection.display.template ? (
-            <p className="rounded-lg border border-dashed border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-900">
-              {objection.display.template_note ?? "Live worked example — substitute the seller's real numbers."}
-            </p>
-          ) : null}
-        </div>
-      ) : (
-        <p className="text-sm text-muted-foreground">Keep following the live script while coaching refreshes.</p>
-      )}
-      <span className="mt-5 block text-xs text-muted-foreground">Tap to dismiss and return to the script.</span>
-    </button>
-  );
-}
-
 function CallControlDock({
   callName,
   callStatus,
@@ -1390,11 +961,9 @@ function CallControlDock({
     const onKeyDown = (event: KeyboardEvent) => {
       if (!/^[0-9*#]$/.test(event.key) || event.repeat) return;
       if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true']")) return;
-      // Guidance can hide the script and move focus to the dialog between
-      // offer-entry keystrokes. The editor itself remains mounted under the
-      // hidden script panel so its draft and blur/commit lifecycle survive;
-      // use that mounted editor as the source of truth instead of trusting
-      // only the key event's newly-moved target.
+      // An entry editor can remain mounted while pointer focus moves to the
+      // keypad. Treat the mounted editor as the source of truth instead of
+      // trusting only the key event's newly moved target.
       if (document.querySelector("[data-coach-entry-editor]")) return;
       event.preventDefault();
       onDigit(event.key as DtmfDigit);

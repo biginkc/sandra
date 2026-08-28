@@ -1,12 +1,20 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { CoachLiveView } from "@/components/coach/coach-live-view";
-import { coachReducer, initialCoachState, MAX_NUDGES, MAX_OBJECTION_CARDS } from "@/lib/coach/event-reducer";
-import { CLOSR_SCRIPT } from "@/lib/coach/script-block";
+import { coachReducer, initialCoachState } from "@/lib/coach/event-reducer";
+import {
+  FIRST_COACH_SECTION_ID,
+  getFirstCoachSectionIdForPhase,
+  getNextCoachSectionId,
+  getPreviousCoachSectionId,
+  type CoachSectionId,
+} from "@/lib/coach/section-manifest";
 import type { DtmfDigit } from "@/lib/dialer/transport";
 import type { CoachSession } from "@/lib/coach/use-coach-session";
 import type { CoachCallContext, CoachPhaseId, CoachState } from "@/lib/coach/types";
+import type { CoachRecommendationRequest, CoachRecommendationResult } from "@/lib/coach/recommendation-types";
+import { createCoachRecommendationContinuity } from "@/lib/coach/recommendation-client";
 
 const sampleContext: CoachCallContext = {
   sellerName: "Jane Homeowner",
@@ -23,35 +31,19 @@ const sampleContext: CoachCallContext = {
   occupancy: "owner_occupied",
 };
 
-function harnessState(withGuidance: boolean): CoachState {
-  const state = initialCoachState("offer");
-  const expiresAt = Date.now() + 300_000;
+function harnessState(): CoachState {
+  const state = initialCoachState("introduction");
   return {
     ...state,
     connected: true,
     transcript: [
       { id: "rep-1", speaker: "rep", text: "Walk me through what has you considering a move.", isFinal: true, ts: "t1" },
-      { id: "seller-1", speaker: "seller", text: "We need to be closer to family.", isFinal: true, ts: "t2" },
+      // Finalized seller speech enables the manual follow-up control, while
+      // this intentionally non-meaningful acknowledgement keeps the
+      // screenshot harness static instead of starting the 1.5s automatic
+      // recommendation timer during multi-pass contrast measurement.
+      { id: "seller-1", speaker: "seller", text: "Okay", isFinal: true, ts: "t2" },
     ],
-    objectionCards: withGuidance
-      ? ["price_too_low", "not_in_rush", "end_buyer"].slice(0, MAX_OBJECTION_CARDS).map((objectionId, index) => ({
-          id: `${objectionId}-${index}`,
-          objectionId,
-          ts: `o${index}`,
-          expiresAt,
-        }))
-      : [],
-    nudges: withGuidance
-      ? ["Slow down.", "Mirror the seller.", "Ask one more question."].slice(0, MAX_NUDGES).map((text, index) => ({
-          id: `nudge-${index}`,
-          text,
-          phaseId: "offer" as const,
-          ts: `n${index}`,
-          expiresAt,
-        }))
-      : [],
-    gates: { no_concerns: false },
-    holdTimer: { timerId: "hold-1", startedAt: new Date().toISOString(), durationS: 300 },
   };
 }
 
@@ -59,18 +51,32 @@ declare global {
   interface Window {
     coachHarness: {
       digits: DtmfDigit[];
-      showObjection: (objectionId?: string) => void;
       setPhase: (phaseId: CoachPhaseId) => void;
+      emitLegacyPhase: (phaseId: CoachPhaseId) => void;
     };
   }
 }
 
-function Harness({ withGuidance, held = false }: { withGuidance: boolean; held?: boolean }) {
-  const [state, dispatch] = useReducer(coachReducer, withGuidance, harnessState);
+function Harness({ held = false }: { held?: boolean }) {
+  const [state, dispatch] = useReducer(coachReducer, undefined, harnessState);
   const [reconnectGap, setReconnectGap] = useState(true);
+  const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(FIRST_COACH_SECTION_ID);
   const digitsRef = useRef<DtmfDigit[]>([]);
+  const goPreviousSection = useCallback(() => {
+    setActiveSectionId((current) => getPreviousCoachSectionId(current) ?? current);
+  }, []);
+  const goNextSection = useCallback(() => {
+    setActiveSectionId((current) => getNextCoachSectionId(current) ?? current);
+  }, []);
+  const goToPhase = useCallback((phaseId: CoachPhaseId) => {
+    setActiveSectionId(getFirstCoachSectionIdForPhase(phaseId));
+  }, []);
+  const previousSectionId = getPreviousCoachSectionId(activeSectionId);
+  const nextSectionId = getNextCoachSectionId(activeSectionId);
   const session = useMemo<CoachSession>(
     () => ({
+      callId: "synthetic-call",
+      recommendationContinuity: createCoachRecommendationContinuity("synthetic-call"),
       state,
       dispatch,
       degraded: false,
@@ -83,31 +89,33 @@ function Harness({ withGuidance, held = false }: { withGuidance: boolean; held?:
       branchOverrides: {},
       selectVariant: () => {},
       setEntryField: (field, value) => dispatch({ type: "set_entry_field", field, value }),
+      activeSectionId,
+      previousSectionId,
+      nextSectionId,
+      canGoPrevious: previousSectionId !== null,
+      canGoNext: nextSectionId !== null,
+      goToSection: setActiveSectionId,
+      goPreviousSection,
+      goNextSection,
+      goToPhase,
     }),
-    [reconnectGap, state],
+    [activeSectionId, goNextSection, goPreviousSection, goToPhase, nextSectionId, previousSectionId, reconnectGap, state],
   );
 
   useEffect(() => {
     window.coachHarness = {
       digits: digitsRef.current,
-      showObjection: (objectionId = "price_too_low") =>
-        dispatch({
-          type: "objection",
-          objectionId,
-          ts: `browser-${Date.now()}`,
-          scriptVersion: CLOSR_SCRIPT.version,
-          matcherVersion: "3",
-        }),
-      setPhase: (phaseId) =>
+      setPhase: goToPhase,
+      emitLegacyPhase: (phaseId) =>
         dispatch({
           type: "phase",
           phaseId,
           ts: `browser-${Date.now()}`,
-          scriptVersion: CLOSR_SCRIPT.version,
+          scriptVersion: "1.0.2",
           matcherVersion: "3",
         }),
     };
-  }, [dispatch]);
+  }, [dispatch, goToPhase]);
 
   return (
     <CoachLiveView
@@ -123,6 +131,17 @@ function Harness({ withGuidance, held = false }: { withGuidance: boolean; held?:
       onHold={() => {}}
       onHangup={() => {}}
       onCollapse={() => {}}
+      recommendationRequest={async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true,
+        requestId: input.requestId,
+        callId: input.callId,
+        activeSectionId: input.activeSectionId,
+        mode: input.mode,
+        recommendations: input.mode === "automatic" ? ["Ask how being closer to family would change their timeline."] : [],
+        followUpQuestions: input.mode === "follow_up"
+          ? ["What would moving closer to family make easier?", "How soon would you like that move to happen?", "What is making the timing important now?"]
+          : [],
+      })}
     />
   );
 }
@@ -130,5 +149,5 @@ function Harness({ withGuidance, held = false }: { withGuidance: boolean; held?:
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("Missing #root for coach live responsive harness");
 createRoot(rootElement).render(
-  <Harness withGuidance={rootElement.dataset.guidance === "true"} held={rootElement.dataset.held === "true"} />,
+  <Harness held={rootElement.dataset.held === "true"} />,
 );

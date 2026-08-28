@@ -4,7 +4,7 @@
   "source": "BMH CLOSR Call Script — Content Spec v1 (JT's Official CLOSR Sales Process, Jarrad-approved draft 2026-08-26). display content transcribed line-for-line from bmh-closr-call-script.html; match data carried forward from schema v1 (version 0.1.0). v1.0.1: full fidelity pass — greeting line restored to every Opener variant, complete coach_notes per phase, corrected file_number fallback, restored {year built} wording, occupancy-keyed 'not in a rush' objection tracks. v1.0.2: fixed the {year built} token — v1.0.1's restoration used a space instead of an underscore, so it never actually resolved (rendered as literal unresolved braces); corrected to {year_built} and added year_built to tokens[].",
   "brand": { "company": "BMH Group", "website": "bmhgroupkc.com" },
   "tokens": ["seller_name", "rep_name", "property_address", "motivation", "rep_phone", "file_number", "cold_caller_name", "year_built", "closing_date", "offer_price", "net_to_seller"],
-  "entry_tokens": ["closing_date", "offer_price", "net_to_seller"],
+  "entry_tokens": ["motivation", "cold_caller_name", "closing_date", "offer_price", "net_to_seller"],
   "file_number_rule": {
     "format": "{county_first2_upper}-{lead_id_last4}",
     "note": "Per the approved script's token legend: 'First 2 letters of county + last 4 of lead ID... Fallback if county missing: last 4 of seller's phone.' The fallback triggers when COUNTY is unavailable (not when the lead id is), and its value is the phone digits ALONE — no county prefix, since county is exactly what's missing. When county is present but the lead id isn't, the county prefix is kept and the seller's phone last 4 is used as the suffix instead.",
@@ -23,23 +23,23 @@
             "auto_select_by": "lead_source",
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" }
+                { "id": "introduction.opener.default.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" }
               ] },
               { "key": "cold_call", "label": "Cold call", "lines": [
-                { "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
-                { "type": "say", "text": "It looks like you spoke to one of my assistants {cold_caller_name} a little bit ago about your property on {property_address} — they said you may need help with {motivation}?" }
+                { "id": "introduction.opener.cold_call.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
+                { "id": "introduction.opener.cold_call.02", "type": "say", "text": "It looks like you spoke to one of my assistants {cold_caller_name} a little bit ago about your property on {property_address} — they said you may need help with {motivation}?" }
               ] },
               { "key": "fsbo", "label": "FSBO", "lines": [
-                { "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
-                { "type": "say", "text": "I saw your place at {property_address} was listed For Sale by Owner. Were you looking to sell to someone planning to live there, or would you want me to check if our team can get you approved for an all-cash offer?" }
+                { "id": "introduction.opener.fsbo.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
+                { "id": "introduction.opener.fsbo.02", "type": "say", "text": "I saw your place at {property_address} was listed For Sale by Owner. Were you looking to sell to someone planning to live there, or would you want me to check if our team can get you approved for an all-cash offer?" }
               ] },
               { "key": "sms", "label": "SMS reply", "lines": [
-                { "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
-                { "type": "say", "text": "I see you just responded to our team's text about getting an offer on {property_address} — is this something you want to sell immediately, or just looking at possible options while you have some free time?" }
+                { "id": "introduction.opener.sms.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
+                { "id": "introduction.opener.sms.02", "type": "say", "text": "I see you just responded to our team's text about getting an offer on {property_address} — is this something you want to sell immediately, or just looking at possible options while you have some free time?" }
               ] },
               { "key": "d4d", "label": "Driving for dollars", "lines": [
-                { "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
-                { "type": "say", "text": "I'm holding a copy of your tax records here for the property at {property_address}, and my team just wanted me to ask — would you be open to a cash offer, or are you planning to hold onto it for now?" }
+                { "id": "introduction.opener.d4d.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
+                { "id": "introduction.opener.d4d.02", "type": "say", "text": "I'm holding a copy of your tax records here for the property at {property_address}, and my team just wanted me to ask — would you be open to a cash offer, or are you planning to hold onto it for now?" }
               ] }
             ],
             "trailing_note": "If no motivation is on file, just say the address with a {{tone:question inflection}}."
@@ -49,12 +49,12 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "The reason for my call today, {seller_name}, is to see if we can even do anything good for you in the first place. Because at the end of the day not every property does qualify for an offer — but it's up to you and I to convince my underwriting team to get you approved. Sound fair?" },
-                { "type": "say", "text": "Cool, so how we work is very simple. We buy properties for a couple reasons:" },
-                { "type": "say", "text": "• To add some sort of value to the property so we can resell it on the market, or" },
-                { "type": "say", "text": "• Buy the property to rent it to someone who needs a nice rental for a fair price." },
-                { "type": "say", "text": "And at the end of this call only one of two things will happen. One — we can't get you approved, but we will at least point you in the right direction. Or two — we'll get you approved for an offer we can firmly stand behind, and we'll send you a simple agreement to approve so we don't keep you waiting and waste your time, because… I'm sure speed is important to you, right?" },
-                { "type": "say", "text": "Perfect — and are you in a position to be able to move forward once we find the solution that makes sense for you?" }
+                { "id": "introduction.frame-the-call.default.01", "type": "say", "text": "The reason for my call today, {seller_name}, is to see if we can even do anything good for you in the first place. Because at the end of the day not every property does qualify for an offer — but it's up to you and I to convince my underwriting team to get you approved. Sound fair?" },
+                { "id": "introduction.frame-the-call.default.02", "type": "say", "text": "Cool, so how we work is very simple. We buy properties for a couple reasons:" },
+                { "id": "introduction.frame-the-call.default.03", "type": "say", "text": "• To add some sort of value to the property so we can resell it on the market, or" },
+                { "id": "introduction.frame-the-call.default.04", "type": "say", "text": "• Buy the property to rent it to someone who needs a nice rental for a fair price." },
+                { "id": "introduction.frame-the-call.default.05", "type": "say", "text": "And at the end of this call only one of two things will happen. One — we can't get you approved, but we will at least point you in the right direction. Or two — we'll get you approved for an offer we can firmly stand behind, and we'll send you a simple agreement to approve so we don't keep you waiting and waste your time, because… I'm sure speed is important to you, right?" },
+                { "id": "introduction.frame-the-call.default.06", "type": "say", "text": "Perfect — and are you in a position to be able to move forward once we find the solution that makes sense for you?" }
               ] }
             ]
           },
@@ -63,13 +63,13 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Alrighty, just in case we get disconnected here I'm going to ask you to pull out a pen and paper so I can tell you some things you'll surely want to know — especially if we get you approved. Let me know when you're ready to take notes." },
-                { "type": "say", "text": "• My name is {rep_name}." },
-                { "type": "say", "text": "• Our company is BMH Group." },
-                { "type": "say", "text": "• Our website is bmhgroupkc.com — you can see our testimonials, reviews, and how our process works." },
-                { "type": "say", "text": "• My phone number is {rep_phone} — if we get disconnected you can call or text me anytime. Could you repeat that back to me so I know you have the right number? And for you — is this a landline or cell phone?" },
-                { "type": "say", "text": "• And finally, most important — your file number is {file_number}. You can call back anytime with this number to ask for updates on your file." },
-                { "type": "say", "text": "You got it? Awesome." }
+                { "id": "introduction.pen-paper-contact-details.default.01", "type": "say", "text": "Alrighty, just in case we get disconnected here I'm going to ask you to pull out a pen and paper so I can tell you some things you'll surely want to know — especially if we get you approved. Let me know when you're ready to take notes." },
+                { "id": "introduction.pen-paper-contact-details.default.02", "type": "say", "text": "• My name is {rep_name}." },
+                { "id": "introduction.pen-paper-contact-details.default.03", "type": "say", "text": "• Our company is BMH Group." },
+                { "id": "introduction.pen-paper-contact-details.default.04", "type": "say", "text": "• Our website is bmhgroupkc.com — you can see our testimonials, reviews, and how our process works." },
+                { "id": "introduction.pen-paper-contact-details.default.05", "type": "say", "text": "• My phone number is {rep_phone} — if we get disconnected you can call or text me anytime. Could you repeat that back to me so I know you have the right number? And for you — is this a landline or cell phone?" },
+                { "id": "introduction.pen-paper-contact-details.default.06", "type": "say", "text": "• And finally, most important — your file number is {file_number}. You can call back anytime with this number to ask for updates on your file." },
+                { "id": "introduction.pen-paper-contact-details.default.07", "type": "say", "text": "You got it? Awesome." }
               ] }
             ]
           }
@@ -107,20 +107,20 @@
             "auto_select_by": "occupancy",
             "variants": [
               { "key": "unknown", "label": null, "lines": [
-                { "type": "say", "text": "Ok {seller_name}, that should be all you need for now until we find out if we can get you approved for an offer. But until then, could you give me a little bit of a rundown?" },
-                { "type": "say", "text": "Do you currently… live here?.. Or are there tenants? What's going on?" }
+                { "id": "reveal.entry.unknown.01", "type": "say", "text": "Ok {seller_name}, that should be all you need for now until we find out if we can get you approved for an offer. But until then, could you give me a little bit of a rundown?" },
+                { "id": "reveal.entry.unknown.02", "type": "say", "text": "Do you currently… live here?.. Or are there tenants? What's going on?" }
               ] },
               { "key": "owner_occupied", "label": "Owner-occupied", "lines": [
-                { "type": "say", "text": "Ok {seller_name}, that should be all you need for now until we find out if we can get you approved for an offer. But until then, could you give me a little bit of a rundown?" },
-                { "type": "say", "text": "I know you live here and all, but what made you ready to make this move now?" }
+                { "id": "reveal.entry.owner_occupied.01", "type": "say", "text": "Ok {seller_name}, that should be all you need for now until we find out if we can get you approved for an offer. But until then, could you give me a little bit of a rundown?" },
+                { "id": "reveal.entry.owner_occupied.02", "type": "say", "text": "I know you live here and all, but what made you ready to make this move now?" }
               ] },
               { "key": "tenant_occupied", "label": "Tenant-occupied", "lines": [
-                { "type": "say", "text": "Ok {seller_name}, that should be all you need for now until we find out if we can get you approved for an offer. But until then, could you give me a little bit of a rundown?" },
-                { "type": "say", "text": "I know you have these tenants and all, but what made you ready to move on to something new now?" }
+                { "id": "reveal.entry.tenant_occupied.01", "type": "say", "text": "Ok {seller_name}, that should be all you need for now until we find out if we can get you approved for an offer. But until then, could you give me a little bit of a rundown?" },
+                { "id": "reveal.entry.tenant_occupied.02", "type": "say", "text": "I know you have these tenants and all, but what made you ready to move on to something new now?" }
               ] },
               { "key": "vacant", "label": "Vacant", "lines": [
-                { "type": "say", "text": "Ok {seller_name}, that should be all you need for now until we find out if we can get you approved for an offer. But until then, could you give me a little bit of a rundown?" },
-                { "type": "say", "text": "I know it's been vacant for a little bit, but what made you decide to go ahead and sell it now?" }
+                { "id": "reveal.entry.vacant.01", "type": "say", "text": "Ok {seller_name}, that should be all you need for now until we find out if we can get you approved for an offer. But until then, could you give me a little bit of a rundown?" },
+                { "id": "reveal.entry.vacant.02", "type": "say", "text": "I know it's been vacant for a little bit, but what made you decide to go ahead and sell it now?" }
               ] }
             ]
           },
@@ -129,26 +129,26 @@
             "auto_select_by": null,
             "variants": [
               { "key": "homeowner", "label": "Homeowner", "lines": [
-                { "type": "say", "text": "Oh! Where are you headed next?" },
-                { "type": "say", "text": "Why there?" },
-                { "type": "say", "text": "How does that compare to where you are now?" },
-                { "type": "say", "text": "How long have you been there?" },
-                { "type": "say", "text": "If nowhere: Well, we don't want to just kick you out in the streets! {{tone:playful tone}} No seriously — the investors are going to want to know: if we end up buying it, what's the plan?" }
+                { "id": "reveal.example-probes-goal-7.homeowner.01", "type": "say", "text": "Oh! Where are you headed next?" },
+                { "id": "reveal.example-probes-goal-7.homeowner.02", "type": "say", "text": "Why there?" },
+                { "id": "reveal.example-probes-goal-7.homeowner.03", "type": "say", "text": "How does that compare to where you are now?" },
+                { "id": "reveal.example-probes-goal-7.homeowner.04", "type": "say", "text": "How long have you been there?" },
+                { "id": "reveal.example-probes-goal-7.homeowner.05", "type": "say", "text": "If nowhere: Well, we don't want to just kick you out in the streets! {{tone:playful tone}} No seriously — the investors are going to want to know: if we end up buying it, what's the plan?" }
               ] },
               { "key": "investor", "label": "Investor", "lines": [
-                { "type": "say", "text": "Are there tenants there now? What are they paying?" },
-                { "type": "say", "text": "Are they on a lease? Month to month?" },
-                { "type": "say", "text": "And the tenants — are they paying every month, on time, like the exact time they're supposed to?" },
-                { "type": "say", "text": "How are the tenants?" },
-                { "type": "say", "text": "Are you investing in something else once you sell this one, or hanging up the hat for good?" }
+                { "id": "reveal.example-probes-goal-7.investor.01", "type": "say", "text": "Are there tenants there now? What are they paying?" },
+                { "id": "reveal.example-probes-goal-7.investor.02", "type": "say", "text": "Are they on a lease? Month to month?" },
+                { "id": "reveal.example-probes-goal-7.investor.03", "type": "say", "text": "And the tenants — are they paying every month, on time, like the exact time they're supposed to?" },
+                { "id": "reveal.example-probes-goal-7.investor.04", "type": "say", "text": "How are the tenants?" },
+                { "id": "reveal.example-probes-goal-7.investor.05", "type": "say", "text": "Are you investing in something else once you sell this one, or hanging up the hat for good?" }
               ] },
               { "key": "vacant", "label": "Vacant", "lines": [
-                { "type": "say", "text": "How long has it been vacant?" },
-                { "type": "say", "text": "What are you doing now to keep up with the maintenance?" },
-                { "type": "say", "text": "Who's actually responsible for the yard, the property taxes, things like that?" },
-                { "type": "say", "text": "How long have you been paying that?" },
-                { "type": "note", "text": "Add up everything they've paid so far." },
-                { "type": "say", "text": "So when you sell — are ya taking a one-way trip to Vegas, or what's the plan?" }
+                { "id": "reveal.example-probes-goal-7.vacant.01", "type": "say", "text": "How long has it been vacant?" },
+                { "id": "reveal.example-probes-goal-7.vacant.02", "type": "say", "text": "What are you doing now to keep up with the maintenance?" },
+                { "id": "reveal.example-probes-goal-7.vacant.03", "type": "say", "text": "Who's actually responsible for the yard, the property taxes, things like that?" },
+                { "id": "reveal.example-probes-goal-7.vacant.04", "type": "say", "text": "How long have you been paying that?" },
+                { "id": "reveal.example-probes-goal-7.vacant.05", "type": "note", "text": "Add up everything they've paid so far." },
+                { "id": "reveal.example-probes-goal-7.vacant.06", "type": "say", "text": "So when you sell — are ya taking a one-way trip to Vegas, or what's the plan?" }
               ] }
             ]
           },
@@ -157,16 +157,16 @@
             "auto_select_by": null,
             "variants": [
               { "key": "clear_no_urgency", "label": "Clear motivation, no urgency", "tone": "concerned / curious tone", "lines": [
-                { "type": "say", "text": "So besides {motivation}, what was it that came up that made you want to look at possibly moving on from this house… now?" },
-                { "type": "say", "text": "How long has that been going on?" }
+                { "id": "reveal.motivation.clear_no_urgency.01", "type": "say", "text": "So besides {motivation}, what was it that came up that made you want to look at possibly moving on from this house… now?" },
+                { "id": "reveal.motivation.clear_no_urgency.02", "type": "say", "text": "How long has that been going on?" }
               ] },
               { "key": "clear_with_urgency", "label": "Clear motivation with urgency", "lines": [
-                { "type": "say", "text": "Just so I can understand the rationale here… what's the main reason you're reaching out to us for maybe a quicker close or easier transaction — versus, I don't know… taking a chance, listing it with a realtor, and going through all the hassle?" }
+                { "id": "reveal.motivation.clear_with_urgency.01", "type": "say", "text": "Just so I can understand the rationale here… what's the main reason you're reaching out to us for maybe a quicker close or easier transaction — versus, I don't know… taking a chance, listing it with a realtor, and going through all the hassle?" }
               ] },
               { "key": "no_clear_motivation", "label": "No clear motivation", "lines": [
-                { "type": "say", "text": "It sounds like things are going fairly well for you here — what's the rationale behind wanting to possibly sell the property rather than, I don't know… (repeat back their situation)?" },
-                { "type": "say", "text": "Well, that all makes sense — but why take care of this… now though?" },
-                { "type": "say", "text": "Ah, well that makes sense — and how we could possibly help." }
+                { "id": "reveal.motivation.no_clear_motivation.01", "type": "say", "text": "It sounds like things are going fairly well for you here — what's the rationale behind wanting to possibly sell the property rather than, I don't know… (repeat back their situation)?" },
+                { "id": "reveal.motivation.no_clear_motivation.02", "type": "say", "text": "Well, that all makes sense — but why take care of this… now though?" },
+                { "id": "reveal.motivation.no_clear_motivation.03", "type": "say", "text": "Ah, well that makes sense — and how we could possibly help." }
               ] }
             ]
           }
@@ -206,15 +206,15 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Ok, thank you for sharing all of that with me, {seller_name} — that's truly helpful and will help the chances of you getting approved. Now, before we get into the inside of the house, can you tell me about the outside?" },
-                { "type": "say", "text": "• Like the neighborhood? How are the neighbors — do they take care of their home, and are they nice?" },
-                { "type": "say", "text": "• What about the windows and doors — are they all weather-proof?" },
-                { "type": "say", "text": "• And the road — is it a double yellow line? What's the speed limit out front?" },
-                { "type": "say", "text": "• Any power lines crossing through the property?" },
-                { "type": "say", "text": "• The structure — is it in good condition, or do you know of anything wrong right now?" },
-                { "type": "say", "text": "• And the roof? Any leaks, missing shingles, anything like that?" },
-                { "type": "say", "text": "• How about the HVAC — good operating condition, or does that need replacing too?" },
-                { "type": "say", "text": "• Anything I can't see from the road out back — a shed, pool, any other structure?" }
+                { "id": "assessment.outside.default.01", "type": "say", "text": "Ok, thank you for sharing all of that with me, {seller_name} — that's truly helpful and will help the chances of you getting approved. Now, before we get into the inside of the house, can you tell me about the outside?" },
+                { "id": "assessment.outside.default.02", "type": "say", "text": "• Like the neighborhood? How are the neighbors — do they take care of their home, and are they nice?" },
+                { "id": "assessment.outside.default.03", "type": "say", "text": "• What about the windows and doors — are they all weather-proof?" },
+                { "id": "assessment.outside.default.04", "type": "say", "text": "• And the road — is it a double yellow line? What's the speed limit out front?" },
+                { "id": "assessment.outside.default.05", "type": "say", "text": "• Any power lines crossing through the property?" },
+                { "id": "assessment.outside.default.06", "type": "say", "text": "• The structure — is it in good condition, or do you know of anything wrong right now?" },
+                { "id": "assessment.outside.default.07", "type": "say", "text": "• And the roof? Any leaks, missing shingles, anything like that?" },
+                { "id": "assessment.outside.default.08", "type": "say", "text": "• How about the HVAC — good operating condition, or does that need replacing too?" },
+                { "id": "assessment.outside.default.09", "type": "say", "text": "• Anything I can't see from the road out back — a shed, pool, any other structure?" }
               ] }
             ]
           },
@@ -223,15 +223,15 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Great, that should be everything I need about the outside for now. So this can segue us into the inside — I'd like you to walk me through the layout of the house as detailed as you can. Would you do that for me?" },
-                { "type": "say", "text": "• Would you say the interior still looks like the {year_built}'s, or has it been updated since?" },
-                { "type": "say", "text": "• What type of flooring is it currently?" },
-                { "type": "say", "text": "• Is it sheetrock or paneling?" },
-                { "type": "say", "text": "• What kind of countertops and appliances in the kitchen?" },
-                { "type": "say", "text": "• The bathrooms — what type of shower?" },
-                { "type": "say", "text": "• Has the plumbing been updated — pex, PVC, copper, or galvanized?" },
-                { "type": "say", "text": "• And the electric — breaker box, or tube and knob?" },
-                { "type": "say", "text": "Thank you! So let's say I gave you a $50,000 gift card to Home Depot — what exactly would you do to this property to get it HGTV-ready?" }
+                { "id": "assessment.inside.default.01", "type": "say", "text": "Great, that should be everything I need about the outside for now. So this can segue us into the inside — I'd like you to walk me through the layout of the house as detailed as you can. Would you do that for me?" },
+                { "id": "assessment.inside.default.02", "type": "say", "text": "• Would you say the interior still looks like the {year_built}'s, or has it been updated since?" },
+                { "id": "assessment.inside.default.03", "type": "say", "text": "• What type of flooring is it currently?" },
+                { "id": "assessment.inside.default.04", "type": "say", "text": "• Is it sheetrock or paneling?" },
+                { "id": "assessment.inside.default.05", "type": "say", "text": "• What kind of countertops and appliances in the kitchen?" },
+                { "id": "assessment.inside.default.06", "type": "say", "text": "• The bathrooms — what type of shower?" },
+                { "id": "assessment.inside.default.07", "type": "say", "text": "• Has the plumbing been updated — pex, PVC, copper, or galvanized?" },
+                { "id": "assessment.inside.default.08", "type": "say", "text": "• And the electric — breaker box, or tube and knob?" },
+                { "id": "assessment.inside.default.09", "type": "say", "text": "Thank you! So let's say I gave you a $50,000 gift card to Home Depot — what exactly would you do to this property to get it HGTV-ready?" }
               ] }
             ]
           }
@@ -264,11 +264,11 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Thank you so much for being so detailed. In just a few minutes I'll be running this back to my underwriting — is there anything else you'd need to figure out before you truly know you can close on this property?" },
-                { "type": "say", "text": "So, do you have a deadline this absolutely has to sell by?" },
-                { "type": "say", "text": "Ok — and is there anyone else who might be even a tiny bit concerned that you're selling the home? No realtor, or crazy ex-girlfriend, or anything like that?" },
-                { "type": "say", "text": "Ok great — and after all mortgages and liens are taken out, how much do you need in your pocket at closing in order to {motivation}?" },
-                { "type": "say", "text": "Ok, and how much is currently left on your mortgage?" }
+                { "id": "secure_positioning.lock-the-frame.default.01", "type": "say", "text": "Thank you so much for being so detailed. In just a few minutes I'll be running this back to my underwriting — is there anything else you'd need to figure out before you truly know you can close on this property?" },
+                { "id": "secure_positioning.lock-the-frame.default.02", "type": "say", "text": "So, do you have a deadline this absolutely has to sell by?" },
+                { "id": "secure_positioning.lock-the-frame.default.03", "type": "say", "text": "Ok — and is there anyone else who might be even a tiny bit concerned that you're selling the home? No realtor, or crazy ex-girlfriend, or anything like that?" },
+                { "id": "secure_positioning.lock-the-frame.default.04", "type": "say", "text": "Ok great — and after all mortgages and liens are taken out, how much do you need in your pocket at closing in order to {motivation}?" },
+                { "id": "secure_positioning.lock-the-frame.default.05", "type": "say", "text": "Ok, and how much is currently left on your mortgage?" }
               ] }
             ]
           },
@@ -277,8 +277,8 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "So {seller_name}, I just want to let you know — and keep in mind this is by no means our offer — but other investors are buying similar properties at 40 to 50% of Zillow value. Again, that's not our offer, just what other investors are paying cash… if they offered you something like that, would you still be able to achieve {motivation}?" },
-                { "type": "say", "text": "And really, that is by no means our offer — I'm just trying to understand what I should do in case underwriting comes back a little lower than you and I are hoping for." }
+                { "id": "secure_positioning.anchor.default.01", "type": "say", "text": "So {seller_name}, I just want to let you know — and keep in mind this is by no means our offer — but other investors are buying similar properties at 40 to 50% of Zillow value. Again, that's not our offer, just what other investors are paying cash… if they offered you something like that, would you still be able to achieve {motivation}?" },
+                { "id": "secure_positioning.anchor.default.02", "type": "say", "text": "And really, that is by no means our offer — I'm just trying to understand what I should do in case underwriting comes back a little lower than you and I are hoping for." }
               ] }
             ]
           },
@@ -288,10 +288,10 @@
             "critical": true,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "note", "text": "Stay here until they have zero concerns — most important moment in the script." },
-                { "type": "say", "text": "So that {net_to_seller} you said you needed in your pocket at closing — if we can get you close to that, close in a time frame that works for you, and make sure you achieve {motivation}… would you have any concerns at that point?" },
-                { "type": "note", "text": "If nothing:" },
-                { "type": "say", "text": "If we're able to do all that, then what do you want the next steps to be from here?" }
+                { "id": "secure_positioning.the-no-concerns-gate.default.01", "type": "note", "text": "Stay here until they have zero concerns — most important moment in the script." },
+                { "id": "secure_positioning.the-no-concerns-gate.default.02", "type": "say", "text": "So that {net_to_seller} you said you needed in your pocket at closing — if we can get you close to that, close in a time frame that works for you, and make sure you achieve {motivation}… would you have any concerns at that point?" },
+                { "id": "secure_positioning.the-no-concerns-gate.default.03", "type": "note", "text": "If nothing:" },
+                { "id": "secure_positioning.the-no-concerns-gate.default.04", "type": "say", "text": "If we're able to do all that, then what do you want the next steps to be from here?" }
               ] }
             ]
           },
@@ -301,7 +301,7 @@
             "hold_after": "3-minute hold — run comps",
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Ok — so what I can do from here, if you feel like it would help, is run down the hall to the underwriting department to see if we can get you approved for one of our cash offer programs. Within the next few minutes I'll either have you an approval with an offer attached to your file number, or a denial with a reason why. So just hold on for a few minutes while I put you on hold." }
+                { "id": "secure_positioning.send-to-underwriting.default.01", "type": "say", "text": "Ok — so what I can do from here, if you feel like it would help, is run down the hall to the underwriting department to see if we can get you approved for one of our cash offer programs. Within the next few minutes I'll either have you an approval with an offer attached to your file number, or a denial with a reason why. So just hold on for a few minutes while I put you on hold." }
               ] }
             ]
           },
@@ -310,14 +310,14 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Hey {seller_name}, can you hear me? So I don't have good or bad news quite yet — they just have a few more specific questions before we give you an offer we can firmly stand behind." },
-                { "type": "say", "text": "• Do you happen to know the exact age of the HVAC? What about the roof?" },
-                { "type": "say", "text": "• What schools is the home zoned for? Nearest grocery store?" },
-                { "type": "say", "text": "• What type of foundation — basement, crawlspace, slab?" },
-                { "type": "say", "text": "• Septic or sewer? Well or city water?" },
-                { "type": "say", "text": "• Is there internet available? What about fiber?" },
-                { "type": "say", "text": "And a couple more for the final approval: if they come back with an approval and an offer that makes sense for you, are you ready to approve an agreement and get the process rolling now, so we can get you to the closing table on the day we promise?" },
-                { "type": "say", "text": "What's the best email address for you?" }
+                { "id": "secure_positioning.back-from-hold-final-questions.default.01", "type": "say", "text": "Hey {seller_name}, can you hear me? So I don't have good or bad news quite yet — they just have a few more specific questions before we give you an offer we can firmly stand behind." },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.02", "type": "say", "text": "• Do you happen to know the exact age of the HVAC? What about the roof?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.03", "type": "say", "text": "• What schools is the home zoned for? Nearest grocery store?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.04", "type": "say", "text": "• What type of foundation — basement, crawlspace, slab?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.05", "type": "say", "text": "• Septic or sewer? Well or city water?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.06", "type": "say", "text": "• Is there internet available? What about fiber?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.07", "type": "say", "text": "And a couple more for the final approval: if they come back with an approval and an offer that makes sense for you, are you ready to approve an agreement and get the process rolling now, so we can get you to the closing table on the day we promise?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.08", "type": "say", "text": "What's the best email address for you?" }
               ] }
             ]
           },
@@ -327,14 +327,14 @@
             "hold_after": "3-minute hold — write contract",
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Alright, perfect — this is all they needed! Before I take this back, do you mind if I share how our process works?" },
-                { "type": "say", "text": "Awesome. So if you do receive a final approval, it'll be attached to file number {file_number} like we discussed. I'll then send you a simple three-page agreement that we'll go over together — and luckily for both of us it's written in third-grade English. Not to insult your intelligence — to make sure everyone can easily understand it." },
-                { "type": "say", "text": "Once it's approved, we'll send a member of our team out to the home within the next 72 hours to take some pictures so our team can start the closing process. Once we have pictures, we share them with our contractors first for an accurate repair budget, and then possibly with the open partner market to make sure we can get the price we say we will, in the time frame we promised you." },
-                { "type": "say", "text": "We'll then schedule a couple of walkthroughs with our contractors and retail partners — but our team is used to this, so for you it's hands-off. No repairs, renovations, cleaning, or anything like that to stress about." },
-                { "type": "say", "text": "And from that point on — you sit back, relax, and get paid!" },
-                { "type": "say", "text": "Do you have any questions or concerns about the process before I take this back for final approval?" },
-                { "type": "note", "text": "This is where objections get pre-handled so nothing new surfaces after price. Stress this." },
-                { "type": "say", "text": "Ok, awesome — give me just a few minutes with the team and I'll see if we can get you approved!" }
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.01", "type": "say", "text": "Alright, perfect — this is all they needed! Before I take this back, do you mind if I share how our process works?" },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.02", "type": "say", "text": "Awesome. So if you do receive a final approval, it'll be attached to file number {file_number} like we discussed. I'll then send you a simple three-page agreement that we'll go over together — and luckily for both of us it's written in third-grade English. Not to insult your intelligence — to make sure everyone can easily understand it." },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.03", "type": "say", "text": "Once it's approved, we'll send a member of our team out to the home within the next 72 hours to take some pictures so our team can start the closing process. Once we have pictures, we share them with our contractors first for an accurate repair budget, and then possibly with the open partner market to make sure we can get the price we say we will, in the time frame we promised you." },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.04", "type": "say", "text": "We'll then schedule a couple of walkthroughs with our contractors and retail partners — but our team is used to this, so for you it's hands-off. No repairs, renovations, cleaning, or anything like that to stress about." },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.05", "type": "say", "text": "And from that point on — you sit back, relax, and get paid!" },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.06", "type": "say", "text": "Do you have any questions or concerns about the process before I take this back for final approval?" },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.07", "type": "note", "text": "This is where objections get pre-handled so nothing new surfaces after price. Stress this." },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.08", "type": "say", "text": "Ok, awesome — give me just a few minutes with the team and I'll see if we can get you approved!" }
               ] }
             ]
           }
@@ -383,9 +383,9 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "CONGRATS {seller_name}!!! Looks like we are able to help you with this. It looks like the best you could get approved for was {offer_price}, which will put {net_to_seller} in your pocket and allow you to achieve {motivation}." },
-                { "type": "note", "text": "Assume the close:" },
-                { "type": "say", "text": "So next steps from here — I'll send you a simple agreement to approve so we can get you to the closing table on {closing_date} like we promised. What's the best email for me to send it to?" }
+                { "id": "offer.good-news.default.01", "type": "say", "text": "CONGRATS {seller_name}!!! Looks like we are able to help you with this. It looks like the best you could get approved for was {offer_price}, which will put {net_to_seller} in your pocket and allow you to achieve {motivation}." },
+                { "id": "offer.good-news.default.02", "type": "note", "text": "Assume the close:" },
+                { "id": "offer.good-news.default.03", "type": "say", "text": "So next steps from here — I'll send you a simple agreement to approve so we can get you to the closing table on {closing_date} like we promised. What's the best email for me to send it to?" }
               ] }
             ]
           },
@@ -394,9 +394,9 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Unfortunately it did come in right around where I was thinking it would. It looks like the best you could get approved for is {offer_price}, which will put {net_to_seller} in your pocket so you could {motivation}. Now I know that's not what you were expecting — but will that at least put you in a better position than you're in now?" },
-                { "type": "note", "text": "If yes: assume the close. If no: {{tone:sigh}}" },
-                { "type": "say", "text": "Yeah… I was afraid of that… what were you hoping I was at least going to say?" }
+                { "id": "offer.bad-news.default.01", "type": "say", "text": "Unfortunately it did come in right around where I was thinking it would. It looks like the best you could get approved for is {offer_price}, which will put {net_to_seller} in your pocket so you could {motivation}. Now I know that's not what you were expecting — but will that at least put you in a better position than you're in now?" },
+                { "id": "offer.bad-news.default.02", "type": "note", "text": "If yes: assume the close. If no: {{tone:sigh}}" },
+                { "id": "offer.bad-news.default.03", "type": "say", "text": "Yeah… I was afraid of that… what were you hoping I was at least going to say?" }
               ] }
             ]
           },
@@ -405,7 +405,7 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Unfortunately we were not able to get you approved for one of our rapid offer programs… Now I DO have other options we can look at, buuut it's not going to close in 10–14 days like the other one. Let's say I could get you closer to the {net_to_seller} you said you needed — would it really matter if it took an extra 30 days?" }
+                { "id": "offer.bad-news-below-mortgage.default.01", "type": "say", "text": "Unfortunately we were not able to get you approved for one of our rapid offer programs… Now I DO have other options we can look at, buuut it's not going to close in 10–14 days like the other one. Let's say I could get you closer to the {net_to_seller} you said you needed — would it really matter if it took an extra 30 days?" }
               ] }
             ]
           },
@@ -414,8 +414,8 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "note", "text": "{{tone:sigh}}" },
-                { "type": "say", "text": "Man, I apologize — our offer was lower than what you and I were hoping for… what were you hoping I was at least going to say?" }
+                { "id": "offer.price-too-low.default.01", "type": "note", "text": "{{tone:sigh}}" },
+                { "id": "offer.price-too-low.default.02", "type": "say", "text": "Man, I apologize — our offer was lower than what you and I were hoping for… what were you hoping I was at least going to say?" }
               ] }
             ]
           }
@@ -448,8 +448,8 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "note", "text": "Only for novation prices on the calculator." },
-                { "type": "say", "text": "There is one program I can check to see if you qualify for… not everyone does, but if you do, we may be able to get you your number. {seller_name}, if you had that amount in your pocket on closing day — no strings attached — would there be any other reason you wouldn't move forward?" }
+                { "id": "close.if-far-apart-program-pivot.default.01", "type": "note", "text": "Only for novation prices on the calculator." },
+                { "id": "close.if-far-apart-program-pivot.default.02", "type": "say", "text": "There is one program I can check to see if you qualify for… not everyone does, but if you do, we may be able to get you your number. {seller_name}, if you had that amount in your pocket on closing day — no strings attached — would there be any other reason you wouldn't move forward?" }
               ] }
             ]
           },
@@ -458,7 +458,7 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Congratulations, {seller_name}! I'm grateful we're able to help you. Next steps — I just need your email so I can take it down the hall to the team and they can write up the agreement for you and I to go over together. What's the best email to send the agreement to?" }
+                { "id": "close.they-accept.default.01", "type": "say", "text": "Congratulations, {seller_name}! I'm grateful we're able to help you. Next steps — I just need your email so I can take it down the hall to the team and they can write up the agreement for you and I to go over together. What's the best email to send the agreement to?" }
               ] }
             ]
           },
@@ -467,10 +467,10 @@
             "auto_select_by": null,
             "variants": [
               { "key": "default", "label": null, "lines": [
-                { "type": "say", "text": "Just to confirm, {seller_name} — the address is {property_address}, the purchase price we agreed on is {offer_price}, and the closing date we agreed on is {closing_date}. The company handling closing and wiring your funds — we'll let you know via formal notification. Oh yeah! Do you want your funds via wire, or a check at closing?" },
-                { "type": "say", "text": "Awesome — any other questions?" },
-                { "type": "say", "text": "So I just sent it over to your email — pull that up for me please: press View Documents → press Sign in the top left → press the red flashing box → press Adopt and Sign → (novation: have them press the second red box) → then press share back with {rep_name}." },
-                { "type": "say", "text": "Great! Our team will reach out within the next 72 hours to schedule the initial walkthrough. It's a blessing being able to help you — talk soon." }
+                { "id": "close.going-over-the-contract.default.01", "type": "say", "text": "Just to confirm, {seller_name} — the address is {property_address}, the purchase price we agreed on is {offer_price}, and the closing date we agreed on is {closing_date}. The company handling closing and wiring your funds — we'll let you know via formal notification. Oh yeah! Do you want your funds via wire, or a check at closing?" },
+                { "id": "close.going-over-the-contract.default.02", "type": "say", "text": "Awesome — any other questions?" },
+                { "id": "close.going-over-the-contract.default.03", "type": "say", "text": "So I just sent it over to your email — pull that up for me please: press View Documents → press Sign in the top left → press the red flashing box → press Adopt and Sign → (novation: have them press the second red box) → then press share back with {rep_name}." },
+                { "id": "close.going-over-the-contract.default.04", "type": "say", "text": "Great! Our team will reach out within the next 72 hours to schedule the initial walkthrough. It's a blessing being able to help you — talk soon." }
               ] }
             ]
           }

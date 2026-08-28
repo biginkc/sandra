@@ -66,7 +66,7 @@ export type ScriptPhaseMatch = {
 /** One spoken sentence/bullet ("say") or a rep-facing stage direction
  * ("note", e.g. "If yes: assume the close.") — notes render dimmed and are
  * never meant to be read aloud. */
-export type ScriptLineBlock = { type: "say" | "note"; text: string };
+export type ScriptLineBlock = { id: string; type: "say" | "note"; text: string };
 
 export type ScriptVariant = {
   /** Stable key ("cold_call", "vacant", "default", …) — matched against
@@ -144,6 +144,31 @@ export type ClosrScript = {
   };
   phases: ScriptPhase[];
   objections: ScriptObjection[];
+};
+
+export type CoachSectionVariantReference = {
+  variant_key: string;
+  line_ids: string[];
+};
+
+export type CoachSectionContentReference = {
+  branch_tag: string;
+  variants: CoachSectionVariantReference[];
+};
+
+export type CoachSectionDefinition = {
+  id: string;
+  phase_id: string;
+  title: string;
+  content: CoachSectionContentReference[];
+};
+
+export type CoachSectionManifest = {
+  schema_version: number;
+  version: string;
+  script_version: string;
+  source: string;
+  sections: CoachSectionDefinition[];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -322,6 +347,7 @@ export function assertValidClosrScript(data: unknown): asserts data is ClosrScri
   // match.exit_to references below, which can point forward to a phase
   // not yet visited in the main per-phase loop's iteration order.
   const phaseIds = new Set<string>();
+  const lineIds = new Set<string>();
   for (const phase of data.phases) {
     if (isRecord(phase) && isNonEmptyString(phase.id)) {
       if (phaseIds.has(phase.id)) throw new Error(`closr-script: duplicate phase id '${phase.id}'`);
@@ -384,9 +410,16 @@ export function assertValidClosrScript(data: unknown): asserts data is ClosrScri
           throw new Error(`closr-script: ${branchLabel} variant '${String(variant.key)}' has a non-string, non-null label`);
         }
         for (const line of variant.lines) {
-          if (!isRecord(line) || (line.type !== "say" && line.type !== "note") || !isNonEmptyString(line.text)) {
+          if (
+            !isRecord(line) ||
+            !isNonEmptyString(line.id) ||
+            (line.type !== "say" && line.type !== "note") ||
+            !isNonEmptyString(line.text)
+          ) {
             throw new Error(`closr-script: ${branchLabel} has a malformed line`);
           }
+          if (lineIds.has(line.id)) throw new Error(`closr-script: duplicate line id '${line.id}'`);
+          lineIds.add(line.id);
           assertKnownPlaceholders(line.text, knownTokens, `${branchLabel} variant '${String(variant.key)}' line`);
         }
       }
@@ -452,5 +485,165 @@ export function assertValidClosrScript(data: unknown): asserts data is ClosrScri
         assertKnownPlaceholders(value, knownTokens, `${objectionLabel} display.overcome_by_occupancy['${key}']`);
       }
     }
+  }
+}
+
+/**
+ * Validates the navigation manifest against the exact loaded script. The
+ * manifest is intentionally only references: script copy remains authored in
+ * closr-script-v0.json and therefore cannot drift or be rewritten by the
+ * navigation layer.
+ */
+export function assertValidCoachSectionManifest(
+  data: unknown,
+  script: ClosrScript,
+): asserts data is CoachSectionManifest {
+  if (!isRecord(data)) throw new Error("coach-sections: root is not an object");
+  if (data.schema_version !== 1) throw new Error("coach-sections: unsupported schema_version");
+  if (!isNonEmptyString(data.version)) throw new Error("coach-sections: missing version");
+  if (data.script_version !== script.version) {
+    throw new Error(`coach-sections: script_version '${String(data.script_version)}' does not match '${script.version}'`);
+  }
+  if (!isNonEmptyString(data.source)) throw new Error("coach-sections: missing source");
+  if (!Array.isArray(data.sections) || data.sections.length === 0) {
+    throw new Error("coach-sections: missing sections[]");
+  }
+
+  const phaseIndexes = new Map(script.phases.map((phase, index) => [phase.id, index]));
+  const authoredLines = new Map<string, {
+    phaseId: string;
+    branchTag: string;
+    variantKey: string;
+    type: "say" | "note";
+    branchIndex: number;
+    lineIndex: number;
+  }>();
+  for (const phase of script.phases) {
+    for (const [branchIndex, branch] of phase.display.branches.entries()) {
+      for (const variant of branch.variants) {
+        for (const [lineIndex, line] of variant.lines.entries()) {
+          authoredLines.set(line.id, {
+            phaseId: phase.id,
+            branchTag: branch.tag,
+            variantKey: variant.key,
+            type: line.type,
+            branchIndex,
+            lineIndex,
+          });
+        }
+      }
+    }
+  }
+
+  const sectionIds = new Set<string>();
+  const referencedLineIds = new Set<string>();
+  const lastLineIndexByVariant = new Map<string, number>();
+  let previousPhaseIndex = -1;
+  let previousBranchIndex = -1;
+
+  for (const [sectionIndex, section] of data.sections.entries()) {
+    if (
+      !isRecord(section) ||
+      !isNonEmptyString(section.id) ||
+      !isNonEmptyString(section.phase_id) ||
+      !isNonEmptyString(section.title) ||
+      !Array.isArray(section.content) ||
+      section.content.length === 0
+    ) {
+      throw new Error(`coach-sections: sections[${sectionIndex}] is malformed`);
+    }
+    if (sectionIds.has(section.id)) throw new Error(`coach-sections: duplicate section id '${section.id}'`);
+    sectionIds.add(section.id);
+
+    const phaseIndex = phaseIndexes.get(section.phase_id);
+    if (phaseIndex === undefined) throw new Error(`coach-sections: section '${section.id}' references unknown phase '${section.phase_id}'`);
+    if (phaseIndex < previousPhaseIndex) throw new Error("coach-sections: sections are not ordered by script phase");
+    if (phaseIndex > previousPhaseIndex) previousBranchIndex = -1;
+    previousPhaseIndex = phaseIndex;
+
+    let hasSpokenLine = false;
+    const sectionBranchTags = new Set<string>();
+    for (const [contentIndex, content] of section.content.entries()) {
+      if (!isRecord(content) || !isNonEmptyString(content.branch_tag) || !Array.isArray(content.variants) || content.variants.length === 0) {
+        throw new Error(`coach-sections: section '${section.id}' content[${contentIndex}] is malformed`);
+      }
+      const branch = script.phases[phaseIndex].display.branches.find((candidate) => candidate.tag === content.branch_tag);
+      if (!branch) {
+        throw new Error(`coach-sections: section '${section.id}' references unknown branch '${content.branch_tag}'`);
+      }
+      if (sectionBranchTags.has(content.branch_tag)) {
+        throw new Error(`coach-sections: section '${section.id}' repeats branch '${content.branch_tag}'`);
+      }
+      sectionBranchTags.add(content.branch_tag);
+
+      const branchIndex = script.phases[phaseIndex].display.branches.indexOf(branch);
+      if (branchIndex < previousBranchIndex) {
+        throw new Error(`coach-sections: section '${section.id}' is not ordered by authored script content`);
+      }
+      previousBranchIndex = branchIndex;
+
+      const variantKeys = new Set<string>();
+      for (const [variantIndex, variantRef] of content.variants.entries()) {
+        if (
+          !isRecord(variantRef) ||
+          !isNonEmptyString(variantRef.variant_key) ||
+          !isStringArray(variantRef.line_ids) ||
+          variantRef.line_ids.length === 0
+        ) {
+          throw new Error(`coach-sections: section '${section.id}' variant[${variantIndex}] is malformed`);
+        }
+        if (variantKeys.has(variantRef.variant_key)) {
+          throw new Error(`coach-sections: section '${section.id}' repeats variant '${variantRef.variant_key}'`);
+        }
+        variantKeys.add(variantRef.variant_key);
+        if (!branch.variants.some((candidate) => candidate.key === variantRef.variant_key)) {
+          throw new Error(`coach-sections: section '${section.id}' references unknown variant '${variantRef.variant_key}'`);
+        }
+
+        let variantHasSpokenLine = false;
+        for (const lineId of variantRef.line_ids) {
+          const authored = authoredLines.get(lineId);
+          if (!authored) throw new Error(`coach-sections: section '${section.id}' references unknown line '${lineId}'`);
+          if (
+            authored.phaseId !== section.phase_id ||
+            authored.branchTag !== content.branch_tag ||
+            authored.variantKey !== variantRef.variant_key
+          ) {
+            throw new Error(`coach-sections: line '${lineId}' is referenced from the wrong phase, branch, or variant`);
+          }
+          if (referencedLineIds.has(lineId)) throw new Error(`coach-sections: line '${lineId}' is referenced more than once`);
+          const variantPositionKey = `${section.phase_id}\u0000${content.branch_tag}\u0000${variantRef.variant_key}`;
+          const previousLineIndex = lastLineIndexByVariant.get(variantPositionKey) ?? -1;
+          if (authored.lineIndex <= previousLineIndex) {
+            throw new Error(`coach-sections: line '${lineId}' is not ordered by authored script content`);
+          }
+          lastLineIndexByVariant.set(variantPositionKey, authored.lineIndex);
+          referencedLineIds.add(lineId);
+          variantHasSpokenLine ||= authored.type === "say";
+        }
+        if (!variantHasSpokenLine) {
+          throw new Error(
+            `coach-sections: section '${section.id}' variant '${variantRef.variant_key}' has no spoken line`,
+          );
+        }
+        hasSpokenLine = true;
+      }
+
+      const expectedVariantKeys = new Set(branch.variants.map((variant) => variant.key));
+      if (
+        variantKeys.size !== expectedVariantKeys.size ||
+        [...expectedVariantKeys].some((variantKey) => !variantKeys.has(variantKey))
+      ) {
+        throw new Error(
+          `coach-sections: section '${section.id}' must keep every variant of branch '${content.branch_tag}' together`,
+        );
+      }
+    }
+    if (!hasSpokenLine) throw new Error(`coach-sections: section '${section.id}' has no spoken line`);
+  }
+
+  const missingLines = [...authoredLines.keys()].filter((lineId) => !referencedLineIds.has(lineId));
+  if (missingLines.length > 0) {
+    throw new Error(`coach-sections: authored line coverage is incomplete (missing ${missingLines.join(", ")})`);
   }
 }
