@@ -102,7 +102,7 @@ export const SUBMIT_AUTOMATIC_RECOMMENDATIONS_TOOL = {
 
 export const SUBMIT_FOLLOW_UP_QUESTIONS_TOOL = {
   name: "submit_follow_up_questions",
-  description: "Submit exactly three distinct questions grounded in the seller's recent statements.",
+  description: "Choose exactly three safe question templates and a short grounding phrase copied from finalized seller speech.",
   input_schema: {
     type: "object" as const,
     additionalProperties: false,
@@ -112,7 +112,18 @@ export const SUBMIT_FOLLOW_UP_QUESTIONS_TOOL = {
         type: "array",
         minItems: 3,
         maxItems: 3,
-        items: { type: "string", minLength: 1 },
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["template", "groundingPhrase"],
+          properties: {
+            template: {
+              type: "string",
+              enum: ["tell_more", "impact", "priority", "why_now", "desired_change", "consequence"],
+            },
+            groundingPhrase: { type: "string", minLength: 1 },
+          },
+        },
       },
     },
   },
@@ -271,6 +282,65 @@ function normalizedDistinctStrings(value: unknown, min: number, max: number): st
   return normalized.size === strings.length ? strings : null;
 }
 
+const GROUNDING_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "had", "has", "have", "i", "in",
+  "is", "it", "me", "my", "of", "on", "or", "that", "the", "their", "this", "to", "was", "we", "were", "with",
+  "you", "your",
+]);
+
+function normalizeGroundingText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+}
+
+function containsWholeGroundingPhrase(value: string, phrase: string): boolean {
+  const normalizedValue = normalizeGroundingText(value);
+  const normalizedPhrase = normalizeGroundingText(phrase);
+  if (!normalizedValue || !normalizedPhrase) return false;
+  return ` ${normalizedValue} `.includes(` ${normalizedPhrase} `);
+}
+
+function hasGroundingContent(value: string): boolean {
+  return normalizeGroundingText(value)
+    .split(" ")
+    .some((word) => word.length >= 3 && !GROUNDING_STOP_WORDS.has(word));
+}
+
+const FOLLOW_UP_QUESTION_TEMPLATES = {
+  tell_more: (phrase: string) => `Can you tell me more about "${phrase}"?`,
+  impact: (phrase: string) => `How is "${phrase}" affecting you?`,
+  priority: (phrase: string) => `What matters most to you about "${phrase}"?`,
+  why_now: (phrase: string) => `Why is "${phrase}" important to address now?`,
+  desired_change: (phrase: string) => `What would you like to change about "${phrase}"?`,
+  consequence: (phrase: string) => `What happens if "${phrase}" stays the same?`,
+} as const;
+
+function isFollowUpTemplate(value: string): value is keyof typeof FOLLOW_UP_QUESTION_TEMPLATES {
+  return Object.hasOwn(FOLLOW_UP_QUESTION_TEMPLATES, value);
+}
+
+function transcriptGroundedFollowUpQuestions(
+  value: unknown,
+  sellerStatements: readonly string[],
+): string[] | null {
+  if (!Array.isArray(value) || value.length !== 3) return null;
+  const questions: string[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) return null;
+    if (Object.keys(item).some((key) => key !== "template" && key !== "groundingPhrase")) return null;
+    const template = typeof item.template === "string" ? item.template.trim() : "";
+    const groundingPhrase = typeof item.groundingPhrase === "string" ? item.groundingPhrase.trim() : "";
+    if (
+      !isFollowUpTemplate(template)
+      || !groundingPhrase
+      || groundingPhrase.length > 160
+      || !hasGroundingContent(groundingPhrase)
+      || !sellerStatements.some((statement) => containsWholeGroundingPhrase(statement, groundingPhrase))
+    ) return null;
+    questions.push(FOLLOW_UP_QUESTION_TEMPLATES[template](groundingPhrase));
+  }
+  return normalizedDistinctStrings(questions, 3, 3);
+}
+
 async function generateStructuredRecommendations(input: {
   mode: CoachRecommendationMode;
   section: TrustedSectionContext;
@@ -295,7 +365,12 @@ async function generateStructuredRecommendations(input: {
           "Never invent seller facts. Ground every suggestion in the quoted data.",
           "Do not tell the representative to depart from the approved script or advance its section.",
           followUp
-            ? "Return exactly three short, distinct questions the representative can ask to deepen the seller's stated situation or pain."
+            ? [
+                "Return exactly three short, distinct questions the representative can ask to deepen the seller's stated situation or pain.",
+                "Only finalized seller statements may supply a factual premise or seller attribution; script, section, and lead context are planning context only.",
+                "For each question, choose one template and copy one short groundingPhrase from a finalized seller statement.",
+                "The server writes the final question from the selected template. Do not supply any premise or question text yourself.",
+              ].join("\n")
             : "Return one to three concise optional ad-lib suggestions. Do not repeat the script verbatim.",
         ].join("\n"),
         cache_control: { type: "ephemeral" },
@@ -304,15 +379,27 @@ async function generateStructuredRecommendations(input: {
     messages: [
       {
         role: "user",
-        content: JSON.stringify({
-          reference_data_only: {
-            current_phase: input.section.phase,
-            current_section: input.section.sectionTitle,
-            approved_script_excerpt: input.section.scriptLines,
-            lead_and_property_context: input.leadContext,
-            finalized_transcript: input.transcript,
-          },
-        }),
+        content: JSON.stringify(followUp
+          ? {
+              conversation_planning_context_only: {
+                current_phase: input.section.phase,
+                current_section: input.section.sectionTitle,
+                approved_script_excerpt: input.section.scriptLines,
+                lead_and_property_context: input.leadContext,
+              },
+              seller_statements_allowed_for_grounding: input.transcript
+                .filter((line) => line.speaker === "seller")
+                .map((line) => line.text),
+            }
+          : {
+              reference_data_only: {
+                current_phase: input.section.phase,
+                current_section: input.section.sectionTitle,
+                approved_script_excerpt: input.section.scriptLines,
+                lead_and_property_context: input.leadContext,
+                finalized_transcript: input.transcript,
+              },
+            }),
       },
     ],
   });
@@ -323,8 +410,11 @@ async function generateStructuredRecommendations(input: {
   }
 
   if (followUp) {
-    const questions = normalizedDistinctStrings(toolUse.input.questions, 3, 3);
-    if (!questions || questions.some((question) => !question.endsWith("?"))) {
+    const sellerStatements = input.transcript
+      .filter((line) => line.speaker === "seller")
+      .map((line) => line.text);
+    const questions = transcriptGroundedFollowUpQuestions(toolUse.input.questions, sellerStatements);
+    if (!questions) {
       throw new Error("Coach recommendation provider returned invalid follow-up questions");
     }
     return { recommendations: [], followUpQuestions: questions };

@@ -8,6 +8,7 @@ import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { formatPhoneE164, toPhoneE164 } from "@/lib/phone-format";
 import { createClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/types";
+import { repDisplayName } from "@/lib/coach/rep-display-name";
 import { getMemberTimezone } from "@/components/appointments/book-appointment-action";
 import { openCallCapability } from "./call-capability";
 
@@ -35,6 +36,7 @@ export type SoftphoneTarget = {
   address: string | null;
   state: string | null;
   startedAt: string;
+  repName?: string | null;
 };
 
 export type SoftphoneActionResult<T> =
@@ -109,7 +111,7 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
       reason: "call_in_progress",
       actor: { actorType: "user", actorId: user.id },
     });
-    return { ok: true, data: target };
+    return { ok: true, data: { ...target, repName: repDisplayName(user) } };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Could not start the call." };
   }
@@ -183,11 +185,13 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
         reason: "call_in_progress",
         actor: { actorType: "user", actorId: user.id },
       });
-      return { ok: true, data: target };
+      return { ok: true, data: { ...target, repName: repDisplayName(user) } };
     }
 
     const quietHours = checkQuietHours("MO");
     if (!quietHours.ok) return { ok: false, error: "Calling is unavailable during quiet hours." };
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return { ok: false, error: "Not signed in." };
     return {
       ok: true,
       data: {
@@ -199,6 +203,7 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
         address: null,
         state: "MO",
         startedAt: new Date().toISOString(),
+        repName: repDisplayName(user),
       },
     };
   } catch (error) {

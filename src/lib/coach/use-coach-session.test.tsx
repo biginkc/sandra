@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CoachCallContext } from "./types";
 
-const { loadCoachCallContext } = vi.hoisted(() => ({ loadCoachCallContext: vi.fn() }));
+const { loadCoachCallContext, createCoachChannel } = vi.hoisted(() => ({
+  loadCoachCallContext: vi.fn(),
+  createCoachChannel: vi.fn(),
+}));
 
 vi.mock("./coach-context-actions", () => ({ loadCoachCallContext }));
 
@@ -11,14 +14,7 @@ vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
     auth: { getSession: () => Promise.resolve({ data: { session: null } }) },
     realtime: { setAuth: vi.fn() },
-    channel: () => ({
-      on() {
-        return this;
-      },
-      subscribe() {
-        return this;
-      },
-    }),
+    channel: createCoachChannel,
     removeChannel: vi.fn(),
   }),
 }));
@@ -43,6 +39,105 @@ const sampleContext: CoachCallContext = {
 describe("useCoachSession", () => {
   beforeEach(() => {
     loadCoachCallContext.mockReset().mockResolvedValue(sampleContext);
+    createCoachChannel.mockReset().mockImplementation(() => ({
+      on() {
+        return this;
+      },
+      subscribe() {
+        return this;
+      },
+    }));
+  });
+
+  it("hydrates prepared names during connecting, then subscribes without resetting the session", async () => {
+    loadCoachCallContext.mockReturnValue(new Promise(() => undefined));
+    const { result, rerender } = renderHook(
+      ({ callId }: { callId: string | null }) => useCoachSession(
+        callId,
+        "lead-1",
+        "+18165559876",
+        "+18165551234",
+        true,
+        {
+          repName: "Mel",
+          sellerName: "Jarrad",
+          propertyAddress: "55 Oak Ave",
+          sellerPhoneE164: "+18165559876",
+          maskedSellerPhone: "+1 (816) 555-9876",
+        },
+        "call-token",
+      ),
+      { initialProps: { callId: null } as { callId: string | null } },
+    );
+
+    expect(result.current.contextLoad).toEqual({
+      status: "loading",
+      context: expect.objectContaining({
+        repName: "Mel",
+        sellerName: "Jarrad",
+        propertyAddress: "55 Oak Ave",
+      }),
+    });
+    await waitFor(() => expect(loadCoachCallContext).toHaveBeenCalledTimes(1));
+    expect(createCoachChannel).not.toHaveBeenCalled();
+
+    act(() => result.current.goNextSection());
+    act(() => result.current.setEntryField("motivation", "sell before winter"));
+    const selectedSection = result.current.activeSectionId;
+    rerender({ callId: "call-token" });
+
+    expect(result.current.activeSectionId).toBe(selectedSection);
+    expect(result.current.state.entryFields.motivation).toBe("sell before winter");
+    expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(createCoachChannel).toHaveBeenCalledTimes(1));
+  });
+
+  it("replaces a prior connecting identity synchronously when the session key changes", () => {
+    loadCoachCallContext.mockReturnValue(new Promise(() => undefined));
+    const { result, rerender } = renderHook(
+      ({ sessionKey, repName, sellerName, address }) => useCoachSession(
+        null,
+        "lead-1",
+        null,
+        null,
+        true,
+        {
+          repName,
+          sellerName,
+          propertyAddress: address,
+          sellerPhoneE164: null,
+          maskedSellerPhone: null,
+        },
+        sessionKey,
+      ),
+      {
+        initialProps: {
+          sessionKey: "call-one",
+          repName: "Mel",
+          sellerName: "Seller One",
+          address: "1 First St",
+        },
+      },
+    );
+
+    act(() => result.current.setEntryField("offer_price", "$200,000"));
+
+    rerender({
+      sessionKey: "call-two",
+      repName: "Morgan",
+      sellerName: "Seller Two",
+      address: "2 Second St",
+    });
+
+    expect(result.current.contextLoad).toEqual({
+      status: "loading",
+      context: expect.objectContaining({
+        repName: "Morgan",
+        sellerName: "Seller Two",
+        propertyAddress: "2 Second St",
+      }),
+    });
+    expect(result.current.state.entryFields.offer_price).toBeNull();
   });
 
   it("loads context once and exposes it as ready", async () => {
