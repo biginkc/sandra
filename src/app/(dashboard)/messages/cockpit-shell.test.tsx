@@ -159,9 +159,19 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
     expect(replaceCalls).toEqual(["/messages?filter=unassigned"]);
     expect(noOwner).toHaveAttribute("aria-pressed", "true");
     expect(noOwner).toHaveAttribute("aria-busy", "true");
+    expect(noOwner).toHaveAttribute("aria-disabled", "true");
+    expect(noOwner).not.toBeDisabled();
     expect(screen.getByTestId("filter-all")).toHaveAttribute(
       "aria-pressed",
       "false",
+    );
+    expect(screen.getByTestId("filter-all")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.getByTestId("dnc-toggle")).toHaveAttribute(
+      "aria-disabled",
+      "true",
     );
     expect(screen.getByTestId("filter-unassigned-spinner")).toBeVisible();
     expect(screen.getByRole("status")).toHaveTextContent(
@@ -197,12 +207,15 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
       "false",
     );
     expect(screen.getByTestId("inbox-filter-results")).toHaveClass("ring-0");
+    expect(screen.getByTestId("inbox-filter-results")).not.toHaveAttribute(
+      "inert",
+    );
     expect(screen.getByRole("status")).toHaveTextContent(
       "No owner messages loaded",
     );
   });
 
-  it("replaces or cancels pending feedback when the operator changes direction", async () => {
+  it("locks filter controls while pending and cancels feedback on navigation", async () => {
     replaceCalls.length = 0;
     const user = userEvent.setup();
     const { rerender } = render(
@@ -215,21 +228,22 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
     );
 
     await user.click(screen.getByTestId("dnc-toggle"));
-    expect(screen.queryByTestId("filter-unassigned-spinner")).toBeNull();
-    expect(screen.getByTestId("dnc-toggle-spinner")).toBeVisible();
+    expect(replaceCalls).toEqual(["/messages?filter=unassigned"]);
+    expect(screen.getByTestId("filter-unassigned-spinner")).toBeVisible();
+    expect(screen.queryByTestId("dnc-toggle-spinner")).toBeNull();
     expect(screen.getByTestId("dnc-toggle")).toHaveAttribute(
       "aria-checked",
-      "false",
+      "true",
     );
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Updating DNC visibility",
+      "Loading No owner messages",
     );
 
     rerender(
       <CockpitView
         {...baseProps}
         activeTab="inbox"
-        hideDnc={false}
+        filter="unassigned"
       />,
     );
     await waitFor(() =>
@@ -239,10 +253,41 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
       ),
     );
     expect(screen.getByRole("status")).toHaveTextContent(
+      "No owner messages loaded",
+    );
+
+    await user.click(screen.getByTestId("dnc-toggle"));
+    expect(screen.getByTestId("dnc-toggle-spinner")).toBeVisible();
+    expect(replaceCalls).toHaveLength(2);
+
+    // A click on the already-active chip cannot replace the DNC marker
+    // and falsely end its loading feedback before the server catches up.
+    await user.click(screen.getByTestId("filter-unassigned"));
+    expect(replaceCalls).toHaveLength(2);
+    expect(screen.getByTestId("dnc-toggle-spinner")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Updating DNC visibility",
+    );
+
+    rerender(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        filter="unassigned"
+        hideDnc={false}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("dnc-toggle")).toHaveAttribute(
+        "aria-busy",
+        "false",
+      ),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
       "DNC visibility updated",
     );
 
-    await user.click(screen.getByTestId("filter-unassigned"));
+    await user.click(screen.getByTestId("filter-all"));
     await user.click(screen.getByTestId("tab-outbox"));
     expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(
       "aria-busy",
@@ -253,6 +298,7 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
       <CockpitView
         {...baseProps}
         activeTab="outbox"
+        filter="unassigned"
         hideDnc={false}
       />,
     );
@@ -260,6 +306,7 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
       <CockpitView
         {...baseProps}
         activeTab="inbox"
+        filter="unassigned"
         hideDnc={false}
       />,
     );
@@ -268,7 +315,7 @@ describe("<CockpitView /> shell — tabs + cadence", () => {
       "false",
     );
 
-    await user.click(screen.getByTestId("filter-unassigned"));
+    await user.click(screen.getByTestId("filter-all"));
     act(() => window.dispatchEvent(new PopStateEvent("popstate")));
     await waitFor(() =>
       expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute(

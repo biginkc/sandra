@@ -296,11 +296,7 @@ export function CockpitView({
 
   const handleInboxFilterChange = useCallback(
     (next: InboxFilter) => {
-      if (
-        (pendingInboxChange?.kind === "filter" &&
-          pendingInboxChange.value === next) ||
-        (pendingInboxChange === null && next === filter)
-      ) {
+      if (pendingInboxChange !== null || next === filter) {
         return;
       }
 
@@ -321,10 +317,7 @@ export function CockpitView({
 
   const handleHideDncChange = useCallback(
     (nextHideDnc: boolean) => {
-      if (
-        pendingInboxChange?.kind === "hideDnc" &&
-        pendingInboxChange.value === nextHideDnc
-      ) {
+      if (pendingInboxChange !== null || nextHideDnc === hideDnc) {
         return;
       }
 
@@ -340,7 +333,7 @@ export function CockpitView({
       const qs = sp.toString();
       router.replace(qs ? `/messages?${qs}` : "/messages");
     },
-    [pendingInboxChange, router, searchParams],
+    [hideDnc, pendingInboxChange, router, searchParams],
   );
 
   useEffect(() => {

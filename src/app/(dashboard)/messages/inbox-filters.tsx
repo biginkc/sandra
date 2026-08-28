@@ -67,6 +67,7 @@ export function InboxFilters({
   const pendingFilter =
     pendingChange?.kind === "filter" ? pendingChange.value : null;
   const pendingHideDnc = pendingChange?.kind === "hideDnc";
+  const controlsPending = pendingChange !== null;
   const displayedActive = pendingFilter ?? active;
   const displayedHideDnc =
     pendingChange?.kind === "hideDnc" ? pendingChange.value : hideDnc;
@@ -82,6 +83,7 @@ export function InboxFilters({
         label="Unread"
         active={displayedActive === "unread"}
         pending={pendingFilter === "unread"}
+        interactionDisabled={controlsPending}
         count={filterCounts.unread}
         onClick={() => onFilterChange("unread")}
         testId="filter-unread"
@@ -90,6 +92,7 @@ export function InboxFilters({
         label="Needs Outcome"
         active={displayedActive === "needs_outcome"}
         pending={pendingFilter === "needs_outcome"}
+        interactionDisabled={controlsPending}
         count={filterCounts.needs_outcome}
         onClick={() => onFilterChange("needs_outcome")}
         testId="filter-needs-outcome"
@@ -100,6 +103,7 @@ export function InboxFilters({
             label="Mine"
             active={displayedActive === "mine"}
             pending={pendingFilter === "mine"}
+            interactionDisabled={controlsPending}
             count={filterCounts.mine}
             onClick={() => onFilterChange("mine")}
             testId="filter-mine"
@@ -109,6 +113,7 @@ export function InboxFilters({
             icon="mascot"
             active={displayedActive === "escalated"}
             pending={pendingFilter === "escalated"}
+            interactionDisabled={controlsPending}
             count={filterCounts.escalated}
             onClick={() => onFilterChange("escalated")}
             testId="filter-escalated"
@@ -121,6 +126,7 @@ export function InboxFilters({
           icon="mascot"
           active={displayedActive === "escalated"}
           pending={pendingFilter === "escalated"}
+          interactionDisabled={controlsPending}
           count={filterCounts.escalated}
           onClick={() => onFilterChange("escalated")}
           testId="filter-escalated"
@@ -131,6 +137,7 @@ export function InboxFilters({
         icon="mascot"
         active={displayedActive === "dispo"}
         pending={pendingFilter === "dispo"}
+        interactionDisabled={controlsPending}
         count={filterCounts.dispo}
         onClick={() => onFilterChange("dispo")}
         testId="filter-dispo"
@@ -140,6 +147,7 @@ export function InboxFilters({
           label="No owner"
           active={displayedActive === "unassigned"}
           pending={pendingFilter === "unassigned"}
+          interactionDisabled={controlsPending}
           count={filterCounts.unassigned}
           onClick={() => onFilterChange("unassigned")}
           testId="filter-unassigned"
@@ -149,6 +157,7 @@ export function InboxFilters({
         label="All"
         active={displayedActive === "all"}
         pending={pendingFilter === "all"}
+        interactionDisabled={controlsPending}
         count={filterCounts.all}
         onClick={() => onFilterChange("all")}
         testId="filter-all"
@@ -157,6 +166,7 @@ export function InboxFilters({
         label="Unknown"
         active={displayedActive === "unknown"}
         pending={pendingFilter === "unknown"}
+        interactionDisabled={controlsPending}
         count={filterCounts.unknown}
         onClick={() => onFilterChange("unknown")}
         testId="filter-unknown"
@@ -165,6 +175,7 @@ export function InboxFilters({
         label="Dismissed"
         active={displayedActive === "dismissed"}
         pending={pendingFilter === "dismissed"}
+        interactionDisabled={controlsPending}
         count={filterCounts.dismissed}
         onClick={() => onFilterChange("dismissed")}
         testId="filter-dismissed"
@@ -181,6 +192,7 @@ export function InboxFilters({
           hideDnc={displayedHideDnc}
           hiddenDncCount={hiddenDncCount}
           pending={pendingHideDnc}
+          interactionDisabled={controlsPending}
           onToggle={() => onHideDncChange(!displayedHideDnc)}
         />
       )}
@@ -212,25 +224,29 @@ function DncToggle({
   hideDnc,
   hiddenDncCount,
   pending,
+  interactionDisabled,
   onToggle,
 }: {
   hideDnc: boolean;
   hiddenDncCount: number;
   pending: boolean;
+  interactionDisabled: boolean;
   onToggle: () => void;
 }) {
   const label = hideDnc ? "Hide DNC & tests" : "Showing all";
   return (
     <button
       type="button"
-      onClick={pending ? undefined : onToggle}
+      onClick={interactionDisabled ? undefined : onToggle}
       role="switch"
       aria-checked={hideDnc}
       aria-busy={pending}
-      aria-disabled={pending}
+      aria-disabled={interactionDisabled}
       data-testid="dnc-toggle"
       data-active={hideDnc || undefined}
-      className="relative ml-auto inline-flex min-h-11 items-center gap-2 text-[12px] text-[#78716c] hover:text-[#1c1917]"
+      className={`relative ml-auto inline-flex min-h-11 items-center gap-2 text-[12px] text-[#78716c] ${
+        interactionDisabled ? "cursor-wait" : "hover:text-[#1c1917]"
+      }`}
     >
       <span
         className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
@@ -269,6 +285,7 @@ function FilterChip({
   icon,
   active,
   pending = false,
+  interactionDisabled,
   onClick,
   count,
   testId,
@@ -277,6 +294,7 @@ function FilterChip({
   icon?: "mascot";
   active: boolean;
   pending?: boolean;
+  interactionDisabled: boolean;
   onClick: () => void;
   count?: number;
   testId: string;
@@ -288,17 +306,21 @@ function FilterChip({
   return (
     <button
       type="button"
-      onClick={pending ? undefined : onClick}
+      onClick={interactionDisabled ? undefined : onClick}
       aria-label={ariaLabel}
       aria-pressed={active}
       aria-busy={pending}
-      aria-disabled={pending}
+      aria-disabled={interactionDisabled}
       data-testid={testId}
       data-active={active || undefined}
       className={`relative inline-flex min-h-11 items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${
         active
           ? "bg-primary text-primary-foreground"
-          : "border border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4] hover:text-[#1c1917]"
+          : `border border-[#e5e1df] text-[#78716c] ${
+              interactionDisabled
+                ? "cursor-wait"
+                : "hover:bg-[#f5f5f4] hover:text-[#1c1917]"
+            }`
       }`}
     >
       {icon === "mascot" ? (
