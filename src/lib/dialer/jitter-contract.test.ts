@@ -193,6 +193,7 @@ describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
       requestJitterAudioHealth(
         CALL_ID,
         {
+          media_state: "active",
           controller_id: "00000000-0000-4000-8000-000000000021",
           peer_connection_generation: 1,
           sample_sequence: 2,

@@ -384,6 +384,32 @@ describe("SoftphoneProvider transport gate", () => {
     expect(screen.getByTestId("call-keypad")).toBeDisabled();
   });
 
+  it("keeps the call live and tells the rep when Hold fails", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "connecting" | "live") => void) | null = null;
+      return {
+        onStateChange: vi.fn((cb) => { listener = cb; }),
+        start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
+        mute: vi.fn(),
+        hold: vi.fn(async () => false),
+        sendDigit: vi.fn(async () => true),
+        hangup: vi.fn(),
+      };
+    });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+
+    await user.click(screen.getByTestId("call-hold"));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Hold failed. The call is still live.");
+    expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live");
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Hold");
+  });
+
   it.each([
     ["operator_busy", "You already have an active Jitter call."],
     ["not_callable", "This number is no longer callable."],
