@@ -205,8 +205,9 @@ test("populates known lead tokens, selects lead and occupancy variants, and lets
   await expect(script).toContainText("1987’s");
 
   await page.getByTestId("phase-rail-offer").click();
+  await expect(script).toContainText("move closer to family");
   for (const [field, value] of [
-    ["dream_outcome", "move closer to family"],
+    ["dream_outcome", "retire near family"],
     ["offer_price", "$210,000"],
     ["net_to_seller", "$185,000"],
     ["closing_date", "October 18"],

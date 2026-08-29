@@ -55,6 +55,17 @@ describe("resolveCoachTokens", () => {
     expect(tokens.net_to_seller).toEqual({ value: "$180,000", isPlaceholder: false });
   });
 
+  it("pre-fills the dream outcome from known motivation while allowing a typed outcome to override it", () => {
+    expect(resolveCoachTokens(baseContext).dream_outcome).toEqual({
+      value: "Job relocation",
+      isPlaceholder: false,
+    });
+    expect(resolveCoachTokens(baseContext, entryFields).dream_outcome).toEqual({
+      value: "move closer to family",
+      isPlaceholder: false,
+    });
+  });
+
   it("lets the rep fill motivation and cold-caller name when trusted context does not have them", () => {
     const tokens = resolveCoachTokens(
       { ...baseContext, motivation: null, coldCallerName: null },
@@ -86,8 +97,8 @@ describe("resolveCoachTokens", () => {
     expect(tokens.cold_caller_name).toEqual({ value: "Rose", isPlaceholder: false });
   });
 
-  it("treats the outcome and every deal-panel token as an unset placeholder when entryFields is omitted", () => {
-    const tokens = resolveCoachTokens(baseContext);
+  it("treats the outcome and every deal-panel token as an unset placeholder when neither context nor entry can resolve them", () => {
+    const tokens = resolveCoachTokens({ ...baseContext, motivation: null });
     expect(tokens.dream_outcome).toEqual({ value: "—", isPlaceholder: true });
     expect(tokens.closing_date).toEqual({ value: "—", isPlaceholder: true });
     expect(tokens.offer_price).toEqual({ value: "—", isPlaceholder: true });
