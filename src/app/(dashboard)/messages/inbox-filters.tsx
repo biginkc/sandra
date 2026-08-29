@@ -71,6 +71,10 @@ export function InboxFilters({
   const displayedActive = pendingFilter ?? active;
   const displayedHideDnc =
     pendingChange?.kind === "hideDnc" ? pendingChange.value : hideDnc;
+  const showDncToggle =
+    displayedActive !== "dispo" &&
+    displayedActive !== "unknown" &&
+    displayedActive !== "dismissed";
 
   return (
     <div
@@ -187,7 +191,7 @@ export function InboxFilters({
         >
           Compliance reviews shown · tests hidden
         </span>
-      ) : (
+      ) : showDncToggle ? (
         <DncToggle
           hideDnc={displayedHideDnc}
           hiddenDncCount={hiddenDncCount}
@@ -195,7 +199,7 @@ export function InboxFilters({
           interactionDisabled={controlsPending}
           onToggle={() => onHideDncChange(!displayedHideDnc)}
         />
-      )}
+      ) : null}
       {errorMessage ? (
         <span
           className="text-[12px] font-semibold text-destructive"

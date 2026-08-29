@@ -76,6 +76,8 @@ async function seedThread(options: {
   dnc?: boolean;
   testTraffic?: boolean;
   reviewStatus?: "pending" | "confirmed" | null;
+  /** Semantic-corruption guard only: production applies the outcome first. */
+  applyOutcome?: boolean;
   disposition?: "not_interested" | "dnc";
   propertyStatus?: "prospect" | "new_lead" | "contacted";
   assignedUserId?: string | null;
@@ -113,7 +115,8 @@ async function seedThread(options: {
       options.testTraffic ? `Jitter ${options.label}` : `${options.label} Ln`,
       options.propertyStatus ?? "contacted",
       contactId,
-      options.reviewStatus || options.label === "Historical"
+      (options.reviewStatus && options.applyOutcome !== false) ||
+      options.label === "Historical"
         ? (options.disposition ?? "not_interested")
         : null,
       options.assignedUserId ?? null,
@@ -504,6 +507,32 @@ describe("Sandra Dispo inbox queue migration", () => {
       ]),
     );
     expect(mineAfterRollback.counts.mine).toBe(mineAfterRollback.total);
+  });
+
+  it("keys Sandra Dispo only to pending review state, not applied outcome state", async () => {
+    const pendingWithoutAppliedOutcome = await seedThread({
+      label: "Pending semantic guard",
+      reviewStatus: "pending",
+      applyOutcome: false,
+    });
+    const appliedWithoutPendingReview = await seedThread({
+      label: "Applied semantic guard",
+      reviewStatus: null,
+    });
+    await pg.query(
+      `update public.properties
+       set outreach_dispo = 'not_interested'
+       where id = $1 and org_id = $2`,
+      [appliedWithoutPendingReview.propertyId, BMH_ORG_ID],
+    );
+
+    const dispo = await snapshot("dispo", true);
+    expect(dispo.rows.map((row) => row.thread_id)).toContain(
+      pendingWithoutAppliedOutcome.conversationId,
+    );
+    expect(dispo.rows.map((row) => row.thread_id)).not.toContain(
+      appliedWithoutPendingReview.conversationId,
+    );
   });
 
   it("rehearses the timeout-recovery rollback and restores ordinary inbox access", async () => {

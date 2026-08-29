@@ -95,6 +95,10 @@ export default async function MessagesPage({
   const pageFilter: ThreadPageFilter = isThreadFilter(effectiveFilter)
     ? (effectiveFilter as ThreadPageFilter)
     : "all";
+  const effectiveInboxPage =
+    activeTab === "inbox" && isThreadFilter(effectiveFilter)
+      ? requestedInboxPage
+      : 1;
   const [threadPage, queuedResult, threadDetail, unknownAll, queueStatsResult] =
     await Promise.all([
       listThreadPage(supabase, {
@@ -102,7 +106,7 @@ export default async function MessagesPage({
         currentUserId,
         includeThreadId: canonicalThreadId,
         hideNoise: hideDnc,
-        page: requestedInboxPage,
+        page: effectiveInboxPage,
       }),
       listQueuedPage(null),
       canonicalThreadId
@@ -113,6 +117,21 @@ export default async function MessagesPage({
     ]);
 
   const visibleThreads = threadPage.threads;
+
+  // The database clamps stale or adversarial offsets to the final real page.
+  // Keep the shareable URL truthful too, instead of showing (for example)
+  // page 2 while the address bar still says inboxPage=999999.
+  if (
+    activeTab === "inbox" &&
+    isThreadFilter(effectiveFilter) &&
+    firstSearchParam(sp.inboxPage) !== canonicalInboxPage(threadPage.page)
+  ) {
+    const canonical = searchParamsToUrlParams(sp);
+    if (threadPage.page <= 1) canonical.delete("inboxPage");
+    else canonical.set("inboxPage", String(threadPage.page));
+    const query = canonical.toString();
+    redirect(query ? `/messages?${query}` : "/messages");
+  }
 
   // Banner still renders if first-paint stats fail — the client-side poll
   // will retry every 30s.
@@ -198,6 +217,10 @@ function parsePositivePage(value: string | null): number {
   return Number.isSafeInteger(parsed) && parsed > 0
     ? Math.min(parsed, 10_000_000)
     : 1;
+}
+
+function canonicalInboxPage(page: number): string | null {
+  return page <= 1 ? null : String(page);
 }
 
 function searchParamsToUrlParams(

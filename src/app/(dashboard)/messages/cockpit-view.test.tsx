@@ -260,11 +260,11 @@ describe("<CockpitView /> URL deep-linking", () => {
       screen.getByText("Page 2 of 225 · 45,000 conversations"),
     ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(navigationMocks.push).toHaveBeenCalledWith(
       "/messages?filter=unread&inboxPage=3",
     );
     fireEvent.click(screen.getByRole("button", { name: "Previous" }));
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(navigationMocks.push).toHaveBeenCalledWith(
       "/messages?filter=unread",
     );
   });
