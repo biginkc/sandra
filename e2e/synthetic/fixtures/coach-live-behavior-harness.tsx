@@ -18,7 +18,7 @@ import {
   setSyntheticCoachContextMode,
   type SyntheticContextMode,
 } from "./coach-context-actions-browser-stub";
-import { emitSyntheticCoachStatus } from "./coach-supabase-browser-stub";
+import { emitSyntheticCoachBroadcast, emitSyntheticCoachStatus } from "./coach-supabase-browser-stub";
 
 const BASE_CONTEXT: CoachCallContext = {
   sellerName: "Jane Homeowner",
@@ -167,11 +167,21 @@ function BehaviorHarness() {
     const common = { ts: `legacy-${Date.now()}`, ...eventVersion() };
     session.dispatch({ type: "phase", phaseId: "close", ...common });
     session.dispatch({ type: "cursor", phaseId: "introduction", branchTag: "Opener", variantKey: "default", lineIndex: 0, lineText: "legacy", ...common });
+    session.dispatch({ type: "cursor", phaseId: "close", branchTag: "If far apart — program pivot", variantKey: "default", lineIndex: 4, lineText: "There is one program I can check to see if you qualify for…", ...common });
     session.dispatch({ type: "objection", objectionId: "price", ...common });
     session.dispatch({ type: "counter", probeCount: 99, ...common });
     session.dispatch({ type: "gate", gateId: "legacy", cleared: true, ...common });
     session.dispatch({ type: "timer", timerId: "legacy", startedAt: common.ts, durationS: 999, ...common });
     session.dispatch({ type: "coach_note", phaseId: "close", text: "Legacy note must remain invisible.", ...common });
+    emitSyntheticCoachBroadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "Legacy-version transcript remains visible.",
+      isFinal: true,
+      ts: common.ts,
+      scriptVersion: "1.0.2",
+      matcherVersion: "legacy",
+    });
   }, [session]);
 
   useEffect(() => {

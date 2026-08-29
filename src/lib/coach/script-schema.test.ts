@@ -34,6 +34,17 @@ describe("assertValidClosrScript", () => {
     expect(spokenText).not.toContain("fastcashoffernow.com");
   });
 
+  it("locks every displayed phase purpose to the official document", () => {
+    expect((scriptJson as unknown as ClosrScript).phases.map(({ id, purpose }) => ({ id, purpose }))).toEqual([
+      { id: "introduction", purpose: "Build Minor Rapport - Break The Cycle of Traditional Sales Calls - Set Proper Expectations - Instill Scarcity… Can they qualify?" },
+      { id: "reveal", purpose: "Make them FEEL their pain" },
+      { id: "assessment", purpose: "Avoid “How Can You Buy My House Over The Phone?” Objection. Makes them feel like you are the real deal." },
+      { id: "secure_positioning", purpose: "Avoid all smokescreens and objections after the offer by prehandling them upfront, and get the seller to confirm they want to move forward with our process before we present price." },
+      { id: "offer", purpose: "Make the seller feel like they’ve qualified for our program — reinforcing that they need us, not the other way around. Step 1 is complete, and now it’s only about finalizing the minor details." },
+      { id: "close", purpose: "Price is only an objection in the absence of value… how does our offer solve their problem?" },
+    ]);
+  });
+
   it("rejects a non-object root", () => {
     expect(() => assertValidClosrScript(null)).toThrow(/root is not an object/);
     expect(() => assertValidClosrScript("nope")).toThrow(/root is not an object/);

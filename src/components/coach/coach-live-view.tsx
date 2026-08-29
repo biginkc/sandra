@@ -731,6 +731,7 @@ function BranchCard({
           <p
             key={index}
             className={cn(
+              "whitespace-pre-line",
               compact ? "text-[15px] leading-relaxed" : "text-2xl leading-relaxed font-medium md:text-[26px]",
               line.type === "note" && "text-xs text-muted-foreground italic",
             )}

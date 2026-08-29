@@ -105,14 +105,61 @@ test("walks every PDF-aligned section forward and backward with correct boundari
   await expect(page.getByTestId("coach-back")).toBeDisabled();
 });
 
+test("clicks every conditional script variant without changing the active section", async ({ page }) => {
+  await mountCoach(page);
+
+  for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
+    const title = sections[sectionIndex].title;
+    const script = page.getByTestId("current-section-script");
+    const variants = script.getByRole("tab");
+    const variantCount = await variants.count();
+
+    for (let variantIndex = 0; variantIndex < variantCount; variantIndex += 1) {
+      const variant = variants.nth(variantIndex);
+      await variant.click();
+      await expect(variant).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByTestId("current-section-title")).toHaveText(title);
+      await expect(script).not.toBeEmpty();
+    }
+
+    if (sectionIndex < sections.length - 1) await page.getByTestId("coach-next").click();
+  }
+});
+
+test("preserves the official document's multiline outcomes and e-sign steps", async ({ page }) => {
+  await mountCoach(page);
+
+  for (let step = 0; step < 3; step += 1) await page.getByTestId("coach-next").click();
+  const outcomes = page.getByTestId("current-section-script").locator("p").filter({ hasText: "only 1 of 2 things" });
+  await expect(outcomes).toHaveCSS("white-space", "pre-line");
+  expect(await outcomes.innerText()).toContain("\n1. We can’t get you approved");
+  expect(await outcomes.innerText()).toContain("\n2. We’ll get you approved");
+
+  await page.getByTestId("phase-rail-close").click();
+  await page.getByTestId("coach-next").click();
+  await page.getByTestId("coach-next").click();
+  const esign = page.getByTestId("current-section-script").locator("p").filter({ hasText: "Press view documents" });
+  await expect(esign).toHaveCSS("white-space", "pre-line");
+  expect(await esign.innerText()).toContain("\n\nPress view documents");
+});
+
 test("jumps each phase to its first manual section and legacy events are navigation/rendering no-ops", async ({ page }) => {
   await mountCoach(page);
   const phaseFirstTitles = new Map<string, string>();
   for (const section of sections) if (!phaseFirstTitles.has(section.phase_id)) phaseFirstTitles.set(section.phase_id, section.title);
+  const phasePurposes = new Map<string, string>([
+    ["introduction", "Build Minor Rapport - Break The Cycle of Traditional Sales Calls - Set Proper Expectations - Instill Scarcity… Can they qualify?"],
+    ["reveal", "Make them FEEL their pain"],
+    ["assessment", "Avoid “How Can You Buy My House Over The Phone?” Objection. Makes them feel like you are the real deal."],
+    ["secure_positioning", "Avoid all smokescreens and objections after the offer by prehandling them upfront, and get the seller to confirm they want to move forward with our process before we present price."],
+    ["offer", "Make the seller feel like they’ve qualified for our program — reinforcing that they need us, not the other way around. Step 1 is complete, and now it’s only about finalizing the minor details."],
+    ["close", "Price is only an objection in the absence of value… how does our offer solve their problem?"],
+  ]);
 
   for (const [phaseId, title] of phaseFirstTitles) {
     await page.getByTestId(`phase-rail-${phaseId}`).click();
     await expect(page.getByTestId("current-section-title")).toHaveText(title);
+    await expect(page.getByTestId("current-phase-purpose")).toHaveText(`Purpose: ${phasePurposes.get(phaseId)}`);
   }
 
   await page.getByTestId("phase-rail-reveal").click();
@@ -120,6 +167,7 @@ test("jumps each phase to its first manual section and legacy events are navigat
   await emitStimulus(page, "legacyBatch");
   await expect(page.getByTestId("current-section-title")).toHaveText(before ?? "");
   await expect(page.getByText("Legacy note must remain invisible.")).toHaveCount(0);
+  await expect(page.getByTestId("coach-transcript")).toContainText("Legacy-version transcript remains visible.");
   await expect(page.getByTestId("current-script-card")).toBeVisible();
 });
 
@@ -221,7 +269,7 @@ test("real session hook replaces the prior call with the next prepared target on
   await expect(script).not.toContainText("123 Main Street");
 });
 
-test("emulated audio triggers automatic advice only for meaningful finalized homeowner speech", async ({ page }) => {
+test("emulated finalized transcript at Sandra's Jitter boundary triggers advice only for meaningful homeowner speech", async ({ page }) => {
   await mountCoach(page);
   await emitStimulus(page, "sellerInterim");
   await page.waitForTimeout(1_650);
