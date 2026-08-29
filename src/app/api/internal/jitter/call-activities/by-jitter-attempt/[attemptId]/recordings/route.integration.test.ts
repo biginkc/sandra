@@ -9,6 +9,7 @@ import {
   resetJitterIntegration,
   seedCallActivity,
 } from "../../../../_lib/test-helpers.integration";
+import { PUT as PUT_TRANSCRIPT } from "../transcript/route";
 import { POST } from "./route";
 
 const testClient = createTestClient();
@@ -19,6 +20,10 @@ function context(attemptId: string) {
 
 function url(attemptId: string, scopeId = "scope-default") {
   return `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}/recordings?scopeId=${encodeURIComponent(scopeId)}`;
+}
+
+function transcriptUrl(attemptId: string, scopeId: string) {
+  return `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}/transcript?scopeId=${encodeURIComponent(scopeId)}`;
 }
 
 function effectiveKey(scopeId: string, key: string) {
@@ -205,6 +210,222 @@ describe("internal.jitter.call-activities by-attempt recordings POST", () => {
       .select("id")
       .eq("call_activity_id", seeded.callActivityId);
     expect(data).toHaveLength(0);
+  });
+
+  it("adopts the authenticated scope on a wrap-up-first softphone parent", async () => {
+    const callId = crypto.randomUUID();
+    const seeded = await seedCallActivity(testClient, { attemptId: `sandra-${callId}` });
+    const scopeId = `sandra-softphone-session-${callId}:run-1`;
+    const { error: seedError } = await testClient
+      .from("call_activities")
+      .update({ provider: "sandra_softphone", jitter_session_id: null })
+      .eq("id", seeded.callActivityId);
+    expect(seedError).toBeNull();
+
+    const response = await POST(
+      jsonRequest(
+        url(seeded.jitterAttemptId, scopeId),
+        "POST",
+        { status: "available", storage_path: "calls/softphone.wav" },
+        { "idempotency-key": "by-attempt-recording-softphone-scope" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+
+    expect(response.status).toBe(200);
+    const { data: activity, error: activityError } = await testClient
+      .from("call_activities")
+      .select("jitter_session_id")
+      .eq("id", seeded.callActivityId)
+      .single();
+    expect(activityError).toBeNull();
+    expect(activity?.jitter_session_id).toBe(scopeId);
+    const { data: recordings } = await testClient
+      .from("call_recordings")
+      .select("status, storage_path")
+      .eq("call_activity_id", seeded.callActivityId);
+    expect(recordings).toEqual([
+      { status: "available", storage_path: "calls/softphone.wav" },
+    ]);
+  });
+
+  it("lets simultaneous recording and transcript delivery adopt the same softphone scope", async () => {
+    const callId = crypto.randomUUID();
+    const attemptId = `sandra-${callId}`;
+    const scopeId = `sandra-softphone-session-${callId}:run-shared`;
+    const seeded = await seedCallActivity(testClient, { attemptId });
+    const { error: seedError } = await testClient
+      .from("call_activities")
+      .update({ provider: "sandra_softphone", jitter_session_id: null })
+      .eq("id", seeded.callActivityId);
+    expect(seedError).toBeNull();
+
+    const [recording, transcript] = await Promise.all([
+      POST(
+        jsonRequest(
+          url(attemptId, scopeId),
+          "POST",
+          { status: "available", storage_path: "calls/race-shared.wav" },
+          { "idempotency-key": "softphone-race-shared-recording" },
+        ),
+        context(attemptId),
+      ),
+      PUT_TRANSCRIPT(
+        jsonRequest(
+          transcriptUrl(attemptId, scopeId),
+          "PUT",
+          { status: "available", text: "Shared-scope transcript" },
+          { "idempotency-key": "softphone-race-shared-transcript" },
+        ),
+        context(attemptId),
+      ),
+    ]);
+
+    expect([recording.status, transcript.status]).toEqual([200, 200]);
+    const { data: activity } = await testClient
+      .from("call_activities")
+      .select("jitter_session_id")
+      .eq("id", seeded.callActivityId)
+      .single();
+    expect(activity?.jitter_session_id).toBe(scopeId);
+    const [{ data: recordings }, { data: transcripts }] = await Promise.all([
+      testClient.from("call_recordings").select("storage_path").eq("call_activity_id", seeded.callActivityId),
+      testClient.from("call_transcripts").select("text").eq("call_activity_id", seeded.callActivityId),
+    ]);
+    expect(recordings).toEqual([{ storage_path: "calls/race-shared.wav" }]);
+    expect(transcripts).toEqual([{ text: "Shared-scope transcript" }]);
+  });
+
+  it("allows exactly one of two simultaneous coherent softphone scopes to win", async () => {
+    const callId = crypto.randomUUID();
+    const attemptId = `sandra-${callId}`;
+    const scopes = [
+      `sandra-softphone-session-${callId}:run-a`,
+      `sandra-softphone-session-${callId}:run-b`,
+    ];
+    const paths = ["calls/race-a.wav", "calls/race-b.wav"];
+    const seeded = await seedCallActivity(testClient, { attemptId });
+    const { error: seedError } = await testClient
+      .from("call_activities")
+      .update({ provider: "sandra_softphone", jitter_session_id: null })
+      .eq("id", seeded.callActivityId);
+    expect(seedError).toBeNull();
+
+    const responses = await Promise.all(scopes.map((scopeId, index) =>
+      POST(
+        jsonRequest(
+          url(attemptId, scopeId),
+          "POST",
+          { status: "available", storage_path: paths[index] },
+          { "idempotency-key": `softphone-competing-scope-${index}` },
+        ),
+        context(attemptId),
+      ),
+    ));
+
+    expect(responses.filter(({ status }) => status === 200)).toHaveLength(1);
+    expect(responses.filter(({ status }) => status === 409)).toHaveLength(1);
+    const winner = responses.findIndex(({ status }) => status === 200);
+    const loser = responses.findIndex(({ status }) => status === 409);
+    await expect(responses[loser].json()).resolves.toMatchObject({
+      error_code: "call_activity_identity_conflict",
+    });
+    const { data: activity } = await testClient
+      .from("call_activities")
+      .select("jitter_session_id")
+      .eq("id", seeded.callActivityId)
+      .single();
+    expect(activity?.jitter_session_id).toBe(scopes[winner]);
+    const { data: recordings } = await testClient
+      .from("call_recordings")
+      .select("storage_path")
+      .eq("call_activity_id", seeded.callActivityId);
+    expect(recordings).toEqual([{ storage_path: paths[winner] }]);
+  });
+
+  it("adopts scope before returning a cached processed artifact replay", async () => {
+    const callId = crypto.randomUUID();
+    const attemptId = `sandra-${callId}`;
+    const scopeId = `sandra-softphone-session-${callId}:run-cached`;
+    const seeded = await seedCallActivity(testClient, { attemptId, sessionId: scopeId });
+    const { error: providerError } = await testClient
+      .from("call_activities")
+      .update({ provider: "sandra_softphone" })
+      .eq("id", seeded.callActivityId);
+    expect(providerError).toBeNull();
+    const body = { status: "available", storage_path: "calls/cached-softphone.wav" };
+    const headers = { "idempotency-key": "softphone-processed-before-parent-recovery" };
+    const first = await POST(
+      jsonRequest(url(attemptId, scopeId), "POST", body, headers),
+      context(attemptId),
+    );
+    const cachedPayload = await first.json();
+    expect(first.status).toBe(200);
+    const { error: resetError } = await testClient
+      .from("call_activities")
+      .update({ jitter_session_id: null })
+      .eq("id", seeded.callActivityId);
+    expect(resetError).toBeNull();
+
+    const replay = await POST(
+      jsonRequest(url(attemptId, scopeId), "POST", body, headers),
+      context(attemptId),
+    );
+
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toEqual(cachedPayload);
+    const { data: activity } = await testClient
+      .from("call_activities")
+      .select("jitter_session_id")
+      .eq("id", seeded.callActivityId)
+      .single();
+    expect(activity?.jitter_session_id).toBe(scopeId);
+    const { data: recordings } = await testClient
+      .from("call_recordings")
+      .select("storage_path")
+      .eq("call_activity_id", seeded.callActivityId);
+    expect(recordings).toEqual([{ storage_path: body.storage_path }]);
+  });
+
+  it("rejects a different run scope after a softphone parent is bound", async () => {
+    const callId = crypto.randomUUID();
+    const winningScope = `sandra-softphone-session-${callId}:run-winner`;
+    const losingScope = `sandra-softphone-session-${callId}:run-loser`;
+    const seeded = await seedCallActivity(testClient, {
+      attemptId: `sandra-${callId}`,
+      sessionId: winningScope,
+    });
+    const { error: seedError } = await testClient
+      .from("call_activities")
+      .update({ provider: "sandra_softphone" })
+      .eq("id", seeded.callActivityId);
+    expect(seedError).toBeNull();
+
+    const response = await POST(
+      jsonRequest(
+        url(seeded.jitterAttemptId, losingScope),
+        "POST",
+        { status: "available", storage_path: "calls/loser.wav" },
+        { "idempotency-key": "by-attempt-recording-softphone-loser" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error_code: "call_activity_identity_conflict",
+    });
+    const { data: activity } = await testClient
+      .from("call_activities")
+      .select("jitter_session_id")
+      .eq("id", seeded.callActivityId)
+      .single();
+    expect(activity?.jitter_session_id).toBe(winningScope);
+    const { data: recordings } = await testClient
+      .from("call_recordings")
+      .select("id")
+      .eq("call_activity_id", seeded.callActivityId);
+    expect(recordings).toHaveLength(0);
   });
 
   it("writes the recording to the resolved call activity", async () => {

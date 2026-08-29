@@ -8,7 +8,9 @@ import {
   requireIdempotencyKey,
 } from "../../../../_lib/auth";
 import { parseRecordingWritebackBody } from "../../../../_lib/artifact-writeback-payload";
-import { callActivityAttemptProviderFilter } from "../../../../_lib/call-activity-lookup";
+import {
+  resolveArtifactCallActivity,
+} from "../../../../_lib/artifact-call-activity";
 import { responseForWritebackPayload } from "../../../../_lib/writeback-response";
 
 type RouteContext = { params: Promise<{ attemptId: string }> };
@@ -17,6 +19,13 @@ function parentNotFound() {
   return NextResponse.json(
     { error: "not_found", error_code: "call_activity_not_found" },
     { status: 404 },
+  );
+}
+
+function identityConflict() {
+  return NextResponse.json(
+    { error: "conflict", error_code: "call_activity_identity_conflict" },
+    { status: 409 },
   );
 }
 
@@ -61,20 +70,19 @@ export async function POST(
     const body = parsedBody.body;
     const effectiveIdempotencyKey = `${scopeId.length}:${scopeId}:${idempotencyKey}`;
 
-    const { data: activity, error: activityError } = await auth.serviceClient
-      .from("call_activities")
-      .select("id")
-      .eq("org_id", auth.orgId)
-      .eq("jitter_attempt_id", attemptId)
-      .or(callActivityAttemptProviderFilter(scopeId))
-      .maybeSingle();
-    if (activityError) throw activityError;
-    if (!activity) return parentNotFound();
+    const activity = await resolveArtifactCallActivity(auth.serviceClient, {
+      orgId: auth.orgId,
+      attemptId,
+      scopeId,
+    });
+    if (!activity.ok) {
+      return activity.reason === "identity_conflict" ? identityConflict() : parentNotFound();
+    }
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       orgId: auth.orgId,
       eventType: "call_recording_writeback",
-      resourceId: activity.id,
+      resourceId: activity.activityId,
       idempotencyKey: effectiveIdempotencyKey,
       payload: body,
     });
@@ -90,7 +98,7 @@ export async function POST(
 
     const { data: payload, error: mutationError } =
       await auth.serviceClient.rpc("jitter_upsert_call_recording", {
-        p_call_activity_id: activity.id,
+        p_call_activity_id: activity.activityId,
         p_org_id: auth.orgId,
         p_status: body.status,
         p_storage_path: body.storage_path ?? null,

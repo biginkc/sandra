@@ -214,6 +214,43 @@ describe("internal.jitter.call-activities by-attempt transcript PUT", () => {
     expect(data).toHaveLength(0);
   });
 
+  it("adopts the authenticated scope on a wrap-up-first softphone parent", async () => {
+    const callId = crypto.randomUUID();
+    const seeded = await seedCallActivity(testClient, { attemptId: `sandra-${callId}` });
+    const scopeId = `sandra-softphone-session-${callId}:run-1`;
+    const { error: seedError } = await testClient
+      .from("call_activities")
+      .update({ provider: "sandra_softphone", jitter_session_id: null })
+      .eq("id", seeded.callActivityId);
+    expect(seedError).toBeNull();
+
+    const response = await PUT(
+      jsonRequest(
+        url(seeded.jitterAttemptId, scopeId),
+        "PUT",
+        { status: "available", text: "Softphone transcript" },
+        { "idempotency-key": "by-attempt-transcript-softphone-scope" },
+      ),
+      context(seeded.jitterAttemptId),
+    );
+
+    expect(response.status).toBe(200);
+    const { data: activity, error: activityError } = await testClient
+      .from("call_activities")
+      .select("jitter_session_id")
+      .eq("id", seeded.callActivityId)
+      .single();
+    expect(activityError).toBeNull();
+    expect(activity?.jitter_session_id).toBe(scopeId);
+    const { data: transcripts } = await testClient
+      .from("call_transcripts")
+      .select("status, text")
+      .eq("call_activity_id", seeded.callActivityId);
+    expect(transcripts).toEqual([
+      { status: "available", text: "Softphone transcript" },
+    ]);
+  });
+
   it("writes transcript and summary fields and fans summary status to the parent", async () => {
     const seeded = await seedCallActivity(testClient);
     const response = await PUT(
