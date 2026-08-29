@@ -9,7 +9,7 @@ import {
   PhoneIcon,
 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 
 import { toast } from "sonner";
 
@@ -22,7 +22,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { copyToClipboard } from "@/lib/csv/export";
+import { normalizePhone } from "@/lib/csv/normalize";
 import { formatPhoneE164 } from "@/lib/phone-format";
+import {
+  deriveSmsParties,
+  isSmsRouteAuthoritative,
+} from "@/lib/messages/sms-parties";
 import { cn } from "@/lib/utils";
 
 import { InlineReply } from "../leads/[id]/inline-reply";
@@ -31,6 +36,7 @@ import { MessagesThread } from "../leads/[id]/messages-thread";
 
 import { AssignDropdown } from "./assign-dropdown";
 import {
+  confirmAiDispositionReview,
   moveMessageThreadToLead,
   setOutreachDispo,
   type OutreachDispo,
@@ -69,7 +75,10 @@ const DISPO_LABELS: Record<string, string> = {
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 type ReplyRefreshGate = {
   threadId: string;
-  initialMessages: MessageRow[];
+  messageId: string;
+  /** Null while provider confirmation is pending; the current snapshot once
+   * a terminal update has triggered an authoritative server refresh. */
+  initialMessages: MessageRow[] | null;
 };
 
 function initialsOfName(name: string | null): string {
@@ -99,6 +108,7 @@ function DispoBar({
   initialDispo,
   propertyStatus,
   currentUserId,
+  onDispositionChanged,
 }: {
   propertyId: string;
   contactId: string;
@@ -106,6 +116,7 @@ function DispoBar({
   initialDispo: string | null;
   propertyStatus: string | null;
   currentUserId: string | null;
+  onDispositionChanged?: () => void;
 }) {
   const router = useRouter();
   const [dispo, setDispo] = useState<string | null>(initialDispo);
@@ -115,6 +126,7 @@ function DispoBar({
 
   function apply(newDispo: OutreachDispo) {
     startTransition(async () => {
+      const previousDispo = dispo;
       const result = await setOutreachDispo(propertyId, newDispo);
       if (result.ok) {
         setDispo(newDispo);
@@ -123,6 +135,7 @@ function DispoBar({
             "Marked wrong number — consider skip-tracing a new number.",
           );
         }
+        if (previousDispo !== newDispo) onDispositionChanged?.();
       } else {
         toast.error(result.error);
       }
@@ -225,7 +238,10 @@ function DispoBar({
         currentUserId={currentUserId}
         triggerLabel="Book appt"
         disabled={pending}
-        onBooked={() => setDispo("booked_appointment")}
+        onBooked={() => {
+          setDispo("booked_appointment");
+          onDispositionChanged?.();
+        }}
       />
 
       <DropdownMenu>
@@ -274,6 +290,85 @@ function DispoBar({
   );
 }
 
+function SandraDispoReviewBanner({
+  review,
+  onResolved,
+}: {
+  review: NonNullable<InboxDetailData["aiDispositionReview"]>;
+  onResolved: (status: "confirmed" | "superseded") => void;
+}) {
+  const [pending, startTransition] = useTransition();
+  const label = DISPO_LABELS[review.disposition] ?? review.disposition;
+  const keepsRestrictions =
+    review.disposition === "dnc" || review.disposition === "opted_out";
+
+  const confirm = () => {
+    startTransition(async () => {
+      const result = await confirmAiDispositionReview(review.id);
+      if (!result.ok) {
+        toast.error(result.error);
+        return;
+      }
+      if (result.status === "confirmed") {
+        toast.success("Sandra disposition confirmed");
+      } else {
+        toast.info("This Sandra disposition was already replaced");
+      }
+      onResolved(result.status);
+    });
+  };
+
+  return (
+    <div
+      className="border-b border-[#fed7aa] bg-[#fff7ed] px-4 py-3 sm:px-6"
+      data-testid="sandra-dispo-review-banner"
+    >
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-start gap-2.5">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/icon.png"
+            alt=""
+            aria-hidden="true"
+            className="mt-0.5 h-5 w-5 shrink-0"
+          />
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-[#9a3412]">
+              Sandra marked this: {label}
+            </p>
+            <p className="mt-0.5 text-xs text-[#7c2d12]">
+              Why: {review.reason}
+            </p>
+            {review.sourceMessageBody ? (
+              <blockquote
+                className="mt-1.5 border-l-2 border-[#fdba74] pl-2 text-xs italic text-[#7c2d12]"
+                data-testid="sandra-dispo-source-message"
+              >
+                Reviewed message: “{review.sourceMessageBody}”
+              </blockquote>
+            ) : null}
+            {keepsRestrictions ? (
+              <p className="mt-1 text-[11px] font-medium text-[#7c2d12]">
+                Confirming this review does not remove contact restrictions.
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <Button
+          type="button"
+          size="sm"
+          className="min-h-11 shrink-0 bg-[#9a3412] text-white hover:bg-[#7c2d12]"
+          disabled={pending}
+          onClick={confirm}
+          data-testid="confirm-sandra-dispo"
+        >
+          {pending ? "Confirming…" : "Confirm Sandra disposition"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Right-side detail panel of the cockpit. Renders the existing
  * MessagesThread + InlineReply components — same building blocks as the
@@ -300,6 +395,11 @@ export function InboxDetail({
   const [resolveOpen, setResolveOpen] = useState(false);
   const [replyRefreshGate, setReplyRefreshGate] =
     useState<ReplyRefreshGate | null>(null);
+  const replyRefreshGateRef = useRef<ReplyRefreshGate | null>(null);
+  const updateReplyRefreshGate = (gate: ReplyRefreshGate | null) => {
+    replyRefreshGateRef.current = gate;
+    setReplyRefreshGate(gate);
+  };
 
   const closeDetail = useCallback(() => {
     if (onBackToList) {
@@ -312,6 +412,14 @@ export function InboxDetail({
     router.replace(qs ? `/messages?${qs}` : "/messages", { scroll: false });
     router.refresh();
   }, [onBackToList, router, searchParams]);
+
+  const refreshAfterReviewResolution = useCallback(() => {
+    if (searchParams.get("filter") === "dispo") {
+      closeDetail();
+      return;
+    }
+    router.refresh();
+  }, [closeDetail, router, searchParams]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -402,7 +510,7 @@ export function InboxDetail({
     propertySmsOptedOut: data.outreachDispo === "opted_out",
     phoneSuppressed: data.phoneSuppressed,
     outreachDispo: data.outreachDispo,
-    phoneLineType: null,
+    phoneLineType: data.replyToPhoneLineType,
   });
   const isSmsRestricted =
     data.contactDoNotContact || smsPresentation.smsRestricted;
@@ -413,16 +521,124 @@ export function InboxDetail({
     !data.smsSafetyReadFailed &&
     !data.contactDoNotContact &&
     !hasBadThreadNumber;
+  const initialPendingOutboundMessageIds = new Set(
+    data.initialMessages
+      .filter(
+        (message) =>
+          message.direction === "outbound" && message.status === "pending",
+      )
+      .map((message) => message.id),
+  );
+  const liveGateSnapshotMessage =
+    replyRefreshGate?.initialMessages === null
+      ? data.initialMessages.find(
+          (message) => message.id === replyRefreshGate.messageId,
+        )
+      : null;
   const replyRefreshPending =
-    replyRefreshGate?.threadId === data.threadId &&
-    replyRefreshGate.initialMessages === data.initialMessages;
-  const handleLiveMessage = () => {
-    setReplyRefreshGate({
+    initialPendingOutboundMessageIds.size > 0 ||
+    (replyRefreshGate?.threadId === data.threadId &&
+      (replyRefreshGate.initialMessages === null
+        ? !liveGateSnapshotMessage || liveGateSnapshotMessage.status === "pending"
+        : replyRefreshGate.initialMessages === data.initialMessages));
+  const handleLiveMessage = (
+    message: MessageRow,
+    event: "INSERT" | "UPDATE",
+  ) => {
+    const parties = deriveSmsParties(message);
+    const sameRoute =
+      normalizePhone(parties.customerPhone) !== null &&
+      normalizePhone(parties.customerPhone) ===
+        normalizePhone(data.replyToPhone) &&
+      normalizePhone(parties.businessPhone) !== null &&
+      normalizePhone(parties.businessPhone) ===
+        normalizePhone(data.threadBusinessPhone);
+
+    // A changed-route outbound attempt is not authoritative until the
+    // provider confirms it. Preserve and gate the draft while it is pending;
+    // a later sent/delivered or failed update refreshes to the correct route.
+    if (
+      event === "INSERT" &&
+      message.direction === "outbound" &&
+      message.status === "pending"
+    ) {
+      updateReplyRefreshGate({
+        threadId: data.threadId,
+        messageId: message.id,
+        initialMessages: null,
+      });
+      return;
+    }
+
+    // The page can mount after the pending INSERT has already happened. In
+    // that case the initial server snapshot is the gate source, and its first
+    // terminal UPDATE must trigger the same authoritative refresh.
+    if (
+      event === "UPDATE" &&
+      initialPendingOutboundMessageIds.has(message.id) &&
+      message.status !== "pending"
+    ) {
+      updateReplyRefreshGate({
+        threadId: data.threadId,
+        messageId: message.id,
+        initialMessages: data.initialMessages,
+      });
+      router.refresh();
+      return;
+    }
+
+    // A provider can report failure after first reporting sent. This browser
+    // may have loaded after the pending/sent transition, so it has no gate to
+    // match. Refresh every in-thread failed outbound so the server can fall
+    // back to the prior authoritative route while the draft stays mounted.
+    if (
+      event === "UPDATE" &&
+      message.direction === "outbound" &&
+      message.status === "failed"
+    ) {
+      updateReplyRefreshGate({
+        threadId: data.threadId,
+        messageId: message.id,
+        initialMessages: data.initialMessages,
+      });
+      router.refresh();
+      return;
+    }
+
+    if (
+      event === "UPDATE" &&
+      replyRefreshGateRef.current?.threadId === data.threadId &&
+      replyRefreshGateRef.current.messageId === message.id &&
+      message.status !== "pending"
+    ) {
+      updateReplyRefreshGate({
+        threadId: data.threadId,
+        messageId: message.id,
+        initialMessages: data.initialMessages,
+      });
+      router.refresh();
+      return;
+    }
+
+    if (!isSmsRouteAuthoritative(message)) return;
+    // Same-route outbound inserts/updates cannot change sender/destination.
+    // Inbound messages still refresh because STOP and other inbound handling
+    // can change consent, suppression, or disposition on the existing route.
+    if (message.direction === "outbound" && sameRoute) return;
+    updateReplyRefreshGate({
       threadId: data.threadId,
+      messageId: message.id,
       initialMessages: data.initialMessages,
     });
     router.refresh();
   };
+
+  const replyPhoneUnavailableMessage =
+    data.replyToPhoneLineType === "landline"
+      ? "This thread number is saved as a landline — use a mobile number for SMS."
+      : data.threadCustomerPhone
+        ? "This thread number is not saved on the homeowner contact — save or resolve it before replying."
+        : "This conversation does not have a confirmed SMS reply route yet. Open the lead to send from a saved mobile number.";
 
   return (
     <div
@@ -637,6 +853,12 @@ export function InboxDetail({
           .
         </RestrictionNotice>
       ) : null}
+      {data.aiDispositionReview ? (
+        <SandraDispoReviewBanner
+          review={data.aiDispositionReview}
+          onResolved={refreshAfterReviewResolution}
+        />
+      ) : null}
       <div
         className="flex-1 overflow-y-auto px-6 py-5 bg-[#faf9f8]"
         data-testid="inbox-detail-scroll"
@@ -665,40 +887,53 @@ export function InboxDetail({
                 initialDispo={data.outreachDispo}
                 propertyStatus={data.propertyStatus}
                 currentUserId={currentUserId}
+                onDispositionChanged={
+                  data.aiDispositionReview
+                    ? refreshAfterReviewResolution
+                    : undefined
+                }
               />
             </div>
           ) : null}
           <div className="border-t border-border bg-white px-6 py-4">
             {isSmsRestricted ? (
               <div
+                key="inline-reply-restriction"
                 className="rounded-xl border border-dashed border-[#e5e1df] bg-[#fafaf9] p-3 text-center text-xs text-[#57534e]"
                 data-testid="inline-reply-restricted"
               >
                 {data.homeownerContactId === data.contactId &&
                 !data.replyToPhone
-                  ? "This thread number is not saved on the homeowner contact — save or resolve it before replying."
+                  ? replyPhoneUnavailableMessage
                   : "SMS reply unavailable for this restricted thread. Review the notice above before taking another safe action."}
               </div>
-            ) : replyRefreshPending ? (
+            ) : null}
+            {data.homeownerContactId === data.contactId ? (
               <div
-                className="rounded-xl border border-dashed border-[#e5e1df] p-3 text-center text-xs text-[#78716c]"
-                data-testid="inline-reply-refreshing"
+                key="inline-reply-composer"
+                className="flex flex-col gap-3"
               >
-                Updating the thread phone before reply...
+                {replyRefreshPending ? (
+                  <div
+                    className="rounded-xl border border-dashed border-[#e5e1df] p-3 text-center text-xs text-[#78716c]"
+                    data-testid="inline-reply-refreshing"
+                  >
+                    Updating the thread phone before reply...
+                  </div>
+                ) : null}
+                <InlineReply
+                  key={`reply-${data.threadId}`}
+                  propertyId={data.propertyId}
+                  homeownerContactId={data.homeownerContactId}
+                  homeownerPhone={data.replyToPhone}
+                  replyToPhone={data.replyToPhone}
+                  preferredFromNumber={data.threadBusinessPhone}
+                  phoneUnavailableMessage={replyPhoneUnavailableMessage}
+                  routeRefreshPending={replyRefreshPending}
+                  suspended={isSmsRestricted}
+                />
               </div>
-            ) : data.homeownerContactId === data.contactId ? (
-              <InlineReply
-                key={`reply-${data.threadId}`}
-                propertyId={data.propertyId}
-                homeownerContactId={data.homeownerContactId}
-                homeownerPhone={data.replyToPhone}
-                replyToPhone={data.replyToPhone}
-                phoneUnavailableMessage="This thread number is not saved on the homeowner contact — save or resolve it before replying."
-                persistedMessageIds={data.initialMessages.map(
-                  (message) => message.id,
-                )}
-              />
-            ) : (
+            ) : !isSmsRestricted ? (
               <div
                 className="rounded-xl border border-dashed border-[#e5e1df] p-3 text-center text-xs text-[#78716c]"
                 data-testid="inline-reply-unavailable"
@@ -706,7 +941,7 @@ export function InboxDetail({
                 SMS replies from Messages are available only when this thread
                 contact is the homeowner.
               </div>
-            )}
+            ) : null}
           </div>
         </>
       ) : data.propertyId && isPermanentlyLocked ? null : (

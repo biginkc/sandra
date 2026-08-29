@@ -1,0 +1,530 @@
+{
+  "schema_version": 2,
+  "version": "1.1.0",
+  "source": "Outbound Script - Official CLOSR Sales Process (Google Doc 1ab9k0VIUQ4kkSTmdR5XV7qeuiRe2-czgmKGouM-lCag, tab t.0). Spoken wording follows the document verbatim, with approved Sandra substitutions for dynamic placeholders plus BMH Group, bmhgroupkc.com, and the session file-number rule.",
+  "brand": { "company": "BMH Group", "website": "bmhgroupkc.com" },
+  "tokens": ["seller_name", "rep_name", "property_address", "motivation", "dream_outcome", "rep_phone", "file_number", "cold_caller_name", "year_built", "closing_date", "offer_price", "net_to_seller"],
+  "entry_tokens": ["motivation", "dream_outcome", "cold_caller_name", "closing_date", "offer_price", "net_to_seller"],
+  "file_number_rule": {
+    "format": "{county_first2_upper}-{lead_id_last4}",
+    "note": "Per the approved script's token legend: 'First 2 letters of county + last 4 of lead ID... Fallback if county missing: last 4 of seller's phone.' The fallback triggers when COUNTY is unavailable (not when the lead id is), and its value is the phone digits ALONE — no county prefix, since county is exactly what's missing. When county is present but the lead id isn't, the county prefix is kept and the seller's phone last 4 is used as the suffix instead.",
+    "fallback_if_county_missing": "{seller_phone_last4}",
+    "fallback_if_lead_id_missing_but_county_present": "{county_first2_upper}-{seller_phone_last4}"
+  },
+  "phases": [
+    {
+      "id": "introduction",
+      "name": "Introduction",
+      "purpose": "Build Minor Rapport - Break The Cycle of Traditional Sales Calls - Set Proper Expectations - Instill Scarcity… Can they qualify?",
+      "display": {
+        "branches": [
+          {
+            "tag": "Opener",
+            "auto_select_by": "lead_source",
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "introduction.opener.default.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" }
+              ] },
+              { "key": "cold_call", "label": "Cold call", "lines": [
+                { "id": "introduction.opener.cold_call.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
+                { "id": "introduction.opener.cold_call.02", "type": "say", "text": "It looks like you spoke to one of my assistants {cold_caller_name} a little bit ago about your property on {property_address}, they said you may need help with {motivation}?" }
+              ] },
+              { "key": "fsbo", "label": "FSBO", "lines": [
+                { "id": "introduction.opener.fsbo.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
+                { "id": "introduction.opener.fsbo.02", "type": "say", "text": "I saw your place at {property_address} was listed For Sale by Owner. Were you looking to sell to someone planning to live there, or would you want me to check if our team can get you approved for an all-cash offer?" }
+              ] },
+              { "key": "sms", "label": "SMS reply", "lines": [
+                { "id": "introduction.opener.sms.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
+                { "id": "introduction.opener.sms.02", "type": "say", "text": "I see you just responded to our teams text about getting an offer on {property_address}, is this something you want to sell immediately or just looking at possible options while you have some free time?" }
+              ] },
+              { "key": "d4d", "label": "Driving for dollars", "lines": [
+                { "id": "introduction.opener.d4d.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
+                { "id": "introduction.opener.d4d.02", "type": "say", "text": "I’m holding a copy of your tax records here for the property at {property_address}, and my team just wanted me to ask, would you be open to a cash offer, or are you planning to hold onto it for now?" }
+              ] }
+            ],
+            "trailing_note": "If you do not no motivation just say the address with a {{tone:question inflection}}."
+          },
+          {
+            "tag": "Frame the call",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "introduction.frame-the-call.default.01", "type": "say", "text": "The reason for my call today, {seller_name}, is to see if we can even do anything good for you in the first place. Because at the end of the day not every property does qualify for an offer, but it’s up to you & I, to convince my underwriting team to get you approved. Sound fair?" },
+                { "id": "introduction.frame-the-call.default.02", "type": "say", "text": "Cool, so uh how we work is very simple. We buy properties for a couple reasons:" },
+                { "id": "introduction.frame-the-call.default.03", "type": "say", "text": "To add some sort of value to the property so we can resell it on the market or" },
+                { "id": "introduction.frame-the-call.default.04", "type": "say", "text": "Buy the property to rent it to someone who needs a nice rental for a fair price" },
+                { "id": "introduction.frame-the-call.default.05", "type": "say", "text": "And at the end of this call only 1 of 2 things will happen.\n1. We can’t get you approved but we will at least point you in the right direction\n2. We’ll get you approved for an offer we can firmly stand behind, and we’ll send you a simple agreement to approve so we don’t keep you waiting and waste your time because…\n\nI’m sure speed is important to you right?" },
+                { "id": "introduction.frame-the-call.default.06", "type": "say", "text": "Perfect, and are you in a position to be able to move forward once we find the solution that makes sense for you?" }
+              ] }
+            ]
+          },
+          {
+            "tag": "Pen & paper — contact details",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "introduction.pen-paper-contact-details.default.01", "type": "say", "text": "Alrighty, just in case we get disconnected here I'm going to ask you to pull out a pen and paper or note pad so I can tell you some things that you will surely want to know especially if we get you approved. Let me know when you’re ready to take notes.\n\nFirst things first:" },
+                { "id": "introduction.pen-paper-contact-details.default.02", "type": "say", "text": "My name is {rep_name}" },
+                { "id": "introduction.pen-paper-contact-details.default.03", "type": "say", "text": "Our Company Name is BMH Group" },
+                { "id": "introduction.pen-paper-contact-details.default.04", "type": "say", "text": "Our website is bmhgroupkc.com where you can see all of our testimonials, reviews, and see how our process works." },
+                { "id": "introduction.pen-paper-contact-details.default.05", "type": "say", "text": "My phone number is: {rep_phone} so in the case we get disconnected you can call or text me anytime here! Could you repeat that back to me just so I know you have the right number? Ok thank you, and for you is this a landline or cellphone?" },
+                { "id": "introduction.pen-paper-contact-details.default.06", "type": "say", "text": "And finally your most important the file #... your file number will be {file_number} this is where you can call back at any time to ask for updates on your file!" },
+                { "id": "introduction.pen-paper-contact-details.default.07", "type": "say", "text": "You got it?\n\nAwesome." }
+              ] }
+            ]
+          }
+        ]
+      },
+      "match": {
+        "entry_landmarks": [],
+        "advance_landmarks": [
+          { "id": "opener_said", "speaker": "rep", "phrases": ["this is {rep_name}", "hey {seller_name}"], "note": "call start default" },
+          { "id": "reason_frame", "speaker": "rep", "phrases": ["reason for my call", "anything good for you", "underwriting team to get you approved", "sound fair"] },
+          { "id": "two_outcomes", "speaker": "rep", "phrases": ["only one of two things", "point you in the right direction", "firmly stand behind", "speed is important"] },
+          { "id": "position_check", "speaker": "rep", "phrases": ["position to be able to move forward", "position to move forward"] },
+          { "id": "pen_and_paper", "speaker": "rep", "phrases": ["pen and paper", "ready to take notes", "in case we get disconnected"] },
+          { "id": "file_number_given", "speaker": "rep", "phrases": ["your file number", "ask for updates on your file"] }
+        ],
+        "exit_to": "reveal"
+      },
+      "coach_notes": [
+        { "trigger": "phase_enter", "text": "Say their name twice in the first line — builds familiarity fast." },
+        { "trigger": "phase_enter", "text": "Never open with 'How are you doing today?' — you'll sound like a call center." },
+        { "trigger": "seller_busy", "seller_phrases": ["busy", "bad time", "in the middle of"], "text": "Don't ask 'Is now a good time?' — if there's real background noise, use 'Did I catch you at a bad time?'" },
+        { "trigger": "landmark:position_check", "text": "If they can't move forward once a solution is found — cut the call." },
+        { "trigger": "phase_enter", "text": "If someone else must sign, get them present before the real conversation starts." },
+        { "trigger": "phase_enter", "text": "Inbound leads get the full intro; outbound gets it condensed — you called them." }
+      ]
+    },
+    {
+      "id": "reveal",
+      "name": "Reveal",
+      "purpose": "Make them FEEL their pain",
+      "display": {
+        "branches": [
+          {
+            "tag": "Entry",
+            "auto_select_by": "occupancy",
+            "variants": [
+              { "key": "unknown", "label": null, "lines": [
+                { "id": "reveal.entry.unknown.01", "type": "say", "text": "Ok {seller_name}, That should be all you need for now until we find out if we can get you approved for an offer. But until then could you give me a little bit of a run down?" },
+                { "id": "reveal.entry.unknown.02", "type": "say", "text": "Do you currently.. Live here?.. Or are there tenants? What’s going on?" }
+              ] },
+              { "key": "owner_occupied", "label": "Owner-occupied", "lines": [
+                { "id": "reveal.entry.owner_occupied.01", "type": "say", "text": "Ok {seller_name}, That should be all you need for now until we find out if we can get you approved for an offer. But until then could you give me a little bit of a run down?" },
+                { "id": "reveal.entry.owner_occupied.02", "type": "say", "text": "I know you live here and all, but what made you ready to make this move now?" }
+              ] },
+              { "key": "tenant_occupied", "label": "Tenant-occupied", "lines": [
+                { "id": "reveal.entry.tenant_occupied.01", "type": "say", "text": "Ok {seller_name}, That should be all you need for now until we find out if we can get you approved for an offer. But until then could you give me a little bit of a run down?" },
+                { "id": "reveal.entry.tenant_occupied.02", "type": "say", "text": "I know you have these tenants and all, but what made you ready to move on to something new now?" }
+              ] },
+              { "key": "vacant", "label": "Vacant", "lines": [
+                { "id": "reveal.entry.vacant.01", "type": "say", "text": "Ok {seller_name}, That should be all you need for now until we find out if we can get you approved for an offer. But until then could you give me a little bit of a run down?" },
+                { "id": "reveal.entry.vacant.02", "type": "say", "text": "I know its been vacant for a little bit, but what made you decide to go ahead and sell it now." }
+              ] }
+            ]
+          },
+          {
+            "tag": "Example probes — goal 7+",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "homeowner", "label": "Homeowner", "lines": [
+                { "id": "reveal.example-probes-goal-7.homeowner.01", "type": "say", "text": "Oh! Where are you headed next?" },
+                { "id": "reveal.example-probes-goal-7.homeowner.02", "type": "say", "text": "Why there?" },
+                { "id": "reveal.example-probes-goal-7.homeowner.03", "type": "say", "text": "How does that compare to where you are now?" },
+                { "id": "reveal.example-probes-goal-7.homeowner.04", "type": "say", "text": "How long have you been there?" },
+                { "id": "reveal.example-probes-goal-7.homeowner.05", "type": "say", "text": "If nowhere: Well we don’t want to just kick you out in the streets! {{tone:Playful tone}} No seriously the investors are going to want to know. If we end up buying it, what's the Plan?" }
+              ] },
+              { "key": "investor", "label": "Investor", "lines": [
+                { "id": "reveal.example-probes-goal-7.investor.01", "type": "say", "text": "Are there tenants there now?" },
+                { "id": "reveal.example-probes-goal-7.investor.06", "type": "say", "text": "What are they paying?" },
+                { "id": "reveal.example-probes-goal-7.investor.02", "type": "say", "text": "Are they on a lease? Month to month?" },
+                { "id": "reveal.example-probes-goal-7.investor.03", "type": "say", "text": "And the tenants, are they paying every month, on time, you know like the exact time they’re supposed to?" },
+                { "id": "reveal.example-probes-goal-7.investor.04", "type": "say", "text": "How are the tenants?" },
+                { "id": "reveal.example-probes-goal-7.investor.05", "type": "say", "text": "Are you investing in something else once you sell this one or are ya hanging up the hat for good?" }
+              ] },
+              { "key": "vacant", "label": "Vacant", "lines": [
+                { "id": "reveal.example-probes-goal-7.vacant.01", "type": "say", "text": "How long has it been vacant?" },
+                { "id": "reveal.example-probes-goal-7.vacant.02", "type": "say", "text": "What are you doing now to keep up with the maintenance?" },
+                { "id": "reveal.example-probes-goal-7.vacant.03", "type": "say", "text": "Who’s actually responsible for you know, the yard, the property taxes, things like that?" },
+                { "id": "reveal.example-probes-goal-7.vacant.04", "type": "say", "text": "How long have you been paying that?" },
+                { "id": "reveal.example-probes-goal-7.vacant.05", "type": "note", "text": "Add up all of the expenses that they’ve paid so far" },
+                { "id": "reveal.example-probes-goal-7.vacant.06", "type": "say", "text": "So when you sell this property, Are ya taking a one way trip to Vegas or what’s the Plan?" }
+              ] }
+            ]
+          },
+          {
+            "tag": "Motivation",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "clear_no_urgency", "label": "Clear motivation, no urgency", "tone": "concerned/curious tone", "lines": [
+                { "id": "reveal.motivation.clear_no_urgency.00", "type": "note", "text": "Next is motivation, this is just the intro question you should probe and ask questions for as long as the conversation goes naturally, the goal is for us to spend the longest time on this part of the script. Check your resources for probing and questions." },
+                { "id": "reveal.motivation.clear_no_urgency.01", "type": "say", "text": "So besides {motivation}, what was it that came up that made you want to look at possibly moving on from this house... now?" },
+                { "id": "reveal.motivation.clear_no_urgency.02", "type": "say", "text": "How long has that been going on?" }
+              ] },
+              { "key": "clear_with_urgency", "label": "Clear motivation with urgency", "lines": [
+                { "id": "reveal.motivation.clear_with_urgency.00", "type": "note", "text": "Next is motivation, this is just the intro question you should probe and ask questions for as long as the conversation goes naturally, the goal is for us to spend the longest time on this part of the script. Check your resources for probing and questions." },
+                { "id": "reveal.motivation.clear_with_urgency.01", "type": "say", "text": "Just so I can understand the rationale here... what’s the main reason you’re reaching out to us for maybe.. A quicker close or easier transaction vs I don’t know... taking a chance, listing it with a realtor and going through all the hassle?" }
+              ] },
+              { "key": "no_clear_motivation", "label": "No clear motivation", "lines": [
+                { "id": "reveal.motivation.no_clear_motivation.00", "type": "note", "text": "Next is motivation, this is just the intro question you should probe and ask questions for as long as the conversation goes naturally, the goal is for us to spend the longest time on this part of the script. Check your resources for probing and questions." },
+                { "id": "reveal.motivation.no_clear_motivation.01", "type": "say", "text": "It sounds like things are going fairly well for you here, what’s the rationale behind wanting to possibly sell the property, rather than, I don’t know (repeat back their situation)" },
+                { "id": "reveal.motivation.no_clear_motivation.02", "type": "say", "text": "Well that all makes sense, but why take care of this.. NOW though?" },
+                { "id": "reveal.motivation.no_clear_motivation.03", "type": "say", "text": "Ah, well that makes sense and how we could possibly help." }
+              ] }
+            ]
+          }
+        ]
+      },
+      "match": {
+        "entry_landmarks": [
+          { "id": "rundown_ask", "speaker": "rep", "phrases": ["give me a little bit of a rundown", "do you currently live", "are there tenants", "what made you ready"] }
+        ],
+        "advance_landmarks": [
+          { "id": "why_now", "speaker": "rep", "phrases": ["why take care of this now", "made you want to look at possibly moving on", "what's the main reason you're reaching out"] }
+        ],
+        "counters": [
+          { "id": "probe_counter", "counts": "rep_questions", "goal": 7, "display": "Probes {n}/7" }
+        ],
+        "pain_words": ["passed away", "passed last", "divorce", "foreclosure", "behind on", "tenants", "vacant", "health", "hospital", "need out", "need to get out", "tired of", "can't afford", "stress"],
+        "exit_to": "assessment"
+      },
+      "coach_notes": [
+        { "trigger": "phase_enter", "text": "Never move on from pain unless you can't go any deeper. Follow the first leak — 'hard,' 'tenants,' 'health,' 'I need out.'" },
+        { "trigger": "phase_enter", "text": "Goal: 7+ probing questions. The coach counts along." },
+        { "trigger": "phase_enter", "text": "Four tools, mixed naturally: probing questions, consequence questions, mirroring, labeling." },
+        { "trigger": "phase_enter", "text": "Don't open with 'why do you want to sell?' — that's the kill shot too early." },
+        { "trigger": "phase_enter", "text": "Guarded/outbound sellers: slow down, concerned + curious tone, one clean question at a time." },
+        { "trigger": "pain_word", "text": "Pain word — go deeper." },
+        { "trigger": "probe_counter_below_goal_on_exit", "text": "Under 7 probes — you likely left pain on the table." }
+      ]
+    },
+    {
+      "id": "assessment",
+      "name": "Assessment",
+      "purpose": "Avoid “How Can You Buy My House Over The Phone?” Objection. Makes them feel like you are the real deal.",
+      "display": {
+        "branches": [
+          {
+            "tag": "Outside",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "assessment.outside.default.01", "type": "say", "text": "Ok, thank you for sharing all of that with me {seller_name} that is truly helpful and will help the chances of you getting approved. Now before we get into the inside of the house can you tell me about the outside?" },
+                { "id": "assessment.outside.default.02", "type": "say", "text": "Like the neighborhood?" },
+                { "id": "assessment.outside.default.10", "type": "say", "text": "How are the neighbors? Do they take care of their home and are they nice" },
+                { "id": "assessment.outside.default.03", "type": "say", "text": "What about the windows and doors? Are they all weather proof?" },
+                { "id": "assessment.outside.default.04", "type": "say", "text": "And the road, is it a double yellow line?" },
+                { "id": "assessment.outside.default.11", "type": "say", "text": "What is the speed limit of the road out front?" },
+                { "id": "assessment.outside.default.05", "type": "say", "text": "Are there any powerlines crossing through the property?" },
+                { "id": "assessment.outside.default.06", "type": "say", "text": "The structure, is it in good condition? Or do you know of anything wrong with the structure right now?" },
+                { "id": "assessment.outside.default.07", "type": "say", "text": "And the roof? Any leaks, missing shingles or anything like that?" },
+                { "id": "assessment.outside.default.08", "type": "say", "text": "How about the HVAC? Is it in good operating condition or does that need to be replaced too?" },
+                { "id": "assessment.outside.default.09", "type": "say", "text": "Now, is there anything that I cant see from the front of the road that you may have in the back? Like a shed, pool, or any other structure?" }
+              ] }
+            ]
+          },
+          {
+            "tag": "Inside",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "assessment.inside.default.01", "type": "say", "text": "Great, that should be everything I need about the outside for now, so this can segway us into the next portion which is the inside. For this I’d like for you to walk me through the layout of the house as detailed as you can, would you do that for me?" },
+                { "id": "assessment.inside.default.02", "type": "say", "text": "And the interior would you still say it looks like {year_built}’s? Or has it been updated at all since then?" },
+                { "id": "assessment.inside.default.03", "type": "say", "text": "What  type of flooring is it currently?" },
+                { "id": "assessment.inside.default.04", "type": "say", "text": "Is it sheetrock or is it panelling?" },
+                { "id": "assessment.inside.default.05", "type": "say", "text": "What kind of countertops are in the kitchen?" },
+                { "id": "assessment.inside.default.10", "type": "say", "text": "What type of appliance are in the kitchen" },
+                { "id": "assessment.inside.default.06", "type": "say", "text": "The bathrooms what type of shower is it?" },
+                { "id": "assessment.inside.default.07", "type": "say", "text": "Has the plumbing been updated at all since its built? Is it pex, pvc, copper, or galvanized?" },
+                { "id": "assessment.inside.default.08", "type": "say", "text": "What about the electric? Is it a breaker box or is it tube and knob?" },
+                { "id": "assessment.inside.default.09", "type": "say", "text": "Thank you! So lets say I gave you a $50,000 gift card to home depot, what exactly would you do to this property to get it HGTV ready?" }
+              ] }
+            ]
+          }
+        ]
+      },
+      "match": {
+        "entry_landmarks": [
+          { "id": "outside_ask", "speaker": "rep", "phrases": ["tell me about the outside", "how are the neighbors", "the roof"] }
+        ],
+        "advance_landmarks": [
+          { "id": "inside_walkthrough", "speaker": "rep", "phrases": ["walk me through the layout", "has it been updated"] },
+          { "id": "home_depot", "speaker": "rep", "phrases": ["gift card to home depot", "hgtv ready"] }
+        ],
+        "exit_to": "secure_positioning"
+      },
+      "coach_notes": [
+        { "trigger": "phase_enter", "text": "Specific questions read as 'this person is the real deal'; generic ones read as 'another tire kicker.'" },
+        { "trigger": "phase_enter", "text": "Get the seller to acknowledge condition from their own mouth — the later offer lands as diagnosis, not insult." },
+        { "trigger": "phase_enter", "text": "Don't advance while liens, tenants, repairs, timelines, or cash-to-close needs are unclear." }
+      ]
+    },
+    {
+      "id": "secure_positioning",
+      "name": "Secure Positioning",
+      "purpose": "Avoid all smokescreens and objections after the offer by prehandling them upfront, and get the seller to confirm they want to move forward with our process before we present price.",
+      "display": {
+        "branches": [
+          {
+            "tag": "Lock the frame",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "secure_positioning.lock-the-frame.default.01", "type": "say", "text": "Thank you so much for being so detailed, now in just a few minutes I’ll be running this back to my underwriting, is there anything else you would need to figure out before you truly know if you can close on this property?" },
+                { "id": "secure_positioning.lock-the-frame.default.02", "type": "say", "text": "So do you have a deadline that this absolutely has to sell by?" },
+                { "id": "secure_positioning.lock-the-frame.default.03", "type": "say", "text": "Ok, and is there anyone else that might be even a tiny bit concerned that you’re going to be selling the home?\n\nNo realtor, or crazy ex girlfriend or anything like that?" },
+                { "id": "secure_positioning.lock-the-frame.default.04", "type": "say", "text": "Ok great, and after all mortgages and liens have been taken out how much do you need in your pocket at closing in order to {dream_outcome}?" },
+                { "id": "secure_positioning.lock-the-frame.default.05", "type": "say", "text": "Ok, and how much is currently left on your mortgage?" }
+              ] }
+            ]
+          },
+          {
+            "tag": "Anchor",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "secure_positioning.anchor.default.01", "type": "say", "text": "So {seller_name} i just want to let you know, I see other Investors and keep in mind this is by no means our offer, but other investors are buying similar properties at 40 to 50% Zillow/Comparables Value, again that is not our offer just what other investors are buying properties for cash at… if they offered you something like that would you still be able to achieve {dream_outcome}?" },
+                { "id": "secure_positioning.anchor.default.02", "type": "say", "text": "And really, that is by no means our offer, I’m just trying to understand what I should do in the case that our underwriting teams come back a little bit lower than you and I are hoping for." }
+              ] }
+            ]
+          },
+          {
+            "tag": "The no-concerns gate",
+            "auto_select_by": null,
+            "critical": true,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "secure_positioning.the-no-concerns-gate.default.02", "type": "say", "text": "So that {net_to_seller} you said you needed in your pocket at closing if we can get you close to that, close in a time frame that works for you, and make sure you achieve {dream_outcome} would you have any concerns at that point?" },
+                { "id": "secure_positioning.the-no-concerns-gate.default.01", "type": "note", "text": "STAY ON THIS UNTIL THEY HAVE NO CONCERNS THIS IS ONE OF THE MOST IMPORTANT PARTS OF THE ENTIRE SCRIPT." },
+                { "id": "secure_positioning.the-no-concerns-gate.default.03", "type": "note", "text": "If nothing:" },
+                { "id": "secure_positioning.the-no-concerns-gate.default.04", "type": "say", "text": "If we are able to do all that, then what do you want the next steps to be from here?" }
+              ] }
+            ]
+          },
+          {
+            "tag": "Send to underwriting",
+            "auto_select_by": null,
+            "hold_after": "3 Minute Hold - RUN COMPS",
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "secure_positioning.send-to-underwriting.default.01", "type": "say", "text": "Ok, so what I can do from here, if you feel like it would help is run down the hall to the underwriting department to see if we can get you approved for one of our cash offer programs, and within the next few minutes I’ll either have you A) an approval with an offer attached to your file number. Or B) denial with a reason why… so just hold on for a few minutes while I put you on hold." }
+              ] }
+            ]
+          },
+          {
+            "tag": "Back from hold — final questions",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "secure_positioning.back-from-hold-final-questions.default.01", "type": "say", "text": "Hey {seller_name} Can you hear me?\n\nSo I do not have good or bad news quite yet. They just have a few more specific questions they want me to ask before we give you an offer we can firmly stand behind." },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.02", "type": "say", "text": "Do you happen to know the exact age of the HVAC?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.09", "type": "say", "text": "What about the roof?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.03", "type": "say", "text": "What schools are the home zoned for?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.10", "type": "say", "text": "What is the nearest grocery store?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.04", "type": "say", "text": "What is the type of foundation? (Basement, crawlspace, slab etc.)" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.05", "type": "say", "text": "Is it on septic or sewer?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.11", "type": "say", "text": "Is it well or city water?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.06", "type": "say", "text": "Is there internet available? What about fiber optic?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.07", "type": "say", "text": "And a couple more questions for the final approval: If they come back with an approval and an offer that makes sense for you, are you ready to approve an agreement and get the process rolling now so we can get you to the closing table on the day we promise?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.08", "type": "say", "text": "What's the best email address for you?" }
+              ] }
+            ]
+          },
+          {
+            "tag": "Process walkthrough — pre-handle everything",
+            "auto_select_by": null,
+            "hold_after": "3 Minute Hold - WRITE CONTRACT",
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.01", "type": "say", "text": "Alright perfect, this is all they needed! Before I take this back do you mind if I share with you how our process works?" },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.02", "type": "say", "text": "Awesome, so if you do receive a final approval it will be attached to file number {file_number} like we discussed earlier." },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.09", "type": "say", "text": "I will then send you a simple 3 page agreement that we will go over together that outlines how the process works, and luckily for both of us its written in 3rd grade english, not to insult your intelligence but to make sure everyone can easily understand it." },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.03", "type": "say", "text": "Then once it is approved we will send a member of our team out to the home within the next 72 hours to take some pictures so our team can get ready to start the closing process." },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.10", "type": "say", "text": "Once we have pictures in hand we will share them with our contractors first to get an accurate repair budget and then possibly to the open partner market to make sure we can get the price we say we will in the time frame we promised to you." },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.04", "type": "say", "text": "We will then schedule a couple of walkthroughs with our contractors and retail partners but our team is used to this so for you this process is hands off so you don’t have to stress about repairs, renovations, cleaning or anything like that." },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.05", "type": "say", "text": "And from that point on you sit back relax and get paid!" },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.06", "type": "say", "text": "Do you have any questions or concerns about the process before I take this back to get its final approval?" },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.07", "type": "note", "text": "This is super important this is where we prehandle objections to make sure no other objections come up after we give price. Stress this." },
+                { "id": "secure_positioning.process-walkthrough-pre-handle-everything.default.08", "type": "say", "text": "Ok, awesome, give me just a few minutes here with the team, and I’ll see if we can get you approved!" }
+              ] }
+            ]
+          }
+        ]
+      },
+      "match": {
+        "entry_landmarks": [
+          { "id": "underwriting_preframe", "speaker": "rep", "phrases": ["running this back to my underwriting", "anything else you would need to figure out"] }
+        ],
+        "advance_landmarks": [
+          { "id": "deadline_ask", "speaker": "rep", "phrases": ["deadline that this absolutely has to sell"] },
+          { "id": "decision_makers", "speaker": "rep", "phrases": ["anyone else that might be", "tiny bit concerned"] },
+          { "id": "net_need", "speaker": "rep", "phrases": ["need in your pocket at closing"] },
+          { "id": "anchor", "speaker": "rep", "phrases": ["40 to 50", "by no means our offer", "what other investors are buying"] },
+          { "id": "no_concerns_gate", "speaker": "rep", "phrases": ["would you have any concerns at that point"] },
+          { "id": "hold_1", "speaker": "rep", "phrases": ["put you on hold", "run down the hall"] },
+          { "id": "back_from_hold", "speaker": "rep", "phrases": ["can you hear me", "few more specific questions"] },
+          { "id": "email_ask", "speaker": "rep", "phrases": ["best email address"] },
+          { "id": "process_walkthrough", "speaker": "rep", "phrases": ["how our process works", "three page agreement", "third grade english", "72 hours to take some pictures"] },
+          { "id": "hold_2", "speaker": "rep", "phrases": ["few minutes here with the team", "see if we can get you approved"] }
+        ],
+        "gates": [
+          { "id": "no_concerns", "blocks_exit": true, "clear_on": { "speaker": "seller", "phrases": ["no concerns", "no, nothing", "that would work", "no i'd be good", "sounds good"] }, "display": "No-concerns gate NOT cleared — stay here", "note": "v0 logs gate state; nothing is enforced on the rep" }
+        ],
+        "timers": [
+          { "id": "hold_timer", "start_on": ["hold_1", "hold_2"], "duration_s": 180, "display": "Hold {remaining}" }
+        ],
+        "exit_to": "offer"
+      },
+      "coach_notes": [
+        { "trigger": "phase_enter", "text": "Never present price before this phase is done. Jumping from assessment to price creates every objection at once." },
+        { "trigger": "phase_enter", "text": "Authority = 'my team' / 'underwriting' — never 'my partner.' Keeps you on the seller's side." },
+        { "trigger": "phase_enter", "text": "If the route is novation or open-market partners, get them bought into the process before the offer." },
+        { "trigger": "phase_enter", "text": "Use the holds — comp during them. 'You never want to live negotiate.'" },
+        { "trigger": "landmark:no_concerns_gate", "text": "MOST IMPORTANT MOMENT: stay here until zero concerns." }
+      ]
+    },
+    {
+      "id": "offer",
+      "name": "Offer",
+      "purpose": "Make the seller feel like they’ve qualified for our program — reinforcing that they need us, not the other way around. Step 1 is complete, and now it’s only about finalizing the minor details.",
+      "display": {
+        "branches": [
+          {
+            "tag": "Good news",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "offer.good-news.default.01", "type": "say", "text": "CONGRATS {seller_name}!!! Looks like we are able to help you with this. It looks like the best you could get approved for was {offer_price} which will put {net_to_seller} in your pocket and allow you to achieve {dream_outcome}" },
+                { "id": "offer.good-news.default.02", "type": "note", "text": "Assume the close:" },
+                { "id": "offer.good-news.default.03", "type": "say", "text": "So next steps from here, I’ll send you a simple agreement to approve so we can get you to the closing table on {closing_date} like we promised. What’s the best email for me to send it to?" }
+              ] }
+            ]
+          },
+          {
+            "tag": "Bad news",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "offer.bad-news.default.01", "type": "say", "text": "Unfortunately it did come in right around where I was thinking it would. It looks like the best you could get approved for is {offer_price} which will put {net_to_seller} in your pocket so that way you could {dream_outcome}. Now I know that’s not what you were expecting but will that at least put you in a better position then you are now?" },
+                { "id": "offer.bad-news.default.02", "type": "note", "text": "If yes: ASSUME THE CLOSE. If no: {{tone:SIGHHH}}" },
+                { "id": "offer.bad-news.default.03", "type": "say", "text": "yeah…. I was afraid of that… what were you hoping I was at least going to say?" }
+              ] }
+            ]
+          },
+          {
+            "tag": "Bad news — below mortgage",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "offer.bad-news-below-mortgage.default.01", "type": "say", "text": "Unfortunately we were not able to get you approved for one of our rapid offer programs… Now I DO have other options we can look at butttt it’s not going to be closing in 10-14 days like the other one… let’s say I could get you closer to the {net_to_seller} like you said you needed to achieve {dream_outcome} would it really matter if it took an extra 30 days?" }
+              ] }
+            ]
+          },
+          {
+            "tag": "Price too low",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "offer.price-too-low.default.01", "type": "note", "text": "{{tone:Sigh}}" },
+                { "id": "offer.price-too-low.default.02", "type": "say", "text": "Man i apologize our offer was lower than what you and I were hoping for… what were you hoping I was at least going to say" }
+              ] }
+            ]
+          }
+        ]
+      },
+      "match": {
+        "entry_landmarks": [
+          { "id": "good_news", "speaker": "rep", "phrases": ["congrats", "we are able to help you", "best you could get approved for"] },
+          { "id": "bad_news", "speaker": "rep", "phrases": ["unfortunately it did come in", "not what you were expecting"] }
+        ],
+        "advance_landmarks": [
+          { "id": "assume_close", "speaker": "rep", "phrases": ["simple agreement to approve", "best email for me to send"] }
+        ],
+        "exit_to": "close"
+      },
+      "coach_notes": [
+        { "trigger": "phase_enter", "text": "Do not pause after the offer. No silence, no waiting for a reaction — move straight to next steps." },
+        { "trigger": "phase_enter", "text": "State the approval, not your opinion: 'the best you could get approved for was…' — never 'I'm offering you…'" },
+        { "trigger": "phase_enter", "text": "Always tie the number to net pocket + their outcome, not just purchase price." }
+      ]
+    },
+    {
+      "id": "close",
+      "name": "Close",
+      "purpose": "Price is only an objection in the absence of value… how does our offer solve their problem?",
+      "display": {
+        "branches": [
+          {
+            "tag": "If far apart — program pivot",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "close.if-far-apart-program-pivot.default.00", "type": "note", "text": "Here’s where the negotiation really begins…" },
+                { "id": "close.if-far-apart-program-pivot.default.03", "type": "note", "text": "Never negotiate live. Your job is to find out how far apart we are from the seller’s number—then bring it back to the team. From there, we’ll decide if we can come up or not." },
+                { "id": "close.if-far-apart-program-pivot.default.04", "type": "note", "text": "If we do move forward, only increase the offer in small, controlled steps until both sides agree." },
+                { "id": "close.if-far-apart-program-pivot.default.05", "type": "note", "text": "If we can’t agree on a number, pivot with:" },
+                { "id": "close.if-far-apart-program-pivot.default.02", "type": "say", "text": "There is one program I can check to see if you qualify for… not everyone does, but if you do, we may be able to get you your number. {seller_name}, if you had that amount in your pocket on closing day—no strings attached—would there be any other reason you wouldn’t move forward?" },
+                { "id": "close.if-far-apart-program-pivot.default.01", "type": "note", "text": "Only use this for your novation prices on the calculator" }
+              ] }
+            ]
+          },
+          {
+            "tag": "They accept",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "close.they-accept.default.01", "type": "say", "text": "Congratulations, {seller_name}! I am grateful that we are able to help you." },
+                { "id": "close.they-accept.default.02", "type": "say", "text": "Now, next steps I just need your email so I can take it down the hall to the team and they can write up the agreement for you and I to go over together. What is the best email for us to send the agreement to?" }
+              ] }
+            ]
+          },
+          {
+            "tag": "Going over the contract",
+            "auto_select_by": null,
+            "variants": [
+              { "key": "default", "label": null, "lines": [
+                { "id": "close.going-over-the-contract.default.01", "type": "say", "text": "Just to confirm {seller_name}, the address is {property_address}, the purchase price we agreed on is {offer_price}. The closing date we agreed on is {closing_date}. The company we will be using to handle closing and wiring you your funds we will let you know via a formal notification! Oh yeah! Do you want your funds via a wire, or a check at closing?" },
+                { "id": "close.going-over-the-contract.default.02", "type": "say", "text": "Awesome, Do you have any other questions?" },
+                { "id": "close.going-over-the-contract.default.03", "type": "say", "text": "Awesome so I just sent it over to your email pull that up for me please:\n\nPress view documents -> press sign in the top left corner -> press the red flashing box-> then press adopt and sign -> if it is novation have them press the second red box -> then press share back with {rep_name}." },
+                { "id": "close.going-over-the-contract.default.04", "type": "say", "text": "Great! Our team will be reaching out within the next 72 hours to schedule the initial walkthrough, it is a blessing being able to help you! Talk soon." }
+              ] }
+            ]
+          }
+        ]
+      },
+      "match": {
+        "entry_landmarks": [
+          { "id": "accept", "speaker": "rep", "phrases": ["congratulations", "grateful", "write up the agreement"] },
+          { "id": "program_pivot", "speaker": "rep", "phrases": ["one program i can check", "no strings attached"] }
+        ],
+        "advance_landmarks": [
+          { "id": "contract_confirm", "speaker": "rep", "phrases": ["just to confirm", "purchase price we agreed", "closing date we agreed", "wire or a check"] },
+          { "id": "esign_steps", "speaker": "rep", "phrases": ["view documents", "adopt and sign", "share back with"] },
+          { "id": "wrap", "speaker": "rep", "phrases": ["72 hours to schedule", "initial walkthrough", "blessing being able to help"] }
+        ],
+        "exit_to": null
+      },
+      "coach_notes": [
+        { "trigger": "phase_enter", "text": "Never negotiate live. Find how far apart you are, bring it back to the team, move in small controlled steps." },
+        { "trigger": "phase_enter", "text": "Ask for the close multiple times. 'Possible' or 'probably' is movement — lead them to the agreement." },
+        { "trigger": "phase_enter", "text": "'Simple agreement to approve,' never 'contract to sign.'" },
+        { "trigger": "phase_enter", "text": "If they want to review alone, keep the review live. If they mention an attorney — agree it's reasonable, don't attack it, and never interpret legal language." },
+        { "trigger": "phase_enter", "text": "Tie urgency to their deadline and outcome — never fake pressure." }
+      ]
+    }
+  ],
+  "objections": [
+    { "id": "price_too_low", "match": { "triggers": ["too low", "that's low", "insulting", "way less than"] }, "display": { "tonality": "concerned tone", "acknowledge": "*Sighhh* Yeah…", "disarm": "I apologize that our offer was a little bit lower than YOU AND I were hoping for…", "overcome": "What were you hoping I was AT LEAST going to say?" } },
+    { "id": "list_with_realtor", "match": { "triggers": ["list it", "realtor", "real estate agent", "put it on the market"] }, "display": { "tonality": "curious tone", "acknowledge": "Yeah, you're right…", "disarm": "Honestly… it may be better for you to list it with a realtor.", "overcome": "If you have the money for repairs, cleaning, commissions, closing costs, and you're fine waiting 3–6 months and can handle the mortgage payment that long… it probably is the best fit. But is that something that truly makes sense for you?" } },
+    { "id": "zillow_worth", "match": { "triggers": ["zillow", "zestimate", "appraised", "appraiser said", "worth more"] }, "display": { "tonality": "curious + concerned tone", "acknowledge": "Yeah… I've seen that too.", "disarm": "Your home definitely could be worth that much if we make repairs…", "overcome": "{seller_name}, do you mind if I share with you walk-away price versus listing price? Listing price is what your neighbors sell for on the market — after they pay for all the repairs the realtor requests, the cleaning, staging, waiting 3–6 months covering the mortgage… plus commissions, closing costs, attorney fees, title fees, and transfer taxes. Let's put real numbers on it: that house that sold for $200,000 next door — they paid 6% commissions, 3% buyer's closing costs, 2% to the title company, and $5–10k getting it market-ready. That's roughly $27,000 just to list — so they walked away with $173,000. And how much is your mortgage payment?… so six more months takes another chunk away. Realistically you'd walk away with $161,000 minus your mortgage at closing. With us, our offer goes directly into your pocket at closing. Is it really worth the difference to take the risk of hoping it sells?", "template": true, "template_note": "The math is a live worked example — show the pattern (11% fees + prep + monthly mortgage × months waiting) with the rep substituting the seller's real numbers." } },
+    { "id": "not_in_rush", "match": { "triggers": ["not in a rush", "no hurry", "not motivated", "no rush"] }, "display": { "tonality": "playful / curious tone", "acknowledge": "Yeah, I totally get it…", "disarm": "In fact, it's a good thing you're not in a rush — typically we can pay more if we have more time…", "overcome": "When you say you're not in a rush… where do you plan on going next? I'm assuming you haven't identified that yet.", "overcome_by_occupancy": { "owner_occupied": "When you say you're not in a rush… where do you plan on going next? I'm assuming you haven't identified that yet.", "tenant_occupied": "When you say you're not in a rush… I get it — but tell me, with this rental, do you plan on buying more, or are you hanging up the landlord duties for good?", "vacant": "When you say you're not in a rush… I get it, it's been sitting there collecting dust for a while anyway… what even came up now that has you considering selling?", "unknown": "When you say you're not in a rush… where do you plan on going next? I'm assuming you haven't identified that yet." } } },
+    { "id": "talk_to_spouse", "match": { "triggers": ["talk to my spouse", "talk to my wife", "talk to my husband", "think about it", "sleep on it", "talk it over"] }, "display": { "tonality": "curious, hint of concern", "acknowledge": "Totally — if I were you I would do the exact same thing…", "disarm": "{seller_name}, I have two available slots tomorrow afternoon at x:xx and x:xx — will those give you enough time to think about it / talk to your spouse? Which works best for you?", "overcome": "Perfect, I've got you down for x:xx tomorrow. Before you go — what questions do you think might arise when you think it over, just so I can be more prepared for our next call?" } },
+    { "id": "dont_trust", "match": { "triggers": ["scam", "don't trust", "wholesaler", "heard bad things"] }, "display": { "tonality": "concerned, hint of curiosity", "acknowledge": "Yeah, you're completely right.", "disarm": "I'd honestly agree with you… you definitely don't know enough about us or our process to be confident we'd even be a good fit — in fact, I'm not even sure we can help you yet…", "overcome": "What would make you feel more confident we're someone you can actually trust?" } },
+    { "id": "end_buyer", "match": { "triggers": ["are you the buyer", "actually buying", "who are you", "end buyer"] }, "display": { "tonality": "curious tone", "acknowledge": "{seller_name}, that's a fantastic question.", "disarm": "To be completely upfront with you — I would never hop on a call with someone if I didn't have the hopes and intentions of buying their property…", "overcome": "That being said, when we give you a number and a timeline, we do whatever it takes to make sure we deliver. So let me ask you this — as long as you get the price we promise in the time frame we promise, does it REALLY matter how we cut the cake to get you there?" } },
+    { "id": "no_showings", "match": { "triggers": ["strangers", "showings", "walkthrough", "people coming through", "inspections"] }, "display": { "tonality": "concerned tone", "acknowledge": "Yeah, I totally get it.", "disarm": "If I were in your shoes, I wouldn't either…", "overcome": "May I ask you something? Let's say you were in the market for a new home — would you spend hundreds of thousands of dollars on something you weren't allowed to see? …Exactly. And honestly, if you REALLY don't want showings or inspections, that's fine — we can do that. But I'll warn you our price will be significantly lower. Is it worth a good amount of extra money JUST to let us in a few times?" } },
+    { "id": "proof_of_funds", "match": { "triggers": ["earnest money", "proof of funds", "show me the money"] }, "display": { "tonality": null, "acknowledge": "Yeah, totally.", "disarm": "If I were you, I would too.", "overcome": "How much earnest money do you want? — or — What's your email, so when we submit our offer we can send it with proof of funds?" } },
+    { "id": "right_price_only", "match": { "triggers": ["right price", "only selling for", "my number"] }, "display": { "tonality": "playful tone", "acknowledge": "Of course!", "disarm": "Honestly, {seller_name}… I'm not even sure if we can actually help you yet — I still have to ask some questions about the property and the situation to see if I can do anything good for ya.", "overcome": "Straight to the next script question — don't dwell." } },
+    { "id": "straight_to_offer", "match": { "triggers": ["just give me the offer", "what's your offer", "get to the point", "how much"] }, "display": { "tonality": "concerned tone", "acknowledge": "Of course, {seller_name}.", "disarm": "Trust me, I want to get to the offer just as bad as you. I mean, I could be like everyone else — get you on the phone, ask some personal questions, and give you some BS lowball cash offer. But honestly, I don't want to be like everyone else. If you'll answer these few questions, I'll take this back to the team and get you something fair we can firmly stand behind…", "overcome": "Straight to the next script question — don't dwell." } }
+  ]
+}

@@ -3,7 +3,7 @@ import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { LEAD_SOURCES } from "@/lib/leads/create";
+import { LEAD_SOURCES } from "@/lib/leads/sources";
 import { createClient } from "@/lib/supabase/server";
 
 import { submitNewLead } from "./actions";

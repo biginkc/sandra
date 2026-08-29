@@ -104,6 +104,7 @@ function makeThread(
     propertyAddress: overrides.propertyAddress ?? "123 Main St",
     propertyStatus: overrides.propertyStatus ?? "prospect",
     outreachDispo: overrides.outreachDispo ?? null,
+    aiDispositionReview: overrides.aiDispositionReview ?? null,
     isDncLocked: overrides.isDncLocked ?? false,
     lastMessageAt: overrides.lastMessageAt ?? "2026-04-29T12:00:00Z",
     lastMessageBody: overrides.lastMessageBody ?? "hello",
@@ -159,6 +160,7 @@ function makeDetail(contactId: string, body: string): InboxDetailData {
     threadBusinessPhone: "+18162804181",
     contactPhone: "+15551234567",
     replyToPhone: "+15551234567",
+    replyToPhoneLineType: "mobile",
     propertyId,
     propertyAddress: "123 Main St, Albany, NY",
     homeownerContactId: contactId,
@@ -166,6 +168,7 @@ function makeDetail(contactId: string, body: string): InboxDetailData {
     assigneeId: null,
     propertyStatus: "prospect",
     outreachDispo: null,
+    aiDispositionReview: null,
     contactDoNotContact: false,
     contactSmsOptedOut: false,
     smsConsentState: "can_send_marketing",
@@ -257,11 +260,11 @@ describe("<CockpitView /> URL deep-linking", () => {
       screen.getByText("Page 2 of 225 · 45,000 conversations"),
     ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(navigationMocks.push).toHaveBeenCalledWith(
       "/messages?filter=unread&inboxPage=3",
     );
     fireEvent.click(screen.getByRole("button", { name: "Previous" }));
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(navigationMocks.push).toHaveBeenCalledWith(
       "/messages?filter=unread",
     );
   });

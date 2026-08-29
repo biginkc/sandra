@@ -320,6 +320,44 @@ describe("useLeadMessages", () => {
     );
     expect(result.current.some((row) => row.id === inserted.id)).toBe(false);
   });
+
+  it("keeps one realtime subscription while using the latest live-message callback", async () => {
+    const firstCallback = vi.fn();
+    const latestCallback = vi.fn();
+    const initial: MessageRow[] = [];
+    const scope = {
+      contactId: "contact-stable-subscription",
+      conversationId: null,
+      matchMode: "lead" as const,
+      propertyId: "property-stable-subscription",
+    };
+    const { rerender } = renderHook(
+      ({ onLiveMessage }) =>
+        useLeadMessages({ initial, scope, onLiveMessage }),
+      { initialProps: { onLiveMessage: firstCallback } },
+    );
+
+    await waitFor(() => expect(callbacks.INSERT).toBeDefined());
+    const client = createClient.mock.results[0]?.value;
+    const channel = client.channel.mock.results[0]?.value;
+    expect(channel.on).toHaveBeenCalledTimes(2);
+
+    rerender({ onLiveMessage: latestCallback });
+    await act(async () => Promise.resolve());
+
+    expect(client.removeChannel).not.toHaveBeenCalled();
+    expect(channel.on).toHaveBeenCalledTimes(2);
+
+    const inserted = makeMessage({
+      id: "stable-subscription-insert",
+      contact_id: null,
+      property_id: scope.propertyId,
+    });
+    act(() => callbacks.INSERT!({ new: inserted }));
+
+    expect(firstCallback).not.toHaveBeenCalled();
+    expect(latestCallback).toHaveBeenCalledWith(inserted, "INSERT");
+  });
 });
 
 describe("<MessagesThread />", () => {

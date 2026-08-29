@@ -35,6 +35,17 @@ describe("qualifyProperty (integration)", () => {
     expect(data?.status).toBe("new_lead");
     expect(data?.qualified_by).toBe("user-abc");
     expect(data?.qualified_at).not.toBeNull();
+    const { data: events } = await supabase
+      .from("lead_events")
+      .select("event_type, actor_type, payload")
+      .eq("property_id", id);
+    expect(events).toEqual([
+      {
+        event_type: "qualified",
+        actor_type: "system",
+        payload: { from: "prospect", to: "new_lead" },
+      },
+    ]);
   });
 
   it("is idempotent — second call returns already_qualified and preserves the original stamp", async () => {
@@ -63,6 +74,12 @@ describe("qualifyProperty (integration)", () => {
     expect(afterSecond?.status).toBe("new_lead");
     expect(afterSecond?.qualified_at).toBe(originalStamp);
     expect(afterSecond?.qualified_by).toBe(originalBy);
+    const { count } = await supabase
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", id)
+      .eq("event_type", "qualified");
+    expect(count).toBe(1);
   });
 
   it("returns already_qualified when the row isn't a prospect to begin with", async () => {

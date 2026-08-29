@@ -18,7 +18,11 @@ import {
 } from "@/lib/messaging/consent";
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getMessagingProvider } from "@/lib/messaging/registry";
-import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
+import {
+  selectBestSmsPhone,
+  selectSmsPhoneByNumber,
+} from "@/lib/messaging/sms-phone";
+import { findLatestAuthoritativeSmsRoute } from "@/lib/messages/sms-parties";
 import { canShowCallButton } from "@/lib/dialer/eligibility";
 import { zillowUrl } from "@/lib/utils/zillow-url";
 
@@ -59,6 +63,7 @@ import type { Database } from "@/lib/supabase/types";
 import { LeadMediaHero } from "./lead-media-hero";
 import { resolveLeadMediaPresentation } from "./lead-media";
 import { LeadActivityTimeline } from "./lead-activity";
+import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
@@ -317,6 +322,47 @@ export default async function LeadDetailPage({
     providerDefaultFromNumber ??
     null;
 
+  // An existing thread's customer and business numbers are one route. Pick
+  // both from the same newest homeowner SMS row so a lead with multiple saved
+  // phones cannot accidentally reply from sender B to customer phone A.
+  const latestHomeownerSmsRoute = findLatestAuthoritativeSmsRoute(
+    initialMessages.filter(
+      (message) =>
+        message.channel === "sms" &&
+        Boolean(homeownerContactId) &&
+        message.contact_id === homeownerContactId &&
+        message.property_id === lead.id,
+    ),
+  )?.parties ?? null;
+  const inlineRoutePhoneChoice = latestHomeownerSmsRoute
+    ? selectSmsPhoneByNumber(
+        lead.homeowner,
+        latestHomeownerSmsRoute.customerPhone,
+      )
+    : null;
+  const inlineReplyPhone = latestHomeownerSmsRoute
+    ? inlineRoutePhoneChoice?.lineType === "landline"
+      ? null
+      : (inlineRoutePhoneChoice?.phone ?? null)
+    : homeownerSmsPhone;
+  const inlineReplyFromNumber =
+    latestHomeownerSmsRoute?.businessPhone ?? preferredFromNumber;
+  const inlineReplyPhoneUnavailableMessage =
+    latestHomeownerSmsRoute && inlineRoutePhoneChoice?.lineType === "landline"
+      ? "This thread number is saved as a landline — use a mobile number for SMS."
+      : latestHomeownerSmsRoute && !inlineReplyPhone
+        ? "This thread number is not saved on the homeowner contact — save it before replying."
+        : undefined;
+  // Preserve the header composer's preferred-phone presentation, but verify
+  // the inline thread's exact saved phone when it uses another slot.
+  const inlineSmsPhoneSuppressionPromise = inlineReplyPhone
+    ? inlineReplyPhone !== homeownerSmsPhone
+      ? isSmsPhoneSuppressed(supabase, inlineReplyPhone, lead.org_id)
+          .then((value) => ({ ok: true as const, value }))
+          .catch(() => ({ ok: false as const, value: null }))
+      : smsPhoneSuppressionPromise
+    : Promise.resolve({ ok: true as const, value: false });
+
   // Notes — newest first for the feed component.
   const { data: notesRaw, error: notesError } = await supabase
     .from("lead_notes")
@@ -325,6 +371,19 @@ export default async function LeadDetailPage({
     .order("created_at", { ascending: false })
     .limit(200);
   const initialNotes = (notesRaw ?? []) as LeadNoteRow[];
+
+  // Append-only lead activity — newest bounded window, merged client-side
+  // with canonical messages, notes, and calls.
+  const { data: leadEventsRaw, error: leadEventsError } = await supabase
+    .from("lead_events")
+    .select(
+      "id, property_id, actor_type, actor_id, event_type, payload, created_at",
+    )
+    .eq("property_id", lead.id)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(200);
+  const initialLeadEvents = (leadEventsRaw ?? []) as LeadEvent[];
 
   // auth.admin.listUsers() spans the entire Auth project, not this lead's
   // organization. Build an active-org membership allowlist first, fail closed
@@ -461,6 +520,8 @@ export default async function LeadDetailPage({
     ? await smsConsentEventsPromise
     : { data: [], error: null };
   const phoneSuppressionResult = await smsPhoneSuppressionPromise;
+  const inlinePhoneSuppressionResult =
+    await inlineSmsPhoneSuppressionPromise;
   const consentState: ConsentState | null = smsConsentEventsResult.error
     ? null
     : computeConsentState(smsConsentEventsResult.data ?? []);
@@ -478,6 +539,26 @@ export default async function LeadDetailPage({
     outreachDispo: lead.outreach_dispo,
     phoneLineType: homeownerSmsChoice?.lineType ?? null,
   });
+  // Invalid thread routes (unsaved or landline) keep InlineReply's more
+  // specific explanation. Valid routes get a full restriction decision for
+  // their exact slot instead of inheriting the header phone's result.
+  const inlineSmsPresentation = latestHomeownerSmsRoute
+    ? deriveLeadSmsPresentation({
+        hasContact: Boolean(lead.homeowner),
+        // Unsaved and landline established routes are explained by
+        // InlineReply. Keep this gate focused on contact/property-wide
+        // restrictions and the exact route's suppression state.
+        hasUsablePhone: true,
+        consentState,
+        contactSmsOptedOut: lead.homeowner?.sms_opted_out ?? false,
+        propertySmsOptedOut: lead.outreach_dispo === "opted_out",
+        phoneSuppressed: inlinePhoneSuppressionResult.ok
+          ? inlinePhoneSuppressionResult.value
+          : null,
+        outreachDispo: lead.outreach_dispo,
+        phoneLineType: inlineRoutePhoneChoice?.lineType ?? null,
+      })
+    : smsPresentation;
 
   // Tags attached to this property, with the tag row joined inline.
   const { data: tagRowsRaw, error: tagRowsError } = await supabase
@@ -559,7 +640,7 @@ export default async function LeadDetailPage({
         .join(", ") || null
     );
   })();
-  const inlineReplyUnavailable = !lead.homeowner?.id || !homeownerSmsPhone;
+  const inlineReplyUnavailable = !lead.homeowner?.id || !inlineReplyPhone;
   const cassStatusLabel = lead.cass_status
     .replace(/_/g, " ")
     .replace(/^./, (character) => character.toUpperCase());
@@ -757,14 +838,17 @@ export default async function LeadDetailPage({
         <div className="grid min-w-0 items-start gap-[14px] xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="min-w-0 space-y-3">
             <LeadActivityTimeline
+              key={lead.id}
               propertyId={lead.id}
               contactId={lead.homeowner?.id ?? null}
               initialMessages={initialMessages}
               initialNotes={initialNotes}
               initialCalls={initialCallRows}
+              initialEvents={initialLeadEvents}
               messageError={threadError?.message ?? null}
               noteError={notesError?.message ?? null}
               callError={callRollupError?.message ?? null}
+              eventError={leadEventsError?.message ?? null}
               authorEmails={authorEmails}
               currentUserId={sessionUser?.id ?? null}
               currentUserEmail={sessionUser?.email ?? null}
@@ -772,29 +856,30 @@ export default async function LeadDetailPage({
             />
             <div className="min-w-0" data-testid="lead-activity-composers">
               <SmsEntryPointGate
-                restricted={smsPresentation.smsRestricted}
+                restricted={inlineSmsPresentation.smsRestricted}
                 placement="inline"
-                restrictionLabel={smsPresentation.consentLabel}
-                restrictionDetail={smsPresentation.consentDetail}
+                restrictionLabel={inlineSmsPresentation.consentLabel}
+                restrictionDetail={inlineSmsPresentation.consentDetail}
               >
                 <InlineReply
                   propertyId={lead.id}
                   homeownerContactId={lead.homeowner?.id ?? null}
-                  homeownerPhone={homeownerSmsPhone}
-                  replyToPhone={homeownerSmsPhone}
-                  preferredFromNumber={preferredFromNumber}
-                  persistedMessageIds={initialMessages.map(
-                    (message) => message.id,
-                  )}
+                  homeownerPhone={inlineReplyPhone}
+                  replyToPhone={inlineReplyPhone}
+                  preferredFromNumber={inlineReplyFromNumber}
+                  phoneUnavailableMessage={
+                    inlineReplyPhoneUnavailableMessage
+                  }
                   footerAction={
-                    !smsPresentation.smsRestricted &&
+                    !inlineSmsPresentation.smsRestricted &&
                     !inlineReplyUnavailable ? (
                       <AddNoteComposer propertyId={lead.id} compact />
                     ) : null
                   }
                 />
               </SmsEntryPointGate>
-              {smsPresentation.smsRestricted || inlineReplyUnavailable ? (
+              {inlineSmsPresentation.smsRestricted ||
+              inlineReplyUnavailable ? (
                 <div className="mt-2 flex justify-end">
                   <AddNoteComposer propertyId={lead.id} compact />
                 </div>

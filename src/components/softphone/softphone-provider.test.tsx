@@ -39,6 +39,46 @@ vi.mock("@/lib/dialer/transport-selection", () => ({
   isSoftphoneTransportEnabled: transportEnabled,
 }));
 
+const { loadCoachCallContext } = vi.hoisted(() => ({ loadCoachCallContext: vi.fn() }));
+vi.mock("@/lib/coach/coach-context-actions", () => ({ loadCoachCallContext }));
+
+type CoachBroadcastHandler = (message: { payload: unknown }) => void;
+type CoachMockChannel = {
+  on: (type: string, filter: unknown, handler: CoachBroadcastHandler) => CoachMockChannel;
+  subscribe: () => CoachMockChannel;
+  _broadcastHandler: CoachBroadcastHandler | null;
+};
+let coachChannels: CoachMockChannel[] = [];
+function latestCoachChannel(): CoachMockChannel {
+  const channel = coachChannels[coachChannels.length - 1];
+  if (!channel) throw new Error("No coach channel created yet");
+  return channel;
+}
+
+const { removeCoachChannel } = vi.hoisted(() => ({ removeCoachChannel: vi.fn() }));
+
+vi.mock("@/lib/supabase/client", () => ({
+  createClient: () => ({
+    auth: { getSession: () => Promise.resolve({ data: { session: null } }) },
+    realtime: { setAuth: vi.fn() },
+    channel: () => {
+      const channel: CoachMockChannel = {
+        _broadcastHandler: null,
+        on(_type, _filter, handler) {
+          channel._broadcastHandler = handler;
+          return channel;
+        },
+        subscribe() {
+          return channel;
+        },
+      };
+      coachChannels.push(channel);
+      return channel;
+    },
+    removeChannel: removeCoachChannel,
+  }),
+}));
+
 import { SoftphoneLeadButton } from "./softphone-lead-button";
 import { SoftphoneHeaderButton, SoftphoneProvider } from "./softphone-provider";
 
@@ -79,6 +119,19 @@ describe("SoftphoneProvider transport gate", () => {
     mintStartIntent.mockResolvedValue({
       ok: true,
       data: { callToken: "server-call-token", intentCapability: "server-intent-capability" },
+    });
+    loadCoachCallContext.mockReset().mockResolvedValue({
+      sellerName: "Softphone Lead",
+      propertyAddress: "1 Main St",
+      propertyCounty: null,
+      repName: "Alex Rep",
+      repPhoneE164: "+18165550100",
+      motivation: null,
+      leadId: "property-1",
+      sellerPhoneE164: "+18165550123",
+      coldCallerName: null,
+      leadSource: null,
+      occupancy: null,
     });
     window.localStorage.clear();
   });
@@ -191,6 +244,7 @@ describe("SoftphoneProvider transport gate", () => {
         phoneE164: "+18165550123",
         maskedPhone: "(816) 555-0123",
         name: "Softphone Lead",
+        repName: "Mel",
         address: "1 Main St",
         state: "MO",
         startedAt: "2026-08-21T15:00:00.000Z",
@@ -224,6 +278,7 @@ describe("SoftphoneProvider transport gate", () => {
         phoneE164: "+18165550123",
         maskedPhone: "(816) 555-0123",
         name: "Softphone Lead",
+        repName: "Mel",
         address: "1 Main St",
         state: "MO",
         startedAt: "2026-08-21T15:00:00.000Z",
@@ -329,6 +384,32 @@ describe("SoftphoneProvider transport gate", () => {
     expect(screen.getByTestId("call-keypad")).toBeDisabled();
   });
 
+  it("keeps the call live and tells the rep when Hold fails", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "connecting" | "live") => void) | null = null;
+      return {
+        onStateChange: vi.fn((cb) => { listener = cb; }),
+        start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
+        mute: vi.fn(),
+        hold: vi.fn(async () => false),
+        sendDigit: vi.fn(async () => true),
+        hangup: vi.fn(),
+      };
+    });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+
+    await user.click(screen.getByTestId("call-hold"));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Hold failed. The call is still live.");
+    expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live");
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Hold");
+  });
+
   it.each([
     ["operator_busy", "You already have an active Jitter call."],
     ["not_callable", "This number is no longer callable."],
@@ -342,6 +423,7 @@ describe("SoftphoneProvider transport gate", () => {
         phoneE164: "+18165550123",
         maskedPhone: "(816) 555-0123",
         name: "Softphone Lead",
+        repName: "Mel",
         address: "1 Main St",
         state: "MO",
         startedAt: "2026-08-21T15:00:00.000Z",
@@ -762,5 +844,481 @@ describe("SoftphoneProvider transport gate", () => {
     await waitFor(() => expect(hangup).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("Call ended · 00:07")).toBeVisible();
     resolveStart({ id: "session-1" });
+  });
+});
+
+const COACH_LEAD = {
+  id: "property-1",
+  contactId: "contact-1",
+  firstName: "Softphone",
+  name: "Softphone Lead",
+  address: "1 Main St",
+  state: "MO",
+  phones: ["+18165550123"],
+  dncLocked: false,
+  contactDnc: false,
+  callable: true,
+};
+
+describe("SoftphoneProvider coach UI flag", () => {
+  beforeEach(() => {
+    coachChannels = [];
+    removeCoachChannel.mockReset();
+    completeSoftphoneCall.mockReset();
+    prepareLeadCall.mockReset();
+    resumeFailedSoftphoneCall.mockReset();
+    mintStartIntent.mockReset();
+    loadDialerRecents.mockResolvedValue({ ok: true, data: [] });
+    searchDialerLeads.mockResolvedValue({ ok: true, data: [] });
+    playDtmfTone.mockReset();
+    transportEnabled.mockImplementation(() => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "simulated");
+    jitterEnabled.mockImplementation(() => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "jitter");
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "connecting" | "ringing" | "live" | "ended" | "failed") => void) | null = null;
+      return {
+        onStateChange: vi.fn((cb) => { listener = cb; }),
+        start: vi.fn(async () => {
+          listener?.("connecting");
+          listener?.("live");
+          return { id: "simulated-session" };
+        }),
+        mute: vi.fn(),
+        hold: vi.fn(async () => true),
+        sendDigit: vi.fn(async () => true),
+        hangup: vi.fn(async () => {
+          listener?.("ended");
+          return { durationSeconds: 1, outcome: "connected_human" as const };
+        }),
+      };
+    });
+    loadCallerIds.mockResolvedValue({
+      ok: true,
+      data: { caller_ids: [{ phone_e164: "+18165550100", label: "Main" }] },
+    });
+    mintStartIntent.mockResolvedValue({
+      ok: true,
+      data: { callToken: "server-call-token", intentCapability: "server-intent-capability" },
+    });
+    loadCoachCallContext.mockReset().mockResolvedValue({
+      sellerName: "Softphone Lead",
+      propertyAddress: "1 Main St",
+      propertyCounty: null,
+      repName: "Alex Rep",
+      repPhoneE164: "+18165550100",
+      motivation: null,
+      leadId: "property-1",
+      sellerPhoneE164: "+18165550123",
+      coldCallerName: null,
+      leadSource: null,
+      occupancy: null,
+    });
+    window.localStorage.clear();
+    prepareLeadCall.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        contactId: "contact-1",
+        phoneE164: "+18165550123",
+        maskedPhone: "(816) 555-0123",
+        name: "Softphone Lead",
+        repName: "Mel",
+        address: "1 Main St",
+        state: "MO",
+        startedAt: "2026-08-21T15:00:00.000Z",
+      },
+    });
+  });
+
+  it("shows the full-screen coach view instead of the classic popover when the flag is on and the call goes live", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument();
+  });
+
+  it("keeps the prepared homeowner and address in the script when live context loading fails", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    loadCoachCallContext.mockRejectedValue(new Error("network unavailable"));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeVisible());
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("Hey Softphone?");
+    await user.click(screen.getByTestId("variant-Opener-cold_call"));
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("1 Main St");
+  });
+
+  it("shows the prepared homeowner and address on the first live paint while context is still loading", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    loadCoachCallContext.mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeVisible());
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("Hey Softphone?");
+    await user.click(screen.getByTestId("variant-Opener-cold_call"));
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("1 Main St");
+    expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows every known script token while transport is still connecting", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    loadCoachCallContext.mockReturnValue(new Promise(() => undefined));
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "connecting" | "live") => void) | null = null;
+      return {
+        onStateChange: vi.fn((cb) => { listener = cb; }),
+        start: vi.fn(() => {
+          listener?.("connecting");
+          return new Promise(() => undefined);
+        }),
+        mute: vi.fn(),
+        hold: vi.fn(async () => true),
+        sendDigit: vi.fn(async () => true),
+        hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })),
+      };
+    });
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeVisible());
+    const script = screen.getByTestId("current-section-script");
+    expect(script).toHaveTextContent("Hey Softphone?");
+    expect(script).toHaveTextContent("this is Mel");
+    await user.click(screen.getByTestId("variant-Opener-cold_call"));
+    expect(script).toHaveTextContent("1 Main St");
+    expect(script.querySelectorAll('[data-testid="token-placeholder"]')).toHaveLength(0);
+    expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the classic popover as the only live view when the flag is off (default)", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "");
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"));
+    expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
+  });
+
+  it("collapsing the coach view reveals the classic popover with a reopen affordance, which restores the coach view", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+
+    await user.click(screen.getByTestId("coach-collapse"));
+    expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
+    const reopenButton = await screen.findByTestId("reopen-coach");
+    expect(screen.getByTestId("softphone-popover")).toBeVisible();
+
+    await user.click(reopenButton);
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument();
+  });
+
+  it("moves focus to the header dialer button when the coach view collapses — a real mount/unmount lifecycle, not a kept-alive trigger", async () => {
+    // The coach dialog's launch mechanism (call-lead-button) isn't a
+    // persistent trigger the way a classic dialog's opener usually is —
+    // by the time the dialog closes, the button that started the call may
+    // well be scrolled off, disabled, or otherwise not the right place to
+    // land focus. CoachLiveView's finalFocus targets the always-mounted
+    // header dialer button instead. This exercises the REAL collapse path
+    // (SoftphoneProvider unmounting CoachLiveView via coachCollapsed),
+    // not a synthetic harness with its own kept-alive open/close button.
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+
+    await user.click(screen.getByTestId("coach-collapse"));
+
+    expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("header-dialer-button")).toHaveFocus());
+  });
+
+  it("Escape inside the coach view also collapses back to the classic popover", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.getByTestId("softphone-popover")).toBeVisible());
+  });
+
+  it("preserves the coach session across collapse/reopen — exact manual section and transcript survive", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+
+    await user.click(screen.getByTestId("coach-next"));
+    await user.click(screen.getByTestId("coach-next"));
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Explain how BMH works");
+
+    act(() =>
+      latestCoachChannel()._broadcastHandler?.({
+        payload: {
+          type: "transcript",
+          speaker: "seller",
+          text: "hello there",
+          isFinal: true,
+          ts: "t2",
+          scriptVersion: "1.1.0",
+          matcherVersion: "3",
+        },
+      }),
+    );
+    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("hello there");
+
+    await user.click(screen.getByTestId("coach-collapse"));
+    expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
+    expect(screen.getByTestId("softphone-popover")).toBeVisible();
+
+    await user.click(screen.getByTestId("reopen-coach"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Explain how BMH works");
+    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("hello there");
+    // The underlying realtime subscription itself was never torn down and
+    // recreated by the collapse/reopen — proof the session, not just its
+    // rendered values, lived in the provider the whole time.
+    expect(coachChannels.length).toBe(1);
+    expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a DTMF send failure above the coach overlay and never plays the tone before the send resolves", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    let resolveSendDigit!: (value: boolean) => void;
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "connecting" | "ringing" | "live" | "ended" | "failed") => void) | null = null;
+      return {
+        onStateChange: vi.fn((cb) => { listener = cb; }),
+        start: vi.fn(async () => {
+          listener?.("connecting");
+          listener?.("live");
+          return { id: "simulated-session" };
+        }),
+        mute: vi.fn(),
+        hold: vi.fn(async () => true),
+        sendDigit: vi.fn(() => new Promise<boolean>((resolve) => { resolveSendDigit = resolve; })),
+        hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })),
+      };
+    });
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+
+    await user.click(screen.getByTestId("coach-keypad-toggle"));
+    await user.click(screen.getByLabelText("Keypad 5"));
+
+    // No local tone before the transport confirms delivery.
+    expect(playDtmfTone).not.toHaveBeenCalled();
+
+    act(() => resolveSendDigit(false)); // transport reports the digit was not delivered
+    const toast = await screen.findByRole("status");
+    expect(toast).toHaveTextContent("That keypad tone was not sent. Try again.");
+    expect(playDtmfTone).not.toHaveBeenCalled();
+    // Must render above the full-screen coach dialog (z-[80]), including its
+    // in-flow objection focus card, so it stays visible while coach mode is open.
+    expect(toast.className).toMatch(/z-\[100\]/);
+  });
+
+  it("tears down the coach subscription when the call ends — it must not linger through the whole wrap-up phase", async () => {
+    // Regression: coachCallId previously stayed set from live all the way
+    // through wrap-up (only resetIdle(), called much later, cleared it),
+    // leaving a live Realtime subscription open to a call that had
+    // already ended.
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    expect(removeCoachChannel).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("coach-hangup"));
+    await waitFor(() => expect(removeCoachChannel).toHaveBeenCalled());
+  });
+
+  it("tears down the coach subscription when a refusal (operator_busy) arrives AFTER the call was already live and coaching — not just on a clean hangup", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const listener: { current: ((state: "connecting" | "live" | "operator_busy") => void) | null } = { current: null };
+    createTransport.mockReturnValue({
+      onStateChange: vi.fn((cb) => { listener.current = cb; }),
+      start: vi.fn(async () => {
+        listener.current?.("connecting");
+        listener.current?.("live");
+        return { id: "simulated-session" };
+      }),
+      mute: vi.fn(),
+      hold: vi.fn(async () => true),
+      sendDigit: vi.fn(async () => true),
+      hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })),
+    });
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    expect(removeCoachChannel).not.toHaveBeenCalled();
+
+    // A refusal arriving well after the call went live and the coach
+    // subscription was established — coachCallId was genuinely non-null
+    // at this point, unlike a refusal baked into start() itself.
+    act(() => listener.current?.("operator_busy"));
+    await waitFor(() => expect(removeCoachChannel).toHaveBeenCalled());
+  });
+
+  it("invalidates coaching synchronously when a terminal callback beats a deferred transport start", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const listener: { current: ((state: "connecting" | "failed") => void) | null } = { current: null };
+    let resolveStart!: (value: { id: string }) => void;
+    let resolveHangup!: (value: { durationSeconds: number; outcome: "failed" }) => void;
+    const deferredHangup = new Promise<{ durationSeconds: number; outcome: "failed" }>((resolve) => {
+      resolveHangup = resolve;
+    });
+    createTransport.mockReturnValue({
+      onStateChange: vi.fn((cb) => { listener.current = cb; }),
+      start: vi.fn(() => new Promise<{ id: string }>((resolve) => {
+        resolveStart = resolve;
+        listener.current?.("connecting");
+      })),
+      mute: vi.fn(),
+      hold: vi.fn(async () => true),
+      sendDigit: vi.fn(async () => true),
+      hangup: vi.fn(() => deferredHangup),
+    });
+
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalled());
+
+    act(() => listener.current?.("failed"));
+    act(() => resolveStart({ id: "late-session" }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(coachChannels).toHaveLength(0);
+
+    await act(async () => {
+      resolveHangup({ durationSeconds: 0, outcome: "failed" });
+      await Promise.resolve();
+    });
+  });
+
+  it("invalidates coaching synchronously when an operator-busy refusal beats a deferred transport start and recovery", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const listener: { current: ((state: "connecting" | "operator_busy") => void) | null } = { current: null };
+    let resolveStart!: (value: { id: string }) => void;
+    let resolveRecovery!: () => void;
+    resumeFailedSoftphoneCall.mockReturnValue(new Promise<void>((resolve) => {
+      resolveRecovery = resolve;
+    }));
+    createTransport.mockReturnValue({
+      onStateChange: vi.fn((cb) => { listener.current = cb; }),
+      start: vi.fn(() => new Promise<{ id: string }>((resolve) => {
+        resolveStart = resolve;
+        listener.current?.("connecting");
+      })),
+      mute: vi.fn(),
+      hold: vi.fn(async () => true),
+      sendDigit: vi.fn(async () => true),
+      hangup: vi.fn(async () => ({ durationSeconds: 0, outcome: "failed" as const })),
+    });
+
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalled());
+
+    act(() => listener.current?.("operator_busy"));
+    act(() => resolveStart({ id: "late-session" }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(coachChannels).toHaveLength(0);
+
+    await act(async () => {
+      resolveRecovery();
+      await Promise.resolve();
+    });
   });
 });

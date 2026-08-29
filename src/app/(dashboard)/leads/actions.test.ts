@@ -11,28 +11,34 @@ const {
   dispatchTaskAssignedSlack,
   dispatchTaskCalendarEvent,
   loadIntegrationPrefs,
+  recordLeadEvent,
+  recordLeadEvents,
   revalidatePath,
   validateActiveAssigneeForProperties,
+  verifyPropertyAddress,
 } = vi.hoisted(() => ({
-    afterCallbacks: [] as Array<() => Promise<void> | void>,
-    afterMock: vi.fn((callback: () => Promise<void> | void) => {
-      afterCallbacks.push(callback);
-    }),
-    assertPropertyDncUnlocked: vi.fn(),
-    createAdminClient: vi.fn(),
-    createClient: vi.fn(),
-    createTask: vi.fn(),
-    dispatchTaskAssigned: vi.fn(),
-    dispatchTaskAssignedSlack: vi.fn(),
-    dispatchTaskCalendarEvent: vi.fn(),
-    loadIntegrationPrefs: vi.fn(async (_client?: unknown, _userId?: string) => ({
-      slackEnabled: false,
-      calendarEnabled: false,
-      timezone: "America/Chicago",
-    })),
-    revalidatePath: vi.fn(),
-    validateActiveAssigneeForProperties: vi.fn(),
-  }));
+  afterCallbacks: [] as Array<() => Promise<void> | void>,
+  afterMock: vi.fn((callback: () => Promise<void> | void) => {
+    afterCallbacks.push(callback);
+  }),
+  assertPropertyDncUnlocked: vi.fn(),
+  createAdminClient: vi.fn(),
+  createClient: vi.fn(),
+  createTask: vi.fn(),
+  dispatchTaskAssigned: vi.fn(),
+  dispatchTaskAssignedSlack: vi.fn(),
+  dispatchTaskCalendarEvent: vi.fn(),
+  loadIntegrationPrefs: vi.fn(async (_client?: unknown, _userId?: string) => ({
+    slackEnabled: false,
+    calendarEnabled: false,
+    timezone: "America/Chicago",
+  })),
+  recordLeadEvent: vi.fn(),
+  recordLeadEvents: vi.fn(),
+  revalidatePath: vi.fn(),
+  validateActiveAssigneeForProperties: vi.fn(),
+  verifyPropertyAddress: vi.fn(),
+}));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient,
@@ -40,7 +46,8 @@ vi.mock("@/lib/supabase/server", () => ({
 
 vi.mock("@/lib/dnc/property-lock", () => ({
   assertPropertyDncUnlocked,
-  DNC_LOCKED_MESSAGE: "This property is permanently locked Do Not Contact and is read-only.",
+  DNC_LOCKED_MESSAGE:
+    "This property is permanently locked Do Not Contact and is read-only.",
   partitionPropertyDncLocks: vi.fn(async (_client, ids: string[]) => ({
     ok: true,
     data: { unlocked: ids, locked: [], missing: [] },
@@ -53,6 +60,22 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 vi.mock("@/lib/errors/report", () => ({
   reportError: vi.fn(),
+}));
+
+vi.mock("@/lib/events", () => ({
+  LEAD_EVENT_TYPES: {
+    ADDRESS_VERIFIED: "address_verified",
+    MOTIVATION_CHANGED: "motivation_changed",
+    REVERTED_TO_PROSPECT: "reverted_to_prospect",
+    STATUS_CHANGED: "status_changed",
+    LIST_ADDED: "list_added",
+  },
+  recordLeadEvent,
+  recordLeadEvents,
+}));
+
+vi.mock("@/lib/enrichment/verify-property", () => ({
+  verifyPropertyAddress,
 }));
 
 vi.mock("next/cache", () => ({
@@ -99,6 +122,7 @@ import {
   markMessagesReadForThread,
   updatePropertyStatus,
   updateLeadAssignee,
+  verifyLeadAddress,
 } from "./actions";
 
 type NeighborFixture = {
@@ -186,12 +210,27 @@ function makeSupabase(opts: {
   upsertResult: StubResult<null>;
   user: StubResult<{ user: { id: string } | null }>;
   capture: UpsertCapture;
+  listResult?: StubResult<{ id: string; name: string; org_id: string }>;
 }) {
   return {
     auth: {
       getUser: vi.fn().mockResolvedValue(opts.user),
     },
     from: vi.fn((table: string) => {
+      if (table === "lists") {
+        const result = opts.listResult ?? {
+          data: { id: "list-1", name: "Test list", org_id: "org-1" },
+          error: null,
+        };
+        const builder = {
+          select: vi.fn(),
+          eq: vi.fn(),
+          maybeSingle: vi.fn().mockResolvedValue(result),
+        };
+        builder.select.mockReturnValue(builder);
+        builder.eq.mockReturnValue(builder);
+        return builder;
+      }
       if (table === "properties") {
         return {
           select: () => ({
@@ -200,14 +239,28 @@ function makeSupabase(opts: {
         };
       }
       if (table === "property_lists") {
+        const membershipBuilder = {
+          eq: vi.fn(),
+          in: vi.fn().mockResolvedValue({ data: [], error: null }),
+        };
+        membershipBuilder.eq.mockReturnValue(membershipBuilder);
         return {
+          select: vi.fn(() => membershipBuilder),
           upsert: (
             rows: UpsertCapture["rows"],
             options: { onConflict?: string; ignoreDuplicates?: boolean },
           ) => {
             opts.capture.rows.push(...rows);
             opts.capture.options = options;
-            return Promise.resolve(opts.upsertResult);
+            return {
+              select: vi.fn().mockResolvedValue({
+                data:
+                  opts.upsertResult.error === null
+                    ? rows.map((row) => ({ property_id: row.property_id }))
+                    : opts.upsertResult.data,
+                error: opts.upsertResult.error,
+              }),
+            };
           },
         };
       }
@@ -232,18 +285,136 @@ beforeEach(() => {
     calendarEnabled: false,
     timezone: "America/Chicago",
   });
+  recordLeadEvent.mockReset().mockResolvedValue(undefined);
+  recordLeadEvents.mockReset().mockResolvedValue(undefined);
   revalidatePath.mockReset();
   validateActiveAssigneeForProperties.mockReset();
   validateActiveAssigneeForProperties.mockResolvedValue({
     ok: true,
     propertyOrgIds: new Map([["property-1", "org-1"]]),
   });
+  verifyPropertyAddress.mockReset();
   vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://app.test");
 });
 
 afterEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+});
+
+describe("verifyLeadAddress activity", () => {
+  it("records the persisted CASS verdict without copying address data", async () => {
+    const propertyLookup = {
+      select: vi.fn(() => propertyLookup),
+      eq: vi.fn(() => propertyLookup),
+      maybeSingle: vi.fn().mockResolvedValue({
+        data: { org_id: "org-1" },
+        error: null,
+      }),
+    };
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: "user-1" } },
+          error: null,
+        }),
+      },
+      from: vi.fn((table: string) => {
+        if (table === "properties") return propertyLookup;
+        throw new Error(`unexpected table ${table}`);
+      }),
+    });
+    verifyPropertyAddress.mockResolvedValue({
+      status: "verified",
+      propertyId: "property-1",
+      cacheHit: false,
+      verified: {
+        cassStatus: "verified",
+        standardized: "123 Main St, Kansas City, MO 64111",
+        isVacant: false,
+        components: {},
+        raw: {},
+      },
+    });
+
+    const result = await verifyLeadAddress("property-1");
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: { cassStatus: "verified", cacheHit: false },
+    });
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "property-1",
+      actorType: "user",
+      actorId: "user-1",
+      eventType: "address_verified",
+      payload: { cass_status: "verified", cache_hit: false },
+    });
+    expect(JSON.stringify(recordLeadEvent.mock.calls)).not.toContain(
+      "123 Main",
+    );
+  });
+
+  it("does not record an event when the provider result was not persisted", async () => {
+    const propertyLookup = {
+      select: vi.fn(() => propertyLookup),
+      eq: vi.fn(() => propertyLookup),
+      maybeSingle: vi.fn().mockResolvedValue({
+        data: { org_id: "org-1" },
+        error: null,
+      }),
+    };
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: "user-1" } },
+          error: null,
+        }),
+      },
+      from: vi.fn(() => propertyLookup),
+    });
+    verifyPropertyAddress.mockResolvedValue({
+      status: "provider_persist_failed",
+      propertyId: "property-1",
+      error: "database unavailable",
+      verified: {
+        cassStatus: "verified",
+        standardized: "123 Main St",
+        components: {},
+        raw: {},
+      },
+    });
+
+    const result = await verifyLeadAddress("property-1");
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "VERIFICATION_FAILED" },
+    });
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("requires a resolved user before checking or paying to verify", async () => {
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: null },
+          error: { message: "auth unavailable" },
+        }),
+      },
+      from: vi.fn(),
+    });
+
+    const result = await verifyLeadAddress("property-1");
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "AUTH_REQUIRED" },
+    });
+    expect(assertPropertyDncUnlocked).not.toHaveBeenCalled();
+    expect(verifyPropertyAddress).not.toHaveBeenCalled();
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
 });
 
 describe("getPropertyNeighbors historical collection", () => {
@@ -353,7 +524,10 @@ describe("lead assignment membership gate", () => {
 
     const result = await updateLeadAssignee("property-1", "forged-user");
 
-    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_ASSIGNEE" } });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "INVALID_ASSIGNEE" },
+    });
     expect(supabase.from).not.toHaveBeenCalled();
   });
 
@@ -366,9 +540,15 @@ describe("lead assignment membership gate", () => {
       message: "Target is not active in every workspace.",
     });
 
-    const result = await assignLeadsBulk(["property-a", "property-b"], "stale-user");
+    const result = await assignLeadsBulk(
+      ["property-a", "property-b"],
+      "stale-user",
+    );
 
-    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_ASSIGNEE" } });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "INVALID_ASSIGNEE" },
+    });
     expect(supabase.from).not.toHaveBeenCalled();
     expect(supabase.auth.getUser).not.toHaveBeenCalled();
   });
@@ -491,6 +671,11 @@ describe("updatePropertyStatus", () => {
     currentBuilder.eq.mockReturnValue(currentBuilder);
     const currentSelect = vi.fn(() => currentBuilder);
     createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: "00000000-0000-4000-8000-000000000001" } },
+        }),
+      },
       from: vi.fn(() => ({ update, select: currentSelect })),
     });
     return {
@@ -509,7 +694,8 @@ describe("updatePropertyStatus", () => {
       ok: false,
       error: {
         code: "DNC_LOCKED",
-        message: "This property is permanently locked Do Not Contact and is read-only.",
+        message:
+          "This property is permanently locked Do Not Contact and is read-only.",
       },
     });
 
@@ -545,6 +731,13 @@ describe("updatePropertyStatus", () => {
     expect(chain.eq).toHaveBeenCalledWith("id", "property-1");
     expect(chain.eq).toHaveBeenCalledWith("status", "new_lead");
     expect(chain.select).toHaveBeenCalledWith("id, status");
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "property-1",
+      actorType: "user",
+      actorId: "00000000-0000-4000-8000-000000000001",
+      eventType: "status_changed",
+      payload: { from: "new_lead", to: "contacted" },
+    });
   });
 
   it("returns the authoritative current stage when a stale update matched no row", async () => {
@@ -600,6 +793,7 @@ describe("updatePropertyStatus", () => {
       ok: true,
       data: { propertyId: "property-1", status: "contacted" },
     });
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 });
 
@@ -657,8 +851,9 @@ describe("addPropertiesToListBulk", () => {
     }
     expect(capture.options).toEqual({
       onConflict: "property_id,list_id",
-      ignoreDuplicates: false,
+      ignoreDuplicates: true,
     });
+    expect(recordLeadEvents).toHaveBeenCalledTimes(1);
   });
 
   it("records ids the lookup did not return as failed entries", async () => {
@@ -675,10 +870,7 @@ describe("addPropertiesToListBulk", () => {
       }),
     );
 
-    const result = await addPropertiesToListBulk(
-      ["p1", "p-missing"],
-      "list-1",
-    );
+    const result = await addPropertiesToListBulk(["p1", "p-missing"], "list-1");
 
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -1040,7 +1232,10 @@ function makeListUsersSupabase() {
 
 function makeListUsersAdmin(
   userPages: Array<{
-    data: { users: Array<{ id: string; email: string }>; nextPage: number | null };
+    data: {
+      users: Array<{ id: string; email: string }>;
+      nextPage: number | null;
+    };
     error: null;
   }>,
 ) {

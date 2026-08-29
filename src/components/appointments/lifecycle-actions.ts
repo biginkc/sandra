@@ -7,6 +7,7 @@ import { kickCalendarMutationSync } from "@/lib/appointments/inline-sync-kick";
 import { errFromUnknown, err, type Result } from "@/lib/errors/result";
 import { assertAppointmentTaskPropertyDncUnlocked } from "@/lib/dnc/property-lock";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import {
   cancelAppointment,
   completeAppointment,
@@ -187,11 +188,33 @@ export async function completeAppointmentAction(
     const result = await completeAppointment(supabase, taskId, outcome);
     if (!result.ok) return result;
 
+    const task = await loadTaskForNotification(supabase, taskId).catch((e) => {
+      reportError(e, {
+        tags: { surface: "complete_appointment_action_task_lookup" },
+        extra: { taskId },
+      });
+      return null;
+    });
+    if (task?.related_property_id) {
+      await recordLeadEvent({
+        propertyId: task.related_property_id,
+        actorType: "user",
+        actorId: user.id,
+        eventType:
+          outcome === "held"
+            ? LEAD_EVENT_TYPES.APPOINTMENT_HELD
+            : LEAD_EVENT_TYPES.APPOINTMENT_NO_SHOW,
+        payload: { task_id: taskId },
+        sourceType: "appointments.completed",
+        sourceId: taskId,
+      });
+    }
+
     // Codex round 11 (finding 3): the RPC already committed above — the
     // post-commit task lookup + revalidation below is best-effort only,
     // never allowed to flip this action's result back to an error.
     await revalidateAppointmentPathsBestEffort(
-      () => loadTaskForNotification(supabase, taskId),
+      task,
       "complete_appointment_action_post_commit",
       taskId,
     );
@@ -228,6 +251,18 @@ export async function cancelAppointmentAction(
 
     const result = await cancelAppointment(supabase, taskId);
     if (!result.ok) return result;
+
+    if (task?.related_property_id) {
+      await recordLeadEvent({
+        propertyId: task.related_property_id,
+        actorType: "user",
+        actorId: user.id,
+        eventType: LEAD_EVENT_TYPES.APPOINTMENT_CANCELED,
+        payload: { task_id: taskId },
+        sourceType: "appointments.canceled",
+        sourceId: result.data.ledgerId,
+      });
+    }
 
     await kickCalendarMutationSyncBestEffort(
       "cancel_appointment_action",
@@ -326,6 +361,23 @@ export async function rescheduleAppointmentAction(
     });
     if (!result.ok) return result;
 
+    if (task?.related_property_id && !result.data.duplicate) {
+      await recordLeadEvent({
+        propertyId: task.related_property_id,
+        actorType: "user",
+        actorId: user.id,
+        eventType: LEAD_EVENT_TYPES.APPOINTMENT_RESCHEDULED,
+        payload: {
+          task_id: result.data.taskId,
+          previous_task_id: result.data.oldTaskId,
+          from: task.due_at,
+          to: newStartUtc.toISOString(),
+        },
+        sourceType: "appointments.rescheduled",
+        sourceId: result.data.ledgerId,
+      });
+    }
+
     await kickCalendarMutationSyncBestEffort(
       "reschedule_appointment_action",
       result.data.ledgerId,
@@ -374,11 +426,6 @@ export async function reassignAppointmentAction(
     );
     if (!result.ok) return result;
 
-    await kickCalendarMutationSyncBestEffort(
-      "reassign_appointment_action",
-      result.data.ledgerId,
-    );
-
     // Codex round 10 (finding 3): everything past this point is
     // best-effort — `reassignAppointment` above already committed the
     // reassignment, so nothing that follows may flip this action's result
@@ -397,6 +444,31 @@ export async function reassignAppointmentAction(
       });
       return null;
     });
+    const assignmentChanged =
+      result.data.oldAssigneeId !== result.data.newAssigneeId;
+    if (
+      task?.related_property_id &&
+      !result.data.duplicate &&
+      assignmentChanged
+    ) {
+      await recordLeadEvent({
+        propertyId: task.related_property_id,
+        actorType: "user",
+        actorId: user.id,
+        eventType: LEAD_EVENT_TYPES.APPOINTMENT_REASSIGNED,
+        payload: {
+          task_id: taskId,
+          from: result.data.oldAssigneeId,
+          to: result.data.newAssigneeId,
+        },
+        sourceType: "appointments.reassigned",
+        sourceId: result.data.ledgerId,
+      });
+    }
+    await kickCalendarMutationSyncBestEffort(
+      "reassign_appointment_action",
+      result.data.ledgerId,
+    );
     // Codex round 11 (finding 3): round 10 guarded the task RE-FETCH above
     // but left this `revalidateAppointmentPaths` call itself unguarded —
     // the identical class of bug (a `revalidatePath` throw here would still
@@ -423,7 +495,12 @@ export async function reassignAppointmentAction(
     // ever fires on a genuine retry of an idempotency key that already
     // committed AND already notified — not on this path's own failures,
     // which no longer exist for it to trip over.
-    if (task && !result.data.duplicate && newAssigneeId !== user.id) {
+    if (
+      task &&
+      !result.data.duplicate &&
+      assignmentChanged &&
+      newAssigneeId !== user.id
+    ) {
       // ALL notification prep (admin client, prefs, address) plus the
       // dispatch calls themselves move inside `after()`, wrapped in their
       // own try/catch + reportError — a failure anywhere in here is

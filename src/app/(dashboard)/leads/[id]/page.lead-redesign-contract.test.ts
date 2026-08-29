@@ -5,11 +5,12 @@ import { describe, expect, it } from "vitest";
 const source = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
 
 describe("Lead Detail v2 integration contract", () => {
-  it("keeps three isolated logical activity sources with bounded reads", () => {
+  it("keeps four isolated logical activity sources with bounded reads", () => {
     expect(source).toContain('.from("messages")');
     expect(source).toContain('.from("lead_notes")');
     expect(source).toContain('.from("call_activities")');
-    expect(source.match(/\.limit\(200\)/g)).toHaveLength(2);
+    expect(source).toContain('.from("lead_events")');
+    expect(source.match(/\.limit\(200\)/g)).toHaveLength(3);
     const callWindowSource = source.slice(
       source.indexOf("const callSelection"),
       source.indexOf("const { data: openWorkRaw"),
@@ -24,6 +25,9 @@ describe("Lead Detail v2 integration contract", () => {
     expect(source).toContain("messageError={threadError?.message ?? null}");
     expect(source).toContain("noteError={notesError?.message ?? null}");
     expect(source).toContain("callError={callRollupError?.message ?? null}");
+    expect(source).toContain("eventError={leadEventsError?.message ?? null}");
+    expect(source).toContain("initialEvents={initialLeadEvents}");
+    expect(source).toContain("key={lead.id}");
   });
 
   it("excludes cross-org and inactive auth users from note author payloads", () => {
@@ -59,13 +63,50 @@ describe("Lead Detail v2 integration contract", () => {
     expect(clientAuthorMap).toBeGreaterThan(orgFilter);
   });
 
-  it("keeps both SMS entry points behind the same consent result", () => {
+  it("shares consent state while restricting each SMS entry point by its exact phone", () => {
     expect(source.match(/<SmsEntryPointGate/g)).toHaveLength(2);
     expect(source).toContain('placement="header"');
     expect(source).toContain('placement="inline"');
-    expect(
-      source.match(/restricted=\{smsPresentation\.smsRestricted\}/g),
-    ).toHaveLength(2);
+
+    const headerGateStart = source.indexOf("<SmsEntryPointGate");
+    const inlineGateStart = source.indexOf(
+      "<SmsEntryPointGate",
+      headerGateStart + 1,
+    );
+    const headerGate = source.slice(headerGateStart, inlineGateStart);
+    const inlineGate = source.slice(
+      inlineGateStart,
+      source.indexOf("</SmsEntryPointGate>", inlineGateStart),
+    );
+    expect(headerGate).toContain(
+      "restricted={smsPresentation.smsRestricted}",
+    );
+    expect(inlineGate).toContain(
+      "restricted={inlineSmsPresentation.smsRestricted}",
+    );
+
+    const headerPresentationStart = source.indexOf(
+      "const smsPresentation =",
+    );
+    const inlinePresentationStart = source.indexOf(
+      "const inlineSmsPresentation =",
+    );
+    const headerPresentation = source.slice(
+      headerPresentationStart,
+      inlinePresentationStart,
+    );
+    const inlinePresentation = source.slice(
+      inlinePresentationStart,
+      source.indexOf("// Tags attached", inlinePresentationStart),
+    );
+    expect(headerPresentation).toContain("consentState,");
+    expect(inlinePresentation).toContain("consentState,");
+    expect(headerPresentation).toContain("phoneSuppressionResult");
+    expect(inlinePresentation).toContain("inlinePhoneSuppressionResult");
+    expect(inlinePresentation).toContain(
+      "latestHomeownerSmsRoute",
+    );
+    expect(inlinePresentation).toContain(": smsPresentation");
   });
 
   it("keeps the permanent DNC return ahead of normal-page work", () => {

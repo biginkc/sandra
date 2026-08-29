@@ -23,16 +23,16 @@ type Props = {
   replyToPhone?: string | null;
   preferredFromNumber?: string | null;
   phoneUnavailableMessage?: string;
-  /** Persisted thread rows retire the temporary receipt after refresh. */
-  persistedMessageIds?: readonly string[];
-  /** Compact adjacent action rendered with the Outbox explanation. */
+  /** Prevents sending while Messages refreshes the authoritative SMS route. */
+  routeRefreshPending?: boolean;
+  /** Keeps draft state mounted while a parent safety restriction hides UI. */
+  suspended?: boolean;
+  /** Compact adjacent action rendered with the send-safety explanation. */
   footerAction?: React.ReactNode;
 };
 
-type QueuedReceipt = { messageId: string; body: string };
-
 /**
- * Inline reply box under the SMS thread. Queues via the existing
+ * Inline reply box under the SMS thread. Sends via the existing
  * `sendSmsFromLead` server action — same TCPA + quiet-hours guardrails
  * as the modal composer. Kept intentionally minimal: no from-number
  * picker here; it replies from the business number the seller most
@@ -45,14 +45,12 @@ export function InlineReply({
   replyToPhone = null,
   preferredFromNumber = null,
   phoneUnavailableMessage,
-  persistedMessageIds = [],
+  routeRefreshPending = false,
+  suspended = false,
   footerAction,
 }: Props) {
   const router = useRouter();
   const [body, setBody] = useState("");
-  const [queuedReceipt, setQueuedReceipt] = useState<QueuedReceipt | null>(
-    null,
-  );
   const [pending, startTransition] = useTransition();
   // Tracks the most recent template selection so a slower in-flight
   // `loadLeadVars` for an earlier click can't overwrite the body the user
@@ -71,7 +69,8 @@ export function InlineReply({
 
   const length = body.length;
   const tooLong = length > 1600;
-  const canSend = !disabled && length > 0 && !tooLong && !pending;
+  const canSend =
+    !disabled && length > 0 && !tooLong && !pending && !routeRefreshPending;
   const effectiveToPhone = replyToPhone ?? homeownerPhone;
 
   const send = () => {
@@ -83,33 +82,33 @@ export function InlineReply({
           propertyId,
           submittedBody,
           fromNumber,
-          true,
+          false,
           effectiveToPhone,
         ),
-        { fallbackMessage: "SMS queue failed" },
+        {
+          fallbackMessage: "Send not confirmed",
+          unexpectedErrorDescription:
+            "Sandra lost the send result. Check the thread before retrying to avoid a duplicate message.",
+        },
       );
       if (!result.ok) return;
 
       const { outcome } = result.data;
       switch (outcome.status) {
         case "sent":
-          // queueOnly=true makes this an invalid action contract. Keep the
-          // branch fail-closed in case a server regression returns it.
-          toast.error("Queue confirmation failed", {
-            description:
-              "The server reported an immediate send. Refresh before retrying.",
-          });
-          break;
-        case "queued":
-          toast.success("Added to Outbox", {
-            description: `Queued for ${effectiveToPhone}. Review delivery in Outbox.`,
-          });
-          setQueuedReceipt({
-            messageId: outcome.messageId,
-            body: submittedBody,
+          toast.success("Message sent", {
+            description: `Sent to ${effectiveToPhone}.`,
           });
           setBody("");
           router.refresh();
+          break;
+        case "queued":
+          // queueOnly=false makes this an invalid action contract. Preserve
+          // the draft so the operator can inspect Outbox before retrying.
+          toast.error("Send did not complete", {
+            description:
+              "The server queued this reply unexpectedly. Review Outbox before retrying.",
+          });
           break;
         case "blocked_no_consent":
           toast.error("Blocked: no consent", { description: outcome.reason });
@@ -133,14 +132,18 @@ export function InlineReply({
           toast.error("No approved sender", { description: outcome.reason });
           break;
         case "provider_failed":
-          toast.error("Provider error", { description: outcome.error });
+          toast.error("Send not confirmed", {
+            description: `${outcome.error} Check the thread before retrying to avoid a duplicate message.`,
+          });
           break;
         case "contact_not_found":
         case "property_not_found":
           toast.error("Lead not found");
           break;
         case "db_error":
-          toast.error("Database error", { description: outcome.error });
+          toast.error("Send not confirmed", {
+            description: `${outcome.error} Check the thread before retrying to avoid a duplicate message.`,
+          });
           break;
       }
     });
@@ -153,6 +156,10 @@ export function InlineReply({
       send();
     }
   };
+
+  // Returning null does not unmount this component, so its draft survives a
+  // temporary route/safety restriction without exposing a send control.
+  if (suspended) return null;
 
   if (disabled) {
     return (
@@ -194,22 +201,6 @@ export function InlineReply({
 
   return (
     <div className="flex flex-col gap-2" data-testid="inline-reply">
-      {queuedReceipt &&
-      !persistedMessageIds.includes(queuedReceipt.messageId) ? (
-        <div
-          className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950"
-          role="status"
-          data-testid="inline-reply-queued-receipt"
-        >
-          <p className="font-bold">Queued · in Outbox</p>
-          <p className="mt-1 whitespace-pre-wrap break-words text-xs text-blue-800">
-            {queuedReceipt.body}
-          </p>
-          <p className="mt-1 text-[11px] text-blue-700">
-            Outbox controls delivery.
-          </p>
-        </div>
-      ) : null}
       <div className="rounded-[14px] border border-[#e5e1df] bg-[#fdfcfb] px-3.5 py-3 transition-colors focus-within:border-[#111827]">
         <textarea
           value={body}
@@ -249,19 +240,19 @@ export function InlineReply({
             type="button"
             onClick={send}
             disabled={!canSend}
-            aria-label="Queue reply in Outbox"
+            aria-label="Send reply"
             data-testid="inline-reply-send"
             className="inline-flex min-h-9 w-full shrink-0 items-center justify-center gap-2 rounded-full bg-primary px-5 py-2 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
           >
-            {pending ? "Queueing…" : "Queue SMS"}
+            {pending ? "Sending…" : "Send SMS"}
             <SendIcon className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2 px-2">
         <p className="text-[10px] leading-relaxed text-[#a8a29e]">
-          This adds the message to Outbox. Delivery happens only after the queue
-          re-checks consent, suppression, and release timing.
+          Sends immediately after Sandra checks current contact restrictions and
+          quiet hours.
         </p>
         {footerAction}
       </div>

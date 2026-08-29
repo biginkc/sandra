@@ -20,6 +20,7 @@ on:
 concurrency:
   group: e2e-shared-test-project
   cancel-in-progress: false
+  queue: max
 
 jobs:
   playwright:

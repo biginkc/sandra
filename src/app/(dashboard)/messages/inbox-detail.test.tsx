@@ -16,8 +16,10 @@ type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 const replaceCalls: string[] = [];
 const refreshCalls: number[] = [];
 const pushCalls: string[] = [];
+let navigationSearch = "";
 const setOutreachDispoMock = vi.hoisted(() => vi.fn());
 const moveMessageThreadToLeadMock = vi.hoisted(() => vi.fn());
+const confirmAiDispositionReviewMock = vi.hoisted(() => vi.fn());
 const supabaseMock = vi.hoisted(() => {
   const subscriptions: Array<{
     type: string;
@@ -67,11 +69,12 @@ vi.mock("next/navigation", () => ({
     forward: vi.fn(),
     prefetch: vi.fn(),
   }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(navigationSearch),
   usePathname: () => "/messages",
 }));
 
 vi.mock("./dispo-actions", () => ({
+  confirmAiDispositionReview: confirmAiDispositionReviewMock,
   setOutreachDispo: setOutreachDispoMock,
   moveMessageThreadToLead: moveMessageThreadToLeadMock,
 }));
@@ -105,6 +108,20 @@ vi.mock("sonner", () => ({
   },
 }));
 
+vi.mock("@/components/appointments/book-appointment-popover", () => ({
+  BookAppointmentPopover: ({
+    onBooked,
+    triggerLabel,
+  }: {
+    onBooked: () => void;
+    triggerLabel: string;
+  }) => (
+    <button data-testid="book-appointment" onClick={onBooked}>
+      {triggerLabel}
+    </button>
+  ),
+}));
+
 function makeMessage(
   overrides: Partial<MessageRow> & {
     id: string;
@@ -126,9 +143,11 @@ function makeMessage(
       overrides.conversation_id ??
       `conv-${overrides.contact_id ?? "contact-1"}`,
     from_address:
-      overrides.direction === "inbound" ? "+15551234567" : "+18162804181",
+      overrides.from_address ??
+      (overrides.direction === "inbound" ? "+15551234567" : "+18162804181"),
     to_address:
-      overrides.direction === "inbound" ? "+18162804181" : "+15551234567",
+      overrides.to_address ??
+      (overrides.direction === "inbound" ? "+18162804181" : "+15551234567"),
     created_at: overrides.created_at ?? "2026-04-29T12:00:00Z",
     read_at: overrides.read_at ?? null,
     metadata: overrides.metadata ?? null,
@@ -150,12 +169,21 @@ function makeData(
     conversationId: overrides.conversationId ?? `conv-${contactId}`,
     contactId,
     contactName: overrides.contactName ?? "Panel Test",
-    threadCustomerPhone: overrides.threadCustomerPhone ?? "+15551234567",
-    threadBusinessPhone: overrides.threadBusinessPhone ?? "+18162804181",
-    contactPhone: overrides.contactPhone ?? "+15551234567",
+    threadCustomerPhone: Object.hasOwn(overrides, "threadCustomerPhone")
+      ? overrides.threadCustomerPhone!
+      : "+15551234567",
+    threadBusinessPhone: Object.hasOwn(overrides, "threadBusinessPhone")
+      ? overrides.threadBusinessPhone!
+      : "+18162804181",
+    contactPhone: Object.hasOwn(overrides, "contactPhone")
+      ? overrides.contactPhone!
+      : "+15551234567",
     replyToPhone: Object.hasOwn(overrides, "replyToPhone")
       ? overrides.replyToPhone!
       : "+15551234567",
+    replyToPhoneLineType: Object.hasOwn(overrides, "replyToPhoneLineType")
+      ? overrides.replyToPhoneLineType!
+      : "mobile",
     propertyId,
     propertyAddress: Object.hasOwn(overrides, "propertyAddress")
       ? overrides.propertyAddress!
@@ -167,6 +195,7 @@ function makeData(
     assigneeId: overrides.assigneeId ?? null,
     propertyStatus: overrides.propertyStatus ?? "prospect",
     outreachDispo: overrides.outreachDispo ?? null,
+    aiDispositionReview: overrides.aiDispositionReview ?? null,
     contactDoNotContact: overrides.contactDoNotContact ?? false,
     contactSmsOptedOut: overrides.contactSmsOptedOut ?? false,
     smsConsentState: Object.hasOwn(overrides, "smsConsentState")
@@ -213,12 +242,18 @@ describe("<InboxDetail />", () => {
     pushCalls.length = 0;
     replaceCalls.length = 0;
     refreshCalls.length = 0;
+    navigationSearch = "";
     setOutreachDispoMock.mockClear();
     moveMessageThreadToLeadMock.mockClear();
+    confirmAiDispositionReviewMock.mockClear();
     setOutreachDispoMock.mockResolvedValue({ ok: true });
     moveMessageThreadToLeadMock.mockResolvedValue({
       ok: true,
       alreadyQualified: false,
+    });
+    confirmAiDispositionReviewMock.mockResolvedValue({
+      ok: true,
+      status: "confirmed",
     });
     supabaseMock.subscriptions.length = 0;
     supabaseMock.client.channel.mockClear();
@@ -228,7 +263,13 @@ describe("<InboxDetail />", () => {
     vi.mocked(sendSmsFromLead).mockReset();
     vi.mocked(sendSmsFromLead).mockResolvedValue({
       ok: true,
-      data: { outcome: { status: "queued", messageId: "queued-reply-1" } },
+      data: {
+        outcome: {
+          status: "sent",
+          messageId: "sent-reply-1",
+          externalId: "mock_sent-reply-1",
+        },
+      },
     } as Awaited<ReturnType<typeof sendSmsFromLead>>);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -401,7 +442,7 @@ describe("<InboxDetail />", () => {
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
   });
 
-  it("queues inline replies to the same saved thread phone shown in Messages", async () => {
+  it("sends inline replies immediately to the same saved thread phone shown in Messages", async () => {
     const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-reply-phone",
@@ -412,12 +453,15 @@ describe("<InboxDetail />", () => {
       initialMessages: [],
     });
 
-    const view = render(
+    render(
       <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     expect(screen.getByTestId("inline-reply")).toHaveTextContent(
       "+1 (555) 000-0002",
+    );
+    expect(screen.getByTestId("inline-reply")).toHaveTextContent(
+      "+1 (816) 280-4181",
     );
 
     await user.type(screen.getByLabelText("Reply to this lead"), "Thanks");
@@ -427,57 +471,25 @@ describe("<InboxDetail />", () => {
       expect(sendSmsFromLead).toHaveBeenCalledWith(
         "prop-reply-phone",
         "Thanks",
-        null,
-        true,
+        "+18162804181",
+        false,
         "+15550000002",
       );
     });
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
-    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
-      "Queued · in Outbox",
-    );
-    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
-      "Thanks",
-    );
-    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
-      "Outbox controls delivery",
-    );
+    expect(toast.success).toHaveBeenCalledWith("Message sent", {
+      description: "Sent to +15550000002.",
+    });
     expect(screen.getByRole("button", { name: "Insert template" })).toHaveClass(
       "min-h-11",
     );
-
-    view.rerender(
-      <InboxDetail
-        data={{
-          ...data,
-          initialMessages: [
-            makeMessage({
-              id: "queued-reply-1",
-              body: "Thanks",
-              direction: "outbound",
-              status: "queued",
-              contact_id: "contact-reply-phone",
-              property_id: "prop-reply-phone",
-              conversation_id: data.conversationId,
-            }),
-          ],
-        }}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
-    );
-    expect(screen.queryByTestId("inline-reply-queued-receipt")).toBeNull();
-    expect(screen.getAllByText("Thanks")).toHaveLength(1);
-    expect(screen.getByTestId("messages-thread-delivery-status")).toHaveTextContent(
-      "Queued · in Outbox",
-    );
   });
 
-  it("does not claim success or clear the draft if queueOnly returns an impossible immediate send", async () => {
+  it("does not claim success or clear the draft if immediate send unexpectedly queues", async () => {
     const user = userEvent.setup();
     vi.mocked(sendSmsFromLead).mockResolvedValueOnce({
       ok: true,
-      data: { outcome: { status: "sent" } },
+      data: { outcome: { status: "queued", messageId: "unexpected-queue" } },
     } as Awaited<ReturnType<typeof sendSmsFromLead>>);
     render(
       <InboxDetail
@@ -493,6 +505,10 @@ describe("<InboxDetail />", () => {
 
     await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
     expect(composer).toHaveValue("keep this draft");
+    expect(toast.error).toHaveBeenCalledWith("Send did not complete", {
+      description:
+        "The server queued this reply unexpectedly. Review Outbox before retrying.",
+    });
   });
 
   it("explains a missing approved sender and preserves the reply draft", async () => {
@@ -525,6 +541,654 @@ describe("<InboxDetail />", () => {
     expect(composer).toHaveValue("keep this draft too");
   });
 
+  it("keeps a lost-response draft gated until the same-route send becomes terminal", async () => {
+    const user = userEvent.setup();
+    let rejectSend: ((reason: Error) => void) | undefined;
+    vi.mocked(sendSmsFromLead).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    const data = makeData({
+      contactId: "contact-outbound-pending",
+      propertyId: "prop-outbound-pending",
+      threadId: "conv-outbound-pending",
+      conversationId: "conv-outbound-pending",
+    });
+
+    const view = render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    const composer = screen.getByLabelText("Reply to this lead");
+    await user.type(composer, "preserve after provider failure");
+    await user.click(screen.getByTestId("inline-reply-send"));
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+
+    const insertSubscription = supabaseMock.subscriptions.find(
+      (subscription) =>
+        subscription.type === "postgres_changes" &&
+        subscription.filter.event === "INSERT",
+    );
+    expect(insertSubscription).toBeDefined();
+
+    await act(async () => {
+      insertSubscription!.callback({
+        new: makeMessage({
+          id: "outbound-pending",
+          body: "preserve after provider failure",
+          direction: "outbound",
+          status: "pending",
+          contact_id: data.contactId,
+          property_id: data.propertyId,
+          conversation_id: data.conversationId,
+        }),
+      });
+    });
+
+    expect(screen.getByTestId("inline-reply-refreshing")).toHaveTextContent(
+      "Updating the thread phone before reply",
+    );
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(
+      "preserve after provider failure",
+    );
+    expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
+    expect(refreshCalls).toHaveLength(0);
+
+    await act(async () => {
+      rejectSend?.(new Error("Network connection lost"));
+    });
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith("Send not confirmed", {
+        description:
+          "Sandra lost the send result. Check the thread before retrying to avoid a duplicate message.",
+      });
+    });
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(
+      "preserve after provider failure",
+    );
+    expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
+
+    const updateSubscription = supabaseMock.subscriptions.find(
+      (subscription) =>
+        subscription.type === "postgres_changes" &&
+        subscription.filter.event === "UPDATE",
+    );
+    const failedMessage = makeMessage({
+      id: "outbound-pending",
+      body: "preserve after provider failure",
+      direction: "outbound",
+      status: "failed",
+      contact_id: data.contactId,
+      property_id: data.propertyId,
+      conversation_id: data.conversationId,
+    });
+    await act(async () => {
+      updateSubscription!.callback({ new: failedMessage });
+    });
+    expect(refreshCalls.length).toBeGreaterThan(0);
+
+    view.rerender(
+      <InboxDetail
+        data={{ ...data, initialMessages: [failedMessage] }}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(
+      "preserve after provider failure",
+    );
+    expect(screen.getByTestId("inline-reply-send")).toBeEnabled();
+  });
+
+  it("unlocks a live pending gate from an explicit terminal server snapshot", async () => {
+    const user = userEvent.setup();
+    let resolveSend:
+      | ((value: Awaited<ReturnType<typeof sendSmsFromLead>>) => void)
+      | undefined;
+    vi.mocked(sendSmsFromLead).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    const data = makeData({
+      contactId: "contact-missed-terminal-update",
+      propertyId: "prop-missed-terminal-update",
+      threadId: "conv-missed-terminal-update",
+      conversationId: "conv-missed-terminal-update",
+    });
+    const view = render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+    const draft = "preserve through missed terminal event";
+    await user.type(screen.getByLabelText("Reply to this lead"), draft);
+    await user.click(screen.getByTestId("inline-reply-send"));
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+
+    const insertSubscription = supabaseMock.subscriptions.find(
+      (subscription) =>
+        subscription.type === "postgres_changes" &&
+        subscription.filter.event === "INSERT",
+    );
+    const pendingMessage = makeMessage({
+      id: "pending-with-missed-terminal-update",
+      body: draft,
+      direction: "outbound",
+      status: "pending",
+      contact_id: data.contactId,
+      property_id: data.propertyId,
+      conversation_id: data.conversationId,
+    });
+    await act(async () => {
+      insertSubscription!.callback({ new: pendingMessage });
+    });
+    expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
+
+    await act(async () => {
+      resolveSend?.({
+        ok: true,
+        data: {
+          outcome: {
+            status: "sent",
+            messageId: pendingMessage.id,
+            externalId: "provider-missed-terminal-update",
+          },
+        },
+      } as Awaited<ReturnType<typeof sendSmsFromLead>>);
+    });
+    expect(refreshCalls.length).toBeGreaterThan(0);
+
+    // Simulate that refresh returning the terminal database row while the
+    // corresponding Realtime UPDATE was missed during a disconnect.
+    view.rerender(
+      <InboxDetail
+        data={{
+          ...data,
+          initialMessages: [{ ...pendingMessage, status: "sent" }],
+        }}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("inline-reply-refreshing"),
+    ).not.toBeInTheDocument();
+    await user.type(
+      screen.getByLabelText("Reply to this lead"),
+      "new draft after terminal snapshot",
+    );
+    expect(screen.getByTestId("inline-reply-send")).toBeEnabled();
+  });
+
+  it("starts gated when the initial snapshot already contains a pending send", async () => {
+    const user = userEvent.setup();
+    const priorRoute = makeMessage({
+      id: "initial-pending-prior-route",
+      body: "prior route",
+      direction: "inbound",
+      status: "received",
+      contact_id: "contact-initial-pending",
+      property_id: "prop-initial-pending",
+      conversation_id: "conv-initial-pending",
+      from_address: "+15550000001",
+      to_address: "+18162804181",
+      created_at: "2026-04-29T12:00:00Z",
+    });
+    const pendingMessage = makeMessage({
+      id: "pending-before-page-load",
+      body: "already pending",
+      direction: "outbound",
+      status: "pending",
+      contact_id: "contact-initial-pending",
+      property_id: "prop-initial-pending",
+      conversation_id: "conv-initial-pending",
+      from_address: "+18162804181",
+      to_address: "+15550000001",
+      created_at: "2026-04-29T12:01:00Z",
+    });
+    const data = makeData({
+      contactId: "contact-initial-pending",
+      propertyId: "prop-initial-pending",
+      threadId: "conv-initial-pending",
+      conversationId: "conv-initial-pending",
+      threadCustomerPhone: priorRoute.from_address,
+      threadBusinessPhone: priorRoute.to_address,
+      contactPhone: priorRoute.from_address,
+      replyToPhone: priorRoute.from_address,
+      initialMessages: [priorRoute, pendingMessage],
+    });
+    const view = render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    await user.type(
+      screen.getByLabelText("Reply to this lead"),
+      "draft while prior send is pending",
+    );
+    expect(screen.getByTestId("inline-reply-refreshing")).toBeInTheDocument();
+    expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
+
+    await waitFor(() => {
+      expect(supabaseMock.subscriptions.length).toBeGreaterThan(1);
+    });
+    const updateSubscription = supabaseMock.subscriptions.find(
+      (subscription) =>
+        subscription.type === "postgres_changes" &&
+        subscription.filter.event === "UPDATE",
+    );
+    const sentMessage = { ...pendingMessage, status: "sent" };
+    await act(async () => {
+      updateSubscription!.callback({ new: sentMessage });
+    });
+
+    expect(refreshCalls.length).toBeGreaterThan(0);
+    expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
+    view.rerender(
+      <InboxDetail
+        data={{ ...data, initialMessages: [priorRoute, sentMessage] }}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("inline-reply-refreshing"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(
+      "draft while prior send is pending",
+    );
+    expect(screen.getByTestId("inline-reply-send")).toBeEnabled();
+  });
+
+  it.each([
+    {
+      routeChange: "customer phone",
+      fromAddress: "+18162804181",
+      toAddress: "+15550000003",
+    },
+    {
+      routeChange: "Sandra sender",
+      fromAddress: "+18162804182",
+      toAddress: "+15551234567",
+    },
+  ])(
+    "keeps the draft gated until another outbound confirms the changed $routeChange",
+    async ({ fromAddress, routeChange, toAddress }) => {
+      const user = userEvent.setup();
+      const data = makeData({
+        contactId: `contact-route-${routeChange}`,
+        propertyId: `prop-route-${routeChange}`,
+        threadId: `conv-route-${routeChange}`,
+        conversationId: `conv-route-${routeChange}`,
+      });
+
+      const view = render(
+        <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+      );
+
+      const draft = `preserve ${routeChange} draft`;
+      await user.type(screen.getByLabelText("Reply to this lead"), draft);
+
+      await waitFor(() => {
+        expect(supabaseMock.subscriptions.length).toBeGreaterThan(0);
+      });
+      const insertSubscription = supabaseMock.subscriptions.find(
+        (subscription) =>
+          subscription.type === "postgres_changes" &&
+          subscription.filter.event === "INSERT",
+      );
+      const updateSubscription = supabaseMock.subscriptions.find(
+        (subscription) =>
+          subscription.type === "postgres_changes" &&
+          subscription.filter.event === "UPDATE",
+      );
+      expect(insertSubscription).toBeDefined();
+      expect(updateSubscription).toBeDefined();
+
+      await act(async () => {
+        insertSubscription!.callback({
+          new: makeMessage({
+            id: `outbound-route-${routeChange}`,
+            body: "sent somewhere else",
+            direction: "outbound",
+            status: "pending",
+            contact_id: data.contactId,
+            property_id: data.propertyId,
+            conversation_id: data.conversationId,
+            from_address: fromAddress,
+            to_address: toAddress,
+          }),
+        });
+      });
+
+      expect(screen.getByTestId("inline-reply-refreshing")).toHaveTextContent(
+        "Updating the thread phone before reply",
+      );
+      expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
+      expect(screen.getByLabelText("Reply to this lead")).toHaveValue(draft);
+      expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
+      expect(refreshCalls).toHaveLength(0);
+
+      await act(async () => {
+        updateSubscription!.callback({
+          new: makeMessage({
+            id: `outbound-route-${routeChange}`,
+            body: "sent somewhere else",
+            direction: "outbound",
+            status: "sent",
+            contact_id: data.contactId,
+            property_id: data.propertyId,
+            conversation_id: data.conversationId,
+            from_address: fromAddress,
+            to_address: toAddress,
+          }),
+        });
+      });
+      expect(refreshCalls.length).toBeGreaterThan(0);
+
+      view.rerender(
+        <InboxDetail
+          data={{
+            ...data,
+            threadCustomerPhone: toAddress,
+            threadBusinessPhone: fromAddress,
+            replyToPhone: toAddress,
+            initialMessages: [
+              makeMessage({
+                id: `outbound-route-${routeChange}`,
+                body: "sent somewhere else",
+                direction: "outbound",
+                status: "sent",
+                contact_id: data.contactId,
+                property_id: data.propertyId,
+                conversation_id: data.conversationId,
+                from_address: fromAddress,
+                to_address: toAddress,
+              }),
+            ],
+          }}
+          assigneeEmails={{}}
+          currentUserId="user-1"
+        />,
+      );
+
+      expect(
+        screen.queryByTestId("inline-reply-refreshing"),
+      ).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Reply to this lead")).toHaveValue(draft);
+      expect(screen.getByTestId("inline-reply-send")).toBeEnabled();
+
+      await user.click(screen.getByTestId("inline-reply-send"));
+      await waitFor(() => {
+        expect(sendSmsFromLead).toHaveBeenCalledWith(
+          data.propertyId,
+          draft,
+          fromAddress,
+          false,
+          toAddress,
+        );
+      });
+    },
+  );
+
+  it("restores the prior route and draft when a changed-route attempt fails", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-route-failed",
+      propertyId: "prop-route-failed",
+      threadId: "conv-route-failed",
+      conversationId: "conv-route-failed",
+      threadCustomerPhone: "+15550000001",
+      threadBusinessPhone: "+18162804181",
+      contactPhone: "+15550000001",
+      replyToPhone: "+15550000001",
+      initialMessages: [
+        makeMessage({
+          id: "prior-authoritative-route",
+          body: "prior route",
+          direction: "inbound",
+          status: "received",
+          contact_id: "contact-route-failed",
+          property_id: "prop-route-failed",
+          conversation_id: "conv-route-failed",
+          from_address: "+15550000001",
+          to_address: "+18162804181",
+        }),
+      ],
+    });
+    const view = render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+    const draft = "preserve failed alternate route draft";
+    await user.type(screen.getByLabelText("Reply to this lead"), draft);
+
+    await waitFor(() => {
+      expect(supabaseMock.subscriptions.length).toBeGreaterThan(1);
+    });
+    const insertSubscription = supabaseMock.subscriptions.find(
+      (subscription) =>
+        subscription.type === "postgres_changes" &&
+        subscription.filter.event === "INSERT",
+    );
+    const updateSubscription = supabaseMock.subscriptions.find(
+      (subscription) =>
+        subscription.type === "postgres_changes" &&
+        subscription.filter.event === "UPDATE",
+    );
+    const failedAttempt = makeMessage({
+      id: "failed-alternate-route",
+      body: "failed alternate route",
+      direction: "outbound",
+      status: "pending",
+      contact_id: data.contactId,
+      property_id: data.propertyId,
+      conversation_id: data.conversationId,
+      from_address: "+18162804182",
+      to_address: "+15550000002",
+    });
+
+    await act(async () => {
+      insertSubscription!.callback({ new: failedAttempt });
+    });
+    expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(draft);
+
+    await act(async () => {
+      updateSubscription!.callback({
+        new: { ...failedAttempt, status: "failed" },
+      });
+    });
+    expect(refreshCalls.length).toBeGreaterThan(0);
+
+    view.rerender(
+      <InboxDetail
+        data={{
+          ...data,
+          initialMessages: [
+            ...data.initialMessages,
+            { ...failedAttempt, status: "failed" },
+          ],
+        }}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByTestId("inline-reply-send")).toBeEnabled();
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(draft);
+    await user.click(screen.getByTestId("inline-reply-send"));
+    await waitFor(() => {
+      expect(sendSmsFromLead).toHaveBeenCalledWith(
+        data.propertyId,
+        draft,
+        data.threadBusinessPhone,
+        false,
+        data.replyToPhone,
+      );
+    });
+  });
+
+  it("falls back when a previously sent route later fails after page load", async () => {
+    const user = userEvent.setup();
+    const priorRoute = makeMessage({
+      id: "prior-route-before-late-failure",
+      body: "prior route",
+      direction: "inbound",
+      status: "received",
+      contact_id: "contact-late-failure",
+      property_id: "prop-late-failure",
+      conversation_id: "conv-late-failure",
+      from_address: "+15550000001",
+      to_address: "+18162804181",
+      created_at: "2026-04-29T12:00:00Z",
+    });
+    const sentRoute = makeMessage({
+      id: "sent-route-that-later-fails",
+      body: "sent alternate route",
+      direction: "outbound",
+      status: "sent",
+      contact_id: "contact-late-failure",
+      property_id: "prop-late-failure",
+      conversation_id: "conv-late-failure",
+      from_address: "+18162804182",
+      to_address: "+15550000002",
+      created_at: "2026-04-29T12:01:00Z",
+    });
+    const data = makeData({
+      contactId: "contact-late-failure",
+      propertyId: "prop-late-failure",
+      threadId: "conv-late-failure",
+      conversationId: "conv-late-failure",
+      threadCustomerPhone: "+15550000002",
+      threadBusinessPhone: "+18162804182",
+      contactPhone: "+15550000002",
+      replyToPhone: "+15550000002",
+      initialMessages: [priorRoute, sentRoute],
+    });
+    const view = render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+    const draft = "preserve draft through late failure";
+    await user.type(screen.getByLabelText("Reply to this lead"), draft);
+
+    await waitFor(() => {
+      expect(supabaseMock.subscriptions.length).toBeGreaterThan(1);
+    });
+    const updateSubscription = supabaseMock.subscriptions.find(
+      (subscription) =>
+        subscription.type === "postgres_changes" &&
+        subscription.filter.event === "UPDATE",
+    );
+
+    await act(async () => {
+      updateSubscription!.callback({
+        new: { ...sentRoute, status: "failed" },
+      });
+    });
+
+    expect(screen.getByTestId("inline-reply-refreshing")).toBeInTheDocument();
+    expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(draft);
+    expect(refreshCalls.length).toBeGreaterThan(0);
+
+    view.rerender(
+      <InboxDetail
+        data={{
+          ...data,
+          threadCustomerPhone: priorRoute.from_address,
+          threadBusinessPhone: priorRoute.to_address,
+          contactPhone: priorRoute.from_address,
+          replyToPhone: priorRoute.from_address,
+          initialMessages: [
+            priorRoute,
+            { ...sentRoute, status: "failed" },
+          ],
+        }}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("inline-reply-refreshing"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(draft);
+    expect(screen.getByTestId("inline-reply-send")).toBeEnabled();
+
+    await user.click(screen.getByTestId("inline-reply-send"));
+    await waitFor(() => {
+      expect(sendSmsFromLead).toHaveBeenCalledWith(
+        data.propertyId,
+        draft,
+        priorRoute.to_address,
+        false,
+        priorRoute.from_address,
+      );
+    });
+  });
+
+  it("blocks the reply composer when the exact saved thread phone is a landline", () => {
+    render(
+      <InboxDetail
+        data={makeData({
+          contactId: "contact-thread-landline",
+          propertyId: "prop-thread-landline",
+          threadCustomerPhone: "+15550000002",
+          contactPhone: "+15550000002",
+          replyToPhone: null,
+          replyToPhoneLineType: "landline",
+        })}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByTestId("inline-reply-restricted")).toHaveTextContent(
+      "saved as a landline",
+    );
+    expect(screen.queryByLabelText("Reply to this lead")).not.toBeInTheDocument();
+  });
+
+  it("explains that a queued-only conversation has no confirmed reply route", () => {
+    render(
+      <InboxDetail
+        data={makeData({
+          contactId: "contact-queued-only",
+          propertyId: "prop-queued-only",
+          threadCustomerPhone: null,
+          threadBusinessPhone: null,
+          contactPhone: null,
+          replyToPhone: null,
+          replyToPhoneLineType: null,
+          initialMessages: [
+            makeMessage({
+              id: "queued-only-route",
+              contact_id: "contact-queued-only",
+              property_id: "prop-queued-only",
+              direction: "outbound",
+              status: "queued",
+              body: "queued only",
+            }),
+          ],
+        })}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByTestId("inline-reply-restricted")).toHaveTextContent(
+      "does not have a confirmed SMS reply route yet",
+    );
+    expect(screen.getByTestId("inline-reply-restricted")).toHaveTextContent(
+      "Open the lead to send from a saved mobile number",
+    );
+    expect(screen.queryByText(/not saved on the homeowner contact/i)).not.toBeInTheDocument();
+  });
+
   it("renders a persisted queued reply after reload instead of dropping it from the thread", () => {
     render(
       <InboxDetail
@@ -549,12 +1213,13 @@ describe("<InboxDetail />", () => {
     );
 
     expect(screen.getByText("durable queued body")).toBeInTheDocument();
-    expect(screen.getByTestId("messages-thread-delivery-status")).toHaveTextContent(
-      "Queued · in Outbox",
-    );
+    expect(
+      screen.getByTestId("messages-thread-delivery-status"),
+    ).toHaveTextContent("Queued · in Outbox");
   });
 
   it("pauses Messages replies after a live same-thread insert until server detail refreshes", async () => {
+    const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-live-refresh",
       propertyId: "prop-live-refresh",
@@ -576,8 +1241,13 @@ describe("<InboxDetail />", () => {
       ],
     });
 
-    render(
+    const view = render(
       <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    await user.type(
+      screen.getByLabelText("Reply to this lead"),
+      "preserve inbound draft",
     );
 
     await waitFor(() => {
@@ -608,7 +1278,128 @@ describe("<InboxDetail />", () => {
     expect(screen.getByTestId("inline-reply-refreshing")).toHaveTextContent(
       "Updating the thread phone before reply",
     );
-    expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+    expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(
+      "preserve inbound draft",
+    );
+    expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
+    expect(refreshCalls.length).toBeGreaterThan(0);
+
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    expect(sendSmsFromLead).not.toHaveBeenCalled();
+
+    const refreshedMessages = [
+      ...data.initialMessages,
+      makeMessage({
+        id: "new-live-refresh",
+        body: "new phone",
+        direction: "inbound",
+        contact_id: "contact-live-refresh",
+        property_id: "prop-live-refresh",
+        conversation_id: "conv-live-refresh",
+        from_address: "+15550000002",
+        created_at: "2026-04-29T12:01:00Z",
+      }),
+    ];
+
+    // The authoritative refresh can briefly report that the new thread phone
+    // is not saved. The composer is hidden for safety, but remains mounted so
+    // resolving the phone restores the operator's exact draft.
+    view.rerender(
+      <InboxDetail
+        data={{
+          ...data,
+          threadCustomerPhone: "+15550000002",
+          replyToPhone: null,
+          initialMessages: refreshedMessages,
+        }}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByTestId("inline-reply-restricted")).toHaveTextContent(
+      "not saved on the homeowner contact",
+    );
+    expect(screen.queryByLabelText("Reply to this lead")).not.toBeInTheDocument();
+
+    view.rerender(
+      <InboxDetail
+        data={{
+          ...data,
+          threadCustomerPhone: "+15550000002",
+          replyToPhone: "+15550000002",
+          initialMessages: refreshedMessages,
+        }}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("inline-reply-refreshing"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue(
+      "preserve inbound draft",
+    );
+    expect(screen.getByTestId("inline-reply-send")).toBeEnabled();
+
+    await user.click(screen.getByTestId("inline-reply-send"));
+    await waitFor(() => {
+      expect(sendSmsFromLead).toHaveBeenCalledWith(
+        data.propertyId,
+        "preserve inbound draft",
+        data.threadBusinessPhone,
+        false,
+        "+15550000002",
+      );
+    });
+  });
+
+  it("refreshes SMS restrictions for an inbound message on the existing route", async () => {
+    const data = makeData({
+      contactId: "contact-same-route-refresh",
+      propertyId: "prop-same-route-refresh",
+      threadId: "conv-same-route-refresh",
+      conversationId: "conv-same-route-refresh",
+      threadCustomerPhone: "+15550000001",
+      threadBusinessPhone: "+18162804181",
+      contactPhone: "+15550000001",
+      replyToPhone: "+15550000001",
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+    await waitFor(() => {
+      expect(supabaseMock.subscriptions.length).toBeGreaterThan(0);
+    });
+    const insertSubscription = supabaseMock.subscriptions.find(
+      (subscription) =>
+        subscription.type === "postgres_changes" &&
+        subscription.filter.event === "INSERT",
+    );
+
+    await act(async () => {
+      insertSubscription!.callback({
+        new: makeMessage({
+          id: "same-route-inbound",
+          body: "STOP",
+          direction: "inbound",
+          contact_id: data.contactId,
+          property_id: data.propertyId,
+          conversation_id: data.conversationId,
+          from_address: data.threadCustomerPhone,
+          to_address: data.threadBusinessPhone,
+          created_at: "2026-04-29T12:01:00Z",
+        }),
+      });
+    });
+
+    expect(screen.getByTestId("inline-reply-refreshing")).toHaveTextContent(
+      "Updating the thread phone before reply",
+    );
+    expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
     expect(refreshCalls.length).toBeGreaterThan(0);
   });
 
@@ -769,6 +1560,141 @@ describe("<InboxDetail />", () => {
     expect(setOutreachDispoMock).not.toHaveBeenCalled();
     expect(screen.getByTestId("assign-dropdown-trigger")).toBeInTheDocument();
     expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
+  });
+
+  it("confirms a pending Sandra disposition and leaves the Sandra Dispo queue", async () => {
+    navigationSearch = "filter=dispo&thread=conv-contact-ai-review";
+    const onBackToList = vi.fn();
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-ai-review",
+      outreachDispo: "not_interested",
+      aiDispositionReview: {
+        id: "review-1",
+        status: "pending",
+        disposition: "not_interested",
+        reason: "Homeowner said they are not selling",
+        sourceInboundMessageId: "message-1",
+        sourceMessageBody: "Please stop asking. I am not selling.",
+        createdAt: "2026-08-27T14:00:00.000Z",
+      },
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+        onBackToList={onBackToList}
+      />,
+    );
+
+    expect(screen.getByTestId("sandra-dispo-review-banner")).toHaveTextContent(
+      "Sandra marked this: Not interested",
+    );
+    expect(screen.getByTestId("sandra-dispo-review-banner")).toHaveTextContent(
+      "Homeowner said they are not selling",
+    );
+    expect(screen.getByTestId("sandra-dispo-source-message")).toHaveTextContent(
+      "Please stop asking. I am not selling.",
+    );
+    await user.click(screen.getByTestId("confirm-sandra-dispo"));
+
+    expect(confirmAiDispositionReviewMock).toHaveBeenCalledWith("review-1");
+    await waitFor(() => expect(onBackToList).toHaveBeenCalledOnce());
+  });
+
+  it("keeps the Sandra review control visible on permanently locked DNC history", () => {
+    const data = makeData({
+      contactId: "contact-locked-review",
+      propertyId: "prop-locked-review",
+      outreachDispo: "dnc",
+      isDncLocked: true,
+      contactDoNotContact: true,
+      contactSmsOptedOut: true,
+      aiDispositionReview: {
+        id: "review-dnc",
+        status: "pending",
+        disposition: "dnc",
+        reason: "Threatening response",
+        sourceInboundMessageId: "message-dnc",
+        createdAt: "2026-08-27T14:00:00.000Z",
+      },
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(screen.getByTestId("messages-permanent-dnc-lock")).toBeInTheDocument();
+    expect(screen.getByTestId("confirm-sandra-dispo")).toBeInTheDocument();
+    expect(screen.getByTestId("sandra-dispo-review-banner")).toHaveTextContent(
+      "does not remove contact restrictions",
+    );
+    expect(screen.queryByTestId("dispo-wrong-number")).not.toBeInTheDocument();
+  });
+
+  it("treats a different manual outcome as correction but not a same-state click", async () => {
+    navigationSearch = "filter=dispo&thread=conv-contact-review-correction";
+    const onBackToList = vi.fn();
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-review-correction",
+      outreachDispo: "not_interested",
+      aiDispositionReview: {
+        id: "review-correction",
+        status: "pending",
+        disposition: "not_interested",
+        reason: "AI classification",
+        sourceInboundMessageId: "message-correction",
+        createdAt: "2026-08-27T14:00:00.000Z",
+      },
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+        onBackToList={onBackToList}
+      />,
+    );
+
+    await user.click(screen.getByTestId("dispo-not-interested"));
+    expect(onBackToList).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("dispo-wrong-number"));
+    await waitFor(() => expect(onBackToList).toHaveBeenCalledOnce());
+  });
+
+  it("leaves Sandra Dispo after an appointment is booked", async () => {
+    navigationSearch = "filter=dispo&thread=conv-contact-review-booked";
+    const onBackToList = vi.fn();
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-review-booked",
+      outreachDispo: "nurture",
+      aiDispositionReview: {
+        id: "review-booked",
+        status: "pending",
+        disposition: "nurture",
+        reason: "Homeowner requested a follow-up",
+        sourceInboundMessageId: "message-booked",
+        createdAt: "2026-08-27T14:00:00.000Z",
+      },
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+        onBackToList={onBackToList}
+      />,
+    );
+
+    await user.click(screen.getByTestId("book-appointment"));
+    expect(onBackToList).toHaveBeenCalledOnce();
   });
 
   it("Move to Lead promotes then opens the lead page", async () => {

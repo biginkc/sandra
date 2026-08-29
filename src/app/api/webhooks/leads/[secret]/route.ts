@@ -4,11 +4,8 @@ import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
-import {
-  createLead,
-  LEAD_SOURCES,
-  type LeadSource,
-} from "@/lib/leads/create";
+import { createLead } from "@/lib/leads/create";
+import { LEAD_SOURCES, type LeadSource } from "@/lib/leads/sources";
 import type { Database } from "@/lib/supabase/types";
 
 /**

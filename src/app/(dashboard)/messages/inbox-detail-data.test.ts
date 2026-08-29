@@ -54,8 +54,11 @@ function makeContact(
     last_name: overrides.last_name ?? "Contact",
     entity_name: overrides.entity_name ?? null,
     phone_1: overrides.phone_1 ?? "+15551234567",
+    phone_1_type: overrides.phone_1_type ?? null,
     phone_2: overrides.phone_2 ?? null,
+    phone_2_type: overrides.phone_2_type ?? null,
     phone_3: overrides.phone_3 ?? null,
+    phone_3_type: overrides.phone_3_type ?? null,
     email: overrides.email ?? null,
     notes: overrides.notes ?? null,
     do_not_contact: overrides.do_not_contact ?? false,
@@ -136,6 +139,17 @@ type SeedData = {
   messages: MessageRow[];
   contacts: ContactRow[];
   properties: PropertyRow[];
+  ai_disposition_reviews?: Array<{
+    id: string;
+    org_id: string;
+    property_id: string;
+    conversation_id: string;
+    source_inbound_message_id: string;
+    disposition: string;
+    ai_reason: string;
+    status: string;
+    created_at: string;
+  }>;
   consent_events?: Array<{
     contact_id: string;
     channel: string;
@@ -349,6 +363,62 @@ describe("fetchInboxDetail", () => {
     ).rejects.toThrow("SMS_CONVERSATION_ORG_AMBIGUOUS");
   });
 
+  it("hydrates a pending Sandra review whose property message is outside the 100-message window", async () => {
+    const recentPropertyless = Array.from({ length: 100 }, (_, index) =>
+      makeMessage({
+        id: `recent-propertyless-${index}`,
+        contact_id: CONTACT_ID,
+        property_id: null,
+        conversation_id: CONVERSATION_ID,
+        created_at: new Date(
+          Date.UTC(2026, 7, 27, 18, 0, 0) - index * 1_000,
+        ).toISOString(),
+      }),
+    );
+    const sourceMessage = makeMessage({
+      id: "older-reviewed-source",
+      contact_id: CONTACT_ID,
+      property_id: OLDER_PROPERTY_ID,
+      conversation_id: CONVERSATION_ID,
+      created_at: "2026-08-26T18:00:00.000Z",
+    });
+    const supabase = makeSupabaseStub({
+      messages: [...recentPropertyless, sourceMessage],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [
+        makeProperty({ id: OLDER_PROPERTY_ID, outreach_dispo: "nurture" }),
+      ],
+      ai_disposition_reviews: [
+        {
+          id: "review-outside-window",
+          org_id: "org-1",
+          property_id: OLDER_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          source_inbound_message_id: sourceMessage.id,
+          disposition: "nurture",
+          ai_reason: "Homeowner asked to talk next month",
+          status: "pending",
+          created_at: "2026-08-26T18:00:01.000Z",
+        },
+      ],
+    });
+
+    const detail = await fetchInboxDetail(
+      supabase as never,
+      CONVERSATION_ID,
+    );
+
+    expect(detail?.initialMessages).toHaveLength(100);
+    expect(detail?.propertyId).toBe(OLDER_PROPERTY_ID);
+    expect(detail?.propertyAddress).toBe("123 Main St, Albany, NY");
+    expect(detail?.aiDispositionReview).toMatchObject({
+      id: "review-outside-window",
+      disposition: "nurture",
+      sourceInboundMessageId: "older-reviewed-source",
+      sourceMessageBody: "hello",
+    });
+  });
+
   it("returns null when the conversation has no messages", async () => {
     const supabase = makeSupabaseStub({
       messages: [
@@ -397,6 +467,57 @@ describe("fetchInboxDetail", () => {
     expect(detail?.phoneSuppressed).toBe(false);
     expect(detail?.smsSafetyReadFailed).toBe(false);
     expect(detail?.isDncLocked).toBe(false);
+  });
+
+  it("hydrates only the pending Sandra AI review for the exact conversation and property", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "message-with-review",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+        }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      ai_disposition_reviews: [
+        {
+          id: "review-exact",
+          org_id: "org-1",
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          source_inbound_message_id: "message-with-review",
+          disposition: "not_interested",
+          ai_reason: "Homeowner said no",
+          status: "pending",
+          created_at: "2026-08-27T14:00:00.000Z",
+        },
+        {
+          id: "review-confirmed",
+          org_id: "org-1",
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          source_inbound_message_id: "older-message",
+          disposition: "wrong_number",
+          ai_reason: "Historical",
+          status: "confirmed",
+          created_at: "2026-08-26T14:00:00.000Z",
+        },
+      ],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.aiDispositionReview).toEqual({
+      id: "review-exact",
+      status: "pending",
+      disposition: "not_interested",
+      reason: "Homeowner said no",
+      sourceInboundMessageId: "message-with-review",
+      sourceMessageBody: "hello",
+      createdAt: "2026-08-27T14:00:00.000Z",
+    });
   });
 
   it("surfaces an authoritative phone-suppression read failure", async () => {
@@ -647,6 +768,7 @@ describe("fetchInboxDetail", () => {
           property_id: RECENT_PROPERTY_ID,
           conversation_id: CONVERSATION_ID,
           direction: "outbound",
+          status: "sent",
           from_address: "+18162804182",
           to_address: "+15550000003",
           created_at: "2026-06-09T12:00:00.000Z",
@@ -711,6 +833,95 @@ describe("fetchInboxDetail", () => {
     expect(detail?.threadCustomerPhone).toBe("+15550000003");
     expect(detail?.threadBusinessPhone).toBe("+18162804182");
     expect(detail?.replyToPhone).toBe("+15550000003");
+  });
+
+  it("ignores newer queued and failed rows when deriving the reply route", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "authoritative-inbound",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          direction: "inbound",
+          status: "received",
+          from_address: "+15550000001",
+          to_address: "+18162804181",
+          created_at: "2026-06-09T12:00:00.000Z",
+        }),
+        makeMessage({
+          id: "newer-failed",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          direction: "outbound",
+          status: "failed",
+          from_address: "+18162804182",
+          to_address: "+15550000002",
+          created_at: "2026-06-09T12:01:00.000Z",
+        }),
+        makeMessage({
+          id: "newest-queued",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          direction: "outbound",
+          status: "queued",
+          from_address: "+18162804183",
+          to_address: "+15550000003",
+          created_at: "2026-06-09T12:02:00.000Z",
+        }),
+      ],
+      contacts: [
+        makeContact({
+          id: CONTACT_ID,
+          phone_1: "+15550000001",
+          phone_2: "+15550000002",
+          phone_3: "+15550000003",
+        }),
+      ],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.initialMessages).toHaveLength(3);
+    expect(detail?.threadCustomerPhone).toBe("+15550000001");
+    expect(detail?.threadBusinessPhone).toBe("+18162804181");
+    expect(detail?.replyToPhone).toBe("+15550000001");
+  });
+
+  it("classifies the exact saved thread phone as a landline", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "landline-inbound",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          direction: "inbound",
+          status: "received",
+          from_address: "+15550000002",
+          to_address: "+18162804181",
+        }),
+      ],
+      contacts: [
+        makeContact({
+          id: CONTACT_ID,
+          phone_1: "+15550000001",
+          phone_1_type: "mobile",
+          phone_2: "+15550000002",
+          phone_2_type: "landline",
+        }),
+      ],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.threadCustomerPhone).toBe("+15550000002");
+    expect(detail?.replyToPhone).toBeNull();
+    expect(detail?.replyToPhoneLineType).toBe("landline");
   });
 
   it("keeps contact-only ambiguous threads propertyless while showing the sender number", async () => {

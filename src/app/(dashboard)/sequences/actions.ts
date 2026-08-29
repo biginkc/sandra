@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { enrollLead, resumeEnrollment } from "@/lib/sequences/enrollment";
 import { getSequenceImpact } from "@/lib/sequences/impact";
 
@@ -45,7 +46,9 @@ export async function listSequences(): Promise<Result<SequenceRow[]>> {
     const supabase = await createClient();
     const { data, error } = await supabase
       .from("sequences")
-      .select("id, name, description, active, append_opt_out, archived_at, created_at")
+      .select(
+        "id, name, description, active, append_opt_out, archived_at, created_at",
+      )
       .order("created_at", { ascending: false });
     if (error) {
       return {
@@ -98,9 +101,7 @@ export async function getSequenceWithSteps(
     const supabase = await createClient();
     const { data: seq, error: seqErr } = await supabase
       .from("sequences")
-      .select(
-        "id, name, description, active, append_opt_out, archived_at",
-      )
+      .select("id, name, description, active, append_opt_out, archived_at")
       .eq("id", sequenceId)
       .maybeSingle();
     if (seqErr) {
@@ -441,11 +442,17 @@ export async function enrollLeadInSequence(
     const {
       data: { user },
     } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
 
     const outcome = await enrollLead(supabase, {
       sequenceId,
       propertyId,
-      enrolledByUserId: user?.id ?? null,
+      enrolledByUserId: user.id,
     });
 
     switch (outcome.status) {
@@ -463,7 +470,10 @@ export async function enrollLeadInSequence(
       case "no_steps":
         return {
           ok: false,
-          error: { code: outcome.status.toUpperCase(), message: formatEnrollError(outcome.status) },
+          error: {
+            code: outcome.status.toUpperCase(),
+            message: formatEnrollError(outcome.status),
+          },
         };
       case "failed":
         return {
@@ -506,7 +516,31 @@ export async function cancelEnrollment(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
-    const { error } = await supabase
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+    const { data: enrollment, error: loadError } = await supabase
+      .from("sequence_enrollments")
+      .select("id, property_id, sequence_id, status")
+      .eq("id", enrollmentId)
+      .maybeSingle();
+    if (loadError) {
+      return {
+        ok: false,
+        error: { code: "CANCEL_FAILED", message: loadError.message },
+      };
+    }
+    if (!enrollment || !["active", "paused"].includes(enrollment.status)) {
+      return ok(null);
+    }
+
+    const { data: updated, error } = await supabase
       .from("sequence_enrollments")
       .update({
         status: "completed",
@@ -514,13 +548,29 @@ export async function cancelEnrollment(
         next_run_at: null,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", enrollmentId);
+      .eq("id", enrollmentId)
+      .in("status", ["active", "paused"])
+      .select("id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "CANCEL_FAILED", message: error.message },
       };
     }
+    if (!updated) return ok(null);
+    await recordLeadEvent({
+      propertyId: enrollment.property_id,
+      actorType: "user",
+      actorId: user.id,
+      eventType: LEAD_EVENT_TYPES.SEQUENCE_CANCELED,
+      payload: {
+        enrollment_id: enrollmentId,
+        sequence_id: enrollment.sequence_id,
+      },
+      sourceType: "sequence_enrollments.canceled",
+      sourceId: enrollmentId,
+    });
     return ok(null);
   } catch (e) {
     reportError(e, {
@@ -536,7 +586,19 @@ export async function resumeEnrollmentAction(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
-    const outcome = await resumeEnrollment(supabase, enrollmentId);
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+    const outcome = await resumeEnrollment(supabase, enrollmentId, {
+      actorType: "user",
+      actorId: user.id,
+    });
     if (outcome.status === "failed") {
       return {
         ok: false,
@@ -567,9 +629,7 @@ export async function getImpactAction(
  * Listed sequences for a given property's lead detail page — the drip
  * chip + "Sequences" panel need both names and enrollment states.
  */
-export async function listPropertyEnrollments(
-  propertyId: string,
-): Promise<
+export async function listPropertyEnrollments(propertyId: string): Promise<
   Result<
     Array<{
       id: string;

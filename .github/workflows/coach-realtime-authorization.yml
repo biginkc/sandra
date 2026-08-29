@@ -1,0 +1,134 @@
+name: Coach Realtime authorization
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# This lock covers the whole canary lifecycle so it can't race the real
+# migration pipeline against the same shared test project. `queue: max`
+# retains pending main/E2E/canary runs instead of silently evicting the
+# older pending run, which is GitHub's default single-slot behavior.
+concurrency:
+  group: e2e-shared-test-project
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  # Round-8 rewrite. Two prior reviews (round-6, round-7) kept hardening
+  # this job's PRIVILEGE ISOLATION — step-scoped secrets, then materializing
+  # reviewed SQL outside the PR's own checkout to stop a privileged step
+  # from reading PR-tampered SQL. The final review correctly called that
+  # fight unwinnable: this job still runs `npm ci` and the PR's own test
+  # file on the SAME runner, in the SAME process tree, as any privileged
+  # step — a PR-controlled process can mutate a materialized file, or
+  # simply observe env vars set in a later step, regardless of how
+  # carefully the workflow YAML scopes things. No amount of file
+  # materialization or env scoping makes that isolation real.
+  #
+  # The actual fix: stop holding anything worth protecting. This job now
+  # authenticates ONLY as two permanent, narrowly-scoped Supabase Auth
+  # users (seeded once, directly on the TEST project, outside any CI
+  # pipeline — never as a supabase/migrations/ file, so they can never
+  # reach production) whose entire capability is calling two SECURITY
+  # DEFINER RPCs — coach_ci_seed_ownership / coach_ci_delete_own_ownership
+  # — that check auth.uid() against exactly those two accounts and let
+  # each seed/delete only its OWN row in public.coach_call_index. There is
+  # no service-role key, no database password, and no Supabase account
+  # token anywhere in this workflow. If a PR-controlled process on this
+  # runner does anything at all with these credentials, the worst case is
+  # still "insert/delete one row it already owns" — nothing a compromised
+  # runtime could do with them is worth protecting against in the first
+  # place. coach-ci-contract.test.ts asserts none of those three secret
+  # families are referenced here.
+  #
+  # This also eliminates the entire migration-replay/rollback apparatus
+  # from earlier rounds: public.coach_call_index and its realtime.messages
+  # policies are now PERMANENT fixtures on the TEST project (applied
+  # directly, the same way the production canary migration was applied),
+  # so this job never creates or drops schema — only two test users' own
+  # rows, via the RPCs above.
+  coach-realtime-canary:
+    name: Coach realtime authorization canary
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    # REQUIRED REPO SETTING (code cannot create this protection, and as of
+    # this rewrite it has NOT yet been configured — see PR discussion):
+    # the `coach-realtime-authorization` GitHub Environment exists but has
+    # no protection rules. Require a maintainer reviewer, enable "Prevent
+    # self-review", disable administrator bypass, and allow the protected
+    # pull-request ref pattern `refs/pull/*/merge`. Lower-stakes than
+    # before this rewrite (no secret here can do more than touch two test
+    # users' own rows), but still worth gating — defense in depth against
+    # a compromised same-repo branch, at effectively no ongoing cost now
+    # that there's nothing sensitive left to review.
+    environment: coach-realtime-authorization
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      # No `env:` here — this step installs dependencies from a
+      # PR-controlled package.json/lockfile, which can execute arbitrary
+      # postinstall scripts.
+      - name: Install coach canary dependencies
+        run: npm ci
+
+      - name: Run the coach realtime authorization canary
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+          COACH_CI_OWNER_EMAIL: ${{ secrets.COACH_CI_OWNER_EMAIL }}
+          COACH_CI_OWNER_PASSWORD: ${{ secrets.COACH_CI_OWNER_PASSWORD }}
+          COACH_CI_FOREIGN_EMAIL: ${{ secrets.COACH_CI_FOREIGN_EMAIL }}
+          COACH_CI_FOREIGN_PASSWORD: ${{ secrets.COACH_CI_FOREIGN_PASSWORD }}
+        run: npx vitest run --config vitest.coach-realtime.config.ts
+
+      # Redundant with the test file's own afterAll cleanup — this is the
+      # defense-in-depth layer for a hard process kill (OOM, timeout) that
+      # skips afterAll entirely. Both RPCs are self-scoped (each of the two
+      # static users can only delete its OWN row, derived server-side from
+      # its own auth.uid() — no call-id argument at all, round-9) and
+      # idempotent, so running this even when the test's own cleanup
+      # already succeeded is harmless.
+      - name: Always clean up this run's ownership rows
+        if: always()
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+          COACH_CI_OWNER_EMAIL: ${{ secrets.COACH_CI_OWNER_EMAIL }}
+          COACH_CI_OWNER_PASSWORD: ${{ secrets.COACH_CI_OWNER_PASSWORD }}
+          COACH_CI_FOREIGN_EMAIL: ${{ secrets.COACH_CI_FOREIGN_EMAIL }}
+          COACH_CI_FOREIGN_PASSWORD: ${{ secrets.COACH_CI_FOREIGN_PASSWORD }}
+        run: |
+          sign_in() {
+            curl --fail-with-body --silent --show-error --request POST \
+              "$TEST_SUPABASE_URL/auth/v1/token?grant_type=password" \
+              --header "apikey: $TEST_SUPABASE_ANON_KEY" \
+              --header "Content-Type: application/json" \
+              --data "$(jq -nc --arg email "$1" --arg password "$2" '{email: $email, password: $password}')" \
+              | jq -er '.access_token'
+          }
+          delete_own_row() {
+            curl --fail-with-body --silent --show-error --request POST \
+              "$TEST_SUPABASE_URL/rest/v1/rpc/coach_ci_delete_own_ownership" \
+              --header "apikey: $TEST_SUPABASE_ANON_KEY" \
+              --header "Authorization: Bearer $1" \
+              --header "Content-Type: application/json" \
+              --data '{}' \
+              --output /dev/null
+          }
+          cleanup_failed=0
+          owner_token="$(sign_in "$COACH_CI_OWNER_EMAIL" "$COACH_CI_OWNER_PASSWORD")" || cleanup_failed=1
+          [ -z "$owner_token" ] || delete_own_row "$owner_token" || cleanup_failed=1
+          foreign_token="$(sign_in "$COACH_CI_FOREIGN_EMAIL" "$COACH_CI_FOREIGN_PASSWORD")" || cleanup_failed=1
+          [ -z "$foreign_token" ] || delete_own_row "$foreign_token" || cleanup_failed=1
+          exit "$cleanup_failed"

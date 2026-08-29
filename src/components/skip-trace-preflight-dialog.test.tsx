@@ -108,7 +108,9 @@ describe("<SkipTracePreflightDialog />", () => {
         name: "Confirm skip-trace preflight",
       }),
     ).toBeInTheDocument();
-    expect(await screen.findByText("100 available / 5 needed")).toBeInTheDocument();
+    expect(
+      await screen.findByText("100 available / 5 needed"),
+    ).toBeInTheDocument();
     expectMetric("Selected", "3");
     expectMetric("Skip-trace eligible", "1");
     expectMetric("CASS verified", "1");
@@ -117,6 +119,27 @@ describe("<SkipTracePreflightDialog />", () => {
     expectMetric("Not eligible", "2");
     expectMetric("Skip-trace disabled", "0");
     expect(screen.getByText(/\$0\.06/)).toBeInTheDocument();
+  });
+
+  it("explains when every eligible record is covered by saved results", async () => {
+    renderDialog(
+      makePreflight({
+        requested: 130,
+        eligible: 130,
+        cassVerified: 130,
+        cassUnverified: 0,
+        notEligible: 0,
+        tracefyCreditsRequired: 0,
+        tracefyCreditsAvailable: null,
+        cassVerificationPropertyIds: [],
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Covered by saved results — no new Tracefy credits needed.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("does not claim a canceled approval is running", async () => {
@@ -143,7 +166,9 @@ describe("<SkipTracePreflightDialog />", () => {
     await waitFor(() => {
       expect(toast.info).toHaveBeenCalledWith(
         "Skip-trace canceled - nothing eligible remains.",
-        expect.objectContaining({ description: expect.stringContaining("3 properties") }),
+        expect.objectContaining({
+          description: expect.stringContaining("3 properties"),
+        }),
       );
     });
     expect(toast.success).not.toHaveBeenCalledWith(
@@ -262,7 +287,9 @@ describe("<SkipTracePreflightDialog />", () => {
       }),
     );
 
-    expect(await screen.findByText("4 available / 5 needed")).toBeInTheDocument();
+    expect(
+      await screen.findByText("4 available / 5 needed"),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(/Tracefy credits are insufficient/),
     ).toBeInTheDocument();
@@ -337,7 +364,9 @@ describe("<SkipTracePreflightDialog />", () => {
         }),
       });
     });
-    expect(await screen.findByText("80 available / 5 needed")).toBeInTheDocument();
+    expect(
+      await screen.findByText("80 available / 5 needed"),
+    ).toBeInTheDocument();
 
     await act(async () => {
       resolveFirst({
@@ -355,6 +384,8 @@ describe("<SkipTracePreflightDialog />", () => {
     });
 
     expect(screen.getByText("80 available / 5 needed")).toBeInTheDocument();
-    expect(screen.queryByText("5 available / 5 needed")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("5 available / 5 needed"),
+    ).not.toBeInTheDocument();
   });
 });

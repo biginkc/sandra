@@ -46,6 +46,14 @@ export default defineConfig({
         process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
         env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
         "",
+      // Same session-pooler URL global-setup.ts already uses for the
+      // suite's advisory lock — passed through here too so a test file's
+      // own beforeAll (a worker process, unlike globalSetup which runs in
+      // the main process and reads it directly via loadTestEnv()) can
+      // also connect directly, e.g. to replay a migration under the same
+      // lock rather than trusting the shared project's existing schema.
+      TEST_SUPABASE_DB_URL:
+        process.env.TEST_SUPABASE_DB_URL ?? env.TEST_SUPABASE_DB_URL ?? "",
       // Force the mock address verifier so integration tests never call
       // SmartyStreets for real. Real CASS coverage lives in the
       // `smartystreets.test.ts` unit suite.
@@ -61,6 +69,10 @@ export default defineConfig({
     alias: {
       "@": path.resolve(__dirname, "./src"),
       "@tests": path.resolve(__dirname, "./tests"),
+      "server-only": path.resolve(
+        __dirname,
+        "./node_modules/server-only/empty.js",
+      ),
     },
   },
 });

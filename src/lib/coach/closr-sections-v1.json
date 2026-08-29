@@ -1,0 +1,676 @@
+{
+  "schema_version": 1,
+  "version": "1.1.0",
+  "script_version": "1.1.0",
+  "source": "Outbound Script - Official CLOSR Sales Process — conversational word-track transitions; content references closr-script-v0.json without duplication.",
+  "sections": [
+    {
+      "id": "introduction.opener",
+      "phase_id": "introduction",
+      "title": "Open the call",
+      "content": [
+        {
+          "branch_tag": "Opener",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "introduction.opener.default.01"
+              ]
+            },
+            {
+              "variant_key": "cold_call",
+              "line_ids": [
+                "introduction.opener.cold_call.01",
+                "introduction.opener.cold_call.02"
+              ]
+            },
+            {
+              "variant_key": "fsbo",
+              "line_ids": [
+                "introduction.opener.fsbo.01",
+                "introduction.opener.fsbo.02"
+              ]
+            },
+            {
+              "variant_key": "sms",
+              "line_ids": [
+                "introduction.opener.sms.01",
+                "introduction.opener.sms.02"
+              ]
+            },
+            {
+              "variant_key": "d4d",
+              "line_ids": [
+                "introduction.opener.d4d.01",
+                "introduction.opener.d4d.02"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "introduction.qualification-frame",
+      "phase_id": "introduction",
+      "title": "Set the qualification frame",
+      "content": [
+        {
+          "branch_tag": "Frame the call",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "introduction.frame-the-call.default.01"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "introduction.how-we-work",
+      "phase_id": "introduction",
+      "title": "Explain how BMH works",
+      "content": [
+        {
+          "branch_tag": "Frame the call",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "introduction.frame-the-call.default.02",
+                "introduction.frame-the-call.default.03",
+                "introduction.frame-the-call.default.04"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "introduction.call-outcomes",
+      "phase_id": "introduction",
+      "title": "Set the call outcomes",
+      "content": [
+        {
+          "branch_tag": "Frame the call",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "introduction.frame-the-call.default.05"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "introduction.decision-position",
+      "phase_id": "introduction",
+      "title": "Confirm decision readiness",
+      "content": [
+        {
+          "branch_tag": "Frame the call",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "introduction.frame-the-call.default.06"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "introduction.contact-details",
+      "phase_id": "introduction",
+      "title": "Exchange contact and file details",
+      "content": [
+        {
+          "branch_tag": "Pen & paper — contact details",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "introduction.pen-paper-contact-details.default.01",
+                "introduction.pen-paper-contact-details.default.02",
+                "introduction.pen-paper-contact-details.default.03",
+                "introduction.pen-paper-contact-details.default.04",
+                "introduction.pen-paper-contact-details.default.05",
+                "introduction.pen-paper-contact-details.default.06",
+                "introduction.pen-paper-contact-details.default.07"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reveal.situation-rundown",
+      "phase_id": "reveal",
+      "title": "Open the seller situation",
+      "content": [
+        {
+          "branch_tag": "Entry",
+          "variants": [
+            {
+              "variant_key": "unknown",
+              "line_ids": [
+                "reveal.entry.unknown.01",
+                "reveal.entry.unknown.02"
+              ]
+            },
+            {
+              "variant_key": "owner_occupied",
+              "line_ids": [
+                "reveal.entry.owner_occupied.01",
+                "reveal.entry.owner_occupied.02"
+              ]
+            },
+            {
+              "variant_key": "tenant_occupied",
+              "line_ids": [
+                "reveal.entry.tenant_occupied.01",
+                "reveal.entry.tenant_occupied.02"
+              ]
+            },
+            {
+              "variant_key": "vacant",
+              "line_ids": [
+                "reveal.entry.vacant.01",
+                "reveal.entry.vacant.02"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reveal.probe-options",
+      "phase_id": "reveal",
+      "title": "Explore the seller’s situation",
+      "content": [
+        {
+          "branch_tag": "Example probes — goal 7+",
+          "variants": [
+            {
+              "variant_key": "homeowner",
+              "line_ids": [
+                "reveal.example-probes-goal-7.homeowner.01",
+                "reveal.example-probes-goal-7.homeowner.02",
+                "reveal.example-probes-goal-7.homeowner.03",
+                "reveal.example-probes-goal-7.homeowner.04",
+                "reveal.example-probes-goal-7.homeowner.05"
+              ]
+            },
+            {
+              "variant_key": "investor",
+              "line_ids": [
+                "reveal.example-probes-goal-7.investor.01",
+                "reveal.example-probes-goal-7.investor.06",
+                "reveal.example-probes-goal-7.investor.02",
+                "reveal.example-probes-goal-7.investor.03",
+                "reveal.example-probes-goal-7.investor.04",
+                "reveal.example-probes-goal-7.investor.05"
+              ]
+            },
+            {
+              "variant_key": "vacant",
+              "line_ids": [
+                "reveal.example-probes-goal-7.vacant.01",
+                "reveal.example-probes-goal-7.vacant.02",
+                "reveal.example-probes-goal-7.vacant.03",
+                "reveal.example-probes-goal-7.vacant.04",
+                "reveal.example-probes-goal-7.vacant.05",
+                "reveal.example-probes-goal-7.vacant.06"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reveal.motivation",
+      "phase_id": "reveal",
+      "title": "Clarify motivation and urgency",
+      "content": [
+        {
+          "branch_tag": "Motivation",
+          "variants": [
+            {
+              "variant_key": "clear_no_urgency",
+              "line_ids": [
+                "reveal.motivation.clear_no_urgency.00",
+                "reveal.motivation.clear_no_urgency.01",
+                "reveal.motivation.clear_no_urgency.02"
+              ]
+            },
+            {
+              "variant_key": "clear_with_urgency",
+              "line_ids": [
+                "reveal.motivation.clear_with_urgency.00",
+                "reveal.motivation.clear_with_urgency.01"
+              ]
+            },
+            {
+              "variant_key": "no_clear_motivation",
+              "line_ids": [
+                "reveal.motivation.no_clear_motivation.00",
+                "reveal.motivation.no_clear_motivation.01",
+                "reveal.motivation.no_clear_motivation.02",
+                "reveal.motivation.no_clear_motivation.03"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "assessment.outside",
+      "phase_id": "assessment",
+      "title": "Assess the property exterior",
+      "content": [
+        {
+          "branch_tag": "Outside",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "assessment.outside.default.01",
+                "assessment.outside.default.02",
+                "assessment.outside.default.10",
+                "assessment.outside.default.03",
+                "assessment.outside.default.04",
+                "assessment.outside.default.11",
+                "assessment.outside.default.05",
+                "assessment.outside.default.06",
+                "assessment.outside.default.07",
+                "assessment.outside.default.08",
+                "assessment.outside.default.09"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "assessment.inside",
+      "phase_id": "assessment",
+      "title": "Assess the property interior",
+      "content": [
+        {
+          "branch_tag": "Inside",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "assessment.inside.default.01",
+                "assessment.inside.default.02",
+                "assessment.inside.default.03",
+                "assessment.inside.default.04",
+                "assessment.inside.default.05",
+                "assessment.inside.default.10",
+                "assessment.inside.default.06",
+                "assessment.inside.default.07",
+                "assessment.inside.default.08",
+                "assessment.inside.default.09"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "secure_positioning.remaining-questions",
+      "phase_id": "secure_positioning",
+      "title": "Confirm nothing is unresolved",
+      "content": [
+        {
+          "branch_tag": "Lock the frame",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "secure_positioning.lock-the-frame.default.01"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "secure_positioning.deadline-and-decision-makers",
+      "phase_id": "secure_positioning",
+      "title": "Confirm deadline and decision makers",
+      "content": [
+        {
+          "branch_tag": "Lock the frame",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "secure_positioning.lock-the-frame.default.02",
+                "secure_positioning.lock-the-frame.default.03"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "secure_positioning.net-and-mortgage",
+      "phase_id": "secure_positioning",
+      "title": "Confirm net need and mortgage",
+      "content": [
+        {
+          "branch_tag": "Lock the frame",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "secure_positioning.lock-the-frame.default.04",
+                "secure_positioning.lock-the-frame.default.05"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "secure_positioning.anchor",
+      "phase_id": "secure_positioning",
+      "title": "Set the price anchor",
+      "content": [
+        {
+          "branch_tag": "Anchor",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "secure_positioning.anchor.default.01",
+                "secure_positioning.anchor.default.02"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "secure_positioning.no-concerns-gate",
+      "phase_id": "secure_positioning",
+      "title": "Clear every remaining concern",
+      "content": [
+        {
+          "branch_tag": "The no-concerns gate",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "secure_positioning.the-no-concerns-gate.default.02",
+                "secure_positioning.the-no-concerns-gate.default.01",
+                "secure_positioning.the-no-concerns-gate.default.03",
+                "secure_positioning.the-no-concerns-gate.default.04"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "secure_positioning.first-underwriting-hold",
+      "phase_id": "secure_positioning",
+      "title": "Send the file to underwriting",
+      "content": [
+        {
+          "branch_tag": "Send to underwriting",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "secure_positioning.send-to-underwriting.default.01"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "secure_positioning.final-property-questions",
+      "phase_id": "secure_positioning",
+      "title": "Answer underwriting’s property questions",
+      "content": [
+        {
+          "branch_tag": "Back from hold — final questions",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "secure_positioning.back-from-hold-final-questions.default.01",
+                "secure_positioning.back-from-hold-final-questions.default.02",
+                "secure_positioning.back-from-hold-final-questions.default.09",
+                "secure_positioning.back-from-hold-final-questions.default.03",
+                "secure_positioning.back-from-hold-final-questions.default.10",
+                "secure_positioning.back-from-hold-final-questions.default.04",
+                "secure_positioning.back-from-hold-final-questions.default.05",
+                "secure_positioning.back-from-hold-final-questions.default.11",
+                "secure_positioning.back-from-hold-final-questions.default.06"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "secure_positioning.final-commitment",
+      "phase_id": "secure_positioning",
+      "title": "Confirm readiness and email",
+      "content": [
+        {
+          "branch_tag": "Back from hold — final questions",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "secure_positioning.back-from-hold-final-questions.default.07",
+                "secure_positioning.back-from-hold-final-questions.default.08"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "secure_positioning.explain-agreement",
+      "phase_id": "secure_positioning",
+      "title": "Explain the approval and agreement",
+      "content": [
+        {
+          "branch_tag": "Process walkthrough — pre-handle everything",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "secure_positioning.process-walkthrough-pre-handle-everything.default.01",
+                "secure_positioning.process-walkthrough-pre-handle-everything.default.02",
+                "secure_positioning.process-walkthrough-pre-handle-everything.default.09"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "secure_positioning.explain-walkthroughs",
+      "phase_id": "secure_positioning",
+      "title": "Explain walkthroughs and closing preparation",
+      "content": [
+        {
+          "branch_tag": "Process walkthrough — pre-handle everything",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "secure_positioning.process-walkthrough-pre-handle-everything.default.03",
+                "secure_positioning.process-walkthrough-pre-handle-everything.default.10",
+                "secure_positioning.process-walkthrough-pre-handle-everything.default.04",
+                "secure_positioning.process-walkthrough-pre-handle-everything.default.05"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "secure_positioning.final-concerns-and-hold",
+      "phase_id": "secure_positioning",
+      "title": "Clear process concerns and seek final approval",
+      "content": [
+        {
+          "branch_tag": "Process walkthrough — pre-handle everything",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "secure_positioning.process-walkthrough-pre-handle-everything.default.06",
+                "secure_positioning.process-walkthrough-pre-handle-everything.default.07",
+                "secure_positioning.process-walkthrough-pre-handle-everything.default.08"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "offer.outcome-tracks",
+      "phase_id": "offer",
+      "title": "Present the appropriate offer outcome",
+      "content": [
+        {
+          "branch_tag": "Good news",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "offer.good-news.default.01",
+                "offer.good-news.default.02",
+                "offer.good-news.default.03"
+              ]
+            }
+          ]
+        },
+        {
+          "branch_tag": "Bad news",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "offer.bad-news.default.01",
+                "offer.bad-news.default.02",
+                "offer.bad-news.default.03"
+              ]
+            }
+          ]
+        },
+        {
+          "branch_tag": "Bad news — below mortgage",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "offer.bad-news-below-mortgage.default.01"
+              ]
+            }
+          ]
+        },
+        {
+          "branch_tag": "Price too low",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "offer.price-too-low.default.01",
+                "offer.price-too-low.default.02"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "close.decision-tracks",
+      "phase_id": "close",
+      "title": "Choose the closing path",
+      "content": [
+        {
+          "branch_tag": "If far apart — program pivot",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "close.if-far-apart-program-pivot.default.00",
+                "close.if-far-apart-program-pivot.default.03",
+                "close.if-far-apart-program-pivot.default.04",
+                "close.if-far-apart-program-pivot.default.05",
+                "close.if-far-apart-program-pivot.default.02",
+                "close.if-far-apart-program-pivot.default.01"
+              ]
+            }
+          ]
+        },
+        {
+          "branch_tag": "They accept",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "close.they-accept.default.01",
+                "close.they-accept.default.02"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "close.contract-confirmation",
+      "phase_id": "close",
+      "title": "Confirm the agreement details",
+      "content": [
+        {
+          "branch_tag": "Going over the contract",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "close.going-over-the-contract.default.01",
+                "close.going-over-the-contract.default.02"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "close.esign-and-wrap",
+      "phase_id": "close",
+      "title": "Complete e-signing and wrap the call",
+      "content": [
+        {
+          "branch_tag": "Going over the contract",
+          "variants": [
+            {
+              "variant_key": "default",
+              "line_ids": [
+                "close.going-over-the-contract.default.03",
+                "close.going-over-the-contract.default.04"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -7,12 +7,13 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
+import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
 /**
- * Feature 8 Phase 1 — queue-only reply flow from the cockpit side panel.
- * Inline replies create a durable Outbox row. Delivery, consent, suppression,
- * and release timing stay under Outbox control.
+ * Feature 8 Phase 1 — immediate reply flow from the cockpit side panel.
+ * Inline replies use the protected send-now path. Mock messaging stamps an
+ * external_id starting with `mock_` when provider delivery is accepted.
  */
 
 async function seedConsentedThread(
@@ -88,17 +89,29 @@ async function seedConsentedThread(
   };
 }
 
-test("type body, queue reply → Outbox receipt appears + DB row is queued (tests 20 + 21)", async ({
+function callableStateForNow(): string | null {
+  for (const state of Object.keys(STATE_TO_TZ).sort()) {
+    if (checkQuietHours(state).ok) return state;
+  }
+  return null;
+}
+
+test("type body, send reply → visible bubble + DB row is sent (tests 20 + 21)", async ({
   page,
 }) => {
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
+  const callableState = callableStateForNow();
+  if (callableState === null) {
+    test.skip(true, "outside legal send windows in every configured US state");
+    return;
+  }
   const { propertyId, threadId } = await seedConsentedThread(admin, {
     phone: "+18165557201",
     addressTag: "REPLY-OK",
     opted: "in",
-    state: "MO",
+    state: callableState,
   });
 
   await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
@@ -109,7 +122,7 @@ test("type body, queue reply → Outbox receipt appears + DB row is queued (test
   await textarea.fill(reply);
   await page.getByTestId("inline-reply-send").click();
 
-  // Queueing never calls the provider. The durable row remains in Outbox.
+  // Mock provider acceptance produces a sent row and external provider ID.
   await expect(async () => {
     const { data } = await admin
       .from("messages")
@@ -117,19 +130,16 @@ test("type body, queue reply → Outbox receipt appears + DB row is queued (test
       .eq("property_id", propertyId)
       .eq("body", reply);
     expect(data).toHaveLength(1);
-    expect(data![0].status).toBe("queued");
+    expect(data![0].status).toBe("sent");
     expect(data![0].direction).toBe("outbound");
-    expect(data![0].external_id).toBeNull();
+    expect(data![0].external_id).toMatch(/^mock_/);
   }).toPass({ timeout: 10_000 });
 
-  // The operator gets an exact, truthful Outbox receipt.
+  // The sent reply appears in the selected thread.
   await expect(page.getByTestId("inbox-detail-panel")).toContainText(reply);
-  await expect(page.getByTestId("inbox-detail-panel")).toContainText(
-    "Queued · in Outbox",
-  );
 });
 
-test("Queue button is disabled when the body is empty (test 22)", async ({
+test("Send button is disabled when the body is empty (test 22)", async ({
   page,
 }) => {
   const admin = adminClient();
@@ -179,7 +189,7 @@ test("opted-out contact renders a restriction instead of a composer (test 23)", 
   expect(data).toHaveLength(0);
 });
 
-test("unknown-state reply queues for release-time safety recheck (test 24)", async ({
+test("unknown-state reply is blocked by the send-time quiet-hours check (test 24)", async ({
   page,
 }) => {
   // Force quiet hours by setting the property to an unknown state so
@@ -194,39 +204,42 @@ test("unknown-state reply queues for release-time safety recheck (test 24)", asy
     addressTag: "REPLY-QUIET",
     opted: "in",
   });
-  await admin
-    .from("properties")
-    .update({ state: "ZZ" })
-    .eq("id", propertyId);
+  await admin.from("properties").update({ state: "ZZ" }).eq("id", propertyId);
 
   await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
-  const reply = `release-time safety ${Date.now()}`;
+  const reply = `send-time safety ${Date.now()}`;
   await page.getByPlaceholder(/Type.*reply/i).fill(reply);
   await page.getByTestId("inline-reply-send").click();
 
-  await expect(async () => {
-    const { data } = await admin
-      .from("messages")
-      .select("status, external_id")
-      .eq("property_id", propertyId)
-      .eq("body", reply);
-    expect(data).toEqual([{ status: "queued", external_id: null }]);
-  }).toPass({ timeout: 10_000 });
-  await expect(page.getByText("Queued · in Outbox").first()).toBeVisible();
+  await expect(page.getByText(/Blocked: quiet hours/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+
+  const { data } = await admin
+    .from("messages")
+    .select("id")
+    .eq("property_id", propertyId)
+    .eq("body", reply);
+  expect(data).toHaveLength(0);
 });
 
-test("after queueing, the selected thread stays stable and shows its Outbox receipt (test 25)", async ({
+test("after sending, the selected thread stays stable and shows the sent reply (test 25)", async ({
   page,
 }) => {
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
-  // Two threads: queueing on B must not navigate away or claim delivery.
+  const callableState = callableStateForNow();
+  if (callableState === null) {
+    test.skip(true, "outside legal send windows in every configured US state");
+    return;
+  }
+  // Two threads: sending on B must not navigate away.
   const a = await seedConsentedThread(admin, {
     phone: "+18165557205",
     addressTag: "REPLY-A",
     opted: "in",
-    state: "MO",
+    state: callableState,
   });
   await admin
     .from("messages")
@@ -237,7 +250,7 @@ test("after queueing, the selected thread stays stable and shows its Outbox rece
     phone: "+18165557206",
     addressTag: "REPLY-B",
     opted: "in",
-    state: "MO",
+    state: callableState,
   });
   await admin
     .from("messages")
@@ -253,5 +266,4 @@ test("after queueing, the selected thread stays stable and shows its Outbox rece
     new RegExp(`[?&]thread=${encodeURIComponent(b.threadId)}`),
   );
   await expect(page.getByTestId("inbox-detail-panel")).toContainText(reply);
-  await expect(page.getByText("Queued · in Outbox").first()).toBeVisible();
 });

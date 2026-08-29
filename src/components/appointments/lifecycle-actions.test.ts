@@ -12,6 +12,7 @@ const {
   dispatchTaskAssignedSlack,
   kickCalendarMutationSync,
   loadIntegrationPrefs,
+  recordLeadEvent,
   reassignAppointment,
   rescheduleAppointment,
   revalidatePath,
@@ -33,6 +34,7 @@ const {
     calendarEnabled: true,
     timezone: "America/Chicago",
   })),
+  recordLeadEvent: vi.fn().mockResolvedValue(undefined),
   reassignAppointment: vi.fn(),
   rescheduleAppointment: vi.fn(),
   revalidatePath: vi.fn(),
@@ -51,6 +53,16 @@ vi.mock("@/lib/integrations/slack/dispatch", () => ({
   dispatchTaskAssignedSlack,
 }));
 vi.mock("@/lib/notifications/dispatch", () => ({ dispatchTaskAssigned }));
+vi.mock("@/lib/events", () => ({
+  LEAD_EVENT_TYPES: {
+    APPOINTMENT_HELD: "appointment_held",
+    APPOINTMENT_NO_SHOW: "appointment_no_show",
+    APPOINTMENT_CANCELED: "appointment_canceled",
+    APPOINTMENT_RESCHEDULED: "appointment_rescheduled",
+    APPOINTMENT_REASSIGNED: "appointment_reassigned",
+  },
+  recordLeadEvent,
+}));
 vi.mock("@/lib/appointments/inline-sync-kick", () => ({
   kickCalendarMutationSync,
 }));
@@ -202,6 +214,49 @@ describe("completeAppointmentAction", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
     expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
     expect(revalidatePath).toHaveBeenCalledWith("/calendar");
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "prop-1",
+      actorType: "user",
+      actorId: "user-1",
+      eventType: "appointment_held",
+      payload: { task_id: "task-1" },
+      sourceType: "appointments.completed",
+      sourceId: "task-1",
+    });
+  });
+
+  it("records the distinct no-show event after a confirmed completion", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Private title",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+      }),
+    );
+    completeAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "no_show" },
+    });
+
+    await completeAppointmentAction("task-1", "no_show");
+
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "prop-1",
+      actorType: "user",
+      actorId: "user-1",
+      eventType: "appointment_no_show",
+      payload: { task_id: "task-1" },
+      sourceType: "appointments.completed",
+      sourceId: "task-1",
+    });
+    expect(JSON.stringify(recordLeadEvent.mock.calls[0]?.[0])).not.toContain(
+      "Private title",
+    );
   });
 
   it("does not revalidate when the RPC fails", async () => {
@@ -215,6 +270,30 @@ describe("completeAppointmentAction", () => {
 
     expect(result.ok).toBe(false);
     expect(revalidatePath).not.toHaveBeenCalled();
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("does not record a lead event for a successful propertyless completion", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Personal block",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: null,
+          contact_id: null,
+        },
+      }),
+    );
+    completeAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "held" },
+    });
+
+    await completeAppointmentAction("task-1", "held");
+
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   // Codex round 11 (finding 3): the RPC above already committed — a
@@ -246,6 +325,7 @@ describe("completeAppointmentAction", () => {
     expect(revalidatePath).not.toHaveBeenCalledWith(
       expect.stringMatching(/^\/leads\//),
     );
+    expect(recordLeadEvent).not.toHaveBeenCalled();
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
     expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
   });
@@ -312,6 +392,61 @@ describe("cancelAppointmentAction", () => {
     expect(revalidatePath).not.toHaveBeenCalledWith(
       expect.stringMatching(/^\/leads\//),
     );
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("records a confirmed property-linked cancellation", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Private title",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+      }),
+    );
+    cancelAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "cancelled", ledgerId: "ledger-1" },
+    });
+
+    await cancelAppointmentAction("task-1");
+
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "prop-1",
+      actorType: "user",
+      actorId: "user-1",
+      eventType: "appointment_canceled",
+      payload: { task_id: "task-1" },
+      sourceType: "appointments.canceled",
+      sourceId: "ledger-1",
+    });
+  });
+
+  it("does not record when cancellation fails", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Call",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+      }),
+    );
+    cancelAppointment.mockResolvedValue({
+      ok: false,
+      error: { code: "CANCEL_APPOINTMENT_FAILED", message: "not open" },
+    });
+
+    await cancelAppointmentAction("task-1");
+
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   // Codex round 11 (finding 3): the RPC above already committed — a
@@ -367,7 +502,18 @@ describe("rescheduleAppointmentAction", () => {
   });
 
   it("converts the wall time server-side and delegates to the lib", async () => {
-    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1" }));
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Private title",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+      }),
+    );
     rescheduleAppointment.mockResolvedValue({
       ok: true,
       data: {
@@ -391,6 +537,101 @@ describe("rescheduleAppointmentAction", () => {
     );
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
     expect(revalidatePath).toHaveBeenCalledWith("/calendar");
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "prop-1",
+      actorType: "user",
+      actorId: "user-1",
+      eventType: "appointment_rescheduled",
+      payload: {
+        task_id: "succ-1",
+        previous_task_id: "task-1",
+        from: "2026-09-01T15:00:00Z",
+        to: "2026-09-02T20:00:00.000Z",
+      },
+      sourceType: "appointments.rescheduled",
+      sourceId: "ledger-reschedule-1",
+    });
+  });
+
+  it("does not record an idempotent reschedule replay", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Call",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+      }),
+    );
+    rescheduleAppointment.mockResolvedValue({
+      ok: true,
+      data: {
+        taskId: "succ-1",
+        oldTaskId: "task-1",
+        chainId: "chain-1",
+        duplicate: true,
+        ledgerId: "ledger-reschedule-1",
+      },
+    });
+
+    await rescheduleAppointmentAction(validInput);
+
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("does not record a non-duplicate propertyless reschedule", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Personal block",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: null,
+          contact_id: null,
+        },
+      }),
+    );
+    rescheduleAppointment.mockResolvedValue({
+      ok: true,
+      data: {
+        taskId: "succ-1",
+        oldTaskId: "task-1",
+        chainId: "chain-1",
+        duplicate: false,
+        ledgerId: "ledger-reschedule-1",
+      },
+    });
+
+    await rescheduleAppointmentAction(validInput);
+
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("does not record when rescheduling fails", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Call",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+      }),
+    );
+    rescheduleAppointment.mockResolvedValue({
+      ok: false,
+      error: { code: "RESCHEDULE_APPOINTMENT_FAILED", message: "not open" },
+    });
+
+    await rescheduleAppointmentAction(validInput);
+
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   // Codex round 11 (finding 3): the RPC above already committed — a
@@ -429,6 +670,13 @@ describe("rescheduleAppointmentAction", () => {
 
 describe("reassignAppointmentAction", () => {
   it("fires the assignment notification/Slack side effects for a real (non-duplicate, non-self) reassignment", async () => {
+    const postCommitOrder: string[] = [];
+    recordLeadEvent.mockImplementationOnce(async () => {
+      postCommitOrder.push("event");
+    });
+    kickCalendarMutationSync.mockImplementationOnce(async () => {
+      postCommitOrder.push("calendar");
+    });
     createClient.mockResolvedValue(
       makeSupabaseMock({
         userId: "user-1",
@@ -471,6 +719,20 @@ describe("reassignAppointmentAction", () => {
     );
     expect(revalidatePath).toHaveBeenCalledWith("/leads/prop-1");
     expect(revalidatePath).toHaveBeenCalledWith("/calendar");
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "prop-1",
+      actorType: "user",
+      actorId: "user-1",
+      eventType: "appointment_reassigned",
+      payload: {
+        task_id: "task-1",
+        from: "user-1",
+        to: "user-2",
+      },
+      sourceType: "appointments.reassigned",
+      sourceId: "ledger-reassign-1",
+    });
+    expect(postCommitOrder).toEqual(["event", "calendar"]);
   });
 
   it("skips the notification when the result is a duplicate (no-op) reassignment", async () => {
@@ -499,6 +761,37 @@ describe("reassignAppointmentAction", () => {
 
     await reassignAppointmentAction("task-1", "user-2");
 
+    expect(afterCallbacks).toHaveLength(0);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("does not record or notify a non-duplicate same-assignee operation", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Walkthrough",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+      }),
+    );
+    reassignAppointment.mockResolvedValue({
+      ok: true,
+      data: {
+        taskId: "task-1",
+        oldAssigneeId: "user-2",
+        newAssigneeId: "user-2",
+        duplicate: false,
+        ledgerId: "ledger-reassign-1",
+      },
+    });
+
+    await reassignAppointmentAction("task-1", "user-2");
+
+    expect(recordLeadEvent).not.toHaveBeenCalled();
     expect(afterCallbacks).toHaveLength(0);
   });
 
@@ -529,6 +822,45 @@ describe("reassignAppointmentAction", () => {
     await reassignAppointmentAction("task-1", "user-1");
 
     expect(afterCallbacks).toHaveLength(0);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("records a property-linked reassignment to the actor but skips self-notification", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Walkthrough",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+      }),
+    );
+    reassignAppointment.mockResolvedValue({
+      ok: true,
+      data: {
+        taskId: "task-1",
+        oldAssigneeId: "user-2",
+        newAssigneeId: "user-1",
+        duplicate: false,
+        ledgerId: "ledger-reassign-1",
+      },
+    });
+
+    await reassignAppointmentAction("task-1", "user-1");
+
+    expect(recordLeadEvent).toHaveBeenCalledWith({
+      propertyId: "prop-1",
+      actorType: "user",
+      actorId: "user-1",
+      eventType: "appointment_reassigned",
+      payload: { task_id: "task-1", from: "user-2", to: "user-1" },
+      sourceType: "appointments.reassigned",
+      sourceId: "ledger-reassign-1",
+    });
+    expect(afterCallbacks).toHaveLength(0);
   });
 
   it("does not revalidate or notify when the RPC fails", async () => {
@@ -543,6 +875,7 @@ describe("reassignAppointmentAction", () => {
     expect(result.ok).toBe(false);
     expect(afterCallbacks).toHaveLength(0);
     expect(revalidatePath).not.toHaveBeenCalled();
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   // Codex round 10 (finding 3): the RPC above already committed the

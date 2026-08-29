@@ -1,6 +1,21 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import {
+  BMH_ORG_ID,
+  createOrgUser,
+  TEST_ORG_B_ID,
+  seedTwoOrgs,
+} from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 import { MockSkipTraceProvider } from "./providers/mock";
 
@@ -19,6 +34,8 @@ process.env.ADMIN_EMAILS = "jarrad@bmhgroupkc.com";
 
 let currentEmail: string | null = "jarrad@bmhgroupkc.com";
 let currentUserId: string | null = null;
+let ownerUserId = "";
+let vaUserId = "";
 vi.spyOn(testClient.auth, "getUser").mockImplementation(
   async () =>
     ({
@@ -36,13 +53,16 @@ import {
   preflightSkipTrace,
   requestSkipTrace,
 } from "./actions";
+import { normalizeAddress } from "./cache";
 
 async function seedProperty(opts: {
   address: string;
   cassStatus?: "verified" | "unverified" | "invalid" | "ambiguous";
   killSwitch?: boolean;
+  orgId?: string;
 }): Promise<string> {
   const insert: Record<string, unknown> = {
+    org_id: opts.orgId,
     address: opts.address,
     state: "MO",
     status: "prospect",
@@ -93,18 +113,44 @@ async function attachHomeowner(
 }
 
 describe("requestSkipTrace pre-flight gates (integration)", () => {
+  beforeAll(async () => {
+    await resetTenantTables(testClient);
+    const va = await createOrgUser(testClient, {
+      orgId: BMH_ORG_ID,
+      email: `skip-trace-ledger-va-${crypto.randomUUID()}@bmhgroupkc.com`,
+      role: "member",
+    });
+    vaUserId = va.userId;
+  });
+
   beforeEach(async () => {
     await resetTenantTables(testClient);
+    const { data: owner, error: ownerError } = await testClient
+      .from("memberships")
+      .select("user_id")
+      .eq("org_id", BMH_ORG_ID)
+      .eq("role", "owner")
+      .limit(1)
+      .single();
+    if (ownerError || !owner) {
+      throw ownerError ?? new Error("test owner missing");
+    }
     process.env.SKIP_TRACE_PROVIDER = "mock";
     MockSkipTraceProvider.reset();
     start.mockReset();
     start.mockResolvedValue({ runId: "test-run" });
     currentEmail = "jarrad@bmhgroupkc.com";
-    currentUserId = null;
+    ownerUserId = owner.user_id;
+    currentUserId = ownerUserId;
   });
 
   afterEach(() => {
     MockSkipTraceProvider.reset();
+  });
+
+  afterAll(async () => {
+    await testClient.auth.admin.deleteUser(vaUserId);
+    await resetTenantTables(testClient);
   });
 
   it("happy path: all CASS-verified, no kill-switch — every id lands in input_params", async () => {
@@ -122,15 +168,112 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
       .select("org_id, input_params, title")
       .eq("id", result.data.jobId!)
       .single();
-    const input = (job!.input_params as { property_ids: string[] })
-      .property_ids;
+    const inputParams = job!.input_params as {
+      property_ids: string[];
+      authorized_max_credits: number;
+      provider_pricing_version: string;
+    };
+    const input = inputParams.property_ids;
     expect(new Set(input)).toEqual(new Set(ids));
+    expect(inputParams.authorized_max_credits).toBe(4);
+    expect(inputParams.provider_pricing_version).toBe("tracerfy-2026-08");
     // No skipped suffix on the happy path.
     expect(job!.title).not.toMatch(/skipped/i);
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(expect.any(Function), [
       { jobId: result.data.jobId, orgId: job!.org_id },
     ]);
+    const { data: events, error: eventError } = await testClient
+      .from("lead_events")
+      .select(
+        "property_id, actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("event_type", "skip_trace_requested")
+      .in("property_id", ids);
+    expect(eventError).toBeNull();
+    expect(events).toHaveLength(2);
+    const payloads = events!.map(
+      (event) =>
+        event.payload as {
+          job_id: string;
+          batch_id: string;
+          batch_count: number;
+        },
+    );
+    expect(new Set(payloads.map((payload) => payload.batch_id)).size).toBe(1);
+    expect(payloads[0]?.batch_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    expect(events).toEqual(
+      expect.arrayContaining([
+        ...ids.map((propertyId) => ({
+          property_id: propertyId,
+          actor_type: "user",
+          actor_id: currentUserId,
+          event_type: "skip_trace_requested",
+          payload: {
+            job_id: result.data.jobId,
+            batch_id: payloads[0]!.batch_id,
+            batch_count: 2,
+          },
+          source_type: null,
+          source_id: null,
+        })),
+      ]),
+    );
+    expect(JSON.stringify(events)).not.toMatch(/Verified Ln|jarrad@|phone/i);
+  });
+
+  it("fails closed before creating jobs when eligible properties span organizations", async () => {
+    await seedTwoOrgs(testClient);
+    const first = await seedProperty({
+      address: "1 First Org Ln",
+      cassStatus: "verified",
+      orgId: BMH_ORG_ID,
+    });
+    const second = await seedProperty({
+      address: "2 Second Org Ln",
+      cassStatus: "verified",
+      orgId: TEST_ORG_B_ID,
+    });
+
+    const result = await requestSkipTrace([first, second]);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "MIXED_ORGANIZATIONS" },
+    });
+    const { count: jobCount } = await testClient
+      .from("jobs")
+      .select("id", { count: "exact", head: true });
+    const { count: eventCount } = await testClient
+      .from("lead_events")
+      .select("id", { count: "exact", head: true });
+    expect(jobCount).toBe(0);
+    expect(eventCount).toBe(0);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing user before creating a job or event", async () => {
+    const propertyId = await seedProperty({
+      address: "1 Unauthenticated Request Ln",
+      cassStatus: "verified",
+    });
+    currentEmail = null;
+    currentUserId = null;
+
+    const result = await requestSkipTrace([propertyId]);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "AUTH" } });
+    const { count: jobCount } = await testClient
+      .from("jobs")
+      .select("id", { count: "exact", head: true });
+    const { count: eventCount } = await testClient
+      .from("lead_events")
+      .select("id", { count: "exact", head: true });
+    expect(jobCount).toBe(0);
+    expect(eventCount).toBe(0);
+    expect(start).not.toHaveBeenCalled();
   });
 
   it("keeps admin request successful when workflow enqueue fails after job create", async () => {
@@ -152,6 +295,30 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
       .single();
     expect(job?.status).toBe("queued");
     expect(job?.provider_run_id).toBeNull();
+    const { data: events, error: eventError } = await testClient
+      .from("lead_events")
+      .select(
+        "property_id, actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("event_type", "skip_trace_requested")
+      .eq("property_id", id);
+    expect(eventError).toBeNull();
+    expect(events).toHaveLength(1);
+    expect(events?.[0]).toMatchObject({
+      property_id: id,
+      actor_type: "user",
+      actor_id: currentUserId,
+      event_type: "skip_trace_requested",
+      payload: {
+        job_id: result.data.jobId,
+        batch_count: 1,
+      },
+      source_type: null,
+      source_id: null,
+    });
+    expect((events?.[0]?.payload as { batch_id?: unknown }).batch_id).toEqual(
+      expect.any(String),
+    );
   });
 
   it("preflight prices a single eligible row at 5 Tracefy credits", async () => {
@@ -169,7 +336,56 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     expect(result.data.canLaunchSkipTrace).toBe(true);
   });
 
-  it("preflight prices batch eligible rows at 1 Tracefy credit per row", async () => {
+  it("preflight requires zero new credits for a reusable cache row", async () => {
+    const id = await seedProperty({
+      address: "1 Cached Credit Ln",
+      cassStatus: "verified",
+    });
+    const { data: property, error: propertyError } = await testClient
+      .from("properties")
+      .select("org_id, address, city, state, zip")
+      .eq("id", id)
+      .single();
+    if (propertyError || !property) throw propertyError;
+    const { error: cacheError } = await testClient
+      .from("skip_trace_cache")
+      .insert({
+        org_id: property.org_id,
+        provider: "mock",
+        address_normalized: normalizeAddress(property),
+        match_count: 1,
+        cost_credits: 2,
+        result: {
+          propertyId: id,
+          hit: true,
+          persons: [
+            {
+              phones: [
+                {
+                  number: "+18165550100",
+                  type: "Mobile",
+                  dnc: false,
+                  rank: 1,
+                },
+              ],
+              emails: [],
+            },
+          ],
+          creditsDeducted: 2,
+          raw: { cached: true },
+        },
+      });
+    if (cacheError) throw cacheError;
+
+    const result = await preflightSkipTrace([id]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.tracefyCreditsRequired).toBe(0);
+    expect(result.data.tracefyCreditStatus).toBe("sufficient");
+    expect(result.data.canLaunchSkipTrace).toBe(true);
+  });
+
+  it("preflight prices owner-discovery batch rows at 2 Tracefy credits each", async () => {
     const ids = await Promise.all([
       seedProperty({ address: "1 Batch Ln", cassStatus: "verified" }),
       seedProperty({ address: "2 Batch Ln", cassStatus: "verified" }),
@@ -181,8 +397,34 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     if (!result.ok) return;
     expect(result.data.eligible).toBe(2);
     expect(result.data.cassUnverified).toBe(1);
-    expect(result.data.tracefyCreditsRequired).toBe(2);
+    expect(result.data.tracefyCreditsRequired).toBe(4);
     expect(result.data.estimatedCassVerificationCostUsd).toBeCloseTo(0.03);
+  });
+
+  it("preflight reserves the proven advanced price even for full-name rows", async () => {
+    const ids = await Promise.all([
+      seedProperty({ address: "1 Named Batch Ln", cassStatus: "verified" }),
+      seedProperty({ address: "2 Named Batch Ln", cassStatus: "verified" }),
+    ]);
+    await attachHomeowner(ids[0]!, "7101");
+    await attachHomeowner(ids[1]!, "7102");
+
+    const result = await preflightSkipTrace(ids);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.tracefyCreditsRequired).toBe(4);
+  });
+
+  it("preflight does not double-reserve a deduplicated shared address", async () => {
+    const ids = await Promise.all([
+      seedProperty({ address: "1 Shared Pricing Ln", cassStatus: "verified" }),
+      seedProperty({ address: "1 Shared Pricing Ln", cassStatus: "verified" }),
+    ]);
+
+    const result = await preflightSkipTrace(ids);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.tracefyCreditsRequired).toBe(2);
   });
 
   it("preflight prices split batches including a one-row tail at Tracefy single-lookup cost", async () => {
@@ -193,23 +435,51 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
       skip_trace_disabled: false,
       cass_status: "verified",
     }));
-    const { data, error } = await testClient
-      .from("properties")
-      .insert(rows as never)
-      .select("id");
-    if (error || !data) throw error ?? new Error("bulk seed failed");
+    // Hosted PostgREST can cap rows returned by one INSERT ... SELECT even
+    // though every row was inserted. Seed in bounded chunks so the test always
+    // retains all 4,001 ids it needs to exercise the batch split boundary.
+    const data: Array<{ id: string }> = [];
+    for (let offset = 0; offset < rows.length; offset += 500) {
+      const { data: inserted, error } = await testClient
+        .from("properties")
+        .insert(rows.slice(offset, offset + 500) as never)
+        .select("id");
+      if (error || !inserted) throw error ?? new Error("bulk seed failed");
+      data.push(...inserted);
+    }
 
     const result = await preflightSkipTrace(data.map((row) => row.id));
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.eligible).toBe(4_001);
-    expect(result.data.tracefyCreditsRequired).toBe(4_005);
+    expect(result.data.tracefyCreditsRequired).toBe(8_005);
 
     const launch = await requestSkipTrace(data.map((row) => row.id));
     expect(launch.ok).toBe(true);
     if (!launch.ok) return;
     expect(start).toHaveBeenCalledTimes(2);
+    const edgeIds = [data[0]!.id, data.at(-1)!.id];
+    const { data: events, error: eventError } = await testClient
+      .from("lead_events")
+      .select("property_id, payload")
+      .eq("event_type", "skip_trace_requested")
+      .in("property_id", edgeIds);
+    expect(eventError).toBeNull();
+    expect(events).toHaveLength(2);
+    const payloads = events!.map(
+      (event) =>
+        event.payload as {
+          job_id: string;
+          batch_id: string;
+          batch_count: number;
+        },
+    );
+    expect(new Set(payloads.map((payload) => payload.batch_id)).size).toBe(1);
+    expect(new Set(payloads.map((payload) => payload.job_id)).size).toBe(2);
+    expect(payloads.every((payload) => payload.batch_count === 4_001)).toBe(
+      true,
+    );
   });
 
   it("preflight reports CASS status separately from skip-trace eligibility", async () => {
@@ -553,6 +823,7 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
 
   it("removes a newly DNC property before approval and records the exclusion", async () => {
     currentEmail = "va@example.com";
+    currentUserId = vaUserId;
     const keep = await seedProperty({
       address: "1 Approval Keep Ln",
       cassStatus: "verified",
@@ -565,6 +836,39 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     const requested = await requestSkipTrace([keep, suppress]);
     expect(requested.ok).toBe(true);
     if (!requested.ok || !requested.data.jobId) return;
+    const { data: requestedEvents, error: requestEventError } = await testClient
+      .from("lead_events")
+      .select(
+        "id, property_id, actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("event_type", "skip_trace_requested")
+      .in("property_id", [keep, suppress])
+      .order("property_id");
+    expect(requestEventError).toBeNull();
+    expect(requestedEvents).toHaveLength(2);
+    const requestBatchId = (
+      requestedEvents?.[0]?.payload as { batch_id?: unknown }
+    ).batch_id;
+    expect(requestBatchId).toEqual(expect.any(String));
+    expect(requestedEvents).toEqual(
+      expect.arrayContaining(
+        [keep, suppress].map((propertyId) =>
+          expect.objectContaining({
+            property_id: propertyId,
+            actor_type: "user",
+            actor_id: vaUserId,
+            event_type: "skip_trace_requested",
+            payload: {
+              job_id: requested.data.jobId,
+              batch_id: requestBatchId,
+              batch_count: 2,
+            },
+            source_type: null,
+            source_id: null,
+          }),
+        ),
+      ),
+    );
 
     const { error: dncError } = await testClient
       .from("contacts")
@@ -573,6 +877,7 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     if (dncError) throw dncError;
 
     currentEmail = "jarrad@bmhgroupkc.com";
+    currentUserId = ownerUserId;
     const approved = await approveSkipTraceJob(requested.data.jobId);
     expect(approved.ok).toBe(true);
     if (approved.ok) {
@@ -596,10 +901,20 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
       eligibility_exclusions: { total: 1, by_reason: { dnc: 1 } },
     });
     expect(start).toHaveBeenCalledTimes(1);
+    const { data: afterApprovalEvents } = await testClient
+      .from("lead_events")
+      .select(
+        "id, property_id, actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("event_type", "skip_trace_requested")
+      .in("property_id", [keep, suppress])
+      .order("property_id");
+    expect(afterApprovalEvents).toEqual(requestedEvents);
   });
 
   it("cancels an all-suppressed pending job without balance lookup or workflow start", async () => {
     currentEmail = "va@example.com";
+    currentUserId = vaUserId;
     const suppress = await seedProperty({
       address: "1 Approval All Suppressed Ln",
       cassStatus: "verified",
@@ -608,6 +923,27 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     const requested = await requestSkipTrace([suppress]);
     expect(requested.ok).toBe(true);
     if (!requested.ok || !requested.data.jobId) return;
+    const { data: requestedEvents, error: requestEventError } = await testClient
+      .from("lead_events")
+      .select(
+        "id, property_id, actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("event_type", "skip_trace_requested")
+      .eq("property_id", suppress);
+    expect(requestEventError).toBeNull();
+    expect(requestedEvents).toHaveLength(1);
+    expect(requestedEvents?.[0]).toMatchObject({
+      property_id: suppress,
+      actor_type: "user",
+      actor_id: vaUserId,
+      event_type: "skip_trace_requested",
+      payload: {
+        job_id: requested.data.jobId,
+        batch_count: 1,
+      },
+      source_type: null,
+      source_id: null,
+    });
 
     const balanceSpy = vi.spyOn(MockSkipTraceProvider.prototype, "getBalance");
     const { error: dncError } = await testClient
@@ -617,6 +953,7 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     if (dncError) throw dncError;
 
     currentEmail = "jarrad@bmhgroupkc.com";
+    currentUserId = ownerUserId;
     const approved = await approveSkipTraceJob(requested.data.jobId);
     expect(approved.ok).toBe(true);
     if (approved.ok) {
@@ -641,6 +978,14 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     });
     expect(balanceSpy).not.toHaveBeenCalled();
     expect(start).not.toHaveBeenCalled();
+    const { data: afterApprovalEvents } = await testClient
+      .from("lead_events")
+      .select(
+        "id, property_id, actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("event_type", "skip_trace_requested")
+      .eq("property_id", suppress);
+    expect(afterApprovalEvents).toEqual(requestedEvents);
     balanceSpy.mockRestore();
   });
 

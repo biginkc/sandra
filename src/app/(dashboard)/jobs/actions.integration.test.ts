@@ -26,15 +26,16 @@ process.env.ADMIN_EMAILS = "jarrad@bmhgroupkc.com";
 
 let currentEmail: string | null = "jarrad@bmhgroupkc.com";
 let currentUserId: string | null = null;
-vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
-  ({
-    data: {
-      user: currentEmail
-        ? ({ id: currentUserId, email: currentEmail } as never)
-        : null,
-    },
-    error: null,
-  }) as never,
+vi.spyOn(testClient.auth, "getUser").mockImplementation(
+  async () =>
+    ({
+      data: {
+        user: currentEmail
+          ? ({ id: currentUserId, email: currentEmail } as never)
+          : null,
+      },
+      error: null,
+    }) as never,
 );
 
 import { retryFailedCassItems, retryFailedSkipTraceItems } from "./actions";
@@ -46,14 +47,22 @@ async function getOrgId(): Promise<string> {
 async function seedProperty(address: string): Promise<string> {
   const { data, error } = await testClient
     .from("properties")
-    .insert({ address, state: "MO", status: "prospect" })
+    .insert({
+      address,
+      state: "MO",
+      status: "prospect",
+      cass_status: "verified",
+    })
     .select("id")
     .single();
   if (error || !data) throw error ?? new Error("seed property failed");
   return data.id;
 }
 
-async function seedProperties(count: number, prefix: string): Promise<string[]> {
+async function seedProperties(
+  count: number,
+  prefix: string,
+): Promise<string[]> {
   const ids: string[] = [];
   for (let offset = 0; offset < count; offset += 400) {
     const size = Math.min(400, count - offset);
@@ -64,6 +73,7 @@ async function seedProperties(count: number, prefix: string): Promise<string[]> 
           address: `${prefix} ${offset + index}`,
           state: "MO",
           status: "prospect" as const,
+          cass_status: "verified" as const,
         })),
       )
       .select("id");
@@ -94,7 +104,9 @@ async function seedJob(opts: {
       processed_items: opts.propertyIds.length,
       failed_items: opts.failedItems ?? 0,
       title: `Test ${opts.type} job`,
-      input_params: (opts.inputParams ?? { property_ids: opts.propertyIds }) as never,
+      input_params: (opts.inputParams ?? {
+        property_ids: opts.propertyIds,
+      }) as never,
       result_summary: (opts.resultSummary ?? null) as never,
       error_class: opts.errorClass ?? null,
     })
@@ -129,10 +141,21 @@ async function seedJobItems(
 describe("retryFailedSkipTraceItems (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
+    const orgId = await getOrgId();
+    const { data: owner, error: ownerError } = await testClient
+      .from("memberships")
+      .select("user_id")
+      .eq("org_id", orgId)
+      .eq("role", "owner")
+      .limit(1)
+      .single();
+    if (ownerError || !owner) {
+      throw ownerError ?? new Error("test owner missing");
+    }
     start.mockReset();
     start.mockResolvedValue({ runId: "test-run" });
     currentEmail = "jarrad@bmhgroupkc.com";
-    currentUserId = null;
+    currentUserId = owner.user_id;
   });
 
   it("partial post-#59 job: retries only errored property_ids", async () => {
@@ -164,13 +187,45 @@ describe("retryFailedSkipTraceItems (integration)", () => {
     expect(child?.type).toBe("skip_trace");
     expect(child?.parent_job_id).toBe(jobId);
     expect(child?.total_items).toBe(1);
-    const ids = (child?.input_params as { property_ids: string[] })
-      .property_ids;
+    const inputParams = child?.input_params as {
+      property_ids: string[];
+      authorized_max_credits: number;
+      provider_pricing_version: string;
+    };
+    const ids = inputParams.property_ids;
     expect(ids).toEqual([p2]);
+    expect(inputParams.authorized_max_credits).toBe(5);
+    expect(inputParams.provider_pricing_version).toBe("tracerfy-2026-08");
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(expect.any(Function), [
       { jobId: result.data.childJobId, orgId: await getOrgId() },
     ]);
+    const { data: events, error: eventError } = await testClient
+      .from("lead_events")
+      .select(
+        "property_id, actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("event_type", "skip_trace_requested")
+      .eq("property_id", p2);
+    expect(eventError).toBeNull();
+    expect(events).toHaveLength(1);
+    expect(events).toEqual([
+      {
+        property_id: p2,
+        actor_type: "user",
+        actor_id: currentUserId,
+        event_type: "skip_trace_requested",
+        payload: {
+          job_id: result.data.childJobId,
+          retry_of_job_id: jobId,
+          batch_id: result.data.childJobId,
+          batch_count: 1,
+        },
+        source_type: null,
+        source_id: null,
+      },
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(/Main St|boom|email|phone/i);
   });
 
   it("returns the retry child when workflow enqueue fails so cron can recover it", async () => {
@@ -197,6 +252,30 @@ describe("retryFailedSkipTraceItems (integration)", () => {
       .single();
     expect(child?.status).toBe("queued");
     expect(child?.provider_run_id).toBeNull();
+    const { data: events, error: eventError } = await testClient
+      .from("lead_events")
+      .select(
+        "property_id, actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("event_type", "skip_trace_requested")
+      .eq("property_id", p1);
+    expect(eventError).toBeNull();
+    expect(events).toEqual([
+      {
+        property_id: p1,
+        actor_type: "user",
+        actor_id: currentUserId,
+        event_type: "skip_trace_requested",
+        payload: {
+          job_id: result.data.childJobId,
+          retry_of_job_id: jobId,
+          batch_id: result.data.childJobId,
+          batch_count: 1,
+        },
+        source_type: null,
+        source_id: null,
+      },
+    ]);
   });
 
   it("pre-#59 failed job (0 items): falls back to input_params.property_ids", async () => {
@@ -311,22 +390,31 @@ describe("retryFailedSkipTraceItems (integration)", () => {
     });
     // Seed an in-flight child manually.
     const orgId = await getOrgId();
-    const { data: existing } = await testClient.from("jobs").insert({
-      type: "skip_trace",
-      status: "running",
-      org_id: orgId,
-      parent_job_id: parentId,
-      provider: "tracerfy",
-      total_items: 1,
-      title: "In-flight retry",
-      input_params: { property_ids: [p1] },
-    }).select("id").single();
+    const { data: existing } = await testClient
+      .from("jobs")
+      .insert({
+        type: "skip_trace",
+        status: "running",
+        org_id: orgId,
+        parent_job_id: parentId,
+        provider: "tracerfy",
+        total_items: 1,
+        title: "In-flight retry",
+        input_params: { property_ids: [p1] },
+      })
+      .select("id")
+      .single();
 
     const result = await retryFailedSkipTraceItems(parentId);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.childJobId).toBe(existing?.id);
     expect(start).not.toHaveBeenCalled();
+    const { count: eventCount } = await testClient
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("event_type", "skip_trace_requested");
+    expect(eventCount).toBe(0);
   });
 
   it("concurrent identical retries create one child and enqueue one provider workflow", async () => {
@@ -358,6 +446,34 @@ describe("retryFailedSkipTraceItems (integration)", () => {
     expect(error).toBeNull();
     expect(count).toBe(1);
     expect(start).toHaveBeenCalledTimes(1);
+    const { data: events, error: eventError } = await testClient
+      .from("lead_events")
+      .select(
+        "property_id, actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("event_type", "skip_trace_requested")
+      .eq("property_id", propertyId);
+    expect(eventError).toBeNull();
+    expect(events).toHaveLength(1);
+    expect(events).toEqual([
+      {
+        property_id: propertyId,
+        actor_type: "user",
+        actor_id: currentUserId,
+        event_type: "skip_trace_requested",
+        payload: {
+          job_id: first.data.childJobId,
+          retry_of_job_id: parentId,
+          batch_id: first.data.childJobId,
+          batch_count: 1,
+        },
+        source_type: null,
+        source_id: null,
+      },
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(
+      /Atomic Retry|boom|email|phone/i,
+    );
   });
 
   it("conserves all 1,001 retryable failure targets", async () => {
@@ -408,6 +524,16 @@ describe("retryFailedSkipTraceItems (integration)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.code).toBe("FORBIDDEN");
+    const { count: childCount } = await testClient
+      .from("jobs")
+      .select("id", { count: "exact", head: true })
+      .eq("parent_job_id", jobId);
+    const { count: eventCount } = await testClient
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("event_type", "skip_trace_requested");
+    expect(childCount).toBe(0);
+    expect(eventCount).toBe(0);
   });
 
   it("links child via parent_job_id and returns childJobId", async () => {

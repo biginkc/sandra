@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   requestCancelByKey: vi.fn(),
   requestAudioHealth: vi.fn(),
   requestCallerIds: vi.fn(),
+  coachCallIndexUpsert: vi.fn(),
+  after: vi.fn(),
 }));
 
 vi.mock("@/lib/dialer/actions", () => ({
@@ -23,9 +25,35 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({ auth: { getUser: mocks.getUser } })),
 }));
 
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: vi.fn(() => ({
+    from: vi.fn((table: string) => {
+      if (table !== "coach_call_index") throw new Error(`unexpected admin table: ${table}`);
+      return { upsert: mocks.coachCallIndexUpsert };
+    }),
+  })),
+}));
+
 vi.mock("@/lib/auth/memberships", () => ({
   getCallerMemberships: mocks.getCallerMemberships,
 }));
+
+// The coach_call_index write is scheduled via `after()` (runs once the
+// action's response has gone out), never awaited directly — `after()`
+// throws outside a real Next.js request scope, which is exactly how these
+// tests call startAuthenticatedJitterCall (directly, not through a route
+// handler). Stubbed the same way as
+// src/app/api/cron/appointment-reminder-sweep/route.test.ts: capture the
+// callback instead of invoking it inline, so tests can assert it was
+// scheduled with the right closure and then invoke it themselves to
+// exercise indexCoachCall's own behavior.
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>("next/server");
+  return {
+    ...actual,
+    after: (fn: () => Promise<void>) => mocks.after(fn),
+  };
+});
 
 vi.mock("./jitter-contract", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./jitter-contract")>()),
@@ -97,6 +125,7 @@ describe("authenticated Jitter softphone server boundary", () => {
     vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", "test-service-token");
     vi.stubEnv("SOFTPHONE_CAPABILITY_KEY", OLD_CAPABILITY_KEY);
     vi.stubEnv("SOFTPHONE_CAPABILITY_KEY_PREVIOUS", "");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
     mocks.getUser.mockResolvedValue({
       data: { user: { id: "user-1", email: "Operator@Example.Test" } },
       error: null,
@@ -140,6 +169,7 @@ describe("authenticated Jitter softphone server boundary", () => {
       ok: true,
       data: { caller_ids: [{ phone_e164: "+18165550100", label: "Main" }] },
     });
+    mocks.coachCallIndexUpsert.mockResolvedValue({ error: null });
     const minted = await mintStartIntent();
     if (!minted.ok) throw new Error("expected start intent mint");
     START_INTENT = minted.data.intentCapability;
@@ -178,6 +208,60 @@ describe("authenticated Jitter softphone server boundary", () => {
       },
       START_CALL_TOKEN,
     );
+  });
+
+  it("schedules the coach realtime authorization index via after() — never awaited on the dial path, keyed by the same idempotency token", async () => {
+    const result = await startAuthenticatedJitterCall(
+      callTarget({ propertyId: "property-1", contactId: "contact-1", callerIdE164: "+18165550100" }),
+    );
+    expect(result.ok).toBe(true);
+    // The action has already returned (requestStart resolved and we have
+    // our result) yet the write hasn't run — only scheduled. A rep must
+    // never wait on it.
+    expect(mocks.requestStart).toHaveBeenCalled();
+    expect(mocks.coachCallIndexUpsert).not.toHaveBeenCalled();
+    expect(mocks.after).toHaveBeenCalledTimes(1);
+
+    // Now run what after() captured, simulating the post-response
+    // continuation, and confirm it does the real write with the right
+    // ownership fields.
+    await mocks.after.mock.calls[0][0]();
+    expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
+      { client_call_id: START_CALL_TOKEN, operator_user_id: "user-1", property_id: "property-1" },
+      { onConflict: "client_call_id" },
+    );
+  });
+
+  it("never schedules the coach index write at all when the coach UI flag is off — flag-off is zero new behavior", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "");
+    const result = await startAuthenticatedJitterCall(
+      callTarget({ propertyId: "property-1", contactId: "contact-1", callerIdE164: "+18165550100" }),
+    );
+    expect(result.ok).toBe(true);
+    expect(mocks.after).not.toHaveBeenCalled();
+    expect(mocks.coachCallIndexUpsert).not.toHaveBeenCalled();
+  });
+
+  it("never blocks the call when the coach_call_index write fails", async () => {
+    mocks.coachCallIndexUpsert.mockResolvedValueOnce({ error: { message: "db unavailable" } });
+    const result = await startAuthenticatedJitterCall(
+      callTarget({ propertyId: "property-1", contactId: "contact-1", callerIdE164: "+18165550100" }),
+    );
+    expect(result.ok).toBe(true);
+    expect(mocks.requestStart).toHaveBeenCalled();
+    // The write itself never throws back into the caller even when it
+    // fails — confirm running the scheduled callback doesn't reject.
+    await expect(mocks.after.mock.calls[0][0]()).resolves.toBeUndefined();
+  });
+
+  it("never blocks the call when the coach_call_index write throws", async () => {
+    mocks.coachCallIndexUpsert.mockRejectedValueOnce(new Error("network error"));
+    const result = await startAuthenticatedJitterCall(
+      callTarget({ propertyId: "property-1", contactId: "contact-1", callerIdE164: "+18165550100" }),
+    );
+    expect(result.ok).toBe(true);
+    expect(mocks.requestStart).toHaveBeenCalled();
+    await expect(mocks.after.mock.calls[0][0]()).resolves.toBeUndefined();
   });
 
   it("sends only the server-prepared real refs, never browser-supplied refs", async () => {

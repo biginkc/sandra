@@ -68,17 +68,20 @@ describe("tag-existing-properties sub-op (integration)", () => {
     await resetTenantTables(supabase);
   });
 
-  it("comma-separated tags split correctly when both exist (\"hot, probate\" → 2 applied)", async () => {
+  it('comma-separated tags split correctly when both exist ("hot, probate" → 2 applied)', async () => {
     const propId = await seedProperty("100 Tag St");
     const hotId = await seedTag("hot");
     const probateId = await seedTag("probate");
-    const result = await applyRow({ Address: "100 Tag St", Tags: "hot, probate" });
+    const result = await applyRow({
+      Address: "100 Tag St",
+      Tags: "hot, probate",
+    });
     expect(result.kind).toBe("updated");
     const applied = await readPropertyTagIds(propId);
     expect(applied.sort()).toEqual([hotId, probateId].sort());
   });
 
-  it("existing tag, case variant: \"Hot\" matches existing \"hot\", applied, no duplicate", async () => {
+  it('existing tag, case variant: "Hot" matches existing "hot", applied, no duplicate', async () => {
     const propId = await seedProperty("200 Case St");
     const hotId = await seedTag("hot");
     const result = await applyRow({ Address: "200 Case St", Tags: "Hot" });
@@ -91,7 +94,10 @@ describe("tag-existing-properties sub-op (integration)", () => {
     const propId = await seedProperty("300 Unknown St");
     await seedTag("hot"); // unrelated existing tag
     const tagsBefore = await readTagCount();
-    const result = await applyRow({ Address: "300 Unknown St", Tags: "schmurf" });
+    const result = await applyRow({
+      Address: "300 Unknown St",
+      Tags: "schmurf",
+    });
     expect(result.kind).toBe("rejected");
     if (result.kind === "rejected") {
       expect(result.reason).toBe("unknown-tag");
@@ -101,10 +107,13 @@ describe("tag-existing-properties sub-op (integration)", () => {
     expect(await readTagCount()).toBe(tagsBefore);
   });
 
-  it("mixed row (\"hot, schmurf\") → rejected; schmurf in unknownTags; hot NOT applied (all-or-nothing)", async () => {
+  it('mixed row ("hot, schmurf") → rejected; schmurf in unknownTags; hot NOT applied (all-or-nothing)', async () => {
     const propId = await seedProperty("400 Mixed St");
     await seedTag("hot");
-    const result = await applyRow({ Address: "400 Mixed St", Tags: "hot, schmurf" });
+    const result = await applyRow({
+      Address: "400 Mixed St",
+      Tags: "hot, schmurf",
+    });
     expect(result.kind).toBe("rejected");
     if (result.kind === "rejected") {
       expect(result.reason).toBe("unknown-tag");
@@ -116,15 +125,24 @@ describe("tag-existing-properties sub-op (integration)", () => {
   it("same property + same existing tag run twice → no duplicate property_tags row (upsert)", async () => {
     const propId = await seedProperty("500 Twice St");
     const hotId = await seedTag("hot");
-    await applyRow({ Address: "500 Twice St", Tags: "hot" });
-    await applyRow({ Address: "500 Twice St", Tags: "hot" });
+    const first = await applyRow({ Address: "500 Twice St", Tags: "hot" });
+    const replay = await applyRow({ Address: "500 Twice St", Tags: "hot" });
+    expect(first.kind).toBe("updated");
+    expect(replay).toEqual({
+      kind: "unchanged",
+      rowIndex: 0,
+      address: "500 Twice St",
+      reason: "no-change",
+    });
     expect(await readPropertyTagIds(propId)).toEqual([hotId]);
   });
 
   it("dryRun=true with unknown tag still surfaces unknownTags but writes nothing", async () => {
     const propId = await seedProperty("600 Dry St");
     await seedTag("hot");
-    const match = await matchPropertyByAddress(supabase, { address: "600 Dry St" });
+    const match = await matchPropertyByAddress(supabase, {
+      address: "600 Dry St",
+    });
     if (match.kind !== "matched") throw new Error("expected matched");
     const result = await tagExistingPropertiesOp.apply(
       { supabase, userId: null },

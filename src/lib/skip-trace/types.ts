@@ -106,10 +106,19 @@ export type SkipTraceBatchTicket = {
   queueId: string;
   estimatedWaitSeconds: number;
   creditsPerLead: number;
+  traceType?: "normal" | "advanced" | "enhanced";
 };
 
 export interface SkipTraceProvider {
   readonly providerId: string;
+
+  /**
+   * Rebuild a cached normalized result from its preserved provider payload.
+   * Providers may use this to repair projections after a parser change
+   * without paying for the same lookup again. Return null when the payload
+   * cannot be interpreted safely and the caller should treat it as a miss.
+   */
+  normalizeCachedResult?(result: SkipTraceResult): SkipTraceResult | null;
 
   /**
    * Synchronous single-address lookup. Returns the result inline.

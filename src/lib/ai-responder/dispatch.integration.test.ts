@@ -13,7 +13,7 @@ import {
   seedSenderCatalog,
 } from "@tests/integration/delivery";
 
-import { dispatchAiResponse } from "./dispatch";
+import { dispatchAiResponse, markPropertyNeedsAttention } from "./dispatch";
 import type { AnthropicLike } from "./generate";
 import { IDENTITY_REPLY_BODY } from "./identity";
 import type { AiStructuredOutput } from "./types";
@@ -146,6 +146,34 @@ async function seedLead(opts: {
   return { propertyId: property!.id, contactId: contact!.id };
 }
 
+async function seedAiInbound(args: {
+  propertyId: string;
+  contactId: string;
+  body: string;
+  fromPhone?: string;
+}): Promise<{ id: string; conversationId: string }> {
+  const { data, error } = await supabase
+    .from("messages")
+    .insert({
+      org_id: await getOrgId(),
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      property_id: args.propertyId,
+      contact_id: args.contactId,
+      from_address: args.fromPhone ?? "+18167554999",
+      to_address: MOCK_SENDER_PRIMARY,
+      body: args.body,
+    })
+    .select("id, conversation_id")
+    .single();
+  expect(error).toBeNull();
+  if (!data?.conversation_id) {
+    throw new Error("AI disposition test inbound did not receive a conversation id");
+  }
+  return { id: data.id, conversationId: data.conversation_id };
+}
+
 const HAPPY_OUT: AiStructuredOutput = {
   action: "send_reply",
   body: "Thanks for the reply — someone will reach out shortly.",
@@ -170,12 +198,20 @@ describe("dispatchAiResponse (integration)", () => {
       phone: "+18167554116",
       phone2: "+18167554117",
     });
+    const inbound = await seedAiInbound({
+      propertyId,
+      contactId,
+      body: "please delete my number",
+      fromPhone: "+18167554117",
+    });
 
     const outcome = await dispatchAiResponse(
       supabase,
       {
         propertyId,
         contactId,
+        conversationId: inbound.conversationId,
+        inboundMessageId: inbound.id,
         inboundFromPhone: "+18167554117",
         inboundBody: "please delete my number",
       },
@@ -735,6 +771,32 @@ describe("dispatchAiResponse (integration)", () => {
       .eq("id", propertyId)
       .single();
     expect(property!.needs_human_attention).toBe(true);
+
+    const { data: events } = await supabase
+      .from("lead_events")
+      .select("actor_type, actor_id, event_type, payload")
+      .eq("property_id", propertyId)
+      .eq("event_type", "ai_escalated");
+    expect(events).toEqual([
+      {
+        actor_type: "ai",
+        actor_id: null,
+        event_type: "ai_escalated",
+        payload: {
+          from: false,
+          to: true,
+          reason: "keyword:price_offer",
+        },
+      },
+    ]);
+
+    await markPropertyNeedsAttention(supabase, propertyId, "retry_reason");
+    const { count: retryEventCount } = await supabase
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", propertyId)
+      .eq("event_type", "ai_escalated");
+    expect(retryEventCount).toBe(1);
   });
 
   it("tier-C keyword (lawyer) → escalates", async () => {
@@ -826,10 +888,22 @@ describe("dispatchAiResponse (integration)", () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554016",
     });
+    const inbound = await seedAiInbound({
+      propertyId,
+      contactId,
+      body: "please delete my number",
+      fromPhone: "+18167554016",
+    });
 
     const outcome = await dispatchAiResponse(
       supabase,
-      { propertyId, contactId, inboundBody: "please delete my number" },
+      {
+        propertyId,
+        contactId,
+        conversationId: inbound.conversationId,
+        inboundMessageId: inbound.id,
+        inboundBody: "please delete my number",
+      },
       {
         anthropic: stubAnthropic({
           action: "opt_out",
@@ -850,6 +924,17 @@ describe("dispatchAiResponse (integration)", () => {
     expect(property).toMatchObject({
       outreach_dispo: "opted_out",
       needs_human_attention: false,
+    });
+    const { data: review } = await supabase
+      .from("ai_disposition_reviews")
+      .select("conversation_id, disposition, status, source_inbound_message_id")
+      .eq("source_inbound_message_id", inbound.id)
+      .single();
+    expect(review).toMatchObject({
+      conversation_id: inbound.conversationId,
+      disposition: "opted_out",
+      status: "pending",
+      source_inbound_message_id: inbound.id,
     });
     const { data: contact } = await supabase
       .from("contacts")
@@ -876,12 +961,20 @@ describe("dispatchAiResponse (integration)", () => {
       phone: "+18167554116",
       phone2: "+18167554117",
     });
+    const inbound = await seedAiInbound({
+      propertyId,
+      contactId,
+      body: "please delete this number",
+      fromPhone: "+18167554117",
+    });
 
     const outcome = await dispatchAiResponse(
       supabase,
       {
         propertyId,
         contactId,
+        conversationId: inbound.conversationId,
+        inboundMessageId: inbound.id,
         inboundFromPhone: "+18167554117",
         inboundBody: "please delete this number",
       },
@@ -920,10 +1013,22 @@ describe("dispatchAiResponse (integration)", () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554017",
     });
+    const inbound = await seedAiInbound({
+      propertyId,
+      contactId,
+      body: "I don't own that house",
+      fromPhone: "+18167554017",
+    });
 
     const outcome = await dispatchAiResponse(
       supabase,
-      { propertyId, contactId, inboundBody: "I don't own that house" },
+      {
+        propertyId,
+        contactId,
+        conversationId: inbound.conversationId,
+        inboundMessageId: inbound.id,
+        inboundBody: "I don't own that house",
+      },
       {
         anthropic: stubAnthropic({
           action: "close_wrong_number",
@@ -949,6 +1054,17 @@ describe("dispatchAiResponse (integration)", () => {
       outreach_dispo: "wrong_number",
       needs_human_attention: false,
     });
+    const { data: review } = await supabase
+      .from("ai_disposition_reviews")
+      .select("conversation_id, disposition, status, source_inbound_message_id")
+      .eq("source_inbound_message_id", inbound.id)
+      .single();
+    expect(review).toMatchObject({
+      conversation_id: inbound.conversationId,
+      disposition: "wrong_number",
+      status: "pending",
+      source_inbound_message_id: inbound.id,
+    });
     const { data: contact } = await supabase
       .from("contacts")
       .select("sms_opted_out")
@@ -962,10 +1078,22 @@ describe("dispatchAiResponse (integration)", () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554019",
     });
+    const inbound = await seedAiInbound({
+      propertyId,
+      contactId,
+      body: "wrong number, I never owned any property",
+      fromPhone: "+18167554019",
+    });
 
     const outcome = await dispatchAiResponse(
       supabase,
-      { propertyId, contactId, inboundBody: "wrong number, I never owned any property" },
+      {
+        propertyId,
+        contactId,
+        conversationId: inbound.conversationId,
+        inboundMessageId: inbound.id,
+        inboundBody: "wrong number, I never owned any property",
+      },
       {
         anthropic: stubAnthropic({
           action: "close_wrong_number",
@@ -1007,12 +1135,20 @@ describe("dispatchAiResponse (integration)", () => {
       phone: "+18167554118",
       phone2: "+18167554119",
     });
+    const inbound = await seedAiInbound({
+      propertyId,
+      contactId,
+      body: "wrong number, I never owned any property",
+      fromPhone: "+18167554119",
+    });
 
     const outcome = await dispatchAiResponse(
       supabase,
       {
         propertyId,
         contactId,
+        conversationId: inbound.conversationId,
+        inboundMessageId: inbound.id,
         inboundFromPhone: "+18167554119",
         inboundBody: "wrong number, I never owned any property",
       },
@@ -1048,6 +1184,12 @@ describe("dispatchAiResponse (integration)", () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554018",
     });
+    const inbound = await seedAiInbound({
+      propertyId,
+      contactId,
+      body: "ugh is this a scam",
+      fromPhone: "+18167554018",
+    });
     let calls = 0;
     const anthropic: AnthropicLike = {
       messages: {
@@ -1068,6 +1210,8 @@ describe("dispatchAiResponse (integration)", () => {
       {
         propertyId,
         contactId,
+        conversationId: inbound.conversationId,
+        inboundMessageId: inbound.id,
         inboundToPhone: MOCK_SENDER_PRIMARY,
         inboundBody: "ugh is this a scam",
       },
@@ -1090,6 +1234,17 @@ describe("dispatchAiResponse (integration)", () => {
     expect(property).toMatchObject({
       outreach_dispo: "not_interested",
       needs_human_attention: false,
+    });
+    const { data: review } = await supabase
+      .from("ai_disposition_reviews")
+      .select("conversation_id, disposition, status, source_inbound_message_id")
+      .eq("source_inbound_message_id", inbound.id)
+      .single();
+    expect(review).toMatchObject({
+      conversation_id: inbound.conversationId,
+      disposition: "not_interested",
+      status: "pending",
+      source_inbound_message_id: inbound.id,
     });
   });
 
@@ -1119,11 +1274,19 @@ describe("dispatchAiResponse (integration)", () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554019",
     });
+    const inbound = await seedAiInbound({
+      propertyId,
+      contactId,
+      body: "please delete my number",
+      fromPhone: "+18167554019",
+    });
     const outcome = await dispatchAiResponse(
       supabase,
       {
         propertyId,
         contactId,
+        conversationId: inbound.conversationId,
+        inboundMessageId: inbound.id,
         inboundBody: "please delete my number",
         inboundFromPhone: "+18167554019",
       },
@@ -1167,12 +1330,20 @@ describe("dispatchAiResponse (integration)", () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554020",
     });
+    const inbound = await seedAiInbound({
+      propertyId,
+      contactId,
+      body: "I will find you and make you pay",
+      fromPhone: "+18167554020",
+    });
 
     const outcome = await dispatchAiResponse(
       supabase,
       {
         propertyId,
         contactId,
+        conversationId: inbound.conversationId,
+        inboundMessageId: inbound.id,
         inboundBody: "I will find you and make you pay",
         inboundFromPhone: "+18167554020",
       },
@@ -1206,6 +1377,17 @@ describe("dispatchAiResponse (integration)", () => {
     expect(property).toMatchObject({
       outreach_dispo: "dnc",
       needs_human_attention: false,
+    });
+    const { data: review } = await supabase
+      .from("ai_disposition_reviews")
+      .select("conversation_id, disposition, status, source_inbound_message_id")
+      .eq("source_inbound_message_id", inbound.id)
+      .single();
+    expect(review).toMatchObject({
+      conversation_id: inbound.conversationId,
+      disposition: "dnc",
+      status: "pending",
+      source_inbound_message_id: inbound.id,
     });
     expect(suppression).toMatchObject({
       phone_e164: "+18167554020",

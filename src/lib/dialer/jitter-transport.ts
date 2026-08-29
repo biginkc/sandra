@@ -204,6 +204,7 @@ export class JitterCallTransport implements CallTransport {
   private audioHealthPeerGeneration = 0;
   private audioHealthSequence = 0;
   private audioHealthInFlight = false;
+  private audioHealthResumeBaselinePending = false;
 
   constructor(
     private readonly dependencies: JitterTransportDependencies = defaultDependencies,
@@ -241,12 +242,15 @@ export class JitterCallTransport implements CallTransport {
     this.holdTransition = true;
     this.digitEpoch += 1;
     try {
-      const result = on ? call.hold() : call.unhold();
-      await Promise.resolve(result);
+      const result = await Promise.resolve(on ? call.hold() : call.unhold());
+      // The pinned Telnyx SDK catches provider control errors and resolves
+      // `false` instead of rejecting. Treat that concrete return contract as
+      // a failed control operation so the UI and health state stay truthful.
+      if (result === false) return false;
       this.desiredHold = on;
+      if (!on) this.audioHealthResumeBaselinePending = true;
       return true;
-    } catch (error) {
-      await this.failAndCancel(error);
+    } catch {
       return false;
     } finally {
       this.holdTransition = false;
@@ -414,9 +418,8 @@ export class JitterCallTransport implements CallTransport {
           return;
         }
         if (code === TELNYX_HOLD_FAILED) {
-          // The Phase 1 seam has no control-error/rollback event. Failing the
-          // call is safer than telling the operator audio is held when it is not.
-          void this.failAndCancel(eventError(event));
+          // The hold/unhold promise is authoritative for the control state.
+          // A failed hold must never tear down an otherwise healthy live call.
           return;
         }
         if (code === TELNYX_BYE_SEND_FAILED) return;
@@ -593,10 +596,13 @@ export class JitterCallTransport implements CallTransport {
     if (!call) return;
     try {
       if (this.desiredMute) call.muteAudio();
-      if (this.desiredHold)
-        void Promise.resolve(call.hold()).catch((error) =>
-          this.failAndCancel(error),
-        );
+      if (this.desiredHold) {
+        // Reapplying hold after SDK recovery is best-effort. A provider control
+        // failure must never tear down an otherwise healthy live call. Keep the
+        // desired held state so audio-health remains non-latchable until the
+        // operator deliberately resumes.
+        void Promise.resolve(call.hold()).catch(() => undefined);
+      }
     } catch (error) {
       void this.failAndCancel(error);
     }
@@ -800,6 +806,7 @@ export class JitterCallTransport implements CallTransport {
     this.stopAudioHealth?.();
     this.stopAudioHealth = null;
     this.audioHealthPeer = null;
+    this.audioHealthResumeBaselinePending = false;
     if (!preservePageHideListener) {
       this.removePageHideListener?.();
       this.removePageHideListener = null;
@@ -852,7 +859,7 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private async sampleAudioHealth(): Promise<void> {
-    if (this.audioHealthInFlight) return;
+    if (this.audioHealthInFlight || this.holdTransition) return;
     const callId = this.callId;
     const call = this.currentCall;
     if (!callId || !call || this.terminal || this.hangupRequested) return;
@@ -874,20 +881,37 @@ export class JitterCallTransport implements CallTransport {
       )
         return;
       this.audioHealthSequence += 1;
+      const mediaState = this.desiredHold
+        ? "held"
+        : this.audioHealthResumeBaselinePending
+          ? "resumed"
+          : "active";
+      let resumeAccepted = false;
       await settleBeforeDeadline(
         Promise.resolve()
-          .then(() =>
-            this.dependencies.reportAudioHealth(callId, {
+          .then(async () => {
+            const result = await this.dependencies.reportAudioHealth(callId, {
+              media_state: mediaState,
               controller_id: this.audioHealthControllerId,
               peer_connection_generation: this.audioHealthPeerGeneration,
               sample_sequence: this.audioHealthSequence,
               packets_received: counters.packetsReceived,
               bytes_received: counters.bytesReceived,
-            }),
-          )
+            });
+            resumeAccepted = result.ok && result.data.accepted;
+          })
           .catch(() => undefined),
         JITTER_AUDIO_HEALTH_REPORT_TIMEOUT_MS,
       );
+      if (
+        mediaState === "resumed" &&
+        resumeAccepted &&
+        this.callId === callId &&
+        this.currentCall === call &&
+        !this.desiredHold
+      ) {
+        this.audioHealthResumeBaselinePending = false;
+      }
     } finally {
       this.audioHealthInFlight = false;
     }

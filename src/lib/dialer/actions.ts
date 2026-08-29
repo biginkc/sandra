@@ -8,6 +8,7 @@ import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { formatPhoneE164, toPhoneE164 } from "@/lib/phone-format";
 import { createClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/types";
+import { repDisplayName } from "@/lib/coach/rep-display-name";
 import { getMemberTimezone } from "@/components/appointments/book-appointment-action";
 import { openCallCapability } from "./call-capability";
 
@@ -35,6 +36,7 @@ export type SoftphoneTarget = {
   address: string | null;
   state: string | null;
   startedAt: string;
+  repName?: string | null;
 };
 
 export type SoftphoneActionResult<T> =
@@ -102,8 +104,14 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
     if (blocked) {
       return { ok: false, error: typeof blocked === "string" ? "This lead is not callable." : "This lead is blocked: " + blocked.blocked.replaceAll("_", " ") + "." };
     }
-    await pausePropertyEnrollments(supabase, { propertyId: lead.id, reason: "call_in_progress" });
-    return { ok: true, data: target };
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return { ok: false, error: "Not signed in." };
+    await pausePropertyEnrollments(supabase, {
+      propertyId: lead.id,
+      reason: "call_in_progress",
+      actor: { actorType: "user", actorId: user.id },
+    });
+    return { ok: true, data: { ...target, repName: repDisplayName(user) } };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Could not start the call." };
   }
@@ -113,7 +121,12 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
 export async function resumeFailedSoftphoneCall(propertyId: string): Promise<void> {
   try {
     const supabase = await createClient();
-    await resumeByProperty(supabase, { propertyId });
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    await resumeByProperty(supabase, {
+      propertyId,
+      actor: { actorType: "user", actorId: user.id },
+    });
   } catch {
     // The scheduled call-in-progress sweeper is the durable backstop.
   }
@@ -165,12 +178,20 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
       if (!quietHours.ok) return { ok: false, error: "Calling is unavailable during quiet hours." };
       const target = leadTarget(linkedLead, phoneE164);
       if (!target || !linkedLead.homeowner) return { ok: false, error: "This lead has no callable phone number." };
-      await pausePropertyEnrollments(supabase, { propertyId: linkedLead.id, reason: "call_in_progress" });
-      return { ok: true, data: target };
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (authError || !user) return { ok: false, error: "Not signed in." };
+      await pausePropertyEnrollments(supabase, {
+        propertyId: linkedLead.id,
+        reason: "call_in_progress",
+        actor: { actorType: "user", actorId: user.id },
+      });
+      return { ok: true, data: { ...target, repName: repDisplayName(user) } };
     }
 
     const quietHours = checkQuietHours("MO");
     if (!quietHours.ok) return { ok: false, error: "Calling is unavailable during quiet hours." };
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return { ok: false, error: "Not signed in." };
     return {
       ok: true,
       data: {
@@ -182,6 +203,7 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
         address: null,
         state: "MO",
         startedAt: new Date().toISOString(),
+        repName: repDisplayName(user),
       },
     };
   } catch (error) {
@@ -560,7 +582,10 @@ export async function completeSoftphoneCall(input: {
       // the softphone-owned pause, never an inbound-reply or appointment pause.
       if (dispositionSucceeded && input.target.propertyId) {
         try {
-          await resumeByProperty(supabase, { propertyId: input.target.propertyId });
+          await resumeByProperty(supabase, {
+            propertyId: input.target.propertyId,
+            actor: { actorType: "user", actorId: user.id },
+          });
         } catch {
           // The 30-minute call-in-progress sweeper is the durable backstop.
         }

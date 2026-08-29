@@ -6,7 +6,9 @@ import { resetTenantTables } from "@tests/integration/reset";
 
 import {
   enrollLead,
+  pauseContactEnrollments,
   pausePropertyEnrollments,
+  resumeByProperty,
   resumeEnrollment,
 } from "./enrollment";
 
@@ -129,10 +131,30 @@ describe("enrollLead (integration)", () => {
       .single();
     expect(row).toMatchObject({ status: "active", current_step_index: 0 });
     // next_run_at should be within a few seconds of now for delay=0.
-    const diffMs = Math.abs(
-      new Date(row!.next_run_at!).getTime() - Date.now(),
-    );
+    const diffMs = Math.abs(new Date(row!.next_run_at!).getTime() - Date.now());
     expect(diffMs).toBeLessThan(5000);
+
+    const { data: events } = await supabase
+      .from("lead_events")
+      .select(
+        "actor_type, actor_id, event_type, payload, source_type, source_id",
+      )
+      .eq("property_id", propertyId)
+      .eq("event_type", "sequence_enrolled");
+    expect(events).toEqual([
+      {
+        actor_type: "system",
+        actor_id: null,
+        event_type: "sequence_enrolled",
+        source_type: "sequence_enrollments.created",
+        source_id: (outcome as { enrollmentId: string }).enrollmentId,
+        payload: {
+          enrollment_id: (outcome as { enrollmentId: string }).enrollmentId,
+          sequence_id: seqId,
+          label: "Happy-path",
+        },
+      },
+    ]);
   });
 
   it("rejects a lead with no homeowner contact / phone", async () => {
@@ -178,8 +200,17 @@ describe("enrollLead (integration)", () => {
     const first = await enrollLead(supabase, { sequenceId: seqId, propertyId });
     expect(first.status).toBe("enrolled");
 
-    const second = await enrollLead(supabase, { sequenceId: seqId, propertyId });
+    const second = await enrollLead(supabase, {
+      sequenceId: seqId,
+      propertyId,
+    });
     expect(second.status).toBe("duplicate_active");
+    const { count } = await supabase
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", propertyId)
+      .eq("event_type", "sequence_enrolled");
+    expect(count).toBe(1);
   });
 
   it("rejects enrollment on an archived sequence", async () => {
@@ -192,7 +223,10 @@ describe("enrollLead (integration)", () => {
       phone: "+18165550004",
     });
 
-    const outcome = await enrollLead(supabase, { sequenceId: seqId, propertyId });
+    const outcome = await enrollLead(supabase, {
+      sequenceId: seqId,
+      propertyId,
+    });
     expect(outcome.status).toBe("sequence_inactive");
   });
 
@@ -231,7 +265,10 @@ describe("enrollLead (integration)", () => {
       .update({ status: "completed", completed_at: new Date().toISOString() })
       .eq("id", (first as { enrollmentId: string }).enrollmentId);
 
-    const second = await enrollLead(supabase, { sequenceId: seqId, propertyId });
+    const second = await enrollLead(supabase, {
+      sequenceId: seqId,
+      propertyId,
+    });
     expect(second.status).toBe("enrolled");
   });
 });
@@ -270,6 +307,42 @@ describe("pausePropertyEnrollments (integration)", () => {
       expect(row.status).toBe("paused");
       expect(row.pause_reason).toBe("inbound_reply");
     }
+
+    const { data: events } = await supabase
+      .from("lead_events")
+      .select("actor_type, event_type, payload")
+      .eq("property_id", propertyId)
+      .eq("event_type", "sequence_paused");
+    expect(events).toHaveLength(1);
+    expect(events?.[0]?.actor_type).toBe("system");
+    expect(events?.[0]?.event_type).toBe("sequence_paused");
+    const pausedPayload = events?.[0]?.payload as Record<string, unknown>;
+    expect(Object.keys(pausedPayload).sort()).toEqual([
+      "count",
+      "permanent",
+      "reason",
+      "sequence_ids",
+    ]);
+    expect(pausedPayload).toMatchObject({
+      count: 2,
+      reason: "inbound_reply",
+      permanent: false,
+    });
+    expect([...(pausedPayload.sequence_ids as string[])].sort()).toEqual(
+      [seqA, seqB].sort(),
+    );
+
+    const retry = await pausePropertyEnrollments(supabase, {
+      propertyId,
+      reason: "inbound_reply",
+    });
+    expect(retry.paused).toBe(0);
+    const { count: retryEventCount } = await supabase
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", propertyId)
+      .eq("event_type", "sequence_paused");
+    expect(retryEventCount).toBe(1);
   });
 
   it("flips to opted_out permanently when permanent=true", async () => {
@@ -297,6 +370,78 @@ describe("pausePropertyEnrollments (integration)", () => {
     expect(data!.pause_reason).toBe("consent_revoked");
     expect(data!.next_run_at).toBeNull();
   });
+
+  it("groups contact-wide pauses by property with one shared batch id", async () => {
+    const seqId = await seedSequence({
+      name: "ContactPause",
+      steps: [{ delay: 0, body: "x" }],
+    });
+    const { propertyId: firstPropertyId, contactId } =
+      await seedPropertyWithConsent({ phone: "+18165550022" });
+    const { data: secondProperty } = await supabase
+      .from("properties")
+      .insert({
+        address: "124 Enroll Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    if (!contactId || !secondProperty)
+      throw new Error("contact pause seed failed");
+    await enrollLead(supabase, {
+      sequenceId: seqId,
+      propertyId: firstPropertyId,
+    });
+    await enrollLead(supabase, {
+      sequenceId: seqId,
+      propertyId: secondProperty.id,
+    });
+
+    const outcome = await pauseContactEnrollments(supabase, {
+      contactId,
+      reason: "consent_revoked",
+      permanent: true,
+    });
+
+    expect(outcome.paused).toBe(2);
+    const { data: events } = await supabase
+      .from("lead_events")
+      .select("property_id, payload")
+      .eq("event_type", "sequence_paused")
+      .in("property_id", [firstPropertyId, secondProperty.id]);
+    expect(events).toHaveLength(2);
+    const batchIds = new Set(
+      events?.map(
+        (event) => (event.payload as { batch_id?: string } | null)?.batch_id,
+      ),
+    );
+    expect(batchIds.size).toBe(1);
+    expect([...batchIds][0]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    const sharedBatchId = [...batchIds][0];
+    for (const event of events ?? []) {
+      const payload = event.payload as Record<string, unknown>;
+      expect(Object.keys(payload).sort()).toEqual([
+        "batch_count",
+        "batch_id",
+        "count",
+        "permanent",
+        "reason",
+        "sequence_ids",
+      ]);
+      expect(payload).toEqual({
+        count: 1,
+        sequence_ids: [seqId],
+        batch_count: 2,
+        batch_id: sharedBatchId,
+        reason: "consent_revoked",
+        permanent: true,
+      });
+    }
+  });
 });
 
 describe("resumeEnrollment (integration)", () => {
@@ -307,12 +452,18 @@ describe("resumeEnrollment (integration)", () => {
   it("flips paused back to active and recalculates next_run_at", async () => {
     const seqId = await seedSequence({
       name: "Resume",
-      steps: [{ delay: 0, body: "a" }, { delay: 1440, body: "b" }],
+      steps: [
+        { delay: 0, body: "a" },
+        { delay: 1440, body: "b" },
+      ],
     });
     const { propertyId } = await seedPropertyWithConsent({
       phone: "+18165550030",
     });
-    const enrolled = await enrollLead(supabase, { sequenceId: seqId, propertyId });
+    const enrolled = await enrollLead(supabase, {
+      sequenceId: seqId,
+      propertyId,
+    });
     if (enrolled.status !== "enrolled") throw new Error("enroll failed");
 
     await pausePropertyEnrollments(supabase, {
@@ -331,6 +482,27 @@ describe("resumeEnrollment (integration)", () => {
     expect(data!.status).toBe("active");
     expect(data!.pause_reason).toBeNull();
     expect(data!.next_run_at).not.toBeNull();
+
+    const { data: events } = await supabase
+      .from("lead_events")
+      .select("event_type, payload")
+      .eq("property_id", propertyId)
+      .eq("event_type", "sequence_resumed");
+    expect(events).toHaveLength(1);
+    expect(events?.[0]?.event_type).toBe("sequence_resumed");
+    const resumedPayload = events?.[0]?.payload as Record<string, unknown>;
+    expect(Object.keys(resumedPayload).sort()).toEqual([
+      "enrollment_id",
+      "next_run_at",
+      "sequence_id",
+    ]);
+    expect(resumedPayload).toMatchObject({
+      enrollment_id: enrolled.enrollmentId,
+      sequence_id: seqId,
+    });
+    expect(
+      new Date(String(resumedPayload.next_run_at)).toISOString(),
+    ).toBe(new Date(data!.next_run_at!).toISOString());
   });
 
   it("does nothing for an enrollment that isn't paused", async () => {
@@ -341,10 +513,52 @@ describe("resumeEnrollment (integration)", () => {
     const { propertyId } = await seedPropertyWithConsent({
       phone: "+18165550031",
     });
-    const enrolled = await enrollLead(supabase, { sequenceId: seqId, propertyId });
+    const enrolled = await enrollLead(supabase, {
+      sequenceId: seqId,
+      propertyId,
+    });
     if (enrolled.status !== "enrolled") throw new Error("enroll failed");
 
     const outcome = await resumeEnrollment(supabase, enrolled.enrollmentId);
     expect(outcome.status).toBe("not_paused");
+    const { count } = await supabase
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", propertyId)
+      .eq("event_type", "sequence_resumed");
+    expect(count).toBe(0);
+  });
+
+  it("resumes call-owned property pauses once and records only the actual transition", async () => {
+    const seqId = await seedSequence({
+      name: "ResumeProperty",
+      steps: [{ delay: 0, body: "x" }],
+    });
+    const { propertyId } = await seedPropertyWithConsent({
+      phone: "+18165550032",
+    });
+    await enrollLead(supabase, { sequenceId: seqId, propertyId });
+    await pausePropertyEnrollments(supabase, {
+      propertyId,
+      reason: "call_in_progress",
+    });
+
+    expect((await resumeByProperty(supabase, { propertyId })).resumed).toBe(1);
+    expect((await resumeByProperty(supabase, { propertyId })).resumed).toBe(0);
+    const { data: events } = await supabase
+      .from("lead_events")
+      .select("event_type, payload")
+      .eq("property_id", propertyId)
+      .eq("event_type", "sequence_resumed");
+    expect(events).toEqual([
+      {
+        event_type: "sequence_resumed",
+        payload: {
+          count: 1,
+          sequence_ids: [seqId],
+          reason: "call_in_progress_cleared",
+        },
+      },
+    ]);
   });
 });

@@ -74,7 +74,11 @@ vi.mock("@/components/appointments/book-appointment-action", () => ({
 }));
 vi.mock("@/app/(dashboard)/messages/dispo-actions", () => ({ setOutreachDispo }));
 
-import { completeSoftphoneCall, prepareManualCall } from "./actions";
+import {
+  completeSoftphoneCall,
+  prepareLeadCall,
+  prepareManualCall,
+} from "./actions";
 
 describe("prepareManualCall", () => {
   afterEach(() => {
@@ -169,6 +173,9 @@ describe("prepareManualCall", () => {
       { data: [property], error: null },
     ];
     createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }),
+      },
       from: vi.fn(() => {
         const response = responses.shift() ?? { data: [], error: null };
         const builder = {
@@ -193,8 +200,195 @@ describe("prepareManualCall", () => {
     });
     expect(pausePropertyEnrollments).toHaveBeenCalledWith(
       expect.anything(),
-      { propertyId: property.id, reason: "call_in_progress" },
+      {
+        propertyId: property.id,
+        reason: "call_in_progress",
+        actor: { actorType: "user", actorId: "user-1" },
+      },
     );
+  });
+
+  it("populates the rep name for a callable manual number with no linked lead", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T15:00:00.000Z"));
+    const responses = [
+      { data: [], error: null },
+      { data: [], error: null },
+      { data: [], error: null },
+    ];
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { email: "mel.rep@bmhgroupkc.com", user_metadata: { display_name: "Mel" } } },
+          error: null,
+        }),
+      },
+      from: vi.fn(() => {
+        const response = responses.shift() ?? { data: [], error: null };
+        const builder = {
+          select: vi.fn(() => builder),
+          eq: vi.fn(() => builder),
+          then: (resolve: (value: typeof response) => unknown) => Promise.resolve(response).then(resolve),
+        };
+        return builder;
+      }),
+    });
+
+    await expect(prepareManualCall("+1 (816) 555-0199")).resolves.toMatchObject({
+      ok: true,
+      data: {
+        propertyId: null,
+        repName: "Mel",
+      },
+    });
+  });
+
+  it("does not pause a manual call when authentication fails", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T15:00:00.000Z"));
+    const contact = {
+      id: "contact-1",
+      first_name: "No",
+      last_name: "Session",
+      entity_name: null,
+      phone_1: "+18165550123",
+      phone_2: null,
+      phone_3: null,
+      do_not_contact: false,
+      sms_opted_out: false,
+    };
+    const property = {
+      id: "property-1",
+      address: "1 Auth Lane",
+      city: "Kansas City",
+      state: "MO",
+      is_dnc_locked: false,
+      homeowner_contact_id: contact.id,
+      homeowner: contact,
+    };
+    const responses = [
+      { data: [contact], error: null },
+      { data: [], error: null },
+      { data: [], error: null },
+      { data: [property], error: null },
+    ];
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: null },
+          error: { message: "expired session" },
+        }),
+      },
+      from: vi.fn(() => {
+        const response = responses.shift() ?? { data: [], error: null };
+        const builder = {
+          select: vi.fn(() => builder),
+          eq: vi.fn(() => builder),
+          in: vi.fn(() => builder),
+          then: (resolve: (value: typeof response) => unknown) =>
+            Promise.resolve(response).then(resolve),
+        };
+        return builder;
+      }),
+    });
+
+    await expect(prepareManualCall(contact.phone_1)).resolves.toEqual({
+      ok: false,
+      error: "Not signed in.",
+    });
+    expect(pausePropertyEnrollments).not.toHaveBeenCalled();
+  });
+
+  it("does not pause a lead call without an authenticated user", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T15:00:00.000Z"));
+    const lead = {
+      id: "property-1",
+      address: "1 Auth Lane",
+      city: "Kansas City",
+      state: "MO",
+      is_dnc_locked: false,
+      homeowner_contact_id: "contact-1",
+      homeowner: {
+        id: "contact-1",
+        first_name: "No",
+        last_name: "Session",
+        entity_name: null,
+        phone_1: "+18165550123",
+        phone_2: null,
+        phone_3: null,
+        do_not_contact: false,
+        sms_opted_out: false,
+      },
+    };
+    const builder = {
+      select: vi.fn(() => builder),
+      eq: vi.fn(() => builder),
+      maybeSingle: vi.fn().mockResolvedValue({ data: lead, error: null }),
+    };
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: null },
+          error: null,
+        }),
+      },
+      from: vi.fn(() => builder),
+    });
+
+    await expect(prepareLeadCall(lead.id)).resolves.toEqual({
+      ok: false,
+      error: "Not signed in.",
+    });
+    expect(pausePropertyEnrollments).not.toHaveBeenCalled();
+  });
+
+  it("carries the authenticated rep display name into a prepared lead call", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T15:00:00.000Z"));
+    const lead = {
+      id: "property-1",
+      address: "1 Auth Lane",
+      city: "Kansas City",
+      state: "MO",
+      is_dnc_locked: false,
+      homeowner_contact_id: "contact-1",
+      homeowner: {
+        id: "contact-1",
+        first_name: "Seller",
+        last_name: "One",
+        entity_name: null,
+        phone_1: "+18165550123",
+        phone_2: null,
+        phone_3: null,
+        do_not_contact: false,
+        sms_opted_out: false,
+      },
+    };
+    const builder = {
+      select: vi.fn(() => builder),
+      eq: vi.fn(() => builder),
+      maybeSingle: vi.fn().mockResolvedValue({ data: lead, error: null }),
+    };
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { email: "mel.rep@bmhgroupkc.com", user_metadata: { display_name: "Mel" } } },
+          error: null,
+        }),
+      },
+      from: vi.fn(() => builder),
+    });
+    pausePropertyEnrollments.mockResolvedValue(undefined);
+
+    await expect(prepareLeadCall(lead.id)).resolves.toMatchObject({
+      ok: true,
+      data: {
+        repName: "Mel",
+        name: "Seller One",
+        address: "1 Auth Lane",
+      },
+    });
   });
 
   it("runs disposition before the activity write, then booking and softphone resume", async () => {

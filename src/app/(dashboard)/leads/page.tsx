@@ -3,7 +3,7 @@ import Link from "next/link";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
-import { LEAD_SOURCES } from "@/lib/leads/create";
+import { LEAD_SOURCES } from "@/lib/leads/sources";
 import { createClient } from "@/lib/supabase/server";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
 

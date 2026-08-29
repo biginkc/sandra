@@ -53,6 +53,9 @@ function formatUsd(value: number) {
 function creditCopy(preflight: SkipTracePreflight | null) {
   if (!preflight) return "Checking Tracefy credits...";
   if (preflight.eligible === 0) return "No Tracefy credits needed yet.";
+  if (preflight.tracefyCreditsRequired === 0) {
+    return "Covered by saved results — no new Tracefy credits needed.";
+  }
   if (preflight.tracefyCreditStatus === "unavailable") {
     return `Tracefy credits could not be confirmed. Needed: ${preflight.tracefyCreditsRequired.toLocaleString()}.`;
   }
@@ -180,7 +183,8 @@ export function SkipTracePreflightDialog({
       if (onLaunchSkipTrace) {
         const result = await callAction(onLaunchSkipTrace(), {
           successMessage: launchSuccessMessage,
-          fallbackMessage: launchFallbackMessage ?? "Could not launch skip trace",
+          fallbackMessage:
+            launchFallbackMessage ?? "Could not launch skip trace",
         });
         if (!result.ok) {
           loadPreflight();
@@ -306,7 +310,8 @@ export function SkipTracePreflightDialog({
     hasCurrentPreflight &&
     preflight?.canLaunchSkipTrace === true &&
     launchDisabledReason === null;
-  const cassVerificationCount = preflight?.cassVerificationPropertyIds.length ?? 0;
+  const cassVerificationCount =
+    preflight?.cassVerificationPropertyIds.length ?? 0;
   const hasCassCandidates = hasCurrentPreflight && cassVerificationCount > 0;
   const hasCassFirstAction = hasCassCandidates && !cassStarted;
 
@@ -337,7 +342,10 @@ export function SkipTracePreflightDialog({
               <Metric label="Selected" value={preflight.requested} />
               <Metric label="Skip-trace eligible" value={preflight.eligible} />
               <Metric label="CASS verified" value={preflight.cassVerified} />
-              <Metric label="CASS not verified" value={preflight.cassUnverified} />
+              <Metric
+                label="CASS not verified"
+                value={preflight.cassUnverified}
+              />
               <Metric label="Can CASS now" value={cassVerificationCount} />
               <Metric label="Not eligible" value={preflight.notEligible} />
               <Metric
@@ -370,8 +378,8 @@ export function SkipTracePreflightDialog({
                 {cassStarted ? (
                   <div className="mt-3 flex flex-col gap-2 rounded-md bg-muted p-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
                     <span>
-                      CASS verification has started. Refresh counts after the job
-                      finishes.
+                      CASS verification has started. Refresh counts after the
+                      job finishes.
                     </span>
                     <Button
                       type="button"
@@ -429,7 +437,9 @@ export function SkipTracePreflightDialog({
             className="order-2 sm:order-none"
           >
             {launchButtonLabel ??
-              (mode === "approve" ? "Approve skip-trace" : "Skip trace verified only")}
+              (mode === "approve"
+                ? "Approve skip-trace"
+                : "Skip trace verified only")}
           </Button>
         </DialogFooter>
       </DialogContent>

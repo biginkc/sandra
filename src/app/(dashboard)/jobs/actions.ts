@@ -12,8 +12,10 @@ import {
 import { cassBulkWorkflow } from "@/workflows/cass-bulk";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { preflightSkipTrace } from "@/lib/skip-trace/actions";
 import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
 
 const JOB_ITEM_PAGE_SIZE = 500;
@@ -21,7 +23,9 @@ const JOB_ITEM_PAGE_SIZE = 500;
 async function readFailedJobItems(
   supabase: Awaited<ReturnType<typeof createClient>>,
   jobId: string,
-): Promise<Array<{ id: string; property_id: string | null; error_class: string | null }>> {
+): Promise<
+  Array<{ id: string; property_id: string | null; error_class: string | null }>
+> {
   const rows: Array<{
     id: string;
     property_id: string | null;
@@ -39,7 +43,8 @@ async function readFailedJobItems(
       .limit(JOB_ITEM_PAGE_SIZE);
     if (lastId) query = query.gt("id", lastId);
     const { data, error } = await query;
-    if (error) throw new Error(`job item recovery read failed: ${error.message}`);
+    if (error)
+      throw new Error(`job item recovery read failed: ${error.message}`);
     rows.push(...(data ?? []));
     if (!data || data.length < JOB_ITEM_PAGE_SIZE) break;
     lastId = data.at(-1)?.id ?? null;
@@ -132,7 +137,9 @@ export async function startQueuedCassJob(
         error: {
           code: "JOB_STATUS_FLIP_FAILED",
           message:
-            claimError instanceof Error ? claimError.message : String(claimError),
+            claimError instanceof Error
+              ? claimError.message
+              : String(claimError),
         },
       };
     }
@@ -159,7 +166,10 @@ export async function startQueuedCassJob(
 
     return ok({ total: propertyIds.length });
   } catch (e) {
-    reportError(e, { tags: { surface: "start_queued_cass" }, extra: { jobId } });
+    reportError(e, {
+      tags: { surface: "start_queued_cass" },
+      extra: { jobId },
+    });
     return errFromUnknown(e, "START_QUEUED_CASS_FAILED");
   }
 }
@@ -383,9 +393,10 @@ export async function retryFailedSkipTraceItems(
     );
     const retryableIds = new Set(
       erroredItems
-        .filter((r) =>
-          r.error_class === null ||
-          RETRYABLE_ERROR_CLASSES.includes(r.error_class as string),
+        .filter(
+          (r) =>
+            r.error_class === null ||
+            RETRYABLE_ERROR_CLASSES.includes(r.error_class as string),
         )
         .map((r) => r.property_id)
         .filter((id): id is string => typeof id === "string"),
@@ -426,8 +437,9 @@ export async function retryFailedSkipTraceItems(
           },
         };
       }
-      const fallback = (parent.input_params as { property_ids?: unknown } | null)
-        ?.property_ids;
+      const fallback = (
+        parent.input_params as { property_ids?: unknown } | null
+      )?.property_ids;
       propertyIds = Array.isArray(fallback)
         ? Array.from(
             new Set(
@@ -449,7 +461,23 @@ export async function retryFailedSkipTraceItems(
       }
     }
 
-    const { data: childRows, error: insertErr } = await createAdminClient().rpc(
+    const preflight = await preflightSkipTrace(propertyIds);
+    if (!preflight.ok) return preflight;
+    if (!preflight.data.canLaunchSkipTrace) {
+      return {
+        ok: false,
+        error: {
+          code: "SKIP_TRACE_PREFLIGHT_BLOCKED",
+          message:
+            preflight.data.eligible === 0
+              ? "No retryable property is currently eligible for skip tracing."
+              : "Tracefy credits could not be confirmed for this retry. Run preflight again before retrying.",
+        },
+      };
+    }
+
+    const adminClient = createAdminClient();
+    const { data: childRows, error: insertErr } = await adminClient.rpc(
       "create_skip_trace_retry_job",
       { p_parent_job_id: failedJobId, p_property_ids: propertyIds },
     );
@@ -465,6 +493,62 @@ export async function retryFailedSkipTraceItems(
     }
 
     if (childRow.created) {
+      const { data: authorizedChild, error: authorizationError } =
+        await adminClient
+          .from("jobs")
+          .update({
+            input_params: {
+              property_ids: propertyIds,
+              authorized_max_credits: preflight.data.tracefyCreditsRequired,
+              provider_pricing_version: "tracerfy-2026-08",
+            },
+          })
+          .eq("id", childRow.job_id)
+          .eq("org_id", parent.org_id)
+          .eq("type", "skip_trace")
+          .eq("status", "queued")
+          .is("provider_run_id", null)
+          .select("id")
+          .maybeSingle();
+      if (authorizationError || !authorizedChild) {
+        await adminClient
+          .from("jobs")
+          .update({
+            status: "failed",
+            error_class: "validation",
+            error_message:
+              "Retry could not persist its approved credit ceiling. Run preflight again before retrying.",
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", childRow.job_id)
+          .eq("org_id", parent.org_id)
+          .eq("status", "queued")
+          .is("provider_run_id", null);
+        return {
+          ok: false,
+          error: {
+            code: "SKIP_TRACE_AUTHORIZATION_FAILED",
+            message:
+              authorizationError?.message ??
+              "Retry job changed before its approved credit ceiling was saved.",
+          },
+        };
+      }
+
+      await recordLeadEvents(
+        propertyIds.map((propertyId) => ({
+          propertyId,
+          eventType: LEAD_EVENT_TYPES.SKIP_TRACE_REQUESTED,
+          actorType: "user" as const,
+          actorId: user!.id,
+          payload: {
+            job_id: childRow.job_id,
+            retry_of_job_id: failedJobId,
+            batch_id: childRow.job_id,
+            batch_count: propertyIds.length,
+          },
+        })),
+      );
       try {
         await start(skipTraceSubmitWorkflow, [
           { jobId: childRow.job_id, orgId: parent.org_id },
@@ -472,7 +556,10 @@ export async function retryFailedSkipTraceItems(
       } catch (e) {
         reportError(e, {
           tags: { surface: "retry_skip_trace_workflow_start" },
-          extra: { childId: childRow.job_id, propertyCount: propertyIds.length },
+          extra: {
+            childId: childRow.job_id,
+            propertyCount: propertyIds.length,
+          },
         });
       }
     }

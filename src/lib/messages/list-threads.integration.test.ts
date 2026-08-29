@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished } from "vitest";
 import { Client } from "pg";
 
 import { createTestClient } from "@tests/integration/client";
@@ -12,16 +12,33 @@ import {
 } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
-import { listThreadPage, listThreads } from "./list-threads";
+import {
+  listThreadPage,
+  listThreads,
+  type ThreadPageFilter,
+} from "./list-threads";
 import { ensureConversationIdForThread } from "./threading";
 
 const supabase = createTestClient();
 
-async function readScaleSnapshotUnderStatementTimeout(): Promise<{
+type ScaleSnapshotRow = {
+  thread_id: string;
+  property_status: string | null;
+  assignee_id: string | null;
+  unread_count: number;
+  needs_outcome: boolean;
+  ai_responder_status: string | null;
+  ai_disposition_review_id: string | null;
+};
+
+async function readScaleSnapshotUnderStatementTimeout(
+  filter: ThreadPageFilter = "all",
+  assigneeId: string | null = null,
+): Promise<{
   durationMs: number;
   snapshot: {
-    rows: unknown[];
-    counts: { all: number; unread: number; needs_outcome: number };
+    rows: ScaleSnapshotRow[];
+    counts: Record<ThreadPageFilter, number>;
     total: number;
   };
 }> {
@@ -38,21 +55,25 @@ async function readScaleSnapshotUnderStatementTimeout(): Promise<{
     const startedAt = performance.now();
     const result = await client.query<{
       snapshot: {
-        rows: unknown[];
-        counts: { all: number; unread: number; needs_outcome: number };
+        rows: ScaleSnapshotRow[];
+        counts: Record<ThreadPageFilter, number>;
         total: number;
       };
     }>(
       `select public.sms_inbox_thread_page_snapshot(
         $1::timestamptz,
-        'all'::text,
-        null::uuid,
+        $2::text,
+        $3::uuid,
         null::uuid,
         false,
         200,
         0
       ) as snapshot`,
-      [new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString()],
+      [
+        new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString(),
+        filter,
+        assigneeId,
+      ],
     );
     return {
       durationMs: performance.now() - startedAt,
@@ -167,6 +188,23 @@ describe("listThreads (integration)", () => {
 
   it("pages truthfully beyond the former 20,000-thread production ceiling", async () => {
     const total = 20_005;
+    const viewer = await createOrgUser(supabase, {
+      orgId: BMH_ORG_ID,
+      email: `thread-page-scale-${crypto.randomUUID()}@example.com`,
+      role: "member",
+    });
+    onTestFinished(async () => {
+      await supabase.auth.admin.deleteUser(viewer.userId).catch(() => {});
+    });
+    const otherUser = await createOrgUser(supabase, {
+      orgId: BMH_ORG_ID,
+      email: `thread-page-scale-other-${crypto.randomUUID()}@example.com`,
+      role: "member",
+    });
+    onTestFinished(async () => {
+      await supabase.auth.admin.deleteUser(otherUser.userId).catch(() => {});
+    });
+    const viewerId = viewer.userId;
     const contacts = Array.from({ length: total }, (_, index) => ({
       id: crypto.randomUUID(),
       first_name: `Scale ${index}`,
@@ -183,6 +221,7 @@ describe("listThreads (integration)", () => {
     }));
     const base = Date.now() - total * 1_000;
     const messages = contacts.map((contact, index) => ({
+      id: crypto.randomUUID(),
       channel: "sms" as const,
       direction: "inbound" as const,
       status: "received",
@@ -230,15 +269,215 @@ describe("listThreads (integration)", () => {
       if (historyError) throw historyError;
     }
 
-    const timedSnapshot = await readScaleSnapshotUnderStatementTimeout();
+    const { error: leadUpdateError } = await supabase
+      .from("properties")
+      .upsert([
+        {
+          ...properties[0]!,
+          status: "new_lead",
+          assigned_user_id: viewerId,
+        },
+        {
+          ...properties[1]!,
+          status: "contacted",
+          assigned_user_id: null,
+        },
+        {
+          ...properties[4]!,
+          status: "prospect",
+          assigned_user_id: viewerId,
+        },
+        {
+          ...properties[5]!,
+          status: "new_lead",
+          assigned_user_id: otherUser.userId,
+        },
+      ]);
+    if (leadUpdateError) throw leadUpdateError;
+
+    const { error: threadStateError } = await supabase
+      .from("message_threads")
+      .insert({
+        org_id: BMH_ORG_ID,
+        channel: "sms",
+        contact_id: contacts[2]!.id,
+        property_id: properties[2]!.id,
+        conversation_id: messages[2]!.conversation_id,
+        ai_responder_status: "escalated",
+      });
+    if (threadStateError) throw threadStateError;
+
+    // The table intentionally denies service-role writes; production creates
+    // reviews through its controlled RPC. Seed the read-path fixture directly
+    // through the isolated test database connection.
+    const testEnv = loadTestEnv();
+    const scaleConnectionString =
+      process.env.TEST_SUPABASE_DB_URL ?? testEnv.TEST_SUPABASE_DB_URL;
+    if (!scaleConnectionString) throw new Error("missing TEST_SUPABASE_DB_URL");
+    const scaleDb = new Client({ connectionString: scaleConnectionString });
+    await scaleDb.connect();
+    try {
+      await scaleDb.query("begin");
+      await scaleDb.query(
+        `update public.properties
+         set outreach_dispo = 'not_interested'
+         where id = $1 and org_id = $2`,
+        [properties[3]!.id, BMH_ORG_ID],
+      );
+      await scaleDb.query(
+        `insert into public.ai_disposition_reviews (
+           org_id, property_id, conversation_id, source_inbound_message_id,
+           disposition, ai_reason, status
+         ) values ($1, $2, $3, $4, 'not_interested', $5, 'pending')`,
+        [
+          BMH_ORG_ID,
+          properties[3]!.id,
+          messages[3]!.conversation_id,
+          messages[3]!.id,
+          "scale matrix pending review",
+        ],
+      );
+      await scaleDb.query("commit");
+    } catch (error) {
+      await scaleDb.query("rollback").catch(() => {});
+      throw error;
+    } finally {
+      await scaleDb.end();
+    }
+
+    const timedSnapshot = await readScaleSnapshotUnderStatementTimeout(
+      "all",
+      viewerId,
+    );
     expect(timedSnapshot.durationMs).toBeLessThan(7_000);
     expect(timedSnapshot.snapshot.total).toBe(total);
     expect(timedSnapshot.snapshot.rows).toHaveLength(200);
     expect(timedSnapshot.snapshot.counts).toMatchObject({
       all: total,
       unread: Math.ceil(total / 2),
-      needs_outcome: total,
+      needs_outcome: total - 1,
     });
+
+    const expectedFilterTotals: Record<ThreadPageFilter, number> = {
+      all: total,
+      unread: Math.ceil(total / 2),
+      needs_outcome: total - 1,
+      mine: 1,
+      unassigned: 1,
+      escalated: 1,
+      dispo: 1,
+    };
+    const exactScaleRows = {
+      mine: {
+        thread_id: messages[0]!.conversation_id,
+        property_status: "new_lead",
+        assignee_id: viewerId,
+      },
+      unassigned: {
+        thread_id: messages[1]!.conversation_id,
+        property_status: "contacted",
+        assignee_id: null,
+      },
+      escalated: {
+        thread_id: messages[2]!.conversation_id,
+        ai_responder_status: "escalated",
+      },
+      dispo: {
+        thread_id: messages[3]!.conversation_id,
+        needs_outcome: false,
+        ai_disposition_review_id: expect.any(String),
+      },
+    };
+    for (const filter of [
+      "unread",
+      "needs_outcome",
+      "mine",
+      "unassigned",
+      "escalated",
+      "dispo",
+    ] satisfies ThreadPageFilter[]) {
+      const filteredSnapshot =
+        await readScaleSnapshotUnderStatementTimeout(filter, viewerId);
+      expect(
+        filteredSnapshot.durationMs,
+        `${filter} snapshot duration`,
+      ).toBeLessThan(7_000);
+      expect(filteredSnapshot.snapshot.counts.all).toBe(total);
+      expect(filteredSnapshot.snapshot.total).toBe(
+        expectedFilterTotals[filter],
+      );
+      expect(filteredSnapshot.snapshot.counts[filter]).toBe(
+        expectedFilterTotals[filter],
+      );
+      expect(filteredSnapshot.snapshot.rows).toHaveLength(
+        Math.min(expectedFilterTotals[filter], 200),
+      );
+      if (filter === "unread") {
+        expect(
+          filteredSnapshot.snapshot.rows.every((row) => row.unread_count > 0),
+        ).toBe(true);
+      }
+      if (filter === "needs_outcome") {
+        expect(
+          filteredSnapshot.snapshot.rows.every((row) => row.needs_outcome),
+        ).toBe(true);
+      }
+      if (filter in exactScaleRows) {
+        expect(filteredSnapshot.snapshot.rows).toEqual([
+          expect.objectContaining(
+            exactScaleRows[filter as keyof typeof exactScaleRows],
+          ),
+        ]);
+      }
+    }
+
+    const authenticatedClient = clientForUser(viewer.jwt);
+    for (const filter of [
+      "mine",
+      "unassigned",
+      "escalated",
+      "dispo",
+    ] satisfies ThreadPageFilter[]) {
+      const page = await listThreadPage(authenticatedClient, {
+        filter,
+        currentUserId: viewerId,
+        includeThreadId: null,
+        hideNoise: false,
+        page: 1,
+      });
+      const exactThreadByFilter: Record<
+        "mine" | "unassigned" | "escalated" | "dispo",
+        string
+      > = {
+        mine: messages[0]!.conversation_id,
+        unassigned: messages[1]!.conversation_id,
+        escalated: messages[2]!.conversation_id,
+        dispo: messages[3]!.conversation_id,
+      };
+      expect(page.threads.map((thread) => thread.threadId)).toEqual([
+        exactThreadByFilter[filter],
+      ]);
+      expect(page.counts[filter]).toBe(1);
+      if (filter === "mine") {
+        expect(page.threads[0]).toMatchObject({
+          propertyStatus: "new_lead",
+          assigneeId: viewerId,
+        });
+      }
+      if (filter === "unassigned") {
+        expect(page.threads[0]).toMatchObject({
+          propertyStatus: "contacted",
+          assigneeId: null,
+        });
+      }
+      if (filter === "escalated") {
+        expect(page.threads[0]?.aiResponderStatus).toBe("escalated");
+      }
+      if (filter === "dispo") {
+        expect(page.threads[0]?.aiDispositionReview).not.toBeNull();
+        expect(page.threads[0]?.needsOutcome).toBe(false);
+      }
+    }
 
     const firstPageStartedAt = performance.now();
     const page = await listThreadPage(supabase, {
@@ -251,7 +490,7 @@ describe("listThreads (integration)", () => {
     const firstPageDurationMs = performance.now() - firstPageStartedAt;
     expect(page.counts.all).toBe(total);
     expect(page.counts.unread).toBe(Math.ceil(total / 2));
-    expect(page.counts.needs_outcome).toBe(total);
+    expect(page.counts.needs_outcome).toBe(total - 1);
     expect(page.total).toBe(total);
     expect(page.threads).toHaveLength(200);
     expect(page.threads[0]?.lastMessageBody).toBe(
@@ -294,9 +533,7 @@ describe("listThreads (integration)", () => {
     const dispositioned = await seedConversation({
       contactName: "Dispositioned",
       phone: "+18165554102",
-      messages: [
-        { direction: "inbound", body: "has outcome", read: true },
-      ],
+      messages: [{ direction: "inbound", body: "has outcome", read: true }],
     });
     const escalated = await seedConversation({
       contactName: "Escalated",
@@ -326,7 +563,9 @@ describe("listThreads (integration)", () => {
         .eq("property_id", escalated.propertyId)
         .single();
     if (escalatedMessageError || !escalatedMessage?.conversation_id) {
-      throw escalatedMessageError ?? new Error("missing escalated conversation");
+      throw (
+        escalatedMessageError ?? new Error("missing escalated conversation")
+      );
     }
     const { error: escalationError } = await supabase
       .from("message_threads")
@@ -352,7 +591,9 @@ describe("listThreads (integration)", () => {
       unassigned: 2,
       unread: 2,
       escalated: 1,
-      dispo: 1,
+      // An applied property outcome is not a pending Sandra Dispo review.
+      // That queue is backed only by ai_disposition_reviews.
+      dispo: 0,
       needs_outcome: 2,
     });
     expect(all.total).toBe(3);
@@ -368,10 +609,8 @@ describe("listThreads (integration)", () => {
       hideNoise: true,
       page: 1,
     });
-    expect(dispositionPage.total).toBe(1);
-    expect(dispositionPage.threads[0]?.contactId).toBe(
-      dispositioned.contactId,
-    );
+    expect(dispositionPage.total).toBe(0);
+    expect(dispositionPage.threads).toEqual([]);
 
     const withRestricted = await listThreadPage(supabase, {
       filter: "all",

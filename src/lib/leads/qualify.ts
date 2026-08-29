@@ -1,6 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import type { Database } from "@/lib/supabase/types";
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type QualifyOutcome =
   | { status: "qualified" }
@@ -65,5 +69,15 @@ export async function qualifyProperty(
       ? { status: "failed", message: "Qualification did not save" }
       : { status: "already_qualified" };
   }
+  const actor =
+    qualifiedBy && UUID_PATTERN.test(qualifiedBy)
+      ? ({ actorType: "user", actorId: qualifiedBy } as const)
+      : ({ actorType: "system" } as const);
+  await recordLeadEvent({
+    propertyId,
+    ...actor,
+    eventType: LEAD_EVENT_TYPES.QUALIFIED,
+    payload: { from: "prospect", to: "new_lead" },
+  });
   return { status: "qualified" };
 }

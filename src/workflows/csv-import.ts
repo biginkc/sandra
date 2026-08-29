@@ -53,6 +53,7 @@ import {
   type TelnyxLineTypeLookup,
 } from "@/lib/line-type-lookup/telnyx";
 import { enrollLead } from "@/lib/sequences/enrollment";
+import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
 import { trimRowsToMapping } from "@/lib/csv/trim-rows";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/types";
@@ -399,15 +400,27 @@ export async function enrollJobBatch(
   let enrolled = 0;
   let skipped = 0;
   let failed = 0;
+  const enrolledRows: Array<{
+    propertyId: string;
+    enrollmentId: string;
+    sequenceLabel: string;
+  }> = [];
 
   for (const propertyId of propertyIds) {
     try {
       const outcome = await enrollLead(supabase, {
         sequenceId: args.sequenceId,
         propertyId,
+        deferEvent: true,
       });
-      if (outcome.status === "enrolled") enrolled++;
-      else if (
+      if (outcome.status === "enrolled") {
+        enrolled++;
+        enrolledRows.push({
+          propertyId,
+          enrollmentId: outcome.enrollmentId,
+          sequenceLabel: outcome.sequenceLabel,
+        });
+      } else if (
         outcome.status === "failed" ||
         outcome.status === "sequence_not_found" ||
         outcome.status === "sequence_inactive" ||
@@ -423,6 +436,26 @@ export async function enrollJobBatch(
 
   if (enrolled + skipped + failed !== propertyIds.length) {
     throw new Error("sequence enrollment count conservation failed");
+  }
+
+  if (enrolledRows.length > 0) {
+    const batchId = crypto.randomUUID();
+    await recordLeadEvents(
+      enrolledRows.map((row) => ({
+        propertyId: row.propertyId,
+        actorType: "system" as const,
+        eventType: LEAD_EVENT_TYPES.SEQUENCE_ENROLLED,
+        payload: {
+          enrollment_id: row.enrollmentId,
+          sequence_id: args.sequenceId,
+          label: row.sequenceLabel,
+          batch_id: batchId,
+          batch_count: enrolledRows.length,
+        },
+        sourceType: "sequence_enrollments.created",
+        sourceId: row.enrollmentId,
+      })),
+    );
   }
 
   return { enrolled, skipped, failed };
@@ -787,7 +820,11 @@ async function triggerCassStep(args: {
     await excludeComplianceLockedJobProperties(
       supabase,
       args.parentJobId,
-      await selectCassEligibleProperties(supabase, args.parentJobId, args.orgId),
+      await selectCassEligibleProperties(
+        supabase,
+        args.parentJobId,
+        args.orgId,
+      ),
     ),
     args.orgId,
   );
@@ -940,9 +977,7 @@ async function selectNonDncPropertyIds(
     }
     if (suppressionPage) suppressed.push(...suppressionPage);
   }
-  const suppressedPhones = new Set(
-    suppressed.map((row) => row.phone_e164),
-  );
+  const suppressedPhones = new Set(suppressed.map((row) => row.phone_e164));
 
   return data
     .filter((property) => {

@@ -16,6 +16,7 @@ import {
   InboxFilters,
   type InboxFilter,
   type InboxFilterCounts,
+  type PendingInboxChange,
 } from "./inbox-filters";
 import { InboxThreadList } from "./inbox-thread-list";
 import { QueuePanel, type QueuedRow } from "./queue-panel";
@@ -68,6 +69,7 @@ const THREAD_FILTERS = new Set<InboxFilter>([
   "needs_outcome",
 ]);
 const LIVE_CLOCK_INTERVAL_MS = 30_000;
+const INBOX_CHANGE_TIMEOUT_MS = 10_000;
 
 export function CockpitView({
   activeTab,
@@ -95,6 +97,11 @@ export function CockpitView({
   const searchParams = useSearchParams();
   const liveNowMs = useLiveNow(nowMs);
   const inboxTotalPages = Math.max(Math.ceil(inboxTotal / inboxPageSize), 1);
+  const [pendingInboxChange, setPendingInboxChange] =
+    useState<PendingInboxChange | null>(null);
+  const [completedInboxChange, setCompletedInboxChange] =
+    useState<PendingInboxChange | null>(null);
+  const [inboxChangeError, setInboxChangeError] = useState<string | null>(null);
 
   // One live stats source for the Outbox tab badge + the stats banner,
   // so the two never show different numbers. Seeds from the server
@@ -128,6 +135,9 @@ export function CockpitView({
   });
 
   const setTab = (next: string) => {
+    setPendingInboxChange(null);
+    setCompletedInboxChange(null);
+    setInboxChangeError(null);
     const sp = new URLSearchParams(searchParams.toString());
     if (next === "inbox") {
       sp.delete("tab");
@@ -139,12 +149,15 @@ export function CockpitView({
   };
   const setInboxPage = useCallback(
     (nextPage: number) => {
+      setPendingInboxChange(null);
+      setCompletedInboxChange(null);
+      setInboxChangeError(null);
       const sp = new URLSearchParams(searchParams.toString());
       if (nextPage <= 1) sp.delete("inboxPage");
       else sp.set("inboxPage", String(nextPage));
       sp.delete("thread");
       const qs = sp.toString();
-      router.replace(qs ? `/messages?${qs}` : "/messages");
+      router.push(qs ? `/messages?${qs}` : "/messages");
     },
     [router, searchParams],
   );
@@ -188,6 +201,9 @@ export function CockpitView({
 
   const handleSelectThread = useCallback(
     (threadId: string) => {
+      setPendingInboxChange(null);
+      setCompletedInboxChange(null);
+      setInboxChangeError(null);
       setPendingThreadId(threadId);
       setMobileShowsDetail(true);
       setFocusReturnThreadId(null);
@@ -205,6 +221,9 @@ export function CockpitView({
   }, [serverSelectedThreadId]);
 
   const handleBackToList = useCallback(() => {
+    setPendingInboxChange(null);
+    setCompletedInboxChange(null);
+    setInboxChangeError(null);
     const returningThreadId =
       pendingThreadId ?? threadDetail?.threadId ?? selectedThreadId ?? null;
     setPendingThreadId(null);
@@ -281,6 +300,101 @@ export function CockpitView({
   const isLoadingThread =
     pendingThreadId !== null && selectedThreadId !== pendingThreadId;
 
+  const handleInboxFilterChange = useCallback(
+    (next: InboxFilter) => {
+      const resetsCurrentList =
+        next === filter &&
+        (searchParams.has("thread") || searchParams.has("inboxPage"));
+      if (
+        pendingInboxChange !== null ||
+        (next === filter && !resetsCurrentList)
+      ) {
+        return;
+      }
+
+      setPendingInboxChange({
+        kind: "filter",
+        value: next,
+        resetList: resetsCurrentList,
+      });
+      setCompletedInboxChange(null);
+      setInboxChangeError(null);
+      setPendingThreadId(null);
+      setMobileShowsDetail(false);
+      const sp = new URLSearchParams(searchParams.toString());
+      if (next === "all") sp.delete("filter");
+      else sp.set("filter", next);
+      sp.delete("thread");
+      sp.delete("inboxPage");
+      const qs = sp.toString();
+      router.push(qs ? `/messages?${qs}` : "/messages");
+    },
+    [filter, pendingInboxChange, router, searchParams],
+  );
+
+  const handleHideDncChange = useCallback(
+    (nextHideDnc: boolean) => {
+      if (pendingInboxChange !== null || nextHideDnc === hideDnc) {
+        return;
+      }
+
+      setPendingInboxChange({ kind: "hideDnc", value: nextHideDnc });
+      setCompletedInboxChange(null);
+      setInboxChangeError(null);
+      setPendingThreadId(null);
+      setMobileShowsDetail(false);
+      const sp = new URLSearchParams(searchParams.toString());
+      if (nextHideDnc) sp.delete("hideDnc");
+      else sp.set("hideDnc", "0");
+      sp.delete("thread");
+      sp.delete("inboxPage");
+      const qs = sp.toString();
+      router.push(qs ? `/messages?${qs}` : "/messages");
+    },
+    [hideDnc, pendingInboxChange, router, searchParams],
+  );
+
+  useEffect(() => {
+    if (pendingInboxChange === null) return undefined;
+    const settled =
+      pendingInboxChange.kind === "filter"
+        ? pendingInboxChange.value === filter &&
+          (!pendingInboxChange.resetList ||
+            (inboxPage === 1 && serverSelectedThreadId === null))
+        : pendingInboxChange.value === hideDnc;
+    const timeout = window.setTimeout(
+      () => {
+        setPendingInboxChange(null);
+        if (settled) {
+          setCompletedInboxChange(pendingInboxChange);
+        } else {
+          setCompletedInboxChange(null);
+          setInboxChangeError("Filter update timed out. Try again.");
+        }
+      },
+      settled ? 0 : INBOX_CHANGE_TIMEOUT_MS,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [filter, hideDnc, inboxPage, pendingInboxChange, serverSelectedThreadId]);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setInboxChangeError(null), 0);
+    return () => window.clearTimeout(timeout);
+  }, [filter, hideDnc, inboxPage, serverSelectedThreadId]);
+
+  useEffect(() => {
+    const cancelPendingOnHistoryNavigation = () => {
+      setPendingInboxChange(null);
+      setCompletedInboxChange(null);
+      setInboxChangeError(null);
+    };
+    window.addEventListener("popstate", cancelPendingOnHistoryNavigation);
+    return () =>
+      window.removeEventListener("popstate", cancelPendingOnHistoryNavigation);
+  }, []);
+
+  const isFilterPending = pendingInboxChange !== null;
+
   return (
     <Page className="pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-8">
       <PageHeader
@@ -313,7 +427,7 @@ export function CockpitView({
       >
         <TabButton
           label="Inbox"
-          count={inboxTotal}
+          count={showThreadList ? inboxTotal : filterCounts[filter]}
           active={activeTab === "inbox"}
           onClick={() => setTab("inbox")}
           testId="tab-inbox"
@@ -341,94 +455,106 @@ export function CockpitView({
             showAssignmentChips={currentUserId !== null}
             hideDnc={hideDnc}
             hiddenDncCount={hiddenDncCount}
+            pendingChange={pendingInboxChange}
+            completedChange={completedInboxChange}
+            errorMessage={inboxChangeError}
+            onFilterChange={handleInboxFilterChange}
+            onHideDncChange={handleHideDncChange}
           />
 
-          {showThreadList && (
-            <div
-              className="grid min-h-[500px] grid-cols-1 gap-3 md:h-[calc(100vh-260px)] md:grid-cols-[minmax(280px,360px)_1fr] md:gap-6"
-              data-testid="inbox-cockpit-grid"
-            >
+          <div
+            aria-busy={isFilterPending}
+            inert={isFilterPending}
+            className="rounded-lg ring-0"
+            data-testid="inbox-filter-results"
+          >
+            {showThreadList && (
               <div
-                className={`${mobileShowsDetail ? "hidden" : "block"} min-h-0 md:block`}
-                data-testid="inbox-list-view"
+                className="grid min-h-[500px] grid-cols-1 gap-3 md:h-[calc(100vh-260px)] md:grid-cols-[minmax(280px,360px)_1fr] md:gap-6"
+                data-testid="inbox-cockpit-grid"
               >
-                <div className="flex h-full min-h-0 flex-col gap-2">
-                  <div className="min-h-0 flex-1">
-                    <InboxThreadList
-                      initial={threads}
-                      selectedThreadId={
-                        pendingThreadId ??
-                        threadDetail?.threadId ??
-                        selectedThreadId ??
-                        null
-                      }
-                      currentUserId={currentUserId}
-                      onSelectThread={handleSelectThread}
-                      emptyMessage={emptyInboxMessage(filter, hiddenDncCount)}
-                      nowMs={liveNowMs}
-                    />
+                <div
+                  className={`${mobileShowsDetail ? "hidden" : "block"} min-h-0 md:block`}
+                  data-testid="inbox-list-view"
+                >
+                  <div className="flex h-full min-h-0 flex-col gap-2">
+                    <div className="min-h-0 flex-1">
+                      <InboxThreadList
+                        initial={threads}
+                        selectedThreadId={
+                          pendingThreadId ??
+                          threadDetail?.threadId ??
+                          selectedThreadId ??
+                          null
+                        }
+                        currentUserId={currentUserId}
+                        onSelectThread={handleSelectThread}
+                        emptyMessage={emptyInboxMessage(filter, hiddenDncCount)}
+                        nowMs={liveNowMs}
+                      />
+                    </div>
+                    {inboxTotalPages > 1 ? (
+                      <nav
+                        aria-label="Inbox pages"
+                        className="flex min-h-11 items-center justify-between gap-2 text-xs text-muted-foreground"
+                        data-testid="inbox-pagination"
+                      >
+                        <button
+                          type="button"
+                          className="min-h-11 rounded-md border px-3 font-semibold disabled:opacity-40"
+                          disabled={inboxPage <= 1}
+                          onClick={() => setInboxPage(inboxPage - 1)}
+                        >
+                          Previous
+                        </button>
+                        <span className="text-center" aria-live="polite">
+                          Page {inboxPage} of {inboxTotalPages} ·{" "}
+                          {inboxTotal.toLocaleString()} conversations
+                        </span>
+                        <button
+                          type="button"
+                          className="min-h-11 rounded-md border px-3 font-semibold disabled:opacity-40"
+                          disabled={inboxPage >= inboxTotalPages}
+                          onClick={() => setInboxPage(inboxPage + 1)}
+                        >
+                          Next
+                        </button>
+                      </nav>
+                    ) : null}
                   </div>
-                  {inboxTotalPages > 1 ? (
-                    <nav
-                      aria-label="Inbox pages"
-                      className="flex min-h-11 items-center justify-between gap-2 text-xs text-muted-foreground"
-                      data-testid="inbox-pagination"
-                    >
-                      <button
-                        type="button"
-                        className="min-h-11 rounded-md border px-3 font-semibold disabled:opacity-40"
-                        disabled={inboxPage <= 1}
-                        onClick={() => setInboxPage(inboxPage - 1)}
-                      >
-                        Previous
-                      </button>
-                      <span className="text-center" aria-live="polite">
-                        Page {inboxPage} of {inboxTotalPages} ·{" "}
-                        {inboxTotal.toLocaleString()} conversations
-                      </span>
-                      <button
-                        type="button"
-                        className="min-h-11 rounded-md border px-3 font-semibold disabled:opacity-40"
-                        disabled={inboxPage >= inboxTotalPages}
-                        onClick={() => setInboxPage(inboxPage + 1)}
-                      >
-                        Next
-                      </button>
-                    </nav>
-                  ) : null}
+                </div>
+                <div
+                  className={`${mobileShowsDetail ? "block" : "hidden"} min-h-0 md:block`}
+                  data-testid="inbox-detail-view"
+                >
+                  <InboxDetail
+                    data={threadDetail}
+                    isLoading={isLoadingThread}
+                    assigneeEmails={assigneeEmails}
+                    currentUserId={currentUserId}
+                    onBackToList={handleBackToList}
+                    nowMs={liveNowMs}
+                  />
                 </div>
               </div>
-              <div
-                className={`${mobileShowsDetail ? "block" : "hidden"} min-h-0 md:block`}
-                data-testid="inbox-detail-view"
-              >
-                <InboxDetail
-                  data={threadDetail}
-                  isLoading={isLoadingThread}
-                  assigneeEmails={assigneeEmails}
-                  currentUserId={currentUserId}
-                  onBackToList={handleBackToList}
-                  nowMs={liveNowMs}
-                />
-              </div>
-            </div>
-          )}
+            )}
 
-          {filter === "unknown" && (
-            <UnknownSenderList
-              senders={unknownSenders}
-              showRestore={false}
-              nowMs={liveNowMs}
-            />
-          )}
+            {filter === "unknown" && (
+              <UnknownSenderList
+                senders={unknownSenders}
+                showRestore={false}
+                nowMs={liveNowMs}
+              />
+            )}
 
-          {filter === "dismissed" && (
-            <UnknownSenderList
-              senders={unknownSenders}
-              showRestore={true}
-              nowMs={liveNowMs}
-            />
-          )}
+            {filter === "dismissed" && (
+              <UnknownSenderList
+                senders={unknownSenders}
+                showRestore={true}
+                nowMs={liveNowMs}
+              />
+            )}
+          </div>
         </div>
       ) : (
         <div

@@ -24,7 +24,7 @@ import { detectVendor, getPresetById } from "@/lib/csv/presets";
 import type { VendorPresetId } from "@/lib/csv/presets/types";
 import { xlsxBufferToCsvFile } from "@/lib/csv/xlsx-to-csv-file";
 import { cn } from "@/lib/utils";
-import { LEAD_SOURCES } from "@/lib/leads/create";
+import { LEAD_SOURCES } from "@/lib/leads/sources";
 import {
   Select,
   SelectContent,

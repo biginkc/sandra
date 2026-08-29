@@ -7,6 +7,7 @@ import { listAdminUserIds } from "@/lib/auth/admins";
 import { CASS_COST_PER_LOOKUP_USD } from "@/lib/enrichment/cass-job";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
 import {
   dispatchJobCompleted,
   dispatchSkipTraceRequested,
@@ -16,12 +17,20 @@ import type { Json } from "@/lib/supabase/types";
 import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
 
 import {
+  normalizeAddress,
+  normalizeAddressForMatch,
+  readCacheMany,
+  reusableCachedResult,
+} from "./cache";
+import {
   buildSkipTraceEligibilityAudit,
   resolveSkipTraceEligibility,
   skipTraceAudienceDescription,
   skipTraceAudienceTitle,
 } from "./eligibility";
 import { getSkipTraceProvider } from "./registry";
+import { tracerfyBatchCreditLimit } from "./providers/tracerfy";
+import type { SkipTraceInput } from "./types";
 
 /** Max rows per single Tracefy POST. Their server rejects request
  *  bodies past ~2.5 MB with a generic HTML 400 before any field
@@ -56,16 +65,32 @@ export type SkipTracePreflight = {
 type InternalSkipTracePreflight = SkipTracePreflight & {
   eligiblePropertyIds: string[];
   orgId: string | null;
+  hasMixedOrganizations: boolean;
+  tracefyCreditsRequiredByPart: number[];
 };
 
-function tracefyCreditsRequired(eligibleCount: number): number {
-  if (eligibleCount <= 0) return 0;
-  let required = 0;
-  for (let i = 0; i < eligibleCount; i += PROVIDER_BATCH_MAX) {
-    const partCount = Math.min(PROVIDER_BATCH_MAX, eligibleCount - i);
-    required += partCount === 1 ? 5 : partCount;
+function tracefyCreditsRequired(providerBoundParts: SkipTraceInput[][]): {
+  total: number;
+  byPart: number[];
+} {
+  const byPart: number[] = [];
+  for (const part of providerBoundParts) {
+    if (part.length === 0) {
+      byPart.push(0);
+      continue;
+    }
+    if (part.length === 1) {
+      byPart.push(5);
+      continue;
+    }
+    const uniqueByAddress = new Map<string, SkipTraceInput>();
+    for (const input of part) {
+      const key = normalizeAddressForMatch(input);
+      if (!uniqueByAddress.has(key)) uniqueByAddress.set(key, input);
+    }
+    byPart.push(tracerfyBatchCreditLimit([...uniqueByAddress.values()]));
   }
-  return required;
+  return { total: byPart.reduce((sum, value) => sum + value, 0), byPart };
 }
 
 async function getTracefyCreditState(required: number): Promise<{
@@ -97,6 +122,11 @@ async function buildSkipTracePreflight(
   const rows: Array<{
     id: string;
     org_id: string | null;
+    address: string;
+    city: string | null;
+    state: string;
+    zip: string | null;
+    homeowner_contact_id: string | null;
     skip_trace_disabled: boolean;
     cass_status: string;
   }> = [];
@@ -104,7 +134,9 @@ async function buildSkipTracePreflight(
   for (let i = 0; i < propertyIds.length; i += 500) {
     const { data, error } = await supabase
       .from("properties")
-      .select("id, org_id, skip_trace_disabled, cass_status")
+      .select(
+        "id, org_id, address, city, state, zip, homeowner_contact_id, skip_trace_disabled, cass_status",
+      )
       .in("id", propertyIds.slice(i, i + 500));
     if (error) {
       throw new Error(error.message);
@@ -121,8 +153,59 @@ async function buildSkipTracePreflight(
     (p) => !p.skip_trace_disabled && p.cass_status !== "verified",
   );
   const killSwitched = rows.filter((p) => p.skip_trace_disabled);
-  const required = tracefyCreditsRequired(allowed.length);
-  const creditState = await getTracefyCreditState(required);
+  const eligibleOrgIds = new Set(
+    allowed.map((property) => property.org_id).filter(Boolean),
+  );
+  const hasMixedOrganizations = eligibleOrgIds.size > 1;
+
+  const reusablePropertyIds = new Set<string>();
+  const provider = getSkipTraceProvider();
+  const eligibleOrgId =
+    eligibleOrgIds.size === 1 ? ([...eligibleOrgIds][0] ?? null) : null;
+  if (provider && eligibleOrgId) {
+    const normalizedByPropertyId = new Map(
+      allowed.map((property) => [
+        property.id,
+        normalizeAddress({
+          address: property.address,
+          city: property.city,
+          state: property.state,
+          zip: property.zip,
+        }),
+      ]),
+    );
+    const cache = await readCacheMany(
+      supabase,
+      eligibleOrgId,
+      provider.providerId,
+      [...normalizedByPropertyId.values()],
+    );
+    for (const property of allowed) {
+      const normalized = normalizedByPropertyId.get(property.id);
+      const cached = normalized ? cache.get(normalized) : null;
+      if (cached && reusableCachedResult(provider, cached, property.id)) {
+        reusablePropertyIds.add(property.id);
+      }
+    }
+  }
+
+  const providerBoundParts: SkipTraceInput[][] = [];
+  for (let i = 0; i < allowed.length; i += PROVIDER_BATCH_MAX) {
+    providerBoundParts.push(
+      allowed
+        .slice(i, i + PROVIDER_BATCH_MAX)
+        .filter((property) => !reusablePropertyIds.has(property.id))
+        .map((property) => ({
+          propertyId: property.id,
+          address: property.address,
+          city: property.city ?? "",
+          state: property.state,
+          zip: property.zip,
+        })),
+    );
+  }
+  const required = tracefyCreditsRequired(providerBoundParts);
+  const creditState = await getTracefyCreditState(required.total);
 
   return {
     requested: propertyIds.length,
@@ -131,16 +214,33 @@ async function buildSkipTracePreflight(
     cassUnverified: cassUnverified.length,
     notEligible: propertyIds.length - allowed.length,
     killSwitchSkipped: killSwitched.length,
-    tracefyCreditsRequired: required,
+    tracefyCreditsRequired: required.total,
     tracefyCreditsAvailable: creditState.available,
     tracefyCreditStatus: creditState.status,
     canLaunchSkipTrace:
-      allowed.length > 0 && creditState.status === "sufficient",
+      allowed.length > 0 &&
+      !hasMixedOrganizations &&
+      creditState.status === "sufficient",
     estimatedCassVerificationCostUsd:
       cassVerificationCandidates.length * CASS_COST_PER_LOOKUP_USD,
     cassVerificationPropertyIds: cassVerificationCandidates.map((p) => p.id),
     eligiblePropertyIds: allowed.map((p) => p.id),
-    orgId: allowed[0]?.org_id ?? rows[0]?.org_id ?? null,
+    orgId:
+      eligibleOrgIds.size === 1
+        ? ([...eligibleOrgIds][0] ?? null)
+        : (rows[0]?.org_id ?? null),
+    hasMixedOrganizations,
+    tracefyCreditsRequiredByPart: required.byPart,
+  };
+}
+
+function mixedOrganizationError(): Result<never> {
+  return {
+    ok: false,
+    error: {
+      code: "MIXED_ORGANIZATIONS",
+      message: "Select properties from one organization at a time.",
+    },
   };
 }
 
@@ -284,11 +384,12 @@ export async function preflightSkipTrace(
       };
     }
 
-    return ok(
-      publicPreflight(
-        await buildSkipTracePreflight(supabase, uniquePropertyIds(propertyIds)),
-      ),
+    const preflight = await buildSkipTracePreflight(
+      supabase,
+      uniquePropertyIds(propertyIds),
     );
+    if (preflight.hasMixedOrganizations) return mixedOrganizationError();
+    return ok(publicPreflight(preflight));
   } catch (e) {
     reportError(e, { tags: { surface: "preflight_skip_trace" } });
     return errFromUnknown(e, "PREFLIGHT_SKIP_TRACE_FAILED");
@@ -319,6 +420,7 @@ export async function requestSkipTrace(
 
     const requestedIds = uniquePropertyIds(propertyIds);
     const preflight = await buildSkipTracePreflight(supabase, requestedIds);
+    if (preflight.hasMixedOrganizations) return mixedOrganizationError();
     const killSwitchSkipped = preflight.killSwitchSkipped;
     const cassSkipped = preflight.cassVerificationPropertyIds.length;
     if (preflight.eligible === 0) {
@@ -382,7 +484,29 @@ export async function requestSkipTrace(
       parts.push(eligibleIds.slice(i, i + PROVIDER_BATCH_MAX));
     }
 
-    const jobIds: string[] = [];
+    const batchId = crypto.randomUUID();
+    const createdParts: Array<{ jobId: string; propertyIds: string[] }> = [];
+    const recordCreatedRequests = async () => {
+      const batchCount = createdParts.reduce(
+        (count, part) => count + part.propertyIds.length,
+        0,
+      );
+      await recordLeadEvents(
+        createdParts.flatMap((part) =>
+          part.propertyIds.map((propertyId) => ({
+            propertyId,
+            eventType: LEAD_EVENT_TYPES.SKIP_TRACE_REQUESTED,
+            actorType: "user" as const,
+            actorId: user.id,
+            payload: {
+              job_id: part.jobId,
+              batch_id: batchId,
+              batch_count: batchCount,
+            },
+          })),
+        ),
+      );
+    };
     for (let p = 0; p < parts.length; p++) {
       const partIds = parts[p];
       const partLabel =
@@ -401,12 +525,18 @@ export async function requestSkipTrace(
           description: isAdmin
             ? `Admin-initiated; running immediately${partSkippedSuffix}`
             : `Awaiting admin approval (requested by ${user.email ?? "VA"})${partSkippedSuffix}`,
-          input_params: { property_ids: partIds },
+          input_params: {
+            property_ids: partIds,
+            authorized_max_credits:
+              preflight.tracefyCreditsRequiredByPart[p] ?? 0,
+            provider_pricing_version: "tracerfy-2026-08",
+          },
         })
         .select("id")
         .single();
 
       if (insertErr || !jobRow) {
+        await recordCreatedRequests();
         return {
           ok: false,
           error: {
@@ -415,8 +545,10 @@ export async function requestSkipTrace(
           },
         };
       }
-      jobIds.push(jobRow.id);
+      createdParts.push({ jobId: jobRow.id, propertyIds: partIds });
     }
+    await recordCreatedRequests();
+    const jobIds = createdParts.map((part) => part.jobId);
 
     if (isAdmin) {
       // Run immediately via durable Workflow, not a raw after() runner.
@@ -612,6 +744,11 @@ export async function approveSkipTraceJob(
     );
     const creditGate = await requireTracefyCredits(preflight);
     if (!creditGate.ok) return creditGate;
+    const approvedInputParams = {
+      ...(nextInputParams as Record<string, Json | undefined>),
+      authorized_max_credits: preflight.tracefyCreditsRequired,
+      provider_pricing_version: "tracerfy-2026-08",
+    } as unknown as Json;
 
     const { data: claimedJob, error: claimErr } = await supabase
       .from("jobs")
@@ -623,7 +760,7 @@ export async function approveSkipTraceJob(
           eligibility.eligibleIds.length,
           audit.total,
         ),
-        input_params: nextInputParams,
+        input_params: approvedInputParams,
         result_summary: nextResultSummary,
         description: skipTraceAudienceDescription(
           `Approved by ${user?.email ?? "admin"}. ${job.description ?? ""}`.trim(),

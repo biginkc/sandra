@@ -41,11 +41,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  CASS_COST_PER_LOOKUP_USD,
-  isAwaitingManualStart,
-} from "@/lib/enrichment/cass-job";
+import { isAwaitingManualStart } from "@/lib/enrichment/cass-job-state";
 import { callAction } from "@/lib/errors/call-action";
+import { CASS_COST_PER_LOOKUP_USD } from "@/lib/provider-pricing";
 import {
   denySkipTraceJob,
 } from "@/lib/skip-trace/actions";

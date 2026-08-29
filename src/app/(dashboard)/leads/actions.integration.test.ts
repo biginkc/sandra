@@ -43,6 +43,17 @@ describe("updatePropertyStatus (integration)", () => {
       .eq("id", id)
       .single();
     expect(data?.status).toBe("contacted");
+
+    const { data: events } = await testClient
+      .from("lead_events")
+      .select("event_type, payload")
+      .eq("property_id", id);
+    expect(events).toEqual([
+      {
+        event_type: "status_changed",
+        payload: { from: "new_lead", to: "contacted" },
+      },
+    ]);
   });
 
   it("bumps updated_at when status changes", async () => {
@@ -119,6 +130,11 @@ describe("updatePropertyStatus (integration)", () => {
       ok: true,
       data: { propertyId: id, status: "contacted" },
     });
+    const { count } = await testClient
+      .from("lead_events")
+      .select("id", { count: "exact", head: true })
+      .eq("property_id", id);
+    expect(count).toBe(0);
   });
 
   it("qualifyLeadsBulk collects per-id failures without aborting the batch", async () => {

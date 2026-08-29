@@ -42,7 +42,11 @@ describe("lead detail v2 layout contract", () => {
     expect(note).toBeGreaterThan(composers);
     expect(source).toContain("inlineReplyUnavailable");
     expect(source).toContain(
-      "smsPresentation.smsRestricted || inlineReplyUnavailable",
+      "restricted={inlineSmsPresentation.smsRestricted}",
+    );
+    expect(source).toContain("!inlineSmsPresentation.smsRestricted");
+    expect(source).toMatch(
+      /inlineSmsPresentation\.smsRestricted\s*\|\|\s*inlineReplyUnavailable/,
     );
   });
 

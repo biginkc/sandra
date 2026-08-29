@@ -5,6 +5,7 @@ import type { Thread } from "@/lib/messages/list-threads";
 
 const mocks = vi.hoisted(() => ({
   listThreads: vi.fn(),
+  effectivePage: null as number | null,
   listQueuedPage: vi.fn(),
   getQueueStats: vi.fn(),
   listUnknownSenders: vi.fn(),
@@ -40,13 +41,19 @@ vi.mock("@/lib/messages/list-threads", () => ({
           (row) => !row.isDncLocked && !row.isOptedOut && !row.isTestTraffic,
         )
       : rows;
-    const filtered = visible.filter((row) => {
-      if (opts.filter === "mine") return row.assigneeId === opts.currentUserId;
-      if (opts.filter === "unassigned") return row.assigneeId === null;
+    const dispoVisible = rows.filter((row) => !row.isTestTraffic);
+    const activeRows = opts.filter === "dispo" ? dispoVisible : visible;
+    const isActualLead = (row: Thread) =>
+      row.propertyStatus !== null && row.propertyStatus !== "prospect";
+    const filtered = activeRows.filter((row) => {
+      if (opts.filter === "mine")
+        return isActualLead(row) && row.assigneeId === opts.currentUserId;
+      if (opts.filter === "unassigned")
+        return isActualLead(row) && row.assigneeId === null;
       if (opts.filter === "unread") return row.unreadCount > 0;
       if (opts.filter === "escalated")
         return row.aiResponderStatus === "escalated";
-      if (opts.filter === "dispo") return row.outreachDispo !== null;
+      if (opts.filter === "dispo") return row.aiDispositionReview !== null;
       if (opts.filter === "needs_outcome") return row.needsOutcome;
       return true;
     });
@@ -55,22 +62,31 @@ vi.mock("@/lib/messages/list-threads", () => ({
       counts: {
         all: visible.length,
         mine: opts.currentUserId
-          ? visible.filter((row) => row.assigneeId === opts.currentUserId)
-              .length
+          ? visible.filter(
+              (row) =>
+                isActualLead(row) && row.assigneeId === opts.currentUserId,
+            ).length
           : 0,
         unassigned: opts.currentUserId
-          ? visible.filter((row) => row.assigneeId === null).length
+          ? visible.filter(
+              (row) => isActualLead(row) && row.assigneeId === null,
+            ).length
           : 0,
         unread: visible.filter((row) => row.unreadCount > 0).length,
         escalated: visible.filter(
           (row) => row.aiResponderStatus === "escalated",
         ).length,
-        dispo: visible.filter((row) => row.outreachDispo !== null).length,
+        dispo: dispoVisible.filter((row) => row.aiDispositionReview !== null)
+          .length,
         needs_outcome: visible.filter((row) => row.needsOutcome).length,
       },
       total: filtered.length,
-      hiddenCount: rows.length - visible.length,
-      page: opts.page,
+      hiddenCount:
+        opts.filter === "dispo"
+          ? rows.filter((row) => row.aiDispositionReview !== null).length -
+            filtered.length
+          : rows.length - visible.length,
+      page: mocks.effectivePage ?? opts.page,
       pageSize: 200,
     };
   },
@@ -119,6 +135,7 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
     propertyAddress: overrides.propertyAddress ?? null,
     propertyStatus: overrides.propertyStatus ?? "prospect",
     outreachDispo: overrides.outreachDispo ?? null,
+    aiDispositionReview: overrides.aiDispositionReview ?? null,
     isDncLocked: overrides.isDncLocked ?? false,
     assigneeId: overrides.assigneeId ?? null,
     lastMessageBody: overrides.lastMessageBody ?? "body",
@@ -141,6 +158,7 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
 describe("MessagesPage filter-count boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.effectivePage = null;
     mocks.createClient.mockResolvedValue({
       auth: {
         getUser: vi.fn(async () => ({
@@ -215,20 +233,36 @@ describe("MessagesPage filter-count boundary", () => {
     expect(element.props.hiddenDncCount).toBe(2);
   });
 
-  it("filters Dispo from the live in-memory thread set", async () => {
+  it("treats Sandra Dispo as pending AI review work, including DNC reviews", async () => {
     mocks.listThreads.mockResolvedValue([
       makeThread({
-        threadId: "ai-handled-only",
-        aiResponderStatus: "handled",
-      }),
-      makeThread({
-        threadId: "dispo",
+        threadId: "applied-only",
         outreachDispo: "not_interested",
       }),
       makeThread({
-        threadId: "hidden-dnc-dispo",
+        threadId: "pending-review",
+        outreachDispo: "not_interested",
+        aiDispositionReview: {
+          id: "review-1",
+          status: "pending",
+          disposition: "not_interested",
+          reason: "classified reply",
+          sourceInboundMessageId: "message-1",
+          createdAt: "2026-08-28T12:00:00Z",
+        },
+      }),
+      makeThread({
+        threadId: "pending-dnc",
         outreachDispo: "dnc",
         isOptedOut: true,
+        aiDispositionReview: {
+          id: "review-2",
+          status: "pending",
+          disposition: "dnc",
+          reason: "stop request",
+          sourceInboundMessageId: "message-2",
+          createdAt: "2026-08-28T12:01:00Z",
+        },
       }),
     ]);
 
@@ -242,10 +276,68 @@ describe("MessagesPage filter-count boundary", () => {
 
     expect(element.props.filter).toBe("dispo");
     expect(element.props.threads.map((thread) => thread.threadId)).toEqual([
-      "dispo",
+      "pending-review",
+      "pending-dnc",
     ]);
-    expect(element.props.hiddenDncCount).toBe(1);
+    expect(element.props.hiddenDncCount).toBe(0);
   });
+
+  it("redirects a clamped inbox page to the effective page URL", async () => {
+    mocks.listThreads.mockResolvedValue([]);
+    mocks.effectivePage = 2;
+
+    await expect(
+      MessagesPage({
+        searchParams: Promise.resolve({
+          filter: "unassigned",
+          inboxPage: "999999",
+          hideDnc: "0",
+        }),
+      }),
+    ).rejects.toThrow(/^redirect:/);
+
+    const target = mocks.redirect.mock.calls.at(-1)?.[0] as string;
+    const redirected = new URL(target, "https://sandra.test");
+    expect(redirected.searchParams.get("filter")).toBe("unassigned");
+    expect(redirected.searchParams.get("inboxPage")).toBe("2");
+    expect(redirected.searchParams.get("hideDnc")).toBe("0");
+  });
+
+  it("does not canonicalize irrelevant inbox pagination while Outbox is active", async () => {
+    mocks.listThreads.mockResolvedValue([]);
+    mocks.effectivePage = 2;
+
+    const element = (await MessagesPage({
+      searchParams: Promise.resolve({
+        tab: "outbox",
+        inboxPage: "999999",
+      }),
+    })) as ReactElement<{ activeTab: string }>;
+
+    expect(element.props.activeTab).toBe("outbox");
+    expect(mocks.redirect).not.toHaveBeenCalled();
+    expect(mocks.listThreads).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ page: 1 }),
+    );
+  });
+
+  it.each(["unknown", "dismissed"] as const)(
+    "ignores irrelevant inbox pagination for the %s sender bucket",
+    async (filter) => {
+      mocks.listThreads.mockResolvedValue([]);
+
+      await MessagesPage({
+        searchParams: Promise.resolve({ filter, inboxPage: "999999" }),
+      });
+
+      expect(mocks.redirect).not.toHaveBeenCalled();
+      expect(mocks.listThreads).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ page: 1 }),
+      );
+    },
+  );
 
   it("redirects legacy handled filter links to the canonical Dispo URL", async () => {
     await expect(

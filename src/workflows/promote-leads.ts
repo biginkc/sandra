@@ -1,6 +1,9 @@
 /** Durable Prospects -> Leads promotion workflow. */
 
-import { runPromoteLeadsChunk } from "@/lib/leads/promote-job";
+import {
+  runPromoteLeadsChunk,
+  type PromotionChunkItem,
+} from "@/lib/leads/promote-job";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type PromoteLeadsWorkflowParams = {
@@ -23,7 +26,10 @@ async function createPromotionClaimToken(): Promise<string> {
   return crypto.randomUUID();
 }
 
-async function claimPromotionJob(jobId: string, claimToken: string): Promise<PromotionClaim> {
+async function claimPromotionJob(
+  jobId: string,
+  claimToken: string,
+): Promise<PromotionClaim> {
   "use step";
 
   const supabase = createAdminClient();
@@ -44,7 +50,10 @@ async function claimPromotionJob(jobId: string, claimToken: string): Promise<Pro
     .is("workflow_claim_token", null)
     .select("id, org_id, created_by, status, workflow_claim_token")
     .maybeSingle();
-  if (claimError) throw new Error(`Promotion workflow could not claim job: ${claimError.message}`);
+  if (claimError)
+    throw new Error(
+      `Promotion workflow could not claim job: ${claimError.message}`,
+    );
 
   const { data: current, error: currentError } = claimed
     ? { data: claimed, error: null }
@@ -54,7 +63,10 @@ async function claimPromotionJob(jobId: string, claimToken: string): Promise<Pro
         .eq("id", jobId)
         .eq("type", "promote_leads")
         .maybeSingle();
-  if (currentError) throw new Error(`Promotion workflow could not load job: ${currentError.message}`);
+  if (currentError)
+    throw new Error(
+      `Promotion workflow could not load job: ${currentError.message}`,
+    );
   const job = current;
   if (!job) throw new Error(`Promotion workflow job ${jobId} was not found`);
   if (job.status !== "running" || job.workflow_claim_token !== claimToken) {
@@ -85,31 +97,47 @@ async function checkpointPromotionWorkflowFailure(args: {
     p_error: args.error,
   });
   if (error) {
-    throw new Error(`Promotion workflow failure checkpoint failed: ${error.message}`);
+    throw new Error(
+      `Promotion workflow failure checkpoint failed: ${error.message}`,
+    );
   }
   return data;
 }
 
-async function loadPendingPromotionChunk(jobId: string): Promise<string[]> {
+async function loadPendingPromotionChunk(
+  jobId: string,
+): Promise<PromotionChunkItem[]> {
   "use step";
   const supabase = createAdminClient();
   const { data: items, error: itemError } = await supabase
     .from("job_items")
-    .select("item_key")
+    .select("id, item_key, property_id")
     .eq("job_id", jobId)
     .eq("status", "pending")
     .order("item_key", { ascending: true })
     .limit(CHUNK_SIZE);
-  if (itemError) throw new Error(`Promotion workflow could not load items: ${itemError.message}`);
+  if (itemError)
+    throw new Error(
+      `Promotion workflow could not load items: ${itemError.message}`,
+    );
 
-  return (items ?? [])
-    .map((item) => item.item_key)
-    .filter((key): key is string => typeof key === "string" && key.length > 0);
+  return (items ?? []).flatMap((item) =>
+    item.item_key
+      ? [
+          {
+            id: item.id,
+            itemKey: item.item_key,
+            propertyId: item.property_id,
+          },
+        ]
+      : [],
+  );
 }
 
 async function processPromotionChunk(args: {
   jobId: string;
-  itemKeys: string[];
+  actorId: string;
+  items: PromotionChunkItem[];
 }): Promise<void> {
   "use step";
   const supabase = createAdminClient();
@@ -122,7 +150,10 @@ async function finalizePromotionJob(jobId: string): Promise<unknown> {
   const { data, error } = await supabase.rpc("promote_leads_recompute_job", {
     p_job: jobId,
   });
-  if (error) throw new Error(`Promotion workflow final checkpoint failed: ${error.message}`);
+  if (error)
+    throw new Error(
+      `Promotion workflow final checkpoint failed: ${error.message}`,
+    );
   return data;
 }
 
@@ -137,11 +168,12 @@ export async function promoteLeadsWorkflow(
     if (claim.status !== "claimed") return claim;
 
     while (true) {
-      const itemKeys = await loadPendingPromotionChunk(claim.jobId);
-      if (itemKeys.length === 0) break;
+      const items = await loadPendingPromotionChunk(claim.jobId);
+      if (items.length === 0) break;
       await processPromotionChunk({
         jobId: claim.jobId,
-        itemKeys,
+        actorId: claim.createdBy,
+        items,
       });
     }
 

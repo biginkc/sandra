@@ -31,6 +31,10 @@ export type ConsentEventType =
   | "help_request"
   | "provider_auto_opt_out";
 
+export type RecordConsentEventOutcome =
+  | { inserted: true; id: string }
+  | { inserted: false; id: string | null };
+
 /**
  * Map a sequence of events (most-recent-first is fine, we sort here) to
  * the current effective state. Pure function — DB-free and testable.
@@ -101,7 +105,7 @@ export async function recordConsentEvent(
     occurredAt?: Date;
     idempotencyKey?: string;
   },
-): Promise<void> {
+): Promise<RecordConsentEventOutcome> {
   // `consent_events` is protected by a composite (contact_id, org_id) FK.
   // Never rely on the table's legacy default org: webhook/service-role callers
   // can write for any tenant, so the contact row is the authoritative source.
@@ -116,7 +120,9 @@ export async function recordConsentEvent(
     );
   }
 
+  const rowId = crypto.randomUUID();
   const row = {
+    id: rowId,
     org_id: contact.org_id,
     contact_id: params.contactId,
     channel: params.channel,
@@ -142,13 +148,15 @@ export async function recordConsentEvent(
     if (lookupError) {
       throw new Error(`recordConsentEvent lookup: ${lookupError.message}`);
     }
-    if ((existing ?? []).length > 0) return;
+    if ((existing ?? []).length > 0) {
+      return { inserted: false, id: existing?.[0]?.id ?? null };
+    }
   }
 
   const { error } = await supabase.from("consent_events").insert(row);
-  if (!error) return;
+  if (!error) return { inserted: true, id: rowId };
   if (params.idempotencyKey && isConsentIdempotencyDuplicate(error)) {
-    return;
+    return { inserted: false, id: null };
   }
   throw new Error(`recordConsentEvent: ${error.message}`);
 }

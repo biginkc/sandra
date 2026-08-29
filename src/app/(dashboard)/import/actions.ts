@@ -15,7 +15,7 @@ import {
 import type { SubOperationId } from "@/lib/csv/update-operations";
 import type { Mapping } from "@/lib/csv/validate";
 import type { PreflightProbe } from "@/lib/csv/preflight";
-import { LEAD_SOURCES } from "@/lib/leads/create";
+import { LEAD_SOURCES } from "@/lib/leads/sources";
 import { SUPPRESSED_DISPOS } from "@/lib/messaging/suppression";
 import { csvImportWorkflow } from "@/workflows/csv-import";
 import {
