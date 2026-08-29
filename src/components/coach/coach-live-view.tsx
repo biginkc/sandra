@@ -61,6 +61,7 @@ export type CoachLiveViewProps = {
 
 const ENTRY_TOKEN_SET: ReadonlySet<string> = new Set(COACH_ENTRY_TOKENS);
 const ALWAYS_EDITABLE_ENTRY_TOKEN_SET: ReadonlySet<CoachEntryToken> = new Set([
+  "dream_outcome",
   "closing_date",
   "offer_price",
   "net_to_seller",
@@ -85,6 +86,7 @@ const RAIL_LABEL: Partial<Record<CoachPhaseId, string>> = {
 
 const ENTRY_TOKEN_LABEL: Record<CoachEntryToken, string> = {
   motivation: "seller motivation",
+  dream_outcome: "seller’s dream outcome",
   cold_caller_name: "cold caller name",
   closing_date: "closing date",
   offer_price: "offer price",
@@ -534,6 +536,9 @@ function ScriptPanel({
         >
           <div className="mb-1 text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Current script</div>
           <h2 className="text-xl font-bold" data-testid="current-section-title">{block.title}</h2>
+          <p className="mt-2 text-xs leading-relaxed text-muted-foreground" data-testid="current-phase-purpose">
+            <span className="font-semibold text-foreground">Purpose:</span> {block.purpose}
+          </p>
           <div className="mt-5 divide-y divide-border/70" data-testid="current-section-script">
             {block.branches.map((branch) => (
               <BranchCard

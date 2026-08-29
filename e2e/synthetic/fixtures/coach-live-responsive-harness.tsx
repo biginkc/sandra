@@ -111,7 +111,7 @@ function Harness({ held = false }: { held?: boolean }) {
           type: "phase",
           phaseId,
           ts: `browser-${Date.now()}`,
-          scriptVersion: "1.0.2",
+          scriptVersion: "1.1.0",
           matcherVersion: "3",
         }),
     };

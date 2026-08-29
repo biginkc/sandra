@@ -14,6 +14,26 @@ describe("assertValidClosrScript", () => {
     expect(() => assertValidClosrScript(scriptJson)).not.toThrow();
   });
 
+  it("identifies the authoritative Google Doc and keeps the approved BMH substitutions", () => {
+    const script = scriptJson as unknown as ClosrScript;
+    expect(script.version).toBe("1.1.0");
+    expect(script.source).toContain("1ab9k0VIUQ4kkSTmdR5XV7qeuiRe2-czgmKGouM-lCag");
+    expect(script.brand).toEqual({ company: "BMH Group", website: "bmhgroupkc.com" });
+    expect(script.tokens).toContain("dream_outcome");
+
+    const spokenText = script.phases
+      .flatMap((phase) => phase.display.branches)
+      .flatMap((branch) => branch.variants)
+      .flatMap((variant) => variant.lines)
+      .filter((line) => line.type === "say")
+      .map((line) => line.text)
+      .join("\n");
+    expect(spokenText).toContain("Our Company Name is BMH Group");
+    expect(spokenText).toContain("Our website is bmhgroupkc.com");
+    expect(spokenText).not.toContain("Fast Cash Offer Now");
+    expect(spokenText).not.toContain("fastcashoffernow.com");
+  });
+
   it("rejects a non-object root", () => {
     expect(() => assertValidClosrScript(null)).toThrow(/root is not an object/);
     expect(() => assertValidClosrScript("nope")).toThrow(/root is not an object/);
@@ -67,7 +87,7 @@ describe("assertValidClosrScript", () => {
       .map((line) => line.text)
       .join("\u0000");
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "efc46e5bfd66059268b8b981c374b9fa2fa46a7a83f68374286b61873f26e3fe",
+      "688b2d66771865553be80b99ec58b4bd0a5e8466a7213d8e1751200424ebf47c",
     );
   });
 

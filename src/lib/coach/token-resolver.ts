@@ -65,6 +65,7 @@ function trustedValueOrEntry(
 
 export const EMPTY_ENTRY_FIELDS: CoachEntryFields = {
   motivation: null,
+  dream_outcome: null,
   cold_caller_name: null,
   closing_date: null,
   offer_price: null,
@@ -95,6 +96,8 @@ export function resolveCoachTokens(
         return [token, resolvedOrPlaceholder(context.repPhoneE164)];
       case "motivation":
         return [token, resolvedOrPlaceholder(trustedValueOrEntry(context.motivation, entryFields.motivation))];
+      case "dream_outcome":
+        return [token, resolvedOrPlaceholder(entryFields.dream_outcome)];
       case "cold_caller_name":
         return [token, resolvedOrPlaceholder(trustedValueOrEntry(context.coldCallerName, entryFields.cold_caller_name))];
       case "year_built":

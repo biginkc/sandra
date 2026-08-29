@@ -88,6 +88,7 @@ test("walks every PDF-aligned section forward and backward with correct boundari
   expect(sections).toHaveLength(26);
   await expect(page.getByTestId("coach-back")).toBeDisabled();
   await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title);
+  await expect(page.getByTestId("current-phase-purpose")).toContainText("Build Minor Rapport");
 
   for (let index = 0; index < sections.length - 1; index += 1) {
     await expect(page.getByTestId("next-section-preview")).toContainText(sections[index + 1].title);
@@ -135,16 +136,29 @@ test("populates known lead tokens, selects lead and occupancy variants, and lets
   await page.getByTestId("variant-Opener-fsbo").click();
   await expect(script).toContainText("For Sale by Owner");
   await page.getByTestId("variant-Opener-sms").click();
-  await expect(script).toContainText("responded to our team's text");
+  await expect(script).toContainText("responded to our teams text");
+
+  for (let step = 0; step < 5; step += 1) await page.getByTestId("coach-next").click();
+  await expect(page.getByTestId("current-section-title")).toHaveText("Exchange contact and file details");
+  await expect(script).toContainText("My name is Jarrad Henry");
+  await expect(script).toContainText("Our Company Name is BMH Group");
+  await expect(script).toContainText("bmhgroupkc.com");
+  await expect(script).toContainText("+18165550123");
+  await expect(script).toContainText("JA-ABCD");
 
   await page.getByTestId("phase-rail-reveal").click();
   await page.getByTestId("variant-Entry-tenant_occupied").click();
   await expect(script).toContainText("you have these tenants");
   await page.getByTestId("variant-Entry-vacant").click();
-  await expect(script).toContainText("it's been vacant");
+  await expect(script).toContainText("its been vacant");
+
+  await page.getByTestId("phase-rail-assessment").click();
+  await page.getByTestId("coach-next").click();
+  await expect(script).toContainText("1987’s");
 
   await page.getByTestId("phase-rail-offer").click();
   for (const [field, value] of [
+    ["dream_outcome", "move closer to family"],
     ["offer_price", "$210,000"],
     ["net_to_seller", "$185,000"],
     ["closing_date", "October 18"],

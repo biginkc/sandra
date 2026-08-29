@@ -48,7 +48,7 @@ export const COACH_PHASE_ORDER: readonly CoachPhaseId[] = [
  * src/coach/wire-contract.ts in the Jitter repo, WIRE_CONTRACT_VERSION
  * '1.0.0') — required, not optional. An event missing either is malformed.
  * `scriptVersion` is compared against this file's loaded script
- * (CLOSR_SCRIPT.version in script-block.ts, currently "1.0.1") — a
+ * (CLOSR_SCRIPT.version in script-block.ts, currently "1.1.0") — a
  * mismatch surfaces a persistent "coach out of sync" banner that clears
  * itself the moment a later event reports a matching version.
  * `matcherVersion` is captured/tracked but not gated on client-side: it's
@@ -164,6 +164,7 @@ export const COACH_TOKENS = [
   "rep_name",
   "property_address",
   "motivation",
+  "dream_outcome",
   "rep_phone",
   "file_number",
   "cold_caller_name",
@@ -177,10 +178,11 @@ export type CoachToken = (typeof COACH_TOKENS)[number];
 
 /** Values a rep may need to capture during the call. Motivation and the
  * cold-caller name use trusted dial-time context when available, with this
- * session-owned input as a fallback; the three deal values are always
- * entered live. */
+ * session-owned input as a fallback; the seller's desired outcome and the
+ * three deal values are always entered live. */
 export const COACH_ENTRY_TOKENS = [
   "motivation",
+  "dream_outcome",
   "cold_caller_name",
   "closing_date",
   "offer_price",

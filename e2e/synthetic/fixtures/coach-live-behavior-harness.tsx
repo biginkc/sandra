@@ -73,7 +73,7 @@ function recommendationSuccess(input: CoachRecommendationRequest): CoachRecommen
 }
 
 function eventVersion() {
-  return { scriptVersion: "1.0.2", matcherVersion: "synthetic" } as const;
+  return { scriptVersion: "1.1.0", matcherVersion: "synthetic" } as const;
 }
 
 function BehaviorHarness() {
