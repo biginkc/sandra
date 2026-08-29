@@ -49,6 +49,7 @@ export type JitterConnectPhase = "registered" | "accepted";
 export type JitterCancelReason = "hangup" | "failed" | "abandoned";
 
 export type JitterAudioHealthSample = {
+  media_state: "active" | "held" | "resumed";
   controller_id: string;
   peer_connection_generation: number;
   sample_sequence: number;

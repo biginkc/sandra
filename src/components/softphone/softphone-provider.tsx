@@ -716,10 +716,16 @@ export function SoftphoneProvider({ children }: Props) {
       heldRef.current = next;
       setHeld(next);
       transition(next ? { type: "hold" } : { type: "resume" });
+    } else {
+      showToast(
+        next
+          ? "Hold failed. The call is still live."
+          : "Resume failed. The call is still on hold.",
+      );
     }
     holdPendingRef.current = false;
     setHoldPending(false);
-  }, [callStatus, transition]);
+  }, [callStatus, showToast, transition]);
 
   const contextValue = useMemo(() => ({
     openLead,
