@@ -238,6 +238,23 @@ describe("<CockpitView /> DNC toggle", () => {
     ).toHaveTextContent("Compliance reviews shown · tests hidden");
   });
 
+  it.each(["unknown", "dismissed"] as const)(
+    "hides the unrelated DNC toggle on the %s sender bucket",
+    (filter) => {
+      render(
+        <CockpitView
+          {...baseProps}
+          filter={filter}
+          threads={[]}
+          hiddenDncCount={99}
+        />,
+      );
+
+      expect(screen.queryByTestId("dnc-toggle")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("dnc-toggle-count")).not.toBeInTheDocument();
+    },
+  );
+
   it("shows hidden-count hint when hideDnc=true and DNC threads exist", () => {
     render(
       <CockpitView

@@ -157,7 +157,7 @@ export function CockpitView({
       else sp.set("inboxPage", String(nextPage));
       sp.delete("thread");
       const qs = sp.toString();
-      router.replace(qs ? `/messages?${qs}` : "/messages");
+      router.push(qs ? `/messages?${qs}` : "/messages");
     },
     [router, searchParams],
   );
@@ -327,7 +327,7 @@ export function CockpitView({
       sp.delete("thread");
       sp.delete("inboxPage");
       const qs = sp.toString();
-      router.replace(qs ? `/messages?${qs}` : "/messages");
+      router.push(qs ? `/messages?${qs}` : "/messages");
     },
     [filter, pendingInboxChange, router, searchParams],
   );
@@ -349,7 +349,7 @@ export function CockpitView({
       sp.delete("thread");
       sp.delete("inboxPage");
       const qs = sp.toString();
-      router.replace(qs ? `/messages?${qs}` : "/messages");
+      router.push(qs ? `/messages?${qs}` : "/messages");
     },
     [hideDnc, pendingInboxChange, router, searchParams],
   );
@@ -427,7 +427,7 @@ export function CockpitView({
       >
         <TabButton
           label="Inbox"
-          count={inboxTotal}
+          count={showThreadList ? inboxTotal : filterCounts[filter]}
           active={activeTab === "inbox"}
           onClick={() => setTab("inbox")}
           testId="tab-inbox"
