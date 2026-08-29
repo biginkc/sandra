@@ -183,6 +183,7 @@ export type CoachSectionScriptBlock = {
   phaseId: CoachPhaseId;
   phaseName: string;
   title: string;
+  purpose: string;
   branches: ScriptBranchBlock[];
 };
 
@@ -225,6 +226,7 @@ export function buildCoachSectionScriptBlock(
     phaseId: section.phaseId,
     phaseName: phaseBlock.phaseName,
     title: section.title,
+    purpose: phaseBlock.purpose,
     branches,
   };
 }

@@ -20,6 +20,7 @@ const baseContext: CoachCallContext = {
 
 const entryFields: CoachEntryFields = {
   motivation: null,
+  dream_outcome: "move closer to family",
   cold_caller_name: null,
   closing_date: "Sept 15",
   offer_price: "$210,000",
@@ -46,11 +47,23 @@ describe("resolveCoachTokens", () => {
     expect(tokens.year_built).toEqual({ value: "—", isPlaceholder: true });
   });
 
-  it("resolves the three deal-panel tokens from entryFields when supplied", () => {
+  it("resolves the seller outcome and three deal-panel tokens from entryFields when supplied", () => {
     const tokens = resolveCoachTokens(baseContext, entryFields);
+    expect(tokens.dream_outcome).toEqual({ value: "move closer to family", isPlaceholder: false });
     expect(tokens.closing_date).toEqual({ value: "Sept 15", isPlaceholder: false });
     expect(tokens.offer_price).toEqual({ value: "$210,000", isPlaceholder: false });
     expect(tokens.net_to_seller).toEqual({ value: "$180,000", isPlaceholder: false });
+  });
+
+  it("pre-fills the dream outcome from known motivation while allowing a typed outcome to override it", () => {
+    expect(resolveCoachTokens(baseContext).dream_outcome).toEqual({
+      value: "Job relocation",
+      isPlaceholder: false,
+    });
+    expect(resolveCoachTokens(baseContext, entryFields).dream_outcome).toEqual({
+      value: "move closer to family",
+      isPlaceholder: false,
+    });
   });
 
   it("lets the rep fill motivation and cold-caller name when trusted context does not have them", () => {
@@ -84,14 +97,15 @@ describe("resolveCoachTokens", () => {
     expect(tokens.cold_caller_name).toEqual({ value: "Rose", isPlaceholder: false });
   });
 
-  it("treats every deal-panel token as an unset placeholder when entryFields is omitted", () => {
-    const tokens = resolveCoachTokens(baseContext);
+  it("treats the outcome and every deal-panel token as an unset placeholder when neither context nor entry can resolve them", () => {
+    const tokens = resolveCoachTokens({ ...baseContext, motivation: null });
+    expect(tokens.dream_outcome).toEqual({ value: "—", isPlaceholder: true });
     expect(tokens.closing_date).toEqual({ value: "—", isPlaceholder: true });
     expect(tokens.offer_price).toEqual({ value: "—", isPlaceholder: true });
     expect(tokens.net_to_seller).toEqual({ value: "—", isPlaceholder: true });
   });
 
-  it("covers all 11 declared script tokens with no gaps", () => {
+  it("covers all 12 declared script tokens with no gaps", () => {
     const tokens = resolveCoachTokens(baseContext, entryFields);
     expect(Object.keys(tokens).sort()).toEqual(
       [
@@ -99,6 +113,7 @@ describe("resolveCoachTokens", () => {
         "rep_name",
         "property_address",
         "motivation",
+        "dream_outcome",
         "rep_phone",
         "file_number",
         "cold_caller_name",

@@ -533,6 +533,27 @@ describe("useCoachChannel", () => {
     expect(result.current.scriptOutOfSync).toBe("0.9.0");
   });
 
+  it("keeps a finalized transcript from an older producer visible while flagging script drift", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-version-transcript"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() =>
+      latestChannel()._broadcastHandler?.({
+        payload: {
+          type: "transcript",
+          speaker: "seller",
+          text: "The older producer transcript still arrives.",
+          isFinal: true,
+          ts: "t1",
+          matcherVersion: "legacy",
+          scriptVersion: "1.0.2",
+        },
+      }),
+    );
+    expect(result.current.state.transcript.at(-1)?.text).toBe("The older producer transcript still arrives.");
+    expect(result.current.scriptOutOfSync).toBe("1.0.2");
+  });
+
   it("scriptOutOfSync clears once a later event reports a matching version again", async () => {
     const { result } = renderHook(() => useCoachChannel("call-version-recover"));
     await flush();

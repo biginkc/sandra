@@ -390,6 +390,7 @@ describe("coachReducer — entry fields (deal-panel tokens)", () => {
   it("starts with every entry field unset", () => {
     expect(initialCoachState().entryFields).toEqual({
       motivation: null,
+      dream_outcome: null,
       cold_caller_name: null,
       closing_date: null,
       offer_price: null,
@@ -405,6 +406,7 @@ describe("coachReducer — entry fields (deal-panel tokens)", () => {
     state = coachReducer(state, { type: "set_entry_field", field: "closing_date", value: "Sept 15" });
     expect(state.entryFields).toEqual({
       motivation: null,
+      dream_outcome: null,
       cold_caller_name: null,
       closing_date: "Sept 15",
       offer_price: "$210,000",

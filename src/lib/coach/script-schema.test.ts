@@ -14,6 +14,37 @@ describe("assertValidClosrScript", () => {
     expect(() => assertValidClosrScript(scriptJson)).not.toThrow();
   });
 
+  it("identifies the authoritative Google Doc and keeps the approved BMH substitutions", () => {
+    const script = scriptJson as unknown as ClosrScript;
+    expect(script.version).toBe("1.1.0");
+    expect(script.source).toContain("1ab9k0VIUQ4kkSTmdR5XV7qeuiRe2-czgmKGouM-lCag");
+    expect(script.brand).toEqual({ company: "BMH Group", website: "bmhgroupkc.com" });
+    expect(script.tokens).toContain("dream_outcome");
+
+    const spokenText = script.phases
+      .flatMap((phase) => phase.display.branches)
+      .flatMap((branch) => branch.variants)
+      .flatMap((variant) => variant.lines)
+      .filter((line) => line.type === "say")
+      .map((line) => line.text)
+      .join("\n");
+    expect(spokenText).toContain("Our Company Name is BMH Group");
+    expect(spokenText).toContain("Our website is bmhgroupkc.com");
+    expect(spokenText).not.toContain("Fast Cash Offer Now");
+    expect(spokenText).not.toContain("fastcashoffernow.com");
+  });
+
+  it("locks every displayed phase purpose to the official document", () => {
+    expect((scriptJson as unknown as ClosrScript).phases.map(({ id, purpose }) => ({ id, purpose }))).toEqual([
+      { id: "introduction", purpose: "Build Minor Rapport - Break The Cycle of Traditional Sales Calls - Set Proper Expectations - Instill Scarcity… Can they qualify?" },
+      { id: "reveal", purpose: "Make them FEEL their pain" },
+      { id: "assessment", purpose: "Avoid “How Can You Buy My House Over The Phone?” Objection. Makes them feel like you are the real deal." },
+      { id: "secure_positioning", purpose: "Avoid all smokescreens and objections after the offer by prehandling them upfront, and get the seller to confirm they want to move forward with our process before we present price." },
+      { id: "offer", purpose: "Make the seller feel like they’ve qualified for our program — reinforcing that they need us, not the other way around. Step 1 is complete, and now it’s only about finalizing the minor details." },
+      { id: "close", purpose: "Price is only an objection in the absence of value… how does our offer solve their problem?" },
+    ]);
+  });
+
   it("rejects a non-object root", () => {
     expect(() => assertValidClosrScript(null)).toThrow(/root is not an object/);
     expect(() => assertValidClosrScript("nope")).toThrow(/root is not an object/);
@@ -67,7 +98,7 @@ describe("assertValidClosrScript", () => {
       .map((line) => line.text)
       .join("\u0000");
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "efc46e5bfd66059268b8b981c374b9fa2fa46a7a83f68374286b61873f26e3fe",
+      "688b2d66771865553be80b99ec58b4bd0a5e8466a7213d8e1751200424ebf47c",
     );
   });
 

@@ -46,7 +46,7 @@ describe("buildPhaseScriptBlock", () => {
     const block = buildPhaseScriptBlock("assessment", builtTokens);
     const branchWithInteriorLine = block?.branches
       .flatMap((branch) => branch.selected.lines)
-      .find((line) => allText(line.segments).includes("interior still looks like"));
+      .find((line) => allText(line.segments).includes("interior would you still say it looks like"));
     expect(branchWithInteriorLine).toBeDefined();
     expect(allText(branchWithInteriorLine!.segments)).toContain("1987");
     // The bug this guards: {year built} (a space, not {year_built}) never
@@ -99,7 +99,7 @@ describe("buildPhaseScriptBlock", () => {
   it("attaches a branch's hold_after banner", () => {
     const block = buildPhaseScriptBlock("secure_positioning", tokens);
     const sendToUnderwriting = block?.branches.find((branch) => branch.tag === "Send to underwriting");
-    expect(sendToUnderwriting?.holdAfter).toBe("3-minute hold — run comps");
+    expect(sendToUnderwriting?.holdAfter).toBe("3 Minute Hold - RUN COMPS");
   });
 
   it("returns null for an unknown phase id", () => {
@@ -112,6 +112,7 @@ describe("buildCoachSectionScriptBlock", () => {
   it("resolves only the authored lines referenced by one conversational section", () => {
     const qualification = buildCoachSectionScriptBlock("introduction.qualification-frame", tokens);
     expect(qualification?.title).toBe("Set the qualification frame");
+    expect(qualification?.purpose).toContain("Build Minor Rapport");
     expect(qualification?.branches).toHaveLength(1);
     expect(qualification?.branches[0].selected.lines.map((line) => line.id)).toEqual([
       "introduction.frame-the-call.default.01",
@@ -147,7 +148,7 @@ describe("buildCoachSectionScriptBlock", () => {
     const agreement = buildCoachSectionScriptBlock("secure_positioning.explain-agreement", tokens);
     const finalHold = buildCoachSectionScriptBlock("secure_positioning.final-concerns-and-hold", tokens);
     expect(agreement?.branches[0].holdAfter).toBeNull();
-    expect(finalHold?.branches[0].holdAfter).toBe("3-minute hold — write contract");
+    expect(finalHold?.branches[0].holdAfter).toBe("3 Minute Hold - WRITE CONTRACT");
   });
 
   it("returns null for an unknown section", () => {
@@ -319,7 +320,7 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
         branchTag: "Frame the call",
         variantKey: "not-a-real-variant", // advisory only, must be ignored
         lineIndex: 999, // would be out of range if consulted
-        lineText: "• To add some sort of value to the property so we can resell it on the market, or",
+        lineText: "To add some sort of value to the property so we can resell it on the market or",
         scriptVersion: CLOSR_SCRIPT.version,
       },
       introBlock,
@@ -344,7 +345,7 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
         branchTag: "Entry",
         variantKey: "vacant",
         lineIndex: 1,
-        lineText: "I know it's been vacant for a little bit, but what made you decide to go ahead and sell it now?",
+        lineText: "I know its been vacant for a little bit, but what made you decide to go ahead and sell it now.",
         scriptVersion: CLOSR_SCRIPT.version,
       },
       revealBlock,
@@ -371,7 +372,7 @@ describe("resolveCursorLine — revised wire contract, exact fall-through order"
         branchTag: "Entry",
         variantKey: "vacant",
         lineIndex: 1,
-        lineText: "I know it's been vacant for a little bit, but what made you decide to go ahead and sell it now?",
+        lineText: "I know its been vacant for a little bit, but what made you decide to go ahead and sell it now.",
         scriptVersion: CLOSR_SCRIPT.version,
       },
       overriddenBlock,
