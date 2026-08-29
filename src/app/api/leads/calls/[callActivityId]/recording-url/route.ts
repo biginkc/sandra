@@ -67,7 +67,9 @@ export async function GET(
   }
 
   const call = data as unknown as RecordingLookup;
-  if (call.provider !== "jitter") {
+  // Batch calls and embedded-softphone calls both store their audio in
+  // Jitter; playback resolves through the same internal endpoint.
+  if (call.provider !== "jitter" && call.provider !== "sandra_softphone") {
     return json(
       { error: "Recording playback is unavailable for this provider", error_code: "unsupported_provider" },
       409,
