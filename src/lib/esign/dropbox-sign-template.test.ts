@@ -25,17 +25,23 @@ vi.mock("@dropbox/sign", () => {
     templateUpdateFiles = sdk.updateFiles;
     templateDelete = sdk.deleteTemplate;
   }
+  class AccountApi extends BaseApi {}
+  class ApiAppApi extends BaseApi {}
+  class SignatureRequestApi extends BaseApi {}
   class HttpError extends Error {}
   return {
     EmbeddedApi,
     TemplateApi,
+    AccountApi,
+    ApiAppApi,
+    SignatureRequestApi,
     HttpError,
     SubMergeField: { TypeEnum: { Text: "text" } },
   };
 });
 
 import { ESIGN_MERGE_FIELD_NAMES } from "./contracts";
-import { createDropboxSignTemplateProvider } from "./dropbox-sign-template";
+import { createDropboxSignProvider } from "./dropbox-sign";
 import { EsignSecret } from "./secret";
 
 describe("Dropbox Sign template provider", () => {
@@ -51,7 +57,7 @@ describe("Dropbox Sign template provider", () => {
 
   it("creates a test-mode draft with exact ordered roles and merge labels", async () => {
     const provider = createProvider();
-    await provider.createEmbeddedDraft({
+    await provider.createEmbeddedTemplateDraft({
       localTemplateId: "local-1",
       title: "Purchase agreement",
       file: { filename: "offer.pdf", bytes: Buffer.from("%PDF") },
@@ -77,7 +83,7 @@ describe("Dropbox Sign template provider", () => {
   });
 
   it("gets a fresh edit URL without resending or clearing merge fields", async () => {
-    const result = await createProvider().getFreshEditUrl("template-1");
+    const result = await createProvider().getEmbeddedTemplateEditUrl("template-1");
     expect(sdk.editUrl).toHaveBeenCalledWith("template-1", {
       forceSignerRoles: true,
       testMode: true,
@@ -93,7 +99,7 @@ describe("Dropbox Sign template provider", () => {
         filename: "offer.pdf",
         bytes: Buffer.from("%PDF"),
       }),
-    ).resolves.toEqual({ providerTemplateId: "template-copy" });
+    ).resolves.toEqual({ providerTemplateId: "template-copy", readiness: "pending" });
 
     sdk.updateFiles.mockResolvedValue({ body: { template: { templateId: "template-1" } } });
     await expect(
@@ -106,8 +112,9 @@ describe("Dropbox Sign template provider", () => {
 });
 
 function createProvider() {
-  return createDropboxSignTemplateProvider({
+  return createDropboxSignProvider({
     apiKey: new EsignSecret("api-key"),
     clientId: "client-1",
+    expectedDomain: "sandra.example.com",
   });
 }

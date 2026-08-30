@@ -59,7 +59,7 @@ export type TemplateLibraryActions = Readonly<{
     templateId: string,
     name: string,
   ): Promise<TemplateLaneResult<{ templateId: string }>>;
-  deleteTemplate(templateId: string): Promise<TemplateLaneResult<null>>;
+  deleteTemplate(templateId: string, confirmRecentSends?: boolean): Promise<TemplateLaneResult<null>>;
 }>;
 
 export type EmbeddedTemplateSession = Readonly<{

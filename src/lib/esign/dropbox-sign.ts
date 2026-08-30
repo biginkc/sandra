@@ -123,13 +123,6 @@ export function createDropboxSignProvider(input: {
       try {
         const response = await api.embedded.embeddedEditUrl(providerTemplateId, {
           forceSignerRoles: true,
-          mergeFields: [
-            "seller_name",
-            "property_address",
-            "offer_price",
-            "closing_date",
-            "earnest_money",
-          ].map((name) => ({ name, type: SubMergeField.TypeEnum.Text })),
           testMode: true,
         });
         const embedded = response.body.embedded;
@@ -174,6 +167,27 @@ export function createDropboxSignProvider(input: {
     async getTemplateFiles(providerTemplateId: string) {
       try {
         return (await api.template.templateFiles(providerTemplateId, "pdf")).body;
+      } catch (error) {
+        throw normalizeDropboxSignError(error);
+      }
+    },
+
+    async duplicateTemplate(providerTemplateId: string, file: TemplatePdf) {
+      try {
+        const response = await api.template.templateUpdateFiles(providerTemplateId, {
+          clientId: input.clientId,
+          files: [providerFile(file)],
+          testMode: true,
+        });
+        const duplicateId = response.body.template?.templateId;
+        if (!duplicateId || duplicateId === providerTemplateId) {
+          throw new ProviderError(
+            "Dropbox Sign did not return a distinct copied template identifier.",
+            "dropbox_sign",
+            { providerCode: "template_copy_id_missing" },
+          );
+        }
+        return { providerTemplateId: duplicateId, readiness: "pending" };
       } catch (error) {
         throw normalizeDropboxSignError(error);
       }

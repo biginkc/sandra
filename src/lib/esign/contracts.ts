@@ -32,8 +32,12 @@ export const ESIGN_MERGE_FIELD_NAMES = [
   "earnest_money",
 ] as const;
 
+export const ESIGN_TEMPLATE_MERGE_FIELDS = ESIGN_MERGE_FIELD_NAMES;
+export const ESIGN_TEMPLATE_TITLE_MAX_LENGTH = 160;
+
 export type EsignMergeFieldName =
   (typeof ESIGN_MERGE_FIELD_NAMES)[number];
+export type EsignTemplateMergeField = EsignMergeFieldName;
 
 export type TemplateSignerRole = {
   name: string;
@@ -49,6 +53,21 @@ export type TemplateOption = {
   signerRoles: readonly TemplateSignerRole[];
   mergeFieldNames: typeof ESIGN_MERGE_FIELD_NAMES;
 };
+
+export function validateTemplateTitle(value: string): string | null {
+  const title = value.trim();
+  if (!title) return "Enter a template name.";
+  if (title.length > ESIGN_TEMPLATE_TITLE_MAX_LENGTH) {
+    return `Template names must be ${ESIGN_TEMPLATE_TITLE_MAX_LENGTH} characters or fewer.`;
+  }
+  return null;
+}
+
+export function requireTemplateTitle(value: string): string {
+  const error = validateTemplateTitle(value);
+  if (error) throw new Error(error);
+  return value.trim();
+}
 
 export type EmbeddedTemplateSession = {
   providerTemplateId: string;
@@ -115,6 +134,10 @@ export type DropboxSignProvider = {
   ): Promise<EmbeddedTemplateSession>;
   getTemplate(providerTemplateId: string): Promise<ProviderTemplateMetadata>;
   getTemplateFiles(providerTemplateId: string): Promise<Buffer>;
+  duplicateTemplate(
+    providerTemplateId: string,
+    file: TemplatePdf,
+  ): Promise<{ providerTemplateId: string; readiness: "ready" | "pending" }>;
   updateTemplateFiles(
     providerTemplateId: string,
     file: TemplatePdf,

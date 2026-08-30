@@ -49,7 +49,7 @@ describe("AddTemplateDialog", () => {
     const file = new File(["x"], "large.pdf", { type: "application/pdf" });
     Object.defineProperty(file, "size", { value: 40 * 1024 * 1024 + 1 });
     fireEvent.change(screen.getByLabelText("Upload PDF"), { target: { files: [file] } });
-    expect(screen.getByRole("alert")).toHaveTextContent("40 MB or smaller");
+    expect(screen.getByRole("alert")).toHaveTextContent("smaller than 40 MB");
     expect(actions.createDraft).not.toHaveBeenCalled();
   });
 

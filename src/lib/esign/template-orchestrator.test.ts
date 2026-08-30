@@ -13,14 +13,16 @@ import {
 const owner = { userId: "user-1", orgId: "org-1", isOwner: true } as const;
 const roles = [{ name: "Seller", order: 0 }, { name: "Buyer", order: 1 }] as const;
 const pdfBytes = new TextEncoder().encode("%PDF-1.7\nbody");
+const sourceId = "123e4567-e89b-42d3-a456-426614174000";
 const pdf: TemplateUpload = { filename: "offer.pdf", mimeType: "application/pdf", size: pdfBytes.byteLength, bytes: pdfBytes };
 const stage: StagedTemplateSource = {
-  id: "stage-1",
+  id: sourceId,
   orgId: "org-1",
-  storagePath: "esign-template-staging/org-1/opaque_source_1234",
+  storagePath: `org-1/${sourceId}.pdf`,
   filename: "offer.pdf",
   size: pdf.size,
   mimeType: "application/pdf",
+  sha256: "8c493a43d8a2f643929a28eed63f152c4e68b505506969d28ed62f6c907b06f5",
 };
 const draft: TemplateDraftRecord = {
   id: "template-1",
@@ -31,8 +33,8 @@ const draft: TemplateDraftRecord = {
   sellerRoleName: "Seller",
   signerRoles: roles,
   mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
-  stagingSourceId: "stage-1",
-  lifecycle: "draft",
+  stagingSourceId: sourceId,
+  lifecycle: "editing",
 };
 const finalized = { ...draft, lifecycle: "finalized" as const, stagingSourceId: null };
 
@@ -41,15 +43,16 @@ function makePorts(): TemplateOrchestratorPorts {
     auth: { getActor: vi.fn().mockResolvedValue(owner) },
     repository: {
       listFinalized: vi.fn().mockResolvedValue([]),
-      createStage: vi.fn().mockImplementation(async (input) => ({ ...input, id: "stage-1" })),
+      recordVerifiedStage: vi.fn().mockImplementation(async (input) => input),
+      recordUnattachedStageCleanup: vi.fn().mockResolvedValue(undefined),
       getStage: vi.fn().mockResolvedValue(stage),
       createHiddenDraft: vi.fn().mockResolvedValue({ ...draft, providerTemplateId: null }),
+      createHiddenDuplicate: vi.fn().mockResolvedValue({ ...draft, providerTemplateId: null, lifecycle: "preparing" }),
       getTemplate: vi.fn().mockResolvedValue(draft),
       attachProviderId: vi.fn().mockResolvedValue(true),
       finalizeDraft: vi.fn().mockResolvedValue(true),
       markAbandoned: vi.fn().mockResolvedValue(true),
-      countRecentSends: vi.fn().mockResolvedValue(0),
-      markDeletedRetainingHistory: vi.fn().mockResolvedValue(true),
+      softDelete: vi.fn().mockResolvedValue({ outcome: "deleted", recentSendCount: 0 }),
       recordSourceCleanup: vi.fn().mockResolvedValue(undefined),
     },
     storage: {
@@ -66,14 +69,14 @@ function makePorts(): TemplateOrchestratorPorts {
       deleteTemplate: vi.fn().mockResolvedValue(undefined),
       isNotFound: vi.fn().mockReturnValue(false),
     },
-    randomId: vi.fn().mockReturnValue("opaque_source_1234"),
+    randomId: vi.fn().mockReturnValue(sourceId),
     now: vi.fn().mockReturnValue(new Date("2026-08-29T12:00:00Z")),
   };
 }
 
 function addInput() {
   return {
-    stagingSourceId: "stage-1",
+    stagingSourceId: sourceId,
     name: "  Offer  ",
     documentType: "Purchase agreement",
     signerRoles: roles,
@@ -126,14 +129,26 @@ describe("template action orchestration", () => {
     await expect(core.stageSource([pdf, pdf])).resolves.toMatchObject({ ok: false, error: { code: "PDF_COUNT_INVALID" } });
     await expect(core.stageSource([{ ...pdf, mimeType: "text/plain" }])).resolves.toMatchObject({ ok: false, error: { code: "PDF_TYPE_INVALID" } });
     await expect(core.stageSource([{ ...pdf, bytes: new TextEncoder().encode("not-pdf"), size: 7 }])).resolves.toMatchObject({ ok: false, error: { code: "PDF_MAGIC_INVALID" } });
+    await expect(core.stageSource([{ ...pdf, size: ESIGN_TEMPLATE_MAX_PDF_BYTES }])).resolves.toMatchObject({ ok: false, error: { code: "PDF_SIZE_INVALID" } });
     await expect(core.stageSource([{ ...pdf, size: ESIGN_TEMPLATE_MAX_PDF_BYTES + 1 }])).resolves.toMatchObject({ ok: false, error: { code: "PDF_SIZE_INVALID" } });
-    await expect(core.stageSource([pdf])).resolves.toEqual({ ok: true, data: { stagingSourceId: "stage-1" } });
-    expect(ports.storage.putPrivate).toHaveBeenCalledWith("esign-template-staging/org-1/opaque_source_1234", pdf.bytes, "application/pdf");
+    await expect(core.stageSource([pdf])).resolves.toEqual({ ok: true, data: { stagingSourceId: sourceId } });
+    expect(ports.storage.putPrivate).toHaveBeenCalledWith(`org-1/${sourceId}.pdf`, pdf.bytes, "application/pdf");
+    expect(ports.storage.readPrivate).toHaveBeenCalledWith(`org-1/${sourceId}.pdf`);
+    expect(ports.repository.recordVerifiedStage).toHaveBeenCalledWith(expect.objectContaining({ id: sourceId, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }));
+  });
+
+  it("fails closed when the privately downloaded object differs from the uploaded PDF", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.storage.readPrivate).mockResolvedValue(new TextEncoder().encode("%PDF-1.7\ncopy"));
+    const result = await createTemplateOrchestrator(ports).stageSource([pdf]);
+    expect(result).toMatchObject({ ok: false, error: { code: "STAGING_VERIFY_FAILED" } });
+    expect(ports.repository.recordVerifiedStage).not.toHaveBeenCalled();
+    expect(ports.storage.deletePrivate).toHaveBeenCalledWith(`org-1/${sourceId}.pdf`);
   });
 
   it("rejects a forged or cross-org staging path without reading it", async () => {
     const ports = makePorts();
-    vi.mocked(ports.repository.getStage).mockResolvedValue({ ...stage, orgId: "org-2", storagePath: "esign-template-staging/org-2/opaque_source_1234" });
+    vi.mocked(ports.repository.getStage).mockResolvedValue({ ...stage, orgId: "org-2", storagePath: `org-2/${sourceId}.pdf` });
     const result = await createTemplateOrchestrator(ports).add(addInput());
     expect(result).toMatchObject({ ok: false, error: { code: "STAGING_SOURCE_INVALID" } });
     expect(ports.storage.readPrivate).not.toHaveBeenCalled();
@@ -155,6 +170,15 @@ describe("template action orchestration", () => {
     expect(vi.mocked(ports.repository.createHiddenDraft).mock.calls[0][0]).not.toHaveProperty("lifecycle");
     expect(ports.repository.attachProviderId).toHaveBeenCalledWith("org-1", "template-1", "provider-1");
     expect(JSON.stringify(result)).not.toContain("http");
+  });
+
+  it("cleans and audits an unattached verified source when hidden draft creation fails", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.repository.createHiddenDraft).mockRejectedValue(new Error("database private detail"));
+    const result = await createTemplateOrchestrator(ports).add(addInput());
+    expect(result).toEqual({ ok: false, error: { code: "DRAFT_CREATE_FAILED", message: "The hidden template draft could not be created." } });
+    expect(ports.storage.deletePrivate).toHaveBeenCalledWith(stage.storagePath);
+    expect(ports.repository.recordUnattachedStageCleanup).toHaveBeenCalledWith({ orgId: "org-1", stageId: sourceId, outcome: "deleted" });
   });
 
   it("removes the provider draft when its stable ID cannot be attached locally", async () => {
@@ -219,7 +243,7 @@ describe("template action orchestration", () => {
     expect(result).toEqual({ ok: false, error: { code: "SOURCE_CLEANUP_FAILED", message: "The template was processed, but its private source cleanup requires attention." } });
     expect(JSON.stringify(result)).not.toContain("private detail");
     expect(ports.repository.recordSourceCleanup).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed" }));
-    expect(ports.repository.markAbandoned).not.toHaveBeenCalled();
+    expect(ports.repository.markAbandoned).toHaveBeenCalledBefore(vi.mocked(ports.storage.deletePrivate));
   });
 
   it("keeps duplicate rows hidden for ready and asynchronous provider responses", async () => {
@@ -229,7 +253,7 @@ describe("template action orchestration", () => {
       vi.mocked(ports.provider.duplicateTemplate).mockResolvedValue({ providerTemplateId: `copy-${readiness}`, readiness });
       const result = await createTemplateOrchestrator(ports).duplicate("template-1", "  Copy  ");
       expect(result).toEqual({ ok: true, data: { templateId: "template-1", readiness } });
-      expect(ports.repository.createHiddenDraft).toHaveBeenCalledWith(expect.objectContaining({ name: "Copy" }));
+      expect(ports.repository.createHiddenDuplicate).toHaveBeenCalledWith({ orgId: "org-1", sourceTemplateId: "template-1", name: "Copy" });
       expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
     }
   });
@@ -255,27 +279,40 @@ describe("template action orchestration", () => {
   it("rechecks 30-day usage at delete time and retains history", async () => {
     const ports = makePorts();
     vi.mocked(ports.repository.getTemplate).mockResolvedValue(finalized);
-    vi.mocked(ports.repository.countRecentSends).mockResolvedValue(1);
+    vi.mocked(ports.repository.softDelete).mockResolvedValue({ outcome: "needs_confirmation", recentSendCount: 1 });
     const blocked = await createTemplateOrchestrator(ports).delete("template-1");
     expect(blocked).toMatchObject({ ok: false, error: { code: "TEMPLATE_RECENTLY_USED" } });
     expect(ports.provider.deleteTemplate).not.toHaveBeenCalled();
 
-    vi.mocked(ports.repository.countRecentSends).mockResolvedValue(0);
-    const deleted = await createTemplateOrchestrator(ports).delete("template-1");
+    vi.mocked(ports.repository.softDelete).mockResolvedValue({ outcome: "deleted", recentSendCount: 1 });
+    const deleted = await createTemplateOrchestrator(ports).delete("template-1", true);
     expect(deleted).toEqual({ ok: true, data: null });
-    expect(ports.repository.countRecentSends).toHaveBeenLastCalledWith("org-1", "template-1", new Date("2026-07-30T12:00:00Z"));
-    expect(ports.repository.markDeletedRetainingHistory).toHaveBeenCalledWith("org-1", "template-1");
+    expect(ports.repository.softDelete).toHaveBeenLastCalledWith("org-1", "template-1", true);
   });
 
-  it("treats provider 404 delete as idempotent but surfaces local reconciliation failure", async () => {
+  it("treats provider 404 delete as idempotent after the atomic local delete", async () => {
     const ports = makePorts();
     const notFound = new Error("provider detail");
     vi.mocked(ports.repository.getTemplate).mockResolvedValue(finalized);
     vi.mocked(ports.provider.deleteTemplate).mockRejectedValue(notFound);
     vi.mocked(ports.provider.isNotFound).mockImplementation((error) => error === notFound);
-    vi.mocked(ports.repository.markDeletedRetainingHistory).mockResolvedValue(false);
     const result = await createTemplateOrchestrator(ports).delete("template-1");
-    expect(result).toMatchObject({ ok: false, error: { code: "DELETE_RECONCILIATION_FAILED" } });
-    expect(ports.repository.markDeletedRetainingHistory).toHaveBeenCalled();
+    expect(result).toEqual({ ok: true, data: null });
+    expect(ports.repository.softDelete).toHaveBeenCalled();
+  });
+
+  it("reports explicit provider reconciliation after the atomic local delete", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.repository.getTemplate).mockResolvedValue(finalized);
+    vi.mocked(ports.provider.deleteTemplate).mockRejectedValue(new Error("provider private detail"));
+    const result = await createTemplateOrchestrator(ports).delete("template-1");
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "DELETE_PROVIDER_RECONCILIATION_FAILED",
+        message: "Sandra retained the deletion record, but Dropbox Sign still needs deletion reconciliation.",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("private detail");
   });
 });

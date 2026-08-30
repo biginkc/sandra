@@ -2,11 +2,18 @@
 
 import { LoaderCircleIcon, RefreshCwIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/page-header";
 import { requireTemplateTitle } from "@/lib/esign/template-contract";
+
+import {
+  abandonTemplateDraftAction,
+  startTemplateEditorAction,
+  syncFinishedTemplateAction,
+} from "../../actions";
+import { safeTemplateCallAction } from "../../client-actions";
 
 import type { TemplateEditorActions, TemplateEditorData } from "../../types";
 import {
@@ -36,17 +43,21 @@ export function EmbeddedTemplateEditor({
   loadClient?: (clientId: string) => Promise<EmbeddedTemplateClient>;
 }) {
   const router = useRouter();
+  const editorActions = useMemo<TemplateEditorActions>(() => actions ?? ({
+    startEditor: () => safeTemplateCallAction(startTemplateEditorAction(template.id), { fallbackMessage: "The editor could not be opened." }),
+    syncFinishedTemplate: (input) => safeTemplateCallAction(syncFinishedTemplateAction(template.id, input), { fallbackMessage: "The finished template could not be synchronized." }),
+    abandonDraft: () => safeTemplateCallAction(abandonTemplateDraftAction(template.id), { fallbackMessage: "The draft could not be abandoned." }),
+  }), [actions, template.id]);
   const containerRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const terminalReason = useRef<"finish" | "cancel" | null>(null);
   const [generation, setGeneration] = useState(0);
   const [state, setState] = useState<EditorState>(
-    actions ? { status: "loading" } : { status: "unavailable" },
+    { status: "loading" },
   );
   const [pending, startTransition] = useTransition();
 
   const syncFinished = useCallback(async () => {
-    if (!actions) return;
     setState({ status: "syncing" });
     let name: string;
     try {
@@ -59,33 +70,33 @@ export function EmbeddedTemplateEditor({
       });
       return;
     }
-    const result = await actions.syncFinishedTemplate({ name });
+    const result = await editorActions.syncFinishedTemplate({ name });
     if (!result.ok) {
       setState({ status: "error", message: result.error.message, code: result.error.code });
       return;
     }
     setState({ status: "finished" });
-  }, [actions, template.name]);
+  }, [editorActions, template.name]);
 
   const abandonAndReturn = useCallback(async () => {
-    if (!actions || template.isFinalized) {
+    if (template.isFinalized) {
       router.push("/settings/esign-templates");
       return;
     }
-    const result = await actions.abandonDraft();
+    const result = await editorActions.abandonDraft();
     if (!result.ok) {
       setState({ status: "error", message: result.error.message, code: result.error.code });
       return;
     }
     router.push("/settings/esign-templates");
-  }, [actions, router, template.isFinalized]);
+  }, [editorActions, router, template.isFinalized]);
 
   useEffect(() => {
-    if (!actions || !containerRef.current) return;
+    if (!containerRef.current) return;
     let disposed = false;
     setState({ status: "loading" });
     terminalReason.current = null;
-    void actions.startEditor().then(async (session) => {
+    void editorActions.startEditor().then(async (session) => {
       if (!session.ok) {
         if (!disposed) {
           setState({ status: "error", message: session.error.message, code: session.error.code });
@@ -142,7 +153,7 @@ export function EmbeddedTemplateEditor({
       cleanupRef.current?.();
       cleanupRef.current = null;
     };
-  }, [abandonAndReturn, actions, generation, loadClient, router, syncFinished]);
+  }, [abandonAndReturn, editorActions, generation, loadClient, router, syncFinished]);
 
   const cancel = () => {
     cleanupRef.current?.();

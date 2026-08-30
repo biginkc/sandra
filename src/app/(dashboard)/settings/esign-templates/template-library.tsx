@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils";
 import Link from "next/link";
 
 import { AddTemplateDialog } from "./add-template-dialog";
+import { templateLibraryActions } from "./client-actions";
 import { TemplateRowActions } from "./template-row-actions";
 import type {
   EsignTemplateRow,
@@ -30,7 +31,7 @@ import type {
 
 export function TemplateLibrary({
   result,
-  actions,
+  actions = templateLibraryActions,
   onRetry,
 }: {
   result: TemplateLibraryLoadResult;

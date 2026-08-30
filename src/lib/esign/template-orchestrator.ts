@@ -6,7 +6,6 @@ import {
 } from "./template-contract";
 
 export const ESIGN_TEMPLATE_MAX_PDF_BYTES = 40 * 1024 * 1024;
-const STAGING_PREFIX = "esign-template-staging";
 
 export type TemplateActionError = Readonly<{ code: string; message: string }>;
 export type TemplateActionResult<T> =
@@ -17,6 +16,16 @@ export type TemplateActor = Readonly<{
   userId: string;
   orgId: string;
   isOwner: boolean;
+}>;
+
+export type TemplateListItem = TemplateOption & Readonly<{
+  sourceFilename: string;
+  sourceSizeBytes: number;
+  pageCount: number | null;
+  fieldCount: number | null;
+  updatedAt: string;
+  updatedByName: string;
+  recentSendCount30d: number;
 }>;
 
 export type TemplateUpload = Readonly<{
@@ -33,6 +42,7 @@ export type StagedTemplateSource = Readonly<{
   filename: string;
   size: number;
   mimeType: "application/pdf";
+  sha256: string;
 }>;
 
 export type TemplateDraftRecord = Readonly<{
@@ -45,7 +55,7 @@ export type TemplateDraftRecord = Readonly<{
   signerRoles: readonly TemplateSignerRole[];
   mergeFieldNames: readonly string[];
   stagingSourceId: string | null;
-  lifecycle: "draft" | "finalized" | "abandoned" | "deleted";
+  lifecycle: "preparing" | "editing" | "finalized" | "abandoned" | "deleted" | "error";
 }>;
 
 export type ProviderTemplateState = Readonly<{
@@ -59,10 +69,12 @@ export type TemplateAuthPort = Readonly<{
 }>;
 
 export type TemplateRepositoryPort = Readonly<{
-  listFinalized(orgId: string): Promise<readonly TemplateOption[]>;
-  createStage(input: Omit<StagedTemplateSource, "id">): Promise<StagedTemplateSource>;
+  listFinalized(orgId: string): Promise<readonly TemplateListItem[]>;
+  recordVerifiedStage(input: StagedTemplateSource): Promise<StagedTemplateSource>;
+  recordUnattachedStageCleanup(input: { orgId: string; stageId: string; outcome: "deleted" | "failed" }): Promise<void>;
   getStage(orgId: string, stageId: string): Promise<StagedTemplateSource | null>;
   createHiddenDraft(input: Omit<TemplateDraftRecord, "id" | "providerTemplateId" | "lifecycle">): Promise<TemplateDraftRecord>;
+  createHiddenDuplicate(input: { orgId: string; sourceTemplateId: string; name: string }): Promise<TemplateDraftRecord>;
   getTemplate(orgId: string, templateId: string): Promise<TemplateDraftRecord | null>;
   attachProviderId(orgId: string, templateId: string, providerTemplateId: string): Promise<boolean>;
   finalizeDraft(input: {
@@ -72,8 +84,7 @@ export type TemplateRepositoryPort = Readonly<{
     option: TemplateOption;
   }): Promise<boolean>;
   markAbandoned(orgId: string, templateId: string): Promise<boolean>;
-  countRecentSends(orgId: string, templateId: string, since: Date): Promise<number>;
-  markDeletedRetainingHistory(orgId: string, templateId: string): Promise<boolean>;
+  softDelete(orgId: string, templateId: string, confirmRecentSends: boolean): Promise<{ outcome: "deleted" | "already_deleted" | "needs_confirmation"; recentSendCount: number }>;
   recordSourceCleanup(input: {
     orgId: string;
     templateId: string;
@@ -91,6 +102,7 @@ export type TemplatePrivateStoragePort = Readonly<{
 export type TemplateProviderPort = Readonly<{
   embeddedClientId: string;
   createDraft(input: {
+    localTemplateId: string;
     title: string;
     documentType: string;
     file: TemplateUpload;
@@ -130,7 +142,7 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
   }
 
   return {
-    async list(): Promise<TemplateActionResult<readonly TemplateOption[]>> {
+    async list(): Promise<TemplateActionResult<readonly TemplateListItem[]>> {
       const access = await owner();
       if (!access.ok) return access;
       try {
@@ -153,13 +165,33 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       } catch {
         return failure("STAGING_UPLOAD_FAILED", "The PDF could not be stored privately.");
       }
+      let storedBytes: Uint8Array;
       try {
-        const stage = await ports.repository.createStage({
+        storedBytes = await ports.storage.readPrivate(storagePath);
+      } catch {
+        await safelyDeleteStagedUpload(ports, storagePath);
+        return failure("STAGING_VERIFY_READ_FAILED", "The private PDF could not be verified after upload.");
+      }
+      const stored = validateOnePdf([{ ...validated.data, bytes: storedBytes, size: storedBytes.byteLength }]);
+      if (!stored.ok || storedBytes.byteLength !== validated.data.size) {
+        await safelyDeleteStagedUpload(ports, storagePath);
+        return failure("STAGING_VERIFY_FAILED", "The stored PDF did not match the uploaded file.");
+      }
+      const uploadedHash = await sha256Hex(validated.data.bytes);
+      const storedHash = await sha256Hex(storedBytes);
+      if (uploadedHash !== storedHash) {
+        await safelyDeleteStagedUpload(ports, storagePath);
+        return failure("STAGING_VERIFY_FAILED", "The stored PDF did not match the uploaded file.");
+      }
+      try {
+        const stage = await ports.repository.recordVerifiedStage({
+          id: opaqueId,
           orgId: access.data.orgId,
           storagePath,
           filename: validated.data.filename,
           size: validated.data.size,
           mimeType: "application/pdf",
+          sha256: storedHash,
         });
         return success({ stagingSourceId: stage.id });
       } catch {
@@ -213,11 +245,15 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
           stagingSourceId: stage.id,
         });
       } catch {
-        return failure("DRAFT_CREATE_FAILED", "The hidden template draft could not be created.");
+        const cleanup = await cleanupUnattachedStage(ports, stage);
+        return cleanup
+          ? failure("DRAFT_CREATE_FAILED", "The hidden template draft could not be created.")
+          : failure("DRAFT_CREATE_COMPENSATION_FAILED", "The hidden template draft failed and its private source requires cleanup.");
       }
       let providerTemplateId: string;
       try {
         ({ providerTemplateId } = await ports.provider.createDraft({
+          localTemplateId: draft.id,
           title: contract.data.name,
           documentType: input.documentType.trim(),
           file: file.data,
@@ -293,7 +329,7 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       } catch {
         return failure("TEMPLATE_READ_FAILED", "The template could not be loaded.");
       }
-      if (!draft || draft.orgId !== access.data.orgId || draft.lifecycle !== "draft" || !draft.providerTemplateId) {
+      if (!draft || draft.orgId !== access.data.orgId || !["editing", "finalized"].includes(draft.lifecycle) || !draft.providerTemplateId) {
         return failure("DRAFT_STALE", "The template draft is no longer available to finalize.");
       }
       let provider: ProviderTemplateState;
@@ -316,8 +352,10 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       } catch {
         return failure("FINALIZE_LOCAL_FAILED", "Sandra could not finalize the verified template.");
       }
-      const cleanup = await cleanupSource(ports, draft);
-      if (!cleanup.ok) return cleanup;
+      if (draft.lifecycle === "editing") {
+        const cleanup = await cleanupSource(ports, draft);
+        if (!cleanup.ok) return cleanup;
+      }
       return success(reconciled.data);
     },
 
@@ -330,7 +368,7 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       } catch {
         return failure("TEMPLATE_READ_FAILED", "The template could not be loaded.");
       }
-      if (!draft || draft.orgId !== access.data.orgId || draft.lifecycle !== "draft") return failure("DRAFT_STALE", "The template draft is no longer available.");
+      if (!draft || draft.orgId !== access.data.orgId || !["preparing", "editing"].includes(draft.lifecycle)) return failure("DRAFT_STALE", "The template draft is no longer available.");
       if (draft.providerTemplateId) {
         try {
           await ports.provider.deleteTemplate(draft.providerTemplateId);
@@ -338,8 +376,6 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
           if (!ports.provider.isNotFound(error)) return failure("ABANDON_PROVIDER_FAILED", "Dropbox Sign could not remove the draft.");
         }
       }
-      const cleanup = await cleanupSource(ports, draft);
-      if (!cleanup.ok) return cleanup;
       try {
         if (!(await ports.repository.markAbandoned(access.data.orgId, templateId))) {
           return failure("ABANDON_LOCAL_FAILED", "Sandra could not record the abandoned draft.");
@@ -347,6 +383,8 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       } catch {
         return failure("ABANDON_LOCAL_FAILED", "Sandra could not record the abandoned draft.");
       }
+      const cleanup = await cleanupSource(ports, { ...draft, lifecycle: "abandoned" });
+      if (!cleanup.ok) return cleanup;
       return success(null);
     },
 
@@ -366,15 +404,7 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       }
       let draft: TemplateDraftRecord;
       try {
-        draft = await ports.repository.createHiddenDraft({
-          orgId: access.data.orgId,
-          name: title.data,
-          documentType: source.documentType,
-          signerRoles: source.signerRoles,
-          sellerRoleName: source.sellerRoleName,
-          mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
-          stagingSourceId: null,
-        });
+        draft = await ports.repository.createHiddenDuplicate({ orgId: access.data.orgId, sourceTemplateId: source.id, name: title.data });
       } catch {
         return failure("DUPLICATE_LOCAL_FAILED", "The hidden copy could not be prepared.");
       }
@@ -409,7 +439,7 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       return success({ templateId: draft.id, readiness: duplicate.readiness });
     },
 
-    async delete(templateId: string): Promise<TemplateActionResult<null>> {
+    async delete(templateId: string, confirmRecentSends = false): Promise<TemplateActionResult<null | { recentSendCount: number }>> {
       const access = await owner();
       if (!access.ok) return access;
       let template: TemplateDraftRecord | null;
@@ -418,28 +448,22 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       } catch {
         return failure("TEMPLATE_READ_FAILED", "The template could not be loaded.");
       }
-      if (!template || template.orgId !== access.data.orgId || template.lifecycle !== "finalized" || !template.providerTemplateId) {
+      if (!template || template.orgId !== access.data.orgId || !["finalized", "deleted"].includes(template.lifecycle) || !template.providerTemplateId) {
         return failure("TEMPLATE_NOT_FOUND", "The finalized template is unavailable.");
       }
-      const since = new Date(ports.now().getTime() - 30 * 24 * 60 * 60 * 1000);
-      let recent: number;
+      let deletion: { outcome: "deleted" | "already_deleted" | "needs_confirmation"; recentSendCount: number };
       try {
-        recent = await ports.repository.countRecentSends(access.data.orgId, templateId, since);
+        deletion = await ports.repository.softDelete(access.data.orgId, templateId, confirmRecentSends);
       } catch {
         return failure("RECENT_SEND_CHECK_FAILED", "Recent template usage could not be verified.");
       }
-      if (recent > 0) return failure("TEMPLATE_RECENTLY_USED", "This template was used in the last 30 days and cannot be deleted.");
+      if (deletion.outcome === "needs_confirmation") {
+        return failure("TEMPLATE_RECENTLY_USED", `Confirm deletion of a template used ${deletion.recentSendCount} time${deletion.recentSendCount === 1 ? "" : "s"} in the last 30 days.`);
+      }
       try {
         await ports.provider.deleteTemplate(template.providerTemplateId);
       } catch (error) {
-        if (!ports.provider.isNotFound(error)) return failure("DELETE_PROVIDER_FAILED", "Dropbox Sign could not delete the template.");
-      }
-      try {
-        if (!(await ports.repository.markDeletedRetainingHistory(access.data.orgId, templateId))) {
-          return failure("DELETE_RECONCILIATION_FAILED", "The provider template was removed, but Sandra could not retain the deletion record.");
-        }
-      } catch {
-        return failure("DELETE_RECONCILIATION_FAILED", "The provider template was removed, but Sandra could not retain the deletion record.");
+        if (!ports.provider.isNotFound(error)) return failure("DELETE_PROVIDER_RECONCILIATION_FAILED", "Sandra retained the deletion record, but Dropbox Sign still needs deletion reconciliation.");
       }
       return success(null);
     },
@@ -509,15 +533,15 @@ function validRoles(roles: readonly TemplateSignerRole[]): boolean {
 }
 
 function exactMergeFields(fields: readonly string[]): boolean {
-  return fields.length === ESIGN_TEMPLATE_MERGE_FIELDS.length && ESIGN_TEMPLATE_MERGE_FIELDS.every((field, index) => fields[index] === field);
+  return fields.length === ESIGN_TEMPLATE_MERGE_FIELDS.length && ESIGN_TEMPLATE_MERGE_FIELDS.every((field) => fields.includes(field));
 }
 
 function validateOnePdf(files: readonly TemplateUpload[]): TemplateActionResult<TemplateUpload> {
   if (files.length !== 1) return failure("PDF_COUNT_INVALID", "Choose exactly one PDF.");
   const file = files[0];
   if (file.mimeType !== "application/pdf") return failure("PDF_TYPE_INVALID", "Choose a PDF file.");
-  if (file.size <= 0 || file.size > ESIGN_TEMPLATE_MAX_PDF_BYTES || file.bytes.byteLength !== file.size) {
-    return failure("PDF_SIZE_INVALID", "The PDF must be non-empty and 40 MiB or smaller.");
+  if (file.size <= 0 || file.size >= ESIGN_TEMPLATE_MAX_PDF_BYTES || file.bytes.byteLength !== file.size) {
+    return failure("PDF_SIZE_INVALID", "The PDF must be non-empty and smaller than 40 MiB.");
   }
   const magic = String.fromCharCode(...file.bytes.slice(0, 5));
   if (magic !== "%PDF-") return failure("PDF_MAGIC_INVALID", "The uploaded file is not a valid PDF.");
@@ -525,15 +549,49 @@ function validateOnePdf(files: readonly TemplateUpload[]): TemplateActionResult<
 }
 
 function stagingPath(orgId: string, opaqueId: string): string {
-  return `${STAGING_PREFIX}/${encodeURIComponent(orgId)}/${opaqueId}`;
+  return `${orgId}/${opaqueId}.pdf`;
 }
 
 function isOrgScopedStagingPath(path: string, orgId: string): boolean {
-  return path.startsWith(`${STAGING_PREFIX}/${encodeURIComponent(orgId)}/`) && !path.includes("..") && path.split("/").length === 3;
+  return new RegExp(`^${escapeRegExp(orgId)}/[0-9a-f-]{36}\\.pdf$`).test(path);
 }
 
 function isOpaqueId(value: string): boolean {
-  return /^[A-Za-z0-9_-]{16,128}$/.test(value);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", copy.buffer);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function safelyDeleteStagedUpload(ports: TemplateOrchestratorPorts, path: string): Promise<void> {
+  try {
+    await ports.storage.deletePrivate(path);
+  } catch {
+    // The action still fails closed. Storage diagnostics are reported server-side by the adapter.
+  }
+}
+
+async function cleanupUnattachedStage(ports: TemplateOrchestratorPorts, stage: StagedTemplateSource): Promise<boolean> {
+  try {
+    await ports.storage.deletePrivate(stage.storagePath);
+    await ports.repository.recordUnattachedStageCleanup({ orgId: stage.orgId, stageId: stage.id, outcome: "deleted" });
+    return true;
+  } catch {
+    try {
+      await ports.repository.recordUnattachedStageCleanup({ orgId: stage.orgId, stageId: stage.id, outcome: "failed" });
+    } catch {
+      // The caller returns an explicit compensation failure either way.
+    }
+    return false;
+  }
 }
 
 async function cleanupSource(ports: TemplateOrchestratorPorts, draft: TemplateDraftRecord): Promise<TemplateActionResult<null>> {
@@ -560,11 +618,11 @@ async function cleanupSource(ports: TemplateOrchestratorPorts, draft: TemplateDr
 }
 
 async function compensateHiddenDraft(ports: TemplateOrchestratorPorts, draft: TemplateDraftRecord): Promise<boolean> {
-  const cleanup = await cleanupSource(ports, draft);
-  if (!cleanup.ok) return false;
   try {
-    return await ports.repository.markAbandoned(draft.orgId, draft.id);
+    if (!(await ports.repository.markAbandoned(draft.orgId, draft.id))) return false;
   } catch {
     return false;
   }
+  const cleanup = await cleanupSource(ports, { ...draft, lifecycle: "abandoned" });
+  return cleanup.ok;
 }

@@ -19,6 +19,7 @@ import { Label } from "@/components/ui/label";
 import { validateTemplateTitle } from "@/lib/esign/template-contract";
 
 import { SignerRoleEditor } from "./signer-role-editor";
+import { templateLibraryActions } from "./client-actions";
 import {
   ESIGN_MERGE_FIELD_NAMES,
   type TemplateLibraryActions,
@@ -36,7 +37,7 @@ const DOCUMENT_TYPES = [
 const MAX_PDF_BYTES = 40 * 1024 * 1024;
 
 export function AddTemplateDialog({
-  actions,
+  actions = templateLibraryActions,
   disabledReason,
   trigger,
 }: {
@@ -171,7 +172,7 @@ function validatePdf(file: File): string | null {
   if (!file.name.toLowerCase().endsWith(".pdf")) return "Choose a PDF file.";
   if (file.type && file.type !== "application/pdf") return "Choose a PDF file.";
   if (file.size <= 0) return "The PDF is empty.";
-  if (file.size > MAX_PDF_BYTES) return "The PDF must be 40 MB or smaller.";
+  if (file.size >= MAX_PDF_BYTES) return "The PDF must be smaller than 40 MB.";
   return null;
 }
 

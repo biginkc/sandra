@@ -57,13 +57,13 @@ export async function chooseDropboxPdf(input: {
           selected.isDir ||
           !selected.name.toLowerCase().endsWith(".pdf") ||
           selected.bytes <= 0 ||
-          selected.bytes > DROPBOX_CHOOSER_SIZE_LIMIT
+          selected.bytes >= DROPBOX_CHOOSER_SIZE_LIMIT
         ) {
           resolve({
             ok: false,
             error: {
               code: "DROPBOX_CHOOSER_INVALID_FILE",
-              message: "Choose one PDF that is 40 MB or smaller.",
+              message: "Choose one PDF smaller than 40 MB.",
             },
           });
           return;
@@ -75,8 +75,8 @@ export async function chooseDropboxPdf(input: {
           .then(async (response) => {
             if (!response.ok) throw new Error("Dropbox could not download the selected PDF.");
             const blob = await response.blob();
-            if (blob.size <= 0 || blob.size > DROPBOX_CHOOSER_SIZE_LIMIT) {
-              throw new Error("The downloaded PDF must be 40 MB or smaller.");
+            if (blob.size <= 0 || blob.size >= DROPBOX_CHOOSER_SIZE_LIMIT) {
+              throw new Error("The downloaded PDF must be smaller than 40 MB.");
             }
             resolve({
               ok: true,
