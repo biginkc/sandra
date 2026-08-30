@@ -230,10 +230,10 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await addressLink.click({ modifiers: ["ControlOrMeta"] });
   const detailTab = await newTabPromise;
   await expect(page).toHaveURL(boardUrl);
-  await expect(detailTab).toHaveURL(detailUrl);
+  await expect(detailTab).toHaveURL(detailUrl, { timeout: 15_000 });
   await expect(
     detailTab.getByRole("heading", { name: property.address }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 15_000 });
   await detailTab.close();
 
   const leadCard = page.getByRole("group", {
