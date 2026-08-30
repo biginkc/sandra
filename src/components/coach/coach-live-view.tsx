@@ -22,6 +22,7 @@ import {
 import { resolveCoachTokens, type DisplayTextSegment } from "@/lib/coach/token-resolver";
 import type {
   CoachEntryToken,
+  CoachHoldTimer,
   CoachPhaseId,
   CoachToken,
   CoachTranscriptLine,
@@ -32,6 +33,7 @@ import { COACH_ENTRY_TOKENS, COACH_PHASE_ORDER } from "@/lib/coach/types";
 import type { CoachSession, ContextLoadState } from "@/lib/coach/use-coach-session";
 import { isNearTranscriptBottom } from "@/lib/coach/transcript-scroll";
 import { cn } from "@/lib/utils";
+import { HoldTimer } from "./hold-timer";
 
 export type CoachCallStatus = "connecting" | "ringing" | "live" | "audio_reconnecting" | "audio_reconnect_required" | "ended" | "failed" | null;
 
@@ -251,6 +253,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         callStatus={callStatus}
         seconds={seconds}
         held={held}
+        holdTimer={held ? state.holdTimer : null}
       />
       {callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required" ? (
         <div role="alert" data-testid="coach-audio-reconnect-warning" className="flex shrink-0 items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-950">
@@ -338,6 +341,7 @@ function CoachTopBar({
   callStatus,
   seconds,
   held,
+  holdTimer,
 }: {
   activePhaseId: CoachPhaseId;
   onSelectPhase: (phaseId: CoachPhaseId) => void;
@@ -345,6 +349,7 @@ function CoachTopBar({
   callStatus: CoachCallStatus;
   seconds: number;
   held: boolean;
+  holdTimer: CoachHoldTimer | null;
 }) {
   const preConnectLabel = callStatus === "connecting" ? "Connecting…" : callStatus === "ringing" ? "Ringing…" : null;
   const timerLabel = held ? "On hold" : preConnectLabel ?? timerText(seconds);
@@ -373,6 +378,7 @@ function CoachTopBar({
             Live
           </Badge>
         ) : null}
+        <HoldTimer timer={holdTimer} />
         {degraded ? (
           <Badge variant="outline" data-testid="coach-connecting-pill" className="h-5 text-[10px] text-muted-foreground">
             Transcript connecting…
