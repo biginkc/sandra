@@ -601,7 +601,7 @@ create index idx_esign_templates_provider_create_recovery
   on public.esign_templates (
     org_id, provider_create_state, created_at, id
   )
-  where provider_create_state in ('claimed', 'invoking', 'unknown')
+  where provider_create_state in ('claimed', 'invoking', 'unknown', 'attached')
     and finalized_at is null and deleted_at is null and abandoned_at is null;
 
 create or replace function public.esign_template_is_available(
@@ -1154,6 +1154,120 @@ begin
 end;
 $$;
 
+create or replace function public.mark_stale_esign_template_provider_create_unknown(
+  p_org_id uuid, p_template_id uuid, p_source_id uuid, p_actor_id uuid
+)
+returns table (
+  outcome text,
+  template_id uuid,
+  provider_create_state text,
+  created_by uuid
+)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_template public.esign_templates%rowtype;
+  v_provider_account_id text;
+  v_now timestamptz;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required' using errcode = '42501';
+  end if;
+  perform public.esign_require_active_owner(p_org_id, p_actor_id);
+
+  select integration.provider_account_id into v_provider_account_id
+  from public.org_esign_integrations integration
+  where integration.org_id = p_org_id
+    and integration.provider = 'dropbox_sign'
+  for share;
+  if not found then
+    raise exception 'current Dropbox Sign integration not found'
+      using errcode = 'P0002';
+  end if;
+
+  select * into v_template
+  from public.esign_templates template
+  where template.id = p_template_id
+  for update;
+  if not found
+     or v_template.org_id <> p_org_id
+     or v_template.staging_source_id <> p_source_id
+     or v_template.duplicate_of_template_id is not null
+     or v_template.supersedes_template_id is not null
+     or v_template.provider_create_state is null then
+    raise exception 'ordinary eSign template provider create not found'
+      using errcode = 'P0002';
+  end if;
+  if v_template.provider_account_id is distinct from v_provider_account_id then
+    raise exception 'provider create account no longer matches current integration'
+      using errcode = '23514';
+  end if;
+  if not exists (
+    select 1 from public.esign_template_staging_sources source
+    where source.id = p_source_id and source.org_id = p_org_id
+  ) then
+    raise exception 'ordinary eSign template source is unavailable'
+      using errcode = 'P0002';
+  end if;
+
+  if v_template.provider_create_state = 'attached' then
+    return query select 'already_attached'::text, v_template.id,
+      'attached'::text, v_template.created_by;
+    return;
+  end if;
+  if v_template.provider_create_state = 'unknown' then
+    return query select 'already_unknown'::text, v_template.id,
+      'unknown'::text, v_template.created_by;
+    return;
+  end if;
+  if v_template.provider_create_state <> 'invoking'
+     or v_template.lifecycle_state not in ('preparing', 'editing')
+     or v_template.finalized_at is not null
+     or v_template.deleted_at is not null
+     or v_template.abandoned_at is not null then
+    raise exception 'ordinary eSign template provider invocation is not recoverable'
+      using errcode = '55000';
+  end if;
+  if not exists (
+    select 1 from public.esign_template_staging_sources source
+    where source.id = p_source_id and source.org_id = p_org_id
+      and source.verification_state = 'verified'
+      and source.cleanup_outcome = 'pending'
+  ) then
+    raise exception 'ordinary eSign template source is unavailable'
+      using errcode = '55000';
+  end if;
+
+  v_now := clock_timestamp();
+  if v_template.provider_create_invocation_started_at is null
+     or v_template.provider_create_invocation_started_at + interval '10 minutes'
+       > v_now then
+    raise exception 'provider create invocation is not stale'
+      using errcode = '55000';
+  end if;
+
+  update public.esign_templates template
+  set provider_create_state = 'unknown',
+      provider_create_error_code = 'PROVIDER_CREATE_INVOCATION_STALE',
+      updated_by = p_actor_id,
+      updated_at = v_now
+  where template.id = p_template_id and template.org_id = p_org_id
+    and template.staging_source_id = p_source_id
+    and template.provider_create_state = 'invoking'
+    and template.provider_create_invocation_started_at + interval '10 minutes'
+      <= v_now;
+  if not found then
+    raise exception 'provider create invocation changed concurrently'
+      using errcode = '40001';
+  end if;
+
+  return query select 'recorded_unknown'::text, v_template.id,
+    'unknown'::text, v_template.created_by;
+end;
+$$;
+
 create or replace function public.complete_esign_template_provider_create(
   p_org_id uuid, p_template_id uuid, p_source_id uuid,
   p_claim_token uuid, p_provider_template_id text, p_actor_id uuid
@@ -1312,7 +1426,6 @@ returns table (
   source_id uuid,
   name text,
   provider_create_state text,
-  provider_account_id text,
   provider_create_claimed_at timestamptz,
   provider_create_invocation_started_at timestamptz,
   provider_create_error_code text,
@@ -1331,12 +1444,16 @@ begin
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
   return query
   select template.id, template.staging_source_id, template.name,
-    template.provider_create_state, template.provider_account_id,
+    template.provider_create_state,
     template.provider_create_claimed_at,
     template.provider_create_invocation_started_at,
     template.provider_create_error_code, template.created_by,
     template.created_at
   from public.esign_templates template
+  join public.org_esign_integrations integration
+    on integration.org_id = template.org_id
+   and integration.provider = 'dropbox_sign'
+   and integration.provider_account_id = template.provider_account_id
   where template.org_id = p_org_id
     and template.lifecycle_state in ('preparing', 'editing')
     and template.finalized_at is null
@@ -1344,7 +1461,9 @@ begin
     and template.abandoned_at is null
     and template.duplicate_of_template_id is null
     and template.supersedes_template_id is null
-    and template.provider_create_state in ('claimed', 'invoking', 'unknown')
+    and template.provider_create_state in (
+      'claimed', 'invoking', 'unknown', 'attached'
+    )
   order by template.created_at, template.id;
 end;
 $$;
@@ -2462,6 +2581,12 @@ revoke all on function public.mark_esign_template_provider_create_unknown(
 ) from public, anon, authenticated, service_role;
 grant execute on function public.mark_esign_template_provider_create_unknown(
   uuid, uuid, uuid, uuid, text, uuid
+) to service_role;
+revoke all on function public.mark_stale_esign_template_provider_create_unknown(
+  uuid, uuid, uuid, uuid
+) from public, anon, authenticated, service_role;
+grant execute on function public.mark_stale_esign_template_provider_create_unknown(
+  uuid, uuid, uuid, uuid
 ) to service_role;
 revoke all on function public.complete_esign_template_provider_create(
   uuid, uuid, uuid, uuid, text, uuid

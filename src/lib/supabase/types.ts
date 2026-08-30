@@ -5052,7 +5052,6 @@ export type Database = {
           created_at: string
           created_by: string
           name: string
-          provider_account_id: string | null
           provider_create_claimed_at: string | null
           provider_create_error_code: string | null
           provider_create_invocation_started_at: string | null
@@ -5103,6 +5102,20 @@ export type Database = {
         Returns: {
           created_by: string
           outcome: string
+          template_id: string
+        }[]
+      }
+      mark_stale_esign_template_provider_create_unknown: {
+        Args: {
+          p_actor_id: string
+          p_org_id: string
+          p_source_id: string
+          p_template_id: string
+        }
+        Returns: {
+          created_by: string
+          outcome: string
+          provider_create_state: string
           template_id: string
         }[]
       }

@@ -281,6 +281,79 @@ describe("Migration 20260830080000 — reservation contention", () => {
     }
   });
 
+  it("serializes exact-expiry stale promotion against late completion", async () => {
+    const source = await seedVerifiedSource();
+    const templateId = await consume(source.id);
+    const claim = await setup.query<{ claim_token: string }>(
+      "select * from public.claim_esign_template_provider_create($1,$2,$3,$4)",
+      [orgId, templateId, source.id, ownerId],
+    );
+    const token = claim.rows[0].claim_token;
+    await setup.query(
+      "select * from public.begin_esign_template_provider_create($1,$2,$3,$4,$5)",
+      [orgId, templateId, source.id, token, ownerId],
+    );
+    await setup.query(
+      `update public.esign_templates
+       set provider_create_invocation_started_at=
+         clock_timestamp()-interval '10 minutes'
+       where id=$1`,
+      [templateId],
+    );
+    const providerTemplateId = `stale-race-${crypto.randomUUID()}`;
+    const [promote, complete] = await Promise.allSettled([
+      first.query<{ outcome: string; provider_create_state: string }>(
+        "select * from public.mark_stale_esign_template_provider_create_unknown($1,$2,$3,$4)",
+        [orgId, templateId, source.id, ownerId],
+      ),
+      second.query<{ outcome: string; provider_template_id: string }>(
+        "select * from public.complete_esign_template_provider_create($1,$2,$3,$4,$5,$6)",
+        [orgId, templateId, source.id, token, providerTemplateId, ownerId],
+      ),
+    ]);
+    expect(promote.status).toBe("fulfilled");
+    expect(complete.status).toBe("fulfilled");
+    if (promote.status === "fulfilled") {
+      expect(["recorded_unknown", "already_attached"]).toContain(
+        promote.value.rows[0].outcome,
+      );
+    }
+    if (complete.status === "fulfilled") {
+      expect(complete.value.rows[0]).toMatchObject({
+        outcome: "attached",
+        provider_template_id: providerTemplateId,
+      });
+    }
+    const final = await setup.query<{
+      provider_create_state: string;
+      provider_create_error_code: string | null;
+      sign_template_id: string;
+    }>(
+      `select provider_create_state,provider_create_error_code,sign_template_id
+       from public.esign_templates where id=$1`,
+      [templateId],
+    );
+    expect(final.rows[0]).toEqual({
+      provider_create_state: "attached",
+      provider_create_error_code: null,
+      sign_template_id: providerTemplateId,
+    });
+    await expect(
+      setup.query(
+        "select * from public.complete_esign_template_provider_create($1,$2,$3,$4,$5,$6)",
+        [orgId, templateId, source.id, token, providerTemplateId, ownerId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [expect.objectContaining({ outcome: "already_attached" })],
+    });
+    await expect(
+      setup.query(
+        "select * from public.complete_esign_template_provider_create($1,$2,$3,$4,$5,$6)",
+        [orgId, templateId, source.id, token, "stale-race-conflict", ownerId],
+      ),
+    ).rejects.toMatchObject({ message: expect.stringMatching(/conflicts/i) });
+  });
+
   it("allows only one same-account cross-org attachment for a provider template ID", async () => {
     const firstSource = await seedVerifiedSource();
     const secondSource = await seedVerifiedSource(otherOrgId, otherOwnerId);
