@@ -63,7 +63,7 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
     contract.deliveryState === "failed" || contract.status === "error";
   const canDownload = Boolean(contract.signedPdfFileId);
   const hasAnyAction =
-    Boolean(contract.detailsUrl) ||
+    contract.detailsAvailable ||
     canRemind ||
     canVoid ||
     canRetry ||
@@ -151,7 +151,7 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
           }
         />
         <DropdownMenuContent align="end" className="w-48">
-          {contract.detailsUrl ? (
+          {contract.detailsAvailable ? (
             <DropdownMenuItem
               onClick={view}
             >
@@ -165,7 +165,7 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
               Download signed PDF
             </DropdownMenuItem>
           ) : null}
-          {contract.detailsUrl || canDownload ? (
+          {contract.detailsAvailable || canDownload ? (
             <DropdownMenuSeparator />
           ) : null}
           {canRemind ? (

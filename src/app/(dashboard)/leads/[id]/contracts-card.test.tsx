@@ -67,7 +67,7 @@ function contract(overrides: Partial<LeadContractRow> = {}): LeadContractRow {
     deliveryState: "sent",
     testMode: true,
     sentAt: "2026-08-29T18:00:00.000Z",
-    detailsUrl: "https://app.hellosign.com/home/manage?guid=request-1",
+    detailsAvailable: true,
     voidRequestedAt: null,
     signedPdfFileId: null,
     errorMessage: null,

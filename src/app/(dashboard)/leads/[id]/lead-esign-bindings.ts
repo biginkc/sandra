@@ -400,7 +400,7 @@ export async function loadLeadEsignPageModel(propertyId: string): Promise<LeadEs
       const request = await loadRequest(actor.orgId, item.id);
       if (!request) continue;
       const { data: row } = await admin.from("esign_requests").select("sent_at,error_message,test_mode").eq("org_id", actor.orgId).eq("id", item.id).single();
-      contracts.push({ id: request.id, templateName: request.template.name, signers: request.signers as LeadContractRow["signers"], status: request.status, deliveryState: request.deliveryState, testMode: row?.test_mode ?? true, sentAt: row?.sent_at ?? null, detailsUrl: request.detailsUrl, voidRequestedAt: request.voidRequestedAt, signedPdfFileId: request.signedPdfFileId, errorMessage: row?.error_message ?? null });
+      contracts.push({ id: request.id, templateName: request.template.name, signers: request.signers as LeadContractRow["signers"], status: request.status, deliveryState: request.deliveryState, testMode: row?.test_mode ?? true, sentAt: row?.sent_at ?? null, detailsAvailable: request.detailsUrl !== null, voidRequestedAt: request.voidRequestedAt, signedPdfFileId: request.signedPdfFileId, errorMessage: row?.error_message ?? null });
     }
   }
   return {

@@ -94,7 +94,7 @@ export type LeadContractRow = Readonly<{
   deliveryState: EsignDeliveryState;
   testMode: boolean;
   sentAt: string | null;
-  detailsUrl: string | null;
+  detailsAvailable: boolean;
   voidRequestedAt: string | null;
   signedPdfFileId: string | null;
   errorMessage: string | null;
