@@ -448,6 +448,13 @@ describe("<CoachLiveView /> manual navigation", () => {
     });
     expect(screen.getByTestId("follow-up-questions")).toBeEnabled();
 
+    // A finalized seller turn only unlocks the action. It must not invoke the
+    // recommendation contract until the rep deliberately clicks the button.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_600));
+    });
+    expect(recommendationRequest).not.toHaveBeenCalled();
+
     await user.click(screen.getByTestId("follow-up-questions"));
 
     await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));

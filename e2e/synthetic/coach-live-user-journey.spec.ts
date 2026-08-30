@@ -330,7 +330,7 @@ test("real session hook replaces the prior call with the next prepared target on
   await expect(script).not.toContainText("123 Main Street");
 });
 
-test("emulated finalized transcript at Sandra's Jitter boundary triggers advice only for meaningful homeowner speech", async ({ page }) => {
+test("emulated finalized transcript never requests follow-ups until the rep clicks", async ({ page }) => {
   await mountCoach(page);
   await emitStimulus(page, "sellerInterim");
   await page.waitForTimeout(1_650);
@@ -342,67 +342,66 @@ test("emulated finalized transcript at Sandra's Jitter boundary triggers advice 
   await page.waitForTimeout(1_650);
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
   await emitStimulus(page, "sellerMeaningful");
+  await page.waitForTimeout(1_650);
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
+  await expect(page.getByTestId("follow-up-questions")).toBeEnabled();
+  await page.getByTestId("follow-up-questions").click();
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1", { timeout: 3_000 });
-  await expect(page.getByTestId("automatic-recommendations-loading")).toBeVisible();
-  await expect(page.getByTestId("automatic-recommendations")).toContainText("moving closer to family");
+  await expect(page.getByTestId("follow-up-question-options").getByRole("listitem")).toHaveCount(3);
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1");
 });
 
-test("follow-up supersedes automatic work, rejects duplicates, and keeps exactly three grounded questions", async ({ page }) => {
+test("follow-up clicks reject duplicates and keep exactly three grounded questions", async ({ page }) => {
   await mountCoach(page);
   await emitStimulus(page, "providerDeferred");
   await emitStimulus(page, "sellerMeaningful");
-  await expect(page.getByTestId("automatic-recommendations-loading")).toBeVisible({ timeout: 3_000 });
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
   await expect(page.getByTestId("follow-up-questions")).toBeEnabled();
   await page.getByTestId("follow-up-questions").click();
   await expect(page.getByTestId("follow-up-questions")).toBeDisabled();
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2");
+  await expect(page.getByTestId("follow-up-questions")).toHaveText(/Preparing follow-up questions/);
+  await expect(page.getByTestId("follow-up-questions")).toHaveAttribute("aria-busy", "true");
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1");
   await page.waitForTimeout(100);
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2");
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1");
 
-  await emitStimulus(page, "resolveNewestDelayed");
+  await emitStimulus(page, "resolveDelayed");
   const questions = page.getByTestId("follow-up-question-options").getByRole("listitem");
   await expect(questions).toHaveCount(3);
   const text = await questions.allTextContents();
   expect(new Set(text).size).toBe(3);
   expect(text.join(" ")).toContain("family");
+  await page.getByTestId("follow-up-questions").click();
+  await expect(page.getByTestId("follow-up-questions")).toBeDisabled();
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2");
   await emitStimulus(page, "resolveDelayed");
   await expect(questions).toHaveText(text);
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2");
 });
 
-test("late section and call responses cannot overwrite newer visible advice", async ({ page }) => {
+test("late section and call responses cannot overwrite newer visible questions", async ({ page }) => {
   await mountCoach(page);
   await emitStimulus(page, "providerDeferred");
   await emitStimulus(page, "sellerMeaningful");
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1", { timeout: 3_000 });
-  await expect(page.getByTestId("automatic-recommendations-loading")).toBeVisible();
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
+  await page.getByTestId("follow-up-questions").click();
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1");
   await expect(page.getByTestId("coach-next")).toBeEnabled();
   await page.getByTestId("coach-next").click();
   await emitStimulus(page, "sellerSecondMeaningful");
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2", { timeout: 3_000 });
-  await expect(page.getByTestId("automatic-recommendations-loading")).toBeVisible();
+  await page.getByTestId("follow-up-questions").click();
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2");
 
   await emitStimulus(page, "resolveNewestDelayed");
-  const advice = page.getByTestId("automatic-recommendations");
-  await expect(advice).toContainText(`Current advice for synthetic-call-1 in ${sections[1].id}.`);
-  const currentSectionAdvice = await advice.allTextContents();
+  const questions = page.getByTestId("follow-up-question-options").getByRole("listitem");
+  await expect(questions).toHaveCount(3);
+  const currentSectionQuestions = await questions.allTextContents();
   await emitStimulus(page, "resolveDelayed");
-  await expect(advice).toHaveText(currentSectionAdvice);
+  await expect(questions).toHaveText(currentSectionQuestions);
 
-  await emitStimulus(page, "sellerThirdMeaningful");
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 3", { timeout: 3_000 });
   await emitStimulus(page, "newCall");
   await expect(page.getByTestId("synthetic-active-call")).toHaveText("synthetic-call-2");
   await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title);
-  await emitStimulus(page, "providerDeferred");
-  await emitStimulus(page, "sellerMeaningful");
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1", { timeout: 3_000 });
-  await emitStimulus(page, "resolveNewestDelayed");
-  await expect(advice).toContainText(`Current advice for synthetic-call-2 in ${sections[0].id}.`);
-  const currentCallAdvice = await advice.allTextContents();
-  await emitStimulus(page, "resolveDelayed");
-  await expect(advice).toHaveText(currentCallAdvice);
+  await expect(page.getByTestId("follow-up-question-options")).toHaveCount(0);
 });
 
 test("follow-up request cap is enforced through repeated user clicks without an extra provider call", async ({ page }) => {
@@ -425,36 +424,46 @@ test("follow-up request cap is enforced through repeated user clicks without an 
   await expect(page.getByTestId("follow-up-question-options").getByRole("listitem")).toHaveCount(3);
 });
 
-test("provider failure preserves prior valid advice and never takes over script, transcript, or navigation", async ({ page }) => {
+test("provider failure preserves prior valid questions and never takes over script, transcript, or navigation", async ({ page }) => {
   await mountCoach(page);
   await emitStimulus(page, "sellerMeaningful");
-  await expect(page.getByTestId("automatic-recommendations")).toContainText("moving closer to family", { timeout: 4_000 });
+  await page.getByTestId("follow-up-questions").click();
+  await expect(page.getByTestId("follow-up-question-options")).toBeVisible();
+  const questions = await page.getByTestId("follow-up-question-options").allTextContents();
   await emitStimulus(page, "providerFailure");
   await emitStimulus(page, "sellerSecondMeaningful");
+  await page.getByTestId("follow-up-questions").click();
   await expect(page.getByTestId("recommendation-error")).toContainText("temporarily unavailable", { timeout: 4_000 });
-  await expect(page.getByTestId("automatic-recommendations")).toContainText("moving closer to family");
+  await expect(page.getByTestId("follow-up-questions")).toHaveText("Retry Follow-up Questions");
+  await expect(page.getByTestId("follow-up-question-options")).toHaveText(questions);
   await expect(page.getByTestId("current-script-card")).toBeVisible();
   await expect(page.getByTestId("coach-transcript")).toBeVisible();
   await expect(page.getByTestId("coach-next")).toBeEnabled();
+
+  await emitStimulus(page, "providerImmediate");
+  await page.getByTestId("follow-up-questions").click();
+  await expect(page.getByTestId("follow-up-question-options")).toHaveText(questions);
+  await expect(page.getByTestId("recommendation-error")).toHaveCount(0);
 });
 
 test("collapse/reopen persists the live session while a new call completely resets it", async ({ page }) => {
   await mountCoach(page);
   await page.getByTestId("coach-next").click();
   await emitStimulus(page, "sellerMeaningful");
-  await expect(page.getByTestId("automatic-recommendations")).toBeVisible({ timeout: 4_000 });
+  await page.getByTestId("follow-up-questions").click();
+  await expect(page.getByTestId("follow-up-question-options")).toBeVisible();
   await page.getByTestId("coach-collapse").click();
   await expect(page.getByText("Coach collapsed")).toBeVisible();
   await page.getByTestId("reopen-coach").click();
   await expect(page.getByTestId("current-section-title")).toHaveText(sections[1].title);
-  await expect(page.getByTestId("automatic-recommendations")).toBeVisible();
+  await expect(page.getByTestId("follow-up-question-options")).toBeVisible();
   await expect(page.getByTestId("transcript-line")).toContainText("carrying costs");
 
   await page.getByTestId("coach-collapse").click();
   await page.getByTestId("collapsed-new-call").click();
   await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title);
   await expect(page.getByTestId("coach-back")).toBeDisabled();
-  await expect(page.getByTestId("automatic-recommendations")).toHaveCount(0);
+  await expect(page.getByTestId("follow-up-question-options")).toHaveCount(0);
   await expect(page.getByTestId("transcript-line")).toHaveCount(0);
 });
 
