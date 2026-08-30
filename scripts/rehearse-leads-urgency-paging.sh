@@ -8,6 +8,7 @@ LEADS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LEADS_MIGRATION="$LEADS_ROOT/supabase/migrations/20260815233000_leads_urgency_paging.sql"
 LEADS_SAFETY_MIGRATION="$LEADS_ROOT/supabase/migrations/20260816030000_leads_tenant_paging_safety.sql"
 LEADS_DNC_MIGRATION="$LEADS_ROOT/supabase/migrations/20260815190000_true_dnc_property_lock.sql"
+LEADS_URGENCY_TIMEOUT_MIGRATION="$LEADS_ROOT/supabase/migrations/20260830103000_leads_urgency_counts_timeout_fix.sql"
 mkdir -p "$LEADS_SOCKET"
 
 cleanup() {
@@ -133,7 +134,6 @@ psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandr
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_MIGRATION" >/dev/null
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_SAFETY_MIGRATION" >/dev/null
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_SAFETY_MIGRATION" >/dev/null
-
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL'
 set role authenticated;
 set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111';
@@ -173,9 +173,298 @@ do $$ begin
       '2026-08-15 05:00Z', '2026-08-16 05:00Z'
     ) where all_count=4
   ) then raise exception 'SMS-only opted-out promotion missing from urgency count'; end if;
+  if not exists (
+    select 1 from get_leads_board_urgency_counts(
+      null, false, array[]::text[], 'all', null, false, null, null,
+      '2026-08-15 05:00Z', '2026-08-16 05:00Z'
+    ) where all_count=3
+  ) then raise exception 'pre-fix nullable active-sequence semantics changed'; end if;
 end $$;
 reset role;
 SQL
+
+# Build a mutation-sensitive matrix for every optional urgency filter. The same
+# authenticated rows are captured before and after the forward replacement so
+# semantic drift cannot hide behind a single default-count assertion.
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL' >/dev/null
+insert into memberships values
+ ('33333333-3333-4333-8333-333333333333','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+update properties
+set assigned_user_id='11111111-1111-4111-8111-111111111111', motivation_level=null
+where id='aaaaaaaa-1000-4000-8000-000000000001';
+update properties
+set assigned_user_id='33333333-3333-4333-8333-333333333333', motivation_level='high'
+where id='aaaaaaaa-1000-4000-8000-000000000002';
+update properties set motivation_level='low'
+where id='aaaaaaaa-1000-4000-8000-000000000003';
+insert into properties (id,org_id,address,city,state,status,created_at) values
+ ('aaaaaaaa-1000-4000-8000-000000000031','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','6 Closed St','Kansas City','MO','closed','2026-01-06'),
+ ('aaaaaaaa-1000-4000-8000-000000000032','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','7 Wrong New St','Kansas City','MO','new_lead','2026-01-07'),
+ ('aaaaaaaa-1000-4000-8000-000000000033','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','8 Wrong Hot St','Kansas City','MO','interested','2026-01-08'),
+ ('aaaaaaaa-1000-4000-8000-000000000034','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','9 Bad Contacted St','Kansas City','MO','contacted','2026-01-09');
+update properties set outreach_dispo='wrong_number'
+where id in ('aaaaaaaa-1000-4000-8000-000000000032','aaaaaaaa-1000-4000-8000-000000000033');
+update properties set outreach_dispo='bad_number'
+where id='aaaaaaaa-1000-4000-8000-000000000034';
+insert into skip_trace_cache (provider,address_normalized,result,match_count,cost_credits,org_id)
+values ('rehearsal','1 overdue st|kansas city|mo','{}',1,0,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+
+create table urgency_filter_cases (
+  case_name text primary key,
+  assignee_id uuid,
+  unassigned boolean not null,
+  search_tokens text[] not null,
+  motivation text not null,
+  hot_only boolean not null,
+  no_active_sequence boolean,
+  skip_traced boolean,
+  expected_all bigint not null,
+  expected_overdue bigint not null,
+  expected_today bigint not null,
+  expected_scheduled bigint not null,
+  expected_none bigint not null
+);
+insert into urgency_filter_cases values
+ ('assignee_hit','11111111-1111-4111-8111-111111111111',false,'{}','all',false,false,null,1,1,0,0,0),
+ ('assignee_miss','44444444-4444-4444-8444-444444444444',false,'{}','all',false,false,null,0,0,0,0,0),
+ ('unassigned_excludes_closed',null,true,'{}','all',false,false,null,3,0,0,0,3),
+ ('motivation_unset',null,false,'{}','unset',false,false,null,4,1,0,0,3),
+ ('motivation_concrete',null,false,'{}','high',false,false,null,1,0,1,0,0),
+ ('hot_hit',null,false,'{}','all',true,false,null,1,0,0,0,1),
+ ('hot_miss','11111111-1111-4111-8111-111111111111',false,'{}','all',true,false,null,0,0,0,0,0),
+ ('skip_traced_true',null,false,'{}','all',false,false,true,1,1,0,0,0),
+ ('skip_traced_false',null,false,'{}','all',false,false,false,5,0,1,0,4),
+ ('cross_org',null,false,array['Other','Org'],'all',false,false,null,0,0,0,0,0),
+ ('dnc_locked',null,false,array['Locked'],'all',false,false,null,0,0,0,0,0),
+ ('wrong_new_excluded',null,false,array['Wrong','New'],'all',false,false,null,0,0,0,0,0),
+ ('bad_contacted_excluded',null,false,array['Bad','Contacted'],'all',false,false,null,0,0,0,0,0),
+ ('wrong_hot_allowed',null,false,array['Wrong','Hot'],'all',false,false,null,1,0,0,0,1),
+ ('nullable_active_sequence',null,false,'{}','all',false,null,null,5,1,1,0,3),
+ ('false_active_sequence',null,false,'{}','all',false,false,null,6,1,1,0,4);
+grant select on urgency_filter_cases to authenticated;
+SQL
+
+capture_filter_matrix() {
+  local output_file="$1"
+  : >"$output_file"
+  while IFS= read -r matrix_case; do
+    if [[ ! "$matrix_case" =~ ^[a-z_]+$ ]]; then
+      echo "invalid urgency filter matrix case name" >&2
+      exit 1
+    fi
+    psql -v ON_ERROR_STOP=1 -At -F '|' \
+      -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal \
+      -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; select c.case_name,r.all_count,r.overdue_count,r.today_count,r.scheduled_count,r.no_action_count from urgency_filter_cases c cross join lateral get_leads_board_urgency_counts(c.assignee_id,c.unassigned,c.search_tokens,c.motivation,null,c.hot_only,c.no_active_sequence,c.skip_traced,'2026-08-15 05:00Z','2026-08-16 05:00Z') r where c.case_name='$matrix_case';" \
+      >>"$output_file"
+  done < <(
+    psql -v ON_ERROR_STOP=1 -At -h "$LEADS_SOCKET" -p "$LEADS_PORT" \
+      -U postgres -d sandra_leads_rehearsal \
+      -c "select case_name from urgency_filter_cases order by case_name"
+  )
+}
+
+OLD_FILTER_MATRIX="$LEADS_TMP/old-filter-matrix.out"
+capture_filter_matrix "$OLD_FILTER_MATRIX"
+
+# The view and every relation it expands are also referenced somewhere in the
+# replacement's advanced-filter branch. PostgreSQL relation locks therefore
+# cannot isolate the default fast path. Assert the dependency change directly
+# in the installed catalog and keep runtime checks semantic, not hardware-timed.
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL' >/dev/null
+do $$
+declare function_source text;
+begin
+  select prosrc into function_source
+  from pg_proc
+  where oid = 'public.get_leads_board_urgency_counts(uuid,boolean,text[],text,text,boolean,boolean,boolean,timestamptz,timestamptz)'::regprocedure;
+  if function_source not like '%from public.leads_board b%'
+  then raise exception 'legacy urgency fixture no longer proves the view dependency'; end if;
+end $$;
+SQL
+
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_URGENCY_TIMEOUT_MIGRATION" >/dev/null
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_URGENCY_TIMEOUT_MIGRATION" >/dev/null
+
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal \
+  -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; select * from get_leads_board_urgency_counts(null,false,array[]::text[],'all',null,false,false,null,'2026-08-15 05:00Z','2026-08-16 05:00Z');" \
+  >/dev/null
+
+NEW_FILTER_MATRIX="$LEADS_TMP/new-filter-matrix.out"
+capture_filter_matrix "$NEW_FILTER_MATRIX"
+cmp "$OLD_FILTER_MATRIX" "$NEW_FILTER_MATRIX"
+
+# The forward function must preserve every optional filter while avoiding the
+# full leads_board projection. These assertions execute the installed catalog
+# function as an authenticated tenant, not migration text.
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL'
+do $$
+declare
+  function_oid oid;
+  function_owner oid;
+  function_acl aclitem[];
+  authenticated_oid oid;
+  service_role_oid oid;
+  anon_oid oid;
+begin
+  function_oid := to_regprocedure(
+    'public.get_leads_board_urgency_counts(uuid,boolean,text[],text,text,boolean,boolean,boolean,timestamptz,timestamptz)'
+  );
+  if function_oid is null
+  then raise exception 'exact urgency-count signature is missing'; end if;
+
+  select proowner, proacl
+  into function_owner, function_acl
+  from pg_proc
+  where oid = function_oid
+    and not prosecdef
+    and provolatile = 's'
+    and proconfig = array['search_path=public, pg_temp']::text[];
+  if function_owner is null
+  then raise exception 'urgency-count invoker/stable/search_path catalog contract changed'; end if;
+
+  if pg_get_function_result(function_oid) <>
+    'TABLE(all_count bigint, overdue_count bigint, today_count bigint, scheduled_count bigint, no_action_count bigint)'
+  then raise exception 'urgency-count return contract changed'; end if;
+
+  select oid into authenticated_oid from pg_roles where rolname='authenticated';
+  select oid into service_role_oid from pg_roles where rolname='service_role';
+  select oid into anon_oid from pg_roles where rolname='anon';
+  if authenticated_oid is null or service_role_oid is null or anon_oid is null
+  then raise exception 'rehearsal roles are missing'; end if;
+
+  if exists (
+    select 1
+    from aclexplode(coalesce(function_acl, acldefault('f', function_owner))) acl
+    where acl.privilege_type='EXECUTE'
+      and acl.grantee in (0, anon_oid)
+  ) or has_function_privilege('anon', function_oid, 'EXECUTE')
+  then raise exception 'PUBLIC or anon can execute urgency counts'; end if;
+
+  if not exists (
+    select 1
+    from aclexplode(coalesce(function_acl, acldefault('f', function_owner))) acl
+    where acl.privilege_type='EXECUTE' and acl.grantee=authenticated_oid
+  ) or not has_function_privilege('authenticated', function_oid, 'EXECUTE')
+  then raise exception 'authenticated urgency-count grant is missing'; end if;
+
+  if not exists (
+    select 1
+    from aclexplode(coalesce(function_acl, acldefault('f', function_owner))) acl
+    where acl.privilege_type='EXECUTE' and acl.grantee=service_role_oid
+  ) or not has_function_privilege('service_role', function_oid, 'EXECUTE')
+  then raise exception 'service_role urgency-count grant is missing'; end if;
+end $$;
+
+set role authenticated;
+set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111';
+do $$
+declare
+  function_source text;
+begin
+  select prosrc into function_source
+  from pg_proc
+  where oid = 'public.get_leads_board_urgency_counts(uuid,boolean,text[],text,text,boolean,boolean,boolean,timestamptz,timestamptz)'::regprocedure;
+  if function_source like '%public.leads_board%'
+  then raise exception 'urgency counts still expand the full leads_board projection'; end if;
+  if function_source not like '%from public.properties property%'
+  then raise exception 'urgency counts no longer use the bounded property read model'; end if;
+
+  if exists (
+    select 1
+    from urgency_filter_cases c
+    cross join lateral get_leads_board_urgency_counts(
+      c.assignee_id,c.unassigned,c.search_tokens,c.motivation,null,c.hot_only,
+      c.no_active_sequence,c.skip_traced,
+      '2026-08-15 05:00Z','2026-08-16 05:00Z'
+    ) r
+    where (r.all_count,r.overdue_count,r.today_count,r.scheduled_count,r.no_action_count)
+      is distinct from
+      (c.expected_all,c.expected_overdue,c.expected_today,c.expected_scheduled,c.expected_none)
+  ) then raise exception 'optional-filter result matrix changed'; end if;
+
+  if not exists (
+    select 1 from get_leads_board_urgency_counts(
+      null, false, array['today']::text[], 'all', null, false, false, null,
+      '2026-08-15 05:00Z', '2026-08-16 05:00Z'
+    ) where all_count=1 and today_count=1
+  ) then raise exception 'search or today urgency semantics changed'; end if;
+
+  if not exists (
+    select 1 from get_leads_board_urgency_counts(
+      null, false, array[]::text[], 'all', 'stale', false, false, null,
+      '2026-08-15 05:00Z', '2026-08-16 05:00Z'
+    ) where all_count=1 and today_count=1
+  ) then raise exception 'stale attention semantics changed'; end if;
+
+  if not exists (
+    select 1 from get_leads_board_urgency_counts(
+      null, false, array[]::text[], 'all', 'sequence_ended', false, false, null,
+      '2026-08-15 05:00Z', '2026-08-16 05:00Z'
+    ) where all_count=1 and overdue_count=1
+  ) then raise exception 'sequence-ended attention semantics changed'; end if;
+
+  if not exists (
+    select 1 from get_leads_board_urgency_counts(
+      null, false, array[]::text[], 'all', null, false, true, null,
+      '2026-08-15 05:00Z', '2026-08-16 05:00Z'
+    ) where all_count=5 and no_action_count=3
+  ) then raise exception 'active-sequence exclusion semantics changed'; end if;
+
+  if not exists (
+    select 1 from get_leads_board_urgency_counts(
+      null, false, array[]::text[], 'all', null, false, null, null,
+      '2026-08-15 05:00Z', '2026-08-16 05:00Z'
+    ) where all_count=5 and no_action_count=3
+  ) then raise exception 'nullable active-sequence semantics changed'; end if;
+
+  if not exists (
+    select 1 from get_leads_board_urgency_counts(
+      null, false, array[]::text[], 'all', null, false, false, null,
+      '2026-08-15 05:00Z', '2026-08-16 05:00Z'
+    ) where all_count=6 and no_action_count=4
+  ) then raise exception 'false active-sequence semantics changed'; end if;
+end $$;
+reset role;
+SQL
+
+# Prove the installed function has no qualified or unqualified runtime
+# dependency on the legacy view. This uses a fresh backend and keeps the rename
+# inside a transaction: psql disconnect rollback is the failure cleanup, while
+# the explicit rollback restores the fixture after successful assertions.
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL'
+begin;
+alter view public.leads_board rename to leads_board_dependency_guard;
+set local role authenticated;
+set local request.jwt.claim.sub='11111111-1111-4111-8111-111111111111';
+do $$
+begin
+  if not exists (
+    select 1 from get_leads_board_urgency_counts(
+      null, false, array[]::text[], 'all', null, false, false, null,
+      '2026-08-15 05:00Z', '2026-08-16 05:00Z'
+    ) where all_count=6 and overdue_count=1 and today_count=1
+      and scheduled_count=0 and no_action_count=4
+  ) then raise exception 'renamed-view default urgency result changed'; end if;
+
+  if exists (
+    select 1
+    from urgency_filter_cases c
+    cross join lateral get_leads_board_urgency_counts(
+      c.assignee_id,c.unassigned,c.search_tokens,c.motivation,null,c.hot_only,
+      c.no_active_sequence,c.skip_traced,
+      '2026-08-15 05:00Z','2026-08-16 05:00Z'
+    ) r
+    where (r.all_count,r.overdue_count,r.today_count,r.scheduled_count,r.no_action_count)
+      is distinct from
+      (c.expected_all,c.expected_overdue,c.expected_today,c.expected_scheduled,c.expected_none)
+  ) then raise exception 'renamed-view optional-filter matrix changed'; end if;
+end $$;
+rollback;
+SQL
+
+psql -v ON_ERROR_STOP=1 -At -h "$LEADS_SOCKET" -p "$LEADS_PORT" \
+  -U postgres -d sandra_leads_rehearsal \
+  -c "select to_regclass('public.leads_board') is not null" | grep -qx t
 
 # Equal-count swap: one card leaves before the cursor while another enters in
 # its place. Count-only detection misses this; the whole-filter fingerprint

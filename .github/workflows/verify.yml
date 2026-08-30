@@ -49,3 +49,6 @@ jobs:
         env:
           SANDRA_POSTGRES_BIN: /usr/lib/postgresql/17/bin
         run: npm run verify:hugo-sql && npm run verify:hugo-rollback
+
+      - name: Rehearse bounded Leads urgency counts
+        run: npm run verify:leads-urgency-sql
