@@ -76,6 +76,7 @@ function provider(
     getEmbeddedTemplateEditUrl: vi.fn(),
     getTemplate: vi.fn(),
     getTemplateFiles: vi.fn(),
+    duplicateTemplate: vi.fn(),
     updateTemplateFiles: vi.fn(),
     deleteTemplate: vi.fn(),
     sendWithTemplate: vi.fn().mockResolvedValue({
