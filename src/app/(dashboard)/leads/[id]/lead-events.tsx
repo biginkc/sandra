@@ -28,6 +28,8 @@ const EVENT_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
+const ESIGN_TEMPLATE_TITLE_MAX_LENGTH = 160;
+
 export function useLeadEvents({
   propertyId,
   initial,
@@ -269,9 +271,71 @@ export function formatLeadEventSentence(
       return `${actor} recorded an ${readString(payload, "channel")?.toUpperCase() ?? "contact"} opt-out`;
     case "queued_message_deleted":
       return `${actor} deleted a queued message`;
+    case "esign_awaiting":
+      return formatEsignEventSentence(
+        event,
+        payload,
+        (title) => `System sent ${title} for signature`,
+      );
+    case "esign_viewed":
+      return formatEsignEventSentence(
+        event,
+        payload,
+        (title) => `System recorded ${title} as viewed`,
+      );
+    case "esign_signed":
+      return formatEsignEventSentence(
+        event,
+        payload,
+        (title) => `System recorded ${title} as signed`,
+      );
+    case "esign_declined":
+      return formatEsignEventSentence(
+        event,
+        payload,
+        (title) => `System recorded ${title} as declined`,
+      );
+    case "esign_voided":
+      return formatEsignEventSentence(
+        event,
+        payload,
+        (title) => `System recorded ${title} as voided`,
+      );
+    case "esign_signed_pdf_ready":
+      return formatEsignEventSentence(
+        event,
+        payload,
+        (title) => `System saved the signed PDF for ${title}`,
+      );
     default:
       return `${actor} recorded activity`;
   }
+}
+
+function formatEsignEventSentence(
+  event: LeadEvent,
+  payload: Record<string, Json | undefined>,
+  format: (templateTitle: string) => string,
+): string {
+  const templateTitle = readEsignTemplateTitle(payload);
+  return event.actor_type === "system" &&
+    event.actor_id === null &&
+    templateTitle !== null
+    ? format(templateTitle)
+    : "System recorded activity";
+}
+
+function readEsignTemplateTitle(
+  payload: Record<string, Json | undefined>,
+): string | null {
+  const keys = Object.keys(payload);
+  if (keys.length !== 1 || keys[0] !== "template_title") return null;
+  const value = payload.template_title;
+  if (typeof value !== "string") return null;
+  const title = value.trim();
+  return title.length >= 1 && title.length <= ESIGN_TEMPLATE_TITLE_MAX_LENGTH
+    ? title
+    : null;
 }
 
 function sortLeadEvents(events: LeadEvent[]): LeadEvent[] {

@@ -333,6 +333,215 @@ describe("<LeadEventPill />", () => {
       ),
     ).toBe("System resumed 2 sequences");
   });
+
+  it.each([
+    ["esign_awaiting", "System sent Purchase agreement for signature"],
+    ["esign_viewed", "System recorded Purchase agreement as viewed"],
+    ["esign_signed", "System recorded Purchase agreement as signed"],
+    ["esign_declined", "System recorded Purchase agreement as declined"],
+    ["esign_voided", "System recorded Purchase agreement as voided"],
+    [
+      "esign_signed_pdf_ready",
+      "System saved the signed PDF for Purchase agreement",
+    ],
+  ])("renders the safe %s material event", (eventType, expected) => {
+    expect(
+      formatLeadEventSentence(
+        makeEvent(`event-${eventType}`, "2026-08-25T17:00:00.000Z", {
+          actor_type: "system",
+          actor_id: null,
+          event_type: eventType,
+          payload: { template_title: "  Purchase agreement  " },
+        }),
+        { "private-user": "private@example.com" },
+        "private-user",
+      ),
+    ).toBe(expected);
+  });
+
+  it.each<{ payload: LeadEvent["payload"]; label: string }>([
+    { payload: null, label: "null payload" },
+    { payload: [], label: "array payload" },
+    { payload: {}, label: "missing title" },
+    { payload: { template_title: "" }, label: "empty title" },
+    { payload: { template_title: "   " }, label: "whitespace title" },
+    { payload: { template_title: 42 }, label: "non-string title" },
+    {
+      payload: { template_title: ["Purchase agreement"] },
+      label: "array title",
+    },
+    {
+      payload: { template_title: "x".repeat(161) },
+      label: "overlong title",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        request_id: "request-private",
+      },
+      label: "request id",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        provider_request_id: "provider-request-private",
+      },
+      label: "provider request id",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        signer_id: "signer-private",
+      },
+      label: "signer id",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        receipt_id: "receipt-private",
+      },
+      label: "receipt id",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        file_id: "file-private",
+      },
+      label: "file id",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        file_name: "private-seller-contract.pdf",
+      },
+      label: "file name",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        file_path: "private/org/property/request.pdf",
+      },
+      label: "file path",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        event_hash: "private-event-hash",
+      },
+      label: "event hash",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        error_text: "private provider error",
+      },
+      label: "error text",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        signer_email: "seller-private@example.com",
+      },
+      label: "signer email",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        property_address: "123 Private Address",
+      },
+      label: "property address",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        provider_payload: { event: "raw-private-provider-event" },
+      },
+      label: "provider payload",
+    },
+    {
+      payload: {
+        template_title: "Purchase agreement",
+        future_key: "private-future",
+      },
+      label: "unknown key",
+    },
+  ])("falls back for malformed/private eSign data: $label", ({ payload }) => {
+    const event = makeEvent("private-event-id", "2026-08-25T17:00:00.000Z", {
+      actor_type: "system",
+      actor_id: null,
+      event_type: "esign_signed",
+      payload,
+    });
+    const sentence = formatLeadEventSentence(event, {}, null);
+
+    expect(sentence).toBe("System recorded activity");
+    expect(sentence).not.toMatch(
+      /private|example\.com|123|provider|request|future|event-id/i,
+    );
+  });
+
+  it("accepts exactly 160 UTF-16 code units and never truncates an overlong title", () => {
+    const exact = "T".repeat(160);
+    const base = makeEvent("title-boundary", "2026-08-25T17:00:00.000Z", {
+      actor_type: "system",
+      actor_id: null,
+      event_type: "esign_awaiting",
+    });
+
+    expect(
+      formatLeadEventSentence(
+        { ...base, payload: { template_title: ` ${exact} ` } },
+        {},
+        null,
+      ),
+    ).toBe(`System sent ${exact} for signature`);
+    expect(
+      formatLeadEventSentence(
+        { ...base, payload: { template_title: `${exact}X` } },
+        {},
+        null,
+      ),
+    ).toBe("System recorded activity");
+
+    const eightySurrogatePairs = "📄".repeat(80);
+    expect(eightySurrogatePairs).toHaveLength(160);
+    expect(
+      formatLeadEventSentence(
+        { ...base, payload: { template_title: eightySurrogatePairs } },
+        {},
+        null,
+      ),
+    ).toBe(`System sent ${eightySurrogatePairs} for signature`);
+    expect(
+      formatLeadEventSentence(
+        { ...base, payload: { template_title: `${eightySurrogatePairs}X` } },
+        {},
+        null,
+      ),
+    ).toBe("System recorded activity");
+  });
+
+  it("requires system provenance for material eSign presentation", () => {
+    const payload = { template_title: "Purchase agreement" };
+    const base = makeEvent("bad-provenance", "2026-08-25T17:00:00.000Z", {
+      event_type: "esign_viewed",
+      payload,
+    });
+
+    for (const event of [
+      { ...base, actor_type: "user", actor_id: "private-user-id" },
+      { ...base, actor_type: "ai", actor_id: null },
+      { ...base, actor_type: "system", actor_id: "private-system-id" },
+    ]) {
+      expect(
+        formatLeadEventSentence(
+          event,
+          { "private-user-id": "private-seller@example.com" },
+          "private-user-id",
+        ),
+      ).toBe("System recorded activity");
+    }
+  });
 });
 
 describe("useLeadEvents", () => {
