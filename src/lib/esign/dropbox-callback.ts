@@ -132,11 +132,16 @@ export function buildDropboxSignReceiptFingerprint(
 
 function parseEventTime(value: unknown): string {
   if (typeof value === "number") {
-    if (!Number.isSafeInteger(value) || value < 0) invalidEvent();
+    if (!validEventTime(value)) invalidEvent();
     return String(value);
   }
   if (typeof value !== "string" || !/^\d{1,20}$/.test(value)) invalidEvent();
+  if (!validEventTime(Number(value))) invalidEvent();
   return value;
+}
+
+function validEventTime(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 253_402_300_799;
 }
 
 function parseEventType(value: unknown): string {

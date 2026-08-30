@@ -1,13 +1,6 @@
-export const ESIGN_STATUSES = [
-  "awaiting",
-  "viewed",
-  "signed",
-  "declined",
-  "voided",
-  "error",
-] as const;
+export { ESIGN_STATUSES, type EsignStatus } from "./contracts";
 
-export type EsignStatus = (typeof ESIGN_STATUSES)[number];
+import type { EsignStatus } from "./contracts";
 
 export type NormalizedEsignLifecycleEvent = {
   eventType: string;
