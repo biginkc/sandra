@@ -25,10 +25,11 @@ const sampleContext: CoachCallContext = {
   sellerName: "Jane",
   propertyAddress: "1 Main St",
   propertyCounty: "Jackson",
-  repName: "Alex",
+  repName: "Alex Rep",
+  authenticatedRepName: "Alex Rep",
   repPhoneE164: "+18165551234",
   motivation: null,
-  leadId: "lead-1",
+  leadId: "abcd1234-ef56-7890-abcd-ef1234567890",
   sellerPhoneE164: "+18165559876",
   coldCallerName: null,
   yearBuilt: null,
@@ -74,6 +75,8 @@ describe("useCoachSession", () => {
       status: "loading",
       context: expect.objectContaining({
         repName: "Mel",
+        authenticatedRepName: null,
+        leadId: null,
         sellerName: "Jarrad",
         propertyAddress: "55 Oak Ave",
       }),
@@ -133,6 +136,8 @@ describe("useCoachSession", () => {
       status: "loading",
       context: expect.objectContaining({
         repName: "Morgan",
+        authenticatedRepName: null,
+        leadId: null,
         sellerName: "Seller Two",
         propertyAddress: "2 Second St",
       }),
@@ -149,6 +154,66 @@ describe("useCoachSession", () => {
       sellerPhoneE164: "+18165559876",
       repPhoneE164: "+18165551234",
     });
+  });
+
+  it("uses only the successful authorized context for file-number identity", async () => {
+    const authorized = {
+      ...sampleContext,
+      repName: "Jarrad Henry",
+      authenticatedRepName: "Jarrad Henry",
+      leadId: "abcd1234-ef56-7890-abcd-ef1234c1c524",
+    };
+    loadCoachCallContext.mockResolvedValue(authorized);
+    const { result } = renderHook(() => useCoachSession(
+      "call-1",
+      "unauthorized-abcdef",
+      null,
+      null,
+      true,
+      {
+        repName: "Prepared Impostor",
+        sellerName: "Prepared Homeowner",
+        propertyAddress: "55 Oak Ave",
+        sellerPhoneE164: null,
+        maskedSellerPhone: null,
+      },
+    ));
+
+    expect(result.current.contextLoad.context).toEqual(expect.objectContaining({
+      repName: "Prepared Impostor",
+      authenticatedRepName: null,
+      leadId: null,
+    }));
+    await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
+    expect(result.current.contextLoad.context).toEqual(expect.objectContaining({
+      repName: "Jarrad Henry",
+      authenticatedRepName: "Jarrad Henry",
+      leadId: "abcd1234-ef56-7890-abcd-ef1234c1c524",
+    }));
+  });
+
+  it("does not replace an absent authenticated rep with the prepared target rep", async () => {
+    loadCoachCallContext.mockResolvedValue({ ...sampleContext, repName: null, authenticatedRepName: null });
+    const { result } = renderHook(() => useCoachSession(
+      "call-1",
+      "lead-1",
+      null,
+      null,
+      true,
+      {
+        repName: "Prepared Rep",
+        sellerName: "Prepared Homeowner",
+        propertyAddress: "55 Oak Ave",
+        sellerPhoneE164: null,
+        maskedSellerPhone: null,
+      },
+    ));
+
+    await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
+    expect(result.current.contextLoad.context).toEqual(expect.objectContaining({
+      repName: "Prepared Rep",
+      authenticatedRepName: null,
+    }));
   });
 
   it("fills missing seller and address tokens from the already-prepared call target", async () => {
@@ -296,7 +361,8 @@ describe("useCoachSession", () => {
       context: expect.objectContaining({
         sellerName: "Prepared Homeowner",
         propertyAddress: "55 Oak Ave",
-        leadId: "lead-1",
+        authenticatedRepName: null,
+        leadId: null,
         sellerPhoneE164: "+18165559876",
         repPhoneE164: "+18165551234",
       }),

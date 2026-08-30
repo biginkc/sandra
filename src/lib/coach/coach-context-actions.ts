@@ -86,12 +86,14 @@ export async function loadCoachCallContext(input: {
   }
 
   const lead = leadResult.data as unknown as CoachLeadRow | null;
+  const authenticatedRepName = repDisplayName(user);
 
   return {
     sellerName: sellerName(lead?.homeowner ?? null),
     propertyAddress: lead?.address ?? null,
     propertyCounty: lead?.county?.name ?? null,
-    repName: repDisplayName(user),
+    repName: authenticatedRepName,
+    authenticatedRepName,
     repPhoneE164: input.repPhoneE164,
     // Sandra has no free-text seller-motivation field. properties.motivation_level
     // is a hot/warm/cold SCORE, not the seller's stated reason — mapping it to
@@ -99,7 +101,7 @@ export async function loadCoachCallContext(input: {
     // "job relocation". Until a real motivation/reason text column exists,
     // this always renders as a placeholder chip rather than the wrong value.
     motivation: null,
-    leadId: input.propertyId,
+    leadId: lead ? input.propertyId : null,
     sellerPhoneE164: input.sellerPhoneE164,
     // No cold-caller field exists in Sandra's schema yet — always a
     // placeholder chip until one is added.

@@ -119,6 +119,13 @@ describe("loadCoachCallContext — lead fields", () => {
     const context = await loadCoachCallContext({ propertyId: null, sellerPhoneE164: null, repPhoneE164: null });
     expect(context.propertyAddress).toBeNull();
     expect(context.sellerName).toBeNull();
+    expect(context.leadId).toBeNull();
+  });
+
+  it("does not expose a requested property ID when no actual property row is available", async () => {
+    mockSupabase({ email: "alex.rep@bmhgroupkc.com" }, null);
+    const context = await loadCoachCallContext({ propertyId: "missing-property", sellerPhoneE164: null, repPhoneE164: null });
+    expect(context.leadId).toBeNull();
   });
 
   it("always returns coldCallerName null — no such field exists in Sandra's schema yet", async () => {

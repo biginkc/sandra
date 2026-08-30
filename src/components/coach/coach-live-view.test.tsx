@@ -10,7 +10,7 @@ import type {
   CoachRecommendationResult,
 } from "@/lib/coach/recommendation-types";
 import type { CoachCallContext } from "@/lib/coach/types";
-import { useCoachSession } from "@/lib/coach/use-coach-session";
+import { useCoachSession, type PreparedCoachTarget } from "@/lib/coach/use-coach-session";
 
 import { CoachLiveView, selectSpokenLine, type CoachLiveViewProps } from "./coach-live-view";
 
@@ -63,6 +63,7 @@ const sampleContext: CoachCallContext = {
   propertyAddress: "123 Main St",
   propertyCounty: "Jackson",
   repName: "Alex Rep",
+  authenticatedRepName: "Alex Rep",
   repPhoneE164: "+18165551234",
   motivation: "move closer to family",
   leadId: "lead-1",
@@ -75,10 +76,11 @@ const sampleContext: CoachCallContext = {
 
 type HarnessProps = Omit<CoachLiveViewProps, "session"> & {
   callId?: string;
+  preparedTarget?: PreparedCoachTarget;
 };
 
-function Harness({ callId = "call-1", ...props }: HarnessProps) {
-  const session = useCoachSession(callId, "lead-1", "+18165559876", "+18165551234");
+function Harness({ callId = "call-1", preparedTarget, ...props }: HarnessProps) {
+  const session = useCoachSession(callId, "unauthorized-abcdef", "+18165559876", "+18165551234", true, preparedTarget);
   return <CoachLiveView session={session} {...props} />;
 }
 
@@ -168,6 +170,73 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.queryByTestId("entry-chip-cold_caller_name")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Live transcript")).not.toHaveAttribute("hidden");
     expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
+  });
+
+  it("keeps file-number identity placeholder-only while loading, then shows the authorized context value", async () => {
+    let resolveContext!: (context: CoachCallContext) => void;
+    loadCoachCallContext.mockReturnValue(new Promise((resolve) => { resolveContext = resolve; }));
+    const user = userEvent.setup();
+    render(<Harness {...baseProps()} preparedTarget={{
+      repName: "Jarrad Henry",
+      sellerName: "Prepared Homeowner",
+      propertyAddress: "55 Oak Ave",
+      sellerPhoneE164: "+18165559876",
+      maskedSellerPhone: "+1 (816) 555-9876",
+    }} />);
+
+    for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
+    const script = screen.getByTestId("current-section-script");
+    expect(script).not.toHaveTextContent("JH-abcdef");
+    expect(script).toHaveTextContent("—");
+
+    act(() => resolveContext({
+      ...sampleContext,
+      repName: "Jarrad Henry",
+      authenticatedRepName: "Jarrad Henry",
+      leadId: "abcd1234-ef56-7890-abcd-ef1234c1c524",
+    }));
+    await waitFor(() => expect(script).toHaveTextContent("JH-c1c524"));
+  });
+
+  it("never exposes requested/prepared file-number identity after a property authorization failure", async () => {
+    loadCoachCallContext.mockRejectedValue(new Error("permission denied for property"));
+    const user = userEvent.setup();
+    render(<Harness {...baseProps()} preparedTarget={{
+      repName: "Jarrad Henry",
+      sellerName: "Prepared Homeowner",
+      propertyAddress: "55 Oak Ave",
+      sellerPhoneE164: "+18165559876",
+      maskedSellerPhone: "+1 (816) 555-9876",
+    }} />);
+
+    await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeVisible());
+    for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
+    const script = screen.getByTestId("current-section-script");
+    expect(script).not.toHaveTextContent("JH-abcdef");
+    expect(script).toHaveTextContent("—");
+  });
+
+  it("keeps the file number placeholder when the authorized property loads without an authenticated rep", async () => {
+    loadCoachCallContext.mockResolvedValue({
+      ...sampleContext,
+      repName: null,
+      authenticatedRepName: null,
+      leadId: "abcd1234-ef56-7890-abcd-ef1234c1c524",
+    });
+    const user = userEvent.setup();
+    render(<Harness {...baseProps()} preparedTarget={{
+      repName: "Jarrad Henry",
+      sellerName: "Prepared Homeowner",
+      propertyAddress: "55 Oak Ave",
+      sellerPhoneE164: "+18165559876",
+      maskedSellerPhone: "+1 (816) 555-9876",
+    }} />);
+
+    await waitFor(() => expect(loadCoachCallContext).toHaveBeenCalled());
+    for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
+    const script = screen.getByTestId("current-section-script");
+    expect(script).not.toHaveTextContent("JH-c1c524");
+    expect(script).toHaveTextContent("—");
   });
 
   it("keeps the coach visible and exposes manual audio recovery without ending the call", async () => {

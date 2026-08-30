@@ -200,6 +200,8 @@ export type CoachCallContext = {
   propertyAddress: string | null;
   propertyCounty: string | null;
   repName: string | null;
+  /** Authenticated server identity used only for file-number initials. */
+  authenticatedRepName?: string | null;
   repPhoneE164: string | null;
   motivation: string | null;
   leadId: string | null;

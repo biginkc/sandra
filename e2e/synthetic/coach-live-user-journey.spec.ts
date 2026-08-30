@@ -192,7 +192,7 @@ test("populates known lead tokens, selects lead and occupancy variants, and lets
   await expect(script).toContainText("Our Company Name is BMH Group");
   await expect(script).toContainText("bmhgroupkc.com");
   await expect(script).toContainText("+18165550123");
-  await expect(script).toContainText("JA-ABCD");
+  await expect(script).toContainText("JH-c1c524");
 
   await page.getByTestId("phase-rail-reveal").click();
   await page.getByTestId("variant-Entry-tenant_occupied").click();
