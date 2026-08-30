@@ -123,9 +123,11 @@ function harness() {
     markSendOutcome: vi.fn().mockResolvedValue(undefined),
     findRequest: vi.fn().mockResolvedValue(null),
     claimReminder: vi.fn().mockResolvedValue({ outcome: "ineligible" }),
-    markReminderSent: vi.fn().mockResolvedValue(undefined),
+    finalizeReminder: vi.fn().mockResolvedValue("applied"),
+    releaseReminder: vi.fn().mockResolvedValue("released"),
     claimVoid: vi.fn().mockResolvedValue({ outcome: "ineligible" }),
-    markVoidRequested: vi.fn().mockResolvedValue(undefined),
+    finalizeVoid: vi.fn().mockResolvedValue("applied"),
+    releaseVoid: vi.fn().mockResolvedValue("released"),
     findSignedFile: vi.fn().mockResolvedValue(null),
   } as unknown as EsignActionRepository;
   const provider = {
@@ -396,7 +398,7 @@ describe("lead eSign action orchestration", () => {
       orgId: "org-1",
       requestId: "request-1",
       deliveryState: "failed",
-      safeErrorMessage: "Dropbox Sign rejected the contract send.",
+      safeErrorMessage: "PROVIDER_REJECTED",
     });
   });
 
@@ -471,6 +473,7 @@ describe("lead eSign action orchestration", () => {
       .mockResolvedValueOnce({
         outcome: "eligible",
         candidate: {
+          claimToken: "reminder-claim-1",
           request: request({
             deliveryState: "sent",
             providerRequestId: "provider-request-1",
@@ -499,11 +502,8 @@ describe("lead eSign action orchestration", () => {
       error: { code: "REMINDER_COOLDOWN" },
     });
     expect(sent).toEqual({ ok: true, data: null });
-    expect(h.repository.claimReminder).toHaveBeenCalledWith(
-      expect.objectContaining({ cooldownMs: 3_600_000 }),
-    );
-    expect(h.repository.markReminderSent).toHaveBeenCalledWith(
-      expect.objectContaining({ remindedAt: NOW }),
+    expect(h.repository.finalizeReminder).toHaveBeenCalledWith(
+      expect.objectContaining({ claimToken: "reminder-claim-1" }),
     );
   });
 
@@ -512,6 +512,7 @@ describe("lead eSign action orchestration", () => {
     h.repository.claimReminder.mockResolvedValue({
       outcome: "eligible",
       candidate: {
+        claimToken: "reminder-claim-1",
         request: request({
           deliveryState: "sent",
           providerRequestId: "provider-request-1",
@@ -543,6 +544,7 @@ describe("lead eSign action orchestration", () => {
     h.repository.claimReminder.mockResolvedValue({
       outcome: "eligible",
       candidate: {
+        claimToken: "reminder-claim-1",
         request: request({
           orgId: "org-other",
           deliveryState: "sent",
@@ -580,15 +582,16 @@ describe("lead eSign action orchestration", () => {
     h.repository.claimVoid.mockResolvedValue({
       outcome: "eligible",
       request: awaiting,
+      claimToken: "void-claim-1",
     });
 
     const result = await h.core.void({ requestId: "request-1" });
 
     expect(result).toEqual({ ok: true, data: null });
-    expect(h.repository.markVoidRequested).toHaveBeenCalledWith({
+    expect(h.repository.finalizeVoid).toHaveBeenCalledWith({
       orgId: "org-1",
       requestId: "request-1",
-      requestedAt: NOW,
+      claimToken: "void-claim-1",
     });
     expect(awaiting.status).toBe("awaiting");
     expect(awaiting.voidRequestedAt).toBeNull();
@@ -598,6 +601,7 @@ describe("lead eSign action orchestration", () => {
     const h = harness();
     h.repository.claimVoid.mockResolvedValue({
       outcome: "eligible",
+      claimToken: "void-claim-1",
       request: request({
         deliveryState: "sent",
         providerRequestId: "provider-request-1",

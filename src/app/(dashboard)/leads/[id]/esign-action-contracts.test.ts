@@ -79,6 +79,7 @@ describe("lead eSign server-action contracts", () => {
 
   it("locks reminder, void, retry, and authorized-download input/result shapes", async () => {
     const actions: ContractActionHandlers = {
+      viewAction: vi.fn().mockResolvedValue({ ok: true, data: { detailsUrl: "https://app.hellosign.com/home/manage?guid=request-1" } }),
       remindAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
       voidAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
       retryAction: vi.fn().mockResolvedValue({

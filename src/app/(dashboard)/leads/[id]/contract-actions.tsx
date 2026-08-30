@@ -125,6 +125,15 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
     });
   };
 
+  const view = () => {
+    startTransition(async () => {
+      const result = await callAction(actions.viewAction({ requestId: contract.id }), {
+        fallbackMessage: "Could not open Dropbox Sign details",
+      });
+      if (result.ok) window.open(result.data.detailsUrl, "_blank", "noopener,noreferrer");
+    });
+  };
+
   return (
     <>
       <DropdownMenu>
@@ -144,13 +153,7 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
         <DropdownMenuContent align="end" className="w-48">
           {contract.detailsUrl ? (
             <DropdownMenuItem
-              onClick={() =>
-                window.open(
-                  contract.detailsUrl!,
-                  "_blank",
-                  "noopener,noreferrer",
-                )
-              }
+              onClick={view}
             >
               <ExternalLinkIcon className="size-4" aria-hidden />
               View in Dropbox Sign

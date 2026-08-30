@@ -33,6 +33,7 @@ import {
 
 const REMINDER_COOLDOWN_MS = 60 * 60 * 1_000;
 const DOWNLOAD_MAX_LIFETIME_MS = 5 * 60 * 1_000;
+export const ESIGN_PROVIDER_TIMEOUT_MS = 8 * 60 * 1_000;
 
 export type EsignActor = Readonly<{ orgId: string; userId: string }>;
 
@@ -52,7 +53,11 @@ export type EsignRequestRecord = Readonly<{
   orgId: string;
   propertyId: string;
   template: TemplateOption;
-  signers: readonly SignerAssignment[];
+  signers: readonly (SignerAssignment & Readonly<{
+    id?: string;
+    status?: "awaiting" | "viewed" | "signed" | "declined" | "error";
+    lastRemindedAt?: string | null;
+  }>)[];
   mergeValues: ContractMergeValues;
   sendIntentId: string;
   payloadHash: string;
@@ -66,6 +71,7 @@ export type EsignRequestRecord = Readonly<{
 }>;
 
 export type ReminderCandidate = Readonly<{
+  claimToken: string;
   request: EsignRequestRecord;
   signer: Readonly<{
     id: string;
@@ -91,6 +97,7 @@ export type SendClaim =
   | Readonly<{ outcome: "created"; request: EsignRequestRecord }>
   | Readonly<{ outcome: "existing"; request: EsignRequestRecord }>
   | Readonly<{ outcome: "blocked"; blocker: SendBlockerCode }>
+  | Readonly<{ outcome: "intent_conflict" }>
   | Readonly<{ outcome: "retry_ineligible" }>;
 
 export type EsignActionRepository = Readonly<{
@@ -125,30 +132,42 @@ export type EsignActionRepository = Readonly<{
     requestId: string;
     signerId: string;
     now: Date;
-    cooldownMs: number;
   }): Promise<
     | Readonly<{ outcome: "eligible"; candidate: ReminderCandidate }>
     | Readonly<{ outcome: "cooldown" }>
+    | Readonly<{ outcome: "in_progress" }>
     | Readonly<{ outcome: "ineligible" }>
   >;
-  markReminderSent(input: {
+  finalizeReminder(input: {
     orgId: string;
     requestId: string;
     signerId: string;
-    remindedAt: Date;
-  }): Promise<void>;
+    claimToken: string;
+  }): Promise<"applied" | "lease_lost">;
+  releaseReminder(input: {
+    orgId: string;
+    requestId: string;
+    signerId: string;
+    claimToken: string;
+  }): Promise<"released" | "lease_lost">;
   claimVoid(input: {
     orgId: string;
     requestId: string;
   }): Promise<
-    | Readonly<{ outcome: "eligible"; request: EsignRequestRecord }>
+    | Readonly<{ outcome: "eligible"; request: EsignRequestRecord; claimToken: string }>
+    | Readonly<{ outcome: "in_progress" }>
     | Readonly<{ outcome: "ineligible" }>
   >;
-  markVoidRequested(input: {
+  finalizeVoid(input: {
     orgId: string;
     requestId: string;
-    requestedAt: Date;
-  }): Promise<void>;
+    claimToken: string;
+  }): Promise<"applied" | "lease_lost">;
+  releaseVoid(input: {
+    orgId: string;
+    requestId: string;
+    claimToken: string;
+  }): Promise<"released" | "lease_lost">;
   findSignedFile(input: {
     orgId: string;
     fileId: string;
@@ -171,13 +190,15 @@ export type EsignActionProvider = Readonly<{
     providerTemplateId: string;
     signers: readonly SignerAssignment[];
     mergeValues: ContractMergeValues;
+    signal: AbortSignal;
   }): Promise<ProviderDispatchOutcome>;
   remind(input: {
     providerRequestId: string;
     signerName: string;
     signerEmailAddress: string;
+    signal: AbortSignal;
   }): Promise<"sent" | "failed">;
-  cancel(input: { providerRequestId: string }): Promise<"accepted" | "failed">;
+  cancel(input: { providerRequestId: string; signal: AbortSignal }): Promise<"accepted" | "failed">;
 }>;
 
 export type EsignActionFiles = Readonly<{
@@ -301,6 +322,8 @@ async function send(
     fail(blockerCode(claim.blocker), blockerMessage(claim.blocker));
   if (claim.outcome === "retry_ineligible")
     fail("RETRY_INELIGIBLE", "Only failed contracts can be retried.");
+  if (claim.outcome === "intent_conflict")
+    fail("SEND_INTENT_CONFLICT", "This send key was already used for different contract details.");
   if (claim.outcome === "existing")
     return resolveExistingIntent(claim.request, payloadHash, actor.orgId);
   assertClaimedRequest(
@@ -319,18 +342,19 @@ async function dispatchClaimed(
 ): Promise<SendContractOutput> {
   const provider = await dependencies.providerForOrg(request.orgId);
   if (!provider) {
-    await markFailed(dependencies, request, "Dropbox Sign is not connected.");
+    await markFailed(dependencies, request, "PROVIDER_DISCONNECTED");
     fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
   }
 
   let outcome: ProviderDispatchOutcome;
   try {
-    outcome = await provider.sendWithTemplate({
+    outcome = await withProviderTimeout((signal) => provider.sendWithTemplate({
       localRequestId: request.id,
       providerTemplateId: request.template.providerTemplateId,
       signers: request.signers,
       mergeValues: request.mergeValues,
-    });
+      signal,
+    }));
   } catch {
     await markUnknown(dependencies, request);
     fail(
@@ -349,7 +373,7 @@ async function dispatchClaimed(
     await markFailed(
       dependencies,
       request,
-      "Dropbox Sign rejected the contract send.",
+      "PROVIDER_REJECTED",
     );
     fail("SEND_FAILED", "Dropbox Sign could not send this contract.");
   }
@@ -411,8 +435,9 @@ async function remind(
     requestId: input.requestId,
     signerId: input.signerId,
     now,
-    cooldownMs: REMINDER_COOLDOWN_MS,
   });
+  if (claim.outcome === "in_progress")
+    fail("REMINDER_IN_PROGRESS", "A reminder or void request is already in progress.");
   if (claim.outcome === "cooldown")
     fail(
       "REMINDER_COOLDOWN",
@@ -438,21 +463,34 @@ async function remind(
     fail("REMINDER_INELIGIBLE", "This signer cannot be reminded.");
   }
   const provider = await dependencies.providerForOrg(actor.orgId);
-  if (!provider)
+  if (!provider) {
+    await releaseReminder(dependencies, actor.orgId, request.id, input.signerId, claim.candidate.claimToken);
     fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
-  const outcome = await provider.remind({
-    providerRequestId: request.providerRequestId,
-    signerName: signer.name,
-    signerEmailAddress: signer.emailAddress,
-  });
-  if (outcome !== "sent")
+  }
+  let outcome: "sent" | "failed";
+  try {
+    outcome = await withProviderTimeout((signal) => provider.remind({
+      providerRequestId: request.providerRequestId!,
+      signerName: signer.name,
+      signerEmailAddress: signer.emailAddress,
+      signal,
+    }));
+  } catch {
+    await releaseReminder(dependencies, actor.orgId, request.id, input.signerId, claim.candidate.claimToken);
     fail("REMINDER_FAILED", "Dropbox Sign could not send the reminder.");
-  await dependencies.repository.markReminderSent({
+  }
+  if (outcome !== "sent") {
+    await releaseReminder(dependencies, actor.orgId, request.id, input.signerId, claim.candidate.claimToken);
+    fail("REMINDER_FAILED", "Dropbox Sign could not send the reminder.");
+  }
+  const finalized = await dependencies.repository.finalizeReminder({
     orgId: actor.orgId,
     requestId: request.id,
     signerId: input.signerId,
-    remindedAt: now,
+    claimToken: claim.candidate.claimToken,
   });
+  if (finalized === "lease_lost")
+    fail("REMINDER_LEASE_LOST", "The reminder state changed before it could be recorded.");
   return null;
 }
 
@@ -465,6 +503,8 @@ async function requestVoid(
     orgId: actor.orgId,
     requestId: input.requestId,
   });
+  if (claim.outcome === "in_progress")
+    fail("VOID_IN_PROGRESS", "A reminder or void request is already in progress.");
   if (claim.outcome !== "eligible")
     fail("VOID_INELIGIBLE", "This contract cannot be voided.");
   const request = claim.request;
@@ -478,20 +518,30 @@ async function requestVoid(
     fail("VOID_INELIGIBLE", "This contract cannot be voided.");
   }
   const provider = await dependencies.providerForOrg(actor.orgId);
-  if (!provider)
+  if (!provider) {
+    await releaseVoid(dependencies, actor.orgId, request.id, claim.claimToken);
     fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
-  if (
-    (await provider.cancel({
-      providerRequestId: request.providerRequestId,
-    })) !== "accepted"
-  ) {
+  }
+  let accepted = false;
+  try {
+    accepted = (await withProviderTimeout((signal) => provider.cancel({
+      providerRequestId: request.providerRequestId!, signal,
+    }))) === "accepted";
+  } catch {
+    await releaseVoid(dependencies, actor.orgId, request.id, claim.claimToken);
     fail("VOID_FAILED", "Dropbox Sign could not accept the void request.");
   }
-  await dependencies.repository.markVoidRequested({
+  if (!accepted) {
+    await releaseVoid(dependencies, actor.orgId, request.id, claim.claimToken);
+    fail("VOID_FAILED", "Dropbox Sign could not accept the void request.");
+  }
+  const finalized = await dependencies.repository.finalizeVoid({
     orgId: actor.orgId,
     requestId: request.id,
-    requestedAt: dependencies.now(),
+    claimToken: claim.claimToken,
   });
+  if (finalized === "lease_lost")
+    fail("VOID_LEASE_LOST", "The contract state changed before the void request was recorded.");
   return null;
 }
 
@@ -703,11 +753,49 @@ function isSafeDownload(
   now: Date,
 ): boolean {
   return (
-    authorized.url.startsWith("/api/leads/files/") &&
-    !authorized.url.startsWith("//") &&
+    isAuthorizedDownloadUrl(authorized.url) &&
     authorized.expiresAt.getTime() > now.getTime() &&
     authorized.expiresAt.getTime() - now.getTime() <= DOWNLOAD_MAX_LIFETIME_MS
   );
+}
+
+function isAuthorizedDownloadUrl(value: string): boolean {
+  if (value.startsWith("/api/leads/files/") && !value.startsWith("//")) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && /\.supabase\.(co|in)$/.test(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function withProviderTimeout<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ESIGN_PROVIDER_TIMEOUT_MS);
+  try {
+    return await operation(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function releaseReminder(
+  dependencies: LeadEsignActionDependencies,
+  orgId: string,
+  requestId: string,
+  signerId: string,
+  claimToken: string,
+): Promise<void> {
+  await dependencies.repository.releaseReminder({ orgId, requestId, signerId, claimToken });
+}
+
+async function releaseVoid(
+  dependencies: LeadEsignActionDependencies,
+  orgId: string,
+  requestId: string,
+  claimToken: string,
+): Promise<void> {
+  await dependencies.repository.releaseVoid({ orgId, requestId, claimToken });
 }
 
 async function requireActor(

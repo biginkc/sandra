@@ -35,6 +35,7 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
 
 function actionHandlers(): ContractActionHandlers {
   return {
+    viewAction: vi.fn().mockResolvedValue({ ok: true, data: { detailsUrl: "https://app.hellosign.com/home/manage?guid=request-1" } }),
     remindAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
     voidAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
     retryAction: vi

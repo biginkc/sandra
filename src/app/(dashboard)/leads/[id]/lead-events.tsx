@@ -5,6 +5,7 @@ import { ActivityIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { OPERATOR_TIME_ZONE } from "@/lib/messages/message-metrics";
+import { validateTemplateTitle } from "@/lib/esign/template-contract";
 import { createClient } from "@/lib/supabase/client";
 import type { Database, Json } from "@/lib/supabase/types";
 
@@ -27,8 +28,6 @@ const EVENT_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
 });
-
-const ESIGN_TEMPLATE_TITLE_MAX_LENGTH = 160;
 
 export function useLeadEvents({
   propertyId,
@@ -330,12 +329,7 @@ function readEsignTemplateTitle(
 ): string | null {
   const keys = Object.keys(payload);
   if (keys.length !== 1 || keys[0] !== "template_title") return null;
-  const value = payload.template_title;
-  if (typeof value !== "string") return null;
-  const title = value.trim();
-  return title.length >= 1 && title.length <= ESIGN_TEMPLATE_TITLE_MAX_LENGTH
-    ? title
-    : null;
+  return validateTemplateTitle(payload.template_title);
 }
 
 function sortLeadEvents(events: LeadEvent[]): LeadEvent[] {

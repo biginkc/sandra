@@ -122,6 +122,7 @@ export type AuthorizedDownload = Readonly<{
 }>;
 
 export type ContractActionHandlers = Readonly<{
+  viewAction: (input: { requestId: string }) => Promise<Result<{ detailsUrl: string }>>;
   remindAction: (input: RemindContractInput) => Promise<Result<null>>;
   voidAction: (input: VoidContractInput) => Promise<Result<null>>;
   retryAction: (

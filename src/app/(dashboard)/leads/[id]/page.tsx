@@ -65,6 +65,19 @@ import { resolveLeadMediaPresentation } from "./lead-media";
 import { LeadActivityTimeline } from "./lead-activity";
 import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
+import { SendForSignature } from "./send-for-signature";
+import { ContractsCard } from "./contracts-card";
+import { LeadFilesCard } from "./lead-files-card";
+import { loadLeadEsignPageModel } from "./lead-esign-bindings";
+import {
+  downloadLeadFileAction,
+  loadLeadEsignPreflightAction,
+  remindContractAction,
+  retryContractAction,
+  sendContractAction,
+  viewContractAction,
+  voidContractAction,
+} from "./lead-esign-actions";
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 type LeadNoteRow = Database["public"]["Tables"]["lead_notes"]["Row"];
@@ -161,6 +174,7 @@ export default async function LeadDetailPage({
       />
     );
   }
+  const esign = await loadLeadEsignPageModel(lead.id);
   const homeownerSmsChoice = selectBestSmsPhone(lead.homeowner);
   const homeownerSmsPhone = homeownerSmsChoice?.phone ?? null;
   const homeownerContactId = lead.homeowner?.id ?? null;
@@ -684,6 +698,13 @@ export default async function LeadDetailPage({
           </Button>
         </a>
       ) : null}
+      <SendForSignature
+        propertyId={lead.id}
+        initialBlockers={esign.blockers}
+        preflightAction={loadLeadEsignPreflightAction}
+        sendAction={sendContractAction}
+      />
+      <SkipTraceButton propertyId={lead.id} />
       <span className="border-border inline-flex overflow-hidden rounded-full border [&_[data-slot=button]]:rounded-none [&_[data-slot=button]]:border-0">
         {prevId ? (
           <Link href={`/leads/${prevId}`}>
@@ -837,6 +858,17 @@ export default async function LeadDetailPage({
         </h2>
         <div className="grid min-w-0 items-start gap-[14px] xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="min-w-0 space-y-3">
+            <ContractsCard
+              contracts={esign.contracts}
+              loadError={esign.contractsError}
+              actions={{
+                viewAction: viewContractAction,
+                remindAction: remindContractAction,
+                voidAction: voidContractAction,
+                retryAction: retryContractAction,
+                downloadAction: downloadLeadFileAction,
+              }}
+            />
             <LeadActivityTimeline
               key={lead.id}
               propertyId={lead.id}
@@ -888,6 +920,11 @@ export default async function LeadDetailPage({
           </div>
 
           <aside className="min-w-0 space-y-3" aria-label="Lead dossier">
+            <LeadFilesCard
+              files={esign.files}
+              loadError={esign.filesError}
+              downloadAction={downloadLeadFileAction}
+            />
             <Section title="Homeowner" compact>
               {lead.homeowner ? (
                 <>
@@ -923,16 +960,10 @@ export default async function LeadDetailPage({
                     label="Contact DNC flag"
                     value={formatBool(lead.homeowner.do_not_contact)}
                   />
-                  {!lead.homeowner.phone_1 ? (
-                    <div className="p-3">
-                      <SkipTraceButton propertyId={lead.id} />
-                    </div>
-                  ) : null}
                 </>
               ) : (
                 <div className="space-y-3 p-3">
                   <EmptyRow text="No homeowner linked yet" />
-                  <SkipTraceButton propertyId={lead.id} />
                 </div>
               )}
               {smsPresentation.readFailed ? (
