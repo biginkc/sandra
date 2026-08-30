@@ -184,6 +184,8 @@ describe("<CoachLiveView /> manual navigation", () => {
       maskedSellerPhone: "+1 (816) 555-9876",
     }} />);
 
+    expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: —");
+
     for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");
     expect(script).not.toHaveTextContent("JH-abcdef");
@@ -195,7 +197,29 @@ describe("<CoachLiveView /> manual navigation", () => {
       authenticatedRepName: "Jarrad Henry",
       leadId: "abcd1234-ef56-7890-abcd-ef1234c1c524",
     }));
-    await waitFor(() => expect(script).toHaveTextContent("JH-c1c524"));
+    await waitFor(() => expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: JH-c1c524"));
+    expect(script).toHaveTextContent("JH-c1c524");
+  });
+
+  it("keeps the authorized file number visible while the rep advances through the script", async () => {
+    loadCoachCallContext.mockResolvedValue({
+      ...sampleContext,
+      repName: "Jarrad Henry",
+      authenticatedRepName: "Jarrad Henry",
+      leadId: "abcd1234-ef56-7890-abcd-ef1234c1c524",
+    });
+    const user = userEvent.setup();
+    render(<Harness {...baseProps()} />);
+
+    const fileNumber = await screen.findByTestId("coach-file-number");
+    await waitFor(() => expect(fileNumber).toHaveTextContent("File number: JH-c1c524"));
+    for (let step = 0; step < 25; step += 1) {
+      expect(fileNumber).toBeVisible();
+      expect(fileNumber).toHaveTextContent("File number: JH-c1c524");
+      await user.click(screen.getByTestId("coach-next"));
+    }
+    expect(fileNumber).toBeVisible();
+    expect(fileNumber).toHaveTextContent("File number: JH-c1c524");
   });
 
   it("never exposes requested/prepared file-number identity after a property authorization failure", async () => {
@@ -210,6 +234,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     }} />);
 
     await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeVisible());
+    expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: —");
     for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");
     expect(script).not.toHaveTextContent("JH-abcdef");
@@ -233,6 +258,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     }} />);
 
     await waitFor(() => expect(loadCoachCallContext).toHaveBeenCalled());
+    expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: —");
     for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");
     expect(script).not.toHaveTextContent("JH-c1c524");
