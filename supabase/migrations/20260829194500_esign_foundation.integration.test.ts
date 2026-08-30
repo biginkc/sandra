@@ -889,6 +889,39 @@ describe("Migration 20260829194500 — eSign foundation", () => {
     ).toEqual([]);
 
     await setRequestRole("service_role");
+    const servicePrivileges = await pg.query<{
+      helper_execute: boolean;
+      rpc_execute: boolean;
+      helper_access: boolean;
+    }>(
+      `select
+         has_function_privilege(
+           'service_role',
+           'public.hugo_has_active_org_access(uuid)',
+           'execute'
+         ) as helper_execute,
+         has_function_privilege(
+           'service_role',
+           'public.get_latest_esign_requests_for_properties(uuid,uuid[])',
+           'execute'
+         ) as rpc_execute,
+         public.hugo_has_active_org_access($1) as helper_access`,
+      [BMH_ORG_ID],
+    );
+    expect(servicePrivileges.rows[0]).toEqual({
+      helper_execute: true,
+      rpc_execute: true,
+      helper_access: true,
+    });
+    expect(
+      (
+        await pg.query<{ id: string }>(
+          "select id from public.get_latest_esign_requests_for_properties($1,$2::uuid[])",
+          [BMH_ORG_ID, [tiePropertyId]],
+        )
+      ).rows,
+    ).toEqual([{ id: higherId }]);
+
     await pg.query(
       "update public.memberships set access_status = 'suspended' where user_id = $1 and org_id = $2",
       [memberId, BMH_ORG_ID],
