@@ -8,13 +8,6 @@ begin;
 set local lock_timeout = '5s';
 set local statement_timeout = '30s';
 
--- The foundation exposes selected server-only RPCs to service_role. Keep the
--- shared Hugo access helper executable by that role as well; its implementation
--- already treats service_role as elevated, and hosted Supabase gives the role
--- BYPASSRLS.
-grant execute on function public.hugo_has_active_org_access(uuid)
-  to service_role;
-
 do $$
 begin
   if not exists (
@@ -1431,11 +1424,10 @@ begin
     raise exception 'property IDs must contain 1 to 50 distinct UUIDs'
       using errcode = '22023';
   end if;
-  if coalesce(auth.role(), '') <> 'service_role' then
-    if not public.hugo_has_active_org_access(p_org_id) then
-      raise exception 'active organization membership required'
-        using errcode = '42501';
-    end if;
+  if coalesce(auth.role(), '') <> 'service_role'
+     and not public.hugo_has_active_org_access(p_org_id) then
+    raise exception 'active organization membership required'
+      using errcode = '42501';
   end if;
 
   return query

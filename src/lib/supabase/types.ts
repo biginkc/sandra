@@ -3791,51 +3791,63 @@ export type Database = {
       esign_template_staging_sources: {
         Row: {
           cleanup_attempted_at: string | null
+          cleanup_claimed_at: string | null
           cleanup_error_code: string | null
           cleanup_outcome: string
+          cleanup_token: string | null
           content_type: string
           created_at: string
           created_by: string
           id: string
           org_id: string
+          prepared_at: string
           source_filename: string
           source_sha256: string
           source_size_bytes: number
           storage_bucket: string
           storage_path: string
-          verified_at: string
+          verification_state: string
+          verified_at: string | null
         }
         Insert: {
           cleanup_attempted_at?: string | null
+          cleanup_claimed_at?: string | null
           cleanup_error_code?: string | null
           cleanup_outcome?: string
+          cleanup_token?: string | null
           content_type: string
           created_at?: string
           created_by: string
           id: string
           org_id: string
+          prepared_at?: string
           source_filename: string
           source_sha256: string
           source_size_bytes: number
           storage_bucket?: string
           storage_path: string
-          verified_at?: string
+          verification_state?: string
+          verified_at?: string | null
         }
         Update: {
           cleanup_attempted_at?: string | null
+          cleanup_claimed_at?: string | null
           cleanup_error_code?: string | null
           cleanup_outcome?: string
+          cleanup_token?: string | null
           content_type?: string
           created_at?: string
           created_by?: string
           id?: string
           org_id?: string
+          prepared_at?: string
           source_filename?: string
           source_sha256?: string
           source_size_bytes?: number
           storage_bucket?: string
           storage_path?: string
-          verified_at?: string
+          verification_state?: string
+          verified_at?: string | null
         }
         Relationships: [
           {
@@ -3864,6 +3876,13 @@ export type Database = {
           name: string
           org_id: string
           preparation_error_code: string | null
+          provider_account_id: string | null
+          provider_create_claim_token_hash: string | null
+          provider_create_claimed_at: string | null
+          provider_create_error_code: string | null
+          provider_create_invocation_started_at: string | null
+          provider_create_last_released_token_hash: string | null
+          provider_create_state: string | null
           seller_role: string
           sign_template_id: string | null
           signer_roles: Json
@@ -3894,6 +3913,13 @@ export type Database = {
           name: string
           org_id: string
           preparation_error_code?: string | null
+          provider_account_id?: string | null
+          provider_create_claim_token_hash?: string | null
+          provider_create_claimed_at?: string | null
+          provider_create_error_code?: string | null
+          provider_create_invocation_started_at?: string | null
+          provider_create_last_released_token_hash?: string | null
+          provider_create_state?: string | null
           seller_role: string
           sign_template_id?: string | null
           signer_roles: Json
@@ -3924,6 +3950,13 @@ export type Database = {
           name?: string
           org_id?: string
           preparation_error_code?: string | null
+          provider_account_id?: string | null
+          provider_create_claim_token_hash?: string | null
+          provider_create_claimed_at?: string | null
+          provider_create_error_code?: string | null
+          provider_create_invocation_started_at?: string | null
+          provider_create_last_released_token_hash?: string | null
+          provider_create_state?: string | null
           seller_role?: string
           sign_template_id?: string | null
           signer_roles?: Json
@@ -4122,6 +4155,7 @@ export type Database = {
           id: string
           org_id: string
           provider: string
+          provider_account_id: string
           sending_enabled: boolean
           test_mode: boolean
           updated_at: string
@@ -4138,6 +4172,7 @@ export type Database = {
           id?: string
           org_id: string
           provider?: string
+          provider_account_id: string
           sending_enabled?: boolean
           test_mode?: boolean
           updated_at?: string
@@ -4154,6 +4189,7 @@ export type Database = {
           id?: string
           org_id?: string
           provider?: string
+          provider_account_id?: string
           sending_enabled?: boolean
           test_mode?: boolean
           updated_at?: string
@@ -4636,6 +4672,21 @@ export type Database = {
         }
         Returns: string
       }
+      begin_esign_template_provider_create: {
+        Args: {
+          p_actor_id: string
+          p_claim_token: string
+          p_org_id: string
+          p_source_id: string
+          p_template_id: string
+        }
+        Returns: {
+          created_by: string
+          outcome: string
+          provider_create_state: string
+          template_id: string
+        }[]
+      }
       claim_esign_request_void: {
         Args: {
           p_claim_token: string
@@ -4660,6 +4711,23 @@ export type Database = {
           provider_signature_id: string | null
           signer_email: string | null
           signer_name: string | null
+        }[]
+      }
+      claim_esign_template_provider_create: {
+        Args: {
+          p_actor_id: string
+          p_org_id: string
+          p_source_id: string
+          p_template_id: string
+        }
+        Returns: {
+          claim_token: string | null
+          created_by: string
+          outcome: string
+          provider_account_id: string | null
+          provider_create_state: string
+          provider_template_id: string | null
+          template_id: string
         }[]
       }
       claim_esign_webhook_receipt: {
@@ -4706,6 +4774,38 @@ export type Database = {
           receipt_id: string
         }[]
       }
+      claim_unattached_esign_template_source_cleanup: {
+        Args: {
+          p_actor_id: string
+          p_org_id: string
+          p_source_id: string
+          p_storage_path: string
+        }
+        Returns: {
+          cleanup_claimed_at: string | null
+          cleanup_state: string
+          cleanup_token: string | null
+          created_by: string
+          outcome: string
+          source_id: string
+        }[]
+      }
+      complete_esign_template_provider_create: {
+        Args: {
+          p_actor_id: string
+          p_claim_token: string
+          p_org_id: string
+          p_provider_template_id: string
+          p_source_id: string
+          p_template_id: string
+        }
+        Returns: {
+          created_by: string
+          outcome: string
+          provider_template_id: string
+          template_id: string
+        }[]
+      }
       complete_esign_webhook_receipt: {
         Args: {
           p_lease_id: string
@@ -4714,6 +4814,38 @@ export type Database = {
           p_status: string
         }
         Returns: undefined
+      }
+      complete_unattached_esign_template_source_cleanup: {
+        Args: {
+          p_actor_id: string
+          p_cleanup_token: string
+          p_org_id: string
+          p_outcome: string
+          p_safe_code: string | null
+          p_source_id: string
+          p_storage_path: string
+        }
+        Returns: {
+          cleanup_state: string
+          created_by: string
+          outcome: string
+          source_id: string
+        }[]
+      }
+      consume_esign_template_source_draft: {
+        Args: {
+          p_actor_id: string
+          p_document_type: string
+          p_name: string
+          p_org_id: string
+          p_seller_role: string
+          p_signer_roles: Json
+          p_source_id: string
+        }
+        Returns: {
+          outcome: string
+          template_id: string
+        }[]
       }
       create_esign_request: {
         Args: {
@@ -4812,6 +4944,14 @@ export type Database = {
         Args: { p_path: string }
         Returns: boolean
       }
+      esign_staging_upload_is_reserved: {
+        Args: { p_path: string }
+        Returns: boolean
+      }
+      esign_template_is_available: {
+        Args: { p_org_id: string; p_template_id: string }
+        Returns: boolean
+      }
       esign_storage_org_id: {
         Args: { p_path: string }
         Returns: string
@@ -4872,6 +5012,7 @@ export type Database = {
           api_key: string
           callback_secret_hash: string
           client_id: string
+          provider_account_id: string
           sending_enabled: boolean
           test_mode: boolean
         }[]
@@ -4905,6 +5046,42 @@ export type Database = {
           outcome: string
         }[]
       }
+      list_pending_esign_template_provider_creates: {
+        Args: { p_actor_id: string; p_org_id: string }
+        Returns: {
+          created_at: string
+          created_by: string
+          name: string
+          provider_account_id: string | null
+          provider_create_claimed_at: string | null
+          provider_create_error_code: string | null
+          provider_create_invocation_started_at: string | null
+          provider_create_state: string
+          source_id: string
+          template_id: string
+        }[]
+      }
+      list_pending_esign_template_source_uploads: {
+        Args: { p_actor_id: string; p_org_id: string }
+        Returns: {
+          cleanup_attempted_at: string | null
+          cleanup_claimed_at: string | null
+          cleanup_error_code: string | null
+          cleanup_state: string
+          content_type: string
+          created_at: string
+          created_by: string
+          prepared_at: string
+          source_filename: string
+          source_id: string
+          source_sha256: string
+          source_size_bytes: number
+          storage_bucket: string
+          storage_path: string
+          verification_state: string
+          verified_at: string | null
+        }[]
+      }
       mark_esign_request_send_outcome: {
         Args: {
           p_delivery_state: Database["public"]["Enums"]["esign_delivery_state"]
@@ -4913,6 +5090,39 @@ export type Database = {
           p_request_id: string
         }
         Returns: undefined
+      }
+      mark_esign_template_provider_create_unknown: {
+        Args: {
+          p_actor_id: string
+          p_claim_token: string
+          p_error_code: string
+          p_org_id: string
+          p_source_id: string
+          p_template_id: string
+        }
+        Returns: {
+          created_by: string
+          outcome: string
+          template_id: string
+        }[]
+      }
+      prepare_esign_template_source_upload: {
+        Args: {
+          p_actor_id: string
+          p_content_type: string
+          p_org_id: string
+          p_source_filename: string
+          p_source_id: string
+          p_source_sha256: string
+          p_source_size_bytes: number
+        }
+        Returns: {
+          outcome: string
+          source_id: string
+          storage_bucket: string
+          storage_path: string
+          verification_state: string
+        }[]
       }
       reconcile_esign_request_delivery: {
         Args: {
@@ -4923,6 +5133,21 @@ export type Database = {
           p_request_id: string
         }
         Returns: undefined
+      }
+      reconcile_unknown_esign_template_provider_create: {
+        Args: {
+          p_actor_id: string
+          p_org_id: string
+          p_provider_template_id: string
+          p_source_id: string
+          p_template_id: string
+        }
+        Returns: {
+          created_by: string
+          outcome: string
+          provider_template_id: string
+          template_id: string
+        }[]
       }
       record_esign_template_source_cleanup: {
         Args: {
@@ -4961,6 +5186,20 @@ export type Database = {
         }
         Returns: string
       }
+      release_esign_template_provider_create_claim: {
+        Args: {
+          p_actor_id: string
+          p_claim_token: string
+          p_org_id: string
+          p_source_id: string
+          p_template_id: string
+        }
+        Returns: {
+          created_by: string
+          outcome: string
+          template_id: string
+        }[]
+      }
       soft_delete_esign_template: {
         Args: {
           p_actor_id: string
@@ -4986,8 +5225,25 @@ export type Database = {
           p_client_id: string
           p_key: string
           p_org_id: string
+          p_provider_account_id: string
         }
         Returns: undefined
+      }
+      verify_esign_template_source_upload: {
+        Args: {
+          p_actor_id: string
+          p_observed_content_type: string
+          p_observed_sha256: string
+          p_observed_size_bytes: number
+          p_org_id: string
+          p_source_id: string
+          p_storage_path: string
+        }
+        Returns: {
+          outcome: string
+          source_id: string
+          verification_state: string
+        }[]
       }
       fn_apply_ai_disposition_with_review: {
         Args: {

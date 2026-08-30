@@ -153,12 +153,19 @@ export async function connectDropboxSignAction(
       clientId,
       expectedDomain: configuredDropboxSignEmbeddedDomain(),
     });
-    await provider.validateCredentials();
+    const validation = await provider.validateCredentials();
+    const providerAccountId = validation.accountId?.trim();
+    if (!providerAccountId) {
+      throw new ValidationError(
+        "Dropbox Sign did not return a valid provider account.",
+      );
+    }
     await saveEsignCredentials({
       orgId: membership.org_id,
       actorId: membership.user_id,
       apiKey,
       clientId,
+      providerAccountId,
     });
     revalidatePath("/settings/integrations");
     return ok({

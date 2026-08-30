@@ -34,14 +34,6 @@ beforeAll(async () => {
   isolatedUrl = databaseUrl(databaseName);
   setup = new Client({ connectionString: isolatedUrl });
   await setup.connect();
-  const serviceRole = await setup.query<{ rolbypassrls: boolean }>(
-    "select rolbypassrls from pg_roles where rolname = 'service_role'",
-  );
-  if (serviceRole.rows[0]?.rolbypassrls !== true) {
-    throw new Error(
-      "isolated service_role must use BYPASSRLS to match hosted Supabase",
-    );
-  }
   await setup.query(`
     create schema auth;
     create schema storage;

@@ -42,6 +42,7 @@ describe("eSign credential store", () => {
       actorId: "user-1",
       apiKey: "dropbox-key-1234",
       clientId: "client-id",
+      providerAccountId: "account-1",
     });
     const args = admin.rpc.mock.calls[0][1];
     expect(admin.rpc.mock.calls[0][0]).toBe("upsert_org_esign_integration");
@@ -49,6 +50,7 @@ describe("eSign credential store", () => {
       p_org_id: "org-1",
       p_api_key_last_four: "1234",
       p_client_id: "client-id",
+      p_provider_account_id: "account-1",
       p_actor_id: "user-1",
       p_key: "encryption-key",
     });
@@ -64,6 +66,7 @@ describe("eSign credential store", () => {
         {
           api_key: "dropbox-key",
           client_id: "client-id",
+          provider_account_id: "account-1",
           sending_enabled: true,
           test_mode: true,
           callback_secret_hash: "a".repeat(64),
@@ -73,6 +76,7 @@ describe("eSign credential store", () => {
     });
     const credentials = await getEsignCredentials("org-1");
     expect(credentials?.apiKey.reveal()).toBe("dropbox-key");
+    expect(credentials?.providerAccountId).toBe("account-1");
     expect(JSON.stringify(credentials)).not.toContain("dropbox-key");
   });
 
@@ -81,7 +85,7 @@ describe("eSign credential store", () => {
       error: { code: "23514", message: "db detail" },
     });
     await expect(deleteEsignCredentials("org-1", "owner-1")).rejects.toThrow(
-      "Finish active signatures and save signed PDFs",
+      "Finish active eSign work before disconnecting Dropbox Sign.",
     );
     expect(admin.rpc).toHaveBeenCalledWith("delete_org_esign_integration", {
       p_org_id: "org-1",

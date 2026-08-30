@@ -1,6 +1,7 @@
 export const ESIGN_TEST_API_KEY = "test-dropbox-sign-api-key-1234";
 export const ESIGN_TEST_ENCRYPTION_KEY = "test-esign-encryption-key";
 export const ESIGN_TEST_CLIENT_ID = "test-dropbox-sign-client-id";
+export const ESIGN_TEST_PROVIDER_ACCOUNT_ID = "test-dropbox-sign-account-id";
 export const ESIGN_TEST_CALLBACK_HASH = "a".repeat(64);
 export const ESIGN_TEST_PAYLOAD_HASH = "b".repeat(64);
 

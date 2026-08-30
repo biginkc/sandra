@@ -87,6 +87,7 @@ describe("eSign server actions", () => {
       actorId: "owner-1",
       apiKey: "dropbox-api-key-1234",
       clientId: "client-id",
+      providerAccountId: "account-1",
     });
     expect(result).toEqual({
       ok: true,
@@ -116,6 +117,16 @@ describe("eSign server actions", () => {
       },
     });
     expect(mocks.validateCredentials).not.toHaveBeenCalled();
+    expect(mocks.saveEsignCredentials).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when Dropbox Sign omits the provider account identity", async () => {
+    mocks.validateCredentials.mockResolvedValue({ accountId: null });
+    const result = await connectDropboxSignAction("dropbox-api-key-1234");
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "VALIDATION" },
+    });
     expect(mocks.saveEsignCredentials).not.toHaveBeenCalled();
   });
 

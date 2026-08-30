@@ -10,6 +10,7 @@ import { EsignSecret } from "./secret";
 export type DecryptedEsignCredentials = {
   apiKey: EsignSecret;
   clientId: string;
+  providerAccountId: string;
   sendingEnabled: boolean;
   testMode: true;
   callbackSecretHash: string;
@@ -23,6 +24,7 @@ type EsignRpcClient = {
       p_api_key: string;
       p_api_key_last_four: string;
       p_client_id: string;
+      p_provider_account_id: string;
       p_callback_secret_hash: string;
       p_actor_id: string;
       p_key: string;
@@ -35,6 +37,7 @@ type EsignRpcClient = {
     data: Array<{
       api_key: string;
       client_id: string;
+      provider_account_id: string;
       sending_enabled: boolean;
       test_mode: boolean;
       callback_secret_hash: string;
@@ -110,6 +113,7 @@ export async function saveEsignCredentials(input: {
   actorId: string;
   apiKey: string;
   clientId: string;
+  providerAccountId: string;
 }): Promise<void> {
   const apiKey = input.apiKey.trim();
   const { error } = await adminRpc().rpc("upsert_org_esign_integration", {
@@ -117,6 +121,7 @@ export async function saveEsignCredentials(input: {
     p_api_key: apiKey,
     p_api_key_last_four: apiKey.slice(-4),
     p_client_id: input.clientId,
+    p_provider_account_id: input.providerAccountId,
     p_callback_secret_hash: callbackSecretHashForOrg(input.orgId),
     p_actor_id: input.actorId,
     p_key: encryptionKey(),
@@ -150,6 +155,7 @@ export async function getEsignCredentials(
   return {
     apiKey: new EsignSecret(row.api_key),
     clientId: row.client_id,
+    providerAccountId: row.provider_account_id,
     sendingEnabled: row.sending_enabled,
     testMode: true,
     callbackSecretHash: row.callback_secret_hash,
@@ -167,7 +173,7 @@ export async function deleteEsignCredentials(
   if (error) {
     throw new DatabaseError(
       error.code === "23514"
-        ? "Finish active signatures and save signed PDFs before disconnecting Dropbox Sign."
+        ? "Finish active eSign work before disconnecting Dropbox Sign."
         : "Failed to disconnect Dropbox Sign.",
       { code: error.code },
     );
