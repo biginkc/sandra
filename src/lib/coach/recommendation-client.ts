@@ -356,8 +356,10 @@ export function useCoachRecommendations(input: UseCoachRecommendationsInput) {
       activeSectionId: input.activeSectionId,
       branchOverrides: input.branchOverrides,
     });
-    controller.considerAutomatic(input.transcript);
-  }, [controller, input.callId, input.activeSectionId, input.branchOverrides, input.transcript]);
+    // Follow-up Questions are an explicit rep action. Transcript updates only
+    // determine whether the button is eligible; they must never start an AI
+    // request on their own.
+  }, [controller, input.callId, input.activeSectionId, input.branchOverrides]);
 
   useEffect(() => () => controller.dispose(), [controller]);
 

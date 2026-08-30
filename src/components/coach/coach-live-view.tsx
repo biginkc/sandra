@@ -612,57 +612,49 @@ function ScriptPanel({
 }
 
 function RecommendationsPanel({
-  recommendations,
   followUpQuestions,
   loadingMode,
   error,
-  automaticLimitReached,
   followUpLimitReached,
   hasFinalSellerTranscript,
   requestFollowUp,
 }: ReturnType<typeof useCoachRecommendations> & { hasFinalSellerTranscript: boolean }) {
   const followUpBusy = loadingMode === "follow_up";
+  const retryableError = Boolean(error && error !== "rate_limited" && error !== "busy");
   const failureMessage =
     error === "rate_limited"
-      ? "The recommendation limit for this call has been reached."
+      ? "The follow-up question limit for this call has been reached."
       : error === "busy"
-        ? "Sandra is already preparing a recommendation."
+        ? "Sandra is already preparing follow-up questions."
         : error
-          ? "Recommendations are temporarily unavailable. Your script and transcript are unaffected."
+          ? "Follow-up questions are temporarily unavailable. Your script and transcript are unaffected."
           : null;
   return (
     <aside
-      aria-label="Live recommendations"
+      aria-label="Follow-up questions"
       data-testid="coach-recommendations"
       className="min-h-64 shrink-0 bg-muted/20 px-4 py-5 md:px-6 xl:min-h-0 xl:overflow-y-auto"
     >
-      <div className="text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Recommendations</div>
-      <h2 className="mt-1 text-lg font-bold">Helpful ways to go deeper</h2>
+      <div className="text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Follow-up questions</div>
+      <h2 className="mt-1 text-lg font-bold">Choose what to ask next</h2>
       <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-        Sandra is listening for a meaningful homeowner response. Suggestions will appear here without changing your place in the script.
+        Ask Sandra for three transcript-grounded questions after the homeowner has shared a meaningful response. Nothing runs until you choose this button.
       </p>
-      {recommendations.length > 0 ? (
-        <div className="mt-5" data-testid="automatic-recommendations">
-          <div className="text-[10px] font-bold tracking-wide text-muted-foreground uppercase">Consider saying</div>
-          <ul className="mt-2 space-y-2">
-            {recommendations.map((recommendation) => (
-              <li key={recommendation} className="rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed">
-                {recommendation}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
       <Button
         type="button"
         variant="outline"
         className="mt-5 w-full"
         disabled={followUpBusy || !hasFinalSellerTranscript || followUpLimitReached}
+        aria-busy={followUpBusy}
         data-testid="follow-up-questions"
         onClick={() => void requestFollowUp()}
       >
         {loadingMode === "follow_up" ? <Loader2Icon className="size-4 animate-spin" aria-hidden /> : null}
-        Follow-up Questions
+        {followUpBusy
+          ? "Preparing follow-up questions…"
+          : retryableError
+            ? "Retry Follow-up Questions"
+            : "Follow-up Questions"}
       </Button>
       {!hasFinalSellerTranscript ? (
         <p className="mt-2 text-xs text-muted-foreground">Available after the homeowner has spoken.</p>
@@ -676,17 +668,8 @@ function RecommendationsPanel({
           ))}
         </ol>
       ) : null}
-      {loadingMode === "automatic" ? (
-        <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground" data-testid="automatic-recommendations-loading">
-          <Loader2Icon className="size-3.5 animate-spin" aria-hidden />
-          Preparing suggestions…
-        </p>
-      ) : null}
-      {automaticLimitReached ? (
-        <p className="mt-3 text-xs text-muted-foreground">Automatic suggestions have reached their limit for this call.</p>
-      ) : null}
       {failureMessage ? (
-        <p role="status" className="mt-3 text-xs text-muted-foreground" data-testid="recommendation-error">
+        <p role="alert" className="mt-3 text-xs text-muted-foreground" data-testid="recommendation-error">
           {failureMessage}
         </p>
       ) : null}
