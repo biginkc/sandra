@@ -244,11 +244,27 @@ insert into urgency_filter_cases values
 grant select on urgency_filter_cases to authenticated;
 SQL
 
-FILTER_MATRIX_SQL="select c.case_name,r.all_count,r.overdue_count,r.today_count,r.scheduled_count,r.no_action_count from urgency_filter_cases c cross join lateral get_leads_board_urgency_counts(c.assignee_id,c.unassigned,c.search_tokens,c.motivation,null,c.hot_only,c.no_active_sequence,c.skip_traced,'2026-08-15 05:00Z','2026-08-16 05:00Z') r order by c.case_name"
+capture_filter_matrix() {
+  local output_file="$1"
+  : >"$output_file"
+  while IFS= read -r matrix_case; do
+    if [[ ! "$matrix_case" =~ ^[a-z_]+$ ]]; then
+      echo "invalid urgency filter matrix case name" >&2
+      exit 1
+    fi
+    psql -v ON_ERROR_STOP=1 -At -F '|' \
+      -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal \
+      -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; select c.case_name,r.all_count,r.overdue_count,r.today_count,r.scheduled_count,r.no_action_count from urgency_filter_cases c cross join lateral get_leads_board_urgency_counts(c.assignee_id,c.unassigned,c.search_tokens,c.motivation,null,c.hot_only,c.no_active_sequence,c.skip_traced,'2026-08-15 05:00Z','2026-08-16 05:00Z') r where c.case_name='$matrix_case';" \
+      >>"$output_file"
+  done < <(
+    psql -v ON_ERROR_STOP=1 -At -h "$LEADS_SOCKET" -p "$LEADS_PORT" \
+      -U postgres -d sandra_leads_rehearsal \
+      -c "select case_name from urgency_filter_cases order by case_name"
+  )
+}
+
 OLD_FILTER_MATRIX="$LEADS_TMP/old-filter-matrix.out"
-psql -v ON_ERROR_STOP=1 -At -F '|' -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal \
-  -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; $FILTER_MATRIX_SQL" \
-  >"$OLD_FILTER_MATRIX"
+capture_filter_matrix "$OLD_FILTER_MATRIX"
 
 # Reproduce the production failure shape before applying the forward fix: the
 # default urgency request must not expand every expensive leads_board column.
@@ -256,7 +272,7 @@ psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandr
 insert into properties (id,org_id,address,city,state,status,created_at)
 select gen_random_uuid(), 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
   'Timeout fixture ' || n, 'Kansas City', 'MO', 'contacted', now()
-from generate_series(1,50000) n;
+from generate_series(1,500000) n;
 insert into messages (property_id,direction,body,created_at)
 select property.id,
   case when message_number % 2 = 0 then 'outbound' else 'inbound' end,
@@ -271,7 +287,7 @@ SQL
 
 OLD_URGENCY_OUTPUT="$LEADS_TMP/old-urgency.out"
 if psql -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal \
-  -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; set statement_timeout='150ms'; select * from get_leads_board_urgency_counts(null,false,array[]::text[],'all',null,false,false,null,'2026-08-15 05:00Z','2026-08-16 05:00Z');" \
+  -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; set statement_timeout='2s'; select * from get_leads_board_urgency_counts(null,false,array[]::text[],'all',null,false,false,null,'2026-08-15 05:00Z','2026-08-16 05:00Z');" \
   >"$OLD_URGENCY_OUTPUT" 2>&1; then
   echo "pre-fix urgency query unexpectedly stayed below the bounded timeout" >&2
   exit 1
@@ -282,7 +298,7 @@ psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandr
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_URGENCY_TIMEOUT_MIGRATION" >/dev/null
 
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal \
-  -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; set statement_timeout='150ms'; select * from get_leads_board_urgency_counts(null,false,array[]::text[],'all',null,false,false,null,'2026-08-15 05:00Z','2026-08-16 05:00Z');" \
+  -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; set statement_timeout='2s'; select * from get_leads_board_urgency_counts(null,false,array[]::text[],'all',null,false,false,null,'2026-08-15 05:00Z','2026-08-16 05:00Z');" \
   >/dev/null
 
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL' >/dev/null
@@ -293,9 +309,7 @@ delete from properties where address like 'Timeout fixture %';
 SQL
 
 NEW_FILTER_MATRIX="$LEADS_TMP/new-filter-matrix.out"
-psql -v ON_ERROR_STOP=1 -At -F '|' -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal \
-  -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; $FILTER_MATRIX_SQL" \
-  >"$NEW_FILTER_MATRIX"
+capture_filter_matrix "$NEW_FILTER_MATRIX"
 cmp "$OLD_FILTER_MATRIX" "$NEW_FILTER_MATRIX"
 
 # The forward function must preserve every optional filter while avoiding the
