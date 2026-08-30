@@ -36,6 +36,16 @@ export type TemplateLibraryLoadResult = TemplateLaneResult<
   readonly EsignTemplateRow[]
 >;
 
+export type PendingTemplateCopy = Readonly<{
+  id: string;
+  name: string;
+  lifecycle: "preparing" | "editing" | "cleanup_attention";
+}>;
+
+export type PendingTemplateCopiesLoadResult = TemplateLaneResult<
+  readonly PendingTemplateCopy[]
+>;
+
 export type TemplateSource = Readonly<{
   file: File;
   origin: "upload" | "dropbox";
@@ -58,7 +68,12 @@ export type TemplateLibraryActions = Readonly<{
   duplicateTemplate(
     templateId: string,
     name: string,
-  ): Promise<TemplateLaneResult<{ templateId: string }>>;
+  ): Promise<TemplateLaneResult<{ templateId: string; readiness: "ready" | "pending" }>>;
+  checkEditorReadiness(
+    templateId: string,
+  ): Promise<TemplateLaneResult<{ readiness: "ready" | "pending" }>>;
+  abandonDraft(templateId: string): Promise<TemplateLaneResult<null>>;
+  retryCleanup(templateId: string): Promise<TemplateLaneResult<null>>;
   deleteTemplate(templateId: string, confirmRecentSends?: boolean): Promise<TemplateLaneResult<null>>;
 }>;
 

@@ -43,6 +43,7 @@ function makePorts(): TemplateOrchestratorPorts {
     auth: { getActor: vi.fn().mockResolvedValue(owner) },
     repository: {
       listFinalized: vi.fn().mockResolvedValue([]),
+      listPendingCopies: vi.fn().mockResolvedValue([]),
       recordVerifiedStage: vi.fn().mockImplementation(async (input) => input),
       recordUnattachedStageCleanup: vi.fn().mockResolvedValue(undefined),
       getStage: vi.fn().mockResolvedValue(stage),
@@ -58,7 +59,7 @@ function makePorts(): TemplateOrchestratorPorts {
     storage: {
       putPrivate: vi.fn().mockResolvedValue(undefined),
       readPrivate: vi.fn().mockResolvedValue(pdfBytes),
-      deletePrivate: vi.fn().mockResolvedValue(undefined),
+      deletePrivate: vi.fn().mockResolvedValue("deleted"),
     },
     provider: {
       embeddedClientId: "client-public-1",
@@ -93,8 +94,8 @@ describe("template action orchestration", () => {
     vi.mocked(ports.auth.getActor).mockResolvedValue({ ...owner, isOwner: false });
     const core = createTemplateOrchestrator(ports);
     const results = await Promise.all([
-      core.list(), core.stageSource([pdf]), core.add(addInput()), core.startEditor("template-1"),
-      core.finishSync("template-1"), core.abandon("template-1"), core.duplicate("template-1", "Copy"), core.delete("template-1"),
+      core.list(), core.listPendingCopies(), core.stageSource([pdf]), core.add(addInput()), core.startEditor("template-1"),
+      core.finishSync("template-1"), core.abandon("template-1"), core.retryCleanup("template-1"), core.duplicate("template-1", "Copy"), core.delete("template-1"),
     ]);
     expect(results.every((result) => !result.ok && result.error.code === "OWNER_REQUIRED")).toBe(true);
     expect(ports.repository.getTemplate).not.toHaveBeenCalled();
@@ -120,6 +121,23 @@ describe("template action orchestration", () => {
     const ports = makePorts();
     await createTemplateOrchestrator(ports).list();
     expect(ports.repository.listFinalized).toHaveBeenCalledWith("org-1");
+  });
+
+  it("discovers pending copies separately without exposing them as finalized send options", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.repository.listPendingCopies).mockResolvedValue([{ id: "pending-1", orgId: "org-1", name: "Offer copy", lifecycle: "editing" }]);
+    const core = createTemplateOrchestrator(ports);
+    await expect(core.listPendingCopies()).resolves.toEqual({ ok: true, data: [{ id: "pending-1", orgId: "org-1", name: "Offer copy", lifecycle: "editing" }] });
+    await expect(core.list()).resolves.toEqual({ ok: true, data: [] });
+    expect(ports.repository.listFinalized).toHaveBeenCalledWith("org-1");
+    expect(ports.repository.listPendingCopies).toHaveBeenCalledWith("org-1");
+  });
+
+  it("fails closed if the pending-copy repository leaks another organization", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.repository.listPendingCopies).mockResolvedValue([{ id: "pending-2", orgId: "org-2", name: "Other org copy", lifecycle: "editing" }]);
+    const result = await createTemplateOrchestrator(ports).listPendingCopies();
+    expect(result).toMatchObject({ ok: false, error: { code: "PENDING_COPY_SCOPE_MISMATCH" } });
   });
 
   it("accepts exactly one <=40 MiB PDF with matching MIME, bytes, and magic", async () => {
@@ -172,6 +190,15 @@ describe("template action orchestration", () => {
     expect(JSON.stringify(result)).not.toContain("http");
   });
 
+  it("preserves exact case-distinct signer roles through local and provider DTOs", async () => {
+    const ports = makePorts();
+    const caseDistinctRoles = [{ name: "Seller", order: 0 }, { name: "seller", order: 1 }] as const;
+    const result = await createTemplateOrchestrator(ports).add({ ...addInput(), signerRoles: caseDistinctRoles });
+    expect(result).toEqual({ ok: true, data: { templateId: "template-1" } });
+    expect(ports.repository.createHiddenDraft).toHaveBeenCalledWith(expect.objectContaining({ signerRoles: caseDistinctRoles, sellerRoleName: "Seller" }));
+    expect(ports.provider.createDraft).toHaveBeenCalledWith(expect.objectContaining({ signerRoles: caseDistinctRoles }));
+  });
+
   it("cleans and audits an unattached verified source when hidden draft creation fails", async () => {
     const ports = makePorts();
     vi.mocked(ports.repository.createHiddenDraft).mockRejectedValue(new Error("database private detail"));
@@ -205,6 +232,35 @@ describe("template action orchestration", () => {
     const result = await createTemplateOrchestrator(ports).startEditor("template-1");
     expect(result).toEqual({ ok: true, data: { providerTemplateId: "provider-1", editUrl: "https://app.hellosign.com/editor/transient", expiresAt: 123, clientId: "client-public-1" } });
     expect(ports.repository.attachProviderId).not.toHaveBeenCalled();
+  });
+
+  it("never requests an edit URL for a finalized active provider template", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.repository.getTemplate).mockResolvedValue(finalized);
+    const result = await createTemplateOrchestrator(ports).startEditor("template-1");
+    expect(result).toMatchObject({ ok: false, error: { code: "TEMPLATE_NOT_FOUND" } });
+    expect(ports.provider.getTemplate).not.toHaveBeenCalled();
+    expect(ports.provider.getFreshEditUrl).not.toHaveBeenCalled();
+  });
+
+  it("checks provider readiness before requesting any edit URL", async () => {
+    const ports = makePorts();
+    const providerPending = new Error("not ready");
+    vi.mocked(ports.provider.getTemplate).mockRejectedValue(providerPending);
+    vi.mocked(ports.provider.isNotFound).mockImplementation((error) => error === providerPending);
+    const readiness = await createTemplateOrchestrator(ports).checkEditorReadiness("template-1");
+    expect(readiness).toEqual({ ok: true, data: { readiness: "pending" } });
+    const editor = await createTemplateOrchestrator(ports).startEditor("template-1");
+    expect(editor).toMatchObject({ ok: false, error: { code: "EDITOR_SESSION_FAILED" } });
+    expect(ports.provider.getFreshEditUrl).not.toHaveBeenCalled();
+  });
+
+  it("returns an allowlisted readiness error for non-delay provider failures", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.provider.getTemplate).mockRejectedValue(new Error("secret provider diagnostic"));
+    const result = await createTemplateOrchestrator(ports).checkEditorReadiness("template-1");
+    expect(result).toEqual({ ok: false, error: { code: "DUPLICATE_READINESS_FAILED", message: "Dropbox Sign could not check whether the copy is ready." } });
+    expect(JSON.stringify(result)).not.toContain("secret");
   });
 
   it.each([
@@ -244,6 +300,90 @@ describe("template action orchestration", () => {
     expect(JSON.stringify(result)).not.toContain("private detail");
     expect(ports.repository.recordSourceCleanup).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed" }));
     expect(ports.repository.markAbandoned).toHaveBeenCalledBefore(vi.mocked(ports.storage.deletePrivate));
+  });
+
+  it("cancels a pending duplicate through provider delete and local abandon", async () => {
+    const ports = makePorts();
+    const result = await createTemplateOrchestrator(ports).abandon("template-1");
+    expect(result).toEqual({ ok: true, data: null });
+    expect(ports.provider.deleteTemplate).toHaveBeenCalledWith("provider-1");
+    expect(ports.repository.markAbandoned).toHaveBeenCalledWith("org-1", "template-1");
+  });
+
+  it("leaves provider-delete and local-abandon failures retryable", async () => {
+    const providerPorts = makePorts();
+    vi.mocked(providerPorts.provider.deleteTemplate).mockRejectedValueOnce(new Error("provider unavailable"));
+    const core = createTemplateOrchestrator(providerPorts);
+    await expect(core.abandon("template-1")).resolves.toMatchObject({ ok: false, error: { code: "ABANDON_PROVIDER_FAILED" } });
+    await expect(core.abandon("template-1")).resolves.toEqual({ ok: true, data: null });
+    expect(providerPorts.provider.deleteTemplate).toHaveBeenCalledTimes(2);
+
+    const localPorts = makePorts();
+    vi.mocked(localPorts.repository.markAbandoned).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    vi.mocked(localPorts.provider.isNotFound).mockReturnValue(true);
+    const localCore = createTemplateOrchestrator(localPorts);
+    await expect(localCore.abandon("template-1")).resolves.toMatchObject({ ok: false, error: { code: "ABANDON_LOCAL_FAILED" } });
+    vi.mocked(localPorts.provider.deleteTemplate).mockRejectedValueOnce(new Error("already deleted"));
+    await expect(localCore.abandon("template-1")).resolves.toEqual({ ok: true, data: null });
+  });
+
+  it("rediscovers and converges failed cleanup without repeating provider delete or abandon", async () => {
+    const ports = makePorts();
+    const abandoned = { ...draft, lifecycle: "abandoned" as const };
+    vi.mocked(ports.repository.getTemplate).mockResolvedValueOnce(draft).mockResolvedValueOnce(abandoned);
+    vi.mocked(ports.storage.deletePrivate).mockRejectedValueOnce(new Error("storage unavailable")).mockResolvedValueOnce("deleted");
+    const core = createTemplateOrchestrator(ports);
+    await expect(core.abandon("template-1")).resolves.toMatchObject({ ok: false, error: { code: "SOURCE_CLEANUP_FAILED" } });
+    const providerCallsAfterAbandon = vi.mocked(ports.provider.deleteTemplate).mock.calls.length;
+    const abandonCallsAfterAbandon = vi.mocked(ports.repository.markAbandoned).mock.calls.length;
+    vi.mocked(ports.repository.listPendingCopies).mockResolvedValue([{ id: "template-1", orgId: "org-1", name: "Offer copy", lifecycle: "cleanup_attention" }]);
+    await expect(core.listPendingCopies()).resolves.toMatchObject({ ok: true, data: [expect.objectContaining({ id: "template-1", lifecycle: "cleanup_attention" })] });
+    await expect(core.retryCleanup("template-1")).resolves.toEqual({ ok: true, data: null });
+    expect(ports.provider.deleteTemplate).toHaveBeenCalledTimes(providerCallsAfterAbandon);
+    expect(providerCallsAfterAbandon).toBe(1);
+    expect(ports.repository.markAbandoned).toHaveBeenCalledTimes(abandonCallsAfterAbandon);
+    expect(abandonCallsAfterAbandon).toBe(1);
+    expect(ports.storage.deletePrivate).toHaveBeenCalledTimes(2);
+    expect(ports.repository.recordSourceCleanup).toHaveBeenNthCalledWith(1, expect.objectContaining({ outcome: "failed" }));
+    expect(ports.repository.recordSourceCleanup).toHaveBeenNthCalledWith(2, expect.objectContaining({ outcome: "deleted" }));
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(ports.repository.softDelete).not.toHaveBeenCalled();
+  });
+
+  it("records cleanup after retry finds an object already absent following a failed deleted receipt", async () => {
+    const ports = makePorts();
+    const abandoned = { ...draft, lifecycle: "abandoned" as const };
+    vi.mocked(ports.repository.getTemplate).mockResolvedValueOnce(draft).mockResolvedValueOnce(abandoned);
+    vi.mocked(ports.storage.deletePrivate).mockResolvedValueOnce("deleted").mockResolvedValueOnce("already_absent");
+    vi.mocked(ports.repository.recordSourceCleanup).mockRejectedValueOnce(new Error("receipt unavailable")).mockResolvedValueOnce(undefined);
+    const core = createTemplateOrchestrator(ports);
+
+    await expect(core.abandon("template-1")).resolves.toMatchObject({ ok: false, error: { code: "SOURCE_CLEANUP_FAILED" } });
+    const providerCallsAfterAbandon = vi.mocked(ports.provider.deleteTemplate).mock.calls.length;
+    const abandonCallsAfterAbandon = vi.mocked(ports.repository.markAbandoned).mock.calls.length;
+    vi.mocked(ports.repository.listPendingCopies).mockResolvedValue([{ id: "template-1", orgId: "org-1", name: "Offer copy", lifecycle: "cleanup_attention" }]);
+    await expect(core.listPendingCopies()).resolves.toMatchObject({ ok: true, data: [expect.objectContaining({ id: "template-1", lifecycle: "cleanup_attention" })] });
+    await expect(core.retryCleanup("template-1")).resolves.toEqual({ ok: true, data: null });
+
+    expect(ports.storage.deletePrivate).toHaveBeenNthCalledWith(1, stage.storagePath);
+    expect(ports.storage.deletePrivate).toHaveBeenNthCalledWith(2, stage.storagePath);
+    expect(ports.repository.recordSourceCleanup).toHaveBeenLastCalledWith(expect.objectContaining({ outcome: "deleted" }));
+    expect(ports.provider.deleteTemplate).toHaveBeenCalledTimes(providerCallsAfterAbandon);
+    expect(providerCallsAfterAbandon).toBe(1);
+    expect(ports.repository.markAbandoned).toHaveBeenCalledTimes(abandonCallsAfterAbandon);
+    expect(abandonCallsAfterAbandon).toBe(1);
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(ports.repository.softDelete).not.toHaveBeenCalled();
+    expect(ports.provider.createDraft).not.toHaveBeenCalled();
+    expect(ports.provider.duplicateTemplate).not.toHaveBeenCalled();
+  });
+
+  it("denies a cross-org cleanup retry without touching storage", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.repository.getTemplate).mockResolvedValue({ ...draft, orgId: "org-2", lifecycle: "abandoned" });
+    const result = await createTemplateOrchestrator(ports).retryCleanup("template-1");
+    expect(result).toMatchObject({ ok: false, error: { code: "CLEANUP_RETRY_UNAVAILABLE" } });
+    expect(ports.storage.deletePrivate).not.toHaveBeenCalled();
   });
 
   it("keeps duplicate rows hidden for ready and asynchronous provider responses", async () => {

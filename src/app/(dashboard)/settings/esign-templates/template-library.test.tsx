@@ -54,5 +54,7 @@ describe("TemplateLibrary", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     expect(screen.getByText(/used for 2 contracts in the last 30 days/i)).toBeVisible();
     expect(screen.getByText(/existing contract records and saved PDFs stay/i)).toBeVisible();
+    expect(screen.queryByRole("link", { name: row.name })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Edit" })).not.toBeInTheDocument();
   });
 });

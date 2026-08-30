@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
   stageSource: vi.fn(),
   add: vi.fn(),
   duplicate: vi.fn(),
+  checkEditorReadiness: vi.fn(),
+  abandon: vi.fn(),
+  retryCleanup: vi.fn(),
   delete: vi.fn(),
 }));
 
@@ -23,6 +26,9 @@ import {
   createTemplateDraftAction,
   deleteTemplateAction,
   duplicateTemplateAction,
+  checkTemplateEditorReadinessAction,
+  abandonTemplateDraftAction,
+  retryTemplateSourceCleanupAction,
 } from "./actions";
 
 describe("template server action boundary", () => {
@@ -33,10 +39,16 @@ describe("template server action boundary", () => {
     mocks.add.mockResolvedValue({ ok: true, data: { templateId: "template-1" } });
     mocks.duplicate.mockResolvedValue({ ok: true, data: { templateId: "copy-1", readiness: "pending" } });
     mocks.delete.mockResolvedValue({ ok: true, data: null });
+    mocks.checkEditorReadiness.mockResolvedValue({ ok: true, data: { readiness: "pending" } });
+    mocks.abandon.mockResolvedValue({ ok: true, data: null });
+    mocks.retryCleanup.mockResolvedValue({ ok: true, data: null });
     mocks.factory.mockResolvedValue({
       stageSource: mocks.stageSource,
       add: mocks.add,
       duplicate: mocks.duplicate,
+      checkEditorReadiness: mocks.checkEditorReadiness,
+      abandon: mocks.abandon,
+      retryCleanup: mocks.retryCleanup,
       delete: mocks.delete,
     });
   });
@@ -85,6 +97,29 @@ describe("template server action boundary", () => {
   it("passes the explicit recent-send confirmation into the atomic delete RPC path", async () => {
     await deleteTemplateAction("template-1", true);
     expect(mocks.delete).toHaveBeenCalledWith("template-1", true);
+    expect(mocks.revalidate).toHaveBeenCalledWith("/settings/esign-templates");
+  });
+
+  it("preserves duplicate and readiness states through the safe action boundary", async () => {
+    await expect(duplicateTemplateAction("template-1", "Copy")).resolves.toEqual({
+      ok: true,
+      data: { templateId: "copy-1", readiness: "pending" },
+    });
+    await expect(checkTemplateEditorReadinessAction("copy-1")).resolves.toEqual({
+      ok: true,
+      data: { readiness: "pending" },
+    });
+  });
+
+  it("revalidates the server-backed recovery list after a successful cancel", async () => {
+    await expect(abandonTemplateDraftAction("copy-1")).resolves.toEqual({ ok: true, data: null });
+    expect(mocks.abandon).toHaveBeenCalledWith("copy-1");
+    expect(mocks.revalidate).toHaveBeenCalledWith("/settings/esign-templates");
+  });
+
+  it("revalidates the recovery list after cleanup convergence", async () => {
+    await expect(retryTemplateSourceCleanupAction("copy-1")).resolves.toEqual({ ok: true, data: null });
+    expect(mocks.retryCleanup).toHaveBeenCalledWith("copy-1");
     expect(mocks.revalidate).toHaveBeenCalledWith("/settings/esign-templates");
   });
 });

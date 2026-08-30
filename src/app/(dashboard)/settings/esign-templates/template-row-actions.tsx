@@ -2,13 +2,13 @@
 
 import { CopyIcon, Trash2Icon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { validateTemplateTitle } from "@/lib/esign/template-contract";
+import { getTemplateTitleValidationError } from "@/lib/esign/template-contract";
 
 import type { EsignTemplateRow, TemplateLibraryActions } from "./types";
 
@@ -26,22 +26,84 @@ export function DuplicateTemplateDialog({ template, actions }: { template: Esign
   const [open, setOpen] = useState(false);
   const [name, setName] = useState(`${template.name} (copy)`);
   const [error, setError] = useState<string | null>(null);
+  const [copyId, setCopyId] = useState<string | null>(null);
+  const [pollAttempt, setPollAttempt] = useState(0);
+  const [checkingReadiness, setCheckingReadiness] = useState(false);
+  const [routed, setRouted] = useState(false);
   const [pending, startTransition] = useTransition();
-  const validationError = validateTemplateTitle(name);
+  const mountedRef = useRef(true);
+  const dialogGenerationRef = useRef(0);
+  const dialogActiveRef = useRef(false);
+  const readinessPromiseRef = useRef<Promise<void> | null>(null);
+  const routedRef = useRef(false);
+  const validationError = getTemplateTitleValidationError(name);
+  const checkReadiness = useCallback(() => {
+    if (!actions || !copyId || routedRef.current) return Promise.resolve();
+    if (readinessPromiseRef.current) return readinessPromiseRef.current;
+    const generation = dialogGenerationRef.current;
+    if (mountedRef.current) setCheckingReadiness(true);
+    const request = actions.checkEditorReadiness(copyId).then((result) => {
+      if (!mountedRef.current || !dialogActiveRef.current || generation !== dialogGenerationRef.current || routedRef.current) return;
+      if (!result.ok) {
+        setError(result.error.message);
+        setPollAttempt(3);
+        return;
+      }
+      if (result.data.readiness === "ready") {
+        routedRef.current = true;
+        setRouted(true);
+        setOpen(false);
+        router.push(`/settings/esign-templates/${copyId}/edit`);
+        return;
+      }
+      setPollAttempt((attempt) => attempt + 1);
+    }).finally(() => {
+      if (readinessPromiseRef.current === request) readinessPromiseRef.current = null;
+      if (mountedRef.current && generation === dialogGenerationRef.current && !routedRef.current) setCheckingReadiness(false);
+    });
+    readinessPromiseRef.current = request;
+    return request;
+  }, [actions, copyId, router]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!open || !copyId || pollAttempt >= 3 || error) return;
+    const timeout = window.setTimeout(() => void checkReadiness(), 1_500);
+    return () => window.clearTimeout(timeout);
+  }, [checkReadiness, copyId, error, open, pollAttempt]);
+
   const submit = () => actions && !validationError && startTransition(async () => {
     const result = await actions.duplicateTemplate(template.id, name.trim());
     if (!result.ok) return setError(result.error.message);
-    setOpen(false);
-    router.push(`/settings/esign-templates/${result.data.templateId}/edit`);
+    if (result.data.readiness === "ready") {
+      setOpen(false);
+      router.push(`/settings/esign-templates/${result.data.templateId}/edit`);
+      return;
+    }
+    setCopyId(result.data.templateId);
+    setPollAttempt(0);
+    setError(null);
   });
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <Button variant="ghost" size="sm" onClick={() => { setName(`${template.name} (copy)`); setError(null); setOpen(true); }}><CopyIcon data-icon="inline-start" /> Duplicate</Button>
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen) { dialogActiveRef.current = false; dialogGenerationRef.current += 1; } setOpen(nextOpen); }}>
+      <Button variant="ghost" size="sm" onClick={() => { dialogGenerationRef.current += 1; dialogActiveRef.current = true; routedRef.current = false; readinessPromiseRef.current = null; setRouted(false); setCheckingReadiness(false); setName(`${template.name} (copy)`); setError(null); setCopyId(null); setPollAttempt(0); setOpen(true); }}><CopyIcon data-icon="inline-start" /> Duplicate</Button>
       <DialogContent>
         <DialogHeader><DialogTitle>Duplicate template</DialogTitle><DialogDescription>The original template stays unchanged. The copy opens in the editor when Dropbox Sign finishes preparing it.</DialogDescription></DialogHeader>
-        <div className="space-y-2"><Label htmlFor={`duplicate-${template.id}`}>Copy name</Label><Input id={`duplicate-${template.id}`} value={name} onChange={(event) => setName(event.target.value)} /></div>
-        {(error || validationError || !actions) && <p role="alert" className="text-destructive text-sm">{error ?? validationError ?? "Template actions are not connected yet."}</p>}
-        <DialogFooter><DialogClose render={<Button variant="outline" disabled={pending} />}>Cancel</DialogClose><Button onClick={submit} disabled={!actions || pending || Boolean(validationError)}>{pending ? "Duplicating…" : "Duplicate template"}</Button></DialogFooter>
+        {copyId ? (
+          <div className="border-border bg-muted/40 rounded-lg border p-4" role="status">
+            <p className="font-medium">Copy is still preparing</p>
+            <p className="text-muted-foreground mt-1 text-sm">Dropbox Sign has the copy, but its editor is not ready yet. Sandra will check a few times automatically.</p>
+          </div>
+        ) : <div className="space-y-2"><Label htmlFor={`duplicate-${template.id}`}>Copy name</Label><Input id={`duplicate-${template.id}`} value={name} onChange={(event) => setName(event.target.value)} /></div>}
+        {(error || (!copyId && validationError) || !actions) && <p role="alert" className="text-destructive text-sm">{error ?? validationError ?? "Template actions are not connected yet."}</p>}
+        <DialogFooter>
+          <DialogClose render={<Button variant="outline" disabled={pending} />}>Close</DialogClose>
+          {copyId ? <Button variant="outline" onClick={() => { setError(null); setPollAttempt(0); void checkReadiness(); }} disabled={!actions || pending || checkingReadiness || routed}>{checkingReadiness ? "Checking…" : "Reload"}</Button> : <Button onClick={submit} disabled={!actions || pending || Boolean(validationError)}>{pending ? "Duplicating…" : "Duplicate template"}</Button>}
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

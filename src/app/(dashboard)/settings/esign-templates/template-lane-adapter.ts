@@ -8,6 +8,7 @@ import type {
   TemplateEditorData,
   TemplateLaneResult,
   TemplateLibraryLoadResult,
+  PendingTemplateCopiesLoadResult,
 } from "./types";
 
 export async function loadTemplateLibrary(): Promise<TemplateLibraryLoadResult> {
@@ -19,6 +20,20 @@ export async function loadTemplateLibrary(): Promise<TemplateLibraryLoadResult> 
     return await (await createFoundationTemplateOrchestrator()).list();
   } catch {
     return { ok: false, error: { code: "TEMPLATE_LIST_FAILED", message: "Templates could not be loaded." } };
+  }
+}
+
+export async function loadPendingTemplateCopies(): Promise<PendingTemplateCopiesLoadResult> {
+  try {
+    const membership = (await getCallerMemberships())[0];
+    if (!membership || membership.role !== "owner") {
+      return { ok: false, error: { code: "OWNER_REQUIRED", message: "Only an organization owner can manage eSign templates." } };
+    }
+    const result = await (await createFoundationTemplateOrchestrator()).listPendingCopies();
+    if (!result.ok) return result;
+    return { ok: true, data: result.data.map(({ id, name, lifecycle }) => ({ id, name, lifecycle })) };
+  } catch {
+    return { ok: false, error: { code: "PENDING_COPY_LIST_FAILED", message: "Pending template copies could not be loaded." } };
   }
 }
 

@@ -53,6 +53,10 @@ export async function startTemplateEditorAction(templateId: string) {
   return run("esign_template_start_editor", (orchestrator) => orchestrator.startEditor(templateId));
 }
 
+export async function checkTemplateEditorReadinessAction(templateId: string): Promise<TemplateLaneResult<{ readiness: "ready" | "pending" }>> {
+  return run("esign_template_editor_readiness", (orchestrator) => orchestrator.checkEditorReadiness(templateId));
+}
+
 export async function syncFinishedTemplateAction(templateId: string, _input: { name: string }): Promise<TemplateLaneResult<TemplateOption>> {
   void _input;
   return run("esign_template_finish", async (orchestrator) => {
@@ -70,12 +74,20 @@ export async function abandonTemplateDraftAction(templateId: string): Promise<Te
   });
 }
 
-export async function duplicateTemplateAction(templateId: string, name: string): Promise<TemplateLaneResult<{ templateId: string }>> {
+export async function retryTemplateSourceCleanupAction(templateId: string): Promise<TemplateLaneResult<null>> {
+  return run("esign_template_retry_cleanup", async (orchestrator) => {
+    const result = await orchestrator.retryCleanup(templateId);
+    if (result.ok) revalidatePath("/settings/esign-templates");
+    return result;
+  });
+}
+
+export async function duplicateTemplateAction(templateId: string, name: string): Promise<TemplateLaneResult<{ templateId: string; readiness: "ready" | "pending" }>> {
   return run("esign_template_duplicate", async (orchestrator) => {
     const result = await orchestrator.duplicate(templateId, name);
     if (!result.ok) return result;
     revalidatePath("/settings/esign-templates");
-    return { ok: true, data: { templateId: result.data.templateId } };
+    return { ok: true, data: result.data };
   });
 }
 

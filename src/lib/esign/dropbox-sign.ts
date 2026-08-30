@@ -44,6 +44,18 @@ function authenticatedApiSet(apiKey: EsignSecret): DropboxApiSet {
   return { account, apiApp, embedded, signatureRequest, template };
 }
 
+function abortableSignatureApi(apiKey: EsignSecret, signal?: AbortSignal) {
+  const signatureRequest = new SignatureRequestApi();
+  signatureRequest.username = apiKey.reveal();
+  signatureRequest.password = "";
+  if (signal) {
+    signatureRequest.addInterceptor((options) => {
+      options.signal = signal;
+    });
+  }
+  return signatureRequest;
+}
+
 export function createDropboxSignProvider(input: {
   apiKey: EsignSecret;
   clientId: string;
@@ -232,7 +244,8 @@ export function createDropboxSignProvider(input: {
       };
       try {
         const response =
-          await api.signatureRequest.signatureRequestSendWithTemplate(body);
+          await abortableSignatureApi(input.apiKey, request.signal)
+            .signatureRequestSendWithTemplate(body);
         const signatureRequest = response.body.signatureRequest;
         if (!signatureRequest.signatureRequestId) {
           throw new ProviderError(
@@ -268,9 +281,10 @@ export function createDropboxSignProvider(input: {
     async remind(
       signatureRequestId: string,
       signer: { emailAddress: string; name?: string },
+      signal?: AbortSignal,
     ) {
       try {
-        await api.signatureRequest.signatureRequestRemind(signatureRequestId, {
+        await abortableSignatureApi(input.apiKey, signal).signatureRequestRemind(signatureRequestId, {
           emailAddress: signer.emailAddress,
           name: signer.name,
         });
@@ -279,9 +293,9 @@ export function createDropboxSignProvider(input: {
       }
     },
 
-    async cancel(signatureRequestId: string) {
+    async cancel(signatureRequestId: string, signal?: AbortSignal) {
       try {
-        await api.signatureRequest.signatureRequestCancel(signatureRequestId);
+        await abortableSignatureApi(input.apiKey, signal).signatureRequestCancel(signatureRequestId);
       } catch (error) {
         throw normalizeDropboxSignError(error);
       }

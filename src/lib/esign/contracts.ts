@@ -54,19 +54,18 @@ export type TemplateOption = {
   mergeFieldNames: typeof ESIGN_MERGE_FIELD_NAMES;
 };
 
-export function validateTemplateTitle(value: string): string | null {
+export function validateTemplateTitle(value: unknown): string | null {
+  if (typeof value !== "string") return null;
   const title = value.trim();
-  if (!title) return "Enter a template name.";
-  if (title.length > ESIGN_TEMPLATE_TITLE_MAX_LENGTH) {
-    return `Template names must be ${ESIGN_TEMPLATE_TITLE_MAX_LENGTH} characters or fewer.`;
-  }
-  return null;
+  return title.length >= 1 && title.length <= ESIGN_TEMPLATE_TITLE_MAX_LENGTH
+    ? title
+    : null;
 }
 
-export function requireTemplateTitle(value: string): string {
-  const error = validateTemplateTitle(value);
-  if (error) throw new Error(error);
-  return value.trim();
+export function requireTemplateTitle(value: unknown): string {
+  const title = validateTemplateTitle(value);
+  if (!title) throw new Error("Invalid eSign template title.");
+  return title;
 }
 
 export type EmbeddedTemplateSession = {
@@ -103,6 +102,7 @@ export type SendWithTemplateInput = {
   title?: string;
   subject?: string;
   message?: string;
+  signal?: AbortSignal;
 };
 
 export type ProviderSignature = {
@@ -147,8 +147,9 @@ export type DropboxSignProvider = {
   remind(
     signatureRequestId: string,
     signer: { emailAddress: string; name?: string },
+    signal?: AbortSignal,
   ): Promise<void>;
-  cancel(signatureRequestId: string): Promise<void>;
+  cancel(signatureRequestId: string, signal?: AbortSignal): Promise<void>;
   downloadSignedPdf(signatureRequestId: string): Promise<Buffer>;
 };
 

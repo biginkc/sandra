@@ -79,6 +79,54 @@ export async function createFoundationTemplateOrchestrator() {
       });
     },
 
+    async listPendingCopies(orgId) {
+      const { data: active, error } = await admin
+        .from("esign_templates")
+        .select("id,org_id,name,lifecycle_state,staging_source_id")
+        .eq("org_id", orgId)
+        .not("duplicate_of_template_id", "is", null)
+        .in("lifecycle_state", ["preparing", "editing"])
+        .is("deleted_at", null)
+        .is("abandoned_at", null)
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+      const { data: abandoned, error: abandonedError } = await admin
+        .from("esign_templates")
+        .select("id,org_id,name,lifecycle_state,staging_source_id")
+        .eq("org_id", orgId)
+        .not("duplicate_of_template_id", "is", null)
+        .eq("lifecycle_state", "abandoned")
+        .not("staging_source_id", "is", null)
+        .is("deleted_at", null)
+        .order("created_at", { ascending: false });
+      if (abandonedError) throw abandonedError;
+      const stageIds = (abandoned ?? []).flatMap((row) => row.staging_source_id ? [row.staging_source_id] : []);
+      let cleanupStageIds = new Set<string>();
+      if (stageIds.length > 0) {
+        const { data: stages, error: stageError } = await admin
+          .from("esign_template_staging_sources")
+          .select("id")
+          .eq("org_id", orgId)
+          .in("id", stageIds)
+          .in("cleanup_outcome", ["pending", "failed"]);
+        if (stageError) throw stageError;
+        cleanupStageIds = new Set((stages ?? []).map((stage) => stage.id));
+      }
+      const activeCopies = (active ?? []).map((row) => ({
+        id: row.id,
+        orgId: row.org_id,
+        name: row.name,
+        lifecycle: row.lifecycle_state as "preparing" | "editing",
+      }));
+      const cleanupCopies = (abandoned ?? []).flatMap((row) => row.staging_source_id && cleanupStageIds.has(row.staging_source_id) ? [{
+        id: row.id,
+        orgId: row.org_id,
+        name: row.name,
+        lifecycle: "cleanup_attention" as const,
+      }] : []);
+      return [...activeCopies, ...cleanupCopies];
+    },
+
     async recordVerifiedStage(stage) {
       const { data, error } = await admin.rpc("record_verified_esign_template_source", {
         p_org_id: stage.orgId,
@@ -249,7 +297,10 @@ export async function createFoundationTemplateOrchestrator() {
     },
     async deletePrivate(path) {
       const { data, error } = await admin.storage.from(STAGING_BUCKET).remove([path]);
-      if (error || data.length !== 1 || data[0].name !== path) throw error ?? new Error("staged object was not deleted");
+      if (error) throw error;
+      if (data.length === 0) return "already_absent";
+      if (data.length === 1 && data[0].name === path) return "deleted";
+      throw new Error("staged object deletion returned an unexpected result");
     },
   };
 

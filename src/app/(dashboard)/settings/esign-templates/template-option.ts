@@ -1,5 +1,6 @@
 import {
   ESIGN_MERGE_FIELD_NAMES,
+  getTemplateTitleValidationError,
   requireTemplateTitle,
   type TemplateOption,
   type TemplateSignerRole,
@@ -19,6 +20,8 @@ export function toTemplateOption(input: {
   sellerRoleName: string;
   provider: ProviderTemplateSnapshot;
 }): TemplateOption {
+  const titleError = getTemplateTitleValidationError(input.name);
+  if (titleError) throw new Error(titleError);
   if (input.provider.providerTemplateId !== input.expectedProviderTemplateId) {
     throw new Error("Dropbox Sign returned a different template identifier.");
   }

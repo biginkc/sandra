@@ -28,6 +28,13 @@ export type TemplateListItem = TemplateOption & Readonly<{
   recentSendCount30d: number;
 }>;
 
+export type PendingTemplateCopy = Readonly<{
+  id: string;
+  orgId: string;
+  name: string;
+  lifecycle: "preparing" | "editing" | "cleanup_attention";
+}>;
+
 export type TemplateUpload = Readonly<{
   filename: string;
   mimeType: string;
@@ -70,6 +77,7 @@ export type TemplateAuthPort = Readonly<{
 
 export type TemplateRepositoryPort = Readonly<{
   listFinalized(orgId: string): Promise<readonly TemplateListItem[]>;
+  listPendingCopies(orgId: string): Promise<readonly PendingTemplateCopy[]>;
   recordVerifiedStage(input: StagedTemplateSource): Promise<StagedTemplateSource>;
   recordUnattachedStageCleanup(input: { orgId: string; stageId: string; outcome: "deleted" | "failed" }): Promise<void>;
   getStage(orgId: string, stageId: string): Promise<StagedTemplateSource | null>;
@@ -96,7 +104,7 @@ export type TemplateRepositoryPort = Readonly<{
 export type TemplatePrivateStoragePort = Readonly<{
   putPrivate(path: string, bytes: Uint8Array, mimeType: "application/pdf"): Promise<void>;
   readPrivate(path: string): Promise<Uint8Array>;
-  deletePrivate(path: string): Promise<void>;
+  deletePrivate(path: string): Promise<"deleted" | "already_absent">;
 }>;
 
 export type TemplateProviderPort = Readonly<{
@@ -149,6 +157,20 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
         return success(await ports.repository.listFinalized(access.data.orgId));
       } catch {
         return failure("TEMPLATE_LIST_FAILED", "Templates could not be loaded.");
+      }
+    },
+
+    async listPendingCopies(): Promise<TemplateActionResult<readonly PendingTemplateCopy[]>> {
+      const access = await owner();
+      if (!access.ok) return access;
+      try {
+        const copies = await ports.repository.listPendingCopies(access.data.orgId);
+        if (copies.some((copy) => copy.orgId !== access.data.orgId)) {
+          return failure("PENDING_COPY_SCOPE_MISMATCH", "Pending template copies could not be loaded safely.");
+        }
+        return success(copies);
+      } catch {
+        return failure("PENDING_COPY_LIST_FAILED", "Pending template copies could not be loaded.");
       }
     },
 
@@ -303,11 +325,15 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       } catch {
         return failure("TEMPLATE_READ_FAILED", "The template could not be loaded.");
       }
-      if (!template || template.orgId !== access.data.orgId || template.lifecycle === "deleted" || template.lifecycle === "abandoned") {
+      if (!template || template.orgId !== access.data.orgId || template.lifecycle !== "editing") {
         return failure("TEMPLATE_NOT_FOUND", "The template is unavailable.");
       }
       if (!template.providerTemplateId) return failure("PROVIDER_ID_PENDING", "The template is still being prepared.");
       try {
+        const provider = await ports.provider.getTemplate(template.providerTemplateId);
+        if (provider.providerTemplateId !== template.providerTemplateId) {
+          return failure("PROVIDER_ID_MISMATCH", "Dropbox Sign returned a different template identifier.");
+        }
         const session = await ports.provider.getFreshEditUrl(template.providerTemplateId);
         return success({
           providerTemplateId: template.providerTemplateId,
@@ -317,6 +343,30 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
         });
       } catch {
         return failure("EDITOR_SESSION_FAILED", "Dropbox Sign could not open a fresh editor session.");
+      }
+    },
+
+    async checkEditorReadiness(templateId: string): Promise<TemplateActionResult<{ readiness: "ready" | "pending" }>> {
+      const access = await owner();
+      if (!access.ok) return access;
+      let template: TemplateDraftRecord | null;
+      try {
+        template = await ports.repository.getTemplate(access.data.orgId, templateId);
+      } catch {
+        return failure("TEMPLATE_READ_FAILED", "The template could not be loaded.");
+      }
+      if (!template || template.orgId !== access.data.orgId || !["preparing", "editing"].includes(template.lifecycle) || !template.providerTemplateId) {
+        return failure("TEMPLATE_NOT_FOUND", "The template copy is unavailable.");
+      }
+      try {
+        const provider = await ports.provider.getTemplate(template.providerTemplateId);
+        if (provider.providerTemplateId !== template.providerTemplateId) {
+          return failure("PROVIDER_ID_MISMATCH", "Dropbox Sign returned a different template identifier.");
+        }
+        return success({ readiness: "ready" });
+      } catch (error) {
+        if (ports.provider.isNotFound(error)) return success({ readiness: "pending" });
+        return failure("DUPLICATE_READINESS_FAILED", "Dropbox Sign could not check whether the copy is ready.");
       }
     },
 
@@ -386,6 +436,21 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       const cleanup = await cleanupSource(ports, { ...draft, lifecycle: "abandoned" });
       if (!cleanup.ok) return cleanup;
       return success(null);
+    },
+
+    async retryCleanup(templateId: string): Promise<TemplateActionResult<null>> {
+      const access = await owner();
+      if (!access.ok) return access;
+      let draft: TemplateDraftRecord | null;
+      try {
+        draft = await ports.repository.getTemplate(access.data.orgId, templateId);
+      } catch {
+        return failure("TEMPLATE_READ_FAILED", "The template could not be loaded.");
+      }
+      if (!draft || draft.orgId !== access.data.orgId || draft.lifecycle !== "abandoned" || !draft.stagingSourceId) {
+        return failure("CLEANUP_RETRY_UNAVAILABLE", "The private source cleanup is no longer available to retry.");
+      }
+      return cleanupSource(ports, draft);
     },
 
     async duplicate(templateId: string, newName: string): Promise<TemplateActionResult<{ templateId: string; readiness: "ready" | "pending" }>> {
@@ -604,7 +669,8 @@ async function cleanupSource(ports: TemplateOrchestratorPorts, draft: TemplateDr
   }
   if (!stage || stage.orgId !== draft.orgId || !isOrgScopedStagingPath(stage.storagePath, draft.orgId)) return failure("SOURCE_CLEANUP_INVALID", "The private source path could not be safely reconciled.");
   try {
-    await ports.storage.deletePrivate(stage.storagePath);
+    const deletion = await ports.storage.deletePrivate(stage.storagePath);
+    if (deletion !== "deleted" && deletion !== "already_absent") throw new Error("invalid storage deletion outcome");
     await ports.repository.recordSourceCleanup({ orgId: draft.orgId, templateId: draft.id, storagePath: stage.storagePath, outcome: "deleted" });
     return success(null);
   } catch {

@@ -3,7 +3,7 @@
 import { FileSignatureIcon, RefreshCwIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import {
   DataTableFooter,
   DataTableShell,
@@ -17,9 +17,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { cn } from "@/lib/utils";
-import Link from "next/link";
-
 import { AddTemplateDialog } from "./add-template-dialog";
 import { templateLibraryActions } from "./client-actions";
 import { TemplateRowActions } from "./template-row-actions";
@@ -31,13 +28,14 @@ import type {
 
 export function TemplateLibrary({
   result,
-  actions = templateLibraryActions,
+  actions,
   onRetry,
 }: {
   result: TemplateLibraryLoadResult;
-  actions?: TemplateLibraryActions;
+  actions?: TemplateLibraryActions | null;
   onRetry?: () => void;
 }) {
+  const resolvedActions = actions === undefined ? templateLibraryActions : (actions ?? undefined);
   if (!result.ok) {
     return (
       <DataTableShell>
@@ -83,8 +81,8 @@ export function TemplateLibrary({
             </p>
           </div>
           <AddTemplateDialog
-            actions={actions}
-            disabledReason={actions ? undefined : "Template actions are not connected yet."}
+            actions={resolvedActions}
+            disabledReason={resolvedActions ? undefined : "Template actions are not connected yet."}
           />
         </div>
       </DataTableShell>
@@ -105,7 +103,7 @@ export function TemplateLibrary({
         </TableHeader>
         <TableBody>
           {result.data.map((template) => (
-            <TemplateTableRow key={template.id} template={template} actions={actions} />
+            <TemplateTableRow key={template.id} template={template} actions={resolvedActions} />
           ))}
         </TableBody>
       </Table>
@@ -130,12 +128,9 @@ function TemplateTableRow({
     <TableRow>
       <TableCell>
         <div className="flex min-w-52 flex-col gap-0.5">
-          <Link
-            href={`/settings/esign-templates/${template.id}/edit`}
-            className="font-medium hover:underline"
-          >
+          <span className="font-medium">
             {template.name}
-          </Link>
+          </span>
           <span className="text-muted-foreground text-xs">
             {template.sourceFilename} · {formatBytes(template.sourceSizeBytes)}
           </span>
@@ -165,12 +160,6 @@ function TemplateTableRow({
       </TableCell>
       <TableCell className="text-right">
         <div className="flex items-center justify-end gap-1">
-          <Link
-            href={`/settings/esign-templates/${template.id}/edit`}
-            className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
-          >
-            Edit
-          </Link>
           <TemplateRowActions template={template} actions={actions} />
         </div>
       </TableCell>

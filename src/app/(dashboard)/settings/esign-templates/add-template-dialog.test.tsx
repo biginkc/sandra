@@ -16,6 +16,9 @@ describe("AddTemplateDialog", () => {
       createDraft,
       pickDropboxPdf: vi.fn(),
       duplicateTemplate: vi.fn(),
+      checkEditorReadiness: vi.fn(),
+      abandonDraft: vi.fn(),
+      retryCleanup: vi.fn(),
       deleteTemplate: vi.fn(),
     };
     render(<AddTemplateDialog actions={actions} />);
@@ -42,6 +45,9 @@ describe("AddTemplateDialog", () => {
       createDraft: vi.fn(),
       pickDropboxPdf: vi.fn(),
       duplicateTemplate: vi.fn(),
+      checkEditorReadiness: vi.fn(),
+      abandonDraft: vi.fn(),
+      retryCleanup: vi.fn(),
       deleteTemplate: vi.fn(),
     };
     render(<AddTemplateDialog actions={actions} />);
@@ -58,6 +64,9 @@ describe("AddTemplateDialog", () => {
       createDraft: vi.fn(),
       pickDropboxPdf: vi.fn(),
       duplicateTemplate: vi.fn(),
+      checkEditorReadiness: vi.fn(),
+      abandonDraft: vi.fn(),
+      retryCleanup: vi.fn(),
       deleteTemplate: vi.fn(),
     };
     render(<AddTemplateDialog actions={actions} />);
@@ -67,5 +76,31 @@ describe("AddTemplateDialog", () => {
     expect(screen.queryByText("Template names must be 160 characters or fewer.")).not.toBeInTheDocument();
     fireEvent.change(name, { target: { value: "😀".repeat(81) } });
     expect(screen.getByRole("alert")).toHaveTextContent("Template names must be 160 characters or fewer.");
+  });
+
+  it("allows exact case-distinct roles and rejects only exact trimmed duplicates", async () => {
+    const createDraft = vi.fn().mockResolvedValue({ ok: true, data: { templateId: "local-1" } });
+    const actions: TemplateLibraryActions = {
+      createDraft,
+      pickDropboxPdf: vi.fn(),
+      duplicateTemplate: vi.fn(),
+      checkEditorReadiness: vi.fn(),
+      abandonDraft: vi.fn(),
+      retryCleanup: vi.fn(),
+      deleteTemplate: vi.fn(),
+    };
+    render(<AddTemplateDialog actions={actions} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add template" }));
+    fireEvent.change(screen.getByLabelText("Template name"), { target: { value: "Offer" } });
+    fireEvent.change(screen.getByLabelText("Upload PDF"), { target: { files: [new File(["%PDF-1.7"], "offer.pdf", { type: "application/pdf" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "Add role" }));
+    fireEvent.change(screen.getByLabelText("Signer role 2"), { target: { value: " Seller " } });
+    expect(screen.getByRole("alert")).toHaveTextContent("Signer role names must be unique");
+    fireEvent.change(screen.getByLabelText("Signer role 2"), { target: { value: "seller" } });
+    fireEvent.click(screen.getByRole("button", { name: "Upload and place fields" }));
+    await waitFor(() => expect(createDraft).toHaveBeenCalledWith(expect.objectContaining({
+      signerRoles: [{ name: "Seller", order: 0 }, { name: "seller", order: 1 }],
+      sellerRoleName: "Seller",
+    })));
   });
 });

@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { validateTemplateTitle } from "@/lib/esign/template-contract";
+import { getTemplateTitleValidationError } from "@/lib/esign/template-contract";
 
 import { SignerRoleEditor } from "./signer-role-editor";
 import { templateLibraryActions } from "./client-actions";
@@ -177,12 +177,12 @@ function validatePdf(file: File): string | null {
 }
 
 function validateDraft(input: { name: string; source: TemplateSource | null; roles: readonly TemplateSignerRole[]; sellerRoleName: string }): string | null {
-  const titleError = validateTemplateTitle(input.name);
+  const titleError = getTemplateTitleValidationError(input.name);
   if (titleError) return titleError;
   if (!input.source) return "Choose a PDF.";
   const names = input.roles.map((role) => role.name.trim());
   if (names.some((name) => !name)) return "Every signer role needs a name.";
-  if (new Set(names.map((name) => name.toLocaleLowerCase())).size !== names.length) return "Signer role names must be unique.";
+  if (new Set(names).size !== names.length) return "Signer role names must be unique.";
   if (!names.includes(input.sellerRoleName)) return "Choose the seller role.";
   return null;
 }

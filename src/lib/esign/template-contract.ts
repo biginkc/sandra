@@ -12,3 +12,13 @@ export {
   type TemplateOption,
   type TemplateSignerRole,
 } from "./contracts";
+
+import { ESIGN_TEMPLATE_TITLE_MAX_LENGTH, validateTemplateTitle } from "./contracts";
+
+export function getTemplateTitleValidationError(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return "Enter a template name.";
+  if (value.trim().length > ESIGN_TEMPLATE_TITLE_MAX_LENGTH) {
+    return `Template names must be ${ESIGN_TEMPLATE_TITLE_MAX_LENGTH} characters or fewer.`;
+  }
+  return validateTemplateTitle(value) ? null : "Enter a template name.";
+}

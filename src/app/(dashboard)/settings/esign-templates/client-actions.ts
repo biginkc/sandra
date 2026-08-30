@@ -3,9 +3,12 @@
 import { callAction } from "@/lib/errors/call-action";
 
 import {
+  abandonTemplateDraftAction,
+  checkTemplateEditorReadinessAction,
   createTemplateDraftAction,
   deleteTemplateAction,
   duplicateTemplateAction,
+  retryTemplateSourceCleanupAction,
 } from "./actions";
 import { chooseDropboxPdf, type DropboxChooserSdk } from "./dropbox-chooser";
 import type { TemplateLibraryActions, TemplateLaneResult } from "./types";
@@ -42,6 +45,21 @@ export const templateLibraryActions: TemplateLibraryActions = {
   duplicateTemplate(templateId, name) {
     return safeTemplateCallAction(duplicateTemplateAction(templateId, name), {
       fallbackMessage: "The template could not be duplicated.",
+    });
+  },
+  checkEditorReadiness(templateId) {
+    return safeTemplateCallAction(checkTemplateEditorReadinessAction(templateId), {
+      fallbackMessage: "The template copy readiness could not be checked.",
+    });
+  },
+  abandonDraft(templateId) {
+    return safeTemplateCallAction(abandonTemplateDraftAction(templateId), {
+      fallbackMessage: "The pending template copy could not be canceled.",
+    });
+  },
+  retryCleanup(templateId) {
+    return safeTemplateCallAction(retryTemplateSourceCleanupAction(templateId), {
+      fallbackMessage: "The private source cleanup could not be retried.",
     });
   },
   deleteTemplate(templateId, confirmRecentSends = false) {

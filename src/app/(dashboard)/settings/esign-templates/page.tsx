@@ -4,11 +4,15 @@ import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 
 import { AddTemplateDialog } from "./add-template-dialog";
-import { loadTemplateLibrary } from "./template-lane-adapter";
+import { loadPendingTemplateCopies, loadTemplateLibrary } from "./template-lane-adapter";
 import { TemplateLibrary } from "./template-library";
+import { PendingTemplateCopies } from "./pending-template-copies";
 
 export default async function EsignTemplatesPage() {
-  const result = await loadTemplateLibrary();
+  const [result, pendingCopies] = await Promise.all([
+    loadTemplateLibrary(),
+    loadPendingTemplateCopies(),
+  ]);
 
   return (
     <Page>
@@ -22,7 +26,9 @@ export default async function EsignTemplatesPage() {
         actions={
           <AddTemplateDialog
             disabledReason={
-              result.ok ? undefined : "The Dropbox Sign foundation is not connected yet."
+              result.ok && pendingCopies.ok
+                ? undefined
+                : "Templates and pending copies must load before another template can be added."
             }
             trigger={
               <>
@@ -47,7 +53,8 @@ export default async function EsignTemplatesPage() {
         </a>
       </div>
 
-      <TemplateLibrary result={result} />
+      <PendingTemplateCopies result={pendingCopies} />
+      <TemplateLibrary result={result} actions={pendingCopies.ok ? undefined : null} />
     </Page>
   );
 }
