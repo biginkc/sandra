@@ -1,6 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TelnyxRTC } from "@telnyx/webrtc";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("pinned Telnyx SDK recovery contract", () => {
   it("socketDisconnect closes only signaling and preserves calls without hangup or BYE", () => {
@@ -24,6 +28,17 @@ describe("pinned Telnyx SDK recovery contract", () => {
   });
 
   it("serverDisconnect purges local calls without sending BYE or preserving auto-reconnect", async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+      clear: () => values.clear(),
+      key: (index: number) => [...values.keys()][index] ?? null,
+      get length() {
+        return values.size;
+      },
+    } satisfies Storage);
     const hangup = vi.fn(async () => undefined);
     const setState = vi.fn();
     const cleanupNetworkListeners = vi.fn();
@@ -51,5 +66,7 @@ describe("pinned Telnyx SDK recovery contract", () => {
     );
     expect(session.calls).toEqual({});
     expect(cleanupNetworkListeners).toHaveBeenCalledTimes(1);
+    expect(session._autoReconnect).toBe(false);
+    expect(closeConnection).toHaveBeenCalled();
   });
 });
