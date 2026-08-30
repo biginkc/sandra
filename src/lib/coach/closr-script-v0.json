@@ -66,6 +66,7 @@
                 { "id": "introduction.pen-paper-contact-details.default.03", "type": "say", "text": "Our Company Name is BMH Group" },
                 { "id": "introduction.pen-paper-contact-details.default.04", "type": "say", "text": "Our website is bmhgroupkc.com where you can see all of our testimonials, reviews, and see how our process works." },
                 { "id": "introduction.pen-paper-contact-details.default.05", "type": "say", "text": "My phone number is: {rep_phone} so in the case we get disconnected you can call or text me anytime here! Could you repeat that back to me just so I know you have the right number? Ok thank you, and for you is this a landline or cellphone?" },
+                { "id": "introduction.pen-paper-contact-details.default.08", "type": "say", "text": "What's the best email address for you?" },
                 { "id": "introduction.pen-paper-contact-details.default.06", "type": "say", "text": "And finally your most important the file #... your file number will be {file_number} this is where you can call back at any time to ask for updates on your file!" },
                 { "id": "introduction.pen-paper-contact-details.default.07", "type": "say", "text": "You got it?\n\nAwesome." }
               ] }
@@ -324,8 +325,7 @@
                 { "id": "secure_positioning.back-from-hold-final-questions.default.05", "type": "say", "text": "Is it on septic or sewer?" },
                 { "id": "secure_positioning.back-from-hold-final-questions.default.11", "type": "say", "text": "Is it well or city water?" },
                 { "id": "secure_positioning.back-from-hold-final-questions.default.06", "type": "say", "text": "Is there internet available? What about fiber optic?" },
-                { "id": "secure_positioning.back-from-hold-final-questions.default.07", "type": "say", "text": "And a couple more questions for the final approval: If they come back with an approval and an offer that makes sense for you, are you ready to approve an agreement and get the process rolling now so we can get you to the closing table on the day we promise?" },
-                { "id": "secure_positioning.back-from-hold-final-questions.default.08", "type": "say", "text": "What's the best email address for you?" }
+                { "id": "secure_positioning.back-from-hold-final-questions.default.07", "type": "say", "text": "And a couple more questions for the final approval: If they come back with an approval and an offer that makes sense for you, are you ready to approve an agreement and get the process rolling now so we can get you to the closing table on the day we promise?" }
               ] }
             ]
           },
@@ -395,7 +395,7 @@
               { "key": "default", "label": null, "lines": [
                 { "id": "offer.good-news.default.01", "type": "say", "text": "CONGRATS {seller_name}!!! Looks like we are able to help you with this. It looks like the best you could get approved for was {offer_price} which will put {net_to_seller} in your pocket and allow you to achieve {dream_outcome}" },
                 { "id": "offer.good-news.default.02", "type": "note", "text": "Assume the close:" },
-                { "id": "offer.good-news.default.03", "type": "say", "text": "So next steps from here, I’ll send you a simple agreement to approve so we can get you to the closing table on {closing_date} like we promised. What’s the best email for me to send it to?" }
+                { "id": "offer.good-news.default.03", "type": "say", "text": "So next steps from here, I’ll send you a simple agreement to approve so we can get you to the closing table on {closing_date} like we promised." }
               ] }
             ]
           },
@@ -437,7 +437,7 @@
           { "id": "bad_news", "speaker": "rep", "phrases": ["unfortunately it did come in", "not what you were expecting"] }
         ],
         "advance_landmarks": [
-          { "id": "assume_close", "speaker": "rep", "phrases": ["simple agreement to approve", "best email for me to send"] }
+          { "id": "assume_close", "speaker": "rep", "phrases": ["simple agreement to approve"] }
         ],
         "exit_to": "close"
       },
@@ -473,7 +473,7 @@
             "variants": [
               { "key": "default", "label": null, "lines": [
                 { "id": "close.they-accept.default.01", "type": "say", "text": "Congratulations, {seller_name}! I am grateful that we are able to help you." },
-                { "id": "close.they-accept.default.02", "type": "say", "text": "Now, next steps I just need your email so I can take it down the hall to the team and they can write up the agreement for you and I to go over together. What is the best email for us to send the agreement to?" }
+                { "id": "close.they-accept.default.02", "type": "say", "text": "Now, next steps are for the team to write up the agreement for you and me to go over together." }
               ] }
             ]
           },
@@ -521,7 +521,7 @@
     { "id": "dont_trust", "match": { "triggers": ["scam", "don't trust", "wholesaler", "heard bad things"] }, "display": { "tonality": "concerned, hint of curiosity", "acknowledge": "Yeah, you're completely right.", "disarm": "I'd honestly agree with you… you definitely don't know enough about us or our process to be confident we'd even be a good fit — in fact, I'm not even sure we can help you yet…", "overcome": "What would make you feel more confident we're someone you can actually trust?" } },
     { "id": "end_buyer", "match": { "triggers": ["are you the buyer", "actually buying", "who are you", "end buyer"] }, "display": { "tonality": "curious tone", "acknowledge": "{seller_name}, that's a fantastic question.", "disarm": "To be completely upfront with you — I would never hop on a call with someone if I didn't have the hopes and intentions of buying their property…", "overcome": "That being said, when we give you a number and a timeline, we do whatever it takes to make sure we deliver. So let me ask you this — as long as you get the price we promise in the time frame we promise, does it REALLY matter how we cut the cake to get you there?" } },
     { "id": "no_showings", "match": { "triggers": ["strangers", "showings", "walkthrough", "people coming through", "inspections"] }, "display": { "tonality": "concerned tone", "acknowledge": "Yeah, I totally get it.", "disarm": "If I were in your shoes, I wouldn't either…", "overcome": "May I ask you something? Let's say you were in the market for a new home — would you spend hundreds of thousands of dollars on something you weren't allowed to see? …Exactly. And honestly, if you REALLY don't want showings or inspections, that's fine — we can do that. But I'll warn you our price will be significantly lower. Is it worth a good amount of extra money JUST to let us in a few times?" } },
-    { "id": "proof_of_funds", "match": { "triggers": ["earnest money", "proof of funds", "show me the money"] }, "display": { "tonality": null, "acknowledge": "Yeah, totally.", "disarm": "If I were you, I would too.", "overcome": "How much earnest money do you want? — or — What's your email, so when we submit our offer we can send it with proof of funds?" } },
+    { "id": "proof_of_funds", "match": { "triggers": ["earnest money", "proof of funds", "show me the money"] }, "display": { "tonality": null, "acknowledge": "Yeah, totally.", "disarm": "If I were you, I would too.", "overcome": "How much earnest money do you want?" } },
     { "id": "right_price_only", "match": { "triggers": ["right price", "only selling for", "my number"] }, "display": { "tonality": "playful tone", "acknowledge": "Of course!", "disarm": "Honestly, {seller_name}… I'm not even sure if we can actually help you yet — I still have to ask some questions about the property and the situation to see if I can do anything good for ya.", "overcome": "Straight to the next script question — don't dwell." } },
     { "id": "straight_to_offer", "match": { "triggers": ["just give me the offer", "what's your offer", "get to the point", "how much"] }, "display": { "tonality": "concerned tone", "acknowledge": "Of course, {seller_name}.", "disarm": "Trust me, I want to get to the offer just as bad as you. I mean, I could be like everyone else — get you on the phone, ask some personal questions, and give you some BS lowball cash offer. But honestly, I don't want to be like everyone else. If you'll answer these few questions, I'll take this back to the team and get you something fair we can firmly stand behind…", "overcome": "Straight to the next script question — don't dwell." } }
   ]

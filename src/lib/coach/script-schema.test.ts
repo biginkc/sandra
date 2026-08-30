@@ -98,8 +98,27 @@ describe("assertValidClosrScript", () => {
       .map((line) => line.text)
       .join("\u0000");
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "688b2d66771865553be80b99ec58b4bd0a5e8466a7213d8e1751200424ebf47c",
+      "0f11d3a3fd8f3aab0e92c8dec4442cc6a76a65c049bfe5a45adcedaf3f195a90",
     );
+  });
+
+  it("keeps the spoken email request exactly once in the initial contact-details branch", () => {
+    const script = scriptJson as unknown as ClosrScript;
+    const spokenEmailRequests = script.phases
+      .flatMap((phase) => phase.display.branches.flatMap((branch) => branch.variants))
+      .flatMap((variant) => variant.lines)
+      .filter((line) => line.type === "say" && /(?:what(?:'s| is)|where).{0,80}\bemail\b/i.test(line.text));
+
+    expect(spokenEmailRequests).toHaveLength(1);
+    expect(spokenEmailRequests[0]).toMatchObject({
+      id: "introduction.pen-paper-contact-details.default.08",
+      text: "What's the best email address for you?",
+    });
+
+    const contactDetails = script.phases
+      .find((phase) => phase.id === "introduction")
+      ?.display.branches.find((branch) => branch.tag === "Pen & paper — contact details");
+    expect(contactDetails?.variants[0]?.lines.some((line) => line.id === spokenEmailRequests[0]?.id)).toBe(true);
   });
 
   it("rejects a phase missing match.entry_landmarks/advance_landmarks", () => {
