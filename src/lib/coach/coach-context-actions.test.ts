@@ -5,6 +5,7 @@ const { createClient } = vi.hoisted(() => ({ createClient: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 
 import { loadCoachCallContext } from "./coach-context-actions";
+import { resolveFileNumber } from "./token-resolver";
 
 const lead = {
   address: "123 Main St",
@@ -68,6 +69,19 @@ describe("loadCoachCallContext — rep display name", () => {
     mockSupabase({ email: "JARRAD@BMHGROUPKC.COM", user_metadata: {} });
     const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
     expect(context.repName).toBe("Jarrad Henry");
+  });
+
+  it("keeps the known full production identity when legacy metadata contains only a first name", async () => {
+    mockSupabase({ email: "JARRAD@BMHGROUPKC.COM", user_metadata: { display_name: "Jarrad" } });
+    const context = await loadCoachCallContext({
+      propertyId: "5cc7103e-326b-4469-b02d-429655c1c524",
+      sellerPhoneE164: null,
+      repPhoneE164: null,
+    });
+
+    expect(context.repName).toBe("Jarrad");
+    expect(context.authenticatedRepName).toBe("Jarrad Henry");
+    expect(resolveFileNumber(context)).toEqual({ value: "JH-c1c524", isPlaceholder: false });
   });
 
   it("does not pretend a single-token email local part is the rep's complete known name", async () => {
