@@ -158,19 +158,8 @@ export function createDropboxSignProvider(input: {
       try {
         const response = await api.template.templateGet(providerTemplateId);
         const template = response.body.template;
-        return {
-          providerTemplateId: template.templateId ?? providerTemplateId,
-          title: template.title ?? null,
-          signerRoles: (template.signerRoles ?? [])
-            .map((role, index) => ({
-              name: role.name ?? "",
-              order: role.order ?? index,
-            }))
-            .sort((a, b) => a.order - b.order),
-          mergeFieldNames: (template.namedFormFields ?? [])
-            .map((field) => field.name)
-            .filter((name): name is string => Boolean(name)),
-        };
+        const metadata = providerTemplateMetadata(template as typeof template & { metadata?: Record<string, unknown> });
+        return { ...metadata, providerTemplateId: metadata.providerTemplateId || providerTemplateId };
       } catch (error) {
         throw normalizeDropboxSignError(error);
       }
@@ -312,6 +301,28 @@ export function createDropboxSignProvider(input: {
         throw normalizeDropboxSignError(error, { retryableStatuses: [409] });
       }
     },
+  };
+}
+
+function providerTemplateMetadata(template: {
+  templateId?: string;
+  title?: string;
+  metadata?: Record<string, unknown>;
+  signerRoles?: Array<{ name?: string; order?: number }>;
+  namedFormFields?: Array<{ name?: string }> | null;
+}): ProviderTemplateMetadata {
+  return {
+    providerTemplateId: template.templateId ?? "",
+    localTemplateId: typeof template.metadata?.sandra_template_id === "string"
+      ? template.metadata.sandra_template_id
+      : null,
+    title: template.title ?? null,
+    signerRoles: (template.signerRoles ?? [])
+      .map((role, index) => ({ name: role.name ?? "", order: role.order ?? index }))
+      .sort((a, b) => a.order - b.order),
+    mergeFieldNames: (template.namedFormFields ?? [])
+      .map((field) => field.name)
+      .filter((name): name is string => Boolean(name)),
   };
 }
 

@@ -39,8 +39,9 @@ export type TemplateLibraryLoadResult = TemplateLaneResult<
 export type PendingTemplateCopy = Readonly<{
   id: string;
   name: string;
-  lifecycle: "preparing" | "editing" | "cleanup_attention";
-  kind?: "copy" | "edit_revision";
+  lifecycle: "preparing" | "editing" | "cleanup_attention" | "provider_attention";
+  kind?: "copy" | "edit_revision" | "source_cleanup" | "provider_create";
+  providerCreateState?: "claimed" | "invoking" | "unknown" | "attached";
 }>;
 
 export type PendingTemplateCopiesLoadResult = TemplateLaneResult<
@@ -61,9 +62,35 @@ export type CreateTemplateDraftInput = Readonly<{
   mergeFieldNames: typeof ESIGN_MERGE_FIELD_NAMES;
 }>;
 
+export type PreparedTemplateUpload = Readonly<{
+  stagingSourceId: string;
+  bucket: "esign-staging";
+  storagePath: string;
+}>;
+
+export type PrepareTemplateUploadInput = Readonly<{
+  stagingSourceId: string;
+  filename: string;
+  size: number;
+  mimeType: "application/pdf";
+  sha256: string;
+}>;
+
+export type StagedTemplateSourceReference = PreparedTemplateUpload & Readonly<{
+  filename: string;
+  size: number;
+  mimeType: "application/pdf";
+  sha256: string;
+}>;
+
+export type CreateTemplateDraftActionInput = Omit<CreateTemplateDraftInput, "source"> & Readonly<{
+  source: StagedTemplateSourceReference & Readonly<{ origin: TemplateSource["origin"] }>;
+}>;
+
 export type TemplateLibraryActions = Readonly<{
   createDraft(
     input: CreateTemplateDraftInput,
+    options?: Readonly<{ signal?: AbortSignal; stagingSourceId?: string }>,
   ): Promise<TemplateLaneResult<{ templateId: string }>>;
   pickDropboxPdf(): Promise<TemplateLaneResult<File | null>>;
   duplicateTemplate(
@@ -78,6 +105,7 @@ export type TemplateLibraryActions = Readonly<{
   ): Promise<TemplateLaneResult<{ readiness: "ready" | "pending" }>>;
   abandonDraft(templateId: string): Promise<TemplateLaneResult<null>>;
   retryCleanup(templateId: string): Promise<TemplateLaneResult<null>>;
+  retrySourceCleanup?(sourceId: string): Promise<TemplateLaneResult<null>>;
   deleteTemplate(templateId: string, confirmRecentSends?: boolean): Promise<TemplateLaneResult<null>>;
 }>;
 

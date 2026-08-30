@@ -8,6 +8,7 @@ const sdk = vi.hoisted(() => ({
   remind: vi.fn(),
   cancel: vi.fn(),
   files: vi.fn(),
+  templateGet: vi.fn(),
   interceptorOptions: [] as Array<{ signal?: AbortSignal }>,
   credentials: [] as Array<{ username?: string; password?: string }>,
 }));
@@ -43,7 +44,7 @@ vi.mock("@dropbox/sign", () => {
     signatureRequestCancel = sdk.cancel;
     signatureRequestFiles = sdk.files;
   }
-  class TemplateApi extends BaseApi {}
+  class TemplateApi extends BaseApi { templateGet = sdk.templateGet; }
   class HttpError extends Error {}
   return {
     AccountApi,
@@ -137,6 +138,23 @@ describe("Dropbox Sign provider", () => {
       expect.objectContaining({ username: "api-key", password: "" }),
       expect.objectContaining({ username: "api-key", password: "" }),
     ]);
+  });
+
+  it("returns the authoritative provider and Sandra template identities for reconciliation", async () => {
+    sdk.templateGet.mockResolvedValue({ body: { template: {
+      templateId: "provider-1",
+      title: "Offer",
+      metadata: { sandra_template_id: "local-1" },
+      signerRoles: [{ name: "Seller", order: 0 }],
+      namedFormFields: [{ name: "seller_name" }, { name: "property_address" }, { name: "offer_price" }, { name: "closing_date" }, { name: "earnest_money" }],
+    } } });
+    const provider = createDropboxSignProvider({ apiKey: new EsignSecret("api-key"), clientId: "client-id", expectedDomain: "sandra.example.com" });
+    await expect(provider.getTemplate("provider-1")).resolves.toMatchObject({
+      providerTemplateId: "provider-1",
+      localTemplateId: "local-1",
+      title: "Offer",
+      signerRoles: [{ name: "Seller", order: 0 }],
+    });
   });
 
   it("forces test mode and preserves local/provider identifiers separately", async () => {

@@ -76,6 +76,7 @@ export type EmbeddedTemplateSession = {
 
 export type ProviderTemplateMetadata = {
   providerTemplateId: string;
+  localTemplateId: string | null;
   title: string | null;
   signerRoles: TemplateSignerRole[];
   mergeFieldNames: string[];

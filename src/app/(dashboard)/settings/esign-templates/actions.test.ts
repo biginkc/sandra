@@ -4,8 +4,14 @@ const mocks = vi.hoisted(() => ({
   memberships: vi.fn(),
   factory: vi.fn(),
   report: vi.fn(),
+  initialFactory: vi.fn(),
+  prepareUpload: vi.fn(),
+  createInitial: vi.fn(),
+  cleanupInitial: vi.fn(),
+  reconcileInitial: vi.fn(),
+  promoteInitial: vi.fn(),
   revalidate: vi.fn(),
-  stageSource: vi.fn(),
+  verifyStagedSource: vi.fn(),
   add: vi.fn(),
   duplicate: vi.fn(),
   beginEditRevision: vi.fn(),
@@ -21,6 +27,7 @@ vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships: mocks.membershi
 vi.mock("@/lib/esign/template-foundation-adapter", () => ({
   createFoundationTemplateOrchestrator: mocks.factory,
 }));
+vi.mock("@/lib/esign/template-initial-runtime", () => ({ createInitialTemplateRuntime: mocks.initialFactory }));
 
 import { ESIGN_MERGE_FIELD_NAMES } from "@/lib/esign/contracts";
 import {
@@ -31,13 +38,28 @@ import {
   checkTemplateEditorReadinessAction,
   abandonTemplateDraftAction,
   retryTemplateSourceCleanupAction,
+  prepareTemplateUploadAction,
+  reconcileUnknownTemplateProviderAction,
+  promoteStaleInitialTemplateProviderCreateAction,
 } from "./actions";
 
 describe("template server action boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.memberships.mockResolvedValue([{ user_id: "owner-1", org_id: "org-1", role: "owner" }]);
-    mocks.stageSource.mockResolvedValue({ ok: true, data: { stagingSourceId: "source-1" } });
+    mocks.prepareUpload.mockResolvedValue({ ok: true, data: { stagingSourceId: "source-1", bucket: "esign-staging", storagePath: "org-1/source-1.pdf" } });
+    mocks.createInitial.mockResolvedValue({ ok: true, data: { templateId: "template-1" } });
+    mocks.cleanupInitial.mockResolvedValue({ ok: true, data: null });
+    mocks.reconcileInitial.mockResolvedValue({ ok: true, data: { templateId: "template-1" } });
+    mocks.promoteInitial.mockResolvedValue({ ok: true, data: { templateId: "template-1", providerCreateState: "unknown" } });
+    mocks.initialFactory.mockResolvedValue({
+      prepare: mocks.prepareUpload,
+      create: mocks.createInitial,
+      cleanupSource: mocks.cleanupInitial,
+      reconcileUnknown: mocks.reconcileInitial,
+      promoteStaleProviderCreate: mocks.promoteInitial,
+    });
+    mocks.verifyStagedSource.mockResolvedValue({ ok: true, data: { stagingSourceId: "source-1" } });
     mocks.add.mockResolvedValue({ ok: true, data: { templateId: "template-1" } });
     mocks.duplicate.mockResolvedValue({ ok: true, data: { templateId: "copy-1", readiness: "pending" } });
     mocks.beginEditRevision.mockResolvedValue({ ok: true, data: { templateId: "revision-1", readiness: "pending" } });
@@ -46,7 +68,7 @@ describe("template server action boundary", () => {
     mocks.abandon.mockResolvedValue({ ok: true, data: null });
     mocks.retryCleanup.mockResolvedValue({ ok: true, data: null });
     mocks.factory.mockResolvedValue({
-      stageSource: mocks.stageSource,
+      verifyStagedSource: mocks.verifyStagedSource,
       add: mocks.add,
       duplicate: mocks.duplicate,
       beginEditRevision: mocks.beginEditRevision,
@@ -66,25 +88,55 @@ describe("template server action boundary", () => {
     expect(mocks.factory).not.toHaveBeenCalled();
   });
 
-  it("passes actual File bytes into private staging before creating the provider draft", async () => {
-    const bytes = new TextEncoder().encode("%PDF-1.7\nbody");
-    const file = new File([bytes], "offer.pdf", { type: "application/pdf" });
+  it("prepares an opaque owner/org-scoped private path without constructing the provider", async () => {
+    const metadata = {
+      stagingSourceId: "123e4567-e89b-42d3-a456-426614174000",
+      filename: "offer.pdf",
+      size: 14,
+      mimeType: "application/pdf" as const,
+      sha256: "a".repeat(64),
+    };
+    const result = await prepareTemplateUploadAction(metadata);
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        bucket: "esign-staging",
+        storagePath: "org-1/source-1.pdf",
+        stagingSourceId: "source-1",
+      },
+    });
+    expect(mocks.prepareUpload).toHaveBeenCalledWith(metadata);
+    expect(mocks.factory).not.toHaveBeenCalled();
+  });
+
+  it("passes only the small staged reference through the Server Action", async () => {
     const result = await createTemplateDraftAction({
       name: "Offer",
       documentType: "Purchase agreement",
-      source: { file, origin: "upload" },
+      source: {
+        stagingSourceId: "123e4567-e89b-42d3-a456-426614174000",
+        bucket: "esign-staging",
+        storagePath: "org-1/123e4567-e89b-42d3-a456-426614174000.pdf",
+        filename: "offer.pdf",
+        size: 14,
+        mimeType: "application/pdf",
+        sha256: "a".repeat(64),
+        origin: "upload",
+      },
       signerRoles: [{ name: "Seller", order: 0 }],
       sellerRoleName: "Seller",
       mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
     });
     expect(result).toEqual({ ok: true, data: { templateId: "template-1" } });
-    expect(mocks.stageSource).toHaveBeenCalledWith([expect.objectContaining({
+    expect(mocks.createInitial).toHaveBeenCalledWith(expect.objectContaining({ source: expect.objectContaining({
       filename: "offer.pdf",
       mimeType: "application/pdf",
-      size: bytes.byteLength,
-      bytes: expect.any(Uint8Array),
-    })]);
-    expect(mocks.add).toHaveBeenCalledWith(expect.objectContaining({ stagingSourceId: "source-1" }));
+      size: 14,
+    }) }));
+    const actionPayload = mocks.createInitial.mock.calls[0]?.[0];
+    expect(actionPayload).not.toHaveProperty("file");
+    expect(actionPayload).not.toHaveProperty("bytes");
+    expect(JSON.stringify(actionPayload).length).toBeLessThan(1_024);
   });
 
   it("keeps unexpected database/provider diagnostics out of the returned Result", async () => {
@@ -96,6 +148,19 @@ describe("template server action boundary", () => {
     });
     expect(JSON.stringify(result)).not.toContain("secret");
     expect(mocks.report).toHaveBeenCalled();
+  });
+
+  it("routes claimed recovery and manual reconciliation through typed server actions", async () => {
+    await expect(reconcileUnknownTemplateProviderAction("template-1", "provider-1")).resolves.toEqual({
+      ok: true,
+      data: { templateId: "template-1" },
+    });
+    await expect(promoteStaleInitialTemplateProviderCreateAction("template-1")).resolves.toEqual({
+      ok: true,
+      data: { templateId: "template-1", providerCreateState: "unknown" },
+    });
+    expect(mocks.reconcileInitial).toHaveBeenCalledWith("template-1", "provider-1");
+    expect(mocks.promoteInitial).toHaveBeenCalledWith("template-1");
   });
 
   it("passes the explicit recent-send confirmation into the atomic delete RPC path", async () => {

@@ -2,7 +2,7 @@
 
 import { FileUpIcon, PlusIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { type ReactNode, useMemo, useRef, useState, useTransition } from "react";
+import { type DragEvent, type ReactNode, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -47,6 +47,8 @@ export function AddTemplateDialog({
 }) {
   const router = useRouter();
   const fileInput = useRef<HTMLInputElement>(null);
+  const uploadAbort = useRef<AbortController | null>(null);
+  const stagingSourceId = useRef<string | null>(null);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [documentType, setDocumentType] = useState<(typeof DOCUMENT_TYPES)[number]>("Purchase agreement");
@@ -63,6 +65,16 @@ export function AddTemplateDialog({
     [name, source, roles, sellerRoleName],
   );
 
+  useEffect(() => () => uploadAbort.current?.abort(), []);
+
+  const changeOpen = (nextOpen: boolean) => {
+    if (!nextOpen) {
+      uploadAbort.current?.abort();
+      uploadAbort.current = null;
+    }
+    setOpen(nextOpen);
+  };
+
   const acceptFile = (file: File | null, origin: TemplateSource["origin"]) => {
     if (!file) return;
     const fileError = validatePdf(file);
@@ -71,8 +83,18 @@ export function AddTemplateDialog({
       return;
     }
     setError(null);
+    stagingSourceId.current = null;
     setSource({ file, origin });
     if (!name.trim()) setName(file.name.replace(/\.pdf$/i, ""));
+  };
+
+  const dropPdf = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (event.dataTransfer.files.length !== 1) {
+      setError("Choose one PDF file.");
+      return;
+    }
+    acceptFile(event.dataTransfer.files[0] ?? null, "upload");
   };
 
   const pickDropbox = () => {
@@ -89,6 +111,9 @@ export function AddTemplateDialog({
 
   const submit = () => {
     if (!actions || !source || validationError) return;
+    uploadAbort.current?.abort();
+    const controller = new AbortController();
+    uploadAbort.current = controller;
     startTransition(async () => {
       const result = await actions.createDraft({
         name: name.trim(),
@@ -97,30 +122,63 @@ export function AddTemplateDialog({
         signerRoles: roles.map((role, order) => ({ name: role.name.trim(), order })),
         sellerRoleName,
         mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
+      }, {
+        signal: controller.signal,
+        stagingSourceId: stagingSourceId.current ??= crypto.randomUUID(),
       });
+      if (uploadAbort.current !== controller) return;
       if (!result.ok) {
+        uploadAbort.current = null;
         setError(result.error.message);
         return;
       }
+      uploadAbort.current = null;
+      stagingSourceId.current = null;
       setOpen(false);
       router.push(`/settings/esign-templates/${result.data.templateId}/edit`);
     });
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={changeOpen}>
       <Button type="button" onClick={() => setOpen(true)} disabled={Boolean(disabledReason)} title={disabledReason}>
         {trigger ?? <><PlusIcon data-icon="inline-start" /> Add template</>}
       </Button>
       <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>Add eSign template</DialogTitle>
+          <DialogTitle>Add template</DialogTitle>
           <DialogDescription>
-            Upload one PDF and define every signer role required by Dropbox Sign.
+            Upload the contract PDF. You place the fields in the next step.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
+          <div className="space-y-2">
+            <input ref={fileInput} type="file" accept="application/pdf,.pdf" className="sr-only" onChange={(event) => acceptFile(event.target.files?.[0] ?? null, "upload")} aria-label="Upload PDF" />
+            <div
+              role="group"
+              aria-label="PDF source"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={dropPdf}
+              className="bg-muted/40 flex flex-col items-center gap-2 rounded-xl border border-dashed p-7 text-center"
+            >
+              <div className="text-muted-foreground flex size-12 items-center justify-center rounded-lg border bg-background">
+                <FileUpIcon aria-hidden />
+              </div>
+              <p className="text-sm font-semibold">Drag a PDF here, or browse</p>
+              <p className="text-muted-foreground text-xs">PDF only · up to 40 MB</p>
+              <div className="mt-1 flex flex-wrap justify-center gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={() => fileInput.current?.click()}>
+                  Browse
+                </Button>
+                <Button type="button" variant="outline" size="sm" onClick={pickDropbox} disabled={!actions || pending}>
+                  Choose from Dropbox
+                </Button>
+              </div>
+            </div>
+            {source && <p className="text-muted-foreground text-xs">{source.file.name} · {formatBytes(source.file.size)} · {source.origin === "dropbox" ? "Dropbox" : "Uploaded"}</p>}
+          </div>
+
           <div className="space-y-2">
             <Label htmlFor="esign-template-name">Template name</Label>
             <Input id="esign-template-name" value={name} onChange={(event) => setName(event.target.value)} />
@@ -130,19 +188,6 @@ export function AddTemplateDialog({
             <select id="esign-document-type" value={documentType} onChange={(event) => setDocumentType(event.target.value as (typeof DOCUMENT_TYPES)[number])} className="border-input bg-background h-8 w-full rounded-lg border px-2.5 text-sm">
               {DOCUMENT_TYPES.map((type) => <option key={type}>{type}</option>)}
             </select>
-          </div>
-          <div className="space-y-2">
-            <Label>PDF source</Label>
-            <input ref={fileInput} type="file" accept="application/pdf,.pdf" className="sr-only" onChange={(event) => acceptFile(event.target.files?.[0] ?? null, "upload")} aria-label="Upload PDF" />
-            <div className="flex flex-wrap gap-2">
-              <Button type="button" variant="outline" size="sm" onClick={() => fileInput.current?.click()}>
-                <FileUpIcon data-icon="inline-start" /> Upload PDF
-              </Button>
-              <Button type="button" variant="outline" size="sm" onClick={pickDropbox} disabled={!actions || pending}>
-                Choose from Dropbox
-              </Button>
-            </div>
-            {source && <p className="text-muted-foreground text-xs">{source.file.name} · {formatBytes(source.file.size)} · {source.origin === "dropbox" ? "Dropbox" : "Uploaded"}</p>}
           </div>
 
           <SignerRoleEditor roles={roles} sellerRoleName={sellerRoleName} onChange={(nextRoles, nextSeller) => { setRoles(nextRoles); setSellerRoleName(nextSeller); }} />
@@ -158,7 +203,7 @@ export function AddTemplateDialog({
         </div>
 
         <DialogFooter>
-          <DialogClose render={<Button variant="outline" disabled={pending} />}>Cancel</DialogClose>
+          <DialogClose render={<Button variant="outline" />}>Cancel</DialogClose>
           <Button type="button" onClick={submit} disabled={!actions || pending || Boolean(validationError)}>
             {pending ? "Preparing…" : "Upload and place fields"}
           </Button>
@@ -172,7 +217,7 @@ function validatePdf(file: File): string | null {
   if (!file.name.toLowerCase().endsWith(".pdf")) return "Choose a PDF file.";
   if (file.type && file.type !== "application/pdf") return "Choose a PDF file.";
   if (file.size <= 0) return "The PDF is empty.";
-  if (file.size >= MAX_PDF_BYTES) return "The PDF must be smaller than 40 MB.";
+  if (file.size > MAX_PDF_BYTES) return "The PDF must be 40 MB or smaller.";
   return null;
 }
 

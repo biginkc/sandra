@@ -4,7 +4,7 @@ import { ESIGN_MERGE_FIELD_NAMES } from "../../types";
 
 export function MergeFieldLegend() {
   return (
-    <section aria-labelledby="merge-field-legend" className="space-y-2 rounded-xl border bg-card p-4">
+    <section aria-labelledby="merge-field-legend" className="bg-muted/50 space-y-2 px-5 py-4">
       <div>
         <h2 id="merge-field-legend" className="font-medium">Sandra merge fields</h2>
         <p className="text-muted-foreground text-sm">

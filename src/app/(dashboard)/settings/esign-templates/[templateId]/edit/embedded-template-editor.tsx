@@ -180,25 +180,26 @@ export function EmbeddedTemplateEditor({
           </>
         }
       />
-      <TemplateFileStrip template={template} />
-      <MergeFieldLegend />
-
-      <section className="relative min-h-[520px] w-full overflow-hidden rounded-xl border bg-card" aria-label="Dropbox Sign template editor">
-        <div ref={containerRef} className="min-h-[520px] w-full" data-testid="embedded-template-container" />
-        {(state.status === "loading" || state.status === "syncing") && (
-          <div className="bg-background/90 absolute inset-0 flex min-h-[520px] items-center justify-center">
-            <p className="flex items-center gap-2 text-sm"><LoaderCircleIcon className="animate-spin" />{state.status === "syncing" ? "Synchronizing finished template…" : "Loading Dropbox Sign editor…"}</p>
-          </div>
-        )}
-        {state.status === "unavailable" && (
-          <EditorNotice title="Editor connection pending" message="The reviewed Dropbox Sign foundation must be connected before this editor can open." />
-        )}
-        {state.status === "error" && (
-          <div className="bg-background/95 absolute inset-0 flex min-h-[520px] flex-col items-center justify-center gap-3 p-6 text-center" role="alert">
-            <div><h2 className="font-medium">Editor unavailable</h2><p className="text-muted-foreground mt-1 max-w-lg text-sm">{state.message}</p>{state.code && <p className="text-muted-foreground mt-2 font-mono text-xs">{state.code}</p>}</div>
-            <Button variant="outline" size="sm" onClick={() => setGeneration((value) => value + 1)}><RefreshCwIcon data-icon="inline-start" /> Reload editor</Button>
-          </div>
-        )}
+      <section className="w-full overflow-hidden rounded-2xl border bg-card" aria-label="Dropbox Sign template editor">
+        <TemplateFileStrip template={template} />
+        <div className="relative min-h-[520px] w-full border-y">
+          <div ref={containerRef} className="min-h-[520px] w-full" data-testid="embedded-template-container" />
+          {(state.status === "loading" || state.status === "syncing") && (
+            <div className="bg-background/90 absolute inset-0 flex min-h-[520px] items-center justify-center">
+              <p className="flex items-center gap-2 text-sm"><LoaderCircleIcon className="animate-spin" />{state.status === "syncing" ? "Synchronizing finished template…" : "Loading Dropbox Sign editor…"}</p>
+            </div>
+          )}
+          {state.status === "unavailable" && (
+            <EditorNotice title="Editor connection pending" message="The reviewed Dropbox Sign foundation must be connected before this editor can open." />
+          )}
+          {state.status === "error" && (
+            <div className="bg-background/95 absolute inset-0 flex min-h-[520px] flex-col items-center justify-center gap-3 p-6 text-center" role="alert">
+              <div><h2 className="font-medium">Editor unavailable</h2><p className="text-muted-foreground mt-1 max-w-lg text-sm">{state.message}</p>{state.code && <p className="text-muted-foreground mt-2 font-mono text-xs">{state.code}</p>}</div>
+              <Button variant="outline" size="sm" onClick={() => setGeneration((value) => value + 1)}><RefreshCwIcon data-icon="inline-start" /> Reload editor</Button>
+            </div>
+          )}
+        </div>
+        <MergeFieldLegend />
       </section>
       {state.status !== "finished" && <p className="text-muted-foreground text-sm">Finish in the Dropbox Sign editor first. Sandra cannot force-save or roll back cross-origin editor state.</p>}
     </div>

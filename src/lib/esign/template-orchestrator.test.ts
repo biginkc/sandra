@@ -4,6 +4,7 @@ import { ESIGN_TEMPLATE_MERGE_FIELDS } from "./template-contract";
 import {
   createTemplateOrchestrator,
   ESIGN_TEMPLATE_MAX_PDF_BYTES,
+  ESIGN_TEMPLATE_STAGING_BUCKET,
   type StagedTemplateSource,
   type TemplateDraftRecord,
   type TemplateOrchestratorPorts,
@@ -22,7 +23,7 @@ const stage: StagedTemplateSource = {
   filename: "offer.pdf",
   size: pdf.size,
   mimeType: "application/pdf",
-  sha256: "8c493a43d8a2f643929a28eed63f152c4e68b505506969d28ed62f6c907b06f5",
+  sha256: "3f972854841afd236b04b5d7435b73216bc5fa6e39a86aff6e492b744086189c",
 };
 const draft: TemplateDraftRecord = {
   id: "template-1",
@@ -30,6 +31,7 @@ const draft: TemplateDraftRecord = {
   name: "Offer",
   documentType: "Purchase agreement",
   providerTemplateId: "provider-1",
+  providerAccountId: "account-1",
   sellerRoleName: "Seller",
   signerRoles: roles,
   mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
@@ -38,6 +40,12 @@ const draft: TemplateDraftRecord = {
   lifecycle: "editing",
 };
 const finalized = { ...draft, lifecycle: "finalized" as const, stagingSourceId: null };
+
+function sizedPdfBytes(size: number): Uint8Array {
+  const bytes = new Uint8Array(size);
+  bytes.set(new TextEncoder().encode("%PDF-"));
+  return bytes;
+}
 
 function makePorts(): TemplateOrchestratorPorts {
   return {
@@ -65,7 +73,7 @@ function makePorts(): TemplateOrchestratorPorts {
       deletePrivate: vi.fn().mockResolvedValue("deleted"),
     },
     provider: {
-      embeddedClientId: "client-public-1",
+      getEmbeddedClientId: vi.fn().mockResolvedValue("client-public-1"),
       createDraft: vi.fn().mockResolvedValue({ providerTemplateId: "provider-1" }),
       getFreshEditUrl: vi.fn().mockResolvedValue({ editUrl: "https://app.hellosign.com/editor/transient", expiresAt: 123 }),
       getTemplate: vi.fn().mockResolvedValue({ providerTemplateId: "provider-1", signerRoles: roles, mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS }),
@@ -73,6 +81,7 @@ function makePorts(): TemplateOrchestratorPorts {
       duplicateTemplate: vi.fn().mockResolvedValue({ providerTemplateId: "provider-copy", readiness: "pending" }),
       deleteTemplate: vi.fn().mockResolvedValue(undefined),
       isNotFound: vi.fn().mockReturnValue(false),
+      isAmbiguousMutation: vi.fn().mockReturnValue(false),
     },
     randomId: vi.fn().mockReturnValue(sourceId),
     now: vi.fn().mockReturnValue(new Date("2026-08-29T12:00:00Z")),
@@ -98,7 +107,10 @@ describe("template action orchestration", () => {
     vi.mocked(ports.auth.getActor).mockResolvedValue({ ...owner, isOwner: false });
     const core = createTemplateOrchestrator(ports);
     const results = await Promise.all([
-      core.list(), core.listPendingCopies(), core.stageSource([pdf]), core.add(addInput()), core.startEditor("template-1"),
+      core.list(), core.listPendingCopies(), core.verifyStagedSource({
+        stagingSourceId: sourceId, bucket: ESIGN_TEMPLATE_STAGING_BUCKET, storagePath: stage.storagePath,
+        filename: stage.filename, size: stage.size, mimeType: stage.mimeType, sha256: stage.sha256,
+      }), core.add(addInput()), core.startEditor("template-1"),
       core.beginEditRevision("template-1"), core.finishSync("template-1"), core.abandon("template-1"), core.retryCleanup("template-1"), core.duplicate("template-1", "Copy"), core.delete("template-1"),
     ]);
     expect(results.every((result) => !result.ok && result.error.code === "OWNER_REQUIRED")).toBe(true);
@@ -144,28 +156,120 @@ describe("template action orchestration", () => {
     expect(result).toMatchObject({ ok: false, error: { code: "PENDING_COPY_SCOPE_MISMATCH" } });
   });
 
-  it("accepts exactly one <=40 MiB PDF with matching MIME, bytes, and magic", async () => {
+  it("verifies an exact 40 MiB direct private upload before recording it", async () => {
+    const bytes = sizedPdfBytes(ESIGN_TEMPLATE_MAX_PDF_BYTES);
+    const digestInput = new Uint8Array(bytes.byteLength);
+    digestInput.set(bytes);
+    const sha256 = await crypto.subtle.digest("SHA-256", digestInput.buffer);
+    const hash = Array.from(new Uint8Array(sha256), (byte) => byte.toString(16).padStart(2, "0")).join("");
     const ports = makePorts();
-    const core = createTemplateOrchestrator(ports);
-    await expect(core.stageSource([])).resolves.toMatchObject({ ok: false, error: { code: "PDF_COUNT_INVALID" } });
-    await expect(core.stageSource([pdf, pdf])).resolves.toMatchObject({ ok: false, error: { code: "PDF_COUNT_INVALID" } });
-    await expect(core.stageSource([{ ...pdf, mimeType: "text/plain" }])).resolves.toMatchObject({ ok: false, error: { code: "PDF_TYPE_INVALID" } });
-    await expect(core.stageSource([{ ...pdf, bytes: new TextEncoder().encode("not-pdf"), size: 7 }])).resolves.toMatchObject({ ok: false, error: { code: "PDF_MAGIC_INVALID" } });
-    await expect(core.stageSource([{ ...pdf, size: ESIGN_TEMPLATE_MAX_PDF_BYTES }])).resolves.toMatchObject({ ok: false, error: { code: "PDF_SIZE_INVALID" } });
-    await expect(core.stageSource([{ ...pdf, size: ESIGN_TEMPLATE_MAX_PDF_BYTES + 1 }])).resolves.toMatchObject({ ok: false, error: { code: "PDF_SIZE_INVALID" } });
-    await expect(core.stageSource([pdf])).resolves.toEqual({ ok: true, data: { stagingSourceId: sourceId } });
-    expect(ports.storage.putPrivate).toHaveBeenCalledWith(`org-1/${sourceId}.pdf`, pdf.bytes, "application/pdf");
-    expect(ports.storage.readPrivate).toHaveBeenCalledWith(`org-1/${sourceId}.pdf`);
-    expect(ports.repository.recordVerifiedStage).toHaveBeenCalledWith(expect.objectContaining({ id: sourceId, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }));
+    vi.mocked(ports.storage.readPrivate).mockResolvedValue(bytes);
+    const result = await createTemplateOrchestrator(ports).verifyStagedSource({
+      stagingSourceId: sourceId,
+      bucket: ESIGN_TEMPLATE_STAGING_BUCKET,
+      storagePath: stage.storagePath,
+      filename: "exact-40-mib.pdf",
+      size: ESIGN_TEMPLATE_MAX_PDF_BYTES,
+      mimeType: "application/pdf",
+      sha256: hash,
+    });
+    expect(result).toEqual({ ok: true, data: { stagingSourceId: sourceId } });
+    expect(ports.repository.recordVerifiedStage).toHaveBeenCalledWith(expect.objectContaining({
+      id: sourceId,
+      orgId: "org-1",
+      size: ESIGN_TEMPLATE_MAX_PDF_BYTES,
+      sha256: hash,
+    }));
+    expect(ports.provider.createDraft).not.toHaveBeenCalled();
   });
 
-  it("fails closed when the privately downloaded object differs from the uploaded PDF", async () => {
+  it("rejects a 40 MiB plus one direct upload before reading storage or mutating the provider", async () => {
     const ports = makePorts();
-    vi.mocked(ports.storage.readPrivate).mockResolvedValue(new TextEncoder().encode("%PDF-1.7\ncopy"));
-    const result = await createTemplateOrchestrator(ports).stageSource([pdf]);
-    expect(result).toMatchObject({ ok: false, error: { code: "STAGING_VERIFY_FAILED" } });
+    const result = await createTemplateOrchestrator(ports).verifyStagedSource({
+      stagingSourceId: sourceId,
+      bucket: ESIGN_TEMPLATE_STAGING_BUCKET,
+      storagePath: stage.storagePath,
+      filename: "over.pdf",
+      size: ESIGN_TEMPLATE_MAX_PDF_BYTES + 1,
+      mimeType: "application/pdf",
+      sha256: "a".repeat(64),
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "STAGING_METADATA_INVALID" } });
+    expect(ports.storage.readPrivate).not.toHaveBeenCalled();
     expect(ports.repository.recordVerifiedStage).not.toHaveBeenCalled();
-    expect(ports.storage.deletePrivate).toHaveBeenCalledWith(`org-1/${sourceId}.pdf`);
+    expect(ports.provider.createDraft).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { bucket: "lead-files", storagePath: stage.storagePath },
+    { bucket: ESIGN_TEMPLATE_STAGING_BUCKET, storagePath: `org-2/${sourceId}.pdf` },
+    { bucket: ESIGN_TEMPLATE_STAGING_BUCKET, storagePath: `org-1/not-a-uuid.pdf` },
+  ])("rejects a cross-org, wrong-bucket, or noncanonical staged reference without object/provider access", async (forged) => {
+    const ports = makePorts();
+    const result = await createTemplateOrchestrator(ports).verifyStagedSource({
+      stagingSourceId: sourceId,
+      filename: stage.filename,
+      size: stage.size,
+      mimeType: stage.mimeType,
+      sha256: stage.sha256,
+      ...forged,
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "STAGING_SOURCE_INVALID" } });
+    expect(ports.storage.readPrivate).not.toHaveBeenCalled();
+    expect(ports.storage.deletePrivate).not.toHaveBeenCalled();
+    expect(ports.provider.createDraft).not.toHaveBeenCalled();
+  });
+
+  it("preserves the reservation when byte length, magic, or hash metadata does not match", async () => {
+    const ports = makePorts();
+    const result = await createTemplateOrchestrator(ports).verifyStagedSource({
+      stagingSourceId: sourceId,
+      bucket: ESIGN_TEMPLATE_STAGING_BUCKET,
+      storagePath: stage.storagePath,
+      filename: stage.filename,
+      size: stage.size,
+      mimeType: stage.mimeType,
+      sha256: "f".repeat(64),
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "STAGING_VERIFY_FAILED" } });
+    expect(ports.storage.deletePrivate).not.toHaveBeenCalled();
+    expect(ports.repository.recordVerifiedStage).not.toHaveBeenCalled();
+    expect(ports.provider.createDraft).not.toHaveBeenCalled();
+  });
+
+  it("does not infer deletion authority from a rejected object", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.storage.deletePrivate).mockRejectedValue(new Error("storage unavailable"));
+    const result = await createTemplateOrchestrator(ports).verifyStagedSource({
+      stagingSourceId: sourceId, bucket: ESIGN_TEMPLATE_STAGING_BUCKET, storagePath: stage.storagePath,
+      filename: stage.filename, size: stage.size, mimeType: stage.mimeType, sha256: "f".repeat(64),
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "STAGING_VERIFY_FAILED" } });
+    expect(ports.storage.deletePrivate).not.toHaveBeenCalled();
+    expect(ports.provider.createDraft).not.toHaveBeenCalled();
+  });
+
+  it("preserves an unreadable canonical upload for claim-fenced recovery and never reaches the provider", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.storage.readPrivate).mockRejectedValue(new Error("download failed"));
+    const result = await createTemplateOrchestrator(ports).verifyStagedSource({
+      stagingSourceId: sourceId, bucket: ESIGN_TEMPLATE_STAGING_BUCKET, storagePath: stage.storagePath,
+      filename: stage.filename, size: stage.size, mimeType: stage.mimeType, sha256: stage.sha256,
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "STAGING_VERIFY_READ_FAILED" } });
+    expect(ports.storage.deletePrivate).not.toHaveBeenCalled();
+    expect(ports.provider.createDraft).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-PDF source filenames without deleting outside the cleanup CAS", async () => {
+    const ports = makePorts();
+    const result = await createTemplateOrchestrator(ports).verifyStagedSource({
+      stagingSourceId: sourceId, bucket: ESIGN_TEMPLATE_STAGING_BUCKET, storagePath: stage.storagePath,
+      filename: "offer.txt", size: stage.size, mimeType: stage.mimeType, sha256: stage.sha256,
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "STAGING_METADATA_INVALID" } });
+    expect(ports.storage.deletePrivate).not.toHaveBeenCalled();
+    expect(ports.provider.createDraft).not.toHaveBeenCalled();
   });
 
   it("rejects a forged or cross-org staging path without reading it", async () => {
@@ -174,6 +278,15 @@ describe("template action orchestration", () => {
     const result = await createTemplateOrchestrator(ports).add(addInput());
     expect(result).toMatchObject({ ok: false, error: { code: "STAGING_SOURCE_INVALID" } });
     expect(ports.storage.readPrivate).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the staged SHA-256 immediately before draft/provider creation", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.repository.getStage).mockResolvedValue({ ...stage, sha256: "f".repeat(64) });
+    const result = await createTemplateOrchestrator(ports).add(addInput());
+    expect(result).toMatchObject({ ok: false, error: { code: "STAGING_SOURCE_HASH_MISMATCH" } });
+    expect(ports.repository.createHiddenDraft).not.toHaveBeenCalled();
+    expect(ports.provider.createDraft).not.toHaveBeenCalled();
   });
 
   it("rejects a cross-org template even if a repository port returns it", async () => {
@@ -231,6 +344,18 @@ describe("template action orchestration", () => {
     expect(ports.repository.markAbandoned).toHaveBeenCalledWith("org-1", "template-1");
   });
 
+  it("preserves the hidden draft and source when provider creation is ambiguous", async () => {
+    const ports = makePorts();
+    const ambiguous = new Error("response lost");
+    vi.mocked(ports.provider.createDraft).mockRejectedValue(ambiguous);
+    vi.mocked(ports.provider.isAmbiguousMutation).mockImplementation((error) => error === ambiguous);
+    const result = await createTemplateOrchestrator(ports).add(addInput());
+    expect(result).toMatchObject({ ok: false, error: { code: "PROVIDER_CREATE_RECONCILIATION_REQUIRED" } });
+    expect(ports.repository.markAbandoned).not.toHaveBeenCalled();
+    expect(ports.storage.deletePrivate).not.toHaveBeenCalled();
+    expect(ports.repository.recordSourceCleanup).not.toHaveBeenCalled();
+  });
+
   it("returns a fresh transient edit URL without persisting it", async () => {
     const ports = makePorts();
     const result = await createTemplateOrchestrator(ports).startEditor("template-1");
@@ -261,7 +386,7 @@ describe("template action orchestration", () => {
 
     expect(ports.provider.getTemplateFiles).toHaveBeenCalledWith(finalized.providerTemplateId);
     expect(ports.repository.createHiddenEditRevision).toHaveBeenCalledWith({ orgId: owner.orgId, sourceTemplateId: finalized.id, stagingSourceId: sourceId });
-    expect(ports.provider.duplicateTemplate).toHaveBeenCalledWith({ providerTemplateId: finalized.providerTemplateId, title: finalized.name });
+    expect(ports.provider.duplicateTemplate).toHaveBeenCalledWith({ providerTemplateId: finalized.providerTemplateId, expectedProviderAccountId: "account-1", title: finalized.name });
     expect(ports.repository.attachProviderId).toHaveBeenCalledWith(owner.orgId, revision.id, "provider-revision");
     expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
     expect(ports.repository.publishEditRevision).not.toHaveBeenCalled();

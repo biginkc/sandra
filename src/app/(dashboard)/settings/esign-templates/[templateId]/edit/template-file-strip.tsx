@@ -1,7 +1,6 @@
 import { FileTextIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
 
 import type { TemplateEditorData } from "../../types";
 
@@ -17,18 +16,16 @@ export function TemplateFileStrip({ template }: { template: TemplateEditorData }
   ].filter(Boolean);
 
   return (
-    <Card size="sm">
-      <CardContent className="flex flex-wrap items-center gap-3">
-        <div className="bg-muted text-muted-foreground flex size-9 items-center justify-center rounded-lg">
-          <FileTextIcon aria-hidden />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="truncate font-medium">{template.sourceFilename}</p>
-          <p className="text-muted-foreground text-xs">{facts.join(" · ")}</p>
-        </div>
-        <Badge variant="outline">Test mode</Badge>
-      </CardContent>
-    </Card>
+    <div className="bg-muted/60 flex flex-wrap items-center gap-3 px-5 py-3.5">
+      <div className="bg-muted text-muted-foreground flex size-9 items-center justify-center rounded-lg">
+        <FileTextIcon aria-hidden />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-medium">{template.sourceFilename}</p>
+        <p className="text-muted-foreground text-xs">{facts.join(" · ")}</p>
+      </div>
+      <Badge variant="outline">Test mode</Badge>
+    </div>
   );
 }
 

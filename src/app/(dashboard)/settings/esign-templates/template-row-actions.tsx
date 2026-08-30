@@ -111,7 +111,7 @@ export function DuplicateTemplateDialog({ template, actions }: { template: Esign
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen) { dialogActiveRef.current = false; dialogGenerationRef.current += 1; } setOpen(nextOpen); }}>
       <Button variant="ghost" size="sm" onClick={() => { dialogGenerationRef.current += 1; dialogActiveRef.current = true; routedRef.current = false; readinessPromiseRef.current = null; setRouted(false); setCheckingReadiness(false); setName(`${template.name} (copy)`); setError(null); setCopyId(null); setPollAttempt(0); setOpen(true); }}><CopyIcon data-icon="inline-start" /> Duplicate</Button>
-      <DialogContent>
+      <DialogContent className="sm:max-w-xl">
         <DialogHeader><DialogTitle>Duplicate template</DialogTitle><DialogDescription>The original template stays unchanged. The copy opens in the editor when Dropbox Sign finishes preparing it.</DialogDescription></DialogHeader>
         {copyId ? (
           <div className="border-border bg-muted/40 rounded-lg border p-4" role="status">
@@ -147,9 +147,9 @@ export function DeleteTemplateDialog({ template, actions }: { template: EsignTem
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <Button variant="ghost" size="sm" className="text-destructive" onClick={() => { setConfirmRecentSends(template.recentSendCount30d > 0); setError(null); setOpen(true); }}><Trash2Icon data-icon="inline-start" /> Delete</Button>
-      <DialogContent>
+      <DialogContent className="sm:max-w-xl">
         <DialogHeader><DialogTitle>Delete {template.name}?</DialogTitle><DialogDescription>The reusable template will be removed. Existing contract records and saved PDFs stay in Sandra.</DialogDescription></DialogHeader>
-        {confirmRecentSends && <div className="border-alert-warning/40 bg-alert-warning/10 rounded-lg border p-3 text-sm">{template.recentSendCount30d > 0 ? `This template was used for ${template.recentSendCount30d} contract${template.recentSendCount30d === 1 ? "" : "s"} in the last 30 days.` : "This template was used recently."} Deleting it will not remove existing contract history or signed PDFs.</div>}
+        {confirmRecentSends && <div className="border-destructive/20 bg-destructive/10 text-destructive rounded-lg border p-3 text-sm">{template.recentSendCount30d > 0 ? `This template was used for ${template.recentSendCount30d} contract${template.recentSendCount30d === 1 ? "" : "s"} in the last 30 days.` : "This template was used recently."} Deleting it will not remove existing contract history or signed PDFs.</div>}
         {(error || !actions) && <p role="alert" className="text-destructive text-sm">{error ?? "Template actions are not connected yet."}</p>}
         <DialogFooter><DialogClose render={<Button variant="outline" disabled={pending} />}>Cancel</DialogClose><Button variant="destructive" onClick={submit} disabled={!actions || pending}>{pending ? "Deleting…" : "Delete template"}</Button></DialogFooter>
       </DialogContent>

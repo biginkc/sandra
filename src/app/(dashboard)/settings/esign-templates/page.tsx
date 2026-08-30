@@ -7,6 +7,7 @@ import { AddTemplateDialog } from "./add-template-dialog";
 import { loadPendingTemplateCopies, loadTemplateLibrary } from "./template-lane-adapter";
 import { TemplateLibrary } from "./template-library";
 import { PendingTemplateCopies } from "./pending-template-copies";
+import { TestModeBanner } from "./test-mode-banner";
 
 export default async function EsignTemplatesPage() {
   const [result, pendingCopies] = await Promise.all([
@@ -40,18 +41,7 @@ export default async function EsignTemplatesPage() {
         }
       />
 
-      <div className="border-alert-warning/40 bg-alert-warning/10 text-foreground flex flex-col gap-1 rounded-xl border px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-        <span>
-          <strong>Dropbox Sign test mode.</strong> Documents are watermarked and
-          are not legally binding.
-        </span>
-        <a
-          href="/settings/integrations"
-          className="font-medium underline underline-offset-4"
-        >
-          Integration settings
-        </a>
-      </div>
+      <TestModeBanner />
 
       <PendingTemplateCopies result={pendingCopies} />
       <TemplateLibrary result={result} actions={pendingCopies.ok ? undefined : null} />

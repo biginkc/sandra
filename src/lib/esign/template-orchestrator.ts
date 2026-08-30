@@ -6,6 +6,7 @@ import {
 } from "./template-contract";
 
 export const ESIGN_TEMPLATE_MAX_PDF_BYTES = 40 * 1024 * 1024;
+export const ESIGN_TEMPLATE_STAGING_BUCKET = "esign-staging" as const;
 
 export type TemplateActionError = Readonly<{ code: string; message: string }>;
 export type TemplateActionResult<T> =
@@ -53,12 +54,23 @@ export type StagedTemplateSource = Readonly<{
   sha256: string;
 }>;
 
+export type StagedTemplateSourceReference = Readonly<{
+  stagingSourceId: string;
+  bucket: string;
+  storagePath: string;
+  filename: string;
+  size: number;
+  mimeType: string;
+  sha256: string;
+}>;
+
 export type TemplateDraftRecord = Readonly<{
   id: string;
   orgId: string;
   name: string;
   documentType: string;
   providerTemplateId: string | null;
+  providerAccountId?: string | null;
   sellerRoleName: string;
   signerRoles: readonly TemplateSignerRole[];
   mergeFieldNames: readonly string[];
@@ -119,7 +131,7 @@ export type TemplatePrivateStoragePort = Readonly<{
 }>;
 
 export type TemplateProviderPort = Readonly<{
-  embeddedClientId: string;
+  getEmbeddedClientId(): Promise<string>;
   createDraft(input: {
     localTemplateId: string;
     title: string;
@@ -133,10 +145,12 @@ export type TemplateProviderPort = Readonly<{
   getTemplateFiles(providerTemplateId: string): Promise<Uint8Array>;
   duplicateTemplate(input: {
     providerTemplateId: string;
+    expectedProviderAccountId: string;
     title: string;
   }): Promise<{ providerTemplateId: string; readiness: "ready" | "pending" }>;
   deleteTemplate(providerTemplateId: string): Promise<void>;
   isNotFound(error: unknown): boolean;
+  isAmbiguousMutation(error: unknown): boolean;
 }>;
 
 export type TemplateOrchestratorPorts = Readonly<{
@@ -186,55 +200,50 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       }
     },
 
-    async stageSource(files: readonly TemplateUpload[]): Promise<TemplateActionResult<{ stagingSourceId: string }>> {
+    async verifyStagedSource(input: StagedTemplateSourceReference): Promise<TemplateActionResult<{ stagingSourceId: string }>> {
       const access = await owner();
       if (!access.ok) return access;
-      const validated = validateOnePdf(files);
-      if (!validated.ok) return validated;
-      const opaqueId = ports.randomId();
-      if (!isOpaqueId(opaqueId)) return failure("STAGING_ID_INVALID", "The private upload could not be prepared.");
-      const storagePath = stagingPath(access.data.orgId, opaqueId);
+      if (!isOpaqueId(input.stagingSourceId)
+        || input.bucket !== ESIGN_TEMPLATE_STAGING_BUCKET
+        || input.storagePath !== stagingPath(access.data.orgId, input.stagingSourceId)) {
+        return failure("STAGING_SOURCE_INVALID", "The private PDF source is unavailable.");
+      }
+      if (!isSafeSourceFilename(input.filename)
+        || input.mimeType !== "application/pdf"
+        || input.size <= 0
+        || input.size > ESIGN_TEMPLATE_MAX_PDF_BYTES
+        || !/^[a-f0-9]{64}$/.test(input.sha256)) {
+        return failure("STAGING_METADATA_INVALID", "The private PDF metadata is invalid. Its reservation remains available for safe cleanup.");
+      }
+      let bytes: Uint8Array;
       try {
-        await ports.storage.putPrivate(storagePath, validated.data.bytes, "application/pdf");
+        bytes = await ports.storage.readPrivate(input.storagePath);
       } catch {
-        return failure("STAGING_UPLOAD_FAILED", "The PDF could not be stored privately.");
+        return failure("STAGING_VERIFY_READ_FAILED", "The private PDF could not be verified after upload. Its reservation remains available for safe cleanup.");
       }
-      let storedBytes: Uint8Array;
-      try {
-        storedBytes = await ports.storage.readPrivate(storagePath);
-      } catch {
-        await safelyDeleteStagedUpload(ports, storagePath);
-        return failure("STAGING_VERIFY_READ_FAILED", "The private PDF could not be verified after upload.");
-      }
-      const stored = validateOnePdf([{ ...validated.data, bytes: storedBytes, size: storedBytes.byteLength }]);
-      if (!stored.ok || storedBytes.byteLength !== validated.data.size) {
-        await safelyDeleteStagedUpload(ports, storagePath);
-        return failure("STAGING_VERIFY_FAILED", "The stored PDF did not match the uploaded file.");
-      }
-      const uploadedHash = await sha256Hex(validated.data.bytes);
-      const storedHash = await sha256Hex(storedBytes);
-      if (uploadedHash !== storedHash) {
-        await safelyDeleteStagedUpload(ports, storagePath);
-        return failure("STAGING_VERIFY_FAILED", "The stored PDF did not match the uploaded file.");
+      const validated = validateOnePdf([{
+        filename: input.filename,
+        mimeType: input.mimeType,
+        size: input.size,
+        bytes,
+      }]);
+      const actualHash = await sha256Hex(bytes);
+      if (!validated.ok || bytes.byteLength !== input.size || actualHash !== input.sha256) {
+        return failure("STAGING_VERIFY_FAILED", "The stored PDF did not match the uploaded file. Its reservation remains available for safe cleanup.");
       }
       try {
         const stage = await ports.repository.recordVerifiedStage({
-          id: opaqueId,
+          id: input.stagingSourceId,
           orgId: access.data.orgId,
-          storagePath,
-          filename: validated.data.filename,
-          size: validated.data.size,
+          storagePath: input.storagePath,
+          filename: input.filename,
+          size: input.size,
           mimeType: "application/pdf",
-          sha256: storedHash,
+          sha256: actualHash,
         });
         return success({ stagingSourceId: stage.id });
       } catch {
-        try {
-          await ports.storage.deletePrivate(storagePath);
-          return failure("STAGING_RECORD_FAILED", "The private upload could not be recorded.");
-        } catch {
-          return failure("STAGING_COMPENSATION_FAILED", "The private upload could not be recorded or safely cleaned up.");
-        }
+        return failure("STAGING_RECORD_FAILED", "The private upload could not be recorded. Its reservation remains available for safe cleanup.");
       }
     },
 
@@ -247,7 +256,7 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       } catch {
         return failure("TEMPLATE_READ_FAILED", "The template could not be loaded.");
       }
-      if (!source || source.orgId !== access.data.orgId || source.lifecycle !== "finalized" || !source.providerTemplateId) {
+      if (!source || source.orgId !== access.data.orgId || source.lifecycle !== "finalized" || !source.providerTemplateId || !source.providerAccountId) {
         return failure("TEMPLATE_NOT_FOUND", "Only an active finalized template can be edited.");
       }
       let bytes: Uint8Array;
@@ -273,7 +282,7 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       }
       let duplicate: { providerTemplateId: string; readiness: "ready" | "pending" };
       try {
-        duplicate = await ports.provider.duplicateTemplate({ providerTemplateId: source.providerTemplateId, title: source.name });
+        duplicate = await ports.provider.duplicateTemplate({ providerTemplateId: source.providerTemplateId, expectedProviderAccountId: source.providerAccountId, title: source.name });
       } catch {
         const compensated = await compensateHiddenDraft(ports, revision);
         return compensated
@@ -327,6 +336,9 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       }
       const file = validateOnePdf([{ filename: stage.filename, mimeType: stage.mimeType, size: stage.size, bytes }]);
       if (!file.ok) return file;
+      if (await sha256Hex(bytes) !== stage.sha256) {
+        return failure("STAGING_SOURCE_HASH_MISMATCH", "The private PDF source no longer matches its verified upload.");
+      }
       let draft: TemplateDraftRecord;
       try {
         draft = await ports.repository.createHiddenDraft({
@@ -354,7 +366,10 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
           signerRoles: contract.data.signerRoles,
           mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
         }));
-      } catch {
+      } catch (error) {
+        if (ports.provider.isAmbiguousMutation(error)) {
+          return failure("PROVIDER_CREATE_RECONCILIATION_REQUIRED", "Dropbox Sign may have created the template. The hidden draft remains available for safe recovery.");
+        }
         const compensated = await compensateHiddenDraft(ports, draft);
         if (!compensated) return failure("CREATE_COMPENSATION_FAILED", "The failed provider draft could not be safely reconciled.");
         return failure("PROVIDER_CREATE_FAILED", "Dropbox Sign could not create the template draft.");
@@ -407,11 +422,12 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
           return failure("PROVIDER_ID_MISMATCH", "Dropbox Sign returned a different template identifier.");
         }
         const session = await ports.provider.getFreshEditUrl(template.providerTemplateId);
+        const clientId = await ports.provider.getEmbeddedClientId();
         return success({
           providerTemplateId: template.providerTemplateId,
           editUrl: session.editUrl,
           expiresAt: session.expiresAt,
-          clientId: ports.provider.embeddedClientId,
+          clientId,
         });
       } catch {
         return failure("EDITOR_SESSION_FAILED", "Dropbox Sign could not open a fresh editor session.");
@@ -550,7 +566,7 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       } catch {
         return failure("TEMPLATE_READ_FAILED", "The template could not be loaded.");
       }
-      if (!source || source.orgId !== access.data.orgId || source.lifecycle !== "finalized" || !source.providerTemplateId) {
+      if (!source || source.orgId !== access.data.orgId || source.lifecycle !== "finalized" || !source.providerTemplateId || !source.providerAccountId) {
         return failure("TEMPLATE_NOT_FOUND", "Only a finalized template can be duplicated.");
       }
       let draft: TemplateDraftRecord;
@@ -561,7 +577,7 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       }
       let duplicate: { providerTemplateId: string; readiness: "ready" | "pending" };
       try {
-        duplicate = await ports.provider.duplicateTemplate({ providerTemplateId: source.providerTemplateId, title: title.data });
+        duplicate = await ports.provider.duplicateTemplate({ providerTemplateId: source.providerTemplateId, expectedProviderAccountId: source.providerAccountId, title: title.data });
       } catch {
         try {
           if (!(await ports.repository.markAbandoned(access.data.orgId, draft.id))) {
@@ -691,8 +707,8 @@ function validateOnePdf(files: readonly TemplateUpload[]): TemplateActionResult<
   if (files.length !== 1) return failure("PDF_COUNT_INVALID", "Choose exactly one PDF.");
   const file = files[0];
   if (file.mimeType !== "application/pdf") return failure("PDF_TYPE_INVALID", "Choose a PDF file.");
-  if (file.size <= 0 || file.size >= ESIGN_TEMPLATE_MAX_PDF_BYTES || file.bytes.byteLength !== file.size) {
-    return failure("PDF_SIZE_INVALID", "The PDF must be non-empty and smaller than 40 MiB.");
+  if (file.size <= 0 || file.size > ESIGN_TEMPLATE_MAX_PDF_BYTES || file.bytes.byteLength !== file.size) {
+    return failure("PDF_SIZE_INVALID", "The PDF must be non-empty and no larger than 40 MiB.");
   }
   const magic = String.fromCharCode(...file.bytes.slice(0, 5));
   if (magic !== "%PDF-") return failure("PDF_MAGIC_INVALID", "The uploaded file is not a valid PDF.");
@@ -701,6 +717,14 @@ function validateOnePdf(files: readonly TemplateUpload[]): TemplateActionResult<
 
 function stagingPath(orgId: string, opaqueId: string): string {
   return `${orgId}/${opaqueId}.pdf`;
+}
+
+function isSafeSourceFilename(filename: string): boolean {
+  return filename === filename.trim()
+    && filename.length >= 1
+    && filename.length <= 255
+    && filename.toLowerCase().endsWith(".pdf")
+    && !/[\\/\u0000-\u001f\u007f]/.test(filename);
 }
 
 function isOrgScopedStagingPath(path: string, orgId: string): boolean {

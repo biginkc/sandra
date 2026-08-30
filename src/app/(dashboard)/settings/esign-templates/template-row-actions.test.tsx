@@ -51,6 +51,12 @@ describe("DuplicateTemplateDialog", () => {
     expect(actions.duplicateTemplate).not.toHaveBeenCalled();
   });
 
+  it("uses the reference max-xl confirmation width", () => {
+    render(<DuplicateTemplateDialog template={template} actions={actions} />);
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate" }));
+    expect(screen.getByRole("dialog")).toHaveClass("sm:max-w-xl");
+  });
+
   it("opens a ready copy immediately", async () => {
     vi.mocked(actions.duplicateTemplate).mockResolvedValue({ ok: true, data: { templateId: "copy-ready", readiness: "ready" } });
     render(<DuplicateTemplateDialog template={template} actions={actions} />);
@@ -170,6 +176,27 @@ describe("versioned Edit", () => {
     render(<TemplateRowActions template={template} actions={actions} />);
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     await waitFor(() => expect(push).toHaveBeenCalledWith("/settings/esign-templates/revision-ready/edit"));
+  });
+});
+
+describe("DeleteTemplateDialog", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("uses a max-xl dialog and destructive tint for recent sends", () => {
+    render(<TemplateRowActions template={{ ...template, recentSendCount30d: 3 }} actions={actions} />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.getByRole("dialog")).toHaveClass("sm:max-w-xl");
+    expect(screen.getByText(/used for 3 contracts in the last 30 days/i)).toHaveClass(
+      "border-destructive/20",
+      "bg-destructive/10",
+      "text-destructive",
+    );
+    expect(screen.getByRole("button", { name: "Delete template" })).toHaveClass(
+      "bg-destructive/10",
+    );
   });
 });
 

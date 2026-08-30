@@ -38,14 +38,31 @@ export async function createFoundationTemplateOrchestrator() {
     },
   };
   const membership = await actorPort.getActor();
-  const credentials = membership ? await getEsignCredentials(membership.orgId) : null;
-  if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
-  const provider = createDropboxSignProvider({
-    apiKey: credentials.apiKey,
-    clientId: credentials.clientId,
-    expectedDomain: configuredDropboxSignEmbeddedDomain(),
-  });
   const admin = createAdminClient();
+  let providerPromise: Promise<{
+    clientId: string;
+    providerAccountId: string;
+    provider: ReturnType<typeof createDropboxSignProvider>;
+  }> | null = null;
+  const providerConnection = () => {
+    if (!providerPromise) {
+      providerPromise = (async () => {
+        if (!membership) throw new Error("AUTH_REQUIRED");
+        const credentials = await getEsignCredentials(membership.orgId);
+        if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+        return {
+          clientId: credentials.clientId,
+          providerAccountId: credentials.providerAccountId,
+          provider: createDropboxSignProvider({
+            apiKey: credentials.apiKey,
+            clientId: credentials.clientId,
+            expectedDomain: configuredDropboxSignEmbeddedDomain(),
+          }),
+        };
+      })();
+    }
+    return providerPromise;
+  };
 
   const repository: TemplateOrchestratorPorts["repository"] = {
     async listFinalized(orgId) {
@@ -230,7 +247,7 @@ export async function createFoundationTemplateOrchestrator() {
     async getTemplate(orgId, templateId) {
       const { data, error } = await admin
         .from("esign_templates")
-        .select("id,org_id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names,staging_source_id,supersedes_template_id,lifecycle_state")
+        .select("id,org_id,name,document_type,sign_template_id,provider_account_id,seller_role,signer_roles,merge_field_names,staging_source_id,supersedes_template_id,lifecycle_state")
         .eq("org_id", orgId)
         .eq("id", templateId)
         .maybeSingle();
@@ -340,8 +357,11 @@ export async function createFoundationTemplateOrchestrator() {
     repository,
     storage,
     provider: {
-      embeddedClientId: credentials.clientId,
+      async getEmbeddedClientId() {
+        return (await providerConnection()).clientId;
+      },
       async createDraft(input) {
+        const { provider } = await providerConnection();
         const session = await provider.createEmbeddedTemplateDraft({
           localTemplateId: input.localTemplateId,
           title: input.title,
@@ -352,22 +372,35 @@ export async function createFoundationTemplateOrchestrator() {
         return { providerTemplateId: session.providerTemplateId };
       },
       async getFreshEditUrl(providerTemplateId) {
+        const { provider } = await providerConnection();
         const session = await provider.getEmbeddedTemplateEditUrl(providerTemplateId);
         return { editUrl: session.editUrl, expiresAt: session.expiresAt };
       },
       async getTemplate(providerTemplateId) {
+        const { provider } = await providerConnection();
         return provider.getTemplate(providerTemplateId);
       },
       async getTemplateFiles(providerTemplateId) {
+        const { provider } = await providerConnection();
         return new Uint8Array(await provider.getTemplateFiles(providerTemplateId));
       },
       async duplicateTemplate(input) {
+        const connection = await providerConnection();
+        if (connection.providerAccountId !== input.expectedProviderAccountId) throw new Error("PROVIDER_ACCOUNT_MISMATCH");
+        const { provider } = connection;
         const bytes = await provider.getTemplateFiles(input.providerTemplateId);
         return provider.duplicateTemplate(input.providerTemplateId, { filename: `${input.title}.pdf`, bytes });
       },
-      deleteTemplate: (providerTemplateId) => provider.deleteTemplate(providerTemplateId),
+      async deleteTemplate(providerTemplateId) {
+        const { provider } = await providerConnection();
+        return provider.deleteTemplate(providerTemplateId);
+      },
       isNotFound(error) {
         return error instanceof ProviderError && error.details?.statusCode === 404;
+      },
+      isAmbiguousMutation(error) {
+        return error instanceof ProviderError
+          && (typeof error.details?.statusCode !== "number" || error.details.statusCode >= 500);
       },
     },
     randomId: randomUUID,
@@ -414,7 +447,7 @@ function optionFromRow(row: {
 function draftFromRow(row: {
   id: string; org_id: string; name: string; document_type: string; sign_template_id: string | null;
   seller_role: string; signer_roles: unknown; merge_field_names: string[]; staging_source_id: string | null;
-  supersedes_template_id?: string | null; lifecycle_state: string;
+  supersedes_template_id?: string | null; lifecycle_state: string; provider_account_id?: string | null;
 }): TemplateDraftRecord {
   if (!["preparing", "editing", "finalized", "abandoned", "deleted", "error"].includes(row.lifecycle_state)) throw new Error("invalid template lifecycle");
   return {
@@ -423,6 +456,7 @@ function draftFromRow(row: {
     name: row.name,
     documentType: row.document_type,
     providerTemplateId: row.sign_template_id,
+    providerAccountId: row.provider_account_id ?? null,
     sellerRoleName: row.seller_role,
     signerRoles: signerRoles(row.signer_roles),
     mergeFieldNames: row.merge_field_names,

@@ -42,7 +42,7 @@ function PendingTemplateCopyRow({
   copy,
   actions,
 }: {
-  copy: { id: string; name: string; lifecycle: "preparing" | "editing" | "cleanup_attention"; kind?: "copy" | "edit_revision" };
+  copy: { id: string; name: string; lifecycle: "preparing" | "editing" | "cleanup_attention" | "provider_attention"; kind?: "copy" | "edit_revision" | "source_cleanup" | "provider_create"; providerCreateState?: "claimed" | "invoking" | "unknown" | "attached" };
   actions?: TemplateLibraryActions;
 }) {
   const router = useRouter();
@@ -90,19 +90,30 @@ function PendingTemplateCopyRow({
 
   const retryCleanup = () => actions && !routedRef.current && !readinessPromiseRef.current && startTransition(async () => {
     setError(null);
-    const result = await actions.retryCleanup(copy.id);
+    const result = copy.kind === "source_cleanup" && actions.retrySourceCleanup
+      ? await actions.retrySourceCleanup(copy.id)
+      : await actions.retryCleanup(copy.id);
     if (!result.ok) return setError(result.error.message);
     router.refresh();
   });
 
   const cleanupAttention = copy.lifecycle === "cleanup_attention";
+  const providerAttention = copy.lifecycle === "provider_attention";
   const preparingMessage = copy.kind === "edit_revision" ? "Edit revision is still preparing" : "Copy is still preparing";
 
   return (
     <div className="bg-muted/30 flex flex-col gap-3 rounded-lg border px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
       <div>
         <p className="font-medium">{copy.name}</p>
-        <p className="text-muted-foreground text-sm">{cleanupAttention ? "Cleanup needs attention" : preparingMessage}</p>
+        <p className="text-muted-foreground text-sm">{cleanupAttention ? "Cleanup needs attention" : providerAttention ? "Provider setup needs attention" : preparingMessage}</p>
+        {providerAttention && copy.providerCreateState && (
+          <p className="text-muted-foreground mt-1 text-sm">
+            {copy.providerCreateState === "claimed" && "Provider creation is safely claimed. Reload this page later; Sandra will not start a second provider template."}
+            {copy.providerCreateState === "invoking" && "Dropbox Sign may have created this template. Do not retry creation. Contact an administrator for provider recovery."}
+            {copy.providerCreateState === "unknown" && "Dropbox Sign creation is uncertain. Contact an administrator for provider recovery."}
+            {copy.providerCreateState === "attached" && "Provider setup is attached. Continue to finish setup."}
+          </p>
+        )}
         {error && <p role="alert" className={error === preparingMessage ? "text-muted-foreground mt-1 text-sm" : "text-destructive mt-1 text-sm"}>{error}</p>}
       </div>
       <div className="flex gap-2">
@@ -110,6 +121,25 @@ function PendingTemplateCopyRow({
           <Button size="sm" variant="outline" onClick={retryCleanup} disabled={!actions || isPending}>
             <RefreshCwIcon data-icon="inline-start" /> {isPending ? "Retrying…" : "Retry cleanup"}
           </Button>
+        ) : providerAttention ? (
+          copy.providerCreateState === "claimed" ? (
+            <Button size="sm" variant="outline" onClick={() => router.refresh()} disabled={isPending || routed}>
+              <RefreshCwIcon data-icon="inline-start" /> Reload
+            </Button>
+          ) : copy.providerCreateState === "attached" ? (
+            <Button size="sm" variant="outline" onClick={() => {
+              if (routedRef.current) return;
+              routedRef.current = true;
+              setRouted(true);
+              router.push(`/settings/esign-templates/${copy.id}/edit`);
+            }} disabled={routed}>
+              Continue setup
+            </Button>
+          ) : (
+            <Button size="sm" variant="outline" onClick={() => router.refresh()} disabled={isPending || routed}>
+              <RefreshCwIcon data-icon="inline-start" /> Reload
+            </Button>
+          )
         ) : <>
           <Button size="sm" variant="outline" onClick={() => void reload()} disabled={!actions || isPending || checkingReadiness || routed}>
             <RefreshCwIcon data-icon="inline-start" /> {checkingReadiness ? "Checking…" : "Reload"}

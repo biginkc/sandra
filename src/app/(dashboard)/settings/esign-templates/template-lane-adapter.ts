@@ -3,6 +3,7 @@ import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { createFoundationTemplateOrchestrator } from "@/lib/esign/template-foundation-adapter";
+import { createInitialTemplateRuntime } from "@/lib/esign/template-initial-runtime";
 
 import type {
   TemplateEditorData,
@@ -29,9 +30,16 @@ export async function loadPendingTemplateCopies(): Promise<PendingTemplateCopies
     if (!membership || membership.role !== "owner") {
       return { ok: false, error: { code: "OWNER_REQUIRED", message: "Only an organization owner can manage eSign templates." } };
     }
-    const result = await (await createFoundationTemplateOrchestrator()).listPendingCopies();
+    const [result, recoveries] = await Promise.all([
+      (await createFoundationTemplateOrchestrator()).listPendingCopies(),
+      (await createInitialTemplateRuntime()).listRecoveries(),
+    ]);
     if (!result.ok) return result;
-    return { ok: true, data: result.data.map(({ id, name, lifecycle, kind }) => ({ id, name, lifecycle, kind })) };
+    if (!recoveries.ok) return recoveries;
+    return { ok: true, data: [
+      ...result.data.map(({ id, name, lifecycle, kind }) => ({ id, name, lifecycle, kind })),
+      ...recoveries.data,
+    ] };
   } catch {
     return { ok: false, error: { code: "PENDING_COPY_LIST_FAILED", message: "Pending template copies could not be loaded." } };
   }

@@ -57,6 +57,17 @@ describe("EmbeddedTemplateEditor", () => {
     const container = screen.getByTestId("embedded-template-container");
     expect(container.className).toContain("min-h-[520px]");
     expect(container.className).toContain("w-full");
+    const editor = screen.getByRole("region", { name: "Dropbox Sign template editor" });
+    const fileStrip = screen.getByText("offer.pdf");
+    const legend = screen.getByRole("heading", { name: "Sandra merge fields" });
+    expect(editor).toContainElement(fileStrip);
+    expect(editor).toContainElement(container);
+    expect(editor).toContainElement(legend);
+    expect(fileStrip.compareDocumentPosition(container) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.compareDocumentPosition(legend) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    for (const field of ["seller_name", "property_address", "offer_price", "closing_date", "earnest_money"]) {
+      expect(screen.getByText(field)).toBeVisible();
+    }
     const save = screen.getByRole("button", { name: "Save template" });
     expect(save).toBeDisabled();
     await waitFor(() => expect(client.open).toHaveBeenCalled());

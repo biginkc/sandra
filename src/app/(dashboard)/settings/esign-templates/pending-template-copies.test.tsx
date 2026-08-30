@@ -35,6 +35,7 @@ function makeActions(): TemplateLibraryActions {
     checkEditorReadiness: vi.fn().mockResolvedValue({ ok: true, data: { readiness: "pending" } }),
     abandonDraft: vi.fn().mockResolvedValue({ ok: true, data: null }),
     retryCleanup: vi.fn().mockResolvedValue({ ok: true, data: null }),
+    retrySourceCleanup: vi.fn().mockResolvedValue({ ok: true, data: null }),
     deleteTemplate: vi.fn(),
   };
 }
@@ -96,7 +97,9 @@ describe("PendingTemplateCopies", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Dropbox Sign could not remove the draft."));
     expect(refresh).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    const retryCancel = screen.getByRole("button", { name: "Cancel" });
+    await waitFor(() => expect(retryCancel).toBeEnabled());
+    fireEvent.click(retryCancel);
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
     expect(actions.abandonDraft).toHaveBeenCalledTimes(2);
   });
@@ -141,9 +144,47 @@ describe("PendingTemplateCopies", () => {
     expect(screen.getByText("Cleanup needs attention")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Retry cleanup" }));
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("still requires attention"));
-    fireEvent.click(screen.getByRole("button", { name: "Retry cleanup" }));
+    const retry = await screen.findByRole("button", { name: "Retry cleanup" });
+    await waitFor(() => expect(retry).toBeEnabled());
+    fireEvent.click(retry);
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
     expect(actions.abandonDraft).not.toHaveBeenCalled();
+  });
+
+  it("routes unattached reservation cleanup through the source cleanup action", async () => {
+    const actions = makeActions();
+    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "source-1", name: "offer.pdf", lifecycle: "cleanup_attention", kind: "source_cleanup" }] }} actions={actions} />);
+    fireEvent.click(screen.getByRole("button", { name: "Retry cleanup" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    expect(actions.retrySourceCleanup).toHaveBeenCalledWith("source-1");
+    expect(actions.retryCleanup).not.toHaveBeenCalled();
+  });
+
+  it("keeps a claimed provider create non-reinvokable and offers only a page reload", () => {
+    const actions = makeActions();
+    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "claimed" }] }} actions={actions} />);
+    expect(screen.getByText("Provider setup needs attention")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Reload" }));
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(push).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry cleanup" })).not.toBeInTheDocument();
+  });
+
+  it.each(["invoking", "unknown"] as const)("keeps %s recovery out of the normal provider-ID UI", (providerCreateState) => {
+    const actions = makeActions();
+    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState }] }} actions={actions} />);
+    expect(screen.getByText(/Contact an administrator for provider recovery/)).toBeVisible();
+    expect(screen.queryByPlaceholderText("Provider template ID")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Reload" }));
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it("continues an attached unfinished draft without invoking provider recovery", () => {
+    const actions = makeActions();
+    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "attached" }] }} actions={actions} />);
+    fireEvent.click(screen.getByRole("button", { name: "Continue setup" }));
+    expect(push).toHaveBeenCalledWith("/settings/esign-templates/template-1/edit");
   });
 });
 

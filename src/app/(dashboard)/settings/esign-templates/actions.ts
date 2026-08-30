@@ -4,9 +4,10 @@ import { revalidatePath } from "next/cache";
 
 import { reportError } from "@/lib/errors/report";
 import { createFoundationTemplateOrchestrator } from "@/lib/esign/template-foundation-adapter";
+import { createInitialTemplateRuntime } from "@/lib/esign/template-initial-runtime";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 
-import type { CreateTemplateDraftInput, TemplateLaneResult } from "./types";
+import type { CreateTemplateDraftActionInput, PreparedTemplateUpload, PrepareTemplateUploadInput, TemplateLaneResult } from "./types";
 import type { TemplateOption } from "@/lib/esign/contracts";
 
 const SAFE_FAILURE = {
@@ -26,27 +27,33 @@ async function run<T>(surface: string, operation: (orchestrator: Awaited<ReturnT
   }
 }
 
-export async function createTemplateDraftAction(input: CreateTemplateDraftInput): Promise<TemplateLaneResult<{ templateId: string }>> {
-  return run("esign_template_create", async (orchestrator) => {
-    const bytes = new Uint8Array(await input.source.file.arrayBuffer());
-    const staged = await orchestrator.stageSource([{
-      filename: input.source.file.name,
-      mimeType: input.source.file.type || "application/pdf",
-      size: input.source.file.size,
-      bytes,
-    }]);
-    if (!staged.ok) return staged;
-    const result = await orchestrator.add({
-      stagingSourceId: staged.data.stagingSourceId,
+export async function prepareTemplateUploadAction(input: PrepareTemplateUploadInput): Promise<TemplateLaneResult<PreparedTemplateUpload>> {
+  try {
+    const membership = (await getCallerMemberships())[0];
+    if (!membership) return { ok: false, error: { code: "AUTH_REQUIRED", message: "Sign in to manage eSign templates." } };
+    if (membership.role !== "owner") return { ok: false, error: { code: "OWNER_REQUIRED", message: "Only an organization owner can manage eSign templates." } };
+    return await (await createInitialTemplateRuntime()).prepare(input);
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_template_prepare_upload" } });
+    return { ok: false, error: SAFE_FAILURE };
+  }
+}
+
+export async function createTemplateDraftAction(input: CreateTemplateDraftActionInput): Promise<TemplateLaneResult<{ templateId: string }>> {
+  try {
+    const result = await (await createInitialTemplateRuntime()).create({
+      source: input.source,
       name: input.name,
       documentType: input.documentType,
       signerRoles: input.signerRoles,
       sellerRoleName: input.sellerRoleName,
-      mergeFieldNames: input.mergeFieldNames,
     });
     if (result.ok) revalidatePath("/settings/esign-templates");
     return result;
-  });
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_template_create" } });
+    return { ok: false, error: SAFE_FAILURE };
+  }
 }
 
 export async function startTemplateEditorAction(templateId: string) {
@@ -88,6 +95,39 @@ export async function retryTemplateSourceCleanupAction(templateId: string): Prom
     if (result.ok) revalidatePath("/settings/esign-templates");
     return result;
   });
+}
+
+export async function retryUnattachedTemplateSourceCleanupAction(sourceId: string): Promise<TemplateLaneResult<null>> {
+  try {
+    const result = await (await createInitialTemplateRuntime()).cleanupSource(sourceId);
+    if (result.ok) revalidatePath("/settings/esign-templates");
+    return result;
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_template_unattached_cleanup" } });
+    return { ok: false, error: SAFE_FAILURE };
+  }
+}
+
+export async function reconcileUnknownTemplateProviderAction(templateId: string, providerTemplateId: string): Promise<TemplateLaneResult<{ templateId: string }>> {
+  try {
+    const result = await (await createInitialTemplateRuntime()).reconcileUnknown(templateId, providerTemplateId);
+    if (result.ok) revalidatePath("/settings/esign-templates");
+    return result;
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_template_provider_reconcile" } });
+    return { ok: false, error: SAFE_FAILURE };
+  }
+}
+
+export async function promoteStaleInitialTemplateProviderCreateAction(templateId: string): Promise<TemplateLaneResult<{ templateId: string; providerCreateState: "unknown" | "attached" }>> {
+  try {
+    const result = await (await createInitialTemplateRuntime()).promoteStaleProviderCreate(templateId);
+    if (result.ok) revalidatePath("/settings/esign-templates");
+    return result;
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_template_provider_promote_stale" } });
+    return { ok: false, error: SAFE_FAILURE };
+  }
 }
 
 export async function duplicateTemplateAction(templateId: string, name: string): Promise<TemplateLaneResult<{ templateId: string; readiness: "ready" | "pending" }>> {

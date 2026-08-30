@@ -41,7 +41,9 @@ describe("TemplateLibrary", () => {
 
   it("renders the dedicated empty state", () => {
     render(<TemplateLibrary result={{ ok: true, data: [] }} />);
-    expect(screen.getByText("No eSign templates yet")).toBeVisible();
+    expect(screen.getByText("No templates yet")).toBeVisible();
+    expect(screen.getByText(/Every send after that is two clicks from a lead/)).toBeVisible();
+    expect(screen.getByText("PDF up to 40 MB · or pick a file from Dropbox")).toBeVisible();
   });
 
   it("sorts provider roles by order and warns before deleting recent usage", () => {

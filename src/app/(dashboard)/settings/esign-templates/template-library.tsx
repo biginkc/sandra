@@ -69,21 +69,21 @@ export function TemplateLibrary({
   if (result.data.length === 0) {
     return (
       <DataTableShell>
-        <div className="flex min-h-72 flex-col items-center justify-center gap-4 px-6 py-14 text-center">
-          <div className="bg-muted text-muted-foreground flex size-12 items-center justify-center rounded-full">
-            <FileSignatureIcon aria-hidden />
-          </div>
+        <div className="flex min-h-72 flex-col items-center justify-center gap-3 px-8 py-14 text-center">
           <div className="space-y-1">
-            <h2 className="font-medium">No eSign templates yet</h2>
-            <p className="text-muted-foreground max-w-md text-sm">
-              Add a PDF, define every required signer role, then place fields in
-              the Dropbox Sign editor.
+            <h2 className="font-semibold">No templates yet</h2>
+            <p className="text-muted-foreground max-w-md text-sm leading-relaxed">
+              Upload a contract PDF and place the signature, initials, date, and
+              merge fields once. Every send after that is two clicks from a lead.
             </p>
           </div>
           <AddTemplateDialog
             actions={resolvedActions}
             disabledReason={resolvedActions ? undefined : "Template actions are not connected yet."}
           />
+          <p className="text-muted-foreground font-mono text-[11px]">
+            PDF up to 40 MB · or pick a file from Dropbox
+          </p>
         </div>
       </DataTableShell>
     );
