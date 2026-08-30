@@ -146,6 +146,40 @@ describe("ContractsCard", () => {
 });
 
 describe("ContractActions", () => {
+  it("does not offer dead actions for a delivered lifecycle error", async () => {
+    const user = userEvent.setup();
+    render(
+      <ContractActions
+        contract={contract({ status: "error", deliveryState: "sent" })}
+        actions={actionHandlers()}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Purchase agreement" }),
+    );
+    expect(screen.queryByText("Send reminder")).not.toBeInTheDocument();
+    expect(screen.queryByText("Void contract")).not.toBeInTheDocument();
+    expect(screen.queryByText("Retry send")).not.toBeInTheDocument();
+    expect(screen.getByText("View in Dropbox Sign")).toBeInTheDocument();
+  });
+
+  it("offers retry only for a failed delivery", async () => {
+    const user = userEvent.setup();
+    render(
+      <ContractActions
+        contract={contract({ status: "error", deliveryState: "failed" })}
+        actions={actionHandlers()}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Purchase agreement" }),
+    );
+    expect(screen.getByText("Retry send")).toBeInTheDocument();
+    expect(screen.queryByText("Send reminder")).not.toBeInTheDocument();
+    expect(screen.queryByText("Void contract")).not.toBeInTheDocument();
+  });
+
   it("downloads only through the injected authorized file action", async () => {
     const user = userEvent.setup();
     const actions = actionHandlers();

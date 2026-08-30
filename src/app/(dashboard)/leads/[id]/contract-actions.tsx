@@ -52,15 +52,16 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
   );
 
   const delivered = contract.deliveryState === "sent";
-  const terminal = ["signed", "declined", "voided"].includes(contract.status);
+  const terminal = ["signed", "declined", "voided", "error"].includes(
+    contract.status,
+  );
   const canRemind =
     delivered &&
     !terminal &&
     !contract.voidRequestedAt &&
     Boolean(reminderTarget);
   const canVoid = delivered && !terminal && !contract.voidRequestedAt;
-  const canRetry =
-    contract.deliveryState === "failed" || contract.status === "error";
+  const canRetry = contract.deliveryState === "failed";
   const canDownload = Boolean(contract.signedPdfFileId);
   const hasAnyAction =
     contract.detailsAvailable ||

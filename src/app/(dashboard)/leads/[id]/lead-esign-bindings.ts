@@ -267,7 +267,8 @@ async function claimSend(input: Parameters<EsignActionRepository["claimSend"]>[0
   if (!row) throw new Error("Missing send claim result.");
   if (row.outcome === "intent_conflict") return { outcome: "intent_conflict" };
   if (row.outcome === "blocked") {
-    if (row.blocker_code === "RETRY_NOT_ELIGIBLE") return { outcome: "retry_ineligible" };
+    const safeOutcome = mapAtomicSendBlocker(row.blocker_code);
+    if (safeOutcome) return safeOutcome;
     const blocker: SendBlockerCode = row.blocker_code === "MISSING_HOMEOWNER_EMAIL" ? "owner_email_missing" : row.blocker_code === "FINALIZED_TEMPLATE_NOT_FOUND" ? "no_templates" : "sending_disabled";
     return { outcome: "blocked", blocker };
   }
@@ -275,6 +276,17 @@ async function claimSend(input: Parameters<EsignActionRepository["claimSend"]>[0
   const request = await loadRequest(input.actor.orgId, row.id);
   if (!request) throw new Error("Claimed request not found.");
   return { outcome: row.outcome === "created" ? "created" : "existing", request };
+}
+
+export function mapAtomicSendBlocker(
+  blockerCode: string | null,
+): SendClaim | null {
+  if (blockerCode === "RETRY_NOT_ELIGIBLE")
+    return { outcome: "retry_ineligible" };
+  if (blockerCode === "ACTIVE_MEMBERSHIP_REQUIRED")
+    return { outcome: "authorization_changed" };
+  if (blockerCode === "PROPERTY_NOT_FOUND") return { outcome: "not_found" };
+  return null;
 }
 
 async function loadRequest(orgId: string, requestId: string): Promise<EsignRequestRecord | null> {

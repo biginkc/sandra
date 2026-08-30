@@ -243,6 +243,25 @@ describe("lead eSign action orchestration", () => {
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      outcome: "authorization_changed" as const,
+      code: "AUTHORIZATION_CHANGED",
+    },
+    { outcome: "not_found" as const, code: "NOT_FOUND" },
+  ])("returns a safe $code result for an atomic $outcome claim", async ({ outcome, code }) => {
+    const h = harness();
+    h.repository.claimSend.mockResolvedValue({ outcome });
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({ ok: false, error: { code } });
+    expect(JSON.stringify(result)).not.toMatch(
+      /seller@example\.com|123 Main|provider-template|property-private/i,
+    );
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
   it("rejects a cross-org or mismatched send claim before provider dispatch", async () => {
     const h = harness();
     h.repository.claimSend.mockResolvedValue({
@@ -536,6 +555,12 @@ describe("lead eSign action orchestration", () => {
       ok: false,
       error: { code: "REMINDER_INELIGIBLE" },
     });
+    expect(h.repository.releaseReminder).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      signerId: "signature-1",
+      claimToken: "reminder-claim-1",
+    });
     expect(h.provider.remind).not.toHaveBeenCalled();
   });
 
@@ -570,6 +595,12 @@ describe("lead eSign action orchestration", () => {
       error: { code: "REMINDER_INELIGIBLE" },
     });
     expect(JSON.stringify(result)).not.toMatch(/private|example\.com/);
+    expect(h.repository.releaseReminder).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      signerId: "signature-1",
+      claimToken: "reminder-claim-1",
+    });
     expect(h.provider.remind).not.toHaveBeenCalled();
   });
 
@@ -612,6 +643,36 @@ describe("lead eSign action orchestration", () => {
     expect(await h.core.void({ requestId: "request-1" })).toMatchObject({
       ok: false,
       error: { code: "VOID_INELIGIBLE" },
+    });
+    expect(h.repository.releaseVoid).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      claimToken: "void-claim-1",
+    });
+    expect(h.provider.cancel).not.toHaveBeenCalled();
+  });
+
+  it("preserves the ineligible result when a defensive release loses its lease", async () => {
+    const h = harness();
+    h.repository.claimVoid.mockResolvedValue({
+      outcome: "eligible",
+      claimToken: "void-claim-lost",
+      request: request({
+        deliveryState: "sent",
+        providerRequestId: "provider-request-1",
+        status: "signed",
+      }),
+    });
+    h.repository.releaseVoid.mockResolvedValue("lease_lost");
+
+    expect(await h.core.void({ requestId: "request-1" })).toMatchObject({
+      ok: false,
+      error: { code: "VOID_INELIGIBLE" },
+    });
+    expect(h.repository.releaseVoid).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      claimToken: "void-claim-lost",
     });
     expect(h.provider.cancel).not.toHaveBeenCalled();
   });

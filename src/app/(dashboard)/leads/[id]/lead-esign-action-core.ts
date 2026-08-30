@@ -98,6 +98,8 @@ export type SendClaim =
   | Readonly<{ outcome: "existing"; request: EsignRequestRecord }>
   | Readonly<{ outcome: "blocked"; blocker: SendBlockerCode }>
   | Readonly<{ outcome: "intent_conflict" }>
+  | Readonly<{ outcome: "authorization_changed" }>
+  | Readonly<{ outcome: "not_found" }>
   | Readonly<{ outcome: "retry_ineligible" }>;
 
 export type EsignActionRepository = Readonly<{
@@ -324,6 +326,13 @@ async function send(
     fail("RETRY_INELIGIBLE", "Only failed contracts can be retried.");
   if (claim.outcome === "intent_conflict")
     fail("SEND_INTENT_CONFLICT", "This send key was already used for different contract details.");
+  if (claim.outcome === "authorization_changed")
+    fail(
+      "AUTHORIZATION_CHANGED",
+      "Your organization access changed. Sign in again and retry.",
+    );
+  if (claim.outcome === "not_found")
+    fail("NOT_FOUND", "Lead not found. Refresh and try again.");
   if (claim.outcome === "existing")
     return resolveExistingIntent(claim.request, payloadHash, actor.orgId);
   assertClaimedRequest(
@@ -460,6 +469,13 @@ async function remind(
       (!Number.isFinite(lastRemindedAt) ||
         now.getTime() - lastRemindedAt < REMINDER_COOLDOWN_MS))
   ) {
+    await releaseReminder(
+      dependencies,
+      actor.orgId,
+      request.id,
+      input.signerId,
+      claim.candidate.claimToken,
+    );
     fail("REMINDER_INELIGIBLE", "This signer cannot be reminded.");
   }
   const provider = await dependencies.providerForOrg(actor.orgId);
@@ -515,6 +531,12 @@ async function requestVoid(
     request.voidRequestedAt ||
     !["awaiting", "viewed"].includes(request.status)
   ) {
+    await releaseVoid(
+      dependencies,
+      actor.orgId,
+      request.id,
+      claim.claimToken,
+    );
     fail("VOID_INELIGIBLE", "This contract cannot be voided.");
   }
   const provider = await dependencies.providerForOrg(actor.orgId);
@@ -786,7 +808,17 @@ async function releaseReminder(
   signerId: string,
   claimToken: string,
 ): Promise<void> {
-  await dependencies.repository.releaseReminder({ orgId, requestId, signerId, claimToken });
+  try {
+    await dependencies.repository.releaseReminder({
+      orgId,
+      requestId,
+      signerId,
+      claimToken,
+    });
+  } catch {
+    // The original safe action result remains authoritative. The SQL lease is
+    // token-fenced and expires server-side if this best-effort release fails.
+  }
 }
 
 async function releaseVoid(
@@ -795,7 +827,15 @@ async function releaseVoid(
   requestId: string,
   claimToken: string,
 ): Promise<void> {
-  await dependencies.repository.releaseVoid({ orgId, requestId, claimToken });
+  try {
+    await dependencies.repository.releaseVoid({
+      orgId,
+      requestId,
+      claimToken,
+    });
+  } catch {
+    // Do not replace the original safe action result with repository details.
+  }
 }
 
 async function requireActor(
