@@ -1033,6 +1033,7 @@ function CallControlDock({
             variant={muted ? "default" : "outline"}
             size="sm"
             aria-pressed={muted}
+            disabled={callStatus !== "live"}
             data-testid="coach-mute"
             onClick={onMute}
           >

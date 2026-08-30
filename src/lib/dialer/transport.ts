@@ -24,6 +24,8 @@ export type CallTransportState =
   | "hold_reload_required"
   | "hold_sync_pending"
   | "resume_sync_pending"
+  | "hold_sync_confirmed"
+  | "resume_sync_confirmed"
   | "hold_restored"
   | "ended"
   | "failed"
@@ -44,7 +46,10 @@ export interface CallTransport {
    * wrap-up can keep the provisioned call's identity.
    */
   callHandle?(): CallHandle | null;
-  mute(on: boolean): void;
+  /** True only after exact provider evidence retired the remote leg. */
+  terminalIsAuthoritative?(): boolean;
+  /** Applies mute only when the provider acknowledges the control. */
+  mute(on: boolean): Promise<boolean>;
   hold(on: boolean): Promise<boolean>;
   /** Rebuilds only the browser audio/signaling path; never ends the provider call. */
   reconnectAudio(): Promise<boolean>;
@@ -100,8 +105,9 @@ export class SimulatedCallTransport implements CallTransport {
     return { id: `sim-${crypto.randomUUID()}` };
   }
 
-  mute(on: boolean): void {
+  async mute(on: boolean): Promise<boolean> {
     void on;
+    return true;
   }
 
   async hold(on: boolean): Promise<boolean> {

@@ -28,6 +28,7 @@ import {
   type JitterAudioHealthResponse,
   type JitterAudioHealthSample,
   type JitterConnectPhase,
+  type JitterConnectResponse,
   type JitterCallerIdsResponse,
   type JitterProxyError,
   type JitterProxyResult,
@@ -398,7 +399,7 @@ export async function recoverAuthenticatedJitterAudio(
 export async function connectAuthenticatedJitterCall(
   callCapability: unknown,
   phase: unknown,
-): Promise<JitterProxyResult<{ dialing: true }>> {
+): Promise<JitterProxyResult<JitterConnectResponse>> {
   if (!isConnectPhase(phase))
     return invalidInput("Invalid Jitter connect phase.");
   const operator = await authenticatedOperator();

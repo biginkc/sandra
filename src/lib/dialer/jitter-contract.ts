@@ -54,6 +54,17 @@ export type JitterProviderStatusResponse = {
 };
 
 export type JitterConnectPhase = "registered" | "accepted";
+export type JitterOperatorAttachIdentity = {
+  provider_id: "telnyx";
+  operator_provider_call_control_id: string;
+  operator_call_operation_id: string;
+  run_id: string;
+  request_generation: string;
+};
+export type JitterConnectResponse = {
+  dialing: true;
+  operator_attach_identity?: JitterOperatorAttachIdentity;
+};
 export type JitterCancelReason = "hangup" | "failed" | "abandoned";
 
 export type JitterAudioHealthSample = {
@@ -310,7 +321,7 @@ export function requestJitterConnect(
   callId: string,
   phase: JitterConnectPhase,
   fetchImpl?: typeof fetch,
-): Promise<JitterProxyResult<{ dialing: true }>> {
+): Promise<JitterProxyResult<JitterConnectResponse>> {
   return requestJitterSoftphone({
     path: JITTER_SOFTPHONE_PATHS.connect,
     body: { call_id: callId, phase },
@@ -438,8 +449,16 @@ function isProviderStatusResponse(value: unknown): value is JitterProviderStatus
     (value.outcome === "ended" || value.outcome === "failed");
 }
 
-function isConnectResponse(value: unknown): value is { dialing: true } {
-  return isObject(value) && value.dialing === true;
+function isConnectResponse(value: unknown): value is JitterConnectResponse {
+  if (!isObject(value) || value.dialing !== true) return false;
+  const identity = value.operator_attach_identity;
+  if (identity === undefined) return true;
+  return isObject(identity) &&
+    identity.provider_id === "telnyx" &&
+    Boolean(stringValue(identity.operator_provider_call_control_id)) &&
+    Boolean(stringValue(identity.operator_call_operation_id)) &&
+    Boolean(stringValue(identity.run_id)) &&
+    stringValue(identity.request_generation) === stringValue(identity.operator_call_operation_id);
 }
 
 function isAudioHealthResponse(

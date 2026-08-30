@@ -76,7 +76,11 @@ export function useOptionalSoftphone(): SoftphoneContextValue | null {
   return useContext(SoftphoneContext);
 }
 
-type Props = { children: ReactNode };
+type Props = {
+  children: ReactNode;
+  /** Non-shipping acceptance injection; production always uses the default. */
+  transportFactory?: () => CallTransport;
+};
 
 const TEARDOWN_WARNING = "Jitter could not confirm that the call ended. Do not start another call yet; automatic cleanup is still pending.";
 const AUDIO_RECONNECT_WARNING = "The homeowner call is still live, but browser audio needs to reconnect.";
@@ -143,7 +147,7 @@ function callbackWallTime(kind: "today_pm" | "tomorrow_am"): { date: string; tim
   return { date: nextDate, time: kind === "today_pm" ? "14:00" : "09:00", timeZone: "America/Chicago" };
 }
 
-export function SoftphoneProvider({ children }: Props) {
+export function SoftphoneProvider({ children, transportFactory = createSoftphoneCallTransport }: Props) {
   const [phone, setPhone] = useState<SoftphoneState>("closed");
   const [target, setTarget] = useState<SoftphoneTarget | null>(null);
   const [dialInput, setDialInput] = useState("");
@@ -367,10 +371,13 @@ export function SoftphoneProvider({ children }: Props) {
     if (!callingEnabled || !isJitterTransportEnabled() || transportRef.current) return;
     const retained = readRetainedActiveCall();
     if (!retained) return;
-    const transport = createSoftphoneCallTransport();
+    const transport = transportFactory();
     if (!transport.recover) return;
     transportRef.current = transport;
     callHandleRef.current = retained.handle;
+    // Retained-call hydration is an intentional one-shot state restore from
+    // durable browser storage, not an effect-derived state feedback loop.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setTarget(retained.target);
     setStartedAt(retained.startedAt);
     setWrapToken(retained.wrapToken);
@@ -388,11 +395,15 @@ export function SoftphoneProvider({ children }: Props) {
       if (status === "hold_reapply_failed") {
         heldRef.current = false;
         setHeld(false);
+        transition({ type: "resume" });
+        showToast("Hold could not be restored after audio recovery. The call is still live.");
         return;
       }
       if (status === "resume_reapply_failed") {
         heldRef.current = true;
         setHeld(true);
+        transition({ type: "hold" });
+        showToast("Resume could not be restored after audio recovery. The call is still on hold.");
         return;
       }
       if (status === "hold_reload_required") {
@@ -400,9 +411,20 @@ export function SoftphoneProvider({ children }: Props) {
         return;
       }
       if (status === "hold_sync_pending" || status === "resume_sync_pending") {
+        const providerHeld = status === "hold_sync_pending";
+        heldRef.current = providerHeld;
+        setHeld(providerHeld);
+        transition(providerHeld ? { type: "hold" } : { type: "resume" });
+        holdPendingRef.current = false;
+        setHoldPending(false);
         showToast(status === "hold_sync_pending"
           ? "The call is held, but Jitter has not confirmed the hold yet."
           : "The call resumed, but Jitter has not confirmed audio monitoring yet.");
+        return;
+      }
+      if (status === "hold_sync_confirmed" || status === "resume_sync_confirmed") {
+        holdPendingRef.current = false;
+        setHoldPending(false);
         return;
       }
       if (status === "live" || status === "audio_reconnecting" || status === "audio_reconnect_required") {
@@ -418,7 +440,7 @@ export function SoftphoneProvider({ children }: Props) {
       }
     });
     void transport.recover(retained.handle, retained.startedAt);
-  }, [callingEnabled]);
+  }, [callingEnabled, showToast, transition, transportFactory]);
 
   const startTarget = useCallback(async (
     prepare: () => Promise<{ ok: true; data: SoftphoneTarget } | { ok: false; error: string }>,
@@ -523,10 +545,23 @@ export function SoftphoneProvider({ children }: Props) {
     const callToken = startIntent?.callToken ?? crypto.randomUUID();
     const intentCapability = startIntent?.intentCapability;
     setWrapToken(callToken);
-    const transport = createSoftphoneCallTransport();
+    const transport = transportFactory();
     transportRef.current = transport;
     let terminalPromise: Promise<void> | null = null;
     let terminalFailureMessage = "The call failed. Add a note to log the outcome.";
+    const persistCurrentHandle = () => {
+      if (terminalHandledRef.current || attemptGenerationRef.current !== myAttempt) return;
+      const handle = transport.callHandle?.();
+      if (!handle) return;
+      callHandleRef.current = handle;
+      retainActiveCall({
+        handle,
+        target: result.data,
+        startedAt: result.data.startedAt,
+        wrapToken: callToken,
+      });
+      setCoachCallId(callToken);
+    };
     const finishTerminal = (kind: "ended" | "failed") => {
       if (terminalPromise) return terminalPromise;
       terminalHandledRef.current = true;
@@ -537,7 +572,9 @@ export function SoftphoneProvider({ children }: Props) {
       setCoachCallId(null);
       terminalPromise = (async () => {
         forgetRetainedActiveCall();
-        const terminalResult = await transport.hangup();
+        const terminalResult = transport.terminalIsAuthoritative?.()
+          ? { durationSeconds: Math.max(0, Math.floor((Date.now() - Date.parse(result.data.startedAt)) / 1000)), outcome: kind === "ended" ? "connected_human" as const : "failed" as const }
+          : await transport.hangup();
         setCallOutcome(kind === "failed" ? "failed" : terminalResult.outcome);
         setFinalSeconds(terminalResult.durationSeconds);
         setWrapToken((value) => value ?? crypto.randomUUID());
@@ -557,6 +594,7 @@ export function SoftphoneProvider({ children }: Props) {
       return terminalPromise;
     };
     transport.onStateChange((status) => {
+      if (status === "ringing" || status === "live") persistCurrentHandle();
       if (status === "teardown_unconfirmed") {
         teardownWarningRef.current = true;
         setTeardownUnconfirmed(true);
@@ -646,9 +684,20 @@ export function SoftphoneProvider({ children }: Props) {
         return;
       }
       if (status === "hold_sync_pending" || status === "resume_sync_pending") {
+        const providerHeld = status === "hold_sync_pending";
+        heldRef.current = providerHeld;
+        setHeld(providerHeld);
+        transition(providerHeld ? { type: "hold" } : { type: "resume" });
+        holdPendingRef.current = false;
+        setHoldPending(false);
         showToast(status === "hold_sync_pending"
           ? "The call is held, but Jitter has not confirmed the hold yet."
           : "The call resumed, but Jitter has not confirmed audio monitoring yet.");
+        return;
+      }
+      if (status === "hold_sync_confirmed" || status === "resume_sync_confirmed") {
+        holdPendingRef.current = false;
+        setHoldPending(false);
         return;
       }
       setCallStatus(status);
@@ -707,7 +756,7 @@ export function SoftphoneProvider({ children }: Props) {
         : "The call failed. Add a note to log the outcome.";
       if (!terminalHandledRef.current) await finishTerminal("failed");
     }
-  }, [callingEnabled, loadCallerIds, showToast, transition]);
+  }, [callingEnabled, loadCallerIds, showToast, transition, transportFactory]);
 
   const openLead = useCallback((lead: SoftphoneLead) => {
     if (!callingEnabled || startInFlightRef.current) return;
@@ -855,6 +904,10 @@ export function SoftphoneProvider({ children }: Props) {
           : "Resume failed. The call is still on hold.",
       );
     }
+    // Provider control has settled even when the separate durable health
+    // acknowledgement is missing. Sync truth remains visible via the
+    // hold_sync_pending/resume_sync_pending warning, but the rep must retain
+    // manual Hold/Resume, keypad (when active), and Hang Up control.
     holdPendingRef.current = false;
     setHoldPending(false);
   }, [callStatus, showToast, transition]);
@@ -865,6 +918,15 @@ export function SoftphoneProvider({ children }: Props) {
     const started = await transport.reconnectAudio();
     if (!started) showToast("Browser audio could not reconnect. The call is still live; try again or hang up manually.");
   }, [callStatus, showToast]);
+
+  const toggleMute = useCallback(async () => {
+    const transport = transportRef.current;
+    if (!transport || callStatus !== "live") return;
+    const next = !muted;
+    const changed = await transport.mute(next);
+    if (changed) setMuted(next);
+    else showToast(next ? "Mute failed. The homeowner can still hear you." : "Unmute failed. You are still muted.");
+  }, [callStatus, muted, showToast]);
 
   const contextValue = useMemo(() => ({
     openLead,
@@ -888,7 +950,7 @@ export function SoftphoneProvider({ children }: Props) {
             held={held}
             holdPending={holdPending}
             onDigit={sendLiveDigit}
-            onMute={() => { setMuted((value) => !value); transportRef.current?.mute(!muted); }}
+            onMute={() => { void toggleMute(); }}
             onHold={() => { void toggleHold(); }}
             onHangup={hangup}
             onReconnectAudio={() => { void reconnectAudio(); }}
@@ -930,7 +992,7 @@ export function SoftphoneProvider({ children }: Props) {
             ) : phone === "preparing" ? (
               <PreparingView target={target} />
             ) : isOnCall ? (
-              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} holdPending={holdPending} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { setMuted((value) => !value); transportRef.current?.mute(!muted); }} onHold={() => { void toggleHold(); }} onReconnectAudio={() => { void reconnectAudio(); }} onHangup={hangup} coachAvailable={coachUiEnabled} onReopenCoach={() => setCoachCollapsed(false)} />
+              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} holdPending={holdPending} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { void toggleMute(); }} onHold={() => { void toggleHold(); }} onReconnectAudio={() => { void reconnectAudio(); }} onHangup={hangup} coachAvailable={coachUiEnabled} onReopenCoach={() => setCoachCollapsed(false)} />
             ) : (
               <WrapView target={target} finalSeconds={finalSeconds} notes={notes} setNotes={setNotes} callbackOpen={callbackOpen} setCallbackOpen={setCallbackOpen} callbackTime={callbackTime} setCallbackTime={setCallbackTime} pending={pending} error={error} teardownUnconfirmed={teardownUnconfirmed} onRetryTeardown={() => { void retryTeardown(); }} onDisposition={(disposition) => {
                 const config = SOFTPHONE_DISPOSITIONS.find((item) => item.value === disposition);

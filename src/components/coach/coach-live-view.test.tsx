@@ -185,6 +185,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getByLabelText("Live transcript")).toBeVisible();
     expect(screen.getByTestId("current-section-script")).toBeVisible();
     expect(screen.getByTestId("coach-hangup")).toBeEnabled();
+    expect(screen.getByTestId("coach-mute")).toBeDisabled();
     expect(screen.getByTestId("coach-warning-hangup")).toHaveTextContent("Hang Up");
     expect(onHangup).not.toHaveBeenCalled();
 
@@ -207,6 +208,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getByTestId("coach-audio-reconnect-warning")).toHaveTextContent("Call live · reconnecting browser audio…");
     expect(screen.getByTestId("coach-reconnect-audio")).toBeVisible();
     expect(screen.getByTestId("coach-reconnect-audio")).toBeDisabled();
+    expect(screen.getByTestId("coach-mute")).toBeDisabled();
     expect(screen.getByLabelText("Live transcript")).toBeVisible();
     expect(screen.getByTestId("current-section-script")).toBeVisible();
 
