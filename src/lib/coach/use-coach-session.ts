@@ -58,7 +58,6 @@ function withPreparedTargetFallbacks(
 }
 
 function preparedTargetErrorContext(
-  propertyId: string | null,
   sellerPhoneE164: string | null,
   repPhoneE164: string | null,
   preparedTarget: PreparedCoachTarget | null,
@@ -68,9 +67,10 @@ function preparedTargetErrorContext(
     propertyAddress: preparedTarget?.propertyAddress?.trim() || null,
     propertyCounty: null,
     repName: preparedTarget?.repName?.trim() || null,
+    authenticatedRepName: null,
     repPhoneE164,
     motivation: null,
-    leadId: propertyId,
+    leadId: null,
     sellerPhoneE164,
     coldCallerName: null,
     yearBuilt: null,
@@ -103,7 +103,6 @@ export function useCoachSession(
   const [contextLoad, setContextLoad] = useState<ContextLoadState>(() => ({
     status: "loading",
     context: preparedTargetErrorContext(
-      propertyId,
       sellerPhoneE164,
       repPhoneE164,
       preparedTarget,
@@ -130,7 +129,6 @@ export function useCoachSession(
     setContextLoad({
       status: "loading",
       context: preparedTargetErrorContext(
-        propertyId,
         sellerPhoneE164,
         repPhoneE164,
         preparedTarget,
@@ -159,7 +157,6 @@ export function useCoachSession(
           setContextLoad({
             status: "error",
             context: preparedTargetErrorContext(
-              propertyId,
               sellerPhoneE164,
               repPhoneE164,
               preparedTarget,

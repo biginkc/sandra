@@ -139,8 +139,6 @@ export type ClosrScript = {
   file_number_rule: {
     format: string;
     note: string;
-    fallback_if_county_missing: string;
-    fallback_if_lead_id_missing_but_county_present: string;
   };
   phases: ScriptPhase[];
   objections: ScriptObjection[];
