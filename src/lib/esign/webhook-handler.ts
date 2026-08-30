@@ -8,6 +8,7 @@ import {
   type DropboxSignReplayData,
 } from "./dropbox-callback";
 import type {
+  ActiveReceiptClaim,
   DropboxSignEventAuthenticator,
   EsignWebhookDependencies,
 } from "./ports";
@@ -60,7 +61,7 @@ export async function handleDropboxSignWebhook(input: {
   pathSecret: string;
   dependencies: EsignWebhookDependencies;
 }): Promise<Response> {
-  let receiptId: string | null = null;
+  let activeClaim: ActiveReceiptClaim | null = null;
   try {
     const identity = await resolveCallbackIdentity(
       input.pathSecret,
@@ -85,11 +86,11 @@ export async function handleDropboxSignWebhook(input: {
     if (claim.outcome === "in_progress") {
       return plainResponse("Callback processing is in progress", 503);
     }
-    receiptId = claim.receiptId;
+    activeClaim = claim;
 
     if (replay.signRequestId === null) {
       await input.dependencies.persistence.markReceiptIgnored(
-        receiptId,
+        activeClaim,
         "CALLBACK_WITHOUT_REQUEST",
       );
       return acknowledgement();
@@ -107,29 +108,30 @@ export async function handleDropboxSignWebhook(input: {
     const decision = reduceEsignStatus(request.status, normalized);
     if (normalized.requestedStatus === null && !normalized.artifactReady) {
       await input.dependencies.persistence.markReceiptIgnored(
-        receiptId,
+        activeClaim,
         "AUDIT_ONLY_EVENT",
       );
       return acknowledgement();
     }
 
-    if (decision.changed) {
+    let authoritativeStatus = request.status;
+    if (normalized.requestedStatus !== null) {
       const transition = await input.dependencies.persistence.applyStatusDecision({
         orgId: identity.orgId,
         requestId: request.id,
         propertyId: request.propertyId,
-        receiptId,
+        claim: activeClaim,
         decision,
+        requestedStatus: normalized.requestedStatus,
         providerEventAt: providerEventDate(replay),
+        templateTitle: request.templateTitle,
       });
-      if (transition === "stale") {
-        throw new SafeWebhookProcessingError("STALE_STATUS_CLAIM", 503);
-      }
+      authoritativeStatus = transition.status;
     }
 
     if (
       normalized.artifactReady &&
-      decision.nextStatus === "signed" &&
+      authoritativeStatus === "signed" &&
       request.signedPdfPath === null
     ) {
       const pdf = await input.dependencies.pdfProvider.downloadSignedPdf(
@@ -146,19 +148,20 @@ export async function handleDropboxSignWebhook(input: {
         orgId: identity.orgId,
         propertyId: request.propertyId,
         requestId: request.id,
-        receiptId,
+        claim: activeClaim,
+        templateTitle: request.templateTitle,
         pdf,
         artifact,
       });
     }
 
-    await input.dependencies.persistence.markReceiptProcessed(receiptId);
+    await input.dependencies.persistence.markReceiptProcessed(activeClaim);
     return acknowledgement();
   } catch (error) {
     const safe = safeProcessingFailure(error);
-    if (receiptId !== null) {
+    if (activeClaim !== null) {
       try {
-        await input.dependencies.persistence.markReceiptFailed(receiptId, safe.code);
+        await input.dependencies.persistence.markReceiptFailed(activeClaim, safe.code);
       } catch {
         // The provider must receive a retryable response even if failure marking fails.
       }

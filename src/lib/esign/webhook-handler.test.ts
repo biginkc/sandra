@@ -16,6 +16,11 @@ const ORG_ID = "11111111-1111-4111-8111-111111111111";
 const PROPERTY_ID = "22222222-2222-4222-8222-222222222222";
 const REQUEST_ID = "33333333-3333-4333-8333-333333333333";
 const CONSUMER_ID = "44444444-4444-4444-8444-444444444444";
+const CLAIM = {
+  outcome: "claimed" as const,
+  receiptId: "receipt-1",
+  leaseId: "lease-1",
+};
 
 function callbackRequest(input: {
   eventType?: string;
@@ -61,8 +66,7 @@ function dependencies(
 ): EsignWebhookDependencies {
   const persistence: EsignWebhookDependencies["persistence"] = {
     claimVerifiedReceipt: vi.fn(async () => ({
-      outcome: "claimed" as const,
-      receiptId: "receipt-1",
+      ...CLAIM,
     })),
     findRequest: vi.fn(async () => ({
       id: REQUEST_ID,
@@ -70,8 +74,12 @@ function dependencies(
       propertyId: PROPERTY_ID,
       status: "awaiting" as const,
       signedPdfPath: null,
+      templateTitle: "Purchase Agreement",
     })),
-    applyStatusDecision: vi.fn(async () => "updated" as const),
+    applyStatusDecision: vi.fn(async ({ decision }) => ({
+      outcome: "applied" as const,
+      status: decision.nextStatus,
+    })),
     markReceiptProcessed: vi.fn(async () => undefined),
     markReceiptIgnored: vi.fn(async () => undefined),
     markReceiptFailed: vi.fn(async () => undefined),
@@ -95,7 +103,7 @@ function dependencies(
     },
     artifactPersistence: {
       storeLinkAndRecordReady: vi.fn(async () => ({
-        outcome: "created" as const,
+        outcome: "applied" as const,
         leadFileId: "lead-file-1",
       })),
     },
@@ -124,7 +132,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
         orgId: ORG_ID,
         requestId: REQUEST_ID,
         propertyId: PROPERTY_ID,
-        receiptId: "receipt-1",
+        claim: CLAIM,
         decision: expect.objectContaining({
           previousStatus: "awaiting",
           nextStatus: "viewed",
@@ -132,7 +140,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
         }),
       }),
     );
-    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith("receipt-1");
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
   });
 
   it("rejects an invalid event hash before claiming a receipt", async () => {
@@ -175,7 +183,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
     expect(response.status).toBe(200);
     expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
     expect(deps.persistence.markReceiptIgnored).toHaveBeenCalledWith(
-      "receipt-1",
+      CLAIM,
       "AUDIT_ONLY_EVENT",
     );
   });
@@ -207,7 +215,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
       }),
     );
     expect(deps.persistence.markReceiptFailed).toHaveBeenCalledWith(
-      "receipt-1",
+      CLAIM,
       "UNEXPECTED_PROCESSING_ERROR",
     );
   });
@@ -226,7 +234,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
         orgId: ORG_ID,
         propertyId: PROPERTY_ID,
         requestId: REQUEST_ID,
-        receiptId: "receipt-1",
+        claim: CLAIM,
         artifact: expect.objectContaining({
           storageBucket: "lead-files",
           storagePath: `${ORG_ID}/${PROPERTY_ID}/esign/${REQUEST_ID}/signed.pdf`,
@@ -259,6 +267,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
       propertyId: PROPERTY_ID,
       status: "declined",
       signedPdfPath: null,
+      templateTitle: "Purchase Agreement",
     });
     const response = await handleDropboxSignWebhook({
       request: callbackRequest({ eventType: "signature_request_downloadable" }),
@@ -269,6 +278,6 @@ describe("injectable Dropbox Sign webhook handler", () => {
     expect(response.status).toBe(200);
     expect(deps.pdfProvider.downloadSignedPdf).not.toHaveBeenCalled();
     expect(deps.artifactPersistence.storeLinkAndRecordReady).not.toHaveBeenCalled();
-    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith("receipt-1");
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
   });
 });

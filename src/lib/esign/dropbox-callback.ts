@@ -4,6 +4,7 @@ const MAX_CALLBACK_JSON_BYTES = 1_000_000;
 const MAX_PROVIDER_IDENTIFIER_LENGTH = 256;
 
 export type DropboxSignReplayData = {
+  payloadHash: string;
   eventTime: string;
   eventType: string;
   eventHash: string;
@@ -61,11 +62,17 @@ export function parseDropboxSignCallbackFormData(
   } catch {
     throw new DropboxCallbackValidationError("INVALID_JSON");
   }
-  return validateDropboxSignCallbackEvent(payload);
+  return validateDropboxSignCallbackEvent(
+    payload,
+    createHash("sha256").update(rawJson, "utf8").digest("hex"),
+  );
 }
 
 export function validateDropboxSignCallbackEvent(
   payload: unknown,
+  payloadHash = createHash("sha256")
+    .update(JSON.stringify(payload), "utf8")
+    .digest("hex"),
 ): DropboxSignReplayData {
   if (!isRecord(payload) || !isRecord(payload.event)) {
     throw new DropboxCallbackValidationError("INVALID_EVENT");
@@ -78,6 +85,7 @@ export function validateDropboxSignCallbackEvent(
   const metadata = optionalRecord(payload.event.event_metadata);
 
   return {
+    payloadHash,
     eventTime,
     eventType,
     eventHash,

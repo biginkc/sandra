@@ -11,9 +11,16 @@ export type VerifiedReceiptInput = {
 };
 
 export type ReceiptClaimResult =
-  | { outcome: "claimed"; receiptId: string }
+  | { outcome: "claimed"; receiptId: string; leaseId: string }
   | { outcome: "already_processed"; receiptId: string }
   | { outcome: "in_progress"; receiptId: string };
+
+export type ActiveReceiptClaim = Extract<ReceiptClaimResult, { outcome: "claimed" }>;
+
+export type ApplyStatusDecisionResult = {
+  outcome: "applied" | "no_change" | "terminal_ignored";
+  status: EsignStatus;
+};
 
 export interface EsignCallbackSecretResolver {
   resolvePathSecretHash(secretHash: string): Promise<{
@@ -41,18 +48,27 @@ export interface EsignWebhookPersistence {
     propertyId: string;
     status: EsignStatus;
     signedPdfPath: string | null;
+    templateTitle: string;
   } | null>;
   applyStatusDecision(input: {
     orgId: string;
     requestId: string;
     propertyId: string;
-    receiptId: string;
+    claim: ActiveReceiptClaim;
     decision: EsignStatusDecision;
+    requestedStatus: EsignStatus;
     providerEventAt: Date;
-  }): Promise<"updated" | "stale">;
-  markReceiptProcessed(receiptId: string): Promise<void>;
-  markReceiptIgnored(receiptId: string, safeReasonCode: string): Promise<void>;
-  markReceiptFailed(receiptId: string, safeErrorCode: string): Promise<void>;
+    templateTitle: string;
+  }): Promise<ApplyStatusDecisionResult>;
+  markReceiptProcessed(claim: ActiveReceiptClaim): Promise<void>;
+  markReceiptIgnored(
+    claim: ActiveReceiptClaim,
+    safeReasonCode: string,
+  ): Promise<void>;
+  markReceiptFailed(
+    claim: ActiveReceiptClaim,
+    safeErrorCode: string,
+  ): Promise<void>;
 }
 
 export interface DropboxSignedPdfProvider {
@@ -65,10 +81,22 @@ export interface SignedPdfArtifactPersistence {
     orgId: string;
     propertyId: string;
     requestId: string;
-    receiptId: string;
+    claim: ActiveReceiptClaim;
+    templateTitle: string;
     pdf: Buffer;
     artifact: SignedPdfArtifact;
-  }): Promise<{ outcome: "created" | "already_linked"; leadFileId: string }>;
+  }): Promise<{ outcome: "applied" | "already_linked"; leadFileId: string }>;
+}
+
+/** Database-only half of artifact persistence; object upload remains separate. */
+export interface SignedPdfArtifactLinkPersistence {
+  linkSignedArtifact(input: {
+    orgId: string;
+    requestId: string;
+    claim: ActiveReceiptClaim;
+    templateTitle: string;
+    artifact: SignedPdfArtifact;
+  }): Promise<{ outcome: "applied" | "already_linked"; leadFileId: string }>;
 }
 
 export type EsignWebhookDependencies = {

@@ -16,6 +16,7 @@ function replay(overrides: Partial<DropboxSignReplayData> = {}): DropboxSignRepl
   const eventTime = overrides.eventTime ?? "1788054000";
   const eventType = overrides.eventType ?? "signature_request_viewed";
   return {
+    payloadHash: "f".repeat(64),
     eventTime,
     eventType,
     eventHash:
@@ -50,7 +51,9 @@ function callbackForm(event: DropboxSignReplayData): FormData {
 describe("Dropbox Sign callback parsing and authenticity", () => {
   it("parses the multipart json field into PII-minimal replay data", () => {
     const event = replay();
-    expect(parseDropboxSignCallbackFormData(callbackForm(event))).toEqual(event);
+    const parsed = parseDropboxSignCallbackFormData(callbackForm(event));
+    expect(parsed).toEqual({ ...event, payloadHash: parsed.payloadHash });
+    expect(parsed.payloadHash).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("verifies the documented HMAC input and rejects an invalid hash", () => {
