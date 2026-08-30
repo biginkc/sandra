@@ -111,14 +111,29 @@ async function integrationOwnsActiveConsumer(
   client: AdminClient,
   input: { orgId: string; callbackConsumerId: string },
 ): Promise<boolean> {
-  const { data, error } = await client
-    .from("org_esign_integrations")
-    .select("org_id")
-    .eq("org_id", input.orgId)
-    .eq("callback_consumer_id", input.callbackConsumerId)
-    .maybeSingle();
-  if (error) throw new SafeEsignServerError("INTEGRATION_LOOKUP_FAILED");
-  return data?.org_id === input.orgId;
+  const [integration, consumer] = await Promise.all([
+    client
+      .from("org_esign_integrations")
+      .select("org_id")
+      .eq("org_id", input.orgId)
+      .eq("callback_consumer_id", input.callbackConsumerId)
+      .maybeSingle(),
+    client
+      .from("webhook_consumers")
+      .select("id, org_id")
+      .eq("id", input.callbackConsumerId)
+      .eq("org_id", input.orgId)
+      .eq("consumer_type", "esign_provider")
+      .eq("enabled", true)
+      .is("revoked_at", null)
+      .maybeSingle(),
+  ]);
+  if (integration.error || consumer.error) {
+    throw new SafeEsignServerError("INTEGRATION_LOOKUP_FAILED");
+  }
+  return integration.data?.org_id === input.orgId &&
+    consumer.data?.id === input.callbackConsumerId &&
+    consumer.data.org_id === input.orgId;
 }
 
 function isExistingObjectError(error: unknown): boolean {

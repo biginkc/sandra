@@ -19,11 +19,11 @@ export const MAX_ESIGN_TEMPLATE_TITLE_CODE_UNITS = 160;
 export function buildEsignMaterialEventPayload(
   templateTitle: string,
 ): EsignMaterialEventPayload {
-  const title = templateTitle.trim();
-  if (title.length < 1 || title.length > MAX_ESIGN_TEMPLATE_TITLE_CODE_UNITS) {
-    throw new EsignMaterialEventValidationError();
-  }
-  return { template_title: title };
+  // The value came from the canonical database request/template lookup and the
+  // foundation RPC compares it exactly. Never normalize it here: current rows
+  // are already normalized, while Session 03 validates historical malformed
+  // values and renders its literal safe fallback without exposing them.
+  return { template_title: templateTitle };
 }
 
 export function materialEventTypeForStatus(
@@ -42,14 +42,5 @@ export function materialEventTypeForStatus(
       return ESIGN_MATERIAL_EVENT_TYPES.VOIDED;
     case "error":
       return null;
-  }
-}
-
-export class EsignMaterialEventValidationError extends Error {
-  readonly code = "INVALID_TEMPLATE_TITLE";
-
-  constructor() {
-    super("The eSign template title is invalid.");
-    this.name = "EsignMaterialEventValidationError";
   }
 }

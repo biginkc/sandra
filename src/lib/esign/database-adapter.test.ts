@@ -170,7 +170,7 @@ describe("typed eSign webhook database adapter", () => {
         decision: VIEWED_DECISION,
         requestedStatus: "viewed",
         providerEventAt: new Date("2026-08-29T23:00:00.000Z"),
-        templateTitle: "  Purchase Agreement  ",
+        templateTitle: "Purchase Agreement",
       });
 
       expect(result.outcome).toBe(outcome);
@@ -227,6 +227,93 @@ describe("typed eSign webhook database adapter", () => {
       p_lead_event_type: "esign_signed_pdf_ready",
       p_lead_event_payload: { template_title: "Purchase Agreement" },
     });
+    expect(Object.keys(rpc.mock.calls[0][1])).not.toContain("p_actor_id");
+    expect(Object.keys(rpc.mock.calls[0][1])).not.toContain("p_actor_type");
+  });
+
+  it("allows status convergence with a blank historical title via the presentation fallback payload", async () => {
+    const { client, rpc } = clientWith(() => [{ outcome: "applied", status: "viewed" }]);
+    const adapter = createEsignWebhookDatabaseAdapter(client);
+
+    await expect(adapter.applyStatusDecision({
+      orgId: ORG_ID,
+      requestId: REQUEST_ID,
+      propertyId: PROPERTY_ID,
+      claim: CLAIM,
+      decision: VIEWED_DECISION,
+      requestedStatus: "viewed",
+      providerEventAt: new Date("2026-08-29T23:00:00.000Z"),
+      templateTitle: "   ",
+    })).resolves.toEqual({ outcome: "applied", status: "viewed" });
+
+    expect(rpc).toHaveBeenCalledWith(
+      "apply_esign_webhook_status_decision",
+      expect.objectContaining({
+        p_lead_event_type: "esign_viewed",
+        p_lead_event_payload: { template_title: "   " },
+      }),
+    );
+    expect(Object.keys(rpc.mock.calls[0][1])).not.toContain("p_actor_id");
+    expect(Object.keys(rpc.mock.calls[0][1])).not.toContain("p_actor_type");
+  });
+
+  it("preserves an exact wrapped historical title for status RPC equality and fallback", async () => {
+    const { client, rpc } = clientWith(() => [{ outcome: "applied", status: "viewed" }]);
+    const adapter = createEsignWebhookDatabaseAdapter(client);
+    const historicalTitle = ` ${"a".repeat(159)} `;
+
+    await expect(adapter.applyStatusDecision({
+      orgId: ORG_ID,
+      requestId: REQUEST_ID,
+      propertyId: PROPERTY_ID,
+      claim: CLAIM,
+      decision: VIEWED_DECISION,
+      requestedStatus: "viewed",
+      providerEventAt: new Date("2026-08-29T23:00:00.000Z"),
+      templateTitle: historicalTitle,
+    })).resolves.toEqual({ outcome: "applied", status: "viewed" });
+
+    expect(historicalTitle.length).toBe(161);
+    expect(historicalTitle.trim().length).toBe(159);
+    expect(rpc).toHaveBeenCalledWith(
+      "apply_esign_webhook_status_decision",
+      expect.objectContaining({
+        p_lead_event_type: "esign_viewed",
+        p_lead_event_payload: { template_title: historicalTitle },
+      }),
+    );
+  });
+
+  it("allows downloadable convergence with an overlong historical title via the presentation fallback payload", async () => {
+    const { client, rpc } = clientWith(() => [
+      { outcome: "applied", lead_file_id: RECEIPT_ID },
+    ]);
+    const adapter = createEsignWebhookDatabaseAdapter(client);
+    const historicalTitle = ` ${"a".repeat(159)} `;
+
+    await expect(adapter.linkSignedArtifact({
+      orgId: ORG_ID,
+      requestId: REQUEST_ID,
+      claim: CLAIM,
+      templateTitle: historicalTitle,
+      artifact: {
+        storageBucket: "lead-files",
+        storagePath: `${ORG_ID}/${REQUEST_ID}/${RECEIPT_ID}.pdf`,
+        fileName: "signed-contract.pdf",
+        contentType: "application/pdf",
+        sizeBytes: 8,
+      },
+    })).resolves.toEqual({ outcome: "applied", leadFileId: RECEIPT_ID });
+
+    expect(historicalTitle.length).toBe(161);
+    expect(historicalTitle.trim().length).toBe(159);
+    expect(rpc).toHaveBeenCalledWith(
+      "link_esign_signed_artifact",
+      expect.objectContaining({
+        p_lead_event_type: "esign_signed_pdf_ready",
+        p_lead_event_payload: { template_title: historicalTitle },
+      }),
+    );
     expect(Object.keys(rpc.mock.calls[0][1])).not.toContain("p_actor_id");
     expect(Object.keys(rpc.mock.calls[0][1])).not.toContain("p_actor_type");
   });

@@ -5,6 +5,20 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { createConcreteDropboxSignWebhookDependencies } from "./webhook-server";
 
+const serverMocks = vi.hoisted(() => ({
+  getEsignCredentials: vi.fn(),
+  createDropboxSignProvider: vi.fn(),
+}));
+
+vi.mock("./credentials", () => ({
+  configuredDropboxSignEmbeddedDomain: vi.fn(() => "sandra.test"),
+  getEsignCredentials: serverMocks.getEsignCredentials,
+}));
+
+vi.mock("./dropbox-sign", () => ({
+  createDropboxSignProvider: serverMocks.createDropboxSignProvider,
+}));
+
 const ORG_ID = "11111111-1111-4111-8111-111111111111";
 const CONSUMER_ID = "22222222-2222-4222-8222-222222222222";
 const REQUEST_ID = "33333333-3333-4333-8333-333333333333";
@@ -67,6 +81,71 @@ describe("concrete eSign webhook server binding", () => {
         client,
       ).secretResolver.resolvePathSecretHash("a".repeat(64)),
     ).resolves.toBeNull();
+  });
+
+  it.each(["revoked", "disabled", "wrong-type"])(
+    "does not load HMAC credentials when the consumer becomes %s after secret resolution",
+    async () => {
+      serverMocks.getEsignCredentials.mockClear();
+      const initialConsumer = queryResult({ id: CONSUMER_ID, org_id: ORG_ID });
+      const activeConsumer = queryResult({ id: CONSUMER_ID, org_id: ORG_ID });
+      const inactiveConsumer = queryResult(null);
+      const integration = queryResult({ org_id: ORG_ID });
+      const from = vi.fn()
+        .mockReturnValueOnce(initialConsumer)
+        .mockReturnValueOnce(integration)
+        .mockReturnValueOnce(activeConsumer)
+        .mockReturnValueOnce(integration)
+        .mockReturnValueOnce(inactiveConsumer);
+      const client = {
+        from,
+        rpc: vi.fn(),
+        storage: { from: vi.fn() },
+      } as unknown as AdminClient;
+      const dependencies = createConcreteDropboxSignWebhookDependencies(client);
+
+      const identity = await dependencies.secretResolver.resolvePathSecretHash("a".repeat(64));
+      expect(identity).toEqual({ orgId: ORG_ID, callbackConsumerId: CONSUMER_ID });
+      await expect(dependencies.authenticator.verifyForIntegration({
+        ...identity!,
+        replay: {
+          payloadHash: "a".repeat(64),
+          eventHash: "0".repeat(64),
+          eventTime: "1788054000",
+          eventType: "signature_request_viewed",
+          signRequestId: "provider-request-1",
+          relatedSignatureId: null,
+          reportedForAppId: null,
+        },
+      })).resolves.toBe(false);
+      expect(serverMocks.getEsignCredentials).not.toHaveBeenCalled();
+      expect(inactiveConsumer.eq).toHaveBeenCalledWith("consumer_type", "esign_provider");
+      expect(inactiveConsumer.eq).toHaveBeenCalledWith("enabled", true);
+      expect(inactiveConsumer.is).toHaveBeenCalledWith("revoked_at", null);
+    },
+  );
+
+  it("does not create a provider client when the consumer is revoked after receipt claim", async () => {
+    serverMocks.getEsignCredentials.mockClear();
+    serverMocks.createDropboxSignProvider.mockClear();
+    const inactiveConsumer = queryResult(null);
+    const integration = queryResult({ org_id: ORG_ID });
+    const client = {
+      from: vi.fn()
+        .mockReturnValueOnce(integration)
+        .mockReturnValueOnce(inactiveConsumer),
+      rpc: vi.fn(),
+      storage: { from: vi.fn() },
+    } as unknown as AdminClient;
+    const dependencies = createConcreteDropboxSignWebhookDependencies(client);
+
+    await expect(dependencies.pdfProvider.downloadSignedPdf({
+      orgId: ORG_ID,
+      callbackConsumerId: CONSUMER_ID,
+      signRequestId: "provider-request-1",
+    })).rejects.toThrow("The eSign webhook server operation failed.");
+    expect(serverMocks.getEsignCredentials).not.toHaveBeenCalled();
+    expect(serverMocks.createDropboxSignProvider).not.toHaveBeenCalled();
   });
 
   it("treats an existing opaque PDF object as retry convergence, then links atomically", async () => {

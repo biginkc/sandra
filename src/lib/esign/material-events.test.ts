@@ -18,22 +18,26 @@ describe("eSign material lead-event contract", () => {
     ]);
   });
 
-  it("emits the sole allowlisted payload key with a trimmed title", () => {
+  it("emits the sole allowlisted payload key with the exact canonical title", () => {
     expect(buildEsignMaterialEventPayload("  Purchase Agreement  ")).toEqual({
-      template_title: "Purchase Agreement",
+      template_title: "  Purchase Agreement  ",
     });
   });
 
-  it("enforces the 160 UTF-16 code-unit boundary without truncation", () => {
+  it("preserves malformed historical titles for safe presentation fallback without truncation", () => {
     expect(buildEsignMaterialEventPayload("a".repeat(160))).toEqual({
       template_title: "a".repeat(160),
     });
-    expect(() => buildEsignMaterialEventPayload("a".repeat(161))).toThrow(
-      "The eSign template title is invalid.",
-    );
-    expect(() => buildEsignMaterialEventPayload("😀".repeat(81))).toThrow(
-      "The eSign template title is invalid.",
-    );
+    expect(buildEsignMaterialEventPayload("a".repeat(161))).toEqual({
+      template_title: "a".repeat(161),
+    });
+    expect(buildEsignMaterialEventPayload("😀".repeat(81))).toEqual({
+      template_title: "😀".repeat(81),
+    });
+    expect(buildEsignMaterialEventPayload("   ")).toEqual({ template_title: "   " });
+    const wrapped = ` ${"a".repeat(159)} `;
+    expect(wrapped.length).toBe(161);
+    expect(buildEsignMaterialEventPayload(wrapped)).toEqual({ template_title: wrapped });
   });
 
   it("does not invent a material presentation event for provider errors", () => {
