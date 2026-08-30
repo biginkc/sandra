@@ -21,6 +21,8 @@ import {
   requestJitterDigit,
   requestJitterStartCall,
   requestJitterToken,
+  requestJitterProviderStatus,
+  requestJitterAudioRecovery,
   type JitterCancelResponse,
   type JitterCancelReason,
   type JitterAudioHealthResponse,
@@ -31,6 +33,7 @@ import {
   type JitterProxyResult,
   type JitterStartCallResult,
   type JitterTokenResponse,
+  type JitterProviderStatusResponse,
 } from "./jitter-contract";
 import type { CallTarget } from "./transport";
 
@@ -372,6 +375,26 @@ export async function getAuthenticatedJitterToken(
   return requestJitterToken(callId);
 }
 
+export async function getAuthenticatedJitterProviderStatus(
+  callCapability: unknown,
+): Promise<JitterProxyResult<JitterProviderStatusResponse>> {
+  const operator = await authenticatedOperator();
+  if (!operator.ok) return operator;
+  const callId = openCallCapability(callCapability, operator.userId);
+  if (!callId) return invalidInput("Invalid Jitter call reference.");
+  return requestJitterProviderStatus(callId);
+}
+
+export async function recoverAuthenticatedJitterAudio(
+  callCapability: unknown,
+): Promise<JitterProxyResult<{ recovering: true }>> {
+  const operator = await authenticatedOperator();
+  if (!operator.ok) return operator;
+  const callId = openCallCapability(callCapability, operator.userId);
+  if (!callId) return invalidInput("Invalid Jitter call reference.");
+  return requestJitterAudioRecovery(callId);
+}
+
 export async function connectAuthenticatedJitterCall(
   callCapability: unknown,
   phase: unknown,
@@ -484,6 +507,10 @@ function isAudioHealthSample(value: unknown): value is JitterAudioHealthSample {
     Record<keyof JitterAudioHealthSample, unknown>
   >;
   return (
+    (sample.media_state === undefined ||
+      sample.media_state === "active" ||
+      sample.media_state === "held" ||
+      sample.media_state === "resumed") &&
     validRef(sample.controller_id, 64) &&
     Number.isSafeInteger(sample.peer_connection_generation) &&
     Number(sample.peer_connection_generation) > 0 &&

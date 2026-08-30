@@ -17,6 +17,14 @@ export type CallTransportState =
   | "connecting"
   | "ringing"
   | "live"
+  | "audio_reconnecting"
+  | "audio_reconnect_required"
+  | "hold_reapply_failed"
+  | "resume_reapply_failed"
+  | "hold_reload_required"
+  | "hold_sync_pending"
+  | "resume_sync_pending"
+  | "hold_restored"
   | "ended"
   | "failed"
   | "operator_busy"
@@ -28,6 +36,8 @@ export type CallTransportState =
 
 export interface CallTransport {
   start(target: CallTarget): Promise<CallHandle>;
+  /** Rehydrates a retained connected call capability without provisioning. */
+  recover?(handle: CallHandle, startedAt: string): Promise<CallHandle>;
   /**
    * The server-issued call handle, when one exists — available even if
    * start() later rejects (e.g. RTC setup fails after provisioning), so
@@ -36,6 +46,8 @@ export interface CallTransport {
   callHandle?(): CallHandle | null;
   mute(on: boolean): void;
   hold(on: boolean): Promise<boolean>;
+  /** Rebuilds only the browser audio/signaling path; never ends the provider call. */
+  reconnectAudio(): Promise<boolean>;
   /** Sends one live in-band menu/extension digit without changing call state. */
   sendDigit(digit: DtmfDigit): Promise<boolean>;
   hangup(): Promise<CallResult>;
@@ -95,6 +107,10 @@ export class SimulatedCallTransport implements CallTransport {
   async hold(on: boolean): Promise<boolean> {
     void on;
     return true;
+  }
+
+  async reconnectAudio(): Promise<boolean> {
+    return !this.ended && this.liveAt !== null;
   }
 
   async sendDigit(digit: DtmfDigit): Promise<boolean> {

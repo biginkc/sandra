@@ -7,6 +7,8 @@ export const JITTER_SOFTPHONE_PATHS = {
   callerIds: "/api/internal/sandra/softphone/caller-ids",
   startCall: "/api/internal/sandra/softphone/start-call",
   token: "/api/internal/sandra/softphone/token",
+  status: "/api/internal/sandra/softphone/status",
+  recover: "/api/internal/sandra/softphone/recover",
   connect: "/api/internal/sandra/softphone/connect",
   audioHealth: "/api/internal/sandra/softphone/audio-health",
   digit: "/api/internal/sandra/softphone/digit",
@@ -43,13 +45,20 @@ export type JitterTokenResponse = {
   rtc_token: string;
   sip_identity: string;
   expires_at: string;
+  capabilities?: { audio_health_media_state?: "v1" };
+};
+
+export type JitterProviderStatusResponse = {
+  state: "active" | "terminal" | "unknown";
+  outcome?: "ended" | "failed";
 };
 
 export type JitterConnectPhase = "registered" | "accepted";
 export type JitterCancelReason = "hangup" | "failed" | "abandoned";
 
 export type JitterAudioHealthSample = {
-  media_state: "active" | "held" | "resumed";
+  /** Omitted only by already-open legacy Sandra bundles during rolling deploys. */
+  media_state?: "active" | "held" | "resumed";
   controller_id: string;
   peer_connection_generation: number;
   sample_sequence: number;
@@ -271,6 +280,32 @@ export function requestJitterToken(
   });
 }
 
+export function requestJitterProviderStatus(
+  callId: string,
+  fetchImpl?: typeof fetch,
+): Promise<JitterProxyResult<JitterProviderStatusResponse>> {
+  const path = `${JITTER_SOFTPHONE_PATHS.status}?call_id=${encodeURIComponent(callId)}`;
+  return requestJitterSoftphone({
+    path,
+    method: "GET",
+    validate: isProviderStatusResponse,
+    fetchImpl,
+  });
+}
+
+export function requestJitterAudioRecovery(
+  callId: string,
+  fetchImpl?: typeof fetch,
+): Promise<JitterProxyResult<{ recovering: true }>> {
+  return requestJitterSoftphone({
+    path: JITTER_SOFTPHONE_PATHS.recover,
+    body: { call_id: callId },
+    validate: (value): value is { recovering: true } =>
+      isObject(value) && value.recovering === true,
+    fetchImpl,
+  });
+}
+
 export function requestJitterConnect(
   callId: string,
   phase: JitterConnectPhase,
@@ -387,8 +422,20 @@ function isTokenResponse(value: unknown): value is JitterTokenResponse {
       stringValue(value.sip_identity) &&
       stringValue(value.expires_at),
     ) &&
-    Number.isFinite(Date.parse(String(value.expires_at)))
+    Number.isFinite(Date.parse(String(value.expires_at))) &&
+    (value.capabilities === undefined ||
+      (isObject(value.capabilities) &&
+        (value.capabilities.audio_health_media_state === undefined ||
+          value.capabilities.audio_health_media_state === "v1")))
   );
+}
+
+function isProviderStatusResponse(value: unknown): value is JitterProviderStatusResponse {
+  if (!isObject(value)) return false;
+  if (value.state === "active" || value.state === "unknown")
+    return value.outcome === undefined;
+  return value.state === "terminal" &&
+    (value.outcome === "ended" || value.outcome === "failed");
 }
 
 function isConnectResponse(value: unknown): value is { dialing: true } {

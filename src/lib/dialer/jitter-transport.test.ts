@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   JitterCallTransport,
   mapTelnyxCallState,
+  telnyxRtcClientOptions,
   type JitterTransportDependencies,
 } from "./jitter-transport";
 import type {
@@ -39,6 +40,7 @@ class FakeRtcClient {
   readonly handlers = new Map<string, Array<(...args: unknown[]) => void>>();
   readonly connect = vi.fn(async () => this.emit("telnyx.ready"));
   readonly disconnect = vi.fn(async () => undefined);
+  readonly socketDisconnect = vi.fn(() => this.emit("telnyx.socket.close"));
   readonly login = vi.fn(async () => undefined);
 
   on(eventName: string, handler: (...args: unknown[]) => void): this {
@@ -68,6 +70,27 @@ class FakeCall {
   readonly unhold = vi.fn<() => Promise<unknown>>(async () => undefined);
 }
 
+function attachConnectedPeer(call: FakeCall): void {
+  let packetsReceived = 0;
+  (call as FakeCall & { peer: { instance: RTCPeerConnection } }).peer = {
+    instance: {
+      connectionState: "connected",
+      getReceivers: vi.fn(() => [{
+        track: { kind: "audio", readyState: "live", enabled: true },
+      }]),
+      getStats: vi.fn(async () => {
+        packetsReceived += 1;
+        return new Map([["audio", {
+          type: "inbound-rtp",
+          kind: "audio",
+          packetsReceived,
+          bytesReceived: packetsReceived * 160,
+        }]]);
+      }),
+    } as unknown as RTCPeerConnection,
+  };
+}
+
 function transportHarness(
   overrides: Partial<JitterTransportDependencies> = {},
 ) {
@@ -87,7 +110,16 @@ function transportHarness(
         rtc_token: "rtc-token-1",
         sip_identity: "operator-1",
         expires_at: "2026-08-21T20:05:00.000Z",
+        capabilities: { audio_health_media_state: "v1" as const },
       },
+    })),
+    getProviderStatus: vi.fn(async () => ({
+      ok: true as const,
+      data: { state: "active" as const },
+    })),
+    recoverAudio: vi.fn(async () => ({
+      ok: true as const,
+      data: { recovering: true as const },
     })),
     connect: vi.fn(async () => ({
       ok: true as const,
@@ -221,14 +253,12 @@ describe("JitterCallTransport", () => {
     await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(1));
 
     await expect(harness.transport.hold(true)).resolves.toBe(true);
-    scheduled?.();
     await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(2));
     expect(reportAudioHealth.mock.calls[1]?.[1]).toEqual(
       expect.objectContaining({ media_state: "held" }),
     );
 
     await expect(harness.transport.hold(false)).resolves.toBe(true);
-    scheduled?.();
     await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(3));
     expect(reportAudioHealth.mock.calls[2]?.[1]).toEqual(
       expect.objectContaining({ media_state: "resumed" }),
@@ -240,7 +270,7 @@ describe("JitterCallTransport", () => {
     );
   });
 
-  it("retries the resume baseline after a lost or unaccepted response", async () => {
+  it("replays the resume baseline after the server commits but the response is lost", async () => {
     let scheduled: (() => void) | undefined;
     const reportAudioHealth = vi
       .fn(async (
@@ -258,10 +288,7 @@ describe("JitterCallTransport", () => {
         ok: true as const,
         data: { accepted: true, status: "healthy" as const },
       })
-      .mockResolvedValueOnce({
-        ok: true as const,
-        data: { accepted: false, status: "monitoring" as const },
-      });
+      .mockRejectedValueOnce(new Error("resume response lost after commit"));
     const harness = transportHarness({
       reportAudioHealth,
       scheduleAudioHealth(handler) {
@@ -284,11 +311,9 @@ describe("JitterCallTransport", () => {
     harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
     await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(1));
     await expect(harness.transport.hold(true)).resolves.toBe(true);
-    scheduled?.();
     await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(2));
     await expect(harness.transport.hold(false)).resolves.toBe(true);
 
-    scheduled?.();
     await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(3));
     expect(reportAudioHealth.mock.calls[2]?.[1]).toEqual(
       expect.objectContaining({ media_state: "resumed" }),
@@ -358,7 +383,7 @@ describe("JitterCallTransport", () => {
       scheduled?.();
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(reportAudioHealth).toHaveBeenCalledTimes(2);
+      expect(reportAudioHealth.mock.calls.length).toBeGreaterThanOrEqual(2);
       expect(reportAudioHealth.mock.calls[1]?.[1]).toEqual(
         expect.objectContaining({ sample_sequence: 2 }),
       );
@@ -435,6 +460,68 @@ describe("JitterCallTransport", () => {
     );
     expect(harness.rtc.disconnect).toHaveBeenCalledTimes(1);
     expect(states).toEqual(["connecting", "ringing", "live", "ended"]);
+  });
+
+  it("retains a call that becomes live while the registered-connect response is lost", async () => {
+    let rejectRegistered!: (error: Error) => void;
+    const registered = new Promise<JitterProxyResult<{ dialing: true }>>(
+      (_resolve, reject) => {
+        rejectRegistered = reject;
+      },
+    );
+    const connect = vi.fn(
+      async (_callId: string, phase: "registered" | "accepted") => {
+        if (phase === "registered") return registered;
+        return { ok: true as const, data: { dialing: true as const } };
+      },
+    );
+    const harness = transportHarness({ connect });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+
+    const started = harness.transport.start(target({ propertyId: "property-1" }));
+    for (let attempt = 0; attempt < 20 && connect.mock.calls.length === 0; attempt += 1) {
+      await flush();
+    }
+    expect(connect).toHaveBeenCalledWith("call-1", "registered");
+    const call = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+
+    rejectRegistered(new Error("registered connect response lost"));
+    await expect(started).resolves.toEqual({ id: "call-1" });
+    await flush();
+
+    expect(states).toContain("live");
+    expect(states.at(-1)).toBe("audio_reconnect_required");
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect(call.hangup).not.toHaveBeenCalled();
+  });
+
+  it("treats a late answer rejection after live as recoverable", async () => {
+    let rejectAnswer!: (error: Error) => void;
+    const answer = new Promise<undefined>((_resolve, reject) => {
+      rejectAnswer = reject;
+    });
+    const harness = transportHarness();
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await harness.transport.start(target({ propertyId: "property-1" }));
+    const call = new FakeCall();
+    call.answer.mockImplementationOnce(() => answer);
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    await flush();
+
+    rejectAnswer(new Error("late answer acknowledgement failed"));
+    await flush();
+
+    expect(states.at(-1)).toBe("audio_reconnect_required");
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect(call.hangup).not.toHaveBeenCalled();
   });
 
   it("serializes rapid digits and drops queued digits after hangup", async () => {
@@ -849,7 +936,7 @@ describe("JitterCallTransport", () => {
     expect(states).toEqual(["connecting", "ended"]);
   });
 
-  it("maps a remote terminal event and RTC errors to idempotent teardown", async () => {
+  it("keeps a local SDK terminal event nonterminal without exact provider proof", async () => {
     const harness = transportHarness();
     const states: string[] = [];
     harness.transport.onStateChange((state) => states.push(state));
@@ -874,15 +961,48 @@ describe("JitterCallTransport", () => {
       error: new Error("late duplicate error"),
     });
     await flush();
-    expect(states).toEqual(["connecting", "ringing", "live", "ended"]);
-    expect(harness.dependencies.cancel).toHaveBeenCalledTimes(1);
-    expect(harness.dependencies.cancel).toHaveBeenCalledWith(
-      "call-1",
-      "hangup",
-    );
+    expect(states).toEqual(["connecting", "ringing", "live", "audio_reconnect_required"]);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
   });
 
-  it("keeps failed outcome and real duration when RTC fails after the call became live", async () => {
+  it("does not let delayed browser playback invalidate newer provider-terminal proof", async () => {
+    let resolvePlay!: () => void;
+    const play = new Promise<void>((resolve) => { resolvePlay = resolve; });
+    let resolveStatus!: (value: JitterProxyResult<{ state: "terminal"; outcome: "ended" }>) => void;
+    const status = new Promise<JitterProxyResult<{ state: "terminal"; outcome: "ended" }>>(
+      (resolve) => { resolveStatus = resolve; },
+    );
+    const audio = {
+      play: vi.fn(() => play),
+      remove: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as HTMLAudioElement;
+    const harness = transportHarness({
+      createRemoteAudio: vi.fn(() => audio),
+      getProviderStatus: vi.fn(() => status),
+    });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await harness.transport.start(target());
+    const call = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "destroy";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+
+    resolvePlay();
+    await flush();
+    expect(states.at(-1)).not.toBe("live");
+    resolveStatus({ ok: true, data: { state: "terminal", outcome: "ended" } });
+    await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+    expect(states.filter((state) => state === "ended")).toHaveLength(1);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect(call.hangup).not.toHaveBeenCalled();
+  });
+
+  it("keeps real duration and lets explicit rep hangup end a call after a media error", async () => {
     const harness = transportHarness();
     await harness.transport.start(target());
     const call = new FakeCall();
@@ -894,13 +1014,45 @@ describe("JitterCallTransport", () => {
     await flush();
     await expect(harness.transport.hangup()).resolves.toEqual({
       durationSeconds: 4,
-      outcome: "failed",
+      outcome: "connected_human",
     });
     expect(harness.dependencies.cancel).toHaveBeenCalledTimes(1);
     expect(harness.dependencies.cancel).toHaveBeenCalledWith(
       "call-1",
-      "failed",
+      "hangup",
     );
+  });
+
+  it("accepts delayed exact-provider terminal proof once without sending cancel", async () => {
+    const getProviderStatus = vi
+      .fn()
+      .mockResolvedValue({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "terminal", outcome: "ended" } });
+    const harness = transportHarness({ getProviderStatus });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await harness.transport.start(target());
+    const call = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "destroy";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+
+    await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+    expect(getProviderStatus).toHaveBeenCalledTimes(10);
+    expect(vi.mocked(harness.dependencies.sleep).mock.calls
+      .reduce((total, [delay]) => total + delay, 0)).toBeGreaterThan(60_000);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
   });
 
   it("warns after bounded cancel retries and does not memoize the failed attempt", async () => {
@@ -1008,7 +1160,7 @@ describe("JitterCallTransport", () => {
     expect(harness.dependencies.cancel).toHaveBeenCalledTimes(1);
   });
 
-  it("fails closed when mute state cannot be trusted", async () => {
+  it("keeps the provider call live when browser mute control fails", async () => {
     const harness = transportHarness();
     const states: string[] = [];
     harness.transport.onStateChange((state) => states.push(state));
@@ -1022,11 +1174,359 @@ describe("JitterCallTransport", () => {
     });
     harness.transport.mute(true);
     await flush();
-    expect(states).toEqual(["connecting", "ringing", "live", "failed"]);
-    expect(harness.dependencies.cancel).toHaveBeenCalledWith(
-      "call-1",
-      "failed",
+    expect(states).toEqual(["connecting", "ringing", "live", "audio_reconnect_required"]);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it("ignores another incoming call while the connected Sandra leg stays live", async () => {
+    const harness = transportHarness();
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await harness.transport.start(target());
+    const call = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+
+    const unrelated = new FakeCall();
+    unrelated.id = "browser-leg-unrelated";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: unrelated });
+
+    expect(unrelated.answer).not.toHaveBeenCalled();
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect(states).toEqual(["connecting", "ringing", "live"]);
+  });
+
+  it("keeps a connected provider call live when browser media recovery exhausts", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = transportHarness({ registrationTimeoutMs: 100 });
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+      await harness.transport.start(target());
+      const call = new FakeCall();
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      call.state = "active";
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+
+      harness.rtc.emit("telnyx.socket.close");
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(states).toEqual(["connecting", "ringing", "live", "audio_reconnect_required"]);
+      expect(call.hangup).not.toHaveBeenCalled();
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not treat telnyx.ready without a recovered call attachment as usable media", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = transportHarness({ registrationTimeoutMs: 100 });
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+      await harness.transport.start(target());
+      const call = new FakeCall();
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      call.state = "active";
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+
+      harness.rtc.emit("telnyx.socket.close");
+      harness.rtc.emit("telnyx.ready");
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+      expect(call.hangup).not.toHaveBeenCalled();
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps recovery pending when a replacement call attaches without usable media", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = transportHarness({ registrationTimeoutMs: 100 });
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+      await harness.transport.start(target());
+      const call = new FakeCall();
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      call.state = "active";
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      harness.rtc.emit("telnyx.socket.close");
+
+      const recovered = new FakeCall() as FakeCall & { recoveredCallId: string };
+      recovered.id = "browser-leg-2";
+      recovered.recoveredCallId = "browser-leg-1";
+      recovered.state = "active";
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: recovered });
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("serializes a pending hold onto a recovered replacement leg", async () => {
+    let resolveHold!: () => void;
+    const harness = transportHarness();
+    await harness.transport.start(target());
+    const original = new FakeCall();
+    original.hold.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveHold = resolve; }),
     );
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: original });
+    original.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: original });
+    const pending = harness.transport.hold(true);
+
+    const recovered = new FakeCall() as FakeCall & { recoveredCallId: string };
+    recovered.id = "browser-leg-2";
+    recovered.recoveredCallId = "browser-leg-1";
+    recovered.state = "active";
+    attachConnectedPeer(recovered);
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: recovered });
+    expect(recovered.hold).not.toHaveBeenCalled();
+
+    resolveHold();
+    await expect(pending).resolves.toBe(true);
+    expect(recovered.hold).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it("serializes a pending resume onto a held recovered replacement leg", async () => {
+    let resolveResume!: () => void;
+    const harness = transportHarness();
+    await harness.transport.start(target());
+    const original = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: original });
+    original.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: original });
+    await expect(harness.transport.hold(true)).resolves.toBe(true);
+    original.state = "held";
+    original.unhold.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveResume = resolve; }),
+    );
+    const pending = harness.transport.hold(false);
+
+    const recovered = new FakeCall() as FakeCall & { recoveredCallId: string };
+    recovered.id = "browser-leg-2";
+    recovered.recoveredCallId = "browser-leg-1";
+    recovered.state = "held";
+    attachConnectedPeer(recovered);
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: recovered });
+    expect(recovered.unhold).not.toHaveBeenCalled();
+
+    resolveResume();
+    await expect(pending).resolves.toBe(true);
+    expect(recovered.unhold).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it.each(["resolved false", "rejected"])(
+    "reconciles recovered-call hold when reapply is %s",
+    async (failure) => {
+      const harness = transportHarness();
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+      await harness.transport.start(target());
+      const original = new FakeCall();
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: original });
+      original.state = "active";
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: original });
+      await expect(harness.transport.hold(true)).resolves.toBe(true);
+      harness.rtc.emit("telnyx.socket.close");
+
+      const recovered = new FakeCall() as FakeCall & { recoveredCallId: string };
+      recovered.id = "browser-leg-2";
+      recovered.recoveredCallId = "browser-leg-1";
+      recovered.state = "active";
+      attachConnectedPeer(recovered);
+      if (failure === "resolved false") recovered.hold.mockResolvedValueOnce(false);
+      else recovered.hold.mockRejectedValueOnce(new Error("hold reapply rejected"));
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: recovered });
+      await vi.waitFor(() => expect(states).toContain("hold_reapply_failed"));
+      expect(states.at(-1)).toBe("hold_reapply_failed");
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    },
+  );
+
+  it("degrades visibly after bounded resumed-baseline acknowledgement failures", async () => {
+    let scheduled: (() => void) | undefined;
+    const reportAudioHealth = vi.fn(async () => ({
+      ok: true as const,
+      data: { accepted: false, pending: true, status: "monitoring" as const },
+    }));
+    const harness = transportHarness({
+      reportAudioHealth,
+      scheduleAudioHealth(handler) {
+        scheduled = handler;
+        return () => undefined;
+      },
+    });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await harness.transport.start(target());
+    const call = new FakeCall();
+    attachConnectedPeer(call);
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(1));
+    await expect(harness.transport.hold(true)).resolves.toBe(true);
+    await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(2));
+    await expect(harness.transport.hold(false)).resolves.toBe(true);
+    await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(3));
+    scheduled?.();
+    await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(4));
+    scheduled?.();
+    await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(5));
+
+    expect(states.at(-1)).toBe("audio_reconnect_required");
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it("manually reconnects browser audio without canceling the connected provider call", async () => {
+    const harness = transportHarness();
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await harness.transport.start(target());
+    const call = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    harness.rtc.emit("telnyx.error", {
+      error: { code: 45_003, message: "RECONNECTION_EXHAUSTED" },
+    });
+
+    await expect(harness.transport.reconnectAudio()).resolves.toBe(true);
+    expect(harness.rtc.socketDisconnect).toHaveBeenCalledTimes(1);
+    expect(harness.rtc.disconnect).not.toHaveBeenCalled();
+    const recoveredCall = new FakeCall() as FakeCall & { recoveredCallId: string };
+    recoveredCall.id = "browser-leg-2";
+    recoveredCall.recoveredCallId = "browser-leg-1";
+    recoveredCall.state = "active";
+    attachConnectedPeer(recoveredCall);
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: recoveredCall });
+
+    await vi.waitFor(() => expect(states.at(-1)).toBe("live"));
+    expect(states).toEqual([
+      "connecting",
+      "ringing",
+      "live",
+      "audio_reconnect_required",
+      "audio_reconnecting",
+      "live",
+    ]);
+    expect(call.hangup).not.toHaveBeenCalled();
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it("restores a rehydrated provider-held call without automatically unholding it", async () => {
+    const harness = transportHarness();
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+    const recovered = new FakeCall();
+    recovered.state = "held";
+    attachConnectedPeer(recovered);
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: recovered });
+    await vi.waitFor(() => expect(states).toContain("hold_restored"));
+    expect(recovered.unhold).not.toHaveBeenCalled();
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it("converges retained terminal proof even when no SDK call reattaches after reload", async () => {
+    vi.useFakeTimers();
+    try {
+      const getProviderStatus = vi.fn()
+        .mockResolvedValue({ ok: true, data: { state: "active" } })
+        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+        .mockResolvedValueOnce({ ok: true, data: { state: "terminal", outcome: "ended" } });
+      const harness = transportHarness({ getProviderStatus });
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+      await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+      expect(harness.rtc.disconnect).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops retained terminal probing after current replacement media is proven healthy", async () => {
+    vi.useFakeTimers();
+    try {
+      const getProviderStatus = vi.fn(async () => ({ ok: true as const, data: { state: "active" as const } }));
+      const harness = transportHarness({ getProviderStatus });
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+      await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+      const recovered = new FakeCall();
+      recovered.state = "active";
+      attachConnectedPeer(recovered);
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: recovered });
+      await vi.waitFor(() => expect(states.at(-1)).toBe("live"));
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(states.at(-1)).toBe("live");
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+      expect(recovered.hangup).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows a current Jitter suspect response but ignores the same late response after peer replacement", async () => {
+    let resolveReport!: (value: JitterProxyResult<JitterAudioHealthResponse>) => void;
+    const reportAudioHealth = vi.fn(() => new Promise<JitterProxyResult<JitterAudioHealthResponse>>((resolve) => {
+      resolveReport = resolve;
+    }));
+    const harness = transportHarness({ reportAudioHealth });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await harness.transport.start(target());
+    const original = new FakeCall();
+    attachConnectedPeer(original);
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: original });
+    original.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: original });
+    await vi.waitFor(() => expect(reportAudioHealth).toHaveBeenCalledTimes(1));
+    const replacement = new FakeCall() as FakeCall & { recoveredCallId: string };
+    replacement.id = "browser-leg-2";
+    replacement.recoveredCallId = "browser-leg-1";
+    replacement.state = "active";
+    attachConnectedPeer(replacement);
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: replacement });
+    resolveReport({ ok: true, data: { accepted: true, status: "suspect" } });
+    await flush();
+    expect(states.at(-1)).not.toBe("audio_reconnect_required");
+
+    vi.mocked(reportAudioHealth).mockResolvedValueOnce({
+      ok: true,
+      data: { accepted: true, status: "suspect" },
+    });
+    await (harness.transport as unknown as { sampleAudioHealth(): Promise<void> }).sampleAudioHealth();
+    expect(states.at(-1)).toBe("audio_reconnect_required");
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
   });
 
   it("allows Telnyx signaling recovery instead of canceling on a transient socket loss", async () => {
@@ -1054,11 +1554,12 @@ describe("JitterCallTransport", () => {
     recoveredCall.id = "browser-leg-2";
     recoveredCall.recoveredCallId = "browser-leg-1";
     recoveredCall.state = "active";
+    attachConnectedPeer(recoveredCall);
     harness.rtc.emit("telnyx.notification", {
       type: "callUpdate",
       call: recoveredCall,
     });
-    await flush();
+    await vi.waitFor(() => expect(recoveredCall.muteAudio).toHaveBeenCalledTimes(1));
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
     expect(originalCall.muteAudio).toHaveBeenCalledTimes(1);
     expect(recoveredCall.muteAudio).toHaveBeenCalledTimes(1);
@@ -1087,6 +1588,26 @@ describe("JitterCallTransport", () => {
       durationSeconds: 2,
       outcome: "connected_human",
     });
+  });
+
+  it("does not hang up or cancel a connected call on pagehide", async () => {
+    const sendCancelBeacon = vi.fn(() => true);
+    const harness = transportHarness({ sendCancelBeacon });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await harness.transport.start(target());
+    const call = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+    call.state = "active";
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+
+    harness.firePageHide();
+    await flush();
+
+    expect(states.at(-1)).toBe("audio_reconnect_required");
+    expect(call.hangup).not.toHaveBeenCalled();
+    expect(sendCancelBeacon).not.toHaveBeenCalled();
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
   });
 
   it("treats an accepted pagehide beacon as queueing only and still confirms with the Server Action", async () => {
