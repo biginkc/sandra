@@ -266,47 +266,28 @@ capture_filter_matrix() {
 OLD_FILTER_MATRIX="$LEADS_TMP/old-filter-matrix.out"
 capture_filter_matrix "$OLD_FILTER_MATRIX"
 
-# Reproduce the production failure shape before applying the forward fix: the
-# default urgency request must not expand every expensive leads_board column.
+# The view and every relation it expands are also referenced somewhere in the
+# replacement's advanced-filter branch. PostgreSQL relation locks therefore
+# cannot isolate the default fast path. Assert the dependency change directly
+# in the installed catalog and keep runtime checks semantic, not hardware-timed.
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL' >/dev/null
-insert into properties (id,org_id,address,city,state,status,created_at)
-select gen_random_uuid(), 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-  'Timeout fixture ' || n, 'Kansas City', 'MO', 'contacted', now()
-from generate_series(1,500000) n;
-insert into messages (property_id,direction,body,created_at)
-select property.id,
-  case when message_number % 2 = 0 then 'outbound' else 'inbound' end,
-  'bounded timeout fixture',
-  now() - make_interval(days => message_number)
-from properties property
-cross join generate_series(1,4) message_number
-where property.address like 'Timeout fixture %';
-analyze properties;
-analyze messages;
+do $$
+declare function_source text;
+begin
+  select prosrc into function_source
+  from pg_proc
+  where oid = 'public.get_leads_board_urgency_counts(uuid,boolean,text[],text,text,boolean,boolean,boolean,timestamptz,timestamptz)'::regprocedure;
+  if function_source not like '%from public.leads_board b%'
+  then raise exception 'legacy urgency fixture no longer proves the view dependency'; end if;
+end $$;
 SQL
-
-OLD_URGENCY_OUTPUT="$LEADS_TMP/old-urgency.out"
-if psql -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal \
-  -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; set statement_timeout='2s'; select * from get_leads_board_urgency_counts(null,false,array[]::text[],'all',null,false,false,null,'2026-08-15 05:00Z','2026-08-16 05:00Z');" \
-  >"$OLD_URGENCY_OUTPUT" 2>&1; then
-  echo "pre-fix urgency query unexpectedly stayed below the bounded timeout" >&2
-  exit 1
-fi
-grep -Eq 'ERROR:  +57014: canceling statement due to statement timeout' "$OLD_URGENCY_OUTPUT"
 
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_URGENCY_TIMEOUT_MIGRATION" >/dev/null
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_URGENCY_TIMEOUT_MIGRATION" >/dev/null
 
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal \
-  -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; set statement_timeout='2s'; select * from get_leads_board_urgency_counts(null,false,array[]::text[],'all',null,false,false,null,'2026-08-15 05:00Z','2026-08-16 05:00Z');" \
+  -c "set role authenticated; set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111'; select * from get_leads_board_urgency_counts(null,false,array[]::text[],'all',null,false,false,null,'2026-08-15 05:00Z','2026-08-16 05:00Z');" \
   >/dev/null
-
-psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL' >/dev/null
-delete from messages where property_id in (
-  select id from properties where address like 'Timeout fixture %'
-);
-delete from properties where address like 'Timeout fixture %';
-SQL
 
 NEW_FILTER_MATRIX="$LEADS_TMP/new-filter-matrix.out"
 capture_filter_matrix "$NEW_FILTER_MATRIX"
@@ -316,6 +297,64 @@ cmp "$OLD_FILTER_MATRIX" "$NEW_FILTER_MATRIX"
 # full leads_board projection. These assertions execute the installed catalog
 # function as an authenticated tenant, not migration text.
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL'
+do $$
+declare
+  function_oid oid;
+  function_owner oid;
+  function_acl aclitem[];
+  authenticated_oid oid;
+  service_role_oid oid;
+  anon_oid oid;
+begin
+  function_oid := to_regprocedure(
+    'public.get_leads_board_urgency_counts(uuid,boolean,text[],text,text,boolean,boolean,boolean,timestamptz,timestamptz)'
+  );
+  if function_oid is null
+  then raise exception 'exact urgency-count signature is missing'; end if;
+
+  select proowner, proacl
+  into function_owner, function_acl
+  from pg_proc
+  where oid = function_oid
+    and not prosecdef
+    and provolatile = 's'
+    and proconfig = array['search_path=public, pg_temp']::text[];
+  if function_owner is null
+  then raise exception 'urgency-count invoker/stable/search_path catalog contract changed'; end if;
+
+  if pg_get_function_result(function_oid) <>
+    'TABLE(all_count bigint, overdue_count bigint, today_count bigint, scheduled_count bigint, no_action_count bigint)'
+  then raise exception 'urgency-count return contract changed'; end if;
+
+  select oid into authenticated_oid from pg_roles where rolname='authenticated';
+  select oid into service_role_oid from pg_roles where rolname='service_role';
+  select oid into anon_oid from pg_roles where rolname='anon';
+  if authenticated_oid is null or service_role_oid is null or anon_oid is null
+  then raise exception 'rehearsal roles are missing'; end if;
+
+  if exists (
+    select 1
+    from aclexplode(coalesce(function_acl, acldefault('f', function_owner))) acl
+    where acl.privilege_type='EXECUTE'
+      and acl.grantee in (0, anon_oid)
+  ) or has_function_privilege('anon', function_oid, 'EXECUTE')
+  then raise exception 'PUBLIC or anon can execute urgency counts'; end if;
+
+  if not exists (
+    select 1
+    from aclexplode(coalesce(function_acl, acldefault('f', function_owner))) acl
+    where acl.privilege_type='EXECUTE' and acl.grantee=authenticated_oid
+  ) or not has_function_privilege('authenticated', function_oid, 'EXECUTE')
+  then raise exception 'authenticated urgency-count grant is missing'; end if;
+
+  if not exists (
+    select 1
+    from aclexplode(coalesce(function_acl, acldefault('f', function_owner))) acl
+    where acl.privilege_type='EXECUTE' and acl.grantee=service_role_oid
+  ) or not has_function_privilege('service_role', function_oid, 'EXECUTE')
+  then raise exception 'service_role urgency-count grant is missing'; end if;
+end $$;
+
 set role authenticated;
 set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111';
 do $$
@@ -387,6 +426,45 @@ begin
 end $$;
 reset role;
 SQL
+
+# Prove the installed function has no qualified or unqualified runtime
+# dependency on the legacy view. This uses a fresh backend and keeps the rename
+# inside a transaction: psql disconnect rollback is the failure cleanup, while
+# the explicit rollback restores the fixture after successful assertions.
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL'
+begin;
+alter view public.leads_board rename to leads_board_dependency_guard;
+set local role authenticated;
+set local request.jwt.claim.sub='11111111-1111-4111-8111-111111111111';
+do $$
+begin
+  if not exists (
+    select 1 from get_leads_board_urgency_counts(
+      null, false, array[]::text[], 'all', null, false, false, null,
+      '2026-08-15 05:00Z', '2026-08-16 05:00Z'
+    ) where all_count=6 and overdue_count=1 and today_count=1
+      and scheduled_count=0 and no_action_count=4
+  ) then raise exception 'renamed-view default urgency result changed'; end if;
+
+  if exists (
+    select 1
+    from urgency_filter_cases c
+    cross join lateral get_leads_board_urgency_counts(
+      c.assignee_id,c.unassigned,c.search_tokens,c.motivation,null,c.hot_only,
+      c.no_active_sequence,c.skip_traced,
+      '2026-08-15 05:00Z','2026-08-16 05:00Z'
+    ) r
+    where (r.all_count,r.overdue_count,r.today_count,r.scheduled_count,r.no_action_count)
+      is distinct from
+      (c.expected_all,c.expected_overdue,c.expected_today,c.expected_scheduled,c.expected_none)
+  ) then raise exception 'renamed-view optional-filter matrix changed'; end if;
+end $$;
+rollback;
+SQL
+
+psql -v ON_ERROR_STOP=1 -At -h "$LEADS_SOCKET" -p "$LEADS_PORT" \
+  -U postgres -d sandra_leads_rehearsal \
+  -c "select to_regclass('public.leads_board') is not null" | grep -qx t
 
 # Equal-count swap: one card leaves before the cursor while another enters in
 # its place. Count-only detection misses this; the whole-filter fingerprint
