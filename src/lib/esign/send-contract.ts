@@ -29,9 +29,7 @@ export async function sendContractWithTemplate(
   provider: DropboxSignProvider,
   input: ProviderSendContractInput,
 ) {
-  assertExactTemplateContract(input.template);
-  assertExactSignerAssignments(input.template, input.signers);
-  assertExactMergeValues(input.mergeValues);
+  validateContractSendInput(input);
 
   const response = await provider.sendWithTemplate({
     localRequestId: input.localRequestId,
@@ -52,8 +50,23 @@ export async function sendContractWithTemplate(
       "Dropbox Sign did not return a manager details URL.",
     );
   }
-  assertProviderSignatures(input.signers, response.signatures);
+  validateProviderSignatures(input.signers, response.signatures);
   return response;
+}
+
+export function validateContractSendInput(
+  input: ProviderSendContractInput,
+): void {
+  assertExactTemplateContract(input.template);
+  assertExactSignerAssignments(input.template, input.signers);
+  assertExactMergeValues(input.mergeValues);
+}
+
+export function validateProviderSignatures(
+  expected: ProviderSendContractInput["signers"],
+  actual: readonly ProviderSignature[],
+): void {
+  assertProviderSignatures(expected, actual);
 }
 
 function assertExactTemplateContract(template: TemplateOption): void {
