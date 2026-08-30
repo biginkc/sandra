@@ -2,7 +2,7 @@
 
 import { CopyIcon, Trash2Icon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -26,7 +26,6 @@ export function DuplicateTemplateDialog({ template, actions }: { template: Esign
   const [name, setName] = useState(`${template.name} (copy)`);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
-  useEffect(() => { if (open) setName(`${template.name} (copy)`); }, [open, template.name]);
   const submit = () => actions && startTransition(async () => {
     const result = await actions.duplicateTemplate(template.id, name.trim());
     if (!result.ok) return setError(result.error.message);
@@ -35,7 +34,7 @@ export function DuplicateTemplateDialog({ template, actions }: { template: Esign
   });
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <Button variant="ghost" size="sm" onClick={() => setOpen(true)}><CopyIcon data-icon="inline-start" /> Duplicate</Button>
+      <Button variant="ghost" size="sm" onClick={() => { setName(`${template.name} (copy)`); setError(null); setOpen(true); }}><CopyIcon data-icon="inline-start" /> Duplicate</Button>
       <DialogContent>
         <DialogHeader><DialogTitle>Duplicate template</DialogTitle><DialogDescription>The original template stays unchanged. The copy opens in the editor when Dropbox Sign finishes preparing it.</DialogDescription></DialogHeader>
         <div className="space-y-2"><Label htmlFor={`duplicate-${template.id}`}>Copy name</Label><Input id={`duplicate-${template.id}`} value={name} onChange={(event) => setName(event.target.value)} /></div>

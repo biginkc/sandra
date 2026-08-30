@@ -24,5 +24,6 @@ export async function loadTemplateLibrary(): Promise<TemplateLibraryLoadResult> 
 export async function loadTemplateEditor(
   _templateId: string,
 ): Promise<TemplateLaneResult<TemplateEditorData>> {
+  void _templateId;
   return { ok: false, error: FOUNDATION_PENDING };
 }

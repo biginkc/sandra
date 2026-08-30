@@ -21,7 +21,7 @@ export type TemplateOption = Readonly<{
   providerTemplateId: string;
   signerRoles: readonly TemplateSignerRole[];
   sellerRoleName: string;
-  mergeFieldNames: readonly EsignTemplateMergeField[];
+  mergeFieldNames: typeof ESIGN_TEMPLATE_MERGE_FIELDS;
 }>;
 
 export type EsignTemplateRow = TemplateOption &
