@@ -1,6 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 
-import { ESIGN_TEMPLATE_MERGE_FIELDS } from "../../types";
+import { ESIGN_MERGE_FIELD_NAMES } from "../../types";
 
 export function MergeFieldLegend() {
   return (
@@ -13,7 +13,7 @@ export function MergeFieldLegend() {
         </p>
       </div>
       <div className="flex flex-wrap gap-2">
-        {ESIGN_TEMPLATE_MERGE_FIELDS.map((name) => (
+        {ESIGN_MERGE_FIELD_NAMES.map((name) => (
           <Badge key={name} variant="outline" className="font-mono font-normal">
             {name}
           </Badge>

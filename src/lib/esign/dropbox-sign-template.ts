@@ -8,6 +8,7 @@ import {
 } from "@dropbox/sign";
 
 import { ProviderError } from "@/lib/errors/classes";
+import { requireTemplateTitle } from "@/lib/esign/template-contract";
 
 import {
   ESIGN_MERGE_FIELD_NAMES,
@@ -49,7 +50,7 @@ export function createDropboxSignTemplateProvider(input: {
         const response = await template.templateCreateEmbeddedDraft({
           clientId: input.clientId,
           files: [providerFile(request.file)],
-          title: request.title,
+          title: requireTemplateTitle(request.title),
           signerRoles: request.signerRoles.map((role) => ({
             name: role.name,
             order: role.order,

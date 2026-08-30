@@ -16,10 +16,11 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { validateTemplateTitle } from "@/lib/esign/template-contract";
 
 import { SignerRoleEditor } from "./signer-role-editor";
 import {
-  ESIGN_TEMPLATE_MERGE_FIELDS,
+  ESIGN_MERGE_FIELD_NAMES,
   type TemplateLibraryActions,
   type TemplateSignerRole,
   type TemplateSource,
@@ -94,7 +95,7 @@ export function AddTemplateDialog({
         source,
         signerRoles: roles.map((role, order) => ({ name: role.name.trim(), order })),
         sellerRoleName,
-        mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
+        mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
       });
       if (!result.ok) {
         setError(result.error.message);
@@ -147,7 +148,7 @@ export function AddTemplateDialog({
 
           <div className="bg-muted/50 rounded-lg border p-3 text-xs">
             <p className="font-medium">Merge fields included</p>
-            <p className="text-muted-foreground mt-1 font-mono">{ESIGN_TEMPLATE_MERGE_FIELDS.join(" · ")}</p>
+            <p className="text-muted-foreground mt-1 font-mono">{ESIGN_MERGE_FIELD_NAMES.join(" · ")}</p>
           </div>
 
           {(error || validationError || disabledReason) && (
@@ -175,7 +176,8 @@ function validatePdf(file: File): string | null {
 }
 
 function validateDraft(input: { name: string; source: TemplateSource | null; roles: readonly TemplateSignerRole[]; sellerRoleName: string }): string | null {
-  if (!input.name.trim()) return "Enter a template name.";
+  const titleError = validateTemplateTitle(input.name);
+  if (titleError) return titleError;
   if (!input.source) return "Choose a PDF.";
   const names = input.roles.map((role) => role.name.trim());
   if (names.some((name) => !name)) return "Every signer role needs a name.";

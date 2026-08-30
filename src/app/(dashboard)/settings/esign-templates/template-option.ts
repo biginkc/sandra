@@ -1,8 +1,9 @@
 import {
-  ESIGN_TEMPLATE_MERGE_FIELDS,
+  ESIGN_MERGE_FIELD_NAMES,
+  requireTemplateTitle,
   type TemplateOption,
   type TemplateSignerRole,
-} from "./types";
+} from "@/lib/esign/template-contract";
 
 export type ProviderTemplateSnapshot = Readonly<{
   providerTemplateId: string;
@@ -40,8 +41,8 @@ export function toTemplateOption(input: {
 
   const uniqueFields = [...new Set(input.provider.mergeFieldNames)];
   if (
-    uniqueFields.length !== ESIGN_TEMPLATE_MERGE_FIELDS.length ||
-    ESIGN_TEMPLATE_MERGE_FIELDS.some((name) => !uniqueFields.includes(name))
+    uniqueFields.length !== ESIGN_MERGE_FIELD_NAMES.length ||
+    ESIGN_MERGE_FIELD_NAMES.some((name) => !uniqueFields.includes(name))
   ) {
     throw new Error(
       "The template must contain exactly Sandra's five merge field labels.",
@@ -50,11 +51,11 @@ export function toTemplateOption(input: {
 
   return {
     id: input.id,
-    name: input.name,
+    name: requireTemplateTitle(input.name),
     documentType: input.documentType,
     providerTemplateId: input.provider.providerTemplateId,
     sellerRoleName: input.sellerRoleName,
     signerRoles: roles,
-    mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
+    mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
   };
 }

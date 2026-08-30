@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { validateTemplateTitle } from "@/lib/esign/template-contract";
 
 import type { EsignTemplateRow, TemplateLibraryActions } from "./types";
 
@@ -26,7 +27,8 @@ export function DuplicateTemplateDialog({ template, actions }: { template: Esign
   const [name, setName] = useState(`${template.name} (copy)`);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
-  const submit = () => actions && startTransition(async () => {
+  const validationError = validateTemplateTitle(name);
+  const submit = () => actions && !validationError && startTransition(async () => {
     const result = await actions.duplicateTemplate(template.id, name.trim());
     if (!result.ok) return setError(result.error.message);
     setOpen(false);
@@ -38,8 +40,8 @@ export function DuplicateTemplateDialog({ template, actions }: { template: Esign
       <DialogContent>
         <DialogHeader><DialogTitle>Duplicate template</DialogTitle><DialogDescription>The original template stays unchanged. The copy opens in the editor when Dropbox Sign finishes preparing it.</DialogDescription></DialogHeader>
         <div className="space-y-2"><Label htmlFor={`duplicate-${template.id}`}>Copy name</Label><Input id={`duplicate-${template.id}`} value={name} onChange={(event) => setName(event.target.value)} /></div>
-        {(error || !actions) && <p role="alert" className="text-destructive text-sm">{error ?? "Template actions are not connected yet."}</p>}
-        <DialogFooter><DialogClose render={<Button variant="outline" disabled={pending} />}>Cancel</DialogClose><Button onClick={submit} disabled={!actions || pending || !name.trim()}>{pending ? "Duplicating…" : "Duplicate template"}</Button></DialogFooter>
+        {(error || validationError || !actions) && <p role="alert" className="text-destructive text-sm">{error ?? validationError ?? "Template actions are not connected yet."}</p>}
+        <DialogFooter><DialogClose render={<Button variant="outline" disabled={pending} />}>Cancel</DialogClose><Button onClick={submit} disabled={!actions || pending || Boolean(validationError)}>{pending ? "Duplicating…" : "Duplicate template"}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   );

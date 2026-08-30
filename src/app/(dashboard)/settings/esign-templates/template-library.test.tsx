@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { ESIGN_TEMPLATE_MERGE_FIELDS, type EsignTemplateRow } from "./types";
+import { ESIGN_MERGE_FIELD_NAMES, type EsignTemplateRow } from "./types";
 import { TemplateLibrary } from "./template-library";
 
 vi.mock("next/navigation", () => ({
@@ -18,7 +18,7 @@ const row: EsignTemplateRow = {
     { name: "Seller", order: 0 },
   ],
   sellerRoleName: "Seller",
-  mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
+  mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
   sourceFilename: "purchase-agreement.pdf",
   sourceSizeBytes: 2_400_000,
   pageCount: 8,

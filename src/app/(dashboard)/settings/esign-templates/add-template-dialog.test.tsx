@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { AddTemplateDialog } from "./add-template-dialog";
-import { ESIGN_TEMPLATE_MERGE_FIELDS, type TemplateLibraryActions } from "./types";
+import { ESIGN_MERGE_FIELD_NAMES, type TemplateLibraryActions } from "./types";
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -31,7 +31,7 @@ describe("AddTemplateDialog", () => {
         name: "Offer",
         signerRoles: [{ name: "Seller", order: 0 }],
         sellerRoleName: "Seller",
-        mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
+        mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
       }),
     );
     expect(push).toHaveBeenCalledWith("/settings/esign-templates/local-1/edit");
@@ -51,5 +51,21 @@ describe("AddTemplateDialog", () => {
     fireEvent.change(screen.getByLabelText("Upload PDF"), { target: { files: [file] } });
     expect(screen.getByRole("alert")).toHaveTextContent("40 MB or smaller");
     expect(actions.createDraft).not.toHaveBeenCalled();
+  });
+
+  it("accepts 80 emoji but rejects 81 using the UTF-16 title limit", () => {
+    const actions: TemplateLibraryActions = {
+      createDraft: vi.fn(),
+      pickDropboxPdf: vi.fn(),
+      duplicateTemplate: vi.fn(),
+      deleteTemplate: vi.fn(),
+    };
+    render(<AddTemplateDialog actions={actions} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add template" }));
+    const name = screen.getByLabelText("Template name");
+    fireEvent.change(name, { target: { value: "😀".repeat(80) } });
+    expect(screen.queryByText("Template names must be 160 characters or fewer.")).not.toBeInTheDocument();
+    fireEvent.change(name, { target: { value: "😀".repeat(81) } });
+    expect(screen.getByRole("alert")).toHaveTextContent("Template names must be 160 characters or fewer.");
   });
 });

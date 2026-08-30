@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ESIGN_TEMPLATE_MERGE_FIELDS } from "./types";
+import { ESIGN_MERGE_FIELD_NAMES } from "./types";
 import { toTemplateOption } from "./template-option";
 
 const base = {
@@ -15,7 +15,7 @@ const base = {
       { name: "Seller", order: 0 },
       { name: "Buyer", order: 1 },
     ],
-    mergeFieldNames: [...ESIGN_TEMPLATE_MERGE_FIELDS],
+    mergeFieldNames: [...ESIGN_MERGE_FIELD_NAMES],
   },
 } as const;
 
@@ -35,9 +35,9 @@ describe("toTemplateOption", () => {
 
   it("rejects missing, extra, or case-changed merge labels", () => {
     for (const mergeFieldNames of [
-      ESIGN_TEMPLATE_MERGE_FIELDS.slice(0, 4),
-      [...ESIGN_TEMPLATE_MERGE_FIELDS, "extra"],
-      ["Seller_name", ...ESIGN_TEMPLATE_MERGE_FIELDS.slice(1)],
+      ESIGN_MERGE_FIELD_NAMES.slice(0, 4),
+      [...ESIGN_MERGE_FIELD_NAMES, "extra"],
+      ["Seller_name", ...ESIGN_MERGE_FIELD_NAMES.slice(1)],
     ]) {
       expect(() =>
         toTemplateOption({
@@ -46,5 +46,13 @@ describe("toTemplateOption", () => {
         }),
       ).toThrow(/exactly Sandra's five/i);
     }
+  });
+
+  it("trims valid titles and rejects empty or over-limit reconciliation", () => {
+    expect(toTemplateOption({ ...base, name: "  Offer  " }).name).toBe("Offer");
+    expect(() => toTemplateOption({ ...base, name: "   " })).toThrow("Enter a template name.");
+    expect(() => toTemplateOption({ ...base, name: "😀".repeat(81) })).toThrow(
+      "Template names must be 160 characters or fewer.",
+    );
   });
 });

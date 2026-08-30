@@ -6,10 +6,13 @@ import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/page-header";
+import { requireTemplateTitle } from "@/lib/esign/template-contract";
 
 import type { TemplateEditorActions, TemplateEditorData } from "../../types";
 import {
+  loadOfficialEmbeddedTemplateClient,
   mountEmbeddedTemplateClient,
+  shouldSkipDomainVerification,
   type EmbeddedTemplateClient,
 } from "./embedded-template-client";
 import { MergeFieldLegend } from "./merge-field-legend";
@@ -30,7 +33,7 @@ export function EmbeddedTemplateEditor({
 }: {
   template: TemplateEditorData;
   actions?: TemplateEditorActions;
-  loadClient?: () => Promise<EmbeddedTemplateClient>;
+  loadClient?: (clientId: string) => Promise<EmbeddedTemplateClient>;
 }) {
   const router = useRouter();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -38,20 +41,31 @@ export function EmbeddedTemplateEditor({
   const terminalReason = useRef<"finish" | "cancel" | null>(null);
   const [generation, setGeneration] = useState(0);
   const [state, setState] = useState<EditorState>(
-    actions && loadClient ? { status: "loading" } : { status: "unavailable" },
+    actions ? { status: "loading" } : { status: "unavailable" },
   );
   const [pending, startTransition] = useTransition();
 
   const syncFinished = useCallback(async () => {
     if (!actions) return;
     setState({ status: "syncing" });
-    const result = await actions.syncFinishedTemplate();
+    let name: string;
+    try {
+      name = requireTemplateTitle(template.name);
+    } catch (error) {
+      setState({
+        status: "error",
+        message: error instanceof Error ? error.message : "The template name is invalid.",
+        code: "INVALID_TEMPLATE_TITLE",
+      });
+      return;
+    }
+    const result = await actions.syncFinishedTemplate({ name });
     if (!result.ok) {
       setState({ status: "error", message: result.error.message, code: result.error.code });
       return;
     }
     setState({ status: "finished" });
-  }, [actions]);
+  }, [actions, template.name]);
 
   const abandonAndReturn = useCallback(async () => {
     if (!actions || template.isFinalized) {
@@ -67,21 +81,28 @@ export function EmbeddedTemplateEditor({
   }, [actions, router, template.isFinalized]);
 
   useEffect(() => {
-    if (!actions || !loadClient || !containerRef.current) return;
+    if (!actions || !containerRef.current) return;
     let disposed = false;
     setState({ status: "loading" });
     terminalReason.current = null;
-    void Promise.all([actions.startEditor(), loadClient()]).then(([session, client]) => {
+    void actions.startEditor().then(async (session) => {
+      if (!session.ok) {
+        if (!disposed) {
+          setState({ status: "error", message: session.error.message, code: session.error.code });
+        }
+        return;
+      }
+      const client = await (loadClient ?? loadOfficialEmbeddedTemplateClient)(session.data.clientId);
       if (disposed) {
         client.close();
         return;
       }
-      if (!session.ok || !containerRef.current) {
+      if (!containerRef.current) {
         client.close();
         setState({
           status: "error",
-          message: session.ok ? "The editor container is unavailable." : session.error.message,
-          code: session.ok ? "EDITOR_CONTAINER_MISSING" : session.error.code,
+          message: "The editor container is unavailable.",
+          code: "EDITOR_CONTAINER_MISSING",
         });
         return;
       }
@@ -89,6 +110,10 @@ export function EmbeddedTemplateEditor({
         client,
         session: session.data,
         container: containerRef.current,
+        skipDomainVerification: shouldSkipDomainVerification({
+          hostname: window.location.hostname,
+          deploymentEnvironment: process.env.NEXT_PUBLIC_VERCEL_ENV,
+        }),
         listeners: {
           onFinish: () => {
             terminalReason.current = "finish";

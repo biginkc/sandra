@@ -24,7 +24,6 @@ export type EmbeddedTemplateClient = Readonly<{
   open(
     url: string,
     options: Readonly<{
-      clientId: string;
       container: HTMLElement;
       skipDomainVerification: boolean;
     }>,
@@ -39,10 +38,41 @@ export type EmbeddedTemplateListeners = Readonly<{
   onError(error: EmbeddedTemplateEventMap["error"]): void;
 }>;
 
+type HelloSignClientConstructor = new (options: Readonly<{ clientId: string }>) =>
+  EmbeddedTemplateClient;
+
+export type EmbeddedClientEnvironment = Readonly<{
+  hostname: string;
+  deploymentEnvironment?: string;
+}>;
+
+export function shouldSkipDomainVerification(
+  environment: EmbeddedClientEnvironment,
+): boolean {
+  const hostname = environment.hostname.toLowerCase();
+  const isLocalhost =
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.endsWith(".localhost");
+  return isLocalhost || environment.deploymentEnvironment === "preview";
+}
+
+export async function loadOfficialEmbeddedTemplateClient(
+  clientId: string,
+): Promise<EmbeddedTemplateClient> {
+  // Keep the browser-only SDK out of the server bundle and load it only when
+  // the client component has a fresh provider edit session to open.
+  const embeddedSdk = await import("hellosign-embedded");
+  const HelloSign = embeddedSdk.default as HelloSignClientConstructor;
+  return new HelloSign({ clientId });
+}
+
 export function mountEmbeddedTemplateClient(input: {
   client: EmbeddedTemplateClient;
   session: EmbeddedTemplateSession;
   container: HTMLElement;
+  skipDomainVerification: boolean;
   listeners: EmbeddedTemplateListeners;
 }): () => void {
   let closed = false;
@@ -59,9 +89,8 @@ export function mountEmbeddedTemplateClient(input: {
     input.client.on(event, listener as never);
   }
   input.client.open(input.session.editUrl, {
-    clientId: input.session.clientId,
     container: input.container,
-    skipDomainVerification: input.session.skipDomainVerification,
+    skipDomainVerification: input.skipDomainVerification,
   });
 
   return () => {

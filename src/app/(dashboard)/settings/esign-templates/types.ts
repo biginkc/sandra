@@ -1,28 +1,16 @@
-export const ESIGN_TEMPLATE_MERGE_FIELDS = [
-  "seller_name",
-  "property_address",
-  "offer_price",
-  "closing_date",
-  "earnest_money",
-] as const;
+import {
+  ESIGN_MERGE_FIELD_NAMES,
+  type TemplateOption,
+  type TemplateSignerRole,
+} from "@/lib/esign/template-contract";
 
-export type EsignTemplateMergeField =
-  (typeof ESIGN_TEMPLATE_MERGE_FIELDS)[number];
-
-export type TemplateSignerRole = Readonly<{
-  name: string;
-  order: number;
-}>;
-
-export type TemplateOption = Readonly<{
-  id: string;
-  name: string;
-  documentType: string;
-  providerTemplateId: string;
-  signerRoles: readonly TemplateSignerRole[];
-  sellerRoleName: string;
-  mergeFieldNames: typeof ESIGN_TEMPLATE_MERGE_FIELDS;
-}>;
+export {
+  ESIGN_MERGE_FIELD_NAMES,
+  ESIGN_TEMPLATE_MERGE_FIELDS,
+  type EsignTemplateMergeField,
+  type TemplateOption,
+  type TemplateSignerRole,
+} from "@/lib/esign/template-contract";
 
 export type EsignTemplateRow = TemplateOption &
   Readonly<{
@@ -59,7 +47,7 @@ export type CreateTemplateDraftInput = Readonly<{
   source: TemplateSource;
   signerRoles: readonly TemplateSignerRole[];
   sellerRoleName: string;
-  mergeFieldNames: typeof ESIGN_TEMPLATE_MERGE_FIELDS;
+  mergeFieldNames: typeof ESIGN_MERGE_FIELD_NAMES;
 }>;
 
 export type TemplateLibraryActions = Readonly<{
@@ -79,12 +67,11 @@ export type EmbeddedTemplateSession = Readonly<{
   editUrl: string;
   expiresAt: number | null;
   clientId: string;
-  skipDomainVerification: boolean;
 }>;
 
 export type TemplateEditorActions = Readonly<{
   startEditor(): Promise<TemplateLaneResult<EmbeddedTemplateSession>>;
-  syncFinishedTemplate(): Promise<TemplateLaneResult<TemplateOption>>;
+  syncFinishedTemplate(input: Readonly<{ name: string }>): Promise<TemplateLaneResult<TemplateOption>>;
   abandonDraft(): Promise<TemplateLaneResult<null>>;
 }>;
 
