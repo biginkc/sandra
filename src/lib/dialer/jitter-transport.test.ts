@@ -1472,6 +1472,27 @@ describe("JitterCallTransport", () => {
     }
   });
 
+  it("converges retained terminal proof when browser microphone recovery fails first", async () => {
+    const getProviderStatus = vi.fn()
+      .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "terminal", outcome: "ended" } });
+    const harness = transportHarness({
+      prepareMicrophone: vi.fn(async () => { throw new Error("microphone denied"); }),
+      getProviderStatus,
+    });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+
+    await expect(
+      harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z"),
+    ).resolves.toEqual({ id: "call-1" });
+    await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+
+    expect(getProviderStatus).toHaveBeenCalledTimes(2);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect(harness.rtc.disconnect).not.toHaveBeenCalled();
+  });
+
   it("stops retained terminal probing after current replacement media is proven healthy", async () => {
     vi.useFakeTimers();
     try {

@@ -259,6 +259,10 @@ export class JitterCallTransport implements CallTransport {
     this.removePageHideListener = this.dependencies.subscribePageHide(() => this.onPageHide());
     this.audioRecoveryRequired = true;
     this.emit("audio_reconnect_required");
+    // Exact provider status is independent of browser media setup. Start it
+    // before microphone permission, RTC construction, or registration so a
+    // terminal retained leg still converges when all browser recovery fails.
+    void this.reconcileRetainedProviderProof(handle.id);
     try {
       await this.dependencies.prepareMicrophone();
       const token = await this.dependencies.getToken(handle.id);
@@ -270,12 +274,9 @@ export class JitterCallTransport implements CallTransport {
       this.rtcClient = await this.dependencies.createRtcClient(token.data.rtc_token, this.remoteAudio);
       this.bindRtcEvents(this.rtcClient);
       await this.registerRtc(this.rtcClient);
-      // A retained provider leg may already be terminal and therefore never
-      // Attach back to the new browser session. Reconcile exact Jitter proof
-      // independently of SDK callUpdate so reload cannot orphan bookkeeping.
-      void this.reconcileRetainedProviderProof(handle.id);
       return handle;
     } catch (error) {
+      if (this.terminal || this.hangupRequested) return handle;
       this.requireAudioReconnect(error);
       return handle;
     }
