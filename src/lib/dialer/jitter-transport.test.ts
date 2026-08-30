@@ -165,6 +165,16 @@ async function flush(): Promise<void> {
   await Promise.resolve();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("JitterCallTransport", () => {
   it("reports durable inbound RTP counters while the browser leg is live and stops on teardown", async () => {
     let scheduled: (() => void) | undefined;
@@ -1491,6 +1501,120 @@ describe("JitterCallTransport", () => {
     expect(getProviderStatus).toHaveBeenCalledTimes(2);
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
     expect(harness.rtc.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("does not continue retained recovery when terminal proof wins during microphone setup", async () => {
+    const microphone = deferred<void>();
+    const providerProof = deferred<JitterProxyResult<{ state: "terminal"; outcome: "ended" }>>();
+    const harness = transportHarness({
+      prepareMicrophone: vi.fn(() => microphone.promise),
+      getProviderStatus: vi.fn(() => providerProof.promise),
+    });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+
+    const recovery = harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+    await vi.waitFor(() => expect(harness.dependencies.prepareMicrophone).toHaveBeenCalledTimes(1));
+    providerProof.resolve({ ok: true, data: { state: "terminal", outcome: "ended" } });
+    await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+    microphone.resolve();
+    await expect(recovery).resolves.toEqual({ id: "call-1" });
+
+    expect(harness.dependencies.getToken).not.toHaveBeenCalled();
+    expect(harness.dependencies.createRtcClient).not.toHaveBeenCalled();
+    expect(states).toEqual(["audio_reconnect_required", "ended"]);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect(harness.rtc.disconnect).not.toHaveBeenCalled();
+    expect((harness.transport as unknown as { rtcClient: unknown }).rtcClient).toBeNull();
+    expect((harness.transport as unknown as { remoteAudio: unknown }).remoteAudio).toBeNull();
+  });
+
+  it("does not continue retained recovery when terminal proof wins during token fetch", async () => {
+    const token = deferred<Awaited<ReturnType<JitterTransportDependencies["getToken"]>>>();
+    const providerProof = deferred<JitterProxyResult<{ state: "terminal"; outcome: "ended" }>>();
+    const harness = transportHarness({
+      getToken: vi.fn(() => token.promise),
+      getProviderStatus: vi.fn(() => providerProof.promise),
+    });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+
+    const recovery = harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+    await vi.waitFor(() => expect(harness.dependencies.getToken).toHaveBeenCalledTimes(1));
+    providerProof.resolve({ ok: true, data: { state: "terminal", outcome: "ended" } });
+    await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+    token.resolve({
+      ok: true,
+      data: {
+        rtc_token: "rtc-token-1",
+        sip_identity: "operator-1",
+        expires_at: "2026-08-21T20:05:00.000Z",
+        capabilities: { audio_health_media_state: "v1" },
+      },
+    });
+    await expect(recovery).resolves.toEqual({ id: "call-1" });
+
+    expect(harness.dependencies.createRtcClient).not.toHaveBeenCalled();
+    expect(states).toEqual(["audio_reconnect_required", "ended"]);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect(harness.rtc.disconnect).not.toHaveBeenCalled();
+    expect((harness.transport as unknown as { rtcClient: unknown }).rtcClient).toBeNull();
+  });
+
+  it("disposes an unregistered retained client when terminal proof wins during client creation", async () => {
+    const clientCreation = deferred<FakeRtcClient>();
+    const providerProof = deferred<JitterProxyResult<{ state: "terminal"; outcome: "ended" }>>();
+    const staleClient = new FakeRtcClient();
+    const removeAudio = vi.fn();
+    const audio = { remove: removeAudio } as unknown as HTMLAudioElement;
+    const harness = transportHarness({
+      createRemoteAudio: vi.fn(() => audio),
+      createRtcClient: vi.fn(() => clientCreation.promise),
+      getProviderStatus: vi.fn(() => providerProof.promise),
+    });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+
+    const recovery = harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+    await vi.waitFor(() => expect(harness.dependencies.createRtcClient).toHaveBeenCalledTimes(1));
+    providerProof.resolve({ ok: true, data: { state: "terminal", outcome: "ended" } });
+    await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+    clientCreation.resolve(staleClient);
+    await expect(recovery).resolves.toEqual({ id: "call-1" });
+
+    expect(staleClient.connect).not.toHaveBeenCalled();
+    expect(staleClient.disconnect).toHaveBeenCalledTimes(1);
+    expect(removeAudio).toHaveBeenCalledTimes(1);
+    expect(states).toEqual(["audio_reconnect_required", "ended"]);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect((harness.transport as unknown as { rtcClient: unknown }).rtcClient).toBeNull();
+    expect((harness.transport as unknown as { remoteAudio: unknown }).remoteAudio).toBeNull();
+  });
+
+  it("aborts retained registration when terminal proof wins while connect is pending", async () => {
+    const connect = deferred<void>();
+    const providerProof = deferred<JitterProxyResult<{ state: "terminal"; outcome: "ended" }>>();
+    const staleClient = new FakeRtcClient();
+    staleClient.connect.mockImplementation(() => connect.promise);
+    const harness = transportHarness({
+      createRtcClient: vi.fn(async () => staleClient),
+      getProviderStatus: vi.fn(() => providerProof.promise),
+    });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+
+    const recovery = harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+    await vi.waitFor(() => expect(staleClient.connect).toHaveBeenCalledTimes(1));
+    providerProof.resolve({ ok: true, data: { state: "terminal", outcome: "ended" } });
+    await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+    connect.resolve();
+    await expect(recovery).resolves.toEqual({ id: "call-1" });
+
+    expect(staleClient.disconnect).toHaveBeenCalledTimes(1);
+    expect(states).toEqual(["audio_reconnect_required", "ended"]);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    expect((harness.transport as unknown as { rtcClient: unknown }).rtcClient).toBeNull();
+    expect((harness.transport as unknown as { remoteAudio: unknown }).remoteAudio).toBeNull();
   });
 
   it("stops retained terminal probing after current replacement media is proven healthy", async () => {

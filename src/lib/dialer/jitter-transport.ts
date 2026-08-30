@@ -214,6 +214,7 @@ export class JitterCallTransport implements CallTransport {
   private providerProofRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private providerProofInFlight = false;
   private providerProofGeneration = 0;
+  private recoverySetupGeneration = 0;
   private localTerminalProofCall: TelnyxCallLike | null = null;
   private removePageHideListener: (() => void) | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
@@ -251,6 +252,7 @@ export class JitterCallTransport implements CallTransport {
 
   async recover(handle: CallHandle, startedAt: string): Promise<CallHandle> {
     if (this.callId || this.startPromise) throw new Error("A softphone call is already owned.");
+    const recoveryGeneration = ++this.recoverySetupGeneration;
     this.callId = handle.id;
     this.liveAt = Number.isFinite(Date.parse(startedAt))
       ? Date.parse(startedAt)
@@ -263,23 +265,58 @@ export class JitterCallTransport implements CallTransport {
     // before microphone permission, RTC construction, or registration so a
     // terminal retained leg still converges when all browser recovery fails.
     void this.reconcileRetainedProviderProof(handle.id);
+    let recoveryAudio: HTMLAudioElement | null = null;
+    let recoveryClient: TelnyxRtcLike | null = null;
     try {
       await this.dependencies.prepareMicrophone();
+      if (!this.isRecoverySetupCurrent(recoveryGeneration, handle.id)) return handle;
       const token = await this.dependencies.getToken(handle.id);
+      if (!this.isRecoverySetupCurrent(recoveryGeneration, handle.id)) return handle;
       if (!token.ok) throw proxyError(token);
       requireUsableToken(token.data, this.dependencies.now());
       this.holdCapability = token.data.capabilities?.audio_health_media_state === "v1";
-      this.remoteAudio = this.dependencies.createRemoteAudio();
-      this.removeRemoteAudioDiagnostics = this.bindRemoteAudioDiagnostics(this.remoteAudio);
-      this.rtcClient = await this.dependencies.createRtcClient(token.data.rtc_token, this.remoteAudio);
-      this.bindRtcEvents(this.rtcClient);
-      await this.registerRtc(this.rtcClient);
+      recoveryAudio = this.dependencies.createRemoteAudio();
+      recoveryClient = await this.dependencies.createRtcClient(token.data.rtc_token, recoveryAudio);
+      if (!this.isRecoverySetupCurrent(recoveryGeneration, handle.id)) {
+        this.discardUnregisteredRecoveryClient(recoveryClient, recoveryAudio);
+        return handle;
+      }
+      this.remoteAudio = recoveryAudio;
+      this.removeRemoteAudioDiagnostics = this.bindRemoteAudioDiagnostics(recoveryAudio);
+      this.rtcClient = recoveryClient;
+      this.bindRtcEvents(recoveryClient);
+      if (!this.isRecoverySetupCurrent(recoveryGeneration, handle.id)) {
+        this.destroyRtc();
+        return handle;
+      }
+      await this.registerRtc(recoveryClient);
+      if (!this.isRecoverySetupCurrent(recoveryGeneration, handle.id)) {
+        if (this.rtcClient === recoveryClient) this.destroyRtc();
+        return handle;
+      }
       return handle;
     } catch (error) {
-      if (this.terminal || this.hangupRequested) return handle;
+      if (!this.isRecoverySetupCurrent(recoveryGeneration, handle.id)) return handle;
       this.requireAudioReconnect(error);
       return handle;
     }
+  }
+
+  private isRecoverySetupCurrent(generation: number, callId: string): boolean {
+    return this.recoverySetupGeneration === generation &&
+      this.callId === callId &&
+      !this.terminal &&
+      !this.hangupRequested;
+  }
+
+  private discardUnregisteredRecoveryClient(
+    client: TelnyxRtcLike,
+    audio: HTMLAudioElement | null,
+  ): void {
+    // This client has not been registered and cannot own a provider call. It
+    // is safe to dispose without touching a newer/current RTC client.
+    void Promise.resolve(client.disconnect()).catch(() => undefined);
+    audio?.remove();
   }
 
   mute(on: boolean): void {
@@ -1255,6 +1292,7 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private destroyRtc(preservePageHideListener = false): void {
+    this.recoverySetupGeneration += 1;
     this.stopAudioHealth?.();
     this.stopAudioHealth = null;
     this.audioHealthPeer = null;
@@ -1267,7 +1305,9 @@ export class JitterCallTransport implements CallTransport {
       this.removePageHideListener?.();
       this.removePageHideListener = null;
     }
+    const rejectRegistration = this.rejectRegistration;
     this.clearRegistration();
+    rejectRegistration?.(new Error("Telnyx registration was superseded by call teardown."));
     this.clearRecoveryTimer();
     if (this.providerProofRetryTimer) clearTimeout(this.providerProofRetryTimer);
     this.providerProofRetryTimer = null;
