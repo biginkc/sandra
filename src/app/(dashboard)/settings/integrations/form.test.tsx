@@ -6,15 +6,36 @@ import { IntegrationsForm } from "./form";
 import type { IntegrationStatus } from "./actions";
 
 const {
+  connectDropboxSignAction,
+  disconnectDropboxSignAction,
   disconnectIntegration,
+  setEsignSendingEnabledAction,
   setChannelEnabledAction,
   setReminderPhoneAction,
   setTimezoneAction,
 } = vi.hoisted(() => ({
+  connectDropboxSignAction: vi.fn(async () => ({
+    ok: true,
+    data: {
+      connected: true,
+      canManage: true,
+      sendingEnabled: false,
+      testMode: true as const,
+      apiKeyLastFour: "1234",
+    },
+  })),
+  disconnectDropboxSignAction: vi.fn(async () => ({ ok: true, data: null })),
   disconnectIntegration: vi.fn(async () => ({ ok: true, data: null })),
+  setEsignSendingEnabledAction: vi.fn(async () => ({ ok: true, data: null })),
   setChannelEnabledAction: vi.fn(async () => ({ ok: true, data: null })),
   setReminderPhoneAction: vi.fn(async () => ({ ok: true, data: null })),
   setTimezoneAction: vi.fn(async () => ({ ok: true, data: null })),
+}));
+
+vi.mock("@/lib/esign/actions", () => ({
+  connectDropboxSignAction,
+  disconnectDropboxSignAction,
+  setEsignSendingEnabledAction,
 }));
 
 vi.mock("./actions", () => ({
@@ -30,10 +51,13 @@ vi.mock("sonner", () => ({
 
 describe("<IntegrationsForm />", () => {
   beforeEach(() => {
+    connectDropboxSignAction.mockClear();
+    disconnectDropboxSignAction.mockClear();
     disconnectIntegration.mockClear();
     setChannelEnabledAction.mockClear();
     setReminderPhoneAction.mockClear();
     setTimezoneAction.mockClear();
+    setEsignSendingEnabledAction.mockClear();
   });
 
   it("renders connect links when no integration tokens exist", () => {
@@ -46,7 +70,8 @@ describe("<IntegrationsForm />", () => {
     expect(
       screen.getByRole("link", { name: "Connect Google Calendar" }),
     ).toHaveAttribute("href", "/api/oauth/google/start");
-    expect(screen.getAllByText("Disconnected")).toHaveLength(2);
+    expect(screen.getAllByText("Disconnected")).toHaveLength(3);
+    expect(screen.getByText(/Test mode is always on for v1/i)).toBeVisible();
   });
 
   it("renders disconnect controls when Slack is connected", () => {
@@ -63,7 +88,9 @@ describe("<IntegrationsForm />", () => {
     ).toBeVisible();
     expect(screen.getByText("BMH Group")).toBeVisible();
     expect(screen.queryByRole("link", { name: "Connect Slack" })).toBeNull();
-    expect(screen.getByRole("switch", { name: "Send Slack DMs" })).toBeChecked();
+    expect(
+      screen.getByRole("switch", { name: "Send Slack DMs" }),
+    ).toBeChecked();
   });
 
   it("renders connected Google identity and the manual calendar cleanup note", () => {
@@ -165,17 +192,96 @@ describe("<IntegrationsForm />", () => {
   });
 });
 
-function status(
-  overrides: Partial<IntegrationStatus> = {},
-): IntegrationStatus {
+function status(overrides: Partial<IntegrationStatus> = {}): IntegrationStatus {
   return {
     slack: { connected: false, enabled: true, teamName: null },
     google: { connected: false, enabled: true, email: null },
     sms: { available: false, enabled: false, phone: null },
+    esign: {
+      connected: false,
+      canManage: true,
+      sendingEnabled: false,
+      testMode: true,
+      apiKeyLastFour: null,
+    },
     timezone: "America/Chicago",
     ...overrides,
   };
 }
+
+describe("<IntegrationsForm /> — Dropbox Sign", () => {
+  it("connects with an owner-entered API key and never renders it as text", async () => {
+    const user = userEvent.setup();
+    render(<IntegrationsForm initial={status()} />);
+
+    const input = screen.getByLabelText("Primary API key");
+    expect(input).toHaveAttribute("type", "password");
+    expect(
+      screen.getByText(/Use the Primary Key.*callback signatures/i),
+    ).toBeVisible();
+    await user.type(input, "secret-api-key-1234");
+    await user.click(
+      screen.getByRole("button", { name: "Connect Dropbox Sign" }),
+    );
+
+    await waitFor(() => {
+      expect(connectDropboxSignAction).toHaveBeenCalledWith(
+        "secret-api-key-1234",
+      );
+    });
+    expect(screen.queryByDisplayValue("secret-api-key-1234")).toBeNull();
+    expect(screen.getByText(/Connected ·••••1234/)).toBeVisible();
+  });
+
+  it("toggles sending when connected", async () => {
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: true,
+            sendingEnabled: false,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+        })}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("switch", { name: "Enable contract sending" }),
+    );
+    expect(screen.getByText(/Requires a verified callback/i)).toBeVisible();
+    await waitFor(() => {
+      expect(setEsignSendingEnabledAction).toHaveBeenCalledWith(true);
+    });
+    expect(screen.queryByRole("link", { name: "Manage templates" })).toBeNull();
+  });
+
+  it("prevents members from changing or disconnecting the org connection", () => {
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: false,
+            sendingEnabled: true,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByRole("switch", { name: "Enable contract sending" }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Disconnect Dropbox Sign" }),
+    ).toBeNull();
+  });
+});
 
 describe("<IntegrationsForm /> — SMS reminders", () => {
   beforeEach(() => {
@@ -184,28 +290,42 @@ describe("<IntegrationsForm /> — SMS reminders", () => {
   });
 
   it("hides the SMS card entirely when unavailable (REP_SMS_FROM_NUMBER unset)", () => {
-    render(<IntegrationsForm initial={status({ sms: { available: false, enabled: false, phone: null } })} />);
+    render(
+      <IntegrationsForm
+        initial={status({
+          sms: { available: false, enabled: false, phone: null },
+        })}
+      />,
+    );
 
     expect(screen.queryByLabelText("Phone number")).toBeNull();
-    expect(screen.queryByRole("switch", { name: "Send text reminders" })).toBeNull();
+    expect(
+      screen.queryByRole("switch", { name: "Send text reminders" }),
+    ).toBeNull();
   });
 
   it("shows the SMS card when available, with the toggle disabled until a phone is saved", () => {
     render(
       <IntegrationsForm
-        initial={status({ sms: { available: true, enabled: false, phone: null } })}
+        initial={status({
+          sms: { available: true, enabled: false, phone: null },
+        })}
       />,
     );
 
     expect(screen.getByLabelText("Phone number")).toBeVisible();
-    expect(screen.getByRole("switch", { name: "Send text reminders" })).toBeDisabled();
+    expect(
+      screen.getByRole("switch", { name: "Send text reminders" }),
+    ).toBeDisabled();
   });
 
   it("saving a phone number calls the reminder-phone action", async () => {
     const user = userEvent.setup();
     render(
       <IntegrationsForm
-        initial={status({ sms: { available: true, enabled: false, phone: null } })}
+        initial={status({
+          sms: { available: true, enabled: false, phone: null },
+        })}
       />,
     );
 
@@ -221,7 +341,9 @@ describe("<IntegrationsForm /> — SMS reminders", () => {
     const user = userEvent.setup();
     render(
       <IntegrationsForm
-        initial={status({ sms: { available: true, enabled: false, phone: "+18165551234" } })}
+        initial={status({
+          sms: { available: true, enabled: false, phone: "+18165551234" },
+        })}
       />,
     );
 
@@ -231,7 +353,10 @@ describe("<IntegrationsForm /> — SMS reminders", () => {
     await user.click(toggle);
 
     await waitFor(() => {
-      expect(setChannelEnabledAction).toHaveBeenCalledWith("sms_reminder", true);
+      expect(setChannelEnabledAction).toHaveBeenCalledWith(
+        "sms_reminder",
+        true,
+      );
     });
   });
 });

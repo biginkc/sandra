@@ -1,0 +1,35 @@
+{
+  "format": 1,
+  "supabaseCliVersion": "2.109.1",
+  "productionProjectRef": "copflsklaefwzipsrjqz",
+  "switchboard": {
+    "version": "20260830092331",
+    "name": "switchboard_contact_preferences",
+    "path": "supabase/migrations/20260830092331_switchboard_contact_preferences.sql",
+    "sha256": "c4530a37e58cb69140661a62dc355e6555435d9ee8d3c1c4f59aa9134af3f30f",
+    "statementsSha256": "741a9c39af4b3ef1346ae0e80aae28e1cf916fd331750c3a484fae7b370e1353"
+  },
+  "migrations": [
+    {
+      "version": "20260829194500",
+      "name": "esign_foundation",
+      "path": "supabase/migrations/20260829194500_esign_foundation.sql",
+      "sha256": "d34001a8733f369d1cc5bfb1cfb641e02324452202f22415b361f3c8dbff47b7",
+      "statementsSha256": "a90de8ca5652c0248a82e92f65d27a43e413c42aba1ce609709297b417f005ca"
+    },
+    {
+      "version": "20260830080000",
+      "name": "esign_template_upload_reservations",
+      "path": "supabase/migrations/20260830080000_esign_template_upload_reservations.sql",
+      "sha256": "f8339006ce12bb70ec6566799194a8c73654789272de0d3c70fdb996609a94fb",
+      "statementsSha256": "945cf7c4db0be2b2a341587253952892a0ed409bc929a8a01ab2bdd45e648358"
+    },
+    {
+      "version": "20260830100000",
+      "name": "esign_switchboard_webhook_constraint_union",
+      "path": "supabase/migrations/20260830100000_esign_switchboard_webhook_constraint_union.sql",
+      "sha256": "fb67de5b4b0eaccdd3e37238caeab91e6d42131e674851349aba9103246b85ef",
+      "statementsSha256": "0696768d8a6ecdf584bd22848c44b1f182936cd118d1ee0fb1ae3346ad1efd7c"
+    }
+  ]
+}

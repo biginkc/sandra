@@ -48,6 +48,22 @@ const SYSTEM_MANAGED_LISTS = [
   "Zombie Properties",
 ] as const;
 
+const ESIGN_TEST_STORAGE_BUCKETS = ["esign-staging", "lead-files"] as const;
+
+async function emptyEsignTestStorage(
+  client: SupabaseClient<Database>,
+): Promise<void> {
+  for (const bucket of ESIGN_TEST_STORAGE_BUCKETS) {
+    const { error } = await client.storage.emptyBucket(bucket);
+    if (
+      error &&
+      !/bucket not found|not found/i.test(error.message)
+    ) {
+      throw new Error(`eSign storage reset failed for ${bucket}: ${error.message}`);
+    }
+  }
+}
+
 async function ensureSystemManagedLists(
   client: SupabaseClient<Database>,
 ): Promise<void> {
@@ -119,6 +135,11 @@ async function pruneOrphanMemberships(
 export async function resetTenantTables(
   client: SupabaseClient<Database>,
 ): Promise<void> {
+  // Storage objects must be removed through the Storage API so their backing
+  // files and metadata stay consistent. Direct SQL deletion is rejected by
+  // Supabase and would orphan physical objects even if forced.
+  await emptyEsignTestStorage(client);
+
   const { data: membershipsBefore, error: membershipsBeforeError } = await (
     client as unknown as MembershipSnapshotReader
   )

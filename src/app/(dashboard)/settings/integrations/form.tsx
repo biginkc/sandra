@@ -6,6 +6,7 @@ import { useState, useTransition } from "react";
 import {
   CalendarDays,
   CheckCircle2,
+  FileSignature,
   MessageCircle,
   MessageSquare,
   XCircle,
@@ -23,6 +24,11 @@ import {
 } from "@/components/ui/card";
 import { callAction } from "@/lib/errors/call-action";
 import { cn } from "@/lib/utils";
+import {
+  connectDropboxSignAction,
+  disconnectDropboxSignAction,
+  setEsignSendingEnabledAction,
+} from "@/lib/esign/actions";
 
 import {
   disconnectIntegration,
@@ -47,6 +53,8 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const [smsEnabled, setSmsEnabled] = useState(initial.sms.enabled);
   const [savedPhone, setSavedPhone] = useState(initial.sms.phone);
   const [phoneInput, setPhoneInput] = useState(initial.sms.phone ?? "");
+  const [esign, setEsign] = useState(initial.esign);
+  const [esignApiKey, setEsignApiKey] = useState("");
   const [pending, startTransition] = useTransition();
 
   const toggleSlack = (next: boolean) => {
@@ -95,7 +103,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
       const result = await callAction(
         setChannelEnabledAction("sms_reminder", next),
         {
-          successMessage: next ? "Text reminders turned on" : "Text reminders turned off",
+          successMessage: next
+            ? "Text reminders turned on"
+            : "Text reminders turned off",
           fallbackMessage: "Could not update text reminder preference",
         },
       );
@@ -122,6 +132,53 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
             : "Google Calendar disconnected",
         fallbackMessage: "Could not disconnect integration",
       });
+    });
+  };
+
+  const connectEsign = () => {
+    startTransition(async () => {
+      const result = await callAction(connectDropboxSignAction(esignApiKey), {
+        successMessage: "Dropbox Sign connected",
+        fallbackMessage: "Could not connect Dropbox Sign",
+      });
+      if (result.ok) {
+        setEsign(result.data);
+        setEsignApiKey("");
+      }
+    });
+  };
+
+  const toggleEsign = (next: boolean) => {
+    const previous = esign.sendingEnabled;
+    setEsign((current) => ({ ...current, sendingEnabled: next }));
+    startTransition(async () => {
+      const result = await callAction(setEsignSendingEnabledAction(next), {
+        successMessage: next
+          ? "eSign sending turned on"
+          : "eSign sending turned off",
+        fallbackMessage: "Could not update eSign sending",
+      });
+      if (!result.ok) {
+        setEsign((current) => ({ ...current, sendingEnabled: previous }));
+      }
+    });
+  };
+
+  const disconnectEsign = () => {
+    startTransition(async () => {
+      const result = await callAction(disconnectDropboxSignAction(), {
+        successMessage: "Dropbox Sign disconnected",
+        fallbackMessage: "Could not disconnect Dropbox Sign",
+      });
+      if (result.ok) {
+        setEsign({
+          connected: false,
+          canManage: true,
+          sendingEnabled: false,
+          testMode: true,
+          apiKeyLastFour: null,
+        });
+      }
     });
   };
 
@@ -161,6 +218,111 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
           onDisconnect={() => disconnect("google")}
           testIdPrefix="google"
         />
+
+        <Card className="rounded-md">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <FileSignature aria-hidden className="size-4" />
+              Dropbox Sign
+            </CardTitle>
+            <CardDescription>
+              Create and send contracts from Sandra with Dropbox Sign.
+            </CardDescription>
+            <CardAction>
+              <StatusBadge
+                connected={esign.connected}
+                label={
+                  esign.connected && esign.apiKeyLastFour
+                    ? `Connected ·••••${esign.apiKeyLastFour}`
+                    : "Connected"
+                }
+              />
+            </CardAction>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <div className="border-alert-warning/40 bg-alert-warning/10 rounded-md border px-3 py-2 text-sm">
+              Test mode is always on for v1. Test signatures are not legally
+              binding.
+            </div>
+            {esign.connected ? (
+              <>
+                <label className="flex items-center justify-between gap-4 rounded-md border p-3 text-sm">
+                  <span className="flex flex-col gap-1">
+                    <span className="font-medium">Enable contract sending</span>
+                    <span className="text-muted-foreground text-xs">
+                      Requires a verified callback and applies to new test-mode
+                      requests.
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={esign.sendingEnabled}
+                    disabled={pending || !esign.canManage}
+                    onChange={(event) => toggleEsign(event.target.checked)}
+                    data-testid="esign-enabled-toggle"
+                    className="accent-primary size-5"
+                    aria-label="Enable contract sending"
+                  />
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {esign.canManage && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={pending}
+                      onClick={disconnectEsign}
+                    >
+                      Disconnect Dropbox Sign
+                    </Button>
+                  )}
+                </div>
+                {!esign.canManage && (
+                  <p className="text-muted-foreground text-xs">
+                    Only organization owners can manage this connection.
+                  </p>
+                )}
+              </>
+            ) : esign.canManage ? (
+              <div className="flex flex-col gap-2">
+                <label
+                  htmlFor="dropbox-sign-api-key"
+                  className="text-sm font-medium"
+                >
+                  Primary API key
+                </label>
+                <p className="text-muted-foreground text-xs">
+                  Use the Primary Key from your Dropbox Sign API settings so
+                  callback signatures can be verified.
+                </p>
+                <input
+                  id="dropbox-sign-api-key"
+                  type="password"
+                  autoComplete="off"
+                  value={esignApiKey}
+                  disabled={pending}
+                  onChange={(event) => setEsignApiKey(event.target.value)}
+                  className="border-input bg-background h-10 rounded-md border px-3 text-sm"
+                />
+                <div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={pending || esignApiKey.trim().length < 8}
+                    onClick={connectEsign}
+                  >
+                    Connect Dropbox Sign
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <p className="text-muted-foreground text-sm">
+                Ask an organization owner to connect Dropbox Sign.
+              </p>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       <section className="rounded-md border p-4">

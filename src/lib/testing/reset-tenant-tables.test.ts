@@ -8,6 +8,7 @@ describe("resetTenantTables", () => {
   it("pages through auth users before pruning orphan memberships", async () => {
     const deleteIn = vi.fn().mockResolvedValue({ error: null });
     const upsert = vi.fn().mockResolvedValue({ error: null });
+    const emptyBucket = vi.fn().mockResolvedValue({ error: null });
     const listUsers = vi
       .fn()
       .mockResolvedValueOnce({
@@ -39,6 +40,7 @@ describe("resetTenantTables", () => {
           listUsers,
         },
       },
+      storage: { emptyBucket },
       rpc: vi.fn().mockResolvedValue({ error: null }),
       from: vi.fn((table: string) => {
         if (table === "memberships") {
@@ -97,5 +99,58 @@ describe("resetTenantTables", () => {
     expect(listUsers).toHaveBeenNthCalledWith(2, { page: 2, perPage: 200 });
     expect(deleteIn).not.toHaveBeenCalled();
     expect(upsert).toHaveBeenCalledTimes(1);
+    expect(emptyBucket).toHaveBeenNthCalledWith(1, "esign-staging");
+    expect(emptyBucket).toHaveBeenNthCalledWith(2, "lead-files");
+  });
+
+  it("continues when the eSign buckets have not been migrated yet", async () => {
+    const rpc = vi.fn().mockResolvedValue({ error: null });
+    const client = {
+      auth: {
+        admin: {
+          listUsers: vi.fn().mockResolvedValue({
+            data: { users: [], nextPage: null },
+            error: null,
+          }),
+        },
+      },
+      storage: {
+        emptyBucket: vi.fn().mockResolvedValue({
+          error: { message: "Bucket not found" },
+        }),
+      },
+      rpc,
+      from: vi.fn((table: string) => {
+        if (table === "memberships") {
+          return {
+            select: vi.fn().mockResolvedValue({ data: [], error: null }),
+          };
+        }
+        if (table === "lists") {
+          return { upsert: vi.fn().mockResolvedValue({ error: null }) };
+        }
+        throw new Error(`Unexpected table: ${table}`);
+      }),
+    } as unknown as SupabaseClient<Database>;
+
+    await expect(resetTenantTables(client)).resolves.toBeUndefined();
+    expect(rpc).toHaveBeenCalledWith("reset_tenant_tables");
+  });
+
+  it("fails before relational reset when private object cleanup fails", async () => {
+    const rpc = vi.fn();
+    const client = {
+      storage: {
+        emptyBucket: vi.fn().mockResolvedValue({
+          error: { message: "Storage service unavailable" },
+        }),
+      },
+      rpc,
+    } as unknown as SupabaseClient<Database>;
+
+    await expect(resetTenantTables(client)).rejects.toThrow(
+      "eSign storage reset failed for esign-staging",
+    );
+    expect(rpc).not.toHaveBeenCalled();
   });
 });
