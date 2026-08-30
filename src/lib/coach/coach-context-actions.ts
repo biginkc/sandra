@@ -2,7 +2,7 @@
 
 import { reportError } from "@/lib/errors/report";
 import { createClient } from "@/lib/supabase/server";
-import { repDisplayName } from "./rep-display-name";
+import { repDisplayName, repFileNumberIdentity } from "./rep-display-name";
 import type { CoachCallContext, CoachOccupancy } from "./types";
 
 type CoachLeadRow = {
@@ -86,13 +86,13 @@ export async function loadCoachCallContext(input: {
   }
 
   const lead = leadResult.data as unknown as CoachLeadRow | null;
-  const authenticatedRepName = repDisplayName(user);
+  const authenticatedRepName = repFileNumberIdentity(user);
 
   return {
     sellerName: sellerName(lead?.homeowner ?? null),
     propertyAddress: lead?.address ?? null,
     propertyCounty: lead?.county?.name ?? null,
-    repName: authenticatedRepName,
+    repName: repDisplayName(user),
     authenticatedRepName,
     repPhoneE164: input.repPhoneE164,
     // Sandra has no free-text seller-motivation field. properties.motivation_level
