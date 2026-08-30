@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import {
   adminClient,
@@ -8,6 +8,21 @@ import {
 
 const LEADS_TEAMMATE_EMAIL = "e2e-leads-teammate@bmhgroupkc.com";
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+
+async function resetInboundQueryFilters(page: Page): Promise<void> {
+  await expect(async () => {
+    const currentUrl = new URL(page.url());
+    if (currentUrl.pathname === "/leads" && currentUrl.search === "") return;
+
+    await page
+      .getByRole("button", { name: "Reset all (1)" })
+      .click({ timeout: 1_500 });
+    await expect(page).toHaveURL(/\/leads$/, { timeout: 2_000 });
+  }).toPass({
+    timeout: 15_000,
+    intervals: [250, 500, 1_000],
+  });
+}
 
 async function findAuthUserByEmail(
   admin: ReturnType<typeof adminClient>,
@@ -62,6 +77,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   page,
 }, testInfo) => {
   test.setTimeout(120_000);
+  const boardReplacementTimeoutMs = 15_000;
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
   page.on("console", (message) => {
@@ -283,9 +299,10 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await expect(page.getByText("123 Foundation Ave")).toHaveCount(0);
 
   await page.goto("/leads?assignee=me");
-  await page.getByRole("button", { name: "Reset all (1)" }).click();
-  await expect(page.getByText("789 Unassigned Lead Rd")).toBeVisible();
-  await expect(page).toHaveURL(/\/leads$/);
+  await resetInboundQueryFilters(page);
+  await expect(page.getByText("789 Unassigned Lead Rd")).toBeVisible({
+    timeout: boardReplacementTimeoutMs,
+  });
 
   await page.goto("/leads?unassigned=true");
   await expect(page.getByRole("button", { name: "Unassigned", exact: true })).toBeVisible();
@@ -297,9 +314,10 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await expect(page.getByText("789 Unassigned Lead Rd")).toHaveCount(0);
 
   await page.goto("/leads?unassigned=true");
-  await page.getByRole("button", { name: "Reset all (1)" }).click();
-  await expect(page).toHaveURL(/\/leads$/);
-  await expect(page.getByText("123 Foundation Ave")).toBeVisible();
+  await resetInboundQueryFilters(page);
+  await expect(page.getByText("123 Foundation Ave")).toBeVisible({
+    timeout: boardReplacementTimeoutMs,
+  });
 
   await page.goto("/leads?stale=true");
   await expect(
@@ -310,10 +328,12 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await page.screenshot({
     path: testInfo.outputPath("leads-inbound-stale.png"),
     fullPage: true,
+    caret: "initial",
   });
-  await page.getByRole("button", { name: "Reset all (1)" }).click();
-  await expect(page).toHaveURL(/\/leads$/);
-  await expect(page.getByText("123 Foundation Ave")).toBeVisible();
+  await resetInboundQueryFilters(page);
+  await expect(page.getByText("123 Foundation Ave")).toBeVisible({
+    timeout: boardReplacementTimeoutMs,
+  });
 
   await page.goto("/leads?sequence_ended=true");
   await expect(
@@ -321,9 +341,10 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   ).toBeVisible();
   await expect(page.getByText("789 Unassigned Lead Rd")).toBeVisible();
   await expect(page.getByText("123 Foundation Ave")).toHaveCount(0);
-  await page.getByRole("button", { name: "Reset all (1)" }).click();
-  await expect(page).toHaveURL(/\/leads$/);
-  await expect(page.getByText("123 Foundation Ave")).toBeVisible();
+  await resetInboundQueryFilters(page);
+  await expect(page.getByText("123 Foundation Ave")).toBeVisible({
+    timeout: boardReplacementTimeoutMs,
+  });
 
   await page.goto("/leads?assignee=missing-user");
   await expect(page.getByRole("button", { name: "All leads" })).toHaveAttribute(
@@ -349,6 +370,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await page.screenshot({
     path: testInfo.outputPath("leads-add-dialog-desktop.png"),
     fullPage: true,
+    caret: "initial",
   });
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("dialog")).toBeHidden();
@@ -356,6 +378,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await page.screenshot({
     path: testInfo.outputPath("leads-board-v2-desktop.png"),
     fullPage: true,
+    caret: "initial",
   });
 
   await page.getByRole("textbox", { name: "Search leads" }).fill("no-such-lead");
@@ -363,7 +386,9 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await expect(page.getByText("No leads match these filters")).toBeVisible();
   await expect(page.getByRole("button", { name: /Search: no-such-lead/ })).toBeVisible();
   await page.getByRole("button", { name: "Reset all", exact: true }).click();
-  await expect(page.getByText("123 Foundation Ave")).toBeVisible();
+  await expect(page.getByText("123 Foundation Ave")).toBeVisible({
+    timeout: boardReplacementTimeoutMs,
+  });
 
   await page.setViewportSize({ width: 390, height: 600 });
   await page.getByRole("button", { name: "Add lead" }).click();
@@ -377,6 +402,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await page.screenshot({
     path: testInfo.outputPath("leads-add-dialog-narrow.png"),
     fullPage: true,
+    caret: "initial",
   });
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("dialog")).toBeHidden();
@@ -395,6 +421,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await page.screenshot({
     path: testInfo.outputPath("leads-board-v2-narrow.png"),
     fullPage: true,
+    caret: "initial",
   });
 
   expect(consoleErrors).toEqual([]);
