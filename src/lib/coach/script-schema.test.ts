@@ -98,7 +98,7 @@ describe("assertValidClosrScript", () => {
       .map((line) => line.text)
       .join("\u0000");
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "0f11d3a3fd8f3aab0e92c8dec4442cc6a76a65c049bfe5a45adcedaf3f195a90",
+      "6678196aaa580be5e048682dfa74a88c7445c0868d8f9b295479de246605ea87",
     );
   });
 
@@ -119,6 +119,22 @@ describe("assertValidClosrScript", () => {
       .find((phase) => phase.id === "introduction")
       ?.display.branches.find((branch) => branch.tag === "Pen & paper — contact details");
     expect(contactDetails?.variants[0]?.lines.some((line) => line.id === spokenEmailRequests[0]?.id)).toBe(true);
+  });
+
+  it("keeps brittle e-sign platform directions out of seller-facing copy and match landmarks", () => {
+    const close = (scriptJson as unknown as ClosrScript).phases.find((phase) => phase.id === "close");
+    expect(close).toBeDefined();
+
+    const sellerFacingCopy = close!.display.branches
+      .flatMap((branch) => branch.variants)
+      .flatMap((variant) => variant.lines)
+      .filter((line) => line.type === "say")
+      .map((line) => line.text)
+      .join("\n");
+    expect(sellerFacingCopy).not.toMatch(/view documents|adopt and sign|red flashing box|second red box|share back with/i);
+    expect(sellerFacingCopy).toContain("72 hours to schedule the initial walkthrough");
+
+    expect(close!.match.advance_landmarks.map((landmark) => landmark.id)).not.toContain("esign_steps");
   });
 
   it("rejects a phase missing match.entry_landmarks/advance_landmarks", () => {

@@ -484,7 +484,6 @@
               { "key": "default", "label": null, "lines": [
                 { "id": "close.going-over-the-contract.default.01", "type": "say", "text": "Just to confirm {seller_name}, the address is {property_address}, the purchase price we agreed on is {offer_price}. The closing date we agreed on is {closing_date}. The company we will be using to handle closing and wiring you your funds we will let you know via a formal notification! Oh yeah! Do you want your funds via a wire, or a check at closing?" },
                 { "id": "close.going-over-the-contract.default.02", "type": "say", "text": "Awesome, Do you have any other questions?" },
-                { "id": "close.going-over-the-contract.default.03", "type": "say", "text": "Awesome so I just sent it over to your email pull that up for me please:\n\nPress view documents -> press sign in the top left corner -> press the red flashing box-> then press adopt and sign -> if it is novation have them press the second red box -> then press share back with {rep_name}." },
                 { "id": "close.going-over-the-contract.default.04", "type": "say", "text": "Great! Our team will be reaching out within the next 72 hours to schedule the initial walkthrough, it is a blessing being able to help you! Talk soon." }
               ] }
             ]
@@ -498,7 +497,6 @@
         ],
         "advance_landmarks": [
           { "id": "contract_confirm", "speaker": "rep", "phrases": ["just to confirm", "purchase price we agreed", "closing date we agreed", "wire or a check"] },
-          { "id": "esign_steps", "speaker": "rep", "phrases": ["view documents", "adopt and sign", "share back with"] },
           { "id": "wrap", "speaker": "rep", "phrases": ["72 hours to schedule", "initial walkthrough", "blessing being able to help"] }
         ],
         "exit_to": null

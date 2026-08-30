@@ -187,6 +187,16 @@ describe("buildCoachSectionScriptBlock", () => {
   it("returns null for an unknown section", () => {
     expect(buildCoachSectionScriptBlock("unknown.section", tokens)).toBeNull();
   });
+
+  it("renders only the seller-facing e-sign wrap-up after contract confirmation", () => {
+    const block = buildCoachSectionScriptBlock("close.esign-and-wrap", tokens);
+    expect(block?.branches).toHaveLength(1);
+    const lines = block!.branches[0].selected.lines;
+    expect(lines.map((line) => line.id)).toEqual(["close.going-over-the-contract.default.04"]);
+    const text = lines.map((line) => allText(line.segments)).join(" ");
+    expect(text).toContain("72 hours to schedule the initial walkthrough");
+    expect(text).not.toMatch(/view documents|adopt and sign|red flashing box|second red box|share back with/i);
+  });
 });
 
 describe("branch variant selection", () => {

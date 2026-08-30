@@ -186,7 +186,7 @@ test("selects every approved spoken fork and path without changing navigation or
   }
 });
 
-test("preserves the official document's multiline outcomes and e-sign steps", async ({ page }) => {
+test("preserves the official multiline outcomes and seller-facing e-sign wrap-up", async ({ page }) => {
   await mountCoach(page);
 
   for (let step = 0; step < 3; step += 1) await page.getByTestId("coach-next").click();
@@ -198,9 +198,9 @@ test("preserves the official document's multiline outcomes and e-sign steps", as
   await page.getByTestId("phase-rail-close").click();
   await page.getByTestId("coach-next").click();
   await page.getByTestId("coach-next").click();
-  const esign = page.getByTestId("current-section-script").locator("p").filter({ hasText: "Press view documents" });
-  await expect(esign).toHaveCSS("white-space", "pre-line");
-  expect(await esign.innerText()).toContain("\n\nPress view documents");
+  const scriptText = page.getByTestId("current-section-script");
+  await expect(scriptText).toContainText("72 hours to schedule the initial walkthrough");
+  await expect(scriptText).not.toContainText(/view documents|adopt and sign|red flashing box|second red box|share back with/i);
 });
 
 test("jumps each phase to its first manual section and legacy events are navigation/rendering no-ops", async ({ page }) => {
