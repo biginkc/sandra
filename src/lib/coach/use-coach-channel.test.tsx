@@ -364,6 +364,7 @@ describe("useCoachChannel", () => {
     await flush();
 
     expect(result.current.state.transcript).toEqual([]);
+    expect(result.current.state.transcriptFragments).toEqual([]);
     expect(result.current.state.currentPhaseId).toBe("introduction");
     expect(result.current.degraded).toBe(false);
     expect(result.current.reconnectGap).toBe(false);
