@@ -3874,6 +3874,7 @@ export type Database = {
           staging_deleted_at: string | null
           staging_path: string | null
           staging_source_id: string | null
+          supersedes_template_id: string | null
           updated_at: string
           updated_by: string
         }
@@ -3903,6 +3904,7 @@ export type Database = {
           staging_deleted_at?: string | null
           staging_path?: string | null
           staging_source_id?: string | null
+          supersedes_template_id?: string | null
           updated_at?: string
           updated_by: string
         }
@@ -3932,6 +3934,7 @@ export type Database = {
           staging_deleted_at?: string | null
           staging_path?: string | null
           staging_source_id?: string | null
+          supersedes_template_id?: string | null
           updated_at?: string
           updated_by?: string
         }
@@ -3955,6 +3958,13 @@ export type Database = {
             columns: ["staging_source_id", "org_id"]
             isOneToOne: false
             referencedRelation: "esign_template_staging_sources"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "esign_templates_supersedes_org_fkey"
+            columns: ["supersedes_template_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "esign_templates"
             referencedColumns: ["id", "org_id"]
           },
         ]
@@ -4442,6 +4452,7 @@ export type Database = {
           staging_deleted_at: string | null
           staging_path: string | null
           staging_source_id: string | null
+          supersedes_template_id: string | null
           updated_at: string | null
           updated_by: string | null
         }
@@ -4471,6 +4482,7 @@ export type Database = {
           staging_deleted_at?: string | null
           staging_path?: string | null
           staging_source_id?: string | null
+          supersedes_template_id?: string | null
           updated_at?: string | null
           updated_by?: string | null
         }
@@ -4500,6 +4512,7 @@ export type Database = {
           staging_deleted_at?: string | null
           staging_path?: string | null
           staging_source_id?: string | null
+          supersedes_template_id?: string | null
           updated_at?: string | null
           updated_by?: string | null
         }
@@ -4754,6 +4767,15 @@ export type Database = {
         }
         Returns: string
       }
+      create_esign_template_edit_revision: {
+        Args: {
+          p_actor_id: string
+          p_org_id: string
+          p_source_id: string
+          p_source_template_id: string
+        }
+        Returns: string
+      }
       delete_org_esign_integration: {
         Args: { p_actor_id: string; p_org_id: string }
         Returns: undefined
@@ -4816,6 +4838,20 @@ export type Database = {
           p_provider_template_id: string
           p_seller_role: string
           p_template_id: string
+        }
+        Returns: string
+      }
+      publish_esign_template_edit_revision: {
+        Args: {
+          p_actor_id: string
+          p_expected_source_provider_template_id: string
+          p_org_id: string
+          p_provider_merge_field_names: string[]
+          p_provider_signer_roles: Json
+          p_revision_provider_template_id: string
+          p_revision_template_id: string
+          p_seller_role: string
+          p_source_template_id: string
         }
         Returns: string
       }

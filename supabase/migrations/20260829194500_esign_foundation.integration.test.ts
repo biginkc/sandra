@@ -159,6 +159,97 @@ async function seedTemplate(
   return fixture.id;
 }
 
+async function seedVerifiedTemplateSource(input: {
+  orgId?: string;
+  actorId?: string;
+  filename?: string;
+} = {}): Promise<{ id: string; path: string }> {
+  const orgId = input.orgId ?? BMH_ORG_ID;
+  const actorId = input.actorId ?? ownerId;
+  const id = crypto.randomUUID();
+  const path = `${orgId}/${id}.pdf`;
+  await setRequestRole("service_role");
+  await pg.query(
+    `insert into storage.objects (bucket_id, name, metadata)
+     values ('esign-staging',$1,'{"mimetype":"application/pdf","size":1024}')`,
+    [path],
+  );
+  await pg.query(
+    `select public.record_verified_esign_template_source(
+       $1,$2,$3,$4,1024,'application/pdf',$5,$6
+     )`,
+    [
+      orgId,
+      id,
+      path,
+      input.filename ?? "edit-revision.pdf",
+      "f".repeat(64),
+      actorId,
+    ],
+  );
+  return { id, path };
+}
+
+async function seedTemplateEditRevision(input: {
+  sourceTemplateId: string;
+  providerTemplateId: string;
+  orgId?: string;
+  actorId?: string;
+}): Promise<{ id: string; sourceId: string; sourcePath: string }> {
+  const orgId = input.orgId ?? BMH_ORG_ID;
+  const actorId = input.actorId ?? ownerId;
+  const source = await seedVerifiedTemplateSource({ orgId, actorId });
+  const revision = await pg.query<{ id: string }>(
+    `select public.create_esign_template_edit_revision(
+       $1,$2,$3,$4
+     ) as id`,
+    [orgId, input.sourceTemplateId, source.id, actorId],
+  );
+  const id = revision.rows[0].id;
+  await pg.query(
+    "select public.attach_esign_template_provider_id($1,$2,$3,$4)",
+    [orgId, id, input.providerTemplateId, actorId],
+  );
+  return { id, sourceId: source.id, sourcePath: source.path };
+}
+
+async function publishTemplateEditRevision(input: {
+  sourceTemplateId: string;
+  revisionTemplateId: string;
+  sourceProviderTemplateId: string;
+  revisionProviderTemplateId: string;
+  orgId?: string;
+  actorId?: string;
+  sellerRole?: string;
+  signerRoles?: readonly { name: string; order: number }[];
+}): Promise<string> {
+  const result = await pg.query<{ result: string }>(
+    `select public.publish_esign_template_edit_revision(
+       $1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9
+     ) as result`,
+    [
+      input.orgId ?? BMH_ORG_ID,
+      input.sourceTemplateId,
+      input.revisionTemplateId,
+      input.sourceProviderTemplateId,
+      input.revisionProviderTemplateId,
+      input.sellerRole ?? "Seller",
+      JSON.stringify(
+        input.signerRoles ?? [{ name: "Seller", order: 0 }],
+      ),
+      [
+        "seller_name",
+        "property_address",
+        "offer_price",
+        "closing_date",
+        "earnest_money",
+      ],
+      input.actorId ?? ownerId,
+    ],
+  );
+  return result.rows[0].result;
+}
+
 async function seedRequest(input: {
   propertyId: string;
   templateId: string;
@@ -1876,6 +1967,381 @@ describe("Migration 20260829194500 — eSign foundation", () => {
     }
   });
 
+  it("publishes a verified hidden edit revision without mutating live or historical state", async () => {
+    const sourceTemplateId = await seedTemplate();
+    const editedRoles = [
+      { name: "Seller", order: 0 },
+      { name: "seller", order: 1 },
+    ] as const;
+    const sourceProviderTemplateId = (
+      await pg.query<{ sign_template_id: string }>(
+        "select sign_template_id from public.esign_templates where id = $1",
+        [sourceTemplateId],
+      )
+    ).rows[0].sign_template_id;
+    const revisionProviderTemplateId = `provider-edit-${crypto.randomUUID()}`;
+    const revision = await seedTemplateEditRevision({
+      sourceTemplateId,
+      providerTemplateId: revisionProviderTemplateId,
+    });
+    const propertyId = await seedProperty(BMH_ORG_ID, "seller@example.com");
+    await connectIntegration();
+    await pg.query(
+      `update public.org_esign_integrations
+       set callback_verified_at = now(), sending_enabled = true
+       where org_id = $1`,
+      [BMH_ORG_ID],
+    );
+    const historicalRequest = esignRequestFixture({
+      orgId: BMH_ORG_ID,
+      propertyId,
+      templateId: sourceTemplateId,
+      userId: memberId,
+    });
+    const historicalClaim = await pg.query<{
+      outcome: string;
+      id: string;
+      template_id: string;
+    }>(
+      "select outcome, id, template_id from public.create_esign_request($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,null,$8)",
+      [
+        BMH_ORG_ID,
+        propertyId,
+        sourceTemplateId,
+        JSON.stringify(historicalRequest.signer_snapshot),
+        JSON.stringify(historicalRequest.merge_value_snapshot),
+        historicalRequest.send_intent_id,
+        historicalRequest.payload_hash,
+        memberId,
+      ],
+    );
+    expect(historicalClaim.rows[0]).toMatchObject({
+      outcome: "created",
+      template_id: sourceTemplateId,
+    });
+    const historicalRequestId = historicalClaim.rows[0].id;
+
+    expect(
+      (
+        await pg.query<{ id: string }>(
+          `select id from public.available_esign_templates
+           where org_id = $1 order by id`,
+          [BMH_ORG_ID],
+        )
+      ).rows,
+    ).toEqual([{ id: sourceTemplateId }]);
+    expect(
+      (
+        await pg.query(
+          `select lifecycle_state, finalized_at, supersedes_template_id,
+             staging_source_id
+           from public.esign_templates where id = $1`,
+          [revision.id],
+        )
+      ).rows[0],
+    ).toEqual({
+      lifecycle_state: "editing",
+      finalized_at: null,
+      supersedes_template_id: sourceTemplateId,
+      staging_source_id: revision.sourceId,
+    });
+
+    await setRequestRole("authenticated", ownerId);
+    await expectDatabaseError(
+      () =>
+        pg.query(
+          "update public.esign_templates set finalized_at = now() where id = $1",
+          [revision.id],
+        ),
+      /permission denied/i,
+    );
+    await expectDatabaseError(
+      () =>
+        pg.query(
+          "select public.create_esign_template_edit_revision($1,$2,$3,$4)",
+          [BMH_ORG_ID, sourceTemplateId, revision.sourceId, ownerId],
+        ),
+      /permission denied/i,
+    );
+    await expectDatabaseError(
+      () =>
+        publishTemplateEditRevision({
+          sourceTemplateId,
+          revisionTemplateId: revision.id,
+          sourceProviderTemplateId,
+          revisionProviderTemplateId,
+        }),
+      /permission denied/i,
+    );
+    await setRequestRole("service_role");
+    await expectDatabaseError(
+      () =>
+        pg.query(
+          `select public.finalize_esign_template(
+             $1,$2,$3,'Seller',$4::jsonb,$5,$6
+           )`,
+          [
+            BMH_ORG_ID,
+            revision.id,
+            revisionProviderTemplateId,
+            JSON.stringify([{ name: "Seller", order: 0 }]),
+            [
+              "seller_name",
+              "property_address",
+              "offer_price",
+              "closing_date",
+              "earnest_money",
+            ],
+            ownerId,
+          ],
+        ),
+      /atomic publish/i,
+    );
+    await expectDatabaseError(
+      () =>
+        publishTemplateEditRevision({
+          sourceTemplateId,
+          revisionTemplateId: revision.id,
+          sourceProviderTemplateId,
+          revisionProviderTemplateId: sourceProviderTemplateId,
+        }),
+      /contract is invalid/i,
+    );
+    await expectDatabaseError(
+      () =>
+        publishTemplateEditRevision({
+          sourceTemplateId,
+          revisionTemplateId: revision.id,
+          sourceProviderTemplateId: "stale-provider-id",
+          revisionProviderTemplateId,
+        }),
+      /no longer active or current/i,
+    );
+    await expectDatabaseError(
+      () =>
+        publishTemplateEditRevision({
+          sourceTemplateId,
+          revisionTemplateId: revision.id,
+          sourceProviderTemplateId,
+          revisionProviderTemplateId,
+          actorId: outsiderId,
+        }),
+      /active organization owner required/i,
+    );
+
+    expect(
+      await publishTemplateEditRevision({
+        sourceTemplateId,
+        revisionTemplateId: revision.id,
+        sourceProviderTemplateId,
+        revisionProviderTemplateId,
+        signerRoles: editedRoles,
+      }),
+    ).toBe("published");
+    expect(
+      await publishTemplateEditRevision({
+        sourceTemplateId,
+        revisionTemplateId: revision.id,
+        sourceProviderTemplateId,
+        revisionProviderTemplateId,
+        signerRoles: editedRoles,
+      }),
+    ).toBe("already_published");
+
+    expect(
+      (
+        await pg.query(
+          `select id, lifecycle_state, deleted_at is not null as deleted,
+             supersedes_template_id
+           from public.esign_templates
+           where id in ($1,$2) order by id`,
+          [sourceTemplateId, revision.id],
+        )
+      ).rows,
+    ).toEqual(
+      [
+        {
+          id: sourceTemplateId,
+          lifecycle_state: "deleted",
+          deleted: true,
+          supersedes_template_id: null,
+        },
+        {
+          id: revision.id,
+          lifecycle_state: "finalized",
+          deleted: false,
+          supersedes_template_id: sourceTemplateId,
+        },
+      ].sort((left, right) => left.id.localeCompare(right.id)),
+    );
+    expect(
+      (
+        await pg.query<{ id: string; signer_roles: unknown }>(
+          `select id, signer_roles from public.available_esign_templates
+           where org_id = $1 order by id`,
+          [BMH_ORG_ID],
+        )
+      ).rows,
+    ).toEqual([{ id: revision.id, signer_roles: editedRoles }]);
+    expect(
+      (
+        await pg.query<{ count: string }>(
+          `select count(*) from public.esign_requests
+           where id = $1 and template_id = $2`,
+          [historicalRequestId, sourceTemplateId],
+        )
+      ).rows[0].count,
+    ).toBe("1");
+
+    const oldRequest = esignRequestFixture({
+      orgId: BMH_ORG_ID,
+      propertyId,
+      templateId: sourceTemplateId,
+      userId: memberId,
+    });
+    const newRequest = esignRequestFixture({
+      orgId: BMH_ORG_ID,
+      propertyId,
+      templateId: revision.id,
+      userId: memberId,
+    });
+    const editedSignerSnapshot = [
+      {
+        role: "Seller",
+        name: "Primary seller",
+        emailAddress: "seller@example.com",
+      },
+      {
+        role: "seller",
+        name: "Secondary signer",
+        emailAddress: "secondary@example.com",
+      },
+    ];
+    const oldClaim = await pg.query<{ outcome: string; blocker_code: string }>(
+      "select outcome, blocker_code from public.create_esign_request($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,null,$8)",
+      [
+        BMH_ORG_ID,
+        propertyId,
+        sourceTemplateId,
+        JSON.stringify(oldRequest.signer_snapshot),
+        JSON.stringify(oldRequest.merge_value_snapshot),
+        oldRequest.send_intent_id,
+        oldRequest.payload_hash,
+        memberId,
+      ],
+    );
+    expect(oldClaim.rows[0]).toEqual({
+      outcome: "blocked",
+      blocker_code: "FINALIZED_TEMPLATE_NOT_FOUND",
+    });
+    const newClaim = await pg.query<{ outcome: string; template_id: string }>(
+      "select outcome, template_id from public.create_esign_request($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,null,$8)",
+      [
+        BMH_ORG_ID,
+        propertyId,
+        revision.id,
+        JSON.stringify(editedSignerSnapshot),
+        JSON.stringify(newRequest.merge_value_snapshot),
+        newRequest.send_intent_id,
+        newRequest.payload_hash,
+        memberId,
+      ],
+    );
+    expect(newClaim.rows[0]).toEqual({
+      outcome: "created",
+      template_id: revision.id,
+    });
+    expect(
+      (
+        await pg.query(
+          `select role_name, signer_order
+           from public.esign_request_signers
+           where request_id = (
+             select id from public.esign_requests
+             where org_id = $1 and send_intent_id = $2
+           )
+           order by signer_order`,
+          [BMH_ORG_ID, newRequest.send_intent_id],
+        )
+      ).rows,
+    ).toEqual([
+      { role_name: "Seller", signer_order: 0 },
+      { role_name: "seller", signer_order: 1 },
+    ]);
+  });
+
+  it("abandons and cleans only the hidden edit revision", async () => {
+    const sourceTemplateId = await seedTemplate();
+    const revision = await seedTemplateEditRevision({
+      sourceTemplateId,
+      providerTemplateId: `provider-edit-${crypto.randomUUID()}`,
+    });
+    expect(
+      (
+        await pg.query<{ result: string }>(
+          "select public.abandon_esign_template_draft($1,$2,$3) as result",
+          [BMH_ORG_ID, revision.id, ownerId],
+        )
+      ).rows[0].result,
+    ).toBe("abandoned");
+
+    await pg.query(
+      "select set_config('storage.allow_delete_query','true',true)",
+    );
+    try {
+      await pg.query(
+        "delete from storage.objects where bucket_id = 'esign-staging' and name = $1",
+        [revision.sourcePath],
+      );
+    } finally {
+      await pg.query(
+        "select set_config('storage.allow_delete_query','false',true)",
+      );
+    }
+    await pg.query(
+      `select public.record_esign_template_source_cleanup(
+         $1,$2,$3,'deleted',null,$4
+       )`,
+      [BMH_ORG_ID, revision.id, revision.sourcePath, ownerId],
+    );
+    expect(
+      (
+        await pg.query(
+          `select id, lifecycle_state, deleted_at, staging_deleted_at,
+             supersedes_template_id
+           from public.esign_templates
+           where id in ($1,$2) order by id`,
+          [sourceTemplateId, revision.id],
+        )
+      ).rows,
+    ).toEqual(
+      [
+        {
+          id: sourceTemplateId,
+          lifecycle_state: "finalized",
+          deleted_at: null,
+          staging_deleted_at: null,
+          supersedes_template_id: null,
+        },
+        {
+          id: revision.id,
+          lifecycle_state: "abandoned",
+          deleted_at: null,
+          staging_deleted_at: expect.any(Date),
+          supersedes_template_id: sourceTemplateId,
+        },
+      ].sort((left, right) => left.id.localeCompare(right.id)),
+    );
+    expect(
+      (
+        await pg.query<{ id: string }>(
+          "select id from public.available_esign_templates where id = $1",
+          [sourceTemplateId],
+        )
+      ).rows,
+    ).toEqual([{ id: sourceTemplateId }]);
+  });
+
   it("keeps draft templates hidden and both storage buckets private", async () => {
     const definition = await pg.query<{ predicate: string }>(
       `select pg_get_expr(indexprs, indrelid) as predicate
@@ -1919,6 +2385,10 @@ describe("Migration 20260829194500 — eSign foundation", () => {
     await setRequestRole("service_role");
     const sourceId = crypto.randomUUID();
     const sourcePath = `${BMH_ORG_ID}/${sourceId}.pdf`;
+    const caseDistinctRoles = [
+      { name: "Seller", order: 0 },
+      { name: "seller", order: 1 },
+    ] as const;
     await pg.query(
       `insert into storage.objects (bucket_id, name, metadata)
        values ('esign-staging',$1,'{"mimetype":"application/pdf","size":1024}')`,
@@ -1987,7 +2457,7 @@ describe("Migration 20260829194500 — eSign foundation", () => {
     for (const invalidRoles of [
       [
         { name: "Seller", order: 0 },
-        { name: "seller", order: 1 },
+        { name: "Seller", order: 1 },
       ],
       [{ name: "Seller", order: 1 }],
     ]) {
@@ -2009,7 +2479,7 @@ describe("Migration 20260829194500 — eSign foundation", () => {
       [
         BMH_ORG_ID,
         sourceId,
-        JSON.stringify([{ name: "Seller", order: 0 }]),
+        JSON.stringify(caseDistinctRoles),
         ownerId,
       ],
     );
@@ -2108,8 +2578,8 @@ describe("Migration 20260829194500 — eSign foundation", () => {
             BMH_ORG_ID,
             templateId,
             "provider-template",
-            "seller",
-            JSON.stringify([{ name: "Seller", order: 0 }]),
+            "SELLER",
+            JSON.stringify(caseDistinctRoles),
             [
               "seller_name",
               "property_address",
@@ -2131,7 +2601,7 @@ describe("Migration 20260829194500 — eSign foundation", () => {
             templateId,
             "provider-template",
             "Seller",
-            JSON.stringify([{ name: "Seller", order: 0 }]),
+            JSON.stringify(caseDistinctRoles),
             [
               "earnest_money",
               "closing_date",
@@ -2153,7 +2623,7 @@ describe("Migration 20260829194500 — eSign foundation", () => {
             templateId,
             "provider-template",
             "Seller",
-            JSON.stringify([{ name: "Seller", order: 0 }]),
+            JSON.stringify(caseDistinctRoles),
             [
               "seller_name",
               "property_address",
@@ -2166,6 +2636,88 @@ describe("Migration 20260829194500 — eSign foundation", () => {
         )
       ).rows[0].result,
     ).toBe("already_finalized");
+    expect(
+      (
+        await pg.query<{ signer_roles: unknown; seller_role: string }>(
+          `select signer_roles, seller_role
+           from public.available_esign_templates where id = $1`,
+          [templateId],
+        )
+      ).rows[0],
+    ).toEqual({
+      signer_roles: caseDistinctRoles,
+      seller_role: "Seller",
+    });
+
+    const propertyIdForClaim = await seedProperty(
+      BMH_ORG_ID,
+      "seller@example.com",
+    );
+    await connectIntegration();
+    await pg.query(
+      `update public.org_esign_integrations
+       set callback_verified_at = now(), sending_enabled = true
+       where org_id = $1`,
+      [BMH_ORG_ID],
+    );
+    const requestForClaim = esignRequestFixture({
+      orgId: BMH_ORG_ID,
+      propertyId: propertyIdForClaim,
+      templateId,
+      userId: memberId,
+    });
+    const caseDistinctSignerSnapshot = [
+      {
+        role: "Seller",
+        name: "Primary seller",
+        emailAddress: "seller@example.com",
+      },
+      {
+        role: "seller",
+        name: "Secondary signer",
+        emailAddress: "secondary@example.com",
+      },
+    ];
+    const caseDistinctClaim = await pg.query<{
+      outcome: string;
+      signer_snapshot: unknown;
+    }>(
+      `select outcome, signer_snapshot
+       from public.create_esign_request(
+         $1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,null,$8
+       )`,
+      [
+        BMH_ORG_ID,
+        propertyIdForClaim,
+        templateId,
+        JSON.stringify(caseDistinctSignerSnapshot),
+        JSON.stringify(requestForClaim.merge_value_snapshot),
+        requestForClaim.send_intent_id,
+        requestForClaim.payload_hash,
+        memberId,
+      ],
+    );
+    expect(caseDistinctClaim.rows[0]).toEqual({
+      outcome: "created",
+      signer_snapshot: caseDistinctSignerSnapshot,
+    });
+    expect(
+      (
+        await pg.query(
+          `select role_name, signer_order
+           from public.esign_request_signers
+           where request_id = (
+             select id from public.esign_requests
+             where org_id = $1 and send_intent_id = $2
+           )
+           order by signer_order`,
+          [BMH_ORG_ID, requestForClaim.send_intent_id],
+        )
+      ).rows,
+    ).toEqual([
+      { role_name: "Seller", signer_order: 0 },
+      { role_name: "seller", signer_order: 1 },
+    ]);
     expect(
       (
         await pg.query<{ result: string }>(
@@ -2206,8 +2758,6 @@ describe("Migration 20260829194500 — eSign foundation", () => {
       ).rows[0].result,
     ).toBe("abandoned");
 
-    const propertyId = await seedProperty();
-    await seedRequest({ propertyId, templateId });
     const needsConfirmation = await pg.query<{
       outcome: string;
       recent_send_count: string;
@@ -2377,6 +2927,16 @@ describe("Migration 20260829194500 — eSign foundation", () => {
         ),
       () =>
         pg.query(
+          "select public.create_esign_template_edit_revision($1,$2,$3,$4)",
+          [
+            BMH_ORG_ID,
+            templateId,
+            template.staging_source_id,
+            outsiderId,
+          ],
+        ),
+      () =>
+        pg.query(
           "select public.attach_esign_template_provider_id($1,$2,'forged-provider',$3)",
           [BMH_ORG_ID, templateId, outsiderId],
         ),
@@ -2389,6 +2949,28 @@ describe("Migration 20260829194500 — eSign foundation", () => {
             BMH_ORG_ID,
             templateId,
             `provider-${templateId}`,
+            JSON.stringify([{ name: "Seller", order: 0 }]),
+            [
+              "seller_name",
+              "property_address",
+              "offer_price",
+              "closing_date",
+              "earnest_money",
+            ],
+            outsiderId,
+          ],
+        ),
+      () =>
+        pg.query(
+          `select public.publish_esign_template_edit_revision(
+             $1,$2,$3,$4,$5,'Seller',$6::jsonb,$7,$8
+           )`,
+          [
+            BMH_ORG_ID,
+            templateId,
+            crypto.randomUUID(),
+            `provider-${templateId}`,
+            `provider-edit-${templateId}`,
             JSON.stringify([{ name: "Seller", order: 0 }]),
             [
               "seller_name",

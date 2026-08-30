@@ -151,7 +151,7 @@ as $$
         or (role.value ->> 'order')::integer <> role.position - 1
     )
     and jsonb_array_length(p_roles) = (
-      select count(distinct lower(role.value ->> 'name'))
+      select count(distinct btrim(role.value ->> 'name'))
       from jsonb_array_elements(p_roles) role(value)
     )
     and exists (
@@ -265,6 +265,7 @@ create table public.esign_templates (
       'preparing', 'editing', 'finalized', 'abandoned', 'deleted', 'error'
     )),
   duplicate_of_template_id uuid,
+  supersedes_template_id uuid,
   preparation_error_code text check (
     preparation_error_code is null
     or preparation_error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'
@@ -284,6 +285,16 @@ create table public.esign_templates (
   constraint esign_templates_duplicate_org_fkey
     foreign key (duplicate_of_template_id, org_id)
     references public.esign_templates(id, org_id),
+  constraint esign_templates_supersedes_org_fkey
+    foreign key (supersedes_template_id, org_id)
+    references public.esign_templates(id, org_id),
+  constraint esign_templates_lineage_check check (
+    not (
+      duplicate_of_template_id is not null
+      and supersedes_template_id is not null
+    )
+    and supersedes_template_id is distinct from id
+  ),
   constraint esign_templates_opaque_staging_path_check check (
     staging_path is null
     or staging_path = org_id::text || '/' || staging_source_id::text || '.pdf'
@@ -300,6 +311,7 @@ create table public.esign_templates (
     or (
       staging_source_id is null
       and duplicate_of_template_id is not null
+      and supersedes_template_id is null
       and staging_path is null
     )
   ),
@@ -346,6 +358,8 @@ comment on column public.esign_templates.staging_path is
   'Opaque object path in the private esign-staging bucket. Never a public URL.';
 comment on column public.esign_templates.staging_deleted_at is
   'Audit timestamp for private staged-file cleanup after finalization or soft deletion.';
+comment on column public.esign_templates.supersedes_template_id is
+  'Hidden edit revision lineage. The referenced finalized template remains active until an atomic publish replaces it.';
 
 create table public.esign_requests (
   id uuid primary key default gen_random_uuid(),
@@ -513,6 +527,13 @@ create unique index idx_esign_templates_staging_source
 create index idx_esign_templates_active
   on public.esign_templates (org_id, updated_at desc, id desc)
   where deleted_at is null and finalized_at is not null;
+create index idx_esign_templates_edit_revisions
+  on public.esign_templates (org_id, supersedes_template_id, created_at desc, id desc)
+  where supersedes_template_id is not null and finalized_at is null
+    and deleted_at is null and abandoned_at is null;
+create unique index idx_esign_templates_published_successor
+  on public.esign_templates (org_id, supersedes_template_id)
+  where supersedes_template_id is not null and finalized_at is not null;
 
 create view public.available_esign_templates
 with (security_invoker = true)
@@ -865,6 +886,71 @@ begin
 end;
 $$;
 
+create or replace function public.create_esign_template_edit_revision(
+  p_org_id uuid, p_source_template_id uuid, p_source_id uuid, p_actor_id uuid
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_id uuid := gen_random_uuid();
+  v_source_template public.esign_templates%rowtype;
+  v_source public.esign_template_staging_sources%rowtype;
+begin
+  perform public.esign_require_active_owner(p_org_id, p_actor_id);
+
+  select * into v_source_template
+  from public.esign_templates template
+  where template.id = p_source_template_id
+    and template.org_id = p_org_id
+    and template.lifecycle_state = 'finalized'
+    and template.finalized_at is not null
+    and template.deleted_at is null
+    and template.sign_template_id is not null
+  for update;
+  if not found then
+    raise exception 'active finalized eSign template not found'
+      using errcode = 'P0002';
+  end if;
+
+  select * into v_source
+  from public.esign_template_staging_sources source
+  where source.id = p_source_id
+    and source.org_id = p_org_id
+    and source.cleanup_outcome = 'pending'
+  for update;
+  if not found then
+    raise exception 'verified template edit source not found'
+      using errcode = 'P0002';
+  end if;
+  if exists (
+    select 1 from public.esign_templates template
+    where template.org_id = p_org_id
+      and template.staging_source_id = p_source_id
+  ) then
+    raise exception 'verified template source is already attached'
+      using errcode = '23505';
+  end if;
+
+  insert into public.esign_templates (
+    id, org_id, name, document_type, seller_role, signer_roles,
+    merge_field_names, staging_source_id, source_filename,
+    source_size_bytes, source_content_type, source_sha256, staging_path,
+    lifecycle_state, supersedes_template_id, created_by, updated_by
+  ) values (
+    v_id, p_org_id, v_source_template.name, v_source_template.document_type,
+    v_source_template.seller_role, v_source_template.signer_roles,
+    v_source_template.merge_field_names, v_source.id, v_source.source_filename,
+    v_source.source_size_bytes, v_source.content_type, v_source.source_sha256,
+    v_source.storage_path, 'preparing', v_source_template.id,
+    p_actor_id, p_actor_id
+  );
+  return v_id;
+end;
+$$;
+
 create or replace function public.attach_esign_template_provider_id(
   p_org_id uuid, p_template_id uuid, p_provider_template_id text, p_actor_id uuid
 )
@@ -940,6 +1026,10 @@ begin
   if not found or v_template.deleted_at is not null then
     raise exception 'eSign template draft not found' using errcode = 'P0002';
   end if;
+  if v_template.supersedes_template_id is not null then
+    raise exception 'edit revisions require atomic publish'
+      using errcode = '55000';
+  end if;
   if v_template.finalized_at is not null then
     if v_template.lifecycle_state = 'finalized'
        and v_template.sign_template_id = p_provider_template_id
@@ -968,6 +1058,174 @@ begin
       using errcode = '40001';
   end if;
   return 'finalized';
+end;
+$$;
+
+create or replace function public.publish_esign_template_edit_revision(
+  p_org_id uuid,
+  p_source_template_id uuid,
+  p_revision_template_id uuid,
+  p_expected_source_provider_template_id text,
+  p_revision_provider_template_id text,
+  p_seller_role text,
+  p_provider_signer_roles jsonb,
+  p_provider_merge_field_names text[],
+  p_actor_id uuid
+)
+returns text
+language plpgsql
+security definer
+set search_path = public, storage, pg_temp
+as $$
+declare
+  v_source_template public.esign_templates%rowtype;
+  v_revision public.esign_templates%rowtype;
+  v_published_at timestamptz := clock_timestamp();
+begin
+  perform public.esign_require_active_owner(p_org_id, p_actor_id);
+  if p_source_template_id = p_revision_template_id
+     or btrim(coalesce(p_expected_source_provider_template_id, '')) = ''
+     or btrim(coalesce(p_revision_provider_template_id, '')) = ''
+     or p_expected_source_provider_template_id = p_revision_provider_template_id
+     or not public.esign_signer_roles_are_valid(
+       p_seller_role, p_provider_signer_roles
+     )
+     or not public.esign_merge_fields_are_valid(
+       p_provider_merge_field_names
+     ) then
+    raise exception 'provider-reconciled edit revision contract is invalid'
+      using errcode = '23514';
+  end if;
+
+  perform 1
+  from public.esign_templates template
+  where template.org_id = p_org_id
+    and template.id in (p_source_template_id, p_revision_template_id)
+  order by template.id
+  for update;
+
+  select * into v_source_template
+  from public.esign_templates template
+  where template.id = p_source_template_id
+    and template.org_id = p_org_id;
+  select * into v_revision
+  from public.esign_templates template
+  where template.id = p_revision_template_id
+    and template.org_id = p_org_id;
+  if v_source_template.id is null or v_revision.id is null then
+    raise exception 'eSign template edit revision not found'
+      using errcode = 'P0002';
+  end if;
+
+  if v_revision.lifecycle_state = 'finalized'
+     and v_revision.finalized_at is not null
+     and v_revision.deleted_at is null
+     and v_revision.supersedes_template_id = p_source_template_id
+     and v_revision.sign_template_id = p_revision_provider_template_id
+     and v_revision.seller_role = p_seller_role
+     and v_revision.signer_roles = p_provider_signer_roles
+     and public.esign_merge_fields_are_valid(v_revision.merge_field_names)
+     and v_source_template.lifecycle_state = 'deleted'
+     and v_source_template.deleted_at is not null
+     and v_source_template.sign_template_id
+       = p_expected_source_provider_template_id then
+    return 'already_published';
+  end if;
+
+  if v_source_template.lifecycle_state <> 'finalized'
+     or v_source_template.finalized_at is null
+     or v_source_template.deleted_at is not null
+     or v_source_template.sign_template_id
+       is distinct from p_expected_source_provider_template_id then
+    raise exception 'source eSign template is no longer active or current'
+      using errcode = '40001';
+  end if;
+  if v_revision.supersedes_template_id
+       is distinct from p_source_template_id
+     or v_revision.lifecycle_state <> 'editing'
+     or v_revision.finalized_at is not null
+     or v_revision.deleted_at is not null
+     or v_revision.abandoned_at is not null
+     or v_revision.sign_template_id
+       is distinct from p_revision_provider_template_id
+     or v_revision.staging_source_id is null then
+    raise exception 'hidden eSign template edit revision changed before publish'
+      using errcode = '40001';
+  end if;
+  if not exists (
+    select 1
+    from public.esign_template_staging_sources source
+    join storage.objects object
+      on object.bucket_id = 'esign-staging'
+     and object.name = source.storage_path
+    where source.id = v_revision.staging_source_id
+      and source.org_id = p_org_id
+      and source.cleanup_outcome = 'pending'
+      and source.storage_path = v_revision.staging_path
+      and source.source_filename = v_revision.source_filename
+      and source.source_size_bytes = v_revision.source_size_bytes
+      and source.content_type = v_revision.source_content_type
+      and source.source_sha256 = v_revision.source_sha256
+      and nullif(object.metadata ->> 'size', '')::bigint
+        = source.source_size_bytes
+      and coalesce(
+        object.metadata ->> 'mimetype',
+        object.metadata ->> 'contentType'
+      ) = 'application/pdf'
+  ) then
+    raise exception 'verified template edit source is unavailable'
+      using errcode = '23514';
+  end if;
+  if exists (
+    select 1 from public.esign_templates template
+    where template.org_id = p_org_id
+      and template.supersedes_template_id = p_source_template_id
+      and template.id <> p_revision_template_id
+      and template.finalized_at is not null
+  ) then
+    raise exception 'source eSign template already has a published successor'
+      using errcode = '23505';
+  end if;
+
+  update public.esign_templates set
+    seller_role = p_seller_role,
+    signer_roles = p_provider_signer_roles,
+    merge_field_names = p_provider_merge_field_names,
+    finalized_at = v_published_at,
+    lifecycle_state = 'finalized',
+    preparation_error_code = null,
+    updated_by = p_actor_id,
+    updated_at = v_published_at
+  where id = p_revision_template_id
+    and org_id = p_org_id
+    and lifecycle_state = 'editing'
+    and finalized_at is null
+    and deleted_at is null
+    and abandoned_at is null
+    and supersedes_template_id = p_source_template_id
+    and sign_template_id = p_revision_provider_template_id;
+  if not found then
+    raise exception 'hidden eSign template edit revision changed before publish'
+      using errcode = '40001';
+  end if;
+
+  update public.esign_templates set
+    lifecycle_state = 'deleted',
+    deleted_by = p_actor_id,
+    deleted_at = v_published_at,
+    updated_by = p_actor_id,
+    updated_at = v_published_at
+  where id = p_source_template_id
+    and org_id = p_org_id
+    and lifecycle_state = 'finalized'
+    and finalized_at is not null
+    and deleted_at is null
+    and sign_template_id = p_expected_source_provider_template_id;
+  if not found then
+    raise exception 'source eSign template changed before publish'
+      using errcode = '40001';
+  end if;
+  return 'published';
 end;
 $$;
 
@@ -1093,6 +1351,10 @@ revoke all on function public.create_esign_template_duplicate_draft(uuid, uuid, 
   from public, anon, authenticated;
 grant execute on function public.create_esign_template_duplicate_draft(uuid, uuid, text, uuid)
   to service_role;
+revoke all on function public.create_esign_template_edit_revision(uuid, uuid, uuid, uuid)
+  from public, anon, authenticated;
+grant execute on function public.create_esign_template_edit_revision(uuid, uuid, uuid, uuid)
+  to service_role;
 revoke all on function public.attach_esign_template_provider_id(uuid, uuid, text, uuid)
   from public, anon, authenticated;
 grant execute on function public.attach_esign_template_provider_id(uuid, uuid, text, uuid)
@@ -1102,6 +1364,12 @@ revoke all on function public.finalize_esign_template(
 ) from public, anon, authenticated;
 grant execute on function public.finalize_esign_template(
   uuid, uuid, text, text, jsonb, text[], uuid
+) to service_role;
+revoke all on function public.publish_esign_template_edit_revision(
+  uuid, uuid, uuid, text, text, text, jsonb, text[], uuid
+) from public, anon, authenticated;
+grant execute on function public.publish_esign_template_edit_revision(
+  uuid, uuid, uuid, text, text, text, jsonb, text[], uuid
 ) to service_role;
 revoke all on function public.abandon_esign_template_draft(uuid, uuid, uuid)
   from public, anon, authenticated;

@@ -555,4 +555,151 @@ describe("eSign foundation production lease contention", () => {
       await Promise.all([first.end(), second.end()]);
     }
   });
+
+  it("publishes only one of two concurrent hidden edit revisions", async () => {
+    const orgId = crypto.randomUUID();
+    const userId = crypto.randomUUID();
+    const sourceTemplateId = crypto.randomUUID();
+    const revisionIds = [crypto.randomUUID(), crypto.randomUUID()];
+    const stagingSourceIds = [
+      crypto.randomUUID(),
+      crypto.randomUUID(),
+      crypto.randomUUID(),
+    ];
+    const sourceProviderTemplateId = `provider-${sourceTemplateId}`;
+    const revisionProviderIds = revisionIds.map((id) => `provider-edit-${id}`);
+    await setServiceRole(setup);
+    await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into public.organizations values ($1)", [orgId]);
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
+      [userId, orgId],
+    );
+    for (const sourceId of stagingSourceIds) {
+      const sourcePath = `${orgId}/${sourceId}.pdf`;
+      await setup.query(
+        `insert into storage.objects (bucket_id,name,metadata)
+         values ('esign-staging',$1,'{"mimetype":"application/pdf","size":1024}')`,
+        [sourcePath],
+      );
+      await setup.query(
+        `insert into public.esign_template_staging_sources (
+           id,org_id,storage_path,source_filename,source_size_bytes,
+           content_type,source_sha256,created_by
+         ) values ($1,$2,$3,'source.pdf',1024,'application/pdf',repeat('a',64),$4)`,
+        [sourceId, orgId, sourcePath, userId],
+      );
+    }
+    await setup.query(
+      `insert into public.esign_templates (
+         id,org_id,name,document_type,seller_role,signer_roles,
+         merge_field_names,sign_template_id,staging_source_id,
+         source_filename,source_size_bytes,source_content_type,source_sha256,
+         staging_path,finalized_at,lifecycle_state,created_by,updated_by
+       ) values (
+         $1::uuid,$2::uuid,'Purchase agreement','purchase_agreement','Seller',
+         '[{"name":"Seller","order":0}]'::jsonb,
+         array['seller_name','property_address','offer_price','closing_date','earnest_money'],
+         $3,$4::uuid,'source.pdf',1024,'application/pdf',repeat('a',64),
+         ($2::uuid)::text || '/' || ($4::uuid)::text || '.pdf',now(),'finalized',$5::uuid,$5::uuid
+       )`,
+      [
+        sourceTemplateId,
+        orgId,
+        sourceProviderTemplateId,
+        stagingSourceIds[0],
+        userId,
+      ],
+    );
+    for (const [index, revisionId] of revisionIds.entries()) {
+      await setup.query(
+        `insert into public.esign_templates (
+           id,org_id,name,document_type,seller_role,signer_roles,
+           merge_field_names,sign_template_id,staging_source_id,
+           source_filename,source_size_bytes,source_content_type,source_sha256,
+           staging_path,lifecycle_state,supersedes_template_id,created_by,updated_by
+         ) values (
+           $1::uuid,$2::uuid,'Purchase agreement','purchase_agreement','Seller',
+           '[{"name":"Seller","order":0}]'::jsonb,
+           array['seller_name','property_address','offer_price','closing_date','earnest_money'],
+           $3,$4::uuid,'source.pdf',1024,'application/pdf',repeat('a',64),
+           ($2::uuid)::text || '/' || ($4::uuid)::text || '.pdf','editing',$5::uuid,$6::uuid,$6::uuid
+         )`,
+        [
+          revisionId,
+          orgId,
+          revisionProviderIds[index],
+          stagingSourceIds[index + 1],
+          sourceTemplateId,
+          userId,
+        ],
+      );
+    }
+
+    const first = new Client({ connectionString: isolatedUrl });
+    const second = new Client({ connectionString: isolatedUrl });
+    await Promise.all([first.connect(), second.connect()]);
+    await Promise.all([setServiceRole(first), setServiceRole(second)]);
+    const publishSql = `select public.publish_esign_template_edit_revision(
+      $1,$2,$3,$4,$5,'Seller','[{"name":"Seller","order":0}]'::jsonb,
+      array['seller_name','property_address','offer_price','closing_date','earnest_money'],$6
+    ) as result`;
+    try {
+      const results = await Promise.allSettled([
+        first.query<{ result: string }>(publishSql, [
+          orgId,
+          sourceTemplateId,
+          revisionIds[0],
+          sourceProviderTemplateId,
+          revisionProviderIds[0],
+          userId,
+        ]),
+        second.query<{ result: string }>(publishSql, [
+          orgId,
+          sourceTemplateId,
+          revisionIds[1],
+          sourceProviderTemplateId,
+          revisionProviderIds[1],
+          userId,
+        ]),
+      ]);
+      const successes = results.filter(
+        (result) => result.status === "fulfilled",
+      ) as PromiseFulfilledResult<{ rows: { result: string }[] }>[];
+      const failures = results.filter(
+        (result) => result.status === "rejected",
+      ) as PromiseRejectedResult[];
+      expect(successes).toHaveLength(1);
+      expect(successes[0].value.rows[0]).toEqual({ result: "published" });
+      expect(failures).toHaveLength(1);
+      expect(failures[0].reason).toMatchObject({
+        message: expect.stringMatching(/no longer active or current/i),
+      });
+      expect(
+        (
+          await setup.query<{ id: string }>(
+            `select id from public.available_esign_templates
+             where org_id=$1 order by id`,
+            [orgId],
+          )
+        ).rows,
+      ).toHaveLength(1);
+      expect(
+        (
+          await setup.query<{ lifecycle_state: string; count: number }>(
+            `select lifecycle_state, count(*)::int as count
+             from public.esign_templates
+             where id = any($1::uuid[])
+             group by lifecycle_state order by lifecycle_state`,
+            [revisionIds],
+          )
+        ).rows,
+      ).toEqual([
+        { lifecycle_state: "editing", count: 1 },
+        { lifecycle_state: "finalized", count: 1 },
+      ]);
+    } finally {
+      await Promise.all([first.end(), second.end()]);
+    }
+  });
 });
