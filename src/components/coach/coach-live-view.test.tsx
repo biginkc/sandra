@@ -356,7 +356,8 @@ describe("<CoachLiveView /> manual navigation", () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
 
-    broadcast({ type: "transcript", speaker: "seller", text: "The roof needs work.", isFinal: true, ts: "seller-final" });
+    broadcast({ type: "transcript", speaker: "seller", text: "The roof", isFinal: true, ts: "seller-final-1" });
+    broadcast({ type: "transcript", speaker: "seller", text: "needs work.", isFinal: true, ts: "seller-final-2" });
     broadcast({ type: "transcript", speaker: "rep", text: "Tell me more about", isFinal: false, ts: "rep-interim" });
 
     const lines = screen.getAllByTestId("transcript-line");
@@ -367,6 +368,46 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(lines[1]).toHaveTextContent("Rep");
     expect(lines[1]).toHaveTextContent("Tell me more about");
     expect(lines[1]).toHaveAttribute("data-final", "false");
+  });
+
+  it("keeps finalized seller speech eligible and AI-visible through a same-speaker interim", async () => {
+    const user = userEvent.setup();
+    const recommendationRequest = vi.fn(
+      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true,
+        requestId: input.requestId,
+        callId: input.callId,
+        activeSectionId: input.activeSectionId,
+        mode: input.mode,
+        recommendations: [],
+        followUpQuestions: ["What makes selling important now?"],
+      }),
+    );
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
+
+    broadcast({ type: "transcript", speaker: "seller", text: "I need", isFinal: true, ts: "seller-final-1" });
+    broadcast({ type: "transcript", speaker: "seller", text: "to sell", isFinal: false, ts: "seller-interim-2" });
+
+    expect(screen.getByTestId("follow-up-questions")).toBeEnabled();
+    let lines = screen.getAllByTestId("transcript-line");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toHaveTextContent("I need");
+    expect(lines[0]).toHaveAttribute("data-final", "true");
+    expect(lines[1]).toHaveTextContent("to sell");
+    expect(lines[1]).toHaveAttribute("data-final", "false");
+
+    await user.click(screen.getByTestId("follow-up-questions"));
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
+    expect(recommendationRequest.mock.calls[0][0].transcript).toEqual([
+      expect.objectContaining({ speaker: "seller", text: "I need", isFinal: true }),
+    ]);
+
+    broadcast({ type: "transcript", speaker: "seller", text: "to sell", isFinal: true, ts: "seller-final-2" });
+    lines = screen.getAllByTestId("transcript-line");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toHaveTextContent("I need to sell");
+    expect(lines[0]).toHaveAttribute("data-final", "true");
   });
 
   it("enables follow-up questions only after a finalized homeowner turn and sends one grounded request per click", async () => {
