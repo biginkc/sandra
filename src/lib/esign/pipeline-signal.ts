@@ -1,3 +1,6 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+import type { Database } from "@/lib/supabase/types";
 import {
   isContractStatus,
   selectLatestContract,
@@ -8,13 +11,8 @@ export const MAX_PIPELINE_SIGNAL_PROPERTIES = 50;
 export const LATEST_ESIGN_REQUESTS_RPC =
   "get_latest_esign_requests_for_properties" as const;
 
-export type LatestEsignRequestRpcRow = {
-  org_id: string;
-  property_id: string;
-  id: string;
-  created_at: string;
-  status: ContractStatusRecord["status"];
-};
+export type LatestEsignRequestRpcRow =
+  Database["public"]["Functions"][typeof LATEST_ESIGN_REQUESTS_RPC]["Returns"][number];
 
 export type PipelineSignalRequest = {
   orgId: string;
@@ -29,6 +27,19 @@ export type PipelineSignalRow = ContractStatusRecord & {
 export type PipelineSignalLoader = (
   request: PipelineSignalRequest,
 ) => Promise<readonly PipelineSignalRow[]>;
+
+export function createPipelineSignalLoader(
+  supabase: SupabaseClient<Database>,
+): PipelineSignalLoader {
+  return async ({ orgId, propertyIds }) => {
+    const { data, error } = await supabase.rpc(LATEST_ESIGN_REQUESTS_RPC, {
+      p_org_id: orgId,
+      p_property_ids: [...propertyIds],
+    });
+    if (error) throw new Error(`Pipeline signal load failed: ${error.message}`);
+    return (data ?? []) as LatestEsignRequestRpcRow[];
+  };
+}
 
 function isNonemptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
@@ -47,8 +58,8 @@ function isPipelineSignalRow(value: unknown): value is PipelineSignalRow {
 }
 
 /**
- * Fail-soft adapter for the future bounded database loader. The loader must
- * enforce organization scope and return no more than one row per property.
+ * Fail-soft adapter for the bounded database loader. The RPC enforces
+ * organization scope and returns no more than one row per property.
  */
 export async function loadPipelineSignals(
   loader: PipelineSignalLoader,

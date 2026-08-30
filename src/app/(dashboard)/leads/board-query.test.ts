@@ -58,16 +58,29 @@ describe("fetchLeadBoardData", () => {
       homeowner_sms_opted_out: false,
       homeowner_sms_opted_out_at: null,
     };
+    const rpc = vi.fn(async (name: string) => {
+      if (name === "get_leads_board_page") {
+        return {
+          data: [{ rows: [lead], total_count: 1, snapshot_generation: "generation-a" }],
+          error: null,
+        };
+      }
+      if (name === "get_latest_esign_requests_for_properties") {
+        return {
+          data: [{
+            org_id: "22222222-2222-4222-8222-222222222222",
+            property_id: lead.id,
+            id: "33333333-3333-4333-8333-333333333333",
+            created_at: "2026-08-29T12:00:00.000000+00:00",
+            status: "signed",
+          }],
+          error: null,
+        };
+      }
+      return { data: [], error: null };
+    });
     const client = {
-      async rpc(name: string) {
-        if (name === "get_leads_board_page") {
-          return {
-            data: [{ rows: [lead], total_count: 1, snapshot_generation: "generation-a" }],
-            error: null,
-          };
-        }
-        return { data: [], error: null };
-      },
+      rpc,
       from() {
         return {
           select() {
@@ -80,16 +93,6 @@ describe("fetchLeadBoardData", () => {
         };
       },
     } as unknown as SupabaseClient<Database>;
-    const loader = vi.fn().mockResolvedValue([
-      {
-        org_id: "22222222-2222-4222-8222-222222222222",
-        property_id: lead.id,
-        id: "33333333-3333-4333-8333-333333333333",
-        created_at: "2026-08-29T12:00:00.000000+00:00",
-        status: "signed",
-      },
-    ]);
-
     const data = await fetchLeadBoardData(
       client,
       filters,
@@ -103,13 +106,23 @@ describe("fetchLeadBoardData", () => {
       },
       {},
       ["new_lead"],
-      loader,
     );
 
-    expect(loader).toHaveBeenCalledWith({
-      orgId: "22222222-2222-4222-8222-222222222222",
-      propertyIds: [lead.id],
-    });
+    expect(rpc).toHaveBeenCalledWith(
+      "get_latest_esign_requests_for_properties",
+      {
+        p_org_id: "22222222-2222-4222-8222-222222222222",
+        p_property_ids: [lead.id],
+      },
+    );
+    expect(rpc).not.toHaveBeenCalledWith(
+      "get_latest_esign_requests_for_properties",
+      expect.objectContaining({
+        p_org_id: expect.not.stringMatching(
+          /^22222222-2222-4222-8222-222222222222$/,
+        ),
+      }),
+    );
     expect(data.latestContractByPropertyId[lead.id]).toEqual({
       id: "33333333-3333-4333-8333-333333333333",
       created_at: "2026-08-29T12:00:00.000000+00:00",

@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+import type { Database } from "@/lib/supabase/types";
 
 import {
+  createPipelineSignalLoader,
   LATEST_ESIGN_REQUESTS_RPC,
   loadPipelineSignals,
   MAX_PIPELINE_SIGNAL_PROPERTIES,
@@ -42,6 +46,36 @@ describe("loadPipelineSignals", () => {
       "property_id",
       "status",
     ]);
+  });
+
+  it("binds the generated RPC contract to the trusted organization scope", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [
+        row(
+          "property-1",
+          "request-1",
+          "2026-08-29T12:00:00.000Z",
+          "signed",
+        ),
+      ],
+      error: null,
+    });
+    const loader = createPipelineSignalLoader({ rpc } as unknown as SupabaseClient<Database>);
+
+    await expect(
+      loader({ orgId: "org-1", propertyIds: ["property-1"] }),
+    ).resolves.toEqual([
+      row(
+        "property-1",
+        "request-1",
+        "2026-08-29T12:00:00.000Z",
+        "signed",
+      ),
+    ]);
+    expect(rpc).toHaveBeenCalledWith(LATEST_ESIGN_REQUESTS_RPC, {
+      p_org_id: "org-1",
+      p_property_ids: ["property-1"],
+    });
   });
 
   it("does not call the loader for an empty card set", async () => {

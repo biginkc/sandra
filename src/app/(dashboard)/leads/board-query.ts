@@ -5,6 +5,7 @@ import type { InboundAttentionFilter, InboundOwnershipFilter } from "./inbound-f
 import type { PropertyStatus } from "./actions";
 import type { Database } from "@/lib/supabase/types";
 import {
+  createPipelineSignalLoader,
   loadPipelineSignals,
   type PipelineSignalLoader,
   type PipelineSignalRow,
@@ -304,12 +305,14 @@ export async function fetchLeadBoardData(
     if (page.nextCursor) nextCursors[status] = page.nextCursor;
   }
   const includeFacets = statuses.length === STATUS_ORDER.length;
+  const resolvedPipelineSignalLoader =
+    pipelineSignalLoader ?? createPipelineSignalLoader(supabase);
   const [decorations, urgencyCounts, baselineTotals] = await Promise.all([
     fetchCardDecorations(
       supabase,
       leads,
       context.orgId ?? null,
-      pipelineSignalLoader,
+      resolvedPipelineSignalLoader,
     ),
     includeFacets ? fetchUrgencyCounts(supabase, filters, context) : Promise.resolve(null),
     includeFacets ? fetchBaselineStageTotals(supabase) : Promise.resolve(null),
