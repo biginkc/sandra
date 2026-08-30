@@ -57,7 +57,7 @@ declare global {
   }
 }
 
-function Harness({ held = false }: { held?: boolean }) {
+function Harness({ held = false, interrupted = false }: { held?: boolean; interrupted?: boolean }) {
   const [state, dispatch] = useReducer(coachReducer, undefined, harnessState);
   const [reconnectGap, setReconnectGap] = useState(true);
   const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(FIRST_COACH_SECTION_ID);
@@ -121,7 +121,7 @@ function Harness({ held = false }: { held?: boolean }) {
     <CoachLiveView
       session={session}
       callName="Jane Homeowner"
-      callStatus="live"
+      callStatus={interrupted ? "audio_reconnect_required" : "live"}
       seconds={83}
       muted={false}
       held={held}
@@ -130,6 +130,7 @@ function Harness({ held = false }: { held?: boolean }) {
       onMute={() => {}}
       onHold={() => {}}
       onHangup={() => {}}
+      onReconnectAudio={() => {}}
       onCollapse={() => {}}
       recommendationRequest={async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
         ok: true,
@@ -149,5 +150,8 @@ function Harness({ held = false }: { held?: boolean }) {
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("Missing #root for coach live responsive harness");
 createRoot(rootElement).render(
-  <Harness held={rootElement.dataset.held === "true"} />,
+  <Harness
+    held={rootElement.dataset.held === "true"}
+    interrupted={rootElement.dataset.interrupted === "true"}
+  />,
 );

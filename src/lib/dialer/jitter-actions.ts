@@ -10,6 +10,8 @@ import {
   cancelJitterCallByStartIntent,
   connectAuthenticatedJitterCall,
   getAuthenticatedJitterToken,
+  getAuthenticatedJitterProviderStatus,
+  recoverAuthenticatedJitterAudio,
   getAuthenticatedJitterCallerIds,
   reportAuthenticatedJitterAudioHealth,
   sendAuthenticatedJitterDigit,
@@ -45,6 +47,14 @@ export async function loadJitterSoftphoneCallerIds() {
 
 export async function getJitterSoftphoneToken(callId: string) {
   return getAuthenticatedJitterToken(callId);
+}
+
+export async function getJitterSoftphoneProviderStatus(callId: string) {
+  return getAuthenticatedJitterProviderStatus(callId);
+}
+
+export async function recoverJitterSoftphoneAudio(callId: string) {
+  return recoverAuthenticatedJitterAudio(callId);
 }
 
 export async function connectJitterSoftphoneCall(

@@ -66,6 +66,27 @@ function cancelResponse() {
 }
 
 describe("Sandra -> Jitter softphone CONTRACT v2 proxy", () => {
+  it("preserves the signed registered-connect operator Attach identity", async () => {
+    vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
+    vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);
+    const identity = {
+      provider_id: "telnyx" as const,
+      operator_provider_call_control_id: "v3:operator-leg",
+      operator_call_operation_id: "operator_call_retry_2",
+      run_id: "run-1",
+      request_generation: "operator_call_retry_2",
+    };
+    const server = contractServer(() => Response.json({
+      dialing: true,
+      operator_attach_identity: identity,
+    }));
+
+    await expect(requestJitterConnect(CALL_ID, "registered", server)).resolves.toEqual({
+      ok: true,
+      data: { dialing: true, operator_attach_identity: identity },
+    });
+  });
+
   it("loads caller IDs through the signed owned-number inventory route", async () => {
     vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
     vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", SERVICE_TOKEN);

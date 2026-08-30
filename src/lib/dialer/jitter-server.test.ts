@@ -524,6 +524,42 @@ describe("authenticated Jitter softphone server boundary", () => {
     expect(mocks.requestCancel).toHaveBeenCalledWith(CALL_ID, "failed");
   });
 
+  it("accepts legacy missing media_state but rejects unknown explicit values locally", async () => {
+    const started = await startAuthenticatedJitterCall(
+      callTarget({ propertyId: "property-1", contactId: "contact-1" }),
+    );
+    if (!started.ok) throw new Error("expected successful start");
+    const capability = started.data.callId;
+    mocks.requestAudioHealth.mockResolvedValue({
+      ok: true,
+      data: { accepted: true, status: "monitoring" },
+    });
+    const legacySample = {
+      controller_id: "00000000-0000-4000-8000-000000000021",
+      peer_connection_generation: 1,
+      sample_sequence: 1,
+      packets_received: 0,
+      bytes_received: 0,
+    };
+
+    await expect(
+      reportAuthenticatedJitterAudioHealth(capability, legacySample),
+    ).resolves.toMatchObject({ ok: true });
+    expect(mocks.requestAudioHealth).toHaveBeenLastCalledWith(CALL_ID, legacySample);
+
+    await expect(
+      reportAuthenticatedJitterAudioHealth(capability, {
+        ...legacySample,
+        media_state: "paused",
+      } as never),
+    ).resolves.toMatchObject({
+      ok: false,
+      status: 400,
+      errorCode: "invalid_request",
+    });
+    expect(mocks.requestAudioHealth).toHaveBeenCalledTimes(1);
+  });
+
   it("denies users without current Sandra membership before eligibility or provider work", async () => {
     mocks.getCallerMemberships.mockResolvedValue([]);
     await expect(

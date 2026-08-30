@@ -67,12 +67,12 @@ test.beforeAll(async () => {
 
 async function mountFullCoach(
   page: Page,
-  opts: { darkMode: boolean; withGuidance: boolean; held?: boolean },
+  opts: { darkMode: boolean; withGuidance: boolean; held?: boolean; interrupted?: boolean; viewport?: { width: number; height: number } },
 ): Promise<void> {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize(opts.viewport ?? { width: 1440, height: 900 });
   await page.setContent(`
     <style>${compiledCss}</style>
-    <div id="root" data-guidance="${opts.withGuidance}" data-held="${opts.held ?? false}"></div>
+    <div id="root" data-guidance="${opts.withGuidance}" data-held="${opts.held ?? false}" data-interrupted="${opts.interrupted ?? false}"></div>
   `);
   // Real app puts `.dark` on <html>, so the whole document — not just a
   // wrapper div — resolves the dark theme tokens, matching production.
@@ -80,9 +80,15 @@ async function mountFullCoach(
   await page.addScriptTag({ content: harnessBundle });
   const coach = page.getByTestId("coach-live-view");
   await expect(coach).toBeVisible();
+  await expect(page.locator("[data-starting-style], [data-ending-style]")).toHaveCount(0);
   await coach.evaluate(async (element) => {
     await Promise.allSettled(element.getAnimations().map((animation) => animation.finished));
   });
+  // The first Base UI dialog mounted in a warm synthetic worker can finish
+  // its descendant animations before the portaled backdrop/content opacity
+  // is composited. Wait through two paint opportunities before pixel proof.
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await page.waitForTimeout(350);
 }
 
 function srgbToLin(c: number): number {
@@ -313,6 +319,26 @@ for (const mode of [
     const timer = page.getByTestId("coach-call-timer");
     await expect(timer).toHaveText("On hold");
     assertAA("held-call timer", await measureRenderedContrast(timer));
+  });
+
+  test(`meets WCAG AA for narrow interrupted Coach controls in ${mode.label} mode`, async ({ page }) => {
+    await mountFullCoach(page, {
+      darkMode: mode.darkMode,
+      withGuidance: false,
+      interrupted: true,
+      viewport: { width: 375, height: mode.darkMode ? 812 : 667 },
+    });
+    const warning = page.getByTestId("coach-audio-reconnect-warning");
+    const reconnect = page.getByTestId("coach-reconnect-audio");
+    const hangup = page.getByTestId("coach-warning-hangup");
+    await expect(warning).toHaveAttribute("role", "alert");
+    await expect(reconnect).toBeEnabled();
+    await expect(hangup).toBeEnabled();
+    assertAA("interrupted warning", await measureRenderedContrast(warning));
+    assertAA("reconnect audio control", await measureRenderedContrast(reconnect));
+    assertAA("warning hangup control", await measureRenderedContrast(hangup));
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
   });
 }
 

@@ -103,7 +103,7 @@ describe("SoftphoneProvider transport gate", () => {
           listener?.("live");
           return { id: "simulated-session" };
         }),
-        mute: vi.fn(),
+        mute: vi.fn(async () => true),
         hold: vi.fn(async () => true),
         sendDigit: vi.fn(async () => true),
         hangup: vi.fn(async () => {
@@ -134,6 +134,7 @@ describe("SoftphoneProvider transport gate", () => {
       occupancy: null,
     });
     window.localStorage.clear();
+    window.sessionStorage.clear();
   });
 
   it("shows one company caller ID read-only and sends it with the call", async () => {
@@ -387,15 +388,17 @@ describe("SoftphoneProvider transport gate", () => {
   it("keeps the call live and tells the rep when Hold fails", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    let listener: ((state: "connecting" | "live" | "hold_sync_pending") => void) | null = null;
+    const emitState = (state: "connecting" | "live" | "hold_sync_pending") => listener?.(state);
+    const hangup = vi.fn();
     createTransport.mockImplementation(() => {
-      let listener: ((state: "connecting" | "live") => void) | null = null;
       return {
         onStateChange: vi.fn((cb) => { listener = cb; }),
         start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
         mute: vi.fn(),
         hold: vi.fn(async () => false),
         sendDigit: vi.fn(async () => true),
-        hangup: vi.fn(),
+        hangup,
       };
     });
     const user = userEvent.setup();
@@ -407,7 +410,183 @@ describe("SoftphoneProvider transport gate", () => {
 
     expect(await screen.findByRole("status")).toHaveTextContent("Hold failed. The call is still live.");
     expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live");
+    expect(screen.getByTestId("call-hold")).toBeEnabled();
     expect(screen.getByTestId("call-hold")).toHaveTextContent("Hold");
+    expect(screen.getByTestId("call-keypad")).toBeEnabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+
+    // A later exact provider update is the first authority that the call did
+    // become held despite the direct SDK failure result.
+    await act(async () => emitState("hold_sync_pending"));
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Resume");
+    expect(screen.getByTestId("call-keypad")).toBeDisabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+  });
+
+  it("keeps held truth and controls usable when Resume fails until provider correction", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    let listener: ((state: "connecting" | "live" | "hold_sync_confirmed" | "resume_sync_pending") => void) | null = null;
+    const emitState = (state: "connecting" | "live" | "hold_sync_confirmed" | "resume_sync_pending") => listener?.(state);
+    const hangup = vi.fn();
+    const hold = vi.fn(async (on: boolean) => {
+      if (on) {
+        emitState("hold_sync_confirmed");
+        return true;
+      }
+      return false;
+    });
+    createTransport.mockImplementation(() => ({
+      onStateChange: vi.fn((cb) => { listener = cb; }),
+      start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
+      mute: vi.fn(),
+      hold,
+      sendDigit: vi.fn(async () => true),
+      hangup,
+    }));
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+    await user.click(screen.getByTestId("call-hold"));
+    await user.click(screen.getByTestId("call-hold"));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Resume failed. The call is still on hold.");
+    expect(screen.getByTestId("call-hold")).toBeEnabled();
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Resume");
+    expect(screen.getByTestId("call-keypad")).toBeDisabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+
+    await act(async () => emitState("resume_sync_pending"));
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Hold");
+    expect(screen.getByTestId("call-keypad")).toBeEnabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+  });
+
+  it("settles successful Hold controls while durable sync is unknown", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    let listener: ((state: "connecting" | "live" | "hold_sync_pending") => void) | null = null;
+    const hangup = vi.fn();
+    createTransport.mockImplementation(() => ({
+      onStateChange: vi.fn((cb) => { listener = cb; }),
+      start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
+      mute: vi.fn(async () => true),
+      hold: vi.fn(async () => { listener?.("hold_sync_pending"); return true; }),
+      sendDigit: vi.fn(async () => true),
+      hangup,
+    }));
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+
+    await user.click(screen.getByTestId("call-hold"));
+
+    expect(screen.getByRole("status")).toHaveTextContent("The call is held, but Jitter has not confirmed the hold yet.");
+    expect(screen.getByTestId("call-hold")).toBeEnabled();
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Resume");
+    expect(screen.getByTestId("call-keypad")).toBeDisabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+  });
+
+  it("settles successful Resume controls while durable sync is unknown", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    let listener: ((state: "connecting" | "live" | "hold_sync_confirmed" | "resume_sync_pending") => void) | null = null;
+    const hangup = vi.fn();
+    createTransport.mockImplementation(() => ({
+      onStateChange: vi.fn((cb) => { listener = cb; }),
+      start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
+      mute: vi.fn(async () => true),
+      hold: vi.fn(async (on: boolean) => { listener?.(on ? "hold_sync_confirmed" : "resume_sync_pending"); return true; }),
+      sendDigit: vi.fn(async () => true),
+      hangup,
+    }));
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+    await user.click(screen.getByTestId("call-hold"));
+    await user.click(screen.getByTestId("call-hold"));
+
+    expect(screen.getByRole("status")).toHaveTextContent("The call resumed, but Jitter has not confirmed audio monitoring yet.");
+    expect(screen.getByTestId("call-hold")).toBeEnabled();
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Hold");
+    expect(screen.getByTestId("call-keypad")).toBeEnabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+  });
+
+  it("offers Reconnect Audio while preserving manual Hang Up", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    let listener: ((state: "connecting" | "live" | "audio_reconnecting" | "audio_reconnect_required" | "ended") => void) | null = null;
+    const hangup = vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const }));
+    const reconnectAudio = vi.fn(async () => {
+      listener?.("audio_reconnecting");
+      return true;
+    });
+    createTransport.mockImplementation(() => ({
+      onStateChange: vi.fn((cb) => { listener = cb; }),
+      start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
+      mute: vi.fn(),
+      hold: vi.fn(async () => true),
+      reconnectAudio,
+      sendDigit: vi.fn(async () => true),
+      hangup,
+    }));
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+
+    act(() => listener?.("audio_reconnect_required"));
+    expect(screen.getByTestId("audio-reconnect-warning")).toHaveTextContent("homeowner call is still live");
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("reconnect-audio"));
+    expect(reconnectAudio).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Reconnecting browser audio");
+    expect(hangup).not.toHaveBeenCalled();
+
+    act(() => listener?.("live"));
+    expect(screen.queryByTestId("audio-reconnect-warning")).not.toBeInTheDocument();
+    expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live · browser audio");
+  });
+
+  it("persists the exact live handle before a registered-connect response settles", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    let listener: ((state: "ringing" | "live") => void) | null = null;
+    createTransport.mockImplementation(() => ({
+      onStateChange: vi.fn((cb) => { listener = cb; }),
+      callHandle: vi.fn(() => ({ id: "call-early" })),
+      start: vi.fn(() => {
+        listener?.("ringing");
+        listener?.("live");
+        return new Promise(() => undefined);
+      }),
+      mute: vi.fn(async () => true),
+      hold: vi.fn(async () => true),
+      reconnectAudio: vi.fn(async () => true),
+      sendDigit: vi.fn(async () => true),
+      hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })),
+    }));
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+    expect(JSON.parse(window.sessionStorage.getItem("sandra.softphone.active-call.v1") ?? "null")).toMatchObject({
+      handle: { id: "call-early" },
+      wrapToken: expect.any(String),
+    });
   });
 
   it.each([

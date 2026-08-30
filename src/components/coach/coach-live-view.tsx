@@ -33,7 +33,7 @@ import type { CoachSession, ContextLoadState } from "@/lib/coach/use-coach-sessi
 import { isNearTranscriptBottom } from "@/lib/coach/transcript-scroll";
 import { cn } from "@/lib/utils";
 
-export type CoachCallStatus = "connecting" | "ringing" | "live" | "ended" | "failed" | null;
+export type CoachCallStatus = "connecting" | "ringing" | "live" | "audio_reconnecting" | "audio_reconnect_required" | "ended" | "failed" | null;
 
 export type CoachLiveViewProps = {
   /** The persistent coach session — owned by the provider, not this view,
@@ -49,6 +49,7 @@ export type CoachLiveViewProps = {
   onMute: () => void;
   onHold: () => void;
   onHangup: () => void;
+  onReconnectAudio?: () => void;
   /** Shrinks back to the classic call popover — Esc does the same. The
    * popover surfaces an "Open live coach" button to reverse this. The
    * coach session itself (transcript, phase, gates, cards, entered
@@ -133,6 +134,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     onMute,
     onHold,
     onHangup,
+    onReconnectAudio,
     onCollapse,
     recommendationRequest = requestCoachRecommendations,
   } = props;
@@ -250,6 +252,32 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         seconds={seconds}
         held={held}
       />
+      {callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required" ? (
+        <div role="alert" data-testid="coach-audio-reconnect-warning" className="flex shrink-0 items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-950">
+          <span>{callStatus === "audio_reconnecting" ? "Call live · reconnecting browser audio…" : "Call live · audio interrupted"}</span>
+          <div className="flex shrink-0 items-center gap-2">
+            {onReconnectAudio ? (
+              <button
+                type="button"
+                data-testid="coach-reconnect-audio"
+                onClick={onReconnectAudio}
+                disabled={callStatus === "audio_reconnecting"}
+                className="rounded-md border border-amber-300 bg-white px-3 py-1.5 font-bold disabled:cursor-wait disabled:opacity-60"
+              >
+                Reconnect Audio
+              </button>
+            ) : null}
+            <button
+              type="button"
+              data-testid="coach-warning-hangup"
+              onClick={onHangup}
+              className="rounded-md border border-red-300 bg-white px-3 py-1.5 font-bold text-red-700"
+            >
+              Hang Up
+            </button>
+          </div>
+        </div>
+      ) : null}
       {reconnectGap ? (
         <div
           role="status"
@@ -1005,6 +1033,7 @@ function CallControlDock({
             variant={muted ? "default" : "outline"}
             size="sm"
             aria-pressed={muted}
+            disabled={callStatus !== "live"}
             data-testid="coach-mute"
             onClick={onMute}
           >
