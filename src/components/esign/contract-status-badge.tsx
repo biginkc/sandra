@@ -41,14 +41,14 @@ const CONTRACT_STATUS_DISPLAY = {
   { label: string; className: string; dotClassName: string }
 >;
 
+const CONTRACT_BADGE_VARIANT = "outline" as const;
+
 export interface ContractStatusBadgeProps {
   status?: ContractStatus | null;
-  className?: string;
 }
 
 export function ContractStatusBadge({
   status,
-  className,
 }: ContractStatusBadgeProps) {
   if (!status) return null;
 
@@ -56,10 +56,11 @@ export function ContractStatusBadge({
 
   return (
     <Badge
-      variant="outline"
+      variant={CONTRACT_BADGE_VARIANT}
+      data-contract-variant={CONTRACT_BADGE_VARIANT}
       data-testid="contract-status-badge"
       data-status={status}
-      className={cn("gap-1 text-[10px]", display.className, className)}
+      className={cn("gap-1 text-[10px]", display.className)}
     >
       <span
         aria-hidden="true"

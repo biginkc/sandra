@@ -44,6 +44,46 @@ describe("selectLatestContract", () => {
     expect(selectLatestContract([lowerId, higherId])).toBe(higherId);
   });
 
+  it("compares timestamp instants across equivalent timezone representations", () => {
+    const lowerId = contract(
+      "00000000-0000-0000-0000-000000000101",
+      "2026-08-29T12:00:00.000000Z",
+    );
+    const higherId = contract(
+      "00000000-0000-0000-0000-000000000102",
+      "2026-08-29T07:00:00-05:00",
+      "viewed",
+    );
+
+    expect(selectLatestContract([lowerId, higherId])).toBe(higherId);
+  });
+
+  it("preserves PostgreSQL microsecond ordering", () => {
+    const older = contract(
+      "request-z",
+      "2026-08-29T12:00:00.000001+00:00",
+    );
+    const newer = contract(
+      "request-a",
+      "2026-08-29T12:00:00.000002+00:00",
+      "viewed",
+    );
+
+    expect(selectLatestContract([newer, older])).toBe(newer);
+  });
+
+  it("rejects malformed timestamps instead of inventing an ordering", () => {
+    for (const createdAt of [
+      "not-a-timestamp",
+      "2026-02-30T12:00:00Z",
+      "2026-04-31T12:00:00+00:00",
+    ]) {
+      expect(() =>
+        selectLatestContract([contract("request-1", createdAt)]),
+      ).toThrow(/PostgreSQL timestamp/i);
+    }
+  });
+
   it("selects a newer retry row instead of its original request", () => {
     const original = contract(
       "00000000-0000-0000-0000-000000000201",
