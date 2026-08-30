@@ -255,11 +255,27 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       {callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required" ? (
         <div role="alert" data-testid="coach-audio-reconnect-warning" className="flex shrink-0 items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-950">
           <span>{callStatus === "audio_reconnecting" ? "Call live · reconnecting browser audio…" : "Call live · audio interrupted"}</span>
-          {callStatus === "audio_reconnect_required" && onReconnectAudio ? (
-            <button type="button" data-testid="coach-reconnect-audio" onClick={onReconnectAudio} className="rounded-md border border-amber-300 bg-white px-3 py-1.5 font-bold">
-              Reconnect Audio
+          <div className="flex shrink-0 items-center gap-2">
+            {onReconnectAudio ? (
+              <button
+                type="button"
+                data-testid="coach-reconnect-audio"
+                onClick={onReconnectAudio}
+                disabled={callStatus === "audio_reconnecting"}
+                className="rounded-md border border-amber-300 bg-white px-3 py-1.5 font-bold disabled:cursor-wait disabled:opacity-60"
+              >
+                Reconnect Audio
+              </button>
+            ) : null}
+            <button
+              type="button"
+              data-testid="coach-warning-hangup"
+              onClick={onHangup}
+              className="rounded-md border border-red-300 bg-white px-3 py-1.5 font-bold text-red-700"
+            >
+              Hang Up
             </button>
-          ) : null}
+          </div>
         </div>
       ) : null}
       {reconnectGap ? (

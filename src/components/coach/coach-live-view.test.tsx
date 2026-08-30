@@ -185,11 +185,34 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getByLabelText("Live transcript")).toBeVisible();
     expect(screen.getByTestId("current-section-script")).toBeVisible();
     expect(screen.getByTestId("coach-hangup")).toBeEnabled();
+    expect(screen.getByTestId("coach-warning-hangup")).toHaveTextContent("Hang Up");
     expect(onHangup).not.toHaveBeenCalled();
 
     await user.click(screen.getByTestId("coach-reconnect-audio"));
     expect(onReconnectAudio).toHaveBeenCalledTimes(1);
     expect(onHangup).not.toHaveBeenCalled();
+  });
+
+  it("keeps recovery and hangup visible while reconnecting without hiding live guidance", async () => {
+    const user = userEvent.setup();
+    const onReconnectAudio = vi.fn();
+    const onHangup = vi.fn();
+    render(<Harness {...baseProps({
+      callStatus: "audio_reconnecting",
+      onReconnectAudio,
+      onHangup,
+    })} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+
+    expect(screen.getByTestId("coach-audio-reconnect-warning")).toHaveTextContent("Call live · reconnecting browser audio…");
+    expect(screen.getByTestId("coach-reconnect-audio")).toBeVisible();
+    expect(screen.getByTestId("coach-reconnect-audio")).toBeDisabled();
+    expect(screen.getByLabelText("Live transcript")).toBeVisible();
+    expect(screen.getByTestId("current-section-script")).toBeVisible();
+
+    await user.click(screen.getByTestId("coach-warning-hangup"));
+    expect(onHangup).toHaveBeenCalledTimes(1);
+    expect(onReconnectAudio).not.toHaveBeenCalled();
   });
 
   it("moves only when the rep uses Next, Back, or deliberate phase selection", async () => {
