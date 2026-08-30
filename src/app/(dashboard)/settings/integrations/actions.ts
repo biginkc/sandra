@@ -19,6 +19,10 @@ import {
 } from "@/lib/integrations/tokens/store";
 import { checkRepSmsFromNumberReady } from "@/lib/notifications/rep-sms";
 import { createClient } from "@/lib/supabase/server";
+import {
+  getEsignConnectionStatus,
+} from "@/lib/esign/actions";
+import type { EsignConnectionStatus } from "@/lib/esign/contracts";
 
 export interface IntegrationStatus {
   slack: { connected: boolean; enabled: boolean; teamName?: string | null };
@@ -27,6 +31,7 @@ export interface IntegrationStatus {
    *  present): the SMS reminder card is hidden entirely on the client
    *  when this is false, never just disabled. */
   sms: { available: boolean; enabled: boolean; phone: string | null };
+  esign: EsignConnectionStatus;
   timezone: string;
 }
 
@@ -74,6 +79,8 @@ export async function getIntegrationStatus(): Promise<
     }
 
     const prefs = await loadIntegrationPrefs(supabase, user.id);
+    const esign = await getEsignConnectionStatus();
+    if (!esign.ok) return esign;
     const slackRow = data?.find(
       (row) => row.provider === "slack" && row.token_type === "bot",
     );
@@ -97,6 +104,7 @@ export async function getIntegrationStatus(): Promise<
         enabled: prefs.smsRemindersEnabled,
         phone: prefs.reminderPhone,
       },
+      esign: esign.data,
       timezone: prefs.timezone,
     });
   } catch (error) {

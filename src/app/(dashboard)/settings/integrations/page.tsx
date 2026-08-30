@@ -32,7 +32,7 @@ export default async function IntegrationsSettingsPage(props: Props) {
           { label: "Integrations" },
         ]}
         title="Integrations"
-        description="Connect Slack and Google Calendar to receive task notifications outside Sandra. One-way outbound — Sandra remains the source of truth."
+        description="Connect Slack, Google Calendar, and Dropbox Sign. Sandra remains the source of truth."
       />
 
       {banner && (
