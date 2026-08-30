@@ -32,20 +32,18 @@ type EsignRpcClient = {
     fn: "get_org_esign_credentials",
     args: { p_org_id: string; p_key: string },
   ): Promise<{
-    data:
-      | Array<{
-          api_key: string;
-          client_id: string;
-          sending_enabled: boolean;
-          test_mode: boolean;
-          callback_secret_hash: string;
-        }>
-      | null;
+    data: Array<{
+      api_key: string;
+      client_id: string;
+      sending_enabled: boolean;
+      test_mode: boolean;
+      callback_secret_hash: string;
+    }> | null;
     error: { message: string; code?: string } | null;
   }>;
   rpc(
     fn: "delete_org_esign_integration",
-    args: { p_org_id: string },
+    args: { p_org_id: string; p_actor_id: string },
   ): Promise<{ error: { message: string; code?: string } | null }>;
 };
 
@@ -84,9 +82,7 @@ export function configuredDropboxSignClientId(): string {
 export function configuredDropboxSignEmbeddedDomain(): string {
   const domain = process.env.DROPBOX_SIGN_EMBEDDED_DOMAIN?.trim();
   if (!domain) {
-    throw new ConfigurationError(
-      "DROPBOX_SIGN_EMBEDDED_DOMAIN is required.",
-    );
+    throw new ConfigurationError("DROPBOX_SIGN_EMBEDDED_DOMAIN is required.");
   }
   return domain;
 }
@@ -160,9 +156,13 @@ export async function getEsignCredentials(
   };
 }
 
-export async function deleteEsignCredentials(orgId: string): Promise<void> {
+export async function deleteEsignCredentials(
+  orgId: string,
+  actorId: string,
+): Promise<void> {
   const { error } = await adminRpc().rpc("delete_org_esign_integration", {
     p_org_id: orgId,
+    p_actor_id: actorId,
   });
   if (error) {
     throw new DatabaseError(

@@ -103,7 +103,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
       const result = await callAction(
         setChannelEnabledAction("sms_reminder", next),
         {
-          successMessage: next ? "Text reminders turned on" : "Text reminders turned off",
+          successMessage: next
+            ? "Text reminders turned on"
+            : "Text reminders turned off",
           fallbackMessage: "Could not update text reminder preference",
         },
       );
@@ -151,7 +153,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
     setEsign((current) => ({ ...current, sendingEnabled: next }));
     startTransition(async () => {
       const result = await callAction(setEsignSendingEnabledAction(next), {
-        successMessage: next ? "eSign sending turned on" : "eSign sending turned off",
+        successMessage: next
+          ? "eSign sending turned on"
+          : "eSign sending turned off",
         fallbackMessage: "Could not update eSign sending",
       });
       if (!result.ok) {
@@ -222,7 +226,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               Dropbox Sign
             </CardTitle>
             <CardDescription>
-              Create and send contracts for embedded signatures in Sandra.
+              Create and send contracts from Sandra with Dropbox Sign.
             </CardDescription>
             <CardAction>
               <StatusBadge
@@ -237,7 +241,8 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             <div className="border-alert-warning/40 bg-alert-warning/10 rounded-md border px-3 py-2 text-sm">
-              Test mode is always on for v1. Test signatures are not legally binding.
+              Test mode is always on for v1. Test signatures are not legally
+              binding.
             </div>
             {esign.connected ? (
               <>
@@ -245,7 +250,8 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                   <span className="flex flex-col gap-1">
                     <span className="font-medium">Enable contract sending</span>
                     <span className="text-muted-foreground text-xs">
-                      Applies to new test-mode signature requests.
+                      Requires a verified callback and applies to new test-mode
+                      requests.
                     </span>
                   </span>
                   <input
@@ -280,9 +286,16 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               </>
             ) : esign.canManage ? (
               <div className="flex flex-col gap-2">
-                <label htmlFor="dropbox-sign-api-key" className="text-sm font-medium">
-                  API key
+                <label
+                  htmlFor="dropbox-sign-api-key"
+                  className="text-sm font-medium"
+                >
+                  Primary API key
                 </label>
+                <p className="text-muted-foreground text-xs">
+                  Use the Primary Key from your Dropbox Sign API settings so
+                  callback signatures can be verified.
+                </p>
                 <input
                   id="dropbox-sign-api-key"
                   type="password"

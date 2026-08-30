@@ -3606,13 +3606,11 @@ export type Database = {
           details_url: string | null
           error_message: string | null
           id: string
-          last_reminded_at: string | null
           merge_value_snapshot: Json
           org_id: string
           payload_hash: string
           property_id: string
           provider_event_at: string | null
-          provider_signature_ids: string[]
           retry_of_request_id: string | null
           send_intent_id: string
           sent_at: string | null
@@ -3624,6 +3622,8 @@ export type Database = {
           test_mode: boolean
           updated_at: string
           updated_by: string | null
+          void_claim_token: string | null
+          void_claimed_at: string | null
           void_requested_at: string | null
         }
         Insert: {
@@ -3634,13 +3634,11 @@ export type Database = {
           details_url?: string | null
           error_message?: string | null
           id?: string
-          last_reminded_at?: string | null
           merge_value_snapshot?: Json
           org_id: string
           payload_hash: string
           property_id: string
           provider_event_at?: string | null
-          provider_signature_ids?: string[]
           retry_of_request_id?: string | null
           send_intent_id: string
           sent_at?: string | null
@@ -3652,6 +3650,8 @@ export type Database = {
           test_mode?: boolean
           updated_at?: string
           updated_by?: string | null
+          void_claim_token?: string | null
+          void_claimed_at?: string | null
           void_requested_at?: string | null
         }
         Update: {
@@ -3662,13 +3662,11 @@ export type Database = {
           details_url?: string | null
           error_message?: string | null
           id?: string
-          last_reminded_at?: string | null
           merge_value_snapshot?: Json
           org_id?: string
           payload_hash?: string
           property_id?: string
           provider_event_at?: string | null
-          provider_signature_ids?: string[]
           retry_of_request_id?: string | null
           send_intent_id?: string
           sent_at?: string | null
@@ -3680,6 +3678,8 @@ export type Database = {
           test_mode?: boolean
           updated_at?: string
           updated_by?: string | null
+          void_claim_token?: string | null
+          void_claimed_at?: string | null
           void_requested_at?: string | null
         }
         Relationships: [
@@ -3698,6 +3698,13 @@ export type Database = {
             referencedColumns: ["id", "org_id"]
           },
           {
+            foreignKeyName: "esign_requests_retry_org_fkey"
+            columns: ["retry_of_request_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "esign_requests"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
             foreignKeyName: "esign_requests_template_org_fkey"
             columns: ["template_id", "org_id"]
             isOneToOne: false
@@ -3706,70 +3713,133 @@ export type Database = {
           },
         ]
       }
-      esign_templates: {
+      esign_request_signers: {
         Row: {
           created_at: string
-          created_by: string
-          deleted_at: string | null
-          deleted_by: string | null
-          document_type: string
-          finalized_at: string | null
+          declined_at: string | null
           id: string
-          merge_field_names: string[]
-          name: string
+          last_reminded_at: string | null
           org_id: string
-          seller_role: string
-          sign_template_id: string | null
-          signer_roles: string[]
-          source_filename: string
-          staging_deleted_at: string | null
-          staging_path: string
+          provider_signature_id: string | null
+          reminder_claim_token: string | null
+          reminder_claimed_at: string | null
+          request_id: string
+          role_name: string
+          signed_at: string | null
+          signer_email: string
+          signer_name: string
+          signer_order: number
+          status: string
           updated_at: string
-          updated_by: string
+          viewed_at: string | null
         }
         Insert: {
           created_at?: string
-          created_by: string
-          deleted_at?: string | null
-          deleted_by?: string | null
-          document_type: string
-          finalized_at?: string | null
+          declined_at?: string | null
           id?: string
-          merge_field_names?: string[]
-          name: string
+          last_reminded_at?: string | null
           org_id: string
-          seller_role: string
-          sign_template_id?: string | null
-          signer_roles: string[]
-          source_filename: string
-          staging_deleted_at?: string | null
-          staging_path: string
+          provider_signature_id?: string | null
+          reminder_claim_token?: string | null
+          reminder_claimed_at?: string | null
+          request_id: string
+          role_name: string
+          signed_at?: string | null
+          signer_email: string
+          signer_name: string
+          signer_order: number
+          status?: string
           updated_at?: string
-          updated_by: string
+          viewed_at?: string | null
         }
         Update: {
           created_at?: string
-          created_by?: string
-          deleted_at?: string | null
-          deleted_by?: string | null
-          document_type?: string
-          finalized_at?: string | null
+          declined_at?: string | null
           id?: string
-          merge_field_names?: string[]
-          name?: string
+          last_reminded_at?: string | null
           org_id?: string
-          seller_role?: string
-          sign_template_id?: string | null
-          signer_roles?: string[]
-          source_filename?: string
-          staging_deleted_at?: string | null
-          staging_path?: string
+          provider_signature_id?: string | null
+          reminder_claim_token?: string | null
+          reminder_claimed_at?: string | null
+          request_id?: string
+          role_name?: string
+          signed_at?: string | null
+          signer_email?: string
+          signer_name?: string
+          signer_order?: number
+          status?: string
           updated_at?: string
-          updated_by?: string
+          viewed_at?: string | null
         }
         Relationships: [
           {
-            foreignKeyName: "esign_templates_org_id_fkey"
+            foreignKeyName: "esign_request_signers_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "esign_request_signers_request_org_fkey"
+            columns: ["request_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "esign_requests"
+            referencedColumns: ["id", "org_id"]
+          },
+        ]
+      }
+      esign_template_staging_sources: {
+        Row: {
+          cleanup_attempted_at: string | null
+          cleanup_error_code: string | null
+          cleanup_outcome: string
+          content_type: string
+          created_at: string
+          created_by: string
+          id: string
+          org_id: string
+          source_filename: string
+          source_sha256: string
+          source_size_bytes: number
+          storage_bucket: string
+          storage_path: string
+          verified_at: string
+        }
+        Insert: {
+          cleanup_attempted_at?: string | null
+          cleanup_error_code?: string | null
+          cleanup_outcome?: string
+          content_type: string
+          created_at?: string
+          created_by: string
+          id: string
+          org_id: string
+          source_filename: string
+          source_sha256: string
+          source_size_bytes: number
+          storage_bucket?: string
+          storage_path: string
+          verified_at?: string
+        }
+        Update: {
+          cleanup_attempted_at?: string | null
+          cleanup_error_code?: string | null
+          cleanup_outcome?: string
+          content_type?: string
+          created_at?: string
+          created_by?: string
+          id?: string
+          org_id?: string
+          source_filename?: string
+          source_sha256?: string
+          source_size_bytes?: number
+          storage_bucket?: string
+          storage_path?: string
+          verified_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "esign_template_staging_sources_org_id_fkey"
             columns: ["org_id"]
             isOneToOne: false
             referencedRelation: "organizations"
@@ -3777,47 +3847,180 @@ export type Database = {
           },
         ]
       }
+      esign_templates: {
+        Row: {
+          abandoned_at: string | null
+          abandoned_by: string | null
+          created_at: string
+          created_by: string
+          deleted_at: string | null
+          deleted_by: string | null
+          document_type: string
+          duplicate_of_template_id: string | null
+          finalized_at: string | null
+          id: string
+          lifecycle_state: string
+          merge_field_names: string[]
+          name: string
+          org_id: string
+          preparation_error_code: string | null
+          seller_role: string
+          sign_template_id: string | null
+          signer_roles: Json
+          source_content_type: string | null
+          source_filename: string | null
+          source_sha256: string | null
+          source_size_bytes: number | null
+          staging_deleted_at: string | null
+          staging_path: string | null
+          staging_source_id: string | null
+          updated_at: string
+          updated_by: string
+        }
+        Insert: {
+          abandoned_at?: string | null
+          abandoned_by?: string | null
+          created_at?: string
+          created_by: string
+          deleted_at?: string | null
+          deleted_by?: string | null
+          document_type: string
+          duplicate_of_template_id?: string | null
+          finalized_at?: string | null
+          id?: string
+          lifecycle_state?: string
+          merge_field_names: string[]
+          name: string
+          org_id: string
+          preparation_error_code?: string | null
+          seller_role: string
+          sign_template_id?: string | null
+          signer_roles: Json
+          source_content_type?: string | null
+          source_filename?: string | null
+          source_sha256?: string | null
+          source_size_bytes?: number | null
+          staging_deleted_at?: string | null
+          staging_path?: string | null
+          staging_source_id?: string | null
+          updated_at?: string
+          updated_by: string
+        }
+        Update: {
+          abandoned_at?: string | null
+          abandoned_by?: string | null
+          created_at?: string
+          created_by?: string
+          deleted_at?: string | null
+          deleted_by?: string | null
+          document_type?: string
+          duplicate_of_template_id?: string | null
+          finalized_at?: string | null
+          id?: string
+          lifecycle_state?: string
+          merge_field_names?: string[]
+          name?: string
+          org_id?: string
+          preparation_error_code?: string | null
+          seller_role?: string
+          sign_template_id?: string | null
+          signer_roles?: Json
+          source_content_type?: string | null
+          source_filename?: string | null
+          source_sha256?: string | null
+          source_size_bytes?: number | null
+          staging_deleted_at?: string | null
+          staging_path?: string | null
+          staging_source_id?: string | null
+          updated_at?: string
+          updated_by?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "esign_templates_duplicate_org_fkey"
+            columns: ["duplicate_of_template_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "esign_templates"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "esign_templates_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "esign_templates_staging_source_org_fkey"
+            columns: ["staging_source_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "esign_template_staging_sources"
+            referencedColumns: ["id", "org_id"]
+          },
+        ]
+      }
       esign_webhook_receipts: {
         Row: {
+          attempt_count: number
           callback_consumer_id: string
+          esign_request_id: string | null
           event_fingerprint: string
           event_hash: string
           event_type: string
           id: string
           org_id: string
+          payload_hash: string
           processed_at: string | null
           processing_error: string | null
+          processing_lease_id: string | null
+          processing_started_at: string | null
+          processing_status: string
           provider_event_at: string | null
           received_at: string
           related_signature_id: string | null
+          safe_event_data: Json
           sign_request_id: string | null
         }
         Insert: {
+          attempt_count?: number
           callback_consumer_id: string
+          esign_request_id?: string | null
           event_fingerprint: string
           event_hash: string
           event_type: string
           id?: string
           org_id: string
+          payload_hash: string
           processed_at?: string | null
           processing_error?: string | null
+          processing_lease_id?: string | null
+          processing_started_at?: string | null
+          processing_status?: string
           provider_event_at?: string | null
           received_at?: string
           related_signature_id?: string | null
+          safe_event_data: Json
           sign_request_id?: string | null
         }
         Update: {
+          attempt_count?: number
           callback_consumer_id?: string
+          esign_request_id?: string | null
           event_fingerprint?: string
           event_hash?: string
           event_type?: string
           id?: string
           org_id?: string
+          payload_hash?: string
           processed_at?: string | null
           processing_error?: string | null
+          processing_lease_id?: string | null
+          processing_started_at?: string | null
+          processing_status?: string
           provider_event_at?: string | null
           received_at?: string
           related_signature_id?: string | null
+          safe_event_data?: Json
           sign_request_id?: string | null
         }
         Relationships: [
@@ -3826,6 +4029,13 @@ export type Database = {
             columns: ["callback_consumer_id", "org_id"]
             isOneToOne: false
             referencedRelation: "webhook_consumers"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "esign_webhook_receipts_request_org_fkey"
+            columns: ["esign_request_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "esign_requests"
             referencedColumns: ["id", "org_id"]
           },
         ]
@@ -3839,9 +4049,9 @@ export type Database = {
           id: string
           org_id: string
           property_id: string
-          size_bytes: number | null
+          size_bytes: number
           source: string
-          source_request_id: string | null
+          source_request_id: string
           storage_bucket: string
           storage_path: string
         }
@@ -3853,9 +4063,9 @@ export type Database = {
           id?: string
           org_id: string
           property_id: string
-          size_bytes?: number | null
+          size_bytes: number
           source?: string
-          source_request_id?: string | null
+          source_request_id: string
           storage_bucket?: string
           storage_path: string
         }
@@ -3867,9 +4077,9 @@ export type Database = {
           id?: string
           org_id?: string
           property_id?: string
-          size_bytes?: number | null
+          size_bytes?: number
           source?: string
-          source_request_id?: string | null
+          source_request_id?: string
           storage_bucket?: string
           storage_path?: string
         }
@@ -3895,6 +4105,7 @@ export type Database = {
           api_key_encrypted: string
           api_key_last_four: string
           callback_consumer_id: string
+          callback_verified_at: string | null
           client_id: string
           connected_by: string
           created_at: string
@@ -3910,6 +4121,7 @@ export type Database = {
           api_key_encrypted: string
           api_key_last_four: string
           callback_consumer_id: string
+          callback_verified_at?: string | null
           client_id: string
           connected_by: string
           created_at?: string
@@ -3925,6 +4137,7 @@ export type Database = {
           api_key_encrypted?: string
           api_key_last_four?: string
           callback_consumer_id?: string
+          callback_verified_at?: string | null
           client_id?: string
           connected_by?: string
           created_at?: string
@@ -4204,62 +4417,89 @@ export type Database = {
     Views: {
       available_esign_templates: {
         Row: {
+          abandoned_at: string | null
+          abandoned_by: string | null
           created_at: string | null
           created_by: string | null
           deleted_at: string | null
           deleted_by: string | null
           document_type: string | null
+          duplicate_of_template_id: string | null
           finalized_at: string | null
           id: string | null
+          lifecycle_state: string | null
           merge_field_names: string[] | null
           name: string | null
           org_id: string | null
+          preparation_error_code: string | null
           seller_role: string | null
           sign_template_id: string | null
-          signer_roles: string[] | null
+          signer_roles: Json | null
+          source_content_type: string | null
           source_filename: string | null
+          source_sha256: string | null
+          source_size_bytes: number | null
           staging_deleted_at: string | null
           staging_path: string | null
+          staging_source_id: string | null
           updated_at: string | null
           updated_by: string | null
         }
         Insert: {
+          abandoned_at?: string | null
+          abandoned_by?: string | null
           created_at?: string | null
           created_by?: string | null
           deleted_at?: string | null
           deleted_by?: string | null
           document_type?: string | null
+          duplicate_of_template_id?: string | null
           finalized_at?: string | null
           id?: string | null
+          lifecycle_state?: string | null
           merge_field_names?: string[] | null
           name?: string | null
           org_id?: string | null
+          preparation_error_code?: string | null
           seller_role?: string | null
           sign_template_id?: string | null
-          signer_roles?: string[] | null
+          signer_roles?: Json | null
+          source_content_type?: string | null
           source_filename?: string | null
+          source_sha256?: string | null
+          source_size_bytes?: number | null
           staging_deleted_at?: string | null
           staging_path?: string | null
+          staging_source_id?: string | null
           updated_at?: string | null
           updated_by?: string | null
         }
         Update: {
+          abandoned_at?: string | null
+          abandoned_by?: string | null
           created_at?: string | null
           created_by?: string | null
           deleted_at?: string | null
           deleted_by?: string | null
           document_type?: string | null
+          duplicate_of_template_id?: string | null
           finalized_at?: string | null
           id?: string | null
+          lifecycle_state?: string | null
           merge_field_names?: string[] | null
           name?: string | null
           org_id?: string | null
+          preparation_error_code?: string | null
           seller_role?: string | null
           sign_template_id?: string | null
-          signer_roles?: string[] | null
+          signer_roles?: Json | null
+          source_content_type?: string | null
           source_filename?: string | null
+          source_sha256?: string | null
+          source_size_bytes?: number | null
           staging_deleted_at?: string | null
           staging_path?: string | null
+          staging_source_id?: string | null
           updated_at?: string | null
           updated_by?: string | null
         }
@@ -4353,21 +4593,242 @@ export type Database = {
       }
     }
     Functions: {
+      abandon_esign_template_draft: {
+        Args: { p_actor_id: string; p_org_id: string; p_template_id: string }
+        Returns: string
+      }
+      apply_esign_webhook_status_decision: {
+        Args: {
+          p_expected_status: Database["public"]["Enums"]["esign_request_status"]
+          p_lead_event_payload: Json | null
+          p_lead_event_type: string | null
+          p_lease_id: string
+          p_org_id: string
+          p_provider_event_at: string
+          p_receipt_id: string
+          p_request_id: string
+          p_requested_status: Database["public"]["Enums"]["esign_request_status"]
+        }
+        Returns: {
+          outcome: string
+          status: Database["public"]["Enums"]["esign_request_status"]
+        }[]
+      }
+      attach_esign_template_provider_id: {
+        Args: {
+          p_actor_id: string
+          p_org_id: string
+          p_provider_template_id: string
+          p_template_id: string
+        }
+        Returns: string
+      }
+      claim_esign_request_void: {
+        Args: {
+          p_claim_token: string
+          p_org_id: string
+          p_request_id: string
+        }
+        Returns: {
+          outcome: string
+          provider_request_id: string | null
+        }[]
+      }
+      claim_esign_signer_reminder: {
+        Args: {
+          p_claim_token: string
+          p_org_id: string
+          p_request_id: string
+          p_signer_id: string
+        }
+        Returns: {
+          outcome: string
+          provider_request_id: string | null
+          provider_signature_id: string | null
+          signer_email: string | null
+          signer_name: string | null
+        }[]
+      }
+      claim_esign_webhook_receipt: {
+        Args: {
+          p_callback_consumer_id: string
+          p_event_fingerprint: string
+          p_event_hash: string
+          p_event_type: string
+          p_lease_id: string
+          p_org_id: string
+          p_payload_hash: string
+          p_provider_event_at: string | null
+          p_received_at: string
+          p_related_signature_id: string | null
+          p_safe_event_data: Json
+          p_sign_request_id: string | null
+          p_stale_after_seconds: number
+        }
+        Returns: {
+          lease_id: string | null
+          outcome: string
+          receipt_id: string
+        }[]
+      }
+      claim_verified_esign_webhook_receipt: {
+        Args: {
+          p_callback_consumer_id: string
+          p_event_fingerprint: string
+          p_event_hash: string
+          p_event_type: string
+          p_lease_id: string
+          p_org_id: string
+          p_payload_hash: string
+          p_provider_event_at: string | null
+          p_received_at: string
+          p_related_signature_id: string | null
+          p_safe_event_data: Json
+          p_sign_request_id: string | null
+          p_stale_after?: string
+        }
+        Returns: {
+          lease_id: string | null
+          outcome: string
+          receipt_id: string
+        }[]
+      }
+      complete_esign_webhook_receipt: {
+        Args: {
+          p_lease_id: string
+          p_receipt_id: string
+          p_safe_code?: string | null
+          p_status: string
+        }
+        Returns: undefined
+      }
+      create_esign_request: {
+        Args: {
+          p_actor_id: string
+          p_merge_value_snapshot: Json
+          p_org_id: string
+          p_payload_hash: string
+          p_property_id: string
+          p_retry_of_request_id: string | null
+          p_send_intent_id: string
+          p_signer_snapshot: Json
+          p_template_id: string
+        }
+        Returns: {
+          blocker_code: string | null
+          created_at: string | null
+          delivery_state:
+            Database["public"]["Enums"]["esign_delivery_state"] | null
+          id: string | null
+          merge_value_snapshot: Json
+          org_id: string
+          outcome: Database["public"]["Enums"]["esign_request_claim_outcome"]
+          payload_hash: string
+          property_id: string
+          retry_of_request_id: string | null
+          send_intent_id: string
+          signer_snapshot: Json
+          status: Database["public"]["Enums"]["esign_request_status"] | null
+          template_id: string
+          test_mode: boolean
+        }[]
+      }
+      create_esign_template_draft: {
+        Args: {
+          p_actor_id: string
+          p_document_type: string
+          p_name: string
+          p_org_id: string
+          p_seller_role: string
+          p_signer_roles: Json
+          p_source_id: string
+        }
+        Returns: string
+      }
+      create_esign_template_duplicate_draft: {
+        Args: {
+          p_actor_id: string
+          p_name: string
+          p_org_id: string
+          p_source_template_id: string
+        }
+        Returns: string
+      }
       delete_org_esign_integration: {
-        Args: { p_org_id: string }
+        Args: { p_actor_id: string; p_org_id: string }
         Returns: undefined
       }
       esign_is_active_org_owner: {
         Args: { p_org_id: string }
         Returns: boolean
       }
+      esign_merge_fields_are_valid: {
+        Args: { p_fields: string[] }
+        Returns: boolean
+      }
+      esign_request_payload_is_valid: {
+        Args: {
+          p_merge_values: Json
+          p_signers: Json
+          p_template_roles: Json
+        }
+        Returns: boolean
+      }
+      esign_require_active_owner: {
+        Args: { p_actor_id: string; p_org_id: string }
+        Returns: undefined
+      }
+      esign_safe_event_data_is_valid: {
+        Args: { p_data: Json }
+        Returns: boolean
+      }
       esign_signer_roles_are_valid: {
-        Args: { p_roles: string[]; p_seller_role: string }
+        Args: { p_roles: Json; p_seller_role: string }
+        Returns: boolean
+      }
+      esign_staging_path_is_valid: {
+        Args: { p_path: string }
         Returns: boolean
       }
       esign_storage_org_id: {
         Args: { p_path: string }
         Returns: string
+      }
+      finalize_esign_request_void: {
+        Args: { p_claim_token: string; p_org_id: string; p_request_id: string }
+        Returns: string
+      }
+      finalize_esign_signer_reminder: {
+        Args: {
+          p_claim_token: string
+          p_org_id: string
+          p_request_id: string
+          p_signer_id: string
+        }
+        Returns: string
+      }
+      finalize_esign_template: {
+        Args: {
+          p_actor_id: string
+          p_org_id: string
+          p_provider_merge_field_names: string[]
+          p_provider_signer_roles: Json
+          p_provider_template_id: string
+          p_seller_role: string
+          p_template_id: string
+        }
+        Returns: string
+      }
+      find_esign_webhook_request: {
+        Args: { p_org_id: string; p_sign_request_id: string }
+        Returns: {
+          id: string
+          org_id: string
+          property_id: string
+          signed_pdf_path: string | null
+          status: Database["public"]["Enums"]["esign_request_status"]
+          template_title: string
+        }[]
       }
       get_org_esign_credentials: {
         Args: { p_key: string; p_org_id: string }
@@ -4378,6 +4839,107 @@ export type Database = {
           sending_enabled: boolean
           test_mode: boolean
         }[]
+      }
+      get_latest_esign_requests_for_properties: {
+        Args: { p_org_id: string; p_property_ids: string[] }
+        Returns: {
+          created_at: string
+          id: string
+          org_id: string
+          property_id: string
+          status: Database["public"]["Enums"]["esign_request_status"]
+        }[]
+      }
+      link_esign_signed_artifact: {
+        Args: {
+          p_content_type: string
+          p_lead_event_payload: Json
+          p_lead_event_type: string
+          p_lead_file_id: string
+          p_lease_id: string
+          p_org_id: string
+          p_receipt_id: string
+          p_request_id: string
+          p_size_bytes: number
+          p_storage_bucket: string
+          p_storage_path: string
+        }
+        Returns: {
+          lead_file_id: string
+          outcome: string
+        }[]
+      }
+      mark_esign_request_send_outcome: {
+        Args: {
+          p_delivery_state: Database["public"]["Enums"]["esign_delivery_state"]
+          p_error_message: string | null
+          p_org_id: string
+          p_request_id: string
+        }
+        Returns: undefined
+      }
+      reconcile_esign_request_delivery: {
+        Args: {
+          p_details_url: string | null
+          p_org_id: string
+          p_provider_request_id: string
+          p_provider_signatures: Json
+          p_request_id: string
+        }
+        Returns: undefined
+      }
+      record_esign_template_source_cleanup: {
+        Args: {
+          p_actor_id: string
+          p_error_code: string | null
+          p_org_id: string
+          p_outcome: string
+          p_storage_path: string
+          p_template_id: string
+        }
+        Returns: string
+      }
+      record_verified_esign_template_source: {
+        Args: {
+          p_actor_id: string
+          p_content_type: string
+          p_org_id: string
+          p_source_filename: string
+          p_source_id: string
+          p_source_sha256: string
+          p_source_size_bytes: number
+          p_storage_path: string
+        }
+        Returns: string
+      }
+      release_esign_request_void: {
+        Args: { p_claim_token: string; p_org_id: string; p_request_id: string }
+        Returns: string
+      }
+      release_esign_signer_reminder: {
+        Args: {
+          p_claim_token: string
+          p_org_id: string
+          p_request_id: string
+          p_signer_id: string
+        }
+        Returns: string
+      }
+      soft_delete_esign_template: {
+        Args: {
+          p_actor_id: string
+          p_confirm_recent_sends: boolean
+          p_org_id: string
+          p_template_id: string
+        }
+        Returns: {
+          outcome: string
+          recent_send_count: number
+        }[]
+      }
+      set_org_esign_sending_enabled: {
+        Args: { p_actor_id: string; p_enabled: boolean; p_org_id: string }
+        Returns: undefined
       }
       upsert_org_esign_integration: {
         Args: {
@@ -4928,13 +5490,10 @@ export type Database = {
     }
     Enums: {
       esign_delivery_state: "sending" | "sent" | "send_unknown" | "failed"
+      esign_request_claim_outcome:
+        "created" | "existing_same_payload" | "intent_conflict" | "blocked"
       esign_request_status:
-        | "awaiting"
-        | "viewed"
-        | "signed"
-        | "declined"
-        | "voided"
-        | "error"
+        "awaiting" | "viewed" | "signed" | "declined" | "voided" | "error"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -5061,6 +5620,22 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      esign_delivery_state: ["sending", "sent", "send_unknown", "failed"],
+      esign_request_claim_outcome: [
+        "created",
+        "existing_same_payload",
+        "intent_conflict",
+        "blocked",
+      ],
+      esign_request_status: [
+        "awaiting",
+        "viewed",
+        "signed",
+        "declined",
+        "voided",
+        "error",
+      ],
+    },
   },
 } as const

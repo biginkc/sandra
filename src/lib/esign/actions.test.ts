@@ -52,11 +52,7 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
-    from: () => ({
-      update: () => ({
-        eq: mocks.adminUpdate,
-      }),
-    }),
+    rpc: mocks.adminUpdate,
   }),
 }));
 
@@ -114,7 +110,10 @@ describe("eSign server actions", () => {
     const result = await connectDropboxSignAction("dropbox-api-key-1234");
     expect(result).toMatchObject({
       ok: false,
-      error: { code: "AUTHORIZATION", message: expect.stringMatching(/owners/i) },
+      error: {
+        code: "AUTHORIZATION",
+        message: expect.stringMatching(/owners/i),
+      },
     });
     expect(mocks.validateCredentials).not.toHaveBeenCalled();
     expect(mocks.saveEsignCredentials).not.toHaveBeenCalled();
@@ -159,5 +158,97 @@ describe("eSign server actions", () => {
     });
     expect(mocks.adminUpdate).not.toHaveBeenCalled();
     expect(mocks.deleteEsignCredentials).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when more than one active organization is returned", async () => {
+    mocks.memberships.push({
+      user_id: "owner-2",
+      org_id: "org-0",
+      role: "owner",
+    });
+    const result = await connectDropboxSignAction("dropbox-api-key-1234");
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "AUTHORIZATION", message: expect.stringMatching(/single/i) },
+    });
+    expect(mocks.validateCredentials).not.toHaveBeenCalled();
+    expect(mocks.saveEsignCredentials).not.toHaveBeenCalled();
+  });
+
+  it("never returns upstream provider messages to the browser", async () => {
+    mocks.validateCredentials.mockRejectedValue(
+      new Error("upstream secret diagnostic and account metadata"),
+    );
+    const result = await connectDropboxSignAction("dropbox-api-key-1234");
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "ESIGN_CONNECT_FAILED",
+        message: "Dropbox Sign could not be connected.",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("secret diagnostic");
+  });
+
+  it("fails safely when sending is toggled without a connection row", async () => {
+    mocks.adminUpdate.mockResolvedValue({
+      error: { message: "not found", code: "P0002" },
+    });
+    const result = await setEsignSendingEnabledAction(true);
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "DATABASE",
+        message: "Connect Dropbox Sign before enabling sending.",
+      },
+    });
+  });
+
+  it("explains that callback verification is required before sending", async () => {
+    mocks.adminUpdate.mockResolvedValue({
+      error: { message: "constraint detail", code: "23514" },
+    });
+    const result = await setEsignSendingEnabledAction(true);
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "DATABASE",
+        message: "Verify the Dropbox Sign callback before enabling sending.",
+      },
+    });
+  });
+
+  it("uses the owner-gated database boundary and sanitizes unexpected failures", async () => {
+    mocks.adminUpdate.mockResolvedValue({
+      error: { message: "private database diagnostic", code: "XX000" },
+    });
+    const result = await setEsignSendingEnabledAction(true);
+    expect(mocks.adminUpdate).toHaveBeenCalledWith(
+      "set_org_esign_sending_enabled",
+      {
+        p_org_id: "org-1",
+        p_actor_id: "owner-1",
+        p_enabled: true,
+      },
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "DATABASE",
+        message: "Dropbox Sign sending could not be updated.",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("private database diagnostic");
+  });
+
+  it("passes the owner identity into fail-closed disconnect", async () => {
+    await expect(disconnectDropboxSignAction()).resolves.toEqual({
+      ok: true,
+      data: null,
+    });
+    expect(mocks.deleteEsignCredentials).toHaveBeenCalledWith(
+      "org-1",
+      "owner-1",
+    );
   });
 });

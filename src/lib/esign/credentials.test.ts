@@ -77,9 +77,15 @@ describe("eSign credential store", () => {
   });
 
   it("surfaces the safe disconnect blocker without leaking database details", async () => {
-    admin.rpc.mockResolvedValue({ error: { code: "23514", message: "db detail" } });
-    await expect(deleteEsignCredentials("org-1")).rejects.toThrow(
+    admin.rpc.mockResolvedValue({
+      error: { code: "23514", message: "db detail" },
+    });
+    await expect(deleteEsignCredentials("org-1", "owner-1")).rejects.toThrow(
       "Finish active signatures and save signed PDFs",
     );
+    expect(admin.rpc).toHaveBeenCalledWith("delete_org_esign_integration", {
+      p_org_id: "org-1",
+      p_actor_id: "owner-1",
+    });
   });
 });
