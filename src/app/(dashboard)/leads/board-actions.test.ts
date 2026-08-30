@@ -1,20 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createClient, revalidatePath } = vi.hoisted(() => ({
+const { createClient, revalidatePath, getCallerMemberships, fetchLeadBoardData } = vi.hoisted(() => ({
   createClient: vi.fn(),
   revalidatePath: vi.fn(),
+  getCallerMemberships: vi.fn(),
+  fetchLeadBoardData: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 vi.mock("next/cache", () => ({ revalidatePath }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships }));
+vi.mock("./board-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./board-query")>();
+  return { ...actual, fetchLeadBoardData };
+});
 
 import { loadLeadBoardAction, setLeadNextActionAction } from "./board-actions";
 
 beforeEach(() => {
   createClient.mockReset();
   revalidatePath.mockReset();
+  getCallerMemberships.mockReset();
+  fetchLeadBoardData.mockReset();
 });
 
 describe("setLeadNextActionAction", () => {
@@ -77,5 +86,62 @@ describe("loadLeadBoardAction validation", () => {
     });
     expect(result).toMatchObject({ ok: false, error: { code: "INVALID_LEAD_CURSOR" } });
     expect(createClient).not.toHaveBeenCalled();
+  });
+
+  it("ignores a spoofed client org and reuses the server membership for replacement and load-more", async () => {
+    const serverOrgId = "22222222-2222-4222-8222-222222222222";
+    createClient.mockResolvedValue({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) },
+    });
+    getCallerMemberships.mockResolvedValue([{ user_id: "user-1", org_id: serverOrgId, role: "member" }]);
+    fetchLeadBoardData.mockResolvedValue({ leads: [] });
+    const input = {
+      status: "new_lead" as const,
+      cursor: null,
+      filters: {
+        search: "", ownership: "all" as const, motivation: "all" as const, urgency: "all" as const,
+        attention: null, hotOnly: false, noActiveSequence: false, skipTraced: null,
+      },
+      orgId: "99999999-9999-4999-8999-999999999999",
+    };
+
+    await loadLeadBoardAction(input);
+    await loadLeadBoardAction({
+      ...input,
+      status: undefined,
+      cursor: undefined,
+    });
+
+    expect(fetchLeadBoardData).toHaveBeenCalledTimes(2);
+    expect(
+      fetchLeadBoardData.mock.calls.every(([, , context]) => context.orgId === serverOrgId),
+    ).toBe(true);
+    expect(fetchLeadBoardData.mock.calls[0]?.[3]).toEqual({});
+    expect(fetchLeadBoardData.mock.calls[0]?.[4]).toEqual(["new_lead"]);
+  });
+
+  it("fails soft to an undecorated board when no active membership is available", async () => {
+    createClient.mockResolvedValue({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) },
+    });
+    getCallerMemberships.mockResolvedValue([]);
+    fetchLeadBoardData.mockResolvedValue({ leads: [{ id: "lead-1", latestContract: null }] });
+    const input = {
+      filters: {
+        search: "", ownership: "all" as const, motivation: "all" as const, urgency: "all" as const,
+        attention: null, hotOnly: false, noActiveSequence: false, skipTraced: null,
+      },
+    };
+
+    const result = await loadLeadBoardAction(input);
+
+    expect(result).toEqual({ ok: true, data: { leads: [{ id: "lead-1", latestContract: null }] } });
+    expect(fetchLeadBoardData).toHaveBeenCalledWith(
+      expect.anything(),
+      input.filters,
+      expect.objectContaining({ orgId: null }),
+      {},
+      expect.any(Array),
+    );
   });
 });

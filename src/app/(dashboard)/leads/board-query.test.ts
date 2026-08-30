@@ -120,6 +120,73 @@ describe("fetchLeadBoardData", () => {
     );
   });
 
+  it("does not invoke the org-scoped loader without a trusted server org id", async () => {
+    const lead = {
+      id: "11111111-1111-4111-8111-111111111111",
+      address: "123 Main St",
+      city: "Kansas City",
+      state: "MO",
+      zip: "64111",
+      market: "Jackson County MO",
+      status: "new_lead",
+      is_vacant: false,
+      cass_status: "verified",
+      absentee_flag: false,
+      assigned_user_id: null,
+      motivation_level: null,
+      outreach_dispo: null,
+      has_unread: false,
+      next_task_id: null,
+      next_task_title: null,
+      next_task_due_at: null,
+      homeowner: null,
+      homeowner_sms_opted_out: false,
+      homeowner_sms_opted_out_at: null,
+    };
+    const client = {
+      async rpc(name: string) {
+        if (name === "get_leads_board_page") {
+          return {
+            data: [{ rows: [lead], total_count: 1, snapshot_generation: "generation-a" }],
+            error: null,
+          };
+        }
+        return { data: [], error: null };
+      },
+      from() {
+        return {
+          select() {
+            return {
+              async in() {
+                return { data: [], error: null };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as SupabaseClient<Database>;
+    const loader = vi.fn().mockResolvedValue([]);
+
+    const data = await fetchLeadBoardData(
+      client,
+      filters,
+      {
+        currentUserId: "44444444-4444-4444-8444-444444444444",
+        assigneeId: null,
+        unassigned: false,
+        dayStart: "2026-08-15T05:00:00.000Z",
+        dayEnd: "2026-08-16T05:00:00.000Z",
+      },
+      {},
+      ["new_lead"],
+      loader,
+    );
+
+    expect(loader).not.toHaveBeenCalled();
+    expect(data.latestContractByPropertyId).toEqual({});
+    expect(data.leads[0].latestContract).toBeNull();
+  });
+
   it("gets exact count and bounded rows from one snapshot RPC", async () => {
     const { client, calls } = clientHarness();
     const data = await fetchLeadBoardData(client, filters, {

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { LEAD_SOURCES } from "@/lib/leads/sources";
+import { getCallerMemberships } from "@/lib/auth/memberships";
 import { createClient } from "@/lib/supabase/server";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
 
@@ -34,10 +35,15 @@ export default async function LeadsPage({
   const params = await searchParams;
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  const [teamResult, { data: counties }] = await Promise.all([
+  const [teamResult, { data: counties }, memberships] = await Promise.all([
     listOrgUsers(),
     supabase.from("counties").select("market").order("state").order("name"),
+    getCallerMemberships(),
   ]);
+  // Sandra currently follows the existing single-org convention used by the
+  // other dashboard pages. This value is resolved from the server session and
+  // is never accepted from the browser's board requests.
+  const orgId = memberships[0]?.org_id ?? null;
   const teamMembers = teamResult.ok ? teamResult.data : [];
   const inboundFilters = resolveInboundLeadFilters(params, {
     currentUserId: user?.id ?? null,
@@ -70,6 +76,7 @@ export default async function LeadsPage({
       unassigned: inboundFilters.ownership === "unassigned",
       dayStart: dayStart.toISOString(),
       dayEnd: dayEnd.toISOString(),
+      orgId,
     });
   } catch {
     loadFailed = true;

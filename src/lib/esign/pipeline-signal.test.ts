@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  LATEST_ESIGN_REQUESTS_RPC,
   loadPipelineSignals,
   MAX_PIPELINE_SIGNAL_PROPERTIES,
+  type LatestEsignRequestRpcRow,
   type PipelineSignalLoader,
   type PipelineSignalRow,
 } from "./pipeline-signal";
@@ -21,6 +23,27 @@ const row = (
 });
 
 describe("loadPipelineSignals", () => {
+  it("locks the reviewed RPC name and corrected return DTO", () => {
+    const rpcRow = {
+      org_id: "org-1",
+      property_id: "property-1",
+      id: "request-1",
+      created_at: "2026-08-29T12:00:00.000Z",
+      status: "voided",
+    } satisfies LatestEsignRequestRpcRow;
+
+    expect(LATEST_ESIGN_REQUESTS_RPC).toBe(
+      "get_latest_esign_requests_for_properties",
+    );
+    expect(Object.keys(rpcRow).sort()).toEqual([
+      "created_at",
+      "id",
+      "org_id",
+      "property_id",
+      "status",
+    ]);
+  });
+
   it("does not call the loader for an empty card set", async () => {
     const loader = vi.fn<PipelineSignalLoader>();
 
