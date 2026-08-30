@@ -242,6 +242,11 @@ describe("injectable Dropbox Sign webhook handler", () => {
         }),
       }),
     );
+    expect(deps.pdfProvider.downloadSignedPdf).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      callbackConsumerId: CONSUMER_ID,
+      signRequestId: "provider-request-1",
+    });
   });
 
   it("does not acknowledge an actively processing duplicate", async () => {

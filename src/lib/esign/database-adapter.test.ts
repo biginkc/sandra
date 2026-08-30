@@ -65,6 +65,16 @@ const VIEWED_DECISION: EsignStatusDecision = {
 };
 
 describe("typed eSign webhook database adapter", () => {
+  it.each([59, 3_601, 60.5])(
+    "rejects an out-of-contract stale lease window of %s seconds",
+    (staleAfterSeconds) => {
+      const { client } = clientWith(() => claimRow());
+      expect(() =>
+        createEsignWebhookDatabaseAdapter(client, { staleAfterSeconds }),
+      ).toThrow("The eSign webhook database operation failed.");
+    },
+  );
+
   it("sends the exact PII-minimal insert-and-claim shape", async () => {
     const privateEmail = "private-seller@example.com";
     const { client, rpc } = clientWith(() => claimRow());

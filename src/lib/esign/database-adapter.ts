@@ -130,6 +130,8 @@ export type EsignWebhookDatabaseAdapter = EsignWebhookPersistence &
   SignedPdfArtifactLinkPersistence;
 
 const DEFAULT_STALE_AFTER_SECONDS = 300;
+const MIN_STALE_AFTER_SECONDS = 60;
+const MAX_STALE_AFTER_SECONDS = 3_600;
 const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 export function createEsignWebhookDatabaseAdapter(
@@ -142,7 +144,11 @@ export function createEsignWebhookDatabaseAdapter(
   const createLeaseId = options.createLeaseId ?? randomUUID;
   const staleAfterSeconds =
     options.staleAfterSeconds ?? DEFAULT_STALE_AFTER_SECONDS;
-  if (!Number.isSafeInteger(staleAfterSeconds) || staleAfterSeconds < 1) {
+  if (
+    !Number.isSafeInteger(staleAfterSeconds) ||
+    staleAfterSeconds < MIN_STALE_AFTER_SECONDS ||
+    staleAfterSeconds > MAX_STALE_AFTER_SECONDS
+  ) {
     throw new EsignDatabaseAdapterError("INVALID_ADAPTER_CONFIG");
   }
 

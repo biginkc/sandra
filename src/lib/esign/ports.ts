@@ -72,7 +72,11 @@ export interface EsignWebhookPersistence {
 }
 
 export interface DropboxSignedPdfProvider {
-  downloadSignedPdf(signRequestId: string): Promise<Buffer>;
+  downloadSignedPdf(input: {
+    orgId: string;
+    callbackConsumerId: string;
+    signRequestId: string;
+  }): Promise<Buffer>;
 }
 
 export interface SignedPdfArtifactPersistence {

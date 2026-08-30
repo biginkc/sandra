@@ -134,9 +134,10 @@ export async function handleDropboxSignWebhook(input: {
       authoritativeStatus === "signed" &&
       request.signedPdfPath === null
     ) {
-      const pdf = await input.dependencies.pdfProvider.downloadSignedPdf(
-        replay.signRequestId,
-      );
+      const pdf = await input.dependencies.pdfProvider.downloadSignedPdf({
+        ...identity,
+        signRequestId: replay.signRequestId,
+      });
       const artifact = buildSignedPdfArtifact({
         orgId: identity.orgId,
         propertyId: request.propertyId,
