@@ -4,6 +4,12 @@ import { STATUS_ORDER } from "./board-config";
 import type { InboundAttentionFilter, InboundOwnershipFilter } from "./inbound-filters";
 import type { PropertyStatus } from "./actions";
 import type { Database } from "@/lib/supabase/types";
+import {
+  loadPipelineSignals,
+  type PipelineSignalLoader,
+  type PipelineSignalRow,
+} from "@/lib/esign/pipeline-signal";
+import type { ContractStatusRecord } from "@/lib/esign/contract-status";
 import { truncateMessagePreview } from "../properties/prospects-query";
 import type { UrgencyFilter } from "./urgency";
 
@@ -43,6 +49,7 @@ export type LeadBoardLead = Pick<
   homeowner_sms_opted_out: boolean | null;
   homeowner_sms_opted_out_at: string | null;
   is_dnc_locked?: boolean;
+  latestContract?: ContractStatusRecord | null;
 };
 
 export type ListMembership = { listId: string; name: string; color: string | null };
@@ -65,6 +72,7 @@ export type LeadBoardData = {
   listMemberships: Record<string, ListMembership[]>;
   customTags: Record<string, CustomTag[]>;
   lastMessageByPropertyId: Record<string, LastMessage>;
+  latestContractByPropertyId: Record<string, ContractStatusRecord>;
 };
 
 export type LeadBoardQueryContext = {
@@ -73,6 +81,7 @@ export type LeadBoardQueryContext = {
   unassigned: boolean;
   dayStart: string;
   dayEnd: string;
+  orgId?: string | null;
 };
 
 function rpcFilters(filters: LeadBoardFilters, context: LeadBoardQueryContext) {
@@ -179,7 +188,9 @@ async function fetchCardDecorations(
     last_message_body?: string | null;
     last_message_created_at?: string | null;
   }>,
-): Promise<Pick<LeadBoardData, "listMemberships" | "customTags" | "lastMessageByPropertyId">> {
+  orgId: string | null,
+  pipelineSignalLoader?: PipelineSignalLoader,
+): Promise<Pick<LeadBoardData, "listMemberships" | "customTags" | "lastMessageByPropertyId" | "latestContractByPropertyId">> {
   const ids = rows.map((row) => row.id);
   const membershipRows: Array<{
     property_id: string;
@@ -191,9 +202,17 @@ async function fetchCardDecorations(
     tag_id: string;
     tags: { name: string; color: string | null; category: string } | null;
   }> = [];
+  const latestContractByPropertyId: Record<string, ContractStatusRecord> = {};
   for (let start = 0; start < ids.length; start += 50) {
     const chunk = ids.slice(start, start + 50);
-    const [{ data: memberships, error: membershipsError }, { data: tags, error: tagsError }] =
+    const signalPromise = orgId && pipelineSignalLoader
+      ? loadPipelineSignals(pipelineSignalLoader, { orgId, propertyIds: chunk })
+      : Promise.resolve(new Map<string, PipelineSignalRow>());
+    const [
+      { data: memberships, error: membershipsError },
+      { data: tags, error: tagsError },
+      contractSignals,
+    ] =
       await Promise.all([
         supabase
           .from("property_lists")
@@ -203,6 +222,7 @@ async function fetchCardDecorations(
           .from("property_tags")
           .select("property_id, tag_id, tags!property_tags_tag_id_fkey(name, color, category)")
           .in("property_id", chunk),
+        signalPromise,
       ]);
     // Badges are optional decoration. Preserve the core cards and exact board
     // counts if either bounded auxiliary lookup fails, matching the prior
@@ -212,6 +232,13 @@ async function fetchCardDecorations(
     }
     if (!tagsError) {
       tagRows.push(...((tags ?? []) as unknown as typeof tagRows));
+    }
+    for (const [propertyId, signal] of contractSignals) {
+      latestContractByPropertyId[propertyId] = {
+        id: signal.id,
+        created_at: signal.created_at,
+        status: signal.status,
+      };
     }
   }
 
@@ -243,7 +270,12 @@ async function fetchCardDecorations(
       createdAt: row.last_message_created_at,
     };
   }
-  return { listMemberships, customTags, lastMessageByPropertyId };
+  return {
+    listMemberships,
+    customTags,
+    lastMessageByPropertyId,
+    latestContractByPropertyId,
+  };
 }
 
 export async function fetchLeadBoardData(
@@ -252,6 +284,7 @@ export async function fetchLeadBoardData(
   context: LeadBoardQueryContext,
   cursors: Partial<Record<PropertyStatus, LeadBoardCursor | null>> = {},
   statuses: readonly PropertyStatus[] = STATUS_ORDER,
+  pipelineSignalLoader?: PipelineSignalLoader,
 ): Promise<LeadBoardData> {
   const pages = await Promise.all(
     statuses.map(async (status) => ({
@@ -272,12 +305,20 @@ export async function fetchLeadBoardData(
   }
   const includeFacets = statuses.length === STATUS_ORDER.length;
   const [decorations, urgencyCounts, baselineTotals] = await Promise.all([
-    fetchCardDecorations(supabase, leads),
+    fetchCardDecorations(
+      supabase,
+      leads,
+      context.orgId ?? null,
+      pipelineSignalLoader,
+    ),
     includeFacets ? fetchUrgencyCounts(supabase, filters, context) : Promise.resolve(null),
     includeFacets ? fetchBaselineStageTotals(supabase) : Promise.resolve(null),
   ]);
   return {
-    leads,
+    leads: leads.map((lead) => ({
+      ...lead,
+      latestContract: decorations.latestContractByPropertyId[lead.id] ?? null,
+    })),
     totals,
     baselineTotals,
     urgencyCounts,

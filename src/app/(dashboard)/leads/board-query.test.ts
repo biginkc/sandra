@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
 import { fetchLeadBoardData, LEADS_COLUMN_PAGE_SIZE, type LeadBoardFilters } from "./board-query";
@@ -35,6 +35,91 @@ const filters: LeadBoardFilters = {
 };
 
 describe("fetchLeadBoardData", () => {
+  it("threads a bounded org-aware latest-contract map into the returned cards", async () => {
+    const lead = {
+      id: "11111111-1111-4111-8111-111111111111",
+      address: "123 Main St",
+      city: "Kansas City",
+      state: "MO",
+      zip: "64111",
+      market: "Jackson County MO",
+      status: "new_lead",
+      is_vacant: false,
+      cass_status: "verified",
+      absentee_flag: false,
+      assigned_user_id: null,
+      motivation_level: null,
+      outreach_dispo: null,
+      has_unread: false,
+      next_task_id: null,
+      next_task_title: null,
+      next_task_due_at: null,
+      homeowner: null,
+      homeowner_sms_opted_out: false,
+      homeowner_sms_opted_out_at: null,
+    };
+    const client = {
+      async rpc(name: string) {
+        if (name === "get_leads_board_page") {
+          return {
+            data: [{ rows: [lead], total_count: 1, snapshot_generation: "generation-a" }],
+            error: null,
+          };
+        }
+        return { data: [], error: null };
+      },
+      from() {
+        return {
+          select() {
+            return {
+              async in() {
+                return { data: [], error: null };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as SupabaseClient<Database>;
+    const loader = vi.fn().mockResolvedValue([
+      {
+        org_id: "22222222-2222-4222-8222-222222222222",
+        property_id: lead.id,
+        id: "33333333-3333-4333-8333-333333333333",
+        created_at: "2026-08-29T12:00:00.000000+00:00",
+        status: "signed",
+      },
+    ]);
+
+    const data = await fetchLeadBoardData(
+      client,
+      filters,
+      {
+        currentUserId: "44444444-4444-4444-8444-444444444444",
+        assigneeId: null,
+        unassigned: false,
+        dayStart: "2026-08-15T05:00:00.000Z",
+        dayEnd: "2026-08-16T05:00:00.000Z",
+        orgId: "22222222-2222-4222-8222-222222222222",
+      },
+      {},
+      ["new_lead"],
+      loader,
+    );
+
+    expect(loader).toHaveBeenCalledWith({
+      orgId: "22222222-2222-4222-8222-222222222222",
+      propertyIds: [lead.id],
+    });
+    expect(data.latestContractByPropertyId[lead.id]).toEqual({
+      id: "33333333-3333-4333-8333-333333333333",
+      created_at: "2026-08-29T12:00:00.000000+00:00",
+      status: "signed",
+    });
+    expect(data.leads[0].latestContract).toEqual(
+      data.latestContractByPropertyId[lead.id],
+    );
+  });
+
   it("gets exact count and bounded rows from one snapshot RPC", async () => {
     const { client, calls } = clientHarness();
     const data = await fetchLeadBoardData(client, filters, {

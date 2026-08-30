@@ -5,6 +5,16 @@ import {
 } from "./contract-status";
 
 export const MAX_PIPELINE_SIGNAL_PROPERTIES = 50;
+export const LATEST_ESIGN_REQUESTS_RPC =
+  "get_latest_esign_requests_for_properties" as const;
+
+export type LatestEsignRequestRpcRow = {
+  org_id: string;
+  property_id: string;
+  id: string;
+  created_at: string;
+  status: ContractStatusRecord["status"];
+};
 
 export type PipelineSignalRequest = {
   orgId: string;

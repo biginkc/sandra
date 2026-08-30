@@ -18,6 +18,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { Badge } from "@/components/ui/badge";
+import { ContractStatusBadge } from "@/components/esign/contract-status-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SoftphoneLeadButton } from "@/components/softphone/softphone-lead-button";
@@ -25,6 +26,7 @@ import type { SoftphoneLead } from "@/components/softphone/softphone-provider";
 import { callAction } from "@/lib/errors/call-action";
 import { canShowCallButton } from "@/lib/dialer/eligibility";
 import type { Database } from "@/lib/supabase/types";
+import type { ContractStatusRecord } from "@/lib/esign/contract-status";
 
 import {
   updatePropertyStatus,
@@ -166,6 +168,9 @@ export function Kanban({
   const [listsByLead, setListsByLead] = useState(listMemberships);
   const [tagsByLead, setTagsByLead] = useState(customTags);
   const [messagesByLead, setMessagesByLead] = useState(lastMessageByPropertyId);
+  const [contractsByLead, setContractsByLead] = useState<
+    Record<string, ContractStatusRecord>
+  >(() => contractsFromLeads(initialLeads));
   const [activeId, setActiveId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<PropertyStatus>>(
     () => new Set(DEFAULT_COLLAPSED_STATUSES),
@@ -322,6 +327,9 @@ export function Kanban({
     setListsByLead(data.listMemberships);
     setTagsByLead(data.customTags);
     setMessagesByLead(data.lastMessageByPropertyId);
+    setContractsByLead(
+      data.latestContractByPropertyId ?? contractsFromLeads(data.leads),
+    );
   };
 
   const refreshBoard = async () => {
@@ -414,6 +422,10 @@ export function Kanban({
     setListsByLead((previous) => ({ ...previous, ...data.listMemberships }));
     setTagsByLead((previous) => ({ ...previous, ...data.customTags }));
     setMessagesByLead((previous) => ({ ...previous, ...data.lastMessageByPropertyId }));
+    setContractsByLead((previous) => ({
+      ...previous,
+      ...(data.latestContractByPropertyId ?? contractsFromLeads(data.leads)),
+    }));
     const existingIds = new Set(leads.map((lead) => lead.id));
     const newlyLoaded = (data.leads as Lead[]).filter((lead) => !existingIds.has(lead.id));
     const loadedInStatus = leads.filter((lead) => lead.status === status).length + newlyLoaded.length;
@@ -817,6 +829,7 @@ export function Kanban({
                 listMemberships={listsByLead}
                 customTags={tagsByLead}
                 lastMessageByPropertyId={messagesByLead}
+                latestContractByPropertyId={contractsByLead}
                 renderedAtMs={renderedAtMs}
                 dayStart={dayStart}
                 dayEnd={dayEnd}
@@ -854,6 +867,7 @@ export function Kanban({
                 lists={listsByLead[activeLead.id] ?? []}
                 customTags={tagsByLead[activeLead.id] ?? []}
                 lastMessage={messagesByLead[activeLead.id] ?? null}
+                contractStatus={contractsByLead[activeLead.id]?.status ?? null}
                 renderedAtMs={renderedAtMs}
                 dayStart={dayStart}
                 dayEnd={dayEnd}
@@ -970,6 +984,7 @@ function Column({
   listMemberships,
   customTags,
   lastMessageByPropertyId,
+  latestContractByPropertyId,
   renderedAtMs,
   dayStart,
   dayEnd,
@@ -996,6 +1011,7 @@ function Column({
   listMemberships: Record<string, ListMembership[]>;
   customTags: Record<string, CustomTag[]>;
   lastMessageByPropertyId: Record<string, LastMessage>;
+  latestContractByPropertyId: Record<string, ContractStatusRecord>;
   renderedAtMs: number;
   dayStart: string;
   dayEnd: string;
@@ -1097,6 +1113,7 @@ function Column({
               lists={listMemberships[lead.id] ?? []}
               customTags={customTags[lead.id] ?? []}
               lastMessage={lastMessageByPropertyId[lead.id] ?? null}
+              contractStatus={latestContractByPropertyId[lead.id]?.status ?? null}
               renderedAtMs={renderedAtMs}
               dayStart={dayStart}
               dayEnd={dayEnd}
@@ -1128,6 +1145,7 @@ function LeadCard({
   lists = [],
   customTags = [],
   lastMessage = null,
+  contractStatus = null,
   renderedAtMs,
   dayStart,
   dayEnd,
@@ -1146,6 +1164,7 @@ function LeadCard({
   lists?: ListMembership[];
   customTags?: CustomTag[];
   lastMessage?: LastMessage | null;
+  contractStatus?: ContractStatusRecord["status"] | null;
   renderedAtMs: number;
   dayStart: string;
   dayEnd: string;
@@ -1260,6 +1279,7 @@ function LeadCard({
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-1">
+        <ContractStatusBadge status={contractStatus} />
         {lead.motivation_level &&
         (lead.motivation_level === "hot" ||
           lead.motivation_level === "warm" ||
@@ -1483,6 +1503,16 @@ function LeadCard({
       </div>
     </div>
   );
+}
+
+function contractsFromLeads(
+  leads: readonly Lead[],
+): Record<string, ContractStatusRecord> {
+  const contracts: Record<string, ContractStatusRecord> = {};
+  for (const lead of leads) {
+    if (lead.latestContract) contracts[lead.id] = lead.latestContract;
+  }
+  return contracts;
 }
 
 function toSoftphoneLead(lead: Lead): SoftphoneLead {

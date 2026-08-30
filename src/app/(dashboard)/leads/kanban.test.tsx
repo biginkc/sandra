@@ -194,6 +194,181 @@ beforeEach(() => {
 });
 
 describe("Leads Kanban foundation", () => {
+  it("renders exactly one latest-contract badge in the first badge row", () => {
+    renderBoard([
+      makeLead({
+        latestContract: {
+          id: "11111111-1111-4111-8111-111111111111",
+          created_at: "2026-08-29T12:00:00.000Z",
+          status: "signed",
+        },
+      }),
+    ]);
+
+    const badges = screen.getAllByTestId("contract-status-badge");
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveTextContent("Signed");
+    expect(badges[0].parentElement).toHaveClass("mt-2");
+  });
+
+  it("renders no contract badge when the lead has no contract", () => {
+    renderBoard([makeLead()]);
+
+    expect(screen.queryByTestId("contract-status-badge")).not.toBeInTheDocument();
+  });
+
+  it("replaces the latest-contract badge map on a board refresh", async () => {
+    const user = userEvent.setup();
+    loadLeadBoardAction.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        ...emptyBoardData(),
+        leads: [makeLead({
+          next_task_id: "task-overdue",
+          next_task_title: "Follow up",
+          next_task_due_at: "2026-08-13T15:00:00.000Z",
+        })],
+        totals: baseProps.initialTotals,
+        latestContractByPropertyId: {
+          "lead-a": {
+            id: "22222222-2222-4222-8222-222222222222",
+            created_at: "2026-08-29T12:01:00.000Z",
+            status: "viewed",
+          },
+        },
+      },
+    });
+    renderBoard([
+      makeLead({
+        latestContract: {
+          id: "11111111-1111-4111-8111-111111111111",
+          created_at: "2026-08-29T12:00:00.000Z",
+          status: "awaiting",
+        },
+      }),
+    ]);
+    expect(screen.getByTestId("contract-status-badge")).toHaveTextContent("Awaiting");
+
+    await user.click(screen.getByRole("button", { name: "Overdue 0" }));
+
+    expect(await screen.findByTestId("contract-status-badge")).toHaveTextContent("Viewed");
+    expect(screen.getAllByTestId("contract-status-badge")).toHaveLength(1);
+  });
+
+  it("removes a stale contract badge when replacement data has no contract", async () => {
+    const user = userEvent.setup();
+    loadLeadBoardAction.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        ...emptyBoardData(),
+        leads: [makeLead({
+          next_task_id: "task-overdue",
+          next_task_title: "Follow up",
+          next_task_due_at: "2026-08-13T15:00:00.000Z",
+        })],
+        totals: baseProps.initialTotals,
+        latestContractByPropertyId: {},
+      },
+    });
+    renderBoard([
+      makeLead({
+        latestContract: {
+          id: "11111111-1111-4111-8111-111111111111",
+          created_at: "2026-08-29T12:00:00.000Z",
+          status: "awaiting",
+        },
+      }),
+    ]);
+    expect(screen.getByTestId("contract-status-badge")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Overdue 0" }));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("contract-status-badge")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("threads the latest-contract badge into the drag overlay", async () => {
+    renderBoard([
+      makeLead({
+        latestContract: {
+          id: "11111111-1111-4111-8111-111111111111",
+          created_at: "2026-08-29T12:00:00.000Z",
+          status: "signed",
+        },
+      }),
+    ]);
+
+    act(() => {
+      dndHandlers.onDragStart?.({ active: { id: "lead-a" } });
+    });
+    expect(screen.getAllByTestId("contract-status-badge")).toHaveLength(2);
+    expect(screen.getAllByText("Signed")).toHaveLength(2);
+
+    await act(async () => {
+      await dndHandlers.onDragEnd?.({
+        active: { id: "lead-a" },
+        over: null,
+      });
+    });
+    expect(screen.getAllByTestId("contract-status-badge")).toHaveLength(1);
+  });
+
+  it("merges latest-contract badges from load-more pages", async () => {
+    const user = userEvent.setup();
+    const loadedLead = makeLead({
+      id: "33333333-3333-4333-8333-333333333333",
+      address: "Loaded Contract Card",
+    });
+    loadLeadBoardAction.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        ...emptyBoardData(),
+        leads: [loadedLead],
+        totals: { ...baseProps.initialTotals, new_lead: 2 },
+        hasMore: { new_lead: false },
+        snapshotGenerations: { new_lead: "generation-a" },
+        latestContractByPropertyId: {
+          [loadedLead.id]: {
+            id: "44444444-4444-4444-8444-444444444444",
+            created_at: "2026-08-29T12:05:00.000Z",
+            status: "signed",
+          },
+        },
+      },
+    });
+    render(
+      <Kanban
+        {...baseProps}
+        initialLeads={[
+          makeLead({
+            latestContract: {
+              id: "11111111-1111-4111-8111-111111111111",
+              created_at: "2026-08-29T12:00:00.000Z",
+              status: "awaiting",
+            },
+          }),
+        ]}
+        initialTotals={{ ...baseProps.initialTotals, new_lead: 2 }}
+        initialHasMore={{ new_lead: true }}
+        initialSnapshotGenerations={{ new_lead: "generation-a" }}
+        initialNextCursors={{
+          new_lead: {
+            dueAt: null,
+            id: "11111111-1111-4111-8111-111111111111",
+          },
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Load more New Lead" }));
+
+    expect(await screen.findByText("Loaded Contract Card")).toBeVisible();
+    expect(screen.getByText("Awaiting")).toBeVisible();
+    expect(screen.getByText("Signed")).toBeVisible();
+    expect(screen.getAllByTestId("contract-status-badge")).toHaveLength(2);
+  });
+
   it("shows the approved urgency strip without a suppressed bucket", () => {
     renderBoard([makeLead()]);
     const strip = screen.getByLabelText("Lead urgency");
