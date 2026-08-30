@@ -82,9 +82,9 @@ export async function createFoundationTemplateOrchestrator() {
     async listPendingCopies(orgId) {
       const { data: active, error } = await admin
         .from("esign_templates")
-        .select("id,org_id,name,lifecycle_state,staging_source_id")
+        .select("id,org_id,name,lifecycle_state,staging_source_id,supersedes_template_id")
         .eq("org_id", orgId)
-        .not("duplicate_of_template_id", "is", null)
+        .or("duplicate_of_template_id.not.is.null,supersedes_template_id.not.is.null")
         .in("lifecycle_state", ["preparing", "editing"])
         .is("deleted_at", null)
         .is("abandoned_at", null)
@@ -92,10 +92,10 @@ export async function createFoundationTemplateOrchestrator() {
       if (error) throw error;
       const { data: abandoned, error: abandonedError } = await admin
         .from("esign_templates")
-        .select("id,org_id,name,lifecycle_state,staging_source_id")
+        .select("id,org_id,name,lifecycle_state,staging_source_id,supersedes_template_id")
         .eq("org_id", orgId)
-        .not("duplicate_of_template_id", "is", null)
-        .eq("lifecycle_state", "abandoned")
+        .or("duplicate_of_template_id.not.is.null,supersedes_template_id.not.is.null")
+        .in("lifecycle_state", ["abandoned", "finalized"])
         .not("staging_source_id", "is", null)
         .is("deleted_at", null)
         .order("created_at", { ascending: false });
@@ -117,12 +117,14 @@ export async function createFoundationTemplateOrchestrator() {
         orgId: row.org_id,
         name: row.name,
         lifecycle: row.lifecycle_state as "preparing" | "editing",
+        kind: row.supersedes_template_id ? "edit_revision" as const : "copy" as const,
       }));
       const cleanupCopies = (abandoned ?? []).flatMap((row) => row.staging_source_id && cleanupStageIds.has(row.staging_source_id) ? [{
         id: row.id,
         orgId: row.org_id,
         name: row.name,
         lifecycle: "cleanup_attention" as const,
+        kind: row.supersedes_template_id ? "edit_revision" as const : "copy" as const,
       }] : []);
       return [...activeCopies, ...cleanupCopies];
     },
@@ -212,10 +214,23 @@ export async function createFoundationTemplateOrchestrator() {
       return created;
     },
 
+    async createHiddenEditRevision(input) {
+      const { data, error } = await admin.rpc("create_esign_template_edit_revision", {
+        p_org_id: input.orgId,
+        p_source_template_id: input.sourceTemplateId,
+        p_source_id: input.stagingSourceId,
+        p_actor_id: membership!.userId,
+      });
+      if (error) throw error;
+      const created = await this.getTemplate(input.orgId, data);
+      if (!created) throw new Error("created edit revision not found");
+      return created;
+    },
+
     async getTemplate(orgId, templateId) {
       const { data, error } = await admin
         .from("esign_templates")
-        .select("id,org_id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names,staging_source_id,lifecycle_state")
+        .select("id,org_id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names,staging_source_id,supersedes_template_id,lifecycle_state")
         .eq("org_id", orgId)
         .eq("id", templateId)
         .maybeSingle();
@@ -246,6 +261,22 @@ export async function createFoundationTemplateOrchestrator() {
       });
       if (error) throw error;
       return data === "finalized" || data === "already_finalized";
+    },
+
+    async publishEditRevision(input) {
+      const { data, error } = await admin.rpc("publish_esign_template_edit_revision", {
+        p_org_id: input.orgId,
+        p_source_template_id: input.sourceTemplateId,
+        p_revision_template_id: input.revisionTemplateId,
+        p_expected_source_provider_template_id: input.expectedSourceProviderTemplateId,
+        p_revision_provider_template_id: input.revisionProviderTemplateId,
+        p_seller_role: input.option.sellerRoleName,
+        p_provider_signer_roles: input.option.signerRoles.map((role) => ({ ...role })),
+        p_provider_merge_field_names: [...input.option.mergeFieldNames],
+        p_actor_id: membership!.userId,
+      });
+      if (error) throw error;
+      return data === "published" || data === "already_published" ? data : null;
     },
 
     async markAbandoned(orgId, templateId) {
@@ -327,6 +358,9 @@ export async function createFoundationTemplateOrchestrator() {
       async getTemplate(providerTemplateId) {
         return provider.getTemplate(providerTemplateId);
       },
+      async getTemplateFiles(providerTemplateId) {
+        return new Uint8Array(await provider.getTemplateFiles(providerTemplateId));
+      },
       async duplicateTemplate(input) {
         const bytes = await provider.getTemplateFiles(input.providerTemplateId);
         return provider.duplicateTemplate(input.providerTemplateId, { filename: `${input.title}.pdf`, bytes });
@@ -379,7 +413,8 @@ function optionFromRow(row: {
 
 function draftFromRow(row: {
   id: string; org_id: string; name: string; document_type: string; sign_template_id: string | null;
-  seller_role: string; signer_roles: unknown; merge_field_names: string[]; staging_source_id: string | null; lifecycle_state: string;
+  seller_role: string; signer_roles: unknown; merge_field_names: string[]; staging_source_id: string | null;
+  supersedes_template_id?: string | null; lifecycle_state: string;
 }): TemplateDraftRecord {
   if (!["preparing", "editing", "finalized", "abandoned", "deleted", "error"].includes(row.lifecycle_state)) throw new Error("invalid template lifecycle");
   return {
@@ -392,6 +427,7 @@ function draftFromRow(row: {
     signerRoles: signerRoles(row.signer_roles),
     mergeFieldNames: row.merge_field_names,
     stagingSourceId: row.staging_source_id,
+    supersedesTemplateId: row.supersedes_template_id ?? null,
     lifecycle: row.lifecycle_state as TemplateDraftRecord["lifecycle"],
   };
 }

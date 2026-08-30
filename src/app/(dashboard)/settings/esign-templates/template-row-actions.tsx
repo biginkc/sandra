@@ -1,6 +1,6 @@
 "use client";
 
-import { CopyIcon, Trash2Icon } from "lucide-react";
+import { CopyIcon, PencilIcon, Trash2Icon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 
@@ -15,9 +15,29 @@ import type { EsignTemplateRow, TemplateLibraryActions } from "./types";
 export function TemplateRowActions({ template, actions }: { template: EsignTemplateRow; actions?: TemplateLibraryActions }) {
   return (
     <>
+      <EditTemplateButton template={template} actions={actions} />
       <DuplicateTemplateDialog template={template} actions={actions} />
       <DeleteTemplateDialog template={template} actions={actions} />
     </>
+  );
+}
+
+function EditTemplateButton({ template, actions }: { template: EsignTemplateRow; actions?: TemplateLibraryActions }) {
+  const router = useRouter();
+  const [error, setError] = useState<string | null>(null);
+  const [pending, startTransition] = useTransition();
+  const edit = () => actions && startTransition(async () => {
+    setError(null);
+    const result = await actions.beginEditRevision(template.id);
+    if (!result.ok) return setError(result.error.message);
+    if (result.data.readiness === "ready") router.push(`/settings/esign-templates/${result.data.templateId}/edit`);
+    else router.refresh();
+  });
+  return (
+    <div>
+      <Button variant="ghost" size="sm" onClick={edit} disabled={!actions || pending}><PencilIcon data-icon="inline-start" />{pending ? "Preparing…" : "Edit"}</Button>
+      {error && <p role="alert" className="text-destructive max-w-52 text-xs">{error}</p>}
+    </div>
   );
 }
 

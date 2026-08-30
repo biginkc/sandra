@@ -31,7 +31,7 @@ export async function loadPendingTemplateCopies(): Promise<PendingTemplateCopies
     }
     const result = await (await createFoundationTemplateOrchestrator()).listPendingCopies();
     if (!result.ok) return result;
-    return { ok: true, data: result.data.map(({ id, name, lifecycle }) => ({ id, name, lifecycle })) };
+    return { ok: true, data: result.data.map(({ id, name, lifecycle, kind }) => ({ id, name, lifecycle, kind })) };
   } catch {
     return { ok: false, error: { code: "PENDING_COPY_LIST_FAILED", message: "Pending template copies could not be loaded." } };
   }

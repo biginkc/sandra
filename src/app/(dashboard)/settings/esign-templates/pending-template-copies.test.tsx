@@ -31,6 +31,7 @@ function makeActions(): TemplateLibraryActions {
     createDraft: vi.fn(),
     pickDropboxPdf: vi.fn(),
     duplicateTemplate: vi.fn().mockResolvedValue({ ok: true, data: { templateId: "pending-1", readiness: "pending" } }),
+    beginEditRevision: vi.fn(),
     checkEditorReadiness: vi.fn().mockResolvedValue({ ok: true, data: { readiness: "pending" } }),
     abandonDraft: vi.fn().mockResolvedValue({ ok: true, data: null }),
     retryCleanup: vi.fn().mockResolvedValue({ ok: true, data: null }),
@@ -64,6 +65,12 @@ describe("PendingTemplateCopies", () => {
     render(<PendingTemplateCopies result={pendingResult} actions={actions} />);
     expect(screen.getByText("Offer (copy)")).toBeVisible();
     expect(actions.checkEditorReadiness).not.toHaveBeenCalled();
+  });
+
+  it("labels a hidden edit revision without exposing it as a finalized template", () => {
+    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "revision-1", name: "Offer", lifecycle: "preparing", kind: "edit_revision" }] }} actions={makeActions()} />);
+    expect(screen.getByText("Edit revision is still preparing")).toBeVisible();
+    expect(screen.queryByText("Copy is still preparing")).not.toBeInTheDocument();
   });
 
   it("keeps pending recoverable and routes exactly once after an explicit ready result", async () => {

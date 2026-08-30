@@ -33,6 +33,7 @@ export type PendingTemplateCopy = Readonly<{
   orgId: string;
   name: string;
   lifecycle: "preparing" | "editing" | "cleanup_attention";
+  kind?: "copy" | "edit_revision";
 }>;
 
 export type TemplateUpload = Readonly<{
@@ -62,6 +63,7 @@ export type TemplateDraftRecord = Readonly<{
   signerRoles: readonly TemplateSignerRole[];
   mergeFieldNames: readonly string[];
   stagingSourceId: string | null;
+  supersedesTemplateId: string | null;
   lifecycle: "preparing" | "editing" | "finalized" | "abandoned" | "deleted" | "error";
 }>;
 
@@ -81,8 +83,9 @@ export type TemplateRepositoryPort = Readonly<{
   recordVerifiedStage(input: StagedTemplateSource): Promise<StagedTemplateSource>;
   recordUnattachedStageCleanup(input: { orgId: string; stageId: string; outcome: "deleted" | "failed" }): Promise<void>;
   getStage(orgId: string, stageId: string): Promise<StagedTemplateSource | null>;
-  createHiddenDraft(input: Omit<TemplateDraftRecord, "id" | "providerTemplateId" | "lifecycle">): Promise<TemplateDraftRecord>;
+  createHiddenDraft(input: Omit<TemplateDraftRecord, "id" | "providerTemplateId" | "supersedesTemplateId" | "lifecycle">): Promise<TemplateDraftRecord>;
   createHiddenDuplicate(input: { orgId: string; sourceTemplateId: string; name: string }): Promise<TemplateDraftRecord>;
+  createHiddenEditRevision(input: { orgId: string; sourceTemplateId: string; stagingSourceId: string }): Promise<TemplateDraftRecord>;
   getTemplate(orgId: string, templateId: string): Promise<TemplateDraftRecord | null>;
   attachProviderId(orgId: string, templateId: string, providerTemplateId: string): Promise<boolean>;
   finalizeDraft(input: {
@@ -91,6 +94,14 @@ export type TemplateRepositoryPort = Readonly<{
     expectedProviderTemplateId: string;
     option: TemplateOption;
   }): Promise<boolean>;
+  publishEditRevision(input: {
+    orgId: string;
+    sourceTemplateId: string;
+    revisionTemplateId: string;
+    expectedSourceProviderTemplateId: string;
+    revisionProviderTemplateId: string;
+    option: TemplateOption;
+  }): Promise<"published" | "already_published" | null>;
   markAbandoned(orgId: string, templateId: string): Promise<boolean>;
   softDelete(orgId: string, templateId: string, confirmRecentSends: boolean): Promise<{ outcome: "deleted" | "already_deleted" | "needs_confirmation"; recentSendCount: number }>;
   recordSourceCleanup(input: {
@@ -119,6 +130,7 @@ export type TemplateProviderPort = Readonly<{
   }): Promise<{ providerTemplateId: string }>;
   getFreshEditUrl(providerTemplateId: string): Promise<{ editUrl: string; expiresAt: number | null }>;
   getTemplate(providerTemplateId: string): Promise<ProviderTemplateState>;
+  getTemplateFiles(providerTemplateId: string): Promise<Uint8Array>;
   duplicateTemplate(input: {
     providerTemplateId: string;
     title: string;
@@ -224,6 +236,66 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
           return failure("STAGING_COMPENSATION_FAILED", "The private upload could not be recorded or safely cleaned up.");
         }
       }
+    },
+
+    async beginEditRevision(sourceTemplateId: string): Promise<TemplateActionResult<{ templateId: string; readiness: "ready" | "pending" }>> {
+      const access = await owner();
+      if (!access.ok) return access;
+      let source: TemplateDraftRecord | null;
+      try {
+        source = await ports.repository.getTemplate(access.data.orgId, sourceTemplateId);
+      } catch {
+        return failure("TEMPLATE_READ_FAILED", "The template could not be loaded.");
+      }
+      if (!source || source.orgId !== access.data.orgId || source.lifecycle !== "finalized" || !source.providerTemplateId) {
+        return failure("TEMPLATE_NOT_FOUND", "Only an active finalized template can be edited.");
+      }
+      let bytes: Uint8Array;
+      try {
+        bytes = await ports.provider.getTemplateFiles(source.providerTemplateId);
+      } catch {
+        return failure("EDIT_SOURCE_DOWNLOAD_FAILED", "Dropbox Sign could not prepare the template source for editing.");
+      }
+      const staged = await stageVerifiedSource(ports, access.data, {
+        filename: `${source.name}.pdf`, mimeType: "application/pdf", size: bytes.byteLength, bytes,
+      });
+      if (!staged.ok) return staged;
+      let revision: TemplateDraftRecord;
+      try {
+        revision = await ports.repository.createHiddenEditRevision({
+          orgId: access.data.orgId,
+          sourceTemplateId: source.id,
+          stagingSourceId: staged.data.id,
+        });
+      } catch {
+        await cleanupUnattachedStage(ports, staged.data);
+        return failure("EDIT_REVISION_CREATE_FAILED", "Sandra could not prepare a hidden edit revision.");
+      }
+      let duplicate: { providerTemplateId: string; readiness: "ready" | "pending" };
+      try {
+        duplicate = await ports.provider.duplicateTemplate({ providerTemplateId: source.providerTemplateId, title: source.name });
+      } catch {
+        const compensated = await compensateHiddenDraft(ports, revision);
+        return compensated
+          ? failure("EDIT_PROVIDER_COPY_FAILED", "Dropbox Sign could not create the edit revision.")
+          : failure("EDIT_COMPENSATION_FAILED", "The failed edit revision requires cleanup attention.");
+      }
+      if (!duplicate.providerTemplateId || duplicate.providerTemplateId === source.providerTemplateId) {
+        await compensateHiddenDraft(ports, revision);
+        return failure("EDIT_PROVIDER_ID_INVALID", "Dropbox Sign did not return a distinct edit revision.");
+      }
+      try {
+        if (!(await ports.repository.attachProviderId(access.data.orgId, revision.id, duplicate.providerTemplateId))) throw new Error("attach failed");
+      } catch {
+        let providerRemoved = false;
+        try { await ports.provider.deleteTemplate(duplicate.providerTemplateId); providerRemoved = true; }
+        catch (error) { providerRemoved = ports.provider.isNotFound(error); }
+        const compensated = await compensateHiddenDraft(ports, revision);
+        return providerRemoved && compensated
+          ? failure("EDIT_LOCAL_ATTACH_FAILED", "The provider edit revision was removed because Sandra could not record it.")
+          : failure("EDIT_COMPENSATION_FAILED", "Sandra could not safely reconcile the edit revision.");
+      }
+      return success({ templateId: revision.id, readiness: duplicate.readiness });
     },
 
     async add(input: {
@@ -391,18 +463,21 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       const reconciled = reconcileOption(draft, provider);
       if (!reconciled.ok) return reconciled;
       try {
-        if (!(await ports.repository.finalizeDraft({
-          orgId: access.data.orgId,
-          templateId,
-          expectedProviderTemplateId: draft.providerTemplateId,
-          option: reconciled.data,
-        }))) {
+        const persisted = draft.supersedesTemplateId
+          ? await publishRevision(ports, access.data.orgId, draft, reconciled.data)
+          : await ports.repository.finalizeDraft({
+              orgId: access.data.orgId,
+              templateId,
+              expectedProviderTemplateId: draft.providerTemplateId,
+              option: reconciled.data,
+            });
+        if (!persisted) {
           return failure("DRAFT_STALE", "The template changed before it could be finalized.");
         }
       } catch {
         return failure("FINALIZE_LOCAL_FAILED", "Sandra could not finalize the verified template.");
       }
-      if (draft.lifecycle === "editing") {
+      if (draft.lifecycle === "editing" || (draft.lifecycle === "finalized" && Boolean(draft.supersedesTemplateId))) {
         const cleanup = await cleanupSource(ports, draft);
         if (!cleanup.ok) return cleanup;
       }
@@ -447,8 +522,19 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       } catch {
         return failure("TEMPLATE_READ_FAILED", "The template could not be loaded.");
       }
-      if (!draft || draft.orgId !== access.data.orgId || draft.lifecycle !== "abandoned" || !draft.stagingSourceId) {
+      if (!draft || draft.orgId !== access.data.orgId || !["abandoned", "finalized"].includes(draft.lifecycle) || !draft.stagingSourceId) {
         return failure("CLEANUP_RETRY_UNAVAILABLE", "The private source cleanup is no longer available to retry.");
+      }
+      if (draft.lifecycle === "finalized") {
+        if (!draft.supersedesTemplateId || !draft.providerTemplateId || !validStoredDraftContract(draft)) {
+          return failure("CLEANUP_RETRY_UNAVAILABLE", "The private source cleanup is no longer available to retry.");
+        }
+        let source: TemplateDraftRecord | null;
+        try { source = await ports.repository.getTemplate(access.data.orgId, draft.supersedesTemplateId); }
+        catch { return failure("SOURCE_LINEAGE_READ_FAILED", "The published template lineage could not be verified."); }
+        if (!source || source.orgId !== access.data.orgId || source.lifecycle !== "deleted" || !source.providerTemplateId || source.providerTemplateId === draft.providerTemplateId) {
+          return failure("SOURCE_LINEAGE_MISMATCH", "The published template lineage could not be safely reconciled.");
+        }
       }
       return cleanupSource(ports, draft);
     },
@@ -681,6 +767,49 @@ async function cleanupSource(ports: TemplateOrchestratorPorts, draft: TemplateDr
     }
     return failure("SOURCE_CLEANUP_FAILED", "The template was processed, but its private source cleanup requires attention.");
   }
+}
+
+async function publishRevision(ports: TemplateOrchestratorPorts, orgId: string, revision: TemplateDraftRecord, option: TemplateOption): Promise<boolean> {
+  if (!revision.supersedesTemplateId || !revision.providerTemplateId) return false;
+  const source = await ports.repository.getTemplate(orgId, revision.supersedesTemplateId);
+  const expectedSourceLifecycle = revision.lifecycle === "finalized" ? "deleted" : "finalized";
+  if (!source || source.orgId !== orgId || source.lifecycle !== expectedSourceLifecycle || !source.providerTemplateId || source.providerTemplateId === revision.providerTemplateId) return false;
+  const outcome = await ports.repository.publishEditRevision({
+    orgId,
+    sourceTemplateId: source.id,
+    revisionTemplateId: revision.id,
+    expectedSourceProviderTemplateId: source.providerTemplateId,
+    revisionProviderTemplateId: revision.providerTemplateId,
+    option,
+  });
+  return revision.lifecycle === "finalized" ? outcome === "already_published" : outcome === "published";
+}
+
+function validStoredDraftContract(draft: TemplateDraftRecord): boolean {
+  return validRoles(draft.signerRoles)
+    && draft.signerRoles.some((role) => role.name === draft.sellerRoleName)
+    && exactMergeFields(draft.mergeFieldNames);
+}
+
+async function stageVerifiedSource(ports: TemplateOrchestratorPorts, actor: TemplateActor, file: TemplateUpload): Promise<TemplateActionResult<StagedTemplateSource>> {
+  const validated = validateOnePdf([file]);
+  if (!validated.ok) return validated;
+  const opaqueId = ports.randomId();
+  if (!isOpaqueId(opaqueId)) return failure("STAGING_ID_INVALID", "The private upload could not be prepared.");
+  const storagePath = stagingPath(actor.orgId, opaqueId);
+  try { await ports.storage.putPrivate(storagePath, validated.data.bytes, "application/pdf"); }
+  catch { return failure("STAGING_UPLOAD_FAILED", "The PDF could not be stored privately."); }
+  let storedBytes: Uint8Array;
+  try { storedBytes = await ports.storage.readPrivate(storagePath); }
+  catch { await safelyDeleteStagedUpload(ports, storagePath); return failure("STAGING_VERIFY_READ_FAILED", "The private PDF could not be verified after upload."); }
+  const stored = validateOnePdf([{ ...validated.data, bytes: storedBytes, size: storedBytes.byteLength }]);
+  if (!stored.ok || storedBytes.byteLength !== validated.data.size || await sha256Hex(validated.data.bytes) !== await sha256Hex(storedBytes)) {
+    await safelyDeleteStagedUpload(ports, storagePath);
+    return failure("STAGING_VERIFY_FAILED", "The stored PDF did not match the uploaded file.");
+  }
+  const stage: StagedTemplateSource = { id: opaqueId, orgId: actor.orgId, storagePath, filename: validated.data.filename, size: validated.data.size, mimeType: "application/pdf", sha256: await sha256Hex(storedBytes) };
+  try { return success(await ports.repository.recordVerifiedStage(stage)); }
+  catch { await safelyDeleteStagedUpload(ports, storagePath); return failure("STAGING_RECORD_FAILED", "The private upload could not be recorded."); }
 }
 
 async function compensateHiddenDraft(ports: TemplateOrchestratorPorts, draft: TemplateDraftRecord): Promise<boolean> {

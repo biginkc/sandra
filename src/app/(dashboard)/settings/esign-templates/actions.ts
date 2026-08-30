@@ -53,6 +53,14 @@ export async function startTemplateEditorAction(templateId: string) {
   return run("esign_template_start_editor", (orchestrator) => orchestrator.startEditor(templateId));
 }
 
+export async function beginTemplateEditRevisionAction(templateId: string): Promise<TemplateLaneResult<{ templateId: string; readiness: "ready" | "pending" }>> {
+  return run("esign_template_begin_edit_revision", async (orchestrator) => {
+    const result = await orchestrator.beginEditRevision(templateId);
+    if (result.ok) revalidatePath("/settings/esign-templates");
+    return result;
+  });
+}
+
 export async function checkTemplateEditorReadinessAction(templateId: string): Promise<TemplateLaneResult<{ readiness: "ready" | "pending" }>> {
   return run("esign_template_editor_readiness", (orchestrator) => orchestrator.checkEditorReadiness(templateId));
 }

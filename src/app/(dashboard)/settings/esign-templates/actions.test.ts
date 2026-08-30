@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   stageSource: vi.fn(),
   add: vi.fn(),
   duplicate: vi.fn(),
+  beginEditRevision: vi.fn(),
   checkEditorReadiness: vi.fn(),
   abandon: vi.fn(),
   retryCleanup: vi.fn(),
@@ -26,6 +27,7 @@ import {
   createTemplateDraftAction,
   deleteTemplateAction,
   duplicateTemplateAction,
+  beginTemplateEditRevisionAction,
   checkTemplateEditorReadinessAction,
   abandonTemplateDraftAction,
   retryTemplateSourceCleanupAction,
@@ -38,6 +40,7 @@ describe("template server action boundary", () => {
     mocks.stageSource.mockResolvedValue({ ok: true, data: { stagingSourceId: "source-1" } });
     mocks.add.mockResolvedValue({ ok: true, data: { templateId: "template-1" } });
     mocks.duplicate.mockResolvedValue({ ok: true, data: { templateId: "copy-1", readiness: "pending" } });
+    mocks.beginEditRevision.mockResolvedValue({ ok: true, data: { templateId: "revision-1", readiness: "pending" } });
     mocks.delete.mockResolvedValue({ ok: true, data: null });
     mocks.checkEditorReadiness.mockResolvedValue({ ok: true, data: { readiness: "pending" } });
     mocks.abandon.mockResolvedValue({ ok: true, data: null });
@@ -46,6 +49,7 @@ describe("template server action boundary", () => {
       stageSource: mocks.stageSource,
       add: mocks.add,
       duplicate: mocks.duplicate,
+      beginEditRevision: mocks.beginEditRevision,
       checkEditorReadiness: mocks.checkEditorReadiness,
       abandon: mocks.abandon,
       retryCleanup: mocks.retryCleanup,
@@ -109,6 +113,15 @@ describe("template server action boundary", () => {
       ok: true,
       data: { readiness: "pending" },
     });
+  });
+
+  it("preserves hidden edit-revision readiness and revalidates recovery", async () => {
+    await expect(beginTemplateEditRevisionAction("template-1")).resolves.toEqual({
+      ok: true,
+      data: { templateId: "revision-1", readiness: "pending" },
+    });
+    expect(mocks.beginEditRevision).toHaveBeenCalledWith("template-1");
+    expect(mocks.revalidate).toHaveBeenCalledWith("/settings/esign-templates");
   });
 
   it("revalidates the server-backed recovery list after a successful cancel", async () => {

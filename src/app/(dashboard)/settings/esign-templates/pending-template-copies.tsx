@@ -28,8 +28,8 @@ export function PendingTemplateCopies({
   return (
     <section className="border-border rounded-xl border p-4" aria-labelledby="pending-template-copies-title">
       <div className="mb-3">
-        <h2 id="pending-template-copies-title" className="font-medium">Copies still preparing</h2>
-        <p className="text-muted-foreground text-sm">These hidden copies are not available for sending until setup finishes.</p>
+        <h2 id="pending-template-copies-title" className="font-medium">Templates still preparing</h2>
+        <p className="text-muted-foreground text-sm">These hidden copies and edit revisions are not available for sending until setup finishes.</p>
       </div>
       <div className="space-y-2">
         {result.data.map((copy) => <PendingTemplateCopyRow key={copy.id} copy={copy} actions={actions} />)}
@@ -42,7 +42,7 @@ function PendingTemplateCopyRow({
   copy,
   actions,
 }: {
-  copy: { id: string; name: string; lifecycle: "preparing" | "editing" | "cleanup_attention" };
+  copy: { id: string; name: string; lifecycle: "preparing" | "editing" | "cleanup_attention"; kind?: "copy" | "edit_revision" };
   actions?: TemplateLibraryActions;
 }) {
   const router = useRouter();
@@ -72,7 +72,7 @@ function PendingTemplateCopyRow({
         router.push(`/settings/esign-templates/${copy.id}/edit`);
         return;
       }
-      setError("Copy is still preparing");
+      setError(copy.kind === "edit_revision" ? "Edit revision is still preparing" : "Copy is still preparing");
     }).finally(() => {
       if (readinessPromiseRef.current === request) readinessPromiseRef.current = null;
       if (mountedRef.current && !routedRef.current) setCheckingReadiness(false);
@@ -96,13 +96,14 @@ function PendingTemplateCopyRow({
   });
 
   const cleanupAttention = copy.lifecycle === "cleanup_attention";
+  const preparingMessage = copy.kind === "edit_revision" ? "Edit revision is still preparing" : "Copy is still preparing";
 
   return (
     <div className="bg-muted/30 flex flex-col gap-3 rounded-lg border px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
       <div>
         <p className="font-medium">{copy.name}</p>
-        <p className="text-muted-foreground text-sm">{cleanupAttention ? "Cleanup needs attention" : "Copy is still preparing"}</p>
-        {error && <p role="alert" className={error === "Copy is still preparing" ? "text-muted-foreground mt-1 text-sm" : "text-destructive mt-1 text-sm"}>{error}</p>}
+        <p className="text-muted-foreground text-sm">{cleanupAttention ? "Cleanup needs attention" : preparingMessage}</p>
+        {error && <p role="alert" className={error === preparingMessage ? "text-muted-foreground mt-1 text-sm" : "text-destructive mt-1 text-sm"}>{error}</p>}
       </div>
       <div className="flex gap-2">
         {cleanupAttention ? (

@@ -34,6 +34,7 @@ const draft: TemplateDraftRecord = {
   signerRoles: roles,
   mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
   stagingSourceId: sourceId,
+  supersedesTemplateId: null,
   lifecycle: "editing",
 };
 const finalized = { ...draft, lifecycle: "finalized" as const, stagingSourceId: null };
@@ -49,9 +50,11 @@ function makePorts(): TemplateOrchestratorPorts {
       getStage: vi.fn().mockResolvedValue(stage),
       createHiddenDraft: vi.fn().mockResolvedValue({ ...draft, providerTemplateId: null }),
       createHiddenDuplicate: vi.fn().mockResolvedValue({ ...draft, providerTemplateId: null, lifecycle: "preparing" }),
+      createHiddenEditRevision: vi.fn().mockResolvedValue({ ...draft, id: "revision-1", providerTemplateId: null, lifecycle: "preparing", supersedesTemplateId: "template-1" }),
       getTemplate: vi.fn().mockResolvedValue(draft),
       attachProviderId: vi.fn().mockResolvedValue(true),
       finalizeDraft: vi.fn().mockResolvedValue(true),
+      publishEditRevision: vi.fn().mockResolvedValue("published"),
       markAbandoned: vi.fn().mockResolvedValue(true),
       softDelete: vi.fn().mockResolvedValue({ outcome: "deleted", recentSendCount: 0 }),
       recordSourceCleanup: vi.fn().mockResolvedValue(undefined),
@@ -66,6 +69,7 @@ function makePorts(): TemplateOrchestratorPorts {
       createDraft: vi.fn().mockResolvedValue({ providerTemplateId: "provider-1" }),
       getFreshEditUrl: vi.fn().mockResolvedValue({ editUrl: "https://app.hellosign.com/editor/transient", expiresAt: 123 }),
       getTemplate: vi.fn().mockResolvedValue({ providerTemplateId: "provider-1", signerRoles: roles, mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS }),
+      getTemplateFiles: vi.fn().mockResolvedValue(pdfBytes),
       duplicateTemplate: vi.fn().mockResolvedValue({ providerTemplateId: "provider-copy", readiness: "pending" }),
       deleteTemplate: vi.fn().mockResolvedValue(undefined),
       isNotFound: vi.fn().mockReturnValue(false),
@@ -95,7 +99,7 @@ describe("template action orchestration", () => {
     const core = createTemplateOrchestrator(ports);
     const results = await Promise.all([
       core.list(), core.listPendingCopies(), core.stageSource([pdf]), core.add(addInput()), core.startEditor("template-1"),
-      core.finishSync("template-1"), core.abandon("template-1"), core.retryCleanup("template-1"), core.duplicate("template-1", "Copy"), core.delete("template-1"),
+      core.beginEditRevision("template-1"), core.finishSync("template-1"), core.abandon("template-1"), core.retryCleanup("template-1"), core.duplicate("template-1", "Copy"), core.delete("template-1"),
     ]);
     expect(results.every((result) => !result.ok && result.error.code === "OWNER_REQUIRED")).toBe(true);
     expect(ports.repository.getTemplate).not.toHaveBeenCalled();
@@ -241,6 +245,176 @@ describe("template action orchestration", () => {
     expect(result).toMatchObject({ ok: false, error: { code: "TEMPLATE_NOT_FOUND" } });
     expect(ports.provider.getTemplate).not.toHaveBeenCalled();
     expect(ports.provider.getFreshEditUrl).not.toHaveBeenCalled();
+  });
+
+  it("creates a hidden provider-distinct edit revision without mutating the active template", async () => {
+    const ports = makePorts();
+    const revision = { ...draft, id: "revision-1", lifecycle: "preparing" as const, providerTemplateId: null, supersedesTemplateId: finalized.id };
+    vi.mocked(ports.repository.getTemplate).mockResolvedValueOnce(finalized);
+    vi.mocked(ports.repository.createHiddenEditRevision).mockResolvedValue(revision);
+    vi.mocked(ports.provider.duplicateTemplate).mockResolvedValue({ providerTemplateId: "provider-revision", readiness: "pending" });
+
+    await expect(createTemplateOrchestrator(ports).beginEditRevision(finalized.id)).resolves.toEqual({
+      ok: true,
+      data: { templateId: revision.id, readiness: "pending" },
+    });
+
+    expect(ports.provider.getTemplateFiles).toHaveBeenCalledWith(finalized.providerTemplateId);
+    expect(ports.repository.createHiddenEditRevision).toHaveBeenCalledWith({ orgId: owner.orgId, sourceTemplateId: finalized.id, stagingSourceId: sourceId });
+    expect(ports.provider.duplicateTemplate).toHaveBeenCalledWith({ providerTemplateId: finalized.providerTemplateId, title: finalized.name });
+    expect(ports.repository.attachProviderId).toHaveBeenCalledWith(owner.orgId, revision.id, "provider-revision");
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(ports.repository.publishEditRevision).not.toHaveBeenCalled();
+    expect(ports.repository.softDelete).not.toHaveBeenCalled();
+  });
+
+  it("publishes a reconciled hidden edit revision atomically and only then cleans its source", async () => {
+    const ports = makePorts();
+    const revision = { ...draft, id: "revision-1", providerTemplateId: "provider-revision", supersedesTemplateId: finalized.id };
+    vi.mocked(ports.repository.getTemplate).mockResolvedValueOnce(revision).mockResolvedValueOnce(finalized);
+    vi.mocked(ports.provider.getTemplate).mockResolvedValue({ providerTemplateId: "provider-revision", signerRoles: roles, mergeFieldNames: [...ESIGN_TEMPLATE_MERGE_FIELDS].reverse() });
+
+    const result = await createTemplateOrchestrator(ports).finishSync(revision.id);
+
+    expect(result).toMatchObject({ ok: true, data: { id: revision.id, providerTemplateId: "provider-revision" } });
+    expect(ports.repository.publishEditRevision).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: owner.orgId,
+      sourceTemplateId: finalized.id,
+      revisionTemplateId: revision.id,
+      expectedSourceProviderTemplateId: finalized.providerTemplateId,
+      revisionProviderTemplateId: "provider-revision",
+    }));
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(ports.storage.deletePrivate).toHaveBeenCalledWith(stage.storagePath);
+    expect(ports.provider.deleteTemplate).not.toHaveBeenCalled();
+    expect(ports.repository.softDelete).not.toHaveBeenCalled();
+  });
+
+  it("leaves the original active when an edit revision publish fails", async () => {
+    const ports = makePorts();
+    const revision = { ...draft, id: "revision-1", providerTemplateId: "provider-revision", supersedesTemplateId: finalized.id };
+    vi.mocked(ports.repository.getTemplate).mockResolvedValueOnce(revision).mockResolvedValueOnce(finalized);
+    vi.mocked(ports.provider.getTemplate).mockResolvedValue({ providerTemplateId: "provider-revision", signerRoles: roles, mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS });
+    vi.mocked(ports.repository.publishEditRevision).mockRejectedValue(new Error("publish conflict"));
+
+    await expect(createTemplateOrchestrator(ports).finishSync(revision.id)).resolves.toMatchObject({ ok: false, error: { code: "FINALIZE_LOCAL_FAILED" } });
+    expect(ports.storage.deletePrivate).not.toHaveBeenCalled();
+    expect(ports.provider.deleteTemplate).not.toHaveBeenCalled();
+    expect(ports.repository.markAbandoned).not.toHaveBeenCalled();
+    expect(ports.repository.softDelete).not.toHaveBeenCalled();
+  });
+
+  it("reconciles an exact already-published successor after the publish response is lost", async () => {
+    const ports = makePorts();
+    const revision = { ...draft, id: "revision-1", providerTemplateId: "provider-revision", supersedesTemplateId: finalized.id };
+    const publishedRevision = { ...revision, lifecycle: "finalized" as const };
+    const retiredSource = { ...finalized, lifecycle: "deleted" as const };
+    vi.mocked(ports.repository.getTemplate)
+      .mockResolvedValueOnce(revision)
+      .mockResolvedValueOnce(finalized)
+      .mockResolvedValueOnce(publishedRevision)
+      .mockResolvedValueOnce(retiredSource);
+    vi.mocked(ports.provider.getTemplate).mockResolvedValue({ providerTemplateId: "provider-revision", signerRoles: roles, mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS });
+    vi.mocked(ports.repository.publishEditRevision)
+      .mockRejectedValueOnce(new Error("response lost after commit"))
+      .mockResolvedValueOnce("already_published");
+    const core = createTemplateOrchestrator(ports);
+
+    await expect(core.finishSync(revision.id)).resolves.toMatchObject({ ok: false, error: { code: "FINALIZE_LOCAL_FAILED" } });
+    await expect(core.finishSync(revision.id)).resolves.toMatchObject({ ok: true, data: { id: revision.id, providerTemplateId: "provider-revision" } });
+
+    expect(ports.repository.publishEditRevision).toHaveBeenCalledTimes(2);
+    expect(ports.storage.deletePrivate).toHaveBeenCalledTimes(1);
+    expect(ports.provider.deleteTemplate).not.toHaveBeenCalled();
+    expect(ports.repository.markAbandoned).not.toHaveBeenCalled();
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(ports.repository.softDelete).not.toHaveBeenCalled();
+  });
+
+  it("rediscovers and cleanup-only reconciles a published successor after its deleted receipt fails", async () => {
+    const ports = makePorts();
+    const revision = { ...draft, id: "revision-1", providerTemplateId: "provider-revision", supersedesTemplateId: finalized.id };
+    const publishedRevision = { ...revision, lifecycle: "finalized" as const };
+    const retiredSource = { ...finalized, lifecycle: "deleted" as const };
+    vi.mocked(ports.repository.getTemplate)
+      .mockResolvedValueOnce(revision)
+      .mockResolvedValueOnce(finalized)
+      .mockResolvedValueOnce(publishedRevision)
+      .mockResolvedValueOnce(retiredSource);
+    vi.mocked(ports.provider.getTemplate).mockResolvedValue({ providerTemplateId: "provider-revision", signerRoles: roles, mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS });
+    vi.mocked(ports.storage.deletePrivate).mockResolvedValueOnce("deleted").mockResolvedValueOnce("already_absent");
+    vi.mocked(ports.repository.recordSourceCleanup).mockRejectedValueOnce(new Error("deleted receipt unavailable")).mockResolvedValue(undefined);
+    const core = createTemplateOrchestrator(ports);
+
+    await expect(core.finishSync(revision.id)).resolves.toMatchObject({ ok: false, error: { code: "SOURCE_CLEANUP_FAILED" } });
+    vi.mocked(ports.repository.listPendingCopies).mockResolvedValue([{ id: revision.id, orgId: owner.orgId, name: revision.name, lifecycle: "cleanup_attention", kind: "edit_revision" }]);
+    await expect(core.listPendingCopies()).resolves.toMatchObject({ ok: true, data: [expect.objectContaining({ id: revision.id, lifecycle: "cleanup_attention" })] });
+    await expect(core.retryCleanup(revision.id)).resolves.toEqual({ ok: true, data: null });
+
+    expect(ports.repository.publishEditRevision).toHaveBeenCalledTimes(1);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(1);
+    expect(ports.storage.deletePrivate).toHaveBeenNthCalledWith(2, stage.storagePath);
+    expect(ports.repository.recordSourceCleanup).toHaveBeenLastCalledWith(expect.objectContaining({ templateId: revision.id, outcome: "deleted" }));
+    expect(ports.provider.deleteTemplate).not.toHaveBeenCalled();
+    expect(ports.repository.markAbandoned).not.toHaveBeenCalled();
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(ports.repository.softDelete).not.toHaveBeenCalled();
+  });
+
+  it("fails closed unless a finalized successor receives explicit already_published reconciliation", async () => {
+    const ports = makePorts();
+    const publishedRevision = { ...draft, id: "revision-1", lifecycle: "finalized" as const, providerTemplateId: "provider-revision", supersedesTemplateId: finalized.id };
+    const retiredSource = { ...finalized, lifecycle: "deleted" as const };
+    vi.mocked(ports.repository.getTemplate).mockResolvedValueOnce(publishedRevision).mockResolvedValueOnce(retiredSource);
+    vi.mocked(ports.provider.getTemplate).mockResolvedValue({ providerTemplateId: "provider-revision", signerRoles: roles, mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS });
+    vi.mocked(ports.repository.publishEditRevision).mockResolvedValue("published");
+
+    await expect(createTemplateOrchestrator(ports).finishSync(publishedRevision.id)).resolves.toMatchObject({ ok: false, error: { code: "DRAFT_STALE" } });
+    expect(ports.storage.deletePrivate).not.toHaveBeenCalled();
+    expect(ports.provider.deleteTemplate).not.toHaveBeenCalled();
+  });
+
+  it("rejects finalized cleanup retry when the retired source provider lineage is not distinct", async () => {
+    const ports = makePorts();
+    const publishedRevision = { ...draft, id: "revision-1", lifecycle: "finalized" as const, providerTemplateId: "provider-1", supersedesTemplateId: finalized.id };
+    const retiredSource = { ...finalized, lifecycle: "deleted" as const };
+    vi.mocked(ports.repository.getTemplate).mockResolvedValueOnce(publishedRevision).mockResolvedValueOnce(retiredSource);
+
+    await expect(createTemplateOrchestrator(ports).retryCleanup(publishedRevision.id)).resolves.toMatchObject({ ok: false, error: { code: "SOURCE_LINEAGE_MISMATCH" } });
+    expect(ports.storage.deletePrivate).not.toHaveBeenCalled();
+    expect(ports.repository.recordSourceCleanup).not.toHaveBeenCalled();
+    expect(ports.provider.deleteTemplate).not.toHaveBeenCalled();
+    expect(ports.repository.publishEditRevision).not.toHaveBeenCalled();
+  });
+
+  it("cancels only the hidden edit revision and leaves the original untouched", async () => {
+    const ports = makePorts();
+    const revision = { ...draft, id: "revision-1", providerTemplateId: "provider-revision", supersedesTemplateId: finalized.id };
+    vi.mocked(ports.repository.getTemplate).mockResolvedValueOnce(revision);
+
+    await expect(createTemplateOrchestrator(ports).abandon(revision.id)).resolves.toEqual({ ok: true, data: null });
+
+    expect(ports.provider.deleteTemplate).toHaveBeenCalledWith("provider-revision");
+    expect(ports.repository.markAbandoned).toHaveBeenCalledWith(owner.orgId, revision.id);
+    expect(ports.repository.publishEditRevision).not.toHaveBeenCalled();
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(ports.repository.softDelete).not.toHaveBeenCalled();
+  });
+
+  it("abandons and cleans a failed hidden edit revision without mutating the original", async () => {
+    const ports = makePorts();
+    const revision = { ...draft, id: "revision-1", lifecycle: "preparing" as const, providerTemplateId: null, supersedesTemplateId: finalized.id };
+    vi.mocked(ports.repository.getTemplate).mockResolvedValueOnce(finalized);
+    vi.mocked(ports.repository.createHiddenEditRevision).mockResolvedValue(revision);
+    vi.mocked(ports.provider.duplicateTemplate).mockRejectedValue(new Error("provider copy failed"));
+
+    await expect(createTemplateOrchestrator(ports).beginEditRevision(finalized.id)).resolves.toMatchObject({ ok: false, error: { code: "EDIT_PROVIDER_COPY_FAILED" } });
+
+    expect(ports.repository.markAbandoned).toHaveBeenCalledWith(owner.orgId, revision.id);
+    expect(ports.storage.deletePrivate).toHaveBeenCalledWith(stage.storagePath);
+    expect(ports.repository.publishEditRevision).not.toHaveBeenCalled();
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(ports.repository.softDelete).not.toHaveBeenCalled();
   });
 
   it("checks provider readiness before requesting any edit URL", async () => {

@@ -40,6 +40,7 @@ export type PendingTemplateCopy = Readonly<{
   id: string;
   name: string;
   lifecycle: "preparing" | "editing" | "cleanup_attention";
+  kind?: "copy" | "edit_revision";
 }>;
 
 export type PendingTemplateCopiesLoadResult = TemplateLaneResult<
@@ -68,6 +69,9 @@ export type TemplateLibraryActions = Readonly<{
   duplicateTemplate(
     templateId: string,
     name: string,
+  ): Promise<TemplateLaneResult<{ templateId: string; readiness: "ready" | "pending" }>>;
+  beginEditRevision(
+    templateId: string,
   ): Promise<TemplateLaneResult<{ templateId: string; readiness: "ready" | "pending" }>>;
   checkEditorReadiness(
     templateId: string,

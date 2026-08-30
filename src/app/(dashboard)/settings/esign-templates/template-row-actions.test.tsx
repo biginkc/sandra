@@ -1,11 +1,12 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DuplicateTemplateDialog } from "./template-row-actions";
+import { DuplicateTemplateDialog, TemplateRowActions } from "./template-row-actions";
 import type { EsignTemplateRow, TemplateLibraryActions } from "./types";
 
 const push = vi.fn();
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push, refresh: vi.fn() }) }));
+const refresh = vi.fn();
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push, refresh }) }));
 
 const template: EsignTemplateRow = {
   id: "local-1",
@@ -28,6 +29,7 @@ const actions: TemplateLibraryActions = {
   createDraft: vi.fn(),
   pickDropboxPdf: vi.fn(),
   duplicateTemplate: vi.fn(),
+  beginEditRevision: vi.fn(),
   checkEditorReadiness: vi.fn(),
   abandonDraft: vi.fn(),
   retryCleanup: vi.fn(),
@@ -146,6 +148,28 @@ describe("DuplicateTemplateDialog", () => {
     ready.resolve({ ok: true, data: { readiness: "ready" } });
     await act(async () => { await ready.promise; });
     expect(push).not.toHaveBeenCalled();
+  });
+});
+
+describe("versioned Edit", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("keeps a pending hidden revision off the editor route and refreshes recovery", async () => {
+    vi.mocked(actions.beginEditRevision).mockResolvedValue({ ok: true, data: { templateId: "revision-pending", readiness: "pending" } });
+    render(<TemplateRowActions template={template} actions={actions} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it("routes only the ready hidden revision into the editor", async () => {
+    vi.mocked(actions.beginEditRevision).mockResolvedValue({ ok: true, data: { templateId: "revision-ready", readiness: "ready" } });
+    render(<TemplateRowActions template={template} actions={actions} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/settings/esign-templates/revision-ready/edit"));
   });
 });
 

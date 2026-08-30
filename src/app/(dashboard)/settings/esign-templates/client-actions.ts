@@ -4,6 +4,7 @@ import { callAction } from "@/lib/errors/call-action";
 
 import {
   abandonTemplateDraftAction,
+  beginTemplateEditRevisionAction,
   checkTemplateEditorReadinessAction,
   createTemplateDraftAction,
   deleteTemplateAction,
@@ -45,6 +46,11 @@ export const templateLibraryActions: TemplateLibraryActions = {
   duplicateTemplate(templateId, name) {
     return safeTemplateCallAction(duplicateTemplateAction(templateId, name), {
       fallbackMessage: "The template could not be duplicated.",
+    });
+  },
+  beginEditRevision(templateId) {
+    return safeTemplateCallAction(beginTemplateEditRevisionAction(templateId), {
+      fallbackMessage: "The template edit revision could not be prepared.",
     });
   },
   checkEditorReadiness(templateId) {
