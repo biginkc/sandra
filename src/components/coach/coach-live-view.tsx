@@ -22,6 +22,7 @@ import {
 import { resolveCoachTokens, type DisplayTextSegment } from "@/lib/coach/token-resolver";
 import type {
   CoachEntryToken,
+  CoachHoldTimer,
   CoachPhaseId,
   CoachToken,
   CoachTranscriptLine,
@@ -32,6 +33,7 @@ import { COACH_ENTRY_TOKENS, COACH_PHASE_ORDER } from "@/lib/coach/types";
 import type { CoachSession, ContextLoadState } from "@/lib/coach/use-coach-session";
 import { isNearTranscriptBottom } from "@/lib/coach/transcript-scroll";
 import { cn } from "@/lib/utils";
+import { HoldTimer } from "./hold-timer";
 
 export type CoachCallStatus = "connecting" | "ringing" | "live" | "audio_reconnecting" | "audio_reconnect_required" | "ended" | "failed" | null;
 
@@ -251,6 +253,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         callStatus={callStatus}
         seconds={seconds}
         held={held}
+        holdTimer={held ? state.holdTimer : null}
         fileNumber={tokens.file_number}
       />
       {callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required" ? (
@@ -339,6 +342,7 @@ function CoachTopBar({
   callStatus,
   seconds,
   held,
+  holdTimer,
   fileNumber,
 }: {
   activePhaseId: CoachPhaseId;
@@ -347,6 +351,7 @@ function CoachTopBar({
   callStatus: CoachCallStatus;
   seconds: number;
   held: boolean;
+  holdTimer: CoachHoldTimer | null;
   fileNumber: ResolvedToken;
 }) {
   const preConnectLabel = callStatus === "connecting" ? "Connecting…" : callStatus === "ringing" ? "Ringing…" : null;
@@ -386,6 +391,7 @@ function CoachTopBar({
             Live
           </Badge>
         ) : null}
+        <HoldTimer timer={holdTimer} />
         {degraded ? (
           <Badge variant="outline" data-testid="coach-connecting-pill" className="h-5 text-[10px] text-muted-foreground">
             Transcript connecting…
