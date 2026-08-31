@@ -1198,6 +1198,157 @@ describe("JitterCallTransport", () => {
     expect(states).toEqual(["connecting", "failed"]);
   });
 
+  it("refreshes authentication once before the registered connect on an initial login failure", async () => {
+    const rtc = new FakeRtcClient();
+    rtc.connect.mockResolvedValue(undefined);
+    const getToken = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          rtc_token: "rtc-token-1",
+          sip_identity: "operator-1",
+          expires_at: "2026-08-21T20:05:00.000Z",
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          rtc_token: "rtc-token-2",
+          sip_identity: "operator-1",
+          expires_at: "2026-08-21T20:10:00.000Z",
+        },
+      });
+    const harness = transportHarness({
+      getToken,
+      createRtcClient: vi.fn(async () => rtc),
+      registrationTimeoutMs: 1_000,
+    });
+
+    const started = harness.transport.start(target());
+    await vi.waitFor(() => expect(rtc.connect).toHaveBeenCalledTimes(1));
+    expect(harness.transport.callHandle()).toEqual({ id: "call-1" });
+
+    rtc.emit("telnyx.error", {
+      error: { code: 46_001, message: "Authentication failed" },
+    });
+    await vi.waitFor(() => expect(rtc.login).toHaveBeenCalledWith({
+      creds: { login_token: "rtc-token-2" },
+    }));
+
+    expect(harness.dependencies.startCall).toHaveBeenCalledTimes(1);
+    expect(getToken).toHaveBeenCalledTimes(2);
+    expect(getToken).toHaveBeenNthCalledWith(1, "call-1");
+    expect(getToken).toHaveBeenNthCalledWith(2, "call-1");
+    expect(harness.dependencies.connect).not.toHaveBeenCalled();
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+
+    rtc.emit("telnyx.ready");
+    await expect(started).resolves.toEqual({ id: "call-1" });
+    expect(harness.transport.callHandle()).toEqual({ id: "call-1" });
+    expect(harness.dependencies.connect).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.connect).toHaveBeenCalledWith("call-1", "registered");
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it("fails and cancels once when initial authentication fails a second time", async () => {
+    const rtc = new FakeRtcClient();
+    rtc.connect.mockResolvedValue(undefined);
+    const getToken = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          rtc_token: "rtc-token-1",
+          sip_identity: "operator-1",
+          expires_at: "2026-08-21T20:05:00.000Z",
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          rtc_token: "rtc-token-2",
+          sip_identity: "operator-1",
+          expires_at: "2026-08-21T20:10:00.000Z",
+        },
+      });
+    const harness = transportHarness({
+      getToken,
+      createRtcClient: vi.fn(async () => rtc),
+      registrationTimeoutMs: 1_000,
+    });
+
+    const started = harness.transport.start(target());
+    await vi.waitFor(() => expect(rtc.connect).toHaveBeenCalledTimes(1));
+    rtc.emit("telnyx.error", {
+      error: { code: 46_001, message: "Authentication failed" },
+    });
+    await vi.waitFor(() => expect(rtc.login).toHaveBeenCalledTimes(1));
+    rtc.emit("telnyx.error", {
+      error: { code: 46_001, message: "Authentication failed" },
+    });
+
+    await expect(started).rejects.toMatchObject({ code: 46_001 });
+    expect(harness.dependencies.startCall).toHaveBeenCalledTimes(1);
+    expect(getToken).toHaveBeenCalledTimes(2);
+    expect(harness.dependencies.connect).not.toHaveBeenCalled();
+    expect(harness.dependencies.cancel).toHaveBeenCalledTimes(1);
+    expect(harness.dependencies.cancel).toHaveBeenCalledWith("call-1", "failed");
+  });
+
+  it("cannot late-login or connect when teardown supersedes an initial auth refresh", async () => {
+    const rtc = new FakeRtcClient();
+    rtc.connect.mockResolvedValue(undefined);
+    const refreshedToken = deferred<
+      Awaited<ReturnType<JitterTransportDependencies["getToken"]>>
+    >();
+    const getToken = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          rtc_token: "rtc-token-1",
+          sip_identity: "operator-1",
+          expires_at: "2026-08-21T20:05:00.000Z",
+        },
+      })
+      .mockImplementationOnce(() => refreshedToken.promise);
+    const harness = transportHarness({
+      getToken,
+      createRtcClient: vi.fn(async () => rtc),
+    });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+
+    const started = harness.transport.start(target());
+    void started.catch(() => undefined);
+    await vi.waitFor(() => expect(rtc.connect).toHaveBeenCalledTimes(1));
+    rtc.emit("telnyx.error", {
+      error: { code: 46_001, message: "Authentication failed" },
+    });
+    await vi.waitFor(() => expect(getToken).toHaveBeenCalledTimes(2));
+
+    await expect(harness.transport.hangup()).resolves.toEqual({
+      durationSeconds: 0,
+      outcome: "failed",
+    });
+    refreshedToken.resolve({
+      ok: true,
+      data: {
+        rtc_token: "late-token",
+        sip_identity: "operator-1",
+        expires_at: "2026-08-21T20:10:00.000Z",
+      },
+    });
+    await expect(started).rejects.toThrow("superseded by call teardown");
+    rtc.emit("telnyx.ready");
+    await flush();
+
+    expect(harness.dependencies.startCall).toHaveBeenCalledTimes(1);
+    expect(getToken).toHaveBeenCalledTimes(2);
+    expect(rtc.login).not.toHaveBeenCalled();
+    expect(harness.dependencies.connect).not.toHaveBeenCalled();
+    expect(harness.dependencies.cancel).toHaveBeenCalledTimes(1);
+    expect(states).toEqual(["connecting", "ended"]);
+  });
+
   it("refreshes the short-lived token on Telnyx's expiry warning", async () => {
     const getToken = vi
       .fn()
