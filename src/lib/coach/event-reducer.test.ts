@@ -55,11 +55,75 @@ describe("coachReducer — transcript", () => {
     expect(state.transcript[0]).toMatchObject({ text: "yeah I guess so", isFinal: true });
   });
 
-  it("starts a new line once a final has landed, even for the same speaker", () => {
+  it("groups consecutive finalized fragments from one speaker into one readable turn", () => {
     let state = initialCoachState();
     state = coachReducer(state, { type: "transcript", speaker: "rep", text: "first", isFinal: true, ts: "t1", ...V });
     state = coachReducer(state, { type: "transcript", speaker: "rep", text: "second", isFinal: true, ts: "t2", ...V });
-    expect(state.transcript).toHaveLength(2);
+    expect(state.transcript).toEqual([
+      expect.objectContaining({ speaker: "rep", text: "first second", isFinal: true, ts: "t2" }),
+    ]);
+    expect(state.transcriptFragments.map(({ text, isFinal }) => ({ text, isFinal }))).toEqual([
+      { text: "first", isFinal: true },
+      { text: "second", isFinal: true },
+    ]);
+  });
+
+  it("does not erase repeated finalized words while grouping", () => {
+    let state = initialCoachState();
+    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "very", isFinal: true, ts: "t1", ...V });
+    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "very", isFinal: true, ts: "t2", ...V });
+    expect(state.transcript[0].text).toBe("very very");
+  });
+
+  it("keeps finalized seller truth eligible while a same-speaker interim is live, then folds it without duplication", () => {
+    let state = initialCoachState();
+    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "I need", isFinal: true, ts: "t1", ...V });
+    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "to sell", isFinal: false, ts: "t2", ...V });
+    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "to sell soon", isFinal: false, ts: "t3", ...V });
+    expect(state.transcript).toEqual([
+      expect.objectContaining({ text: "I need", isFinal: true, ts: "t1" }),
+      expect.objectContaining({ text: "to sell soon", isFinal: false, ts: "t3" }),
+    ]);
+    expect(state.transcript.filter((line) => line.isFinal && line.speaker === "seller")).toEqual([
+      expect.objectContaining({ text: "I need" }),
+    ]);
+
+    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "to sell soon", isFinal: true, ts: "t4", ...V });
+    expect(state.transcript).toEqual([
+      expect.objectContaining({ text: "I need to sell soon", isFinal: true, ts: "t4" }),
+    ]);
+    expect(state.transcriptFragments).toHaveLength(2);
+  });
+
+  it("starts a new grouped turn only when the other speaker begins", () => {
+    let state = initialCoachState();
+    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "one", isFinal: true, ts: "t1", ...V });
+    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "two", isFinal: true, ts: "t2", ...V });
+    state = coachReducer(state, { type: "transcript", speaker: "seller", text: "three", isFinal: true, ts: "t3", ...V });
+    state = coachReducer(state, { type: "transcript", speaker: "rep", text: "four", isFinal: true, ts: "t4", ...V });
+    expect(state.transcript.map(({ speaker, text }) => ({ speaker, text }))).toEqual([
+      { speaker: "rep", text: "one two" },
+      { speaker: "seller", text: "three" },
+      { speaker: "rep", text: "four" },
+    ]);
+  });
+
+  it("keeps the existing 500-fragment transcript bound after grouping", () => {
+    let state = initialCoachState();
+    for (let index = 0; index < 501; index += 1) {
+      state = coachReducer(state, {
+        type: "transcript",
+        speaker: index % 2 === 0 ? "rep" : "seller",
+        text: `fragment-${index}`,
+        isFinal: true,
+        ts: `t${index}`,
+        ...V,
+      });
+    }
+    expect(state.transcriptFragments).toHaveLength(500);
+    expect(state.transcript).toHaveLength(500);
+    expect(state.transcriptFragments[0].text).toBe("fragment-1");
+    expect(state.transcript.at(-1)?.text).toBe("fragment-500");
   });
 
   it("does not interleave a new speaker's interim line into the previous speaker's turn", () => {
@@ -85,6 +149,7 @@ describe("coachReducer — transcript", () => {
     expect(state.transcript).toHaveLength(2);
     expect(state.transcript[0]).toMatchObject({ speaker: "rep", text: "hi there, how are you", isFinal: true });
     expect(state.transcript[1]).toMatchObject({ speaker: "seller", text: "yeah", isFinal: false });
+    expect(state.transcriptFragments.map((line) => line.speaker)).toEqual(["rep", "seller"]);
   });
 
   it("starts a fresh line for a speaker whose most recent line is already final, even though it isn't the trailing line", () => {

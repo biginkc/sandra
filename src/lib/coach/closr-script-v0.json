@@ -6,10 +6,8 @@
   "tokens": ["seller_name", "rep_name", "property_address", "motivation", "dream_outcome", "rep_phone", "file_number", "cold_caller_name", "year_built", "closing_date", "offer_price", "net_to_seller"],
   "entry_tokens": ["motivation", "dream_outcome", "cold_caller_name", "closing_date", "offer_price", "net_to_seller"],
   "file_number_rule": {
-    "format": "{county_first2_upper}-{lead_id_last4}",
-    "note": "Per the approved script's token legend: 'First 2 letters of county + last 4 of lead ID... Fallback if county missing: last 4 of seller's phone.' The fallback triggers when COUNTY is unavailable (not when the lead id is), and its value is the phone digits ALONE — no county prefix, since county is exactly what's missing. When county is present but the lead id isn't, the county prefix is kept and the seller's phone last 4 is used as the suffix instead.",
-    "fallback_if_county_missing": "{seller_phone_last4}",
-    "fallback_if_lead_id_missing_but_county_present": "{county_first2_upper}-{seller_phone_last4}"
+    "format": "{authenticated_rep_first_initial}{authenticated_rep_last_initial}-{property_id_last6}",
+    "note": "Uses the trusted authenticated rep's first and last initials plus the final six characters of the actual property ID. Missing or incomplete trusted data renders the standard safe placeholder; county and phone fallbacks are not permitted."
   },
   "phases": [
     {

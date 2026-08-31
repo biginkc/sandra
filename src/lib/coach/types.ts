@@ -200,6 +200,8 @@ export type CoachCallContext = {
   propertyAddress: string | null;
   propertyCounty: string | null;
   repName: string | null;
+  /** Authenticated server identity used only for file-number initials. */
+  authenticatedRepName?: string | null;
   repPhoneE164: string | null;
   motivation: string | null;
   leadId: string | null;
@@ -295,7 +297,15 @@ export type CoachState = {
   /** Set when the rep manually taps a phase on the rail; cleared on the
    * next server phase event. Display-only — never sent back to the server. */
   overriddenPhaseId: CoachPhaseId | null;
+  /** Readable speaker turns derived from transcriptFragments. Consecutive
+   * finalized fragments from one speaker share a turn until the other
+   * speaker begins; this is the surface consumed by the UI and coach AI. */
   transcript: CoachTranscriptLine[];
+  /** Provider-level fragment history. Final fragments stay individually
+   * represented, while a live interim snapshot is replaced in place until
+   * that speaker's final arrives. Keeping this separate prevents display
+   * grouping from destroying the event-level transcript evidence. */
+  transcriptFragments: CoachTranscriptLine[];
   objectionCards: CoachObjectionCard[];
   nudges: CoachNudge[];
   probeCount: number;

@@ -8,6 +8,7 @@ const baseContext: CoachCallContext = {
   propertyAddress: "123 Main St",
   propertyCounty: "Jackson",
   repName: "Alex Rep",
+  authenticatedRepName: "Alex Rep",
   repPhoneE164: "+18165551234",
   motivation: "Job relocation",
   leadId: "abcd1234-ef56-7890-abcd-ef1234567890",
@@ -131,45 +132,45 @@ describe("resolveCoachTokens", () => {
 });
 
 describe("resolveFileNumber", () => {
-  it("uses county first-2-uppercase + last-4 of the lead id", () => {
+  it("uses authenticated rep first/last initials plus the final six property ID characters", () => {
     const result = resolveFileNumber(baseContext);
-    expect(result).toEqual({ value: "JA-7890", isPlaceholder: false });
+    expect(result).toEqual({ value: "AR-567890", isPlaceholder: false });
   });
 
-  it("falls back to the seller phone's last 4 digits when the lead id is missing", () => {
-    const result = resolveFileNumber({ ...baseContext, leadId: null });
-    expect(result).toEqual({ value: "JA-9876", isPlaceholder: false });
-  });
-
-  it("falls back to the seller phone when the lead id has no usable characters", () => {
-    const result = resolveFileNumber({ ...baseContext, leadId: "" });
-    expect(result).toEqual({ value: "JA-9876", isPlaceholder: false });
-  });
-
-  it("falls back to the phone tail ALONE (no county prefix) when county is missing — the documented fallback", () => {
-    // Per the approved script's token legend: "Fallback if county missing:
-    // last 4 of seller's phone." The fallback triggers on county being
-    // unavailable, and its value has no county prefix (county is exactly
-    // what's missing) — this is distinct from the county-present-but-no-
-    // lead-id case above, which keeps the county prefix.
-    expect(resolveFileNumber({ ...baseContext, propertyCounty: null })).toEqual({
-      value: "9876",
+  it("renders the required JH format for the known authenticated production rep", () => {
+    expect(resolveFileNumber({ ...baseContext, authenticatedRepName: "Jarrad Henry", leadId: "c1c524" })).toEqual({
+      value: "JH-c1c524",
       isPlaceholder: false,
     });
   });
 
-  it("returns a placeholder only when truly nothing is usable", () => {
-    expect(
-      resolveFileNumber({ ...baseContext, propertyCounty: null, sellerPhoneE164: null }),
-    ).toEqual({ value: "—", isPlaceholder: true });
-    expect(
-      resolveFileNumber({ ...baseContext, leadId: null, sellerPhoneE164: null }),
-    ).toEqual({ value: "—", isPlaceholder: true });
+  it("uses the first and last name components for a multi-part authenticated rep name", () => {
+    expect(resolveFileNumber({ ...baseContext, authenticatedRepName: "Alex Morgan Rep" })).toEqual({
+      value: "AR-567890",
+      isPlaceholder: false,
+    });
   });
 
-  it("handles a multi-word county name by using its first two letters", () => {
-    const result = resolveFileNumber({ ...baseContext, propertyCounty: "St. Louis" });
-    expect(result.value.startsWith("ST-")).toBe(true);
+  it("does not use county or seller phone fallbacks", () => {
+    expect(resolveFileNumber({ ...baseContext, propertyCounty: null })).toEqual({
+      value: "AR-567890",
+      isPlaceholder: false,
+    });
+    expect(resolveFileNumber({ ...baseContext, sellerPhoneE164: null })).toEqual({
+      value: "AR-567890",
+      isPlaceholder: false,
+    });
+  });
+
+  it("uses a safe placeholder when trusted rep identity is missing or incomplete", () => {
+    expect(resolveFileNumber({ ...baseContext, authenticatedRepName: null })).toEqual({ value: "—", isPlaceholder: true });
+    expect(resolveFileNumber({ ...baseContext, authenticatedRepName: "Alex" })).toEqual({ value: "—", isPlaceholder: true });
+  });
+
+  it("uses a safe placeholder when the property ID is missing, too short, or has an invalid suffix", () => {
+    expect(resolveFileNumber({ ...baseContext, leadId: null })).toEqual({ value: "—", isPlaceholder: true });
+    expect(resolveFileNumber({ ...baseContext, leadId: "p1" })).toEqual({ value: "—", isPlaceholder: true });
+    expect(resolveFileNumber({ ...baseContext, leadId: "abc-12" })).toEqual({ value: "—", isPlaceholder: true });
   });
 });
 

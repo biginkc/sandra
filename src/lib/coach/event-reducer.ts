@@ -49,6 +49,7 @@ export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"
     currentPhaseId: startingPhaseId,
     overriddenPhaseId: null,
     transcript: [],
+    transcriptFragments: [],
     objectionCards: [],
     nudges: [],
     probeCount: 0,
@@ -80,7 +81,7 @@ let nudgeSeq = 0;
  * appended in between (e.g. rep-interim -> seller-interim -> rep-final
  * must update the rep's line, not append a duplicate because the seller's
  * interim is now the trailing line). */
-function upsertTranscriptLine(
+function upsertTranscriptFragment(
   transcript: CoachTranscriptLine[],
   event: CoachTranscriptEvent,
 ): CoachTranscriptLine[] {
@@ -102,15 +103,59 @@ function upsertTranscriptLine(
   return next.length > MAX_TRANSCRIPT_LINES ? next.slice(next.length - MAX_TRANSCRIPT_LINES) : next;
 }
 
+function joinTranscriptText(committed: string, fragment: string): string {
+  const left = committed.trim();
+  const right = fragment.trim();
+  if (!left) return right;
+  if (!right) return left;
+  // Distinct finalized fragments are evidence, not cumulative snapshots.
+  // Always retain both — repeated speech such as "very, very" is meaningful.
+  // Interim duplication is avoided earlier by replacing that fragment in
+  // place before turns are derived.
+  return `${left} ${right}`;
+}
+
+/** Derive readable turns without mutating the provider-fragment record.
+ * Finalized fragments from one speaker accumulate behind one stable line id.
+ * A live interim remains a separate display line until it finalizes, so it
+ * cannot make the already-final portion of that speaker's turn non-final for
+ * recommendation input or eligibility checks. */
+function groupTranscriptFragments(fragments: CoachTranscriptLine[]): CoachTranscriptLine[] {
+  const turns: CoachTranscriptLine[] = [];
+  for (const fragment of fragments) {
+    const current = turns.at(-1);
+    if (
+      !current
+      || current.speaker !== fragment.speaker
+      || !current.isFinal
+      || !fragment.isFinal
+    ) {
+      turns.push({ ...fragment });
+      continue;
+    }
+    turns[turns.length - 1] = {
+      ...current,
+      text: joinTranscriptText(current.text, fragment.text),
+      isFinal: fragment.isFinal,
+      ts: fragment.ts,
+    };
+  }
+  return turns;
+}
+
 export function coachReducer(state: CoachState, action: CoachReducerAction): CoachState {
   switch (action.type) {
     case "transcript":
-      return {
-        ...state,
-        connected: true,
-        lastEventAt: action.ts,
-        transcript: upsertTranscriptLine(state.transcript, action),
-      };
+      {
+        const transcriptFragments = upsertTranscriptFragment(state.transcriptFragments, action);
+        return {
+          ...state,
+          connected: true,
+          lastEventAt: action.ts,
+          transcriptFragments,
+          transcript: groupTranscriptFragments(transcriptFragments),
+        };
+      }
     case "phase": {
       // A cursor is only ever stored for the phase it was validated
       // against (see the "cursor" case below) — once the server actually
