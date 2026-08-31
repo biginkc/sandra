@@ -149,6 +149,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     retryContext,
     branchOverrides,
     selectVariant,
+    sectionBranchSelections,
+    selectSectionBranch,
     setEntryField,
     activeSectionId,
     nextSectionId,
@@ -174,24 +176,37 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   );
 
   const { scriptBlock, selectedVariants } = useMemo(() => {
-    const block = buildCoachSectionScriptBlock(activeSectionId, tokens, selectCtx, branchOverrides);
+    const block = buildCoachSectionScriptBlock(
+      activeSectionId,
+      tokens,
+      selectCtx,
+      branchOverrides,
+      sectionBranchSelections[activeSectionId] ?? null,
+    );
     return {
       scriptBlock: block,
       selectedVariants: Object.fromEntries(
         (block?.branches ?? []).map((branch) => [branch.tag, branch.selected.key]),
       ),
     };
-  }, [activeSectionId, branchOverrides, selectCtx, tokens]);
+  }, [activeSectionId, branchOverrides, sectionBranchSelections, selectCtx, tokens]);
   const nextBlock = useMemo(
     () => nextSectionId
-      ? buildCoachSectionScriptBlock(nextSectionId, tokens, selectCtx, branchOverrides)
+      ? buildCoachSectionScriptBlock(
+        nextSectionId,
+        tokens,
+        selectCtx,
+        branchOverrides,
+        sectionBranchSelections[nextSectionId] ?? null,
+      )
       : null,
-    [branchOverrides, nextSectionId, selectCtx, tokens],
+    [branchOverrides, nextSectionId, sectionBranchSelections, selectCtx, tokens],
   );
   const activePhaseId = scriptBlock?.phaseId ?? "introduction";
   const recommendations = useCoachRecommendations({
     callId: session.callId,
     activeSectionId,
+    selectedSectionBranch: scriptBlock?.selectedBranchTag ?? null,
     branchOverrides: selectedVariants,
     transcript: state.transcript,
     request: recommendationRequest,
@@ -310,6 +325,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           isEntryTokenEditable={isEntryTokenEditable}
           onBeginEntryEdit={() => setKeypadOpen(false)}
           onSelectVariant={onSelectVariant}
+          onSelectSectionBranch={selectSectionBranch}
         />
         <RecommendationsPanel
           {...recommendations}
@@ -522,6 +538,7 @@ function ScriptPanel({
   isEntryTokenEditable,
   onBeginEntryEdit,
   onSelectVariant,
+  onSelectSectionBranch,
 }: {
   block: CoachSectionScriptBlock | null;
   nextBlock: CoachSectionScriptBlock | null;
@@ -536,6 +553,7 @@ function ScriptPanel({
   isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
   onSelectVariant: (tag: string, key: string) => void;
+  onSelectSectionBranch: (sectionId: CoachSectionScriptBlock["sectionId"], tag: string) => void;
 }) {
   if (!block) {
     // Only reachable for a genuinely unknown/corrupt phase id slipping past
@@ -586,6 +604,34 @@ function ScriptPanel({
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground" data-testid="current-phase-purpose">
             <span className="font-semibold text-foreground">Purpose:</span> {block.purpose}
           </p>
+          {block.branchOptions.length > 1 ? (
+            <div
+              className="mt-4 flex flex-wrap gap-1"
+              role="tablist"
+              aria-label={`${block.title} spoken paths`}
+              data-testid="section-path-options"
+            >
+              {block.branchOptions.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  role="tab"
+                  aria-selected={tag === block.selectedBranchTag}
+                  aria-label={`Use ${tag} spoken path for ${block.title}`}
+                  data-testid={`section-path-${block.sectionId}-${tag}`}
+                  onClick={() => onSelectSectionBranch(block.sectionId, tag)}
+                  className={cn(
+                    "rounded-full border px-2 py-0.5 text-[10px] font-bold",
+                    tag === block.selectedBranchTag
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border text-muted-foreground hover:bg-muted",
+                  )}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="mt-5 divide-y divide-border/70" data-testid="current-section-script">
             {block.branches.map((branch) => (
               <BranchCard
@@ -753,6 +799,7 @@ function BranchCard({
                 type="button"
                 role="tab"
                 aria-selected={option.key === branch.selected.key}
+                aria-label={`Use ${option.label ?? option.key} spoken fork for ${branch.tag}`}
                 data-testid={`variant-${branch.tag}-${option.key}`}
                 onClick={() => onSelectVariant(option.key)}
                 className={cn(

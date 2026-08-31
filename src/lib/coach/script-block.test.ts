@@ -126,7 +126,7 @@ describe("buildCoachSectionScriptBlock", () => {
     ]);
   });
 
-  it("retains selected conditional variants inside the section", () => {
+  it("retains variant choices and resolves multi-branch sections to one rep-selected spoken path", () => {
     const opener = buildCoachSectionScriptBlock(
       "introduction.opener",
       tokens,
@@ -136,12 +136,45 @@ describe("buildCoachSectionScriptBlock", () => {
     expect(opener?.branches[0].selected.lines).toHaveLength(2);
 
     const offer = buildCoachSectionScriptBlock("offer.outcome-tracks", tokens);
-    expect(offer?.branches.map((branch) => branch.tag)).toEqual([
+    expect(offer?.branchOptions).toEqual([
       "Good news",
       "Bad news",
       "Bad news — below mortgage",
       "Price too low",
     ]);
+    expect(offer?.selectedBranchTag).toBe("Good news");
+    expect(offer?.branches.map((branch) => branch.tag)).toEqual(["Good news"]);
+
+    const selectedOffer = buildCoachSectionScriptBlock(
+      "offer.outcome-tracks",
+      tokens,
+      { leadSource: null, occupancy: null },
+      {},
+      "Price too low",
+    );
+    expect(selectedOffer?.selectedBranchTag).toBe("Price too low");
+    expect(selectedOffer?.branches.map((branch) => branch.tag)).toEqual(["Price too low"]);
+    expect(allText(selectedOffer!.branches[0].selected.lines[1].segments)).toContain("our offer was lower");
+
+    const close = buildCoachSectionScriptBlock(
+      "close.decision-tracks",
+      tokens,
+      { leadSource: null, occupancy: null },
+      {},
+      "They accept",
+    );
+    expect(close?.branchOptions).toEqual(["If far apart — program pivot", "They accept"]);
+    expect(close?.selectedBranchTag).toBe("They accept");
+    expect(close?.branches.map((branch) => branch.tag)).toEqual(["They accept"]);
+
+    const invalidSelection = buildCoachSectionScriptBlock(
+      "close.decision-tracks",
+      tokens,
+      { leadSource: null, occupancy: null },
+      {},
+      "not-authored",
+    );
+    expect(invalidSelection?.selectedBranchTag).toBe("If far apart — program pivot");
   });
 
   it("attaches a branch hold only to the section containing that branch's final authored line", () => {

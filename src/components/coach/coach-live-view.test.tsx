@@ -530,11 +530,58 @@ describe("<CoachLiveView /> manual navigation", () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("variant-Opener-fsbo")).toBeVisible());
 
+    expect(screen.getByTestId("variant-Opener-fsbo")).toHaveAccessibleName("Use FSBO spoken fork for Opener");
     await user.click(screen.getByTestId("variant-Opener-fsbo"));
 
     expect(screen.getByTestId("variant-Opener-fsbo")).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("current-section-script")).toHaveTextContent("For Sale by Owner");
-  });
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
+  }, 10_000);
+
+  it("shows exactly one rep-selected Offer or Close spoken path and preserves it across collapse", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<CollapsibleHarness {...baseProps()} collapsed={false} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
+
+    await user.click(screen.getByTestId("phase-rail-offer"));
+    const offerPaths = [
+      ["Good news", "CONGRATS"],
+      ["Bad news", "right around where I was thinking"],
+      ["Bad news — below mortgage", "not able to get you approved"],
+      ["Price too low", "our offer was lower"],
+    ] as const;
+    for (const [tag, spokenText] of offerPaths) {
+      const choice = screen.getByRole("tab", {
+        name: `Use ${tag} spoken path for Present the appropriate offer outcome`,
+      });
+      await user.click(choice);
+      expect(choice).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent("Present the appropriate offer outcome");
+      expect(screen.getAllByTestId("script-branch")).toHaveLength(1);
+      expect(screen.getByTestId("current-section-script")).toHaveTextContent(spokenText);
+    }
+
+    await user.click(screen.getByTestId("phase-rail-close"));
+    const closePaths = [
+      ["If far apart — program pivot", "There is one program I can check"],
+      ["They accept", "Congratulations"],
+    ] as const;
+    for (const [tag, spokenText] of closePaths) {
+      const choice = screen.getByRole("tab", { name: `Use ${tag} spoken path for Choose the closing path` });
+      await user.click(choice);
+      expect(choice).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent("Choose the closing path");
+      expect(screen.getAllByTestId("script-branch")).toHaveLength(1);
+      expect(screen.getByTestId("current-section-script")).toHaveTextContent(spokenText);
+    }
+
+    rerender(<CollapsibleHarness {...baseProps()} collapsed />);
+    expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
+    rerender(<CollapsibleHarness {...baseProps()} collapsed={false} />);
+    expect(screen.getByRole("tab", { name: "Use They accept spoken path for Choose the closing path" }))
+      .toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent("Congratulations");
+  }, 15_000);
 
   it("lets the rep fill motivation and cold-caller placeholders when context cannot", async () => {
     loadCoachCallContext.mockResolvedValueOnce({

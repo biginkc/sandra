@@ -179,6 +179,11 @@ function parseRequest(input: unknown): CoachRecommendationRequest | null {
     typeof input.activeSectionId !== "string" ||
     !input.activeSectionId.trim() ||
     input.activeSectionId.length > MAX_SECTION_ID_LENGTH ||
+    (input.selectedSectionBranch !== null && (
+      typeof input.selectedSectionBranch !== "string" ||
+      !input.selectedSectionBranch.trim() ||
+      input.selectedSectionBranch.length > MAX_OVERRIDE_VALUE_LENGTH
+    )) ||
     (input.mode !== "automatic" && input.mode !== "follow_up") ||
     !Array.isArray(input.transcript) ||
     !input.transcript.every(isValidTranscriptLine) ||
@@ -246,14 +251,20 @@ type TrustedSectionContext = {
 export function loadTrustedSectionContext(
   sectionId: string,
   branchOverrides: Record<string, string>,
+  selectedSectionBranch: string | null = null,
 ): TrustedSectionContext | null {
   const section = getCoachSectionById(sectionId);
   if (!section) return null;
   const phase = CLOSR_SCRIPT.phases.find((candidate) => candidate.id === section.phaseId);
   if (!phase) return null;
 
+  const selectedContent = section.content.length > 1
+    ? section.content.find((content) => content.branch_tag === selectedSectionBranch) ?? section.content[0]
+    : section.content[0];
+  if (!selectedContent) return null;
+
   const scriptLines: string[] = [];
-  for (const content of section.content) {
+  for (const content of [selectedContent]) {
     const branch = phase.display.branches.find((candidate) => candidate.tag === content.branch_tag);
     if (!branch) return null;
     const requestedVariant = branchOverrides[branch.tag];
@@ -432,7 +443,11 @@ export async function requestCoachRecommendationsWithDeps(
   const input = parseRequest(rawInput);
   if (!input) return failure(rawInput, "invalid_request");
 
-  const section = loadTrustedSectionContext(input.activeSectionId, input.branchOverrides);
+  const section = loadTrustedSectionContext(
+    input.activeSectionId,
+    input.branchOverrides,
+    input.selectedSectionBranch,
+  );
   if (!section || input.transcript.length === 0) return failure(input, "invalid_request");
 
   const transcript = boundFinalTranscript(input.transcript);

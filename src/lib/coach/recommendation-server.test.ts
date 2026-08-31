@@ -19,6 +19,7 @@ function request(overrides: Partial<CoachRecommendationRequest> = {}): CoachReco
     requestId: "request-1",
     callId: "call-1",
     activeSectionId: "introduction.opener",
+    selectedSectionBranch: null,
     branchOverrides: {},
     mode: "automatic",
     transcript: [{ speaker: "seller", text: "I need to sell because the repairs are too expensive.", isFinal: true }],
@@ -166,6 +167,56 @@ describe("coach recommendation server boundary", () => {
     expect(loadTrustedSectionContext("introduction.opener", { Opener: "cold_call", Entry: "vacant" })).toEqual(context);
     expect(loadTrustedSectionContext("introduction.opener", { Opener: "does-not-exist" })).toBeNull();
     expect(loadTrustedSectionContext("does-not-exist", {})).toBeNull();
+  });
+
+  it("isolates every selected Offer and Close path and defaults invalid path tags to the first authored branch", () => {
+    const cases = [
+      ["offer.outcome-tracks", "Good news", "CONGRATS", ["right around where I was thinking", "not able to get you approved", "our offer was lower"]],
+      ["offer.outcome-tracks", "Bad news", "right around where I was thinking", ["CONGRATS", "not able to get you approved", "our offer was lower"]],
+      ["offer.outcome-tracks", "Bad news — below mortgage", "not able to get you approved", ["CONGRATS", "right around where I was thinking", "our offer was lower"]],
+      ["offer.outcome-tracks", "Price too low", "our offer was lower", ["CONGRATS", "right around where I was thinking", "not able to get you approved"]],
+      ["close.decision-tracks", "If far apart — program pivot", "There is one program I can check", ["Congratulations"]],
+      ["close.decision-tracks", "They accept", "Congratulations", ["There is one program I can check"]],
+    ] as const;
+
+    for (const [sectionId, selectedPath, included, excluded] of cases) {
+      const script = loadTrustedSectionContext(sectionId, {}, selectedPath)?.scriptLines.join("\n") ?? "";
+      expect(script).toContain(included);
+      for (const siblingText of excluded) expect(script).not.toContain(siblingText);
+    }
+
+    expect(loadTrustedSectionContext("offer.outcome-tracks", {}, "not-authored")).toEqual(
+      loadTrustedSectionContext("offer.outcome-tracks", {}, "Good news"),
+    );
+    expect(loadTrustedSectionContext("close.decision-tracks", {}, null)).toEqual(
+      loadTrustedSectionContext("close.decision-tracks", {}, "If far apart — program pivot"),
+    );
+  });
+
+  it("uses the validated selected path in the provider prompt", async () => {
+    let captured: unknown;
+    const dependencies = deps({
+      anthropic: anthropicReturning(
+        { recommendations: ["Ask what offer amount would solve the seller's problem."] },
+        (args) => { captured = args; },
+      ),
+    });
+
+    const result = await requestCoachRecommendationsWithDeps(
+      request({
+        activeSectionId: "offer.outcome-tracks",
+        selectedSectionBranch: "Price too low",
+        branchOverrides: { "Price too low": "default" },
+      }),
+      dependencies,
+    );
+
+    expect(result).toMatchObject({ ok: true });
+    const serialized = JSON.stringify(captured);
+    expect(serialized).toContain("our offer was lower");
+    expect(serialized).not.toContain("CONGRATS");
+    expect(serialized).not.toContain("right around where I was thinking");
+    expect(serialized).not.toContain("not able to get you approved");
   });
 
   it("bounds to the latest 40 finalized lines and 12,000 formatted characters", () => {
