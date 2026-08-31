@@ -373,12 +373,19 @@ describe("useCoachSession", () => {
     expect(loadCoachCallContext).toHaveBeenCalledTimes(2);
   });
 
-  it("tracks branch variant overrides via selectVariant", async () => {
+  it("tracks valid branch-variant and section-path selections", async () => {
     const { result } = renderHook(() => useCoachSession("call-1", "lead-1", null, null));
     await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
     expect(result.current.branchOverrides).toEqual({});
+    expect(result.current.sectionBranchSelections).toEqual({});
     act(() => result.current.selectVariant("Opener", "fsbo"));
+    act(() => result.current.selectSectionBranch("offer.outcome-tracks", "Price too low"));
     expect(result.current.branchOverrides).toEqual({ Opener: "fsbo" });
+    expect(result.current.sectionBranchSelections).toEqual({ "offer.outcome-tracks": "Price too low" });
+
+    act(() => result.current.selectSectionBranch("offer.outcome-tracks", "not-authored"));
+    act(() => result.current.selectSectionBranch("introduction.opener", "Opener"));
+    expect(result.current.sectionBranchSelections).toEqual({ "offer.outcome-tracks": "Price too low" });
   });
 
   it("owns manual section navigation independently of realtime state", async () => {
@@ -435,6 +442,7 @@ describe("useCoachSession", () => {
     );
     await waitFor(() => expect(result.current.contextLoad.status).toBe("ready"));
     act(() => result.current.selectVariant("Opener", "fsbo"));
+    act(() => result.current.selectSectionBranch("offer.outcome-tracks", "Price too low"));
     act(() => result.current.goNextSection());
     act(() => result.current.setEntryField("motivation", "move closer to family"));
     act(() => result.current.setEntryField("cold_caller_name", "Morgan"));
@@ -445,6 +453,7 @@ describe("useCoachSession", () => {
       followUpQuestions: ["Seller A question?"],
     };
     expect(result.current.branchOverrides).toEqual({ Opener: "fsbo" });
+    expect(result.current.sectionBranchSelections).toEqual({ "offer.outcome-tracks": "Price too low" });
     expect(result.current.canGoPrevious).toBe(true);
 
     rerender({ callId: null });
@@ -454,6 +463,7 @@ describe("useCoachSession", () => {
     expect(result.current.recommendationContinuity.state.followUpQuestions).toEqual([]);
     rerender({ callId: "call-2" });
     expect(result.current.branchOverrides).toEqual({});
+    expect(result.current.sectionBranchSelections).toEqual({});
     expect(result.current.state.entryFields.motivation).toBeNull();
     expect(result.current.state.entryFields.cold_caller_name).toBeNull();
     expect(result.current.canGoPrevious).toBe(false);

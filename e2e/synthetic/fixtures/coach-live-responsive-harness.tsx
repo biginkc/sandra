@@ -88,6 +88,8 @@ function Harness({ held = false, interrupted = false }: { held?: boolean; interr
       retryContext: () => {},
       branchOverrides: {},
       selectVariant: () => {},
+      sectionBranchSelections: {},
+      selectSectionBranch: () => {},
       setEntryField: (field, value) => dispatch({ type: "set_entry_field", field, value }),
       activeSectionId,
       previousSectionId,

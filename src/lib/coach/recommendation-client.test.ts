@@ -89,6 +89,51 @@ describe("CoachRecommendationController", () => {
     await expect(first).resolves.toBe(true);
   });
 
+  it("sends the selected section path and rejects a response made stale by a path change", async () => {
+    let resolve!: (value: CoachRecommendationResult) => void;
+    const request = vi.fn((input: CoachRecommendationRequest) => new Promise<CoachRecommendationResult>((done) => {
+      resolve = done;
+      void input;
+    }));
+    const continuity = createCoachRecommendationContinuity("call-1");
+    const controller = new CoachRecommendationController({ request, continuity });
+    controller.setContext({
+      callId: "call-1",
+      activeSectionId: "offer.outcome-tracks",
+      selectedSectionBranch: "Good news",
+      branchOverrides: { "Good news": "default" },
+    });
+
+    const pending = controller.requestFollowUp([meaningfulTurn("seller-1")]);
+    await Promise.resolve();
+    expect(request.mock.calls[0][0].selectedSectionBranch).toBe("Good news");
+
+    controller.setContext({
+      callId: "call-1",
+      activeSectionId: "offer.outcome-tracks",
+      selectedSectionBranch: "Price too low",
+      branchOverrides: { "Price too low": "default" },
+    });
+    resolve(success(request.mock.calls[0][0]));
+    await expect(pending).resolves.toBe(false);
+
+    const current = controller.requestFollowUp([meaningfulTurn("seller-2")]);
+    await Promise.resolve();
+    expect(request.mock.calls[1][0].selectedSectionBranch).toBe("Price too low");
+    resolve(success(request.mock.calls[1][0]));
+    await expect(current).resolves.toBe(true);
+
+    controller.dispose();
+    const reopened = new CoachRecommendationController({ request, continuity });
+    reopened.setContext({
+      callId: "call-1",
+      activeSectionId: "offer.outcome-tracks",
+      selectedSectionBranch: "Price too low",
+      branchOverrides: { "Price too low": "default" },
+    });
+    expect(reopened.getSnapshot().followUpQuestions).toHaveLength(3);
+  });
+
   it("lets a deliberate follow-up request supersede background automatic advice", async () => {
     const resolvers: Array<(value: CoachRecommendationResult) => void> = [];
     const request = vi.fn((input: CoachRecommendationRequest) => new Promise<CoachRecommendationResult>((resolve) => {

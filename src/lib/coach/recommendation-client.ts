@@ -30,6 +30,7 @@ export type CoachRecommendationClientState = {
 export type CoachRecommendationContinuity = {
   callId: string | null;
   activeSectionId: string | null;
+  selectedSectionBranch: string | null;
   lastAutomaticFingerprint: string | null;
   automaticCount: number;
   followUpCount: number;
@@ -73,6 +74,7 @@ export function createCoachRecommendationContinuity(callId: string | null): Coac
   return {
     callId,
     activeSectionId: null,
+    selectedSectionBranch: null,
     lastAutomaticFingerprint: null,
     automaticCount: 0,
     followUpCount: 0,
@@ -106,6 +108,7 @@ export class CoachRecommendationController {
   private state: CoachRecommendationClientState;
   private callId: string | null;
   private activeSectionId: string | null;
+  private selectedSectionBranch: string | null = null;
   private branchOverrides: Record<string, string> = {};
   private generation = 0;
   private activeRequestToken: symbol | null = null;
@@ -134,6 +137,7 @@ export class CoachRecommendationController {
     this.continuity.state = this.state;
     this.callId = this.continuity.callId;
     this.activeSectionId = this.continuity.activeSectionId;
+    this.selectedSectionBranch = this.continuity.selectedSectionBranch;
     this.lastAutomaticFingerprint = this.continuity.lastAutomaticFingerprint;
     if (this.continuity.callId) {
       this.automaticCountByCall.set(this.continuity.callId, this.continuity.automaticCount);
@@ -157,14 +161,21 @@ export class CoachRecommendationController {
   setContext(input: {
     callId: string | null;
     activeSectionId: string | null;
+    selectedSectionBranch?: string | null;
     branchOverrides: Record<string, string>;
   }): void {
+    const selectedSectionBranch = input.selectedSectionBranch ?? null;
     const callChanged = input.callId !== this.callId;
-    const contextChanged = input.callId !== this.callId || input.activeSectionId !== this.activeSectionId;
+    const contextChanged =
+      input.callId !== this.callId ||
+      input.activeSectionId !== this.activeSectionId ||
+      selectedSectionBranch !== this.selectedSectionBranch;
     this.callId = input.callId;
     this.activeSectionId = input.activeSectionId;
+    this.selectedSectionBranch = selectedSectionBranch;
     this.continuity.callId = input.callId;
     this.continuity.activeSectionId = input.activeSectionId;
+    this.continuity.selectedSectionBranch = selectedSectionBranch;
     this.branchOverrides = { ...input.branchOverrides };
     if (!contextChanged) return;
 
@@ -241,6 +252,7 @@ export class CoachRecommendationController {
   ): Promise<boolean> {
     const callId = this.callId;
     const activeSectionId = this.activeSectionId;
+    const selectedSectionBranch = this.selectedSectionBranch;
     if (!callId || !activeSectionId || this.activeRequestToken) return false;
 
     const counts = mode === "automatic" ? this.automaticCountByCall : this.followUpCountByCall;
@@ -274,6 +286,7 @@ export class CoachRecommendationController {
         requestId,
         callId,
         activeSectionId,
+        selectedSectionBranch,
         branchOverrides: { ...this.branchOverrides },
         mode,
         transcript: transcript.filter((line) => line.isFinal),
@@ -298,6 +311,7 @@ export class CoachRecommendationController {
       generation !== this.generation ||
       callId !== this.callId ||
       activeSectionId !== this.activeSectionId ||
+      selectedSectionBranch !== this.selectedSectionBranch ||
       result.requestId !== requestId ||
       result.callId !== callId ||
       result.activeSectionId !== activeSectionId ||
@@ -337,6 +351,7 @@ export class CoachRecommendationController {
 export type UseCoachRecommendationsInput = {
   callId: string | null;
   activeSectionId: string | null;
+  selectedSectionBranch: string | null;
   branchOverrides: Record<string, string>;
   transcript: readonly CoachRecommendationTranscriptLine[];
   request: CoachRecommendationRequestFn;
@@ -354,10 +369,11 @@ export function useCoachRecommendations(input: UseCoachRecommendationsInput) {
     controller.setContext({
       callId: input.callId,
       activeSectionId: input.activeSectionId,
+      selectedSectionBranch: input.selectedSectionBranch,
       branchOverrides: input.branchOverrides,
     });
     controller.considerAutomatic(input.transcript);
-  }, [controller, input.callId, input.activeSectionId, input.branchOverrides, input.transcript]);
+  }, [controller, input.callId, input.activeSectionId, input.selectedSectionBranch, input.branchOverrides, input.transcript]);
 
   useEffect(() => () => controller.dispose(), [controller]);
 

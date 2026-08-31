@@ -8,6 +8,45 @@ import postcss from "postcss";
 type Section = { id: string; phase_id: string; title: string };
 type ContextStartupMode = "immediate" | "deferred" | "failure";
 
+const spokenForkInventory: Record<string, string[]> = {
+  "introduction.opener": [
+    "Use default spoken fork for Opener",
+    "Use Cold call spoken fork for Opener",
+    "Use FSBO spoken fork for Opener",
+    "Use SMS reply spoken fork for Opener",
+    "Use Driving for dollars spoken fork for Opener",
+  ],
+  "reveal.situation-rundown": [
+    "Use unknown spoken fork for Entry",
+    "Use Owner-occupied spoken fork for Entry",
+    "Use Tenant-occupied spoken fork for Entry",
+    "Use Vacant spoken fork for Entry",
+  ],
+  "reveal.probe-options": [
+    "Use Homeowner spoken fork for Example probes — goal 7+",
+    "Use Investor spoken fork for Example probes — goal 7+",
+    "Use Vacant spoken fork for Example probes — goal 7+",
+  ],
+  "reveal.motivation": [
+    "Use Clear motivation, no urgency spoken fork for Motivation",
+    "Use Clear motivation with urgency spoken fork for Motivation",
+    "Use No clear motivation spoken fork for Motivation",
+  ],
+};
+
+const sectionPathInventory: Record<string, { name: string; spokenText: string }[]> = {
+  "offer.outcome-tracks": [
+    { name: "Use Good news spoken path for Present the appropriate offer outcome", spokenText: "CONGRATS" },
+    { name: "Use Bad news spoken path for Present the appropriate offer outcome", spokenText: "right around where I was thinking" },
+    { name: "Use Bad news — below mortgage spoken path for Present the appropriate offer outcome", spokenText: "not able to get you approved" },
+    { name: "Use Price too low spoken path for Present the appropriate offer outcome", spokenText: "our offer was lower" },
+  ],
+  "close.decision-tracks": [
+    { name: "Use If far apart — program pivot spoken path for Choose the closing path", spokenText: "There is one program I can check" },
+    { name: "Use They accept spoken path for Choose the closing path", spokenText: "Congratulations" },
+  ],
+};
+
 let compiledCss = "";
 let harnessBundle = "";
 let sections: Section[] = [];
@@ -109,21 +148,38 @@ test("walks every PDF-aligned section forward and backward with correct boundari
   await expect(page.getByTestId("coach-back")).toBeDisabled();
 });
 
-test("clicks every conditional script variant without changing the active section", async ({ page }) => {
+test("selects every approved spoken fork and path without changing navigation or call controls", async ({ page }) => {
   await mountCoach(page);
 
   for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
     const title = sections[sectionIndex].title;
+    const card = page.getByTestId("current-script-card");
     const script = page.getByTestId("current-section-script");
-    const variants = script.getByRole("tab");
-    const variantCount = await variants.count();
+    const choices = card.getByRole("tab");
+    const choiceCount = await choices.count();
+    const expectedForks = spokenForkInventory[sections[sectionIndex].id] ?? [];
+    const expectedPaths = sectionPathInventory[sections[sectionIndex].id] ?? [];
+    const phaseLabel = await page.getByTestId("coach-current-phase").textContent();
+    const timerLabel = await page.getByTestId("coach-call-timer").textContent();
 
-    for (let variantIndex = 0; variantIndex < variantCount; variantIndex += 1) {
-      const variant = variants.nth(variantIndex);
-      await variant.click();
-      await expect(variant).toHaveAttribute("aria-selected", "true");
+    expect(choiceCount).toBe(expectedForks.length + expectedPaths.length);
+
+    for (let choiceIndex = 0; choiceIndex < choiceCount; choiceIndex += 1) {
+      const choice = choices.nth(choiceIndex);
+      const path = expectedPaths[choiceIndex - expectedForks.length];
+      await expect(choice).toHaveAccessibleName(expectedForks[choiceIndex] ?? path.name);
+      await choice.click();
+      await expect(choice).toHaveAttribute("aria-selected", "true");
       await expect(page.getByTestId("current-section-title")).toHaveText(title);
+      await expect(page.getByTestId("coach-current-phase")).toHaveText(phaseLabel ?? "");
+      await expect(page.getByTestId("coach-call-timer")).toHaveText(timerLabel ?? "");
+      await expect(page.getByTestId("coach-mute")).toHaveAttribute("aria-pressed", "false");
+      await expect(page.getByTestId("coach-hold")).toHaveAttribute("aria-pressed", "false");
       await expect(script).not.toBeEmpty();
+      if (path) {
+        await expect(script.getByTestId("script-branch")).toHaveCount(1);
+        await expect(script).toContainText(path.spokenText);
+      }
     }
 
     if (sectionIndex < sections.length - 1) await page.getByTestId("coach-next").click();

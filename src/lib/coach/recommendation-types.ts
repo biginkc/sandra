@@ -14,6 +14,7 @@ export type CoachRecommendationRequest = {
   requestId: string;
   callId: string;
   activeSectionId: string;
+  selectedSectionBranch: string | null;
   branchOverrides: Record<string, string>;
   mode: CoachRecommendationMode;
   transcript: CoachRecommendationTranscriptLine[];

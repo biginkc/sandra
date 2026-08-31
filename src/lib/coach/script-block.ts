@@ -184,6 +184,8 @@ export type CoachSectionScriptBlock = {
   phaseName: string;
   title: string;
   purpose: string;
+  branchOptions: string[];
+  selectedBranchTag: string | null;
   branches: ScriptBranchBlock[];
 };
 
@@ -193,6 +195,7 @@ export function buildCoachSectionScriptBlock(
   tokens: ResolvedTokens,
   selectCtx: BranchSelectContext = { leadSource: null, occupancy: null },
   branchOverrides: Record<string, string> = {},
+  selectedBranchTag: string | null = null,
 ): CoachSectionScriptBlock | null {
   const section = getCoachSectionById(sectionId);
   if (!section) return null;
@@ -200,7 +203,13 @@ export function buildCoachSectionScriptBlock(
   const rawPhase = getScriptPhase(section.phaseId);
   if (!phaseBlock || !rawPhase) return null;
 
-  const branches = section.content.flatMap((contentRef) => {
+  const branchOptions = section.content.map((contentRef) => contentRef.branch_tag);
+  const selectedContent = section.content.length > 1
+    ? section.content.find((contentRef) => contentRef.branch_tag === selectedBranchTag) ?? section.content[0]
+    : section.content[0];
+  const visibleContent = selectedContent ? [selectedContent] : [];
+
+  const branches = visibleContent.flatMap((contentRef) => {
     const branch = phaseBlock.branches.find((candidate) => candidate.tag === contentRef.branch_tag);
     const rawBranch = rawPhase.display.branches.find((candidate) => candidate.tag === contentRef.branch_tag);
     if (!branch || !rawBranch) return [];
@@ -227,6 +236,8 @@ export function buildCoachSectionScriptBlock(
     phaseName: phaseBlock.phaseName,
     title: section.title,
     purpose: phaseBlock.purpose,
+    branchOptions,
+    selectedBranchTag: section.content.length > 1 ? selectedContent?.branch_tag ?? null : null,
     branches,
   };
 }

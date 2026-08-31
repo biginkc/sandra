@@ -110,6 +110,7 @@ export function useCoachSession(
   }));
   const [contextAttempt, setContextAttempt] = useState(0);
   const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>({});
+  const [sectionBranchSelections, setSectionBranchSelections] = useState<Record<string, string>>({});
   const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(FIRST_COACH_SECTION_ID);
   const [recommendationContinuity, setRecommendationContinuity] = useState(
     () => createCoachRecommendationContinuity(sessionKey),
@@ -136,6 +137,7 @@ export function useCoachSession(
     });
     setContextAttempt(0);
     setBranchOverrides({});
+    setSectionBranchSelections({});
     setActiveSectionId(FIRST_COACH_SECTION_ID);
     setRecommendationContinuity(createCoachRecommendationContinuity(sessionKey));
   }
@@ -178,6 +180,12 @@ export function useCoachSession(
   const selectVariant = useCallback((tag: string, key: string) => {
     setBranchOverrides((prev) => ({ ...prev, [tag]: key }));
   }, []);
+  const selectSectionBranch = useCallback((sectionId: CoachSectionId, tag: string) => {
+    const section = getCoachSectionById(sectionId);
+    if (section && section.content.length > 1 && section.content.some((content) => content.branch_tag === tag)) {
+      setSectionBranchSelections((prev) => ({ ...prev, [sectionId]: tag }));
+    }
+  }, []);
   const setEntryField = useCallback(
     (field: CoachEntryToken, value: string) => dispatch({ type: "set_entry_field", field, value }),
     [dispatch],
@@ -207,6 +215,8 @@ export function useCoachSession(
     retryContext,
     branchOverrides,
     selectVariant,
+    sectionBranchSelections,
+    selectSectionBranch,
     setEntryField,
     activeSectionId,
     previousSectionId,
