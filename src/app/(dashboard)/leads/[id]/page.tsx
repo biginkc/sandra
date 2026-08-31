@@ -858,17 +858,6 @@ export default async function LeadDetailPage({
         </h2>
         <div className="grid min-w-0 items-start gap-[14px] xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="min-w-0 space-y-3">
-            <ContractsCard
-              contracts={esign.contracts}
-              loadError={esign.contractsError}
-              actions={{
-                viewAction: viewContractAction,
-                remindAction: remindContractAction,
-                voidAction: voidContractAction,
-                retryAction: retryContractAction,
-                downloadAction: downloadLeadFileAction,
-              }}
-            />
             <LeadActivityTimeline
               key={lead.id}
               propertyId={lead.id}
@@ -885,6 +874,17 @@ export default async function LeadDetailPage({
               currentUserId={sessionUser?.id ?? null}
               currentUserEmail={sessionUser?.email ?? null}
               jitterHost={process.env.NEXT_PUBLIC_JITTER_HOST ?? ""}
+            />
+            <ContractsCard
+              contracts={esign.contracts}
+              loadError={esign.contractsError}
+              actions={{
+                viewAction: viewContractAction,
+                remindAction: remindContractAction,
+                voidAction: voidContractAction,
+                retryAction: retryContractAction,
+                downloadAction: downloadLeadFileAction,
+              }}
             />
             <div className="min-w-0" data-testid="lead-activity-composers">
               <SmsEntryPointGate
