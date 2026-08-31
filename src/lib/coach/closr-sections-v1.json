@@ -140,6 +140,7 @@
                 "introduction.pen-paper-contact-details.default.03",
                 "introduction.pen-paper-contact-details.default.04",
                 "introduction.pen-paper-contact-details.default.05",
+                "introduction.pen-paper-contact-details.default.08",
                 "introduction.pen-paper-contact-details.default.06",
                 "introduction.pen-paper-contact-details.default.07"
               ]
@@ -466,7 +467,7 @@
     {
       "id": "secure_positioning.final-commitment",
       "phase_id": "secure_positioning",
-      "title": "Confirm readiness and email",
+      "title": "Confirm readiness",
       "content": [
         {
           "branch_tag": "Back from hold — final questions",
@@ -474,8 +475,7 @@
             {
               "variant_key": "default",
               "line_ids": [
-                "secure_positioning.back-from-hold-final-questions.default.07",
-                "secure_positioning.back-from-hold-final-questions.default.08"
+                "secure_positioning.back-from-hold-final-questions.default.07"
               ]
             }
           ]
