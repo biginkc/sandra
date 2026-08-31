@@ -88,13 +88,17 @@ test("walks every PDF-aligned section forward and backward with correct boundari
   expect(sections).toHaveLength(26);
   await expect(page.getByTestId("coach-back")).toBeDisabled();
   await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title);
+  const fileNumber = page.getByTestId("coach-file-number");
+  await expect(fileNumber).toHaveText("File number: JH-c1c524");
   await expect(page.getByTestId("current-phase-purpose")).toContainText("Build Minor Rapport");
 
   for (let index = 0; index < sections.length - 1; index += 1) {
+    await expect(fileNumber).toHaveText("File number: JH-c1c524");
     await expect(page.getByTestId("next-section-preview")).toContainText(sections[index + 1].title);
     await page.getByTestId("coach-next").click();
     await expect(page.getByTestId("current-section-title")).toHaveText(sections[index + 1].title);
   }
+  await expect(fileNumber).toHaveText("File number: JH-c1c524");
   await expect(page.getByTestId("coach-next")).toBeDisabled();
   await expect(page.getByTestId("next-section-preview")).toHaveCount(0);
 

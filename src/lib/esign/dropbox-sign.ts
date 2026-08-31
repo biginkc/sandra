@@ -44,6 +44,18 @@ function authenticatedApiSet(apiKey: EsignSecret): DropboxApiSet {
   return { account, apiApp, embedded, signatureRequest, template };
 }
 
+function abortableSignatureApi(apiKey: EsignSecret, signal?: AbortSignal) {
+  const signatureRequest = new SignatureRequestApi();
+  signatureRequest.username = apiKey.reveal();
+  signatureRequest.password = "";
+  if (signal) {
+    signatureRequest.addInterceptor((options) => {
+      options.signal = signal;
+    });
+  }
+  return signatureRequest;
+}
+
 export function createDropboxSignProvider(input: {
   apiKey: EsignSecret;
   clientId: string;
@@ -123,13 +135,6 @@ export function createDropboxSignProvider(input: {
       try {
         const response = await api.embedded.embeddedEditUrl(providerTemplateId, {
           forceSignerRoles: true,
-          mergeFields: [
-            "seller_name",
-            "property_address",
-            "offer_price",
-            "closing_date",
-            "earnest_money",
-          ].map((name) => ({ name, type: SubMergeField.TypeEnum.Text })),
           testMode: true,
         });
         const embedded = response.body.embedded;
@@ -153,19 +158,8 @@ export function createDropboxSignProvider(input: {
       try {
         const response = await api.template.templateGet(providerTemplateId);
         const template = response.body.template;
-        return {
-          providerTemplateId: template.templateId ?? providerTemplateId,
-          title: template.title ?? null,
-          signerRoles: (template.signerRoles ?? [])
-            .map((role, index) => ({
-              name: role.name ?? "",
-              order: role.order ?? index,
-            }))
-            .sort((a, b) => a.order - b.order),
-          mergeFieldNames: (template.namedFormFields ?? [])
-            .map((field) => field.name)
-            .filter((name): name is string => Boolean(name)),
-        };
+        const metadata = providerTemplateMetadata(template as typeof template & { metadata?: Record<string, unknown> });
+        return { ...metadata, providerTemplateId: metadata.providerTemplateId || providerTemplateId };
       } catch (error) {
         throw normalizeDropboxSignError(error);
       }
@@ -174,6 +168,27 @@ export function createDropboxSignProvider(input: {
     async getTemplateFiles(providerTemplateId: string) {
       try {
         return (await api.template.templateFiles(providerTemplateId, "pdf")).body;
+      } catch (error) {
+        throw normalizeDropboxSignError(error);
+      }
+    },
+
+    async duplicateTemplate(providerTemplateId: string, file: TemplatePdf) {
+      try {
+        const response = await api.template.templateUpdateFiles(providerTemplateId, {
+          clientId: input.clientId,
+          files: [providerFile(file)],
+          testMode: true,
+        });
+        const duplicateId = response.body.template?.templateId;
+        if (!duplicateId || duplicateId === providerTemplateId) {
+          throw new ProviderError(
+            "Dropbox Sign did not return a distinct copied template identifier.",
+            "dropbox_sign",
+            { providerCode: "template_copy_id_missing" },
+          );
+        }
+        return { providerTemplateId: duplicateId, readiness: "pending" };
       } catch (error) {
         throw normalizeDropboxSignError(error);
       }
@@ -218,7 +233,8 @@ export function createDropboxSignProvider(input: {
       };
       try {
         const response =
-          await api.signatureRequest.signatureRequestSendWithTemplate(body);
+          await abortableSignatureApi(input.apiKey, request.signal)
+            .signatureRequestSendWithTemplate(body);
         const signatureRequest = response.body.signatureRequest;
         if (!signatureRequest.signatureRequestId) {
           throw new ProviderError(
@@ -254,9 +270,10 @@ export function createDropboxSignProvider(input: {
     async remind(
       signatureRequestId: string,
       signer: { emailAddress: string; name?: string },
+      signal?: AbortSignal,
     ) {
       try {
-        await api.signatureRequest.signatureRequestRemind(signatureRequestId, {
+        await abortableSignatureApi(input.apiKey, signal).signatureRequestRemind(signatureRequestId, {
           emailAddress: signer.emailAddress,
           name: signer.name,
         });
@@ -265,9 +282,9 @@ export function createDropboxSignProvider(input: {
       }
     },
 
-    async cancel(signatureRequestId: string) {
+    async cancel(signatureRequestId: string, signal?: AbortSignal) {
       try {
-        await api.signatureRequest.signatureRequestCancel(signatureRequestId);
+        await abortableSignatureApi(input.apiKey, signal).signatureRequestCancel(signatureRequestId);
       } catch (error) {
         throw normalizeDropboxSignError(error);
       }
@@ -284,6 +301,28 @@ export function createDropboxSignProvider(input: {
         throw normalizeDropboxSignError(error, { retryableStatuses: [409] });
       }
     },
+  };
+}
+
+function providerTemplateMetadata(template: {
+  templateId?: string;
+  title?: string;
+  metadata?: Record<string, unknown>;
+  signerRoles?: Array<{ name?: string; order?: number }>;
+  namedFormFields?: Array<{ name?: string }> | null;
+}): ProviderTemplateMetadata {
+  return {
+    providerTemplateId: template.templateId ?? "",
+    localTemplateId: typeof template.metadata?.sandra_template_id === "string"
+      ? template.metadata.sandra_template_id
+      : null,
+    title: template.title ?? null,
+    signerRoles: (template.signerRoles ?? [])
+      .map((role, index) => ({ name: role.name ?? "", order: role.order ?? index }))
+      .sort((a, b) => a.order - b.order),
+    mergeFieldNames: (template.namedFormFields ?? [])
+      .map((field) => field.name)
+      .filter((name): name is string => Boolean(name)),
   };
 }
 

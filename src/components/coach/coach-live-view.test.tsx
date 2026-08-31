@@ -184,6 +184,8 @@ describe("<CoachLiveView /> manual navigation", () => {
       maskedSellerPhone: "+1 (816) 555-9876",
     }} />);
 
+    expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: —");
+
     for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");
     expect(script).not.toHaveTextContent("JH-abcdef");
@@ -195,7 +197,29 @@ describe("<CoachLiveView /> manual navigation", () => {
       authenticatedRepName: "Jarrad Henry",
       leadId: "abcd1234-ef56-7890-abcd-ef1234c1c524",
     }));
-    await waitFor(() => expect(script).toHaveTextContent("JH-c1c524"));
+    await waitFor(() => expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: JH-c1c524"));
+    expect(script).toHaveTextContent("JH-c1c524");
+  });
+
+  it("keeps the authorized file number visible while the rep advances through the script", async () => {
+    loadCoachCallContext.mockResolvedValue({
+      ...sampleContext,
+      repName: "Jarrad Henry",
+      authenticatedRepName: "Jarrad Henry",
+      leadId: "abcd1234-ef56-7890-abcd-ef1234c1c524",
+    });
+    const user = userEvent.setup();
+    render(<Harness {...baseProps()} />);
+
+    const fileNumber = await screen.findByTestId("coach-file-number");
+    await waitFor(() => expect(fileNumber).toHaveTextContent("File number: JH-c1c524"));
+    for (let step = 0; step < 25; step += 1) {
+      expect(fileNumber).toBeVisible();
+      expect(fileNumber).toHaveTextContent("File number: JH-c1c524");
+      await user.click(screen.getByTestId("coach-next"));
+    }
+    expect(fileNumber).toBeVisible();
+    expect(fileNumber).toHaveTextContent("File number: JH-c1c524");
   });
 
   it("never exposes requested/prepared file-number identity after a property authorization failure", async () => {
@@ -210,6 +234,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     }} />);
 
     await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeVisible());
+    expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: —");
     for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");
     expect(script).not.toHaveTextContent("JH-abcdef");
@@ -233,6 +258,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     }} />);
 
     await waitFor(() => expect(loadCoachCallContext).toHaveBeenCalled());
+    expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: —");
     for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");
     expect(script).not.toHaveTextContent("JH-c1c524");
@@ -330,7 +356,8 @@ describe("<CoachLiveView /> manual navigation", () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
 
-    broadcast({ type: "transcript", speaker: "seller", text: "The roof needs work.", isFinal: true, ts: "seller-final" });
+    broadcast({ type: "transcript", speaker: "seller", text: "The roof", isFinal: true, ts: "seller-final-1" });
+    broadcast({ type: "transcript", speaker: "seller", text: "needs work.", isFinal: true, ts: "seller-final-2" });
     broadcast({ type: "transcript", speaker: "rep", text: "Tell me more about", isFinal: false, ts: "rep-interim" });
 
     const lines = screen.getAllByTestId("transcript-line");
@@ -341,6 +368,46 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(lines[1]).toHaveTextContent("Rep");
     expect(lines[1]).toHaveTextContent("Tell me more about");
     expect(lines[1]).toHaveAttribute("data-final", "false");
+  });
+
+  it("keeps finalized seller speech eligible and AI-visible through a same-speaker interim", async () => {
+    const user = userEvent.setup();
+    const recommendationRequest = vi.fn(
+      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true,
+        requestId: input.requestId,
+        callId: input.callId,
+        activeSectionId: input.activeSectionId,
+        mode: input.mode,
+        recommendations: [],
+        followUpQuestions: ["What makes selling important now?"],
+      }),
+    );
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
+
+    broadcast({ type: "transcript", speaker: "seller", text: "I need", isFinal: true, ts: "seller-final-1" });
+    broadcast({ type: "transcript", speaker: "seller", text: "to sell", isFinal: false, ts: "seller-interim-2" });
+
+    expect(screen.getByTestId("follow-up-questions")).toBeEnabled();
+    let lines = screen.getAllByTestId("transcript-line");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toHaveTextContent("I need");
+    expect(lines[0]).toHaveAttribute("data-final", "true");
+    expect(lines[1]).toHaveTextContent("to sell");
+    expect(lines[1]).toHaveAttribute("data-final", "false");
+
+    await user.click(screen.getByTestId("follow-up-questions"));
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
+    expect(recommendationRequest.mock.calls[0][0].transcript).toEqual([
+      expect.objectContaining({ speaker: "seller", text: "I need", isFinal: true }),
+    ]);
+
+    broadcast({ type: "transcript", speaker: "seller", text: "to sell", isFinal: true, ts: "seller-final-2" });
+    lines = screen.getAllByTestId("transcript-line");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toHaveTextContent("I need to sell");
+    expect(lines[0]).toHaveAttribute("data-final", "true");
   });
 
   it("enables follow-up questions only after a finalized homeowner turn and sends one grounded request per click", async () => {

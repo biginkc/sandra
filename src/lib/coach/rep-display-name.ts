@@ -23,3 +23,11 @@ export function repDisplayName(
   if (known) return known;
   return repNameFallbackFromEmail(user?.email);
 }
+
+/** Resolves the trusted complete identity used to derive file-number initials. */
+export function repFileNumberIdentity(
+  user: Pick<User, "email" | "user_metadata"> | null | undefined,
+): string | null {
+  const known = user?.email ? KNOWN_REP_NAMES_BY_EMAIL.get(user.email.trim().toLowerCase()) : null;
+  return known ?? repDisplayName(user);
+}

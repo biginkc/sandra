@@ -32,8 +32,12 @@ export const ESIGN_MERGE_FIELD_NAMES = [
   "earnest_money",
 ] as const;
 
+export const ESIGN_TEMPLATE_MERGE_FIELDS = ESIGN_MERGE_FIELD_NAMES;
+export const ESIGN_TEMPLATE_TITLE_MAX_LENGTH = 160;
+
 export type EsignMergeFieldName =
   (typeof ESIGN_MERGE_FIELD_NAMES)[number];
+export type EsignTemplateMergeField = EsignMergeFieldName;
 
 export type TemplateSignerRole = {
   name: string;
@@ -50,6 +54,20 @@ export type TemplateOption = {
   mergeFieldNames: typeof ESIGN_MERGE_FIELD_NAMES;
 };
 
+export function validateTemplateTitle(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const title = value.trim();
+  return title.length >= 1 && title.length <= ESIGN_TEMPLATE_TITLE_MAX_LENGTH
+    ? title
+    : null;
+}
+
+export function requireTemplateTitle(value: unknown): string {
+  const title = validateTemplateTitle(value);
+  if (!title) throw new Error("Invalid eSign template title.");
+  return title;
+}
+
 export type EmbeddedTemplateSession = {
   providerTemplateId: string;
   editUrl: string;
@@ -58,6 +76,7 @@ export type EmbeddedTemplateSession = {
 
 export type ProviderTemplateMetadata = {
   providerTemplateId: string;
+  localTemplateId: string | null;
   title: string | null;
   signerRoles: TemplateSignerRole[];
   mergeFieldNames: string[];
@@ -84,6 +103,7 @@ export type SendWithTemplateInput = {
   title?: string;
   subject?: string;
   message?: string;
+  signal?: AbortSignal;
 };
 
 export type ProviderSignature = {
@@ -115,6 +135,10 @@ export type DropboxSignProvider = {
   ): Promise<EmbeddedTemplateSession>;
   getTemplate(providerTemplateId: string): Promise<ProviderTemplateMetadata>;
   getTemplateFiles(providerTemplateId: string): Promise<Buffer>;
+  duplicateTemplate(
+    providerTemplateId: string,
+    file: TemplatePdf,
+  ): Promise<{ providerTemplateId: string; readiness: "ready" | "pending" }>;
   updateTemplateFiles(
     providerTemplateId: string,
     file: TemplatePdf,
@@ -124,8 +148,9 @@ export type DropboxSignProvider = {
   remind(
     signatureRequestId: string,
     signer: { emailAddress: string; name?: string },
+    signal?: AbortSignal,
   ): Promise<void>;
-  cancel(signatureRequestId: string): Promise<void>;
+  cancel(signatureRequestId: string, signal?: AbortSignal): Promise<void>;
   downloadSignedPdf(signatureRequestId: string): Promise<Buffer>;
 };
 
