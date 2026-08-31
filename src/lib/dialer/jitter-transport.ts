@@ -43,6 +43,7 @@ const JITTER_RECOVERY_MEDIA_PROOF_ATTEMPTS = 6;
 const JITTER_PROVIDER_PROOF_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 10_000, 10_000, 10_000, 10_000, 10_000] as const;
 const JITTER_RECOVERY_CONTROL_ATTEMPTS = 3;
 const TELNYX_TOKEN_EXPIRING_SOON = 34_001;
+const TELNYX_LOGIN_FAILED = 46_001;
 const TELNYX_HOLD_FAILED = 44_001;
 const TELNYX_BYE_SEND_FAILED = 44_003;
 const TELNYX_RECONNECTION_EXHAUSTED = 45_003;
@@ -218,6 +219,7 @@ export class JitterCallTransport implements CallTransport {
   private terminalAuthorityConfirmed = false;
   private teardownUnconfirmedEmitted = false;
   private refreshPromise: Promise<void> | null = null;
+  private initialRegistrationLoginRetryUsed = false;
   private registrationPromise: Promise<void> | null = null;
   private resolveRegistration: (() => void) | null = null;
   private rejectRegistration: ((error: unknown) => void) | null = null;
@@ -773,6 +775,14 @@ export class JitterCallTransport implements CallTransport {
           return;
         }
         if (code === TELNYX_BYE_SEND_FAILED) return;
+        if (
+          code === TELNYX_LOGIN_FAILED &&
+          this.canRetryInitialRegistrationLogin(client)
+        ) {
+          this.initialRegistrationLoginRetryUsed = true;
+          void this.retryInitialRegistrationLogin(client);
+          return;
+        }
         this.handleOperationalFailure(eventError(event));
       })
       .on("telnyx.warning", (event) => {
@@ -806,6 +816,48 @@ export class JitterCallTransport implements CallTransport {
     this.registrationPromise = registration;
     await Promise.resolve(client.connect());
     await registration;
+  }
+
+  private canRetryInitialRegistrationLogin(client: TelnyxRtcLike): boolean {
+    return !this.initialRegistrationLoginRetryUsed &&
+      this.registrationPromise !== null &&
+      this.liveAt === null &&
+      !this.expectedIncoming &&
+      this.callId !== null &&
+      this.rtcClient === client &&
+      !this.terminal &&
+      !this.hangupRequested &&
+      !this.cancelPromise;
+  }
+
+  private async retryInitialRegistrationLogin(client: TelnyxRtcLike): Promise<void> {
+    const callId = this.callId;
+    const generation = this.lifecycleGeneration;
+    if (!callId) return;
+    const isCurrent = () =>
+      this.lifecycleGeneration === generation &&
+      this.callId === callId &&
+      this.rtcClient === client &&
+      this.registrationPromise !== null &&
+      this.liveAt === null &&
+      !this.expectedIncoming &&
+      !this.terminal &&
+      !this.hangupRequested &&
+      !this.cancelPromise;
+    try {
+      const token = await this.dependencies.getToken(callId);
+      if (!isCurrent()) return;
+      if (!token.ok) throw proxyError(token);
+      requireUsableToken(token.data, this.dependencies.now());
+      if (!client.login)
+        throw new Error("Telnyx initial registration token refresh is unavailable.");
+      this.holdCapability = token.data.capabilities?.audio_health_media_state === "v1";
+      await Promise.resolve(
+        client.login({ creds: { login_token: token.data.rtc_token } }),
+      );
+    } catch (error) {
+      if (isCurrent()) this.handleOperationalFailure(error);
+    }
   }
 
   private finishRegistration(): void {
