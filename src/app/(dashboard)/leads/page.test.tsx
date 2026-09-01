@@ -66,10 +66,14 @@ beforeEach(() => {
 });
 
 describe("LeadsPage organization context", () => {
-  it("uses the current server membership for the initial board load", async () => {
-    const orgId = "22222222-2222-4222-8222-222222222222";
+  it("uses every current server membership for the initial board load", async () => {
+    const orgIds = [
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333",
+    ];
     getCallerMemberships.mockResolvedValue([
-      { user_id: "user-1", org_id: orgId, role: "member" },
+      { user_id: "user-1", org_id: orgIds[0], role: "member" },
+      { user_id: "user-1", org_id: orgIds[1], role: "member" },
     ]);
 
     await LeadsPage({ searchParams: Promise.resolve({}) });
@@ -77,7 +81,7 @@ describe("LeadsPage organization context", () => {
     expect(fetchLeadBoardData).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
-      expect.objectContaining({ orgId }),
+      expect.objectContaining({ orgIds }),
     );
   });
 
@@ -89,7 +93,7 @@ describe("LeadsPage organization context", () => {
     expect(fetchLeadBoardData).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
-      expect.objectContaining({ orgId: null }),
+      expect.objectContaining({ orgIds: [] }),
     );
   });
 });

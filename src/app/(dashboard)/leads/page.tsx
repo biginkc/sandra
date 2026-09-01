@@ -40,10 +40,10 @@ export default async function LeadsPage({
     supabase.from("counties").select("market").order("state").order("name"),
     getCallerMemberships(),
   ]);
-  // Sandra currently follows the existing single-org convention used by the
-  // other dashboard pages. This value is resolved from the server session and
-  // is never accepted from the browser's board requests.
-  const orgId = memberships[0]?.org_id ?? null;
+  // Resolve every active organization from the server session. Board cards
+  // can span those organizations, so eSign decoration is scoped per card
+  // rather than selecting an arbitrary first membership.
+  const orgIds = memberships.map((membership) => membership.org_id);
   const teamMembers = teamResult.ok ? teamResult.data : [];
   const inboundFilters = resolveInboundLeadFilters(params, {
     currentUserId: user?.id ?? null,
@@ -76,7 +76,7 @@ export default async function LeadsPage({
       unassigned: inboundFilters.ownership === "unassigned",
       dayStart: dayStart.toISOString(),
       dayEnd: dayEnd.toISOString(),
-      orgId,
+      orgIds,
     });
   } catch {
     loadFailed = true;

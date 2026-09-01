@@ -8,7 +8,6 @@ import {
   createPipelineSignalLoader,
   loadPipelineSignals,
   type PipelineSignalLoader,
-  type PipelineSignalRow,
 } from "@/lib/esign/pipeline-signal";
 import type { ContractStatusRecord } from "@/lib/esign/contract-status";
 import { truncateMessagePreview } from "../properties/prospects-query";
@@ -82,7 +81,7 @@ export type LeadBoardQueryContext = {
   unassigned: boolean;
   dayStart: string;
   dayEnd: string;
-  orgId?: string | null;
+  orgIds?: readonly string[];
 };
 
 function rpcFilters(filters: LeadBoardFilters, context: LeadBoardQueryContext) {
@@ -189,10 +188,11 @@ async function fetchCardDecorations(
     last_message_body?: string | null;
     last_message_created_at?: string | null;
   }>,
-  orgId: string | null,
+  orgIds: readonly string[],
   pipelineSignalLoader?: PipelineSignalLoader,
 ): Promise<Pick<LeadBoardData, "listMemberships" | "customTags" | "lastMessageByPropertyId" | "latestContractByPropertyId">> {
   const ids = rows.map((row) => row.id);
+  const trustedOrgIds = new Set(orgIds.filter(Boolean));
   const membershipRows: Array<{
     property_id: string;
     list_id: string;
@@ -206,15 +206,16 @@ async function fetchCardDecorations(
   const latestContractByPropertyId: Record<string, ContractStatusRecord> = {};
   for (let start = 0; start < ids.length; start += 50) {
     const chunk = ids.slice(start, start + 50);
-    const signalPromise = orgId && pipelineSignalLoader
-      ? loadPipelineSignals(pipelineSignalLoader, { orgId, propertyIds: chunk })
-      : Promise.resolve(new Map<string, PipelineSignalRow>());
     const [
+      { data: propertyScopes, error: propertyScopesError },
       { data: memberships, error: membershipsError },
       { data: tags, error: tagsError },
-      contractSignals,
     ] =
       await Promise.all([
+        supabase
+          .from("properties")
+          .select("id, org_id")
+          .in("id", chunk),
         supabase
           .from("property_lists")
           .select("property_id, list_id, lists!property_lists_list_id_fkey(name, color, archived_at)")
@@ -223,7 +224,6 @@ async function fetchCardDecorations(
           .from("property_tags")
           .select("property_id, tag_id, tags!property_tags_tag_id_fkey(name, color, category)")
           .in("property_id", chunk),
-        signalPromise,
       ]);
     // Badges are optional decoration. Preserve the core cards and exact board
     // counts if either bounded auxiliary lookup fails, matching the prior
@@ -234,12 +234,52 @@ async function fetchCardDecorations(
     if (!tagsError) {
       tagRows.push(...((tags ?? []) as unknown as typeof tagRows));
     }
-    for (const [propertyId, signal] of contractSignals) {
-      latestContractByPropertyId[propertyId] = {
-        id: signal.id,
-        created_at: signal.created_at,
-        status: signal.status,
-      };
+
+    // Board RLS can return cards from every active organization. Resolve each
+    // card's tenant from the trusted properties table, then keep every bounded
+    // eSign lookup inside exactly that tenant. Missing, unauthorized, or
+    // contradictory scope rows fail closed to an undecorated card.
+    if (!propertyScopesError && pipelineSignalLoader && trustedOrgIds.size > 0) {
+      const requestedIds = new Set(chunk);
+      const orgByPropertyId = new Map<string, string>();
+      const conflictingPropertyIds = new Set<string>();
+      for (const scope of propertyScopes ?? []) {
+        if (!requestedIds.has(scope.id) || !trustedOrgIds.has(scope.org_id)) continue;
+        const existingOrgId = orgByPropertyId.get(scope.id);
+        if (existingOrgId && existingOrgId !== scope.org_id) {
+          conflictingPropertyIds.add(scope.id);
+          orgByPropertyId.delete(scope.id);
+          continue;
+        }
+        if (!conflictingPropertyIds.has(scope.id)) {
+          orgByPropertyId.set(scope.id, scope.org_id);
+        }
+      }
+
+      const propertyIdsByOrg = new Map<string, string[]>();
+      for (const [propertyId, propertyOrgId] of orgByPropertyId) {
+        const propertyIds = propertyIdsByOrg.get(propertyOrgId) ?? [];
+        propertyIds.push(propertyId);
+        propertyIdsByOrg.set(propertyOrgId, propertyIds);
+      }
+      const scopedSignals = await Promise.all(
+        [...propertyIdsByOrg].map(async ([propertyOrgId, propertyIds]) =>
+          loadPipelineSignals(pipelineSignalLoader, {
+            orgId: propertyOrgId,
+            propertyIds,
+          }),
+        ),
+      );
+      for (const contractSignals of scopedSignals) {
+        for (const [propertyId, signal] of contractSignals) {
+          if (orgByPropertyId.get(propertyId) !== signal.org_id) continue;
+          latestContractByPropertyId[propertyId] = {
+            id: signal.id,
+            created_at: signal.created_at,
+            status: signal.status,
+          };
+        }
+      }
     }
   }
 
@@ -311,7 +351,7 @@ export async function fetchLeadBoardData(
     fetchCardDecorations(
       supabase,
       leads,
-      context.orgId ?? null,
+      context.orgIds ?? [],
       resolvedPipelineSignalLoader,
     ),
     includeFacets ? fetchUrgencyCounts(supabase, filters, context) : Promise.resolve(null),

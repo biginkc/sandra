@@ -88,12 +88,16 @@ describe("loadLeadBoardAction validation", () => {
     expect(createClient).not.toHaveBeenCalled();
   });
 
-  it("ignores a spoofed client org and reuses the server membership for replacement and load-more", async () => {
+  it("ignores a spoofed client org and carries every server membership for replacement and load-more", async () => {
     const serverOrgId = "22222222-2222-4222-8222-222222222222";
+    const secondServerOrgId = "33333333-3333-4333-8333-333333333333";
     createClient.mockResolvedValue({
       auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) },
     });
-    getCallerMemberships.mockResolvedValue([{ user_id: "user-1", org_id: serverOrgId, role: "member" }]);
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: serverOrgId, role: "member" },
+      { user_id: "user-1", org_id: secondServerOrgId, role: "member" },
+    ]);
     fetchLeadBoardData.mockResolvedValue({ leads: [] });
     const input = {
       status: "new_lead" as const,
@@ -114,7 +118,9 @@ describe("loadLeadBoardAction validation", () => {
 
     expect(fetchLeadBoardData).toHaveBeenCalledTimes(2);
     expect(
-      fetchLeadBoardData.mock.calls.every(([, , context]) => context.orgId === serverOrgId),
+      fetchLeadBoardData.mock.calls.every(([, , context]) =>
+        context.orgIds?.join(",") === `${serverOrgId},${secondServerOrgId}`,
+      ),
     ).toBe(true);
     expect(fetchLeadBoardData.mock.calls[0]?.[3]).toEqual({});
     expect(fetchLeadBoardData.mock.calls[0]?.[4]).toEqual(["new_lead"]);
@@ -139,7 +145,7 @@ describe("loadLeadBoardAction validation", () => {
     expect(fetchLeadBoardData).toHaveBeenCalledWith(
       expect.anything(),
       input.filters,
-      expect.objectContaining({ orgId: null }),
+      expect.objectContaining({ orgIds: [] }),
       {},
       expect.any(Array),
     );

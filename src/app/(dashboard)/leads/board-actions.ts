@@ -65,7 +65,7 @@ export async function loadLeadBoardAction(
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
     const memberships = await getCallerMemberships();
-    const orgId = memberships[0]?.org_id ?? null;
+    const orgIds = memberships.map((membership) => membership.org_id);
 
     let assigneeId: string | null = null;
     let unassigned = false;
@@ -110,7 +110,7 @@ export async function loadLeadBoardAction(
       unassigned,
       dayStart: dayStart.toISOString(),
       dayEnd: dayEnd.toISOString(),
-      orgId,
+      orgIds,
     }, cursors, statuses));
   } catch (error) {
     reportError(error, { tags: { surface: "leads_board_page" } });
