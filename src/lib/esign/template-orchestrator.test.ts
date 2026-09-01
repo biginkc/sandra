@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ESIGN_TEMPLATE_MERGE_FIELDS } from "./template-contract";
 import {
@@ -101,6 +101,7 @@ function addInput() {
 
 describe("template action orchestration", () => {
   beforeEach(() => vi.clearAllMocks());
+  afterEach(() => vi.useRealTimers());
 
   it("owner-gates every operation before touching another port", async () => {
     const ports = makePorts();
@@ -589,6 +590,153 @@ describe("template action orchestration", () => {
     expect(result).toMatchObject({ ok: true, data: { providerTemplateId: "provider-1", sellerRoleName: "Seller", signerRoles: roles, mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS } });
     expect(ports.storage.deletePrivate).toHaveBeenCalledWith(stage.storagePath);
     expect(ports.repository.recordSourceCleanup).toHaveBeenCalledWith({ orgId: "org-1", templateId: "template-1", storagePath: stage.storagePath, outcome: "deleted" });
+  });
+
+  it("retries only the asynchronous provider not-found window before finalizing", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    const providerPending = new Error("not ready");
+    vi.mocked(ports.provider.getTemplate)
+      .mockRejectedValueOnce(providerPending)
+      .mockRejectedValueOnce(providerPending)
+      .mockResolvedValue({
+        providerTemplateId: "provider-1",
+        signerRoles: roles,
+        mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
+      });
+    vi.mocked(ports.provider.isNotFound).mockImplementation(
+      (error) => error === providerPending,
+    );
+
+    const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
+    await vi.advanceTimersByTimeAsync(999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(resultPromise).resolves.toMatchObject({ ok: true });
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(3);
+    expect(ports.repository.finalizeDraft).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stops retrying when a not-found conversion window becomes a genuine failure", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    const providerPending = new Error("not ready");
+    const providerFailure = new Error("private provider diagnostic");
+    vi.mocked(ports.provider.getTemplate)
+      .mockRejectedValueOnce(providerPending)
+      .mockRejectedValueOnce(providerFailure);
+    vi.mocked(ports.provider.isNotFound).mockImplementation(
+      (error) => error === providerPending,
+    );
+
+    const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_SYNC_FAILED" },
+    });
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a missing finalized provider template as conversion delay", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    const missing = new Error("missing");
+    vi.mocked(ports.repository.getTemplate).mockResolvedValue(finalized);
+    vi.mocked(ports.provider.getTemplate).mockRejectedValue(missing);
+    vi.mocked(ports.provider.isNotFound).mockImplementation(
+      (error) => error === missing,
+    );
+
+    const result = await createTemplateOrchestrator(ports).finishSync("template-1");
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_SYNC_FAILED" },
+    });
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not retry a genuine provider failure during finish sync", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    vi.mocked(ports.provider.getTemplate).mockRejectedValue(
+      new Error("private provider diagnostic"),
+    );
+
+    const result = await createTemplateOrchestrator(ports).finishSync("template-1");
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "PROVIDER_SYNC_FAILED",
+        message: "Dropbox Sign template state could not be verified.",
+      },
+    });
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("private provider diagnostic");
+  });
+
+  it("keeps an asynchronously converting template recoverable after bounded retries", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    const providerPending = new Error("not ready");
+    vi.mocked(ports.provider.getTemplate).mockRejectedValue(providerPending);
+    vi.mocked(ports.provider.isNotFound).mockImplementation(
+      (error) => error === providerPending,
+    );
+
+    const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
+    await vi.advanceTimersByTimeAsync(999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(resultPromise).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "PROVIDER_SYNC_PENDING",
+        message:
+          "Dropbox Sign is still finishing this template. Reload the editor, then click Finish again in Dropbox Sign.",
+      },
+    });
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(5);
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(ports.repository.markAbandoned).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.mocked(ports.provider.getTemplate).mockResolvedValue({
+      providerTemplateId: "provider-1",
+      signerRoles: roles,
+      mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
+    });
+    await expect(
+      createTemplateOrchestrator(ports).finishSync("template-1"),
+    ).resolves.toMatchObject({ ok: true });
+    expect(ports.repository.finalizeDraft).toHaveBeenCalledTimes(1);
   });
 
   it("does not claim abandon success when source cleanup fails and audits the failure", async () => {

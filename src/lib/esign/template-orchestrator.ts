@@ -7,6 +7,7 @@ import {
 
 export const ESIGN_TEMPLATE_MAX_PDF_BYTES = 40 * 1024 * 1024;
 export const ESIGN_TEMPLATE_STAGING_BUCKET = "esign-staging" as const;
+const FINISH_SYNC_NOT_FOUND_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
 export type TemplateActionError = Readonly<{ code: string; message: string }>;
 export type TemplateActionResult<T> =
@@ -470,12 +471,13 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       if (!draft || draft.orgId !== access.data.orgId || !["editing", "finalized"].includes(draft.lifecycle) || !draft.providerTemplateId) {
         return failure("DRAFT_STALE", "The template draft is no longer available to finalize.");
       }
-      let provider: ProviderTemplateState;
-      try {
-        provider = await ports.provider.getTemplate(draft.providerTemplateId);
-      } catch {
-        return failure("PROVIDER_SYNC_FAILED", "Dropbox Sign template state could not be verified.");
-      }
+      const providerResult = await getFinishedProviderTemplate(
+        ports,
+        draft.providerTemplateId,
+        draft.lifecycle === "editing",
+      );
+      if (!providerResult.ok) return providerResult;
+      const provider = providerResult.data;
       const reconciled = reconcileOption(draft, provider);
       if (!reconciled.ok) return reconciled;
       try {
@@ -751,6 +753,30 @@ async function safelyDeleteStagedUpload(ports: TemplateOrchestratorPorts, path: 
     await ports.storage.deletePrivate(path);
   } catch {
     // The action still fails closed. Storage diagnostics are reported server-side by the adapter.
+  }
+}
+
+async function getFinishedProviderTemplate(
+  ports: TemplateOrchestratorPorts,
+  providerTemplateId: string,
+  allowConversionDelay: boolean,
+): Promise<TemplateActionResult<ProviderTemplateState>> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return success(await ports.provider.getTemplate(providerTemplateId));
+    } catch (error) {
+      if (!allowConversionDelay || !ports.provider.isNotFound(error)) {
+        return failure("PROVIDER_SYNC_FAILED", "Dropbox Sign template state could not be verified.");
+      }
+      const retryDelay = FINISH_SYNC_NOT_FOUND_RETRY_DELAYS_MS[attempt];
+      if (retryDelay === undefined) {
+        return failure(
+          "PROVIDER_SYNC_PENDING",
+          "Dropbox Sign is still finishing this template. Reload the editor, then click Finish again in Dropbox Sign.",
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, retryDelay));
+    }
   }
 }
 
