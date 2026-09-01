@@ -17,10 +17,13 @@ describe("DashboardMobileNav", () => {
 
     const nav = screen.getByRole("navigation", { name: "Primary" });
     expect(nav.className).toContain("py-1");
+    expect(nav.className).toContain("overflow-x-auto");
 
     const links = screen.getAllByRole("link");
     expect(links).toHaveLength(11);
     for (const link of links) {
+      expect(link.className).toContain("shrink-0");
+      expect(link.className).toContain("whitespace-nowrap");
       expect(link.className).toContain("min-h-11");
       expect(link.className).toContain("min-w-11");
     }
