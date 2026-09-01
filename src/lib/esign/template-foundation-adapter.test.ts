@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   credentials: vi.fn(),
   providerFactory: vi.fn(),
   rpc: vi.fn(),
+  from: vi.fn(),
   download: vi.fn(),
   remove: vi.fn(),
 }));
@@ -19,6 +20,7 @@ vi.mock("./dropbox-sign", () => ({ createDropboxSignProvider: mocks.providerFact
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     rpc: mocks.rpc,
+    from: mocks.from,
     storage: {
       from: (bucket: string) => ({
         download: (path: string) => mocks.download(bucket, path),
@@ -47,6 +49,7 @@ describe("foundation template staging adapter without Dropbox credentials", () =
     });
     mocks.remove.mockResolvedValue({ data: [{ name: storagePath }], error: null });
     mocks.rpc.mockResolvedValue({ data: sourceId, error: null });
+    mocks.from.mockReset();
   });
 
   it("verifies and records a canonical private upload without loading credentials or constructing Dropbox", async () => {
@@ -70,6 +73,79 @@ describe("foundation template staging adapter without Dropbox credentials", () =
     }));
     expect(mocks.credentials).not.toHaveBeenCalled();
     expect(mocks.providerFactory).not.toHaveBeenCalled();
+  });
+
+  it("lists failed cleanup for an abandoned ordinary draft as placement-restart recovery", async () => {
+    const finalizedSourceId = "123e4567-e89b-42d3-a456-426614174099";
+    function query(data: unknown[]) {
+      const chain = {
+        select: vi.fn(),
+        eq: vi.fn(),
+        or: vi.fn(),
+        in: vi.fn(),
+        is: vi.fn(),
+        not: vi.fn(),
+        order: vi.fn(),
+        then: (resolve: (value: unknown) => unknown) =>
+          Promise.resolve(resolve({ data, error: null })),
+      };
+      for (const method of [
+        chain.select,
+        chain.eq,
+        chain.or,
+        chain.in,
+        chain.is,
+        chain.not,
+        chain.order,
+      ]) {
+        method.mockReturnValue(chain);
+      }
+      return chain;
+    }
+    const activeQuery = query([]);
+    const abandonedQuery = query([
+          {
+            id: "draft-1",
+            org_id: orgId,
+            name: "Offer",
+            lifecycle_state: "abandoned",
+            staging_source_id: sourceId,
+            duplicate_of_template_id: null,
+            supersedes_template_id: null,
+          },
+          {
+            id: "finalized-1",
+            org_id: orgId,
+            name: "Finalized offer",
+            lifecycle_state: "finalized",
+            staging_source_id: finalizedSourceId,
+            duplicate_of_template_id: null,
+            supersedes_template_id: null,
+          },
+        ]);
+    mocks.from
+      .mockReturnValueOnce(activeQuery)
+      .mockReturnValueOnce(abandonedQuery)
+      .mockReturnValueOnce(
+        query([{ id: sourceId }, { id: finalizedSourceId }]),
+      );
+
+    const orchestrator = await createFoundationTemplateOrchestrator();
+
+    await expect(orchestrator.listPendingCopies()).resolves.toEqual({
+      ok: true,
+      data: [
+        {
+          id: "draft-1",
+          orgId,
+          name: "Offer",
+          lifecycle: "cleanup_attention",
+          kind: "placement_restart",
+        },
+      ],
+    });
+    expect(activeQuery.or).toHaveBeenCalledTimes(1);
+    expect(abandonedQuery.or).not.toHaveBeenCalled();
   });
 
 });

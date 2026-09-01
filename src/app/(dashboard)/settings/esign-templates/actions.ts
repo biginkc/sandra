@@ -12,6 +12,7 @@ import type {
   CreateTemplateDraftActionInput,
   PreparedTemplateUpload,
   PrepareTemplateUploadInput,
+  RestartedTemplateDraft,
   TemplateLaneResult,
 } from "./types";
 import type { TemplateOption } from "@/lib/esign/contracts";
@@ -107,6 +108,70 @@ export async function startTemplateEditorAction(templateId: string) {
   return run("esign_template_start_editor", (orchestrator) =>
     orchestrator.startEditor(templateId),
   );
+}
+
+export async function restartTemplatePlacementAction(
+  templateId: string,
+): Promise<TemplateLaneResult<RestartedTemplateDraft>> {
+  try {
+    const runtime = await createInitialTemplateRuntime();
+    const replacement = await runtime.createReplacementFromRetainedSource(
+      templateId,
+    );
+    if (!replacement.ok) return replacement;
+    if (!replacement.data.initialEditorSession) {
+      return {
+        ok: false,
+        error: {
+          code: "PLACEMENT_RESTART_IN_PROGRESS",
+          message:
+            "Another restart already created this replacement. Return to the template library to continue or clean it up.",
+        },
+      };
+    }
+
+    const orchestrator = await createFoundationTemplateOrchestrator();
+    const abandoned = await orchestrator.abandon(templateId);
+    const cleanupAttention =
+      !abandoned.ok &&
+      (abandoned.error.code.startsWith("SOURCE_CLEANUP_") ||
+        abandoned.error.code === "ABANDON_LOCAL_FAILED");
+    if (!abandoned.ok && !cleanupAttention) {
+      const compensated = await orchestrator.abandon(
+        replacement.data.templateId,
+      );
+      return compensated.ok
+        ? {
+            ok: false,
+            error: {
+              code: "PLACEMENT_RESTART_ORIGINAL_RETAINED",
+              message:
+                "The original draft could not be retired, so the replacement was removed safely.",
+            },
+          }
+        : {
+            ok: false,
+            error: {
+              code: "PLACEMENT_RESTART_COMPENSATION_FAILED",
+              message:
+                "The original and replacement drafts require cleanup attention.",
+            },
+          };
+    }
+
+    revalidatePath("/settings/esign-templates");
+    return {
+      ok: true,
+      data: {
+        templateId: replacement.data.templateId,
+        initialEditorSession: replacement.data.initialEditorSession,
+        cleanupAttention,
+      },
+    };
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_template_restart_placement" } });
+    return { ok: false, error: SAFE_FAILURE };
+  }
 }
 
 export async function beginTemplateEditRevisionAction(

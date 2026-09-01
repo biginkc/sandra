@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ProviderError } from "@/lib/errors/classes";
 
 import { ESIGN_TEMPLATE_MERGE_FIELDS } from "./template-contract";
 import {
@@ -10,6 +11,7 @@ import {
   type TemplateOrchestratorPorts,
   type TemplateUpload,
 } from "./template-orchestrator";
+import { isRestartableDraftEditorFailure } from "./provider-failure";
 
 const owner = { userId: "user-1", orgId: "org-1", isOwner: true } as const;
 const roles = [{ name: "Seller", order: 0 }, { name: "Buyer", order: 1 }] as const;
@@ -82,6 +84,7 @@ function makePorts(): TemplateOrchestratorPorts {
       deleteTemplate: vi.fn().mockResolvedValue(undefined),
       isNotFound: vi.fn().mockReturnValue(false),
       isAmbiguousMutation: vi.fn().mockReturnValue(false),
+      isRestartableEditorSessionError: vi.fn().mockReturnValue(false),
     },
     randomId: vi.fn().mockReturnValue(sourceId),
     now: vi.fn().mockReturnValue(new Date("2026-08-29T12:00:00Z")),
@@ -100,6 +103,62 @@ function addInput() {
 }
 
 describe("template action orchestration", () => {
+  it("classifies only the observed unfinished-draft Dropbox failure as restartable", () => {
+    expect(
+      isRestartableDraftEditorFailure(
+        new ProviderError(
+          "This unfinished template cannot receive a later edit URL.",
+          "dropbox_sign",
+          {
+          statusCode: 400,
+          providerCode: "bad_request",
+          retryable: false,
+          },
+        ),
+      ),
+    ).toBe(true);
+    for (const error of [
+      new ProviderError("unrelated bad request", "dropbox_sign", {
+        statusCode: 400,
+        providerCode: "bad_request",
+        retryable: false,
+      }),
+      new ProviderError("payment", "dropbox_sign", {
+        statusCode: 402,
+        providerCode: "payment_required",
+        retryable: false,
+      }),
+      new ProviderError("not found", "dropbox_sign", {
+        statusCode: 404,
+        providerCode: "not_found",
+        retryable: false,
+      }),
+      new ProviderError("conflict", "dropbox_sign", {
+        statusCode: 409,
+        providerCode: "conflict",
+        retryable: false,
+      }),
+      new ProviderError("processing", "dropbox_sign", {
+        statusCode: 422,
+        providerCode: "processing",
+        retryable: false,
+      }),
+      new ProviderError("auth", "dropbox_sign", { statusCode: 401 }),
+      new ProviderError("forbidden", "dropbox_sign", { statusCode: 403 }),
+      new ProviderError("rate limit", "dropbox_sign", { statusCode: 429 }),
+      new ProviderError("temporary", "dropbox_sign", {
+        statusCode: 503,
+        retryable: true,
+      }),
+      new ProviderError("other provider", "other", {
+        statusCode: 400,
+        providerCode: "bad_request",
+      }),
+      new Error("network"),
+    ]) {
+      expect(isRestartableDraftEditorFailure(error)).toBe(false);
+    }
+  });
   beforeEach(() => vi.clearAllMocks());
 
   it("owner-gates every operation before touching another port", async () => {
@@ -361,6 +420,46 @@ describe("template action orchestration", () => {
     const result = await createTemplateOrchestrator(ports).startEditor("template-1");
     expect(result).toEqual({ ok: true, data: { providerTemplateId: "provider-1", editUrl: "https://app.hellosign.com/editor/transient", expiresAt: 123, clientId: "client-public-1" } });
     expect(ports.repository.attachProviderId).not.toHaveBeenCalled();
+  });
+
+  it("returns a terminal restart code only for a deterministic lost draft session", async () => {
+    const ports = makePorts();
+    const lostSession = new Error("provider diagnostic must stay server-side");
+    vi.mocked(ports.provider.getFreshEditUrl).mockRejectedValue(lostSession);
+    vi.mocked(ports.provider.isRestartableEditorSessionError).mockImplementation(
+      (error) => error === lostSession,
+    );
+
+    const result = await createTemplateOrchestrator(ports).startEditor("template-1");
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "DRAFT_EDITOR_SESSION_LOST",
+        message:
+          "This unfinished draft's first editor session is no longer available. Restart field placement to continue.",
+      },
+    });
+    expect(ports.provider.getTemplate).toHaveBeenCalledWith("provider-1");
+    expect(ports.provider.isRestartableEditorSessionError).toHaveBeenCalledWith(
+      lostSession,
+    );
+    expect(ports.provider.getEmbeddedClientId).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("diagnostic");
+  });
+
+  it("keeps transient later-edit failures retryable", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.provider.getFreshEditUrl).mockRejectedValue(
+      new Error("temporary provider failure"),
+    );
+
+    const result = await createTemplateOrchestrator(ports).startEditor("template-1");
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "EDITOR_SESSION_FAILED" },
+    });
   });
 
   it("never requests an edit URL for a finalized active provider template", async () => {

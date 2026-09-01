@@ -121,7 +121,7 @@ export async function createInitialTemplateRuntime() {
       },
     );
 
-  return {
+  const runtime = {
     async listRecoveries(): Promise<
       TemplateActionResult<
         readonly (
@@ -565,8 +565,148 @@ export async function createInitialTemplateRuntime() {
           })
         : providerResult;
     },
+    async createReplacementFromRetainedSource(
+      templateId: string,
+    ): Promise<
+      TemplateActionResult<{
+        templateId: string;
+        initialEditorSession: {
+          providerTemplateId: string;
+          editUrl: string;
+          expiresAt: number | null;
+          clientId: string;
+        } | null;
+      }>
+    > {
+      if (!isOpaqueId(templateId)) {
+        return failure(
+          "PLACEMENT_RESTART_INVALID",
+          "The unfinished template reference is invalid.",
+        );
+      }
+      const { data: draft, error: draftError } = await admin
+        .from("esign_templates")
+        .select(
+          "id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,sign_template_id,staging_source_id,source_filename,source_size_bytes,source_content_type,source_sha256,staging_path,staging_deleted_at,lifecycle_state,provider_create_state,duplicate_of_template_id,supersedes_template_id,finalized_at,deleted_at,abandoned_at",
+        )
+        .eq("org_id", orgId)
+        .eq("id", templateId)
+        .maybeSingle();
+      if (
+        draftError ||
+        !draft ||
+        draft.org_id !== orgId ||
+        draft.lifecycle_state !== "editing" ||
+        draft.provider_create_state !== "attached" ||
+        !draft.sign_template_id ||
+        !draft.staging_source_id ||
+        draft.staging_path !== `${orgId}/${draft.staging_source_id}.pdf` ||
+        draft.staging_deleted_at !== null ||
+        draft.duplicate_of_template_id !== null ||
+        draft.supersedes_template_id !== null ||
+        draft.finalized_at !== null ||
+        draft.deleted_at !== null ||
+        draft.abandoned_at !== null ||
+        !draft.source_filename ||
+        !draft.source_size_bytes ||
+        draft.source_content_type !== "application/pdf" ||
+        !draft.source_sha256
+      ) {
+        return failure(
+          "PLACEMENT_RESTART_UNAVAILABLE",
+          "Only an attached unfinished template with its retained PDF can restart field placement.",
+        );
+      }
+      const signerRoles = parseSignerRoles(draft.signer_roles);
+      if (
+        signerRoles.length === 0 ||
+        !signerRoles.some((role) => role.name === draft.seller_role) ||
+        !exactFiveFields(draft.merge_field_names)
+      ) {
+        return failure(
+          "PLACEMENT_RESTART_CONTRACT_MISMATCH",
+          "The unfinished template contract could not be verified safely.",
+        );
+      }
+      let bytes: Uint8Array;
+      try {
+        const { data, error } = await admin.storage
+          .from(BUCKET)
+          .download(draft.staging_path);
+        if (error) throw error;
+        bytes = new Uint8Array(await data.arrayBuffer());
+      } catch {
+        return failure(
+          "PLACEMENT_RESTART_SOURCE_UNAVAILABLE",
+          "The retained private PDF could not be read. The original draft was not changed.",
+        );
+      }
+      const actualSha = createHash("sha256").update(bytes).digest("hex");
+      if (
+        bytes.byteLength !== draft.source_size_bytes ||
+        bytes.byteLength === 0 ||
+        bytes.byteLength > ESIGN_TEMPLATE_MAX_PDF_BYTES ||
+        !hasPdfMagic(bytes) ||
+        actualSha !== draft.source_sha256
+      ) {
+        return failure(
+          "PLACEMENT_RESTART_SOURCE_MISMATCH",
+          "The retained private PDF no longer matches the original draft. The original draft was not changed.",
+        );
+      }
+      // One retained draft gets one durable replacement reservation. Concurrent
+      // restart requests therefore converge on the same local draft and the
+      // existing provider-create claim admits only one Dropbox mutation.
+      const replacementSourceId = templateId;
+      const metadata: PreparedSourceMetadata = {
+        stagingSourceId: replacementSourceId,
+        filename: draft.source_filename,
+        size: bytes.byteLength,
+        mimeType: "application/pdf",
+        sha256: actualSha,
+      };
+      const prepared = await runtime.prepare(metadata);
+      if (!prepared.ok) return prepared;
+      try {
+        const { error } = await admin.storage
+          .from(BUCKET)
+          .upload(prepared.data.storagePath, bytes, {
+            contentType: "application/pdf",
+            upsert: false,
+          });
+        if (error) {
+          const { data: existing, error: readError } = await admin.storage
+            .from(BUCKET)
+            .download(prepared.data.storagePath);
+          if (readError) throw error;
+          const existingBytes = new Uint8Array(await existing.arrayBuffer());
+          const existingSha = createHash("sha256")
+            .update(existingBytes)
+            .digest("hex");
+          if (
+            existingBytes.byteLength !== bytes.byteLength ||
+            existingSha !== actualSha
+          ) {
+            throw error;
+          }
+        }
+      } catch {
+        return failure(
+          "PLACEMENT_RESTART_COPY_FAILED",
+          "The retained PDF could not be copied or reconciled for a safe restart. The original draft was not changed.",
+        );
+      }
+      return runtime.create({
+        source: { ...prepared.data, ...metadata },
+        name: draft.name,
+        documentType: draft.document_type,
+        signerRoles,
+        sellerRoleName: draft.seller_role,
+      });
+    },
     cleanup,
   };
+  return runtime;
 }
 
 function providerPorts(context: {

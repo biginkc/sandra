@@ -2,6 +2,7 @@
 
 import { LoaderCircleIcon, RefreshCwIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import {
   useCallback,
   useEffect,
@@ -17,6 +18,7 @@ import { requireTemplateTitle } from "@/lib/esign/template-contract";
 
 import {
   abandonTemplateDraftAction,
+  restartTemplatePlacementAction,
   startTemplateEditorAction,
   syncFinishedTemplateAction,
 } from "../../actions";
@@ -66,6 +68,10 @@ export function EmbeddedTemplateEditor({
         startEditor: () =>
           safeTemplateCallAction(startTemplateEditorAction(template.id), {
             fallbackMessage: "The editor could not be opened.",
+          }),
+        restartPlacement: () =>
+          safeTemplateCallAction(restartTemplatePlacementAction(template.id), {
+            fallbackMessage: "Field placement could not be restarted.",
           }),
         syncFinishedTemplate: (input) =>
           safeTemplateCallAction(
@@ -313,13 +319,26 @@ export function EmbeddedTemplateEditor({
                   </p>
                 )}
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setGeneration((value) => value + 1)}
-              >
-                <RefreshCwIcon data-icon="inline-start" /> Reload editor
-              </Button>
+              {state.code === "DRAFT_EDITOR_SESSION_LOST" ? (
+                <RestartPlacementButton
+                  restartPlacement={editorActions.restartPlacement}
+                  onError={(error) =>
+                    setState({
+                      status: "error",
+                      message: error.message,
+                      code: error.code,
+                    })
+                  }
+                />
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setGeneration((value) => value + 1)}
+                >
+                  <RefreshCwIcon data-icon="inline-start" /> Reload editor
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -332,6 +351,51 @@ export function EmbeddedTemplateEditor({
         </p>
       )}
     </div>
+  );
+}
+
+function RestartPlacementButton({
+  restartPlacement,
+  onError,
+}: {
+  restartPlacement: TemplateEditorActions["restartPlacement"];
+  onError(error: { code: string; message: string }): void;
+}) {
+  const router = useRouter();
+  const sessions = useInitialEditorSessionStore();
+  const [pending, startTransition] = useTransition();
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={pending}
+      onClick={() =>
+        startTransition(async () => {
+          const result = await restartPlacement();
+          if (!result.ok) {
+            onError(result.error);
+            return;
+          }
+          sessions.put(
+            result.data.templateId,
+            result.data.initialEditorSession,
+          );
+          if (result.data.cleanupAttention) {
+            toast.warning(
+              "The replacement is ready, but the template library still has cleanup to retry.",
+              { duration: Infinity },
+            );
+          }
+          router.replace(
+            `/settings/esign-templates/${result.data.templateId}/edit`,
+          );
+        })
+      }
+    >
+      <RefreshCwIcon data-icon="inline-start" />
+      {pending ? "Restarting…" : "Restart placement"}
+    </Button>
   );
 }
 

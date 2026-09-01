@@ -9,6 +9,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { ESIGN_MERGE_FIELD_NAMES, type TemplateOption, type TemplateSignerRole } from "./contracts";
 import { getEsignCredentials, configuredDropboxSignEmbeddedDomain } from "./credentials";
 import { createDropboxSignProvider } from "./dropbox-sign";
+import { isRestartableDraftEditorFailure } from "./provider-failure";
 import {
   createTemplateOrchestrator,
   type StagedTemplateSource,
@@ -109,9 +110,8 @@ export async function createFoundationTemplateOrchestrator() {
       if (error) throw error;
       const { data: abandoned, error: abandonedError } = await admin
         .from("esign_templates")
-        .select("id,org_id,name,lifecycle_state,staging_source_id,supersedes_template_id")
+        .select("id,org_id,name,lifecycle_state,staging_source_id,duplicate_of_template_id,supersedes_template_id")
         .eq("org_id", orgId)
-        .or("duplicate_of_template_id.not.is.null,supersedes_template_id.not.is.null")
         .in("lifecycle_state", ["abandoned", "finalized"])
         .not("staging_source_id", "is", null)
         .is("deleted_at", null)
@@ -136,13 +136,25 @@ export async function createFoundationTemplateOrchestrator() {
         lifecycle: row.lifecycle_state as "preparing" | "editing",
         kind: row.supersedes_template_id ? "edit_revision" as const : "copy" as const,
       }));
-      const cleanupCopies = (abandoned ?? []).flatMap((row) => row.staging_source_id && cleanupStageIds.has(row.staging_source_id) ? [{
+      const cleanupCopies = (abandoned ?? []).flatMap((row) =>
+        row.staging_source_id &&
+        cleanupStageIds.has(row.staging_source_id) &&
+        (row.lifecycle_state === "abandoned" ||
+          row.duplicate_of_template_id ||
+          row.supersedes_template_id)
+          ? [{
         id: row.id,
         orgId: row.org_id,
         name: row.name,
         lifecycle: "cleanup_attention" as const,
-        kind: row.supersedes_template_id ? "edit_revision" as const : "copy" as const,
-      }] : []);
+        kind: row.supersedes_template_id
+          ? "edit_revision" as const
+          : row.duplicate_of_template_id
+            ? "copy" as const
+            : "placement_restart" as const,
+            }]
+          : [],
+      );
       return [...activeCopies, ...cleanupCopies];
     },
 
@@ -401,6 +413,9 @@ export async function createFoundationTemplateOrchestrator() {
       isAmbiguousMutation(error) {
         return error instanceof ProviderError
           && (typeof error.details?.statusCode !== "number" || error.details.statusCode >= 500);
+      },
+      isRestartableEditorSessionError(error) {
+        return isRestartableDraftEditorFailure(error);
       },
     },
     randomId: randomUUID,

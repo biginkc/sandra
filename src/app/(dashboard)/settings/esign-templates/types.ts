@@ -41,7 +41,12 @@ export type PendingTemplateCopy = Readonly<{
   name: string;
   lifecycle:
     "preparing" | "editing" | "cleanup_attention" | "provider_attention";
-  kind?: "copy" | "edit_revision" | "source_cleanup" | "provider_create";
+  kind?:
+    | "copy"
+    | "edit_revision"
+    | "placement_restart"
+    | "source_cleanup"
+    | "provider_create";
   providerCreateState?: "claimed" | "invoking" | "unknown" | "attached";
 }>;
 
@@ -106,6 +111,12 @@ export type CreatedTemplateDraft = Readonly<{
   initialEditorSession: EmbeddedTemplateSession | null;
 }>;
 
+export type RestartedTemplateDraft = Readonly<{
+  templateId: string;
+  initialEditorSession: EmbeddedTemplateSession;
+  cleanupAttention: boolean;
+}>;
+
 export type TemplateLibraryActions = Readonly<{
   createDraft(
     input: CreateTemplateDraftInput,
@@ -137,6 +148,7 @@ export type TemplateLibraryActions = Readonly<{
 
 export type TemplateEditorActions = Readonly<{
   startEditor(): Promise<TemplateLaneResult<EmbeddedTemplateSession>>;
+  restartPlacement(): Promise<TemplateLaneResult<RestartedTemplateDraft>>;
   syncFinishedTemplate(
     input: Readonly<{ name: string }>,
   ): Promise<TemplateLaneResult<TemplateOption>>;

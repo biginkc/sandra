@@ -22,3 +22,20 @@ export function classifyProviderFailure(
   }
   return "ambiguous";
 }
+
+export function isRestartableDraftEditorFailure(error: unknown): boolean {
+  if (!(error instanceof ProviderError) || error.provider !== "dropbox_sign") {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  const identifiesUnfinishedTemplate =
+    message.includes("unfinished template") ||
+    message.includes("template is still a draft") ||
+    message.includes("template is not yet finalized");
+  return (
+    error.details?.statusCode === 400 &&
+    error.details?.providerCode === "bad_request" &&
+    error.details?.retryable !== true &&
+    identifiesUnfinishedTemplate
+  );
+}

@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   rpc: vi.fn(),
+  from: vi.fn(),
   download: vi.fn(),
+  upload: vi.fn(),
   remove: vi.fn(),
   credentials: vi.fn(),
   providerFactory: vi.fn(),
@@ -18,8 +20,13 @@ vi.mock("@/lib/auth/memberships", () => ({
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     rpc: mocks.rpc,
+    from: mocks.from,
     storage: {
-      from: () => ({ download: mocks.download, remove: mocks.remove }),
+      from: () => ({
+        download: mocks.download,
+        upload: mocks.upload,
+        remove: mocks.remove,
+      }),
     },
   }),
 }));
@@ -58,6 +65,39 @@ const initialEditorSession = {
   expiresAt: 123,
   clientId: "client",
 };
+
+function restartableDraft(templateId: string) {
+  return {
+    id: templateId,
+    org_id: "org-1",
+    name: "Offer",
+    document_type: "Purchase agreement",
+    seller_role: "Seller",
+    signer_roles: [{ name: "Seller", order: 0 }],
+    merge_field_names: [
+      "seller_name",
+      "property_address",
+      "offer_price",
+      "closing_date",
+      "earnest_money",
+    ],
+    sign_template_id: "provider-stuck",
+    staging_source_id: sourceId,
+    source_filename: "offer.pdf",
+    source_size_bytes: bytes.length,
+    source_content_type: "application/pdf",
+    source_sha256: sha256,
+    staging_path: source.storagePath,
+    staging_deleted_at: null,
+    lifecycle_state: "editing",
+    provider_create_state: "attached",
+    duplicate_of_template_id: null,
+    supersedes_template_id: null,
+    finalized_at: null,
+    deleted_at: null,
+    abandoned_at: null,
+  };
+}
 
 function successfulRpc(name: string, args: Record<string, unknown>) {
   if (name === "prepare_esign_template_source_upload")
@@ -166,6 +206,16 @@ describe("foundation initial-template runtime", () => {
       data: new Blob([bytes], { type: "application/pdf" }),
       error: null,
     });
+    mocks.upload.mockResolvedValue({ data: { path: "copied.pdf" }, error: null });
+    const query = {
+      select: vi.fn(),
+      eq: vi.fn(),
+      maybeSingle: vi.fn(),
+    };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    query.maybeSingle.mockResolvedValue({ data: null, error: null });
+    mocks.from.mockReturnValue(query);
     mocks.credentials.mockResolvedValue({
       apiKey: "secret",
       clientId: "client",
@@ -359,6 +409,162 @@ describe("foundation initial-template runtime", () => {
         },
       ],
     });
+  });
+
+  it("copies the retained private PDF into the fenced initial-create path", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = mocks.from() as {
+      maybeSingle: ReturnType<typeof vi.fn>;
+    };
+    query.maybeSingle.mockResolvedValue({
+      data: restartableDraft(templateId),
+      error: null,
+    });
+    mocks.rpc.mockImplementation(
+      async (name: string, args: Record<string, unknown>) => {
+        if (name === "verify_esign_template_source_upload") {
+          return {
+            data: [
+              {
+                outcome: "verified",
+                source_id: args.p_source_id,
+                verification_state: "verified",
+              },
+            ],
+            error: null,
+          };
+        }
+        return successfulRpc(name, args);
+      },
+    );
+
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).createReplacementFromRetainedSource(templateId);
+
+    expect(result).toEqual({
+      ok: true,
+      data: { templateId: "template-1", initialEditorSession },
+    });
+    expect(mocks.upload).toHaveBeenCalledWith(
+      `org-1/${templateId}.pdf`,
+      bytes,
+      { contentType: "application/pdf", upsert: false },
+    );
+    expect(mocks.upload.mock.calls[0]?.[0]).not.toBe(source.storagePath);
+    expect(mocks.providerCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        localTemplateId: "template-1",
+        title: "Offer",
+      }),
+    );
+    expect(JSON.stringify(mocks.rpc.mock.calls)).not.toContain(
+      initialEditorSession.editUrl,
+    );
+  });
+
+  it("reconciles a concurrent restart onto the same durable source reservation", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = mocks.from() as {
+      maybeSingle: ReturnType<typeof vi.fn>;
+    };
+    query.maybeSingle.mockResolvedValue({
+      data: restartableDraft(templateId),
+      error: null,
+    });
+    mocks.upload.mockResolvedValueOnce({
+      data: null,
+      error: new Error("object already exists"),
+    });
+    mocks.rpc.mockImplementation(
+      (name: string, args: Record<string, unknown>) =>
+        name === "verify_esign_template_source_upload"
+          ? {
+              data: [
+                {
+                  outcome: "already_verified",
+                  source_id: args.p_source_id,
+                  verification_state: "verified",
+                },
+              ],
+              error: null,
+            }
+          : successfulRpc(name, args),
+    );
+
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).createReplacementFromRetainedSource(templateId);
+
+    expect(result).toEqual({
+      ok: true,
+      data: { templateId: "template-1", initialEditorSession },
+    });
+    expect(mocks.download).toHaveBeenCalledTimes(3);
+    expect(mocks.rpc).toHaveBeenCalledWith(
+      "prepare_esign_template_source_upload",
+      expect.objectContaining({ p_source_id: templateId }),
+    );
+    expect(mocks.providerCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a conflicting object at the durable restart reservation", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = mocks.from() as {
+      maybeSingle: ReturnType<typeof vi.fn>;
+    };
+    query.maybeSingle.mockResolvedValue({
+      data: restartableDraft(templateId),
+      error: null,
+    });
+    mocks.download
+      .mockResolvedValueOnce({
+        data: new Blob([bytes], { type: "application/pdf" }),
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: new Blob([new TextEncoder().encode("%PDF-conflict")], {
+          type: "application/pdf",
+        }),
+        error: null,
+      });
+    mocks.upload.mockResolvedValueOnce({
+      data: null,
+      error: new Error("object already exists"),
+    });
+
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).createReplacementFromRetainedSource(templateId);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PLACEMENT_RESTART_COPY_FAILED" },
+    });
+    expect(mocks.providerCreate).not.toHaveBeenCalled();
+  });
+
+  it("refuses to copy a draft that is no longer in the unfinished editing state", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = mocks.from() as {
+      maybeSingle: ReturnType<typeof vi.fn>;
+    };
+    query.maybeSingle.mockResolvedValue({
+      data: { ...restartableDraft(templateId), lifecycle_state: "finalized" },
+      error: null,
+    });
+
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).createReplacementFromRetainedSource(templateId);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PLACEMENT_RESTART_UNAVAILABLE" },
+    });
+    expect(mocks.download).not.toHaveBeenCalled();
+    expect(mocks.upload).not.toHaveBeenCalled();
+    expect(mocks.providerCreate).not.toHaveBeenCalled();
   });
 
   it("constructs and invokes Dropbox only after a successful token-fenced begin", async () => {

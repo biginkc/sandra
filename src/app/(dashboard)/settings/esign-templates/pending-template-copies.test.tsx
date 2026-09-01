@@ -178,6 +178,7 @@ describe("PendingTemplateCopies", () => {
     expect(screen.queryByPlaceholderText("Provider template ID")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Reload" }));
     expect(refresh).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
   });
 
   it("continues an attached unfinished draft without invoking provider recovery", () => {
@@ -185,6 +186,25 @@ describe("PendingTemplateCopies", () => {
     render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "attached" }] }} actions={actions} />);
     fireEvent.click(screen.getByRole("button", { name: "Continue setup" }));
     expect(push).toHaveBeenCalledWith("/settings/esign-templates/template-1/edit");
+  });
+
+  it("keeps a failed attached-draft cancellation visible and retryable", async () => {
+    const actions = makeActions();
+    vi.mocked(actions.abandonDraft)
+      .mockResolvedValueOnce({ ok: false, error: { code: "ABANDON_LOCAL_FAILED", message: "The replacement is ready, but the old draft still needs cleanup." } })
+      .mockResolvedValueOnce({ ok: true, data: null });
+    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "attached" }] }} actions={actions} />);
+
+    expect(screen.getByRole("button", { name: "Continue setup" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("old draft still needs cleanup"));
+    expect(refresh).not.toHaveBeenCalled();
+
+    const retryCancel = screen.getByRole("button", { name: "Cancel" });
+    await waitFor(() => expect(retryCancel).toBeEnabled());
+    fireEvent.click(retryCancel);
+    await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    expect(actions.abandonDraft).toHaveBeenCalledTimes(2);
   });
 });
 

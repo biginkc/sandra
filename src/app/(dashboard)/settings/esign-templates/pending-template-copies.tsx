@@ -42,7 +42,7 @@ function PendingTemplateCopyRow({
   copy,
   actions,
 }: {
-  copy: { id: string; name: string; lifecycle: "preparing" | "editing" | "cleanup_attention" | "provider_attention"; kind?: "copy" | "edit_revision" | "source_cleanup" | "provider_create"; providerCreateState?: "claimed" | "invoking" | "unknown" | "attached" };
+  copy: { id: string; name: string; lifecycle: "preparing" | "editing" | "cleanup_attention" | "provider_attention"; kind?: "copy" | "edit_revision" | "placement_restart" | "source_cleanup" | "provider_create"; providerCreateState?: "claimed" | "invoking" | "unknown" | "attached" };
   actions?: TemplateLibraryActions;
 }) {
   const router = useRouter();
@@ -127,14 +127,19 @@ function PendingTemplateCopyRow({
               <RefreshCwIcon data-icon="inline-start" /> Reload
             </Button>
           ) : copy.providerCreateState === "attached" ? (
-            <Button size="sm" variant="outline" onClick={() => {
-              if (routedRef.current) return;
-              routedRef.current = true;
-              setRouted(true);
-              router.push(`/settings/esign-templates/${copy.id}/edit`);
-            }} disabled={routed}>
-              Continue setup
-            </Button>
+            <>
+              <Button size="sm" variant="outline" onClick={() => {
+                if (routedRef.current) return;
+                routedRef.current = true;
+                setRouted(true);
+                router.push(`/settings/esign-templates/${copy.id}/edit`);
+              }} disabled={routed}>
+                Continue setup
+              </Button>
+              <Button size="sm" variant="ghost" onClick={cancel} disabled={!actions || isPending || routed}>
+                <XIcon data-icon="inline-start" /> Cancel
+              </Button>
+            </>
           ) : (
             <Button size="sm" variant="outline" onClick={() => router.refresh()} disabled={isPending || routed}>
               <RefreshCwIcon data-icon="inline-start" /> Reload
