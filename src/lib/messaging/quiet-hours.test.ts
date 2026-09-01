@@ -76,39 +76,40 @@ describe("checkQuietHours", () => {
 
   // US territories previously fell through STATE_TO_TZ as unmapped and
   // failed closed (unknown_state) on every property — not a window
-  // block, a total refusal to send. Guam/CNMI (Pacific/Guam, ChST =
-  // UTC+10) and Puerto Rico (America/Puerto_Rico, AST = UTC-4) below.
-  it("returns ok for 18:00 ChST in Guam (08:00Z)", () => {
-    const result = checkQuietHours("GU", new Date("2026-06-15T08:00:00Z"));
+  // block, a total refusal to send. Table-driven so all five codes are
+  // independently protected: an earlier version of this test covered
+  // only GU and PR, so removing AS, MP, or VI from STATE_TO_TZ left every
+  // test green (see the per-code mutation check this file's PR describes).
+  // Each zone's 12:00-local and 23:00-local instants below were computed
+  // directly from its fixed UTC offset (none of the five observe DST) and
+  // verified against Node's Intl before being hardcoded here.
+  const TERRITORY_CASES: Array<{
+    code: string;
+    zone: string;
+    openUtc: string;
+    closedUtc: string;
+  }> = [
+    { code: "GU", zone: "Pacific/Guam", openUtc: "2026-06-15T02:00:00Z", closedUtc: "2026-06-15T13:00:00Z" },
+    { code: "MP", zone: "Pacific/Saipan", openUtc: "2026-06-15T02:00:00Z", closedUtc: "2026-06-15T13:00:00Z" },
+    { code: "AS", zone: "Pacific/Pago_Pago", openUtc: "2026-06-15T23:00:00Z", closedUtc: "2026-06-16T10:00:00Z" },
+    { code: "PR", zone: "America/Puerto_Rico", openUtc: "2026-06-15T16:00:00Z", closedUtc: "2026-06-16T03:00:00Z" },
+    { code: "VI", zone: "America/St_Thomas", openUtc: "2026-06-15T16:00:00Z", closedUtc: "2026-06-16T03:00:00Z" },
+  ];
+
+  it.each(TERRITORY_CASES)("$code ($zone): ok at 12:00 local", ({ code, zone, openUtc }) => {
+    const result = checkQuietHours(code, new Date(openUtc));
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.zone).toBe("Pacific/Guam");
-      expect(result.localTime).toBe("18:00");
-    }
-  });
-
-  it("blocks at 23:00 ChST in Guam (13:00Z)", () => {
-    const result = checkQuietHours("GU", new Date("2026-06-15T13:00:00Z"));
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.reason).toBe("outside_window");
-      expect(result.localTime).toBe("23:00");
-    }
-  });
-
-  it("returns ok for 12:00 AST in Puerto Rico (16:00Z)", () => {
-    const result = checkQuietHours("PR", new Date("2026-06-15T16:00:00Z"));
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.zone).toBe("America/Puerto_Rico");
+      expect(result.zone).toBe(zone);
       expect(result.localTime).toBe("12:00");
     }
   });
 
-  it("blocks at 23:00 AST in Puerto Rico (03:00Z next day)", () => {
-    const result = checkQuietHours("PR", new Date("2026-06-16T03:00:00Z"));
+  it.each(TERRITORY_CASES)("$code ($zone): blocks at 23:00 local", ({ code, zone, closedUtc }) => {
+    const result = checkQuietHours(code, new Date(closedUtc));
     expect(result.ok).toBe(false);
     if (!result.ok) {
+      expect(result.zone).toBe(zone);
       expect(result.reason).toBe("outside_window");
       expect(result.localTime).toBe("23:00");
     }
