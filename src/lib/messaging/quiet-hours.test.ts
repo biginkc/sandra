@@ -73,4 +73,50 @@ describe("checkQuietHours", () => {
     expect(unmapped.ok).toBe(false);
     if (!unmapped.ok) expect(unmapped.reason).toBe("unknown_state");
   });
+
+  // US territories previously fell through STATE_TO_TZ as unmapped and
+  // failed closed (unknown_state) on every property — not a window
+  // block, a total refusal to send. Guam/CNMI (Pacific/Guam, ChST =
+  // UTC+10) and Puerto Rico (America/Puerto_Rico, AST = UTC-4) below.
+  it("returns ok for 18:00 ChST in Guam (08:00Z)", () => {
+    const result = checkQuietHours("GU", new Date("2026-06-15T08:00:00Z"));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.zone).toBe("Pacific/Guam");
+      expect(result.localTime).toBe("18:00");
+    }
+  });
+
+  it("blocks at 23:00 ChST in Guam (13:00Z)", () => {
+    const result = checkQuietHours("GU", new Date("2026-06-15T13:00:00Z"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("outside_window");
+      expect(result.localTime).toBe("23:00");
+    }
+  });
+
+  it("returns ok for 12:00 AST in Puerto Rico (16:00Z)", () => {
+    const result = checkQuietHours("PR", new Date("2026-06-15T16:00:00Z"));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.zone).toBe("America/Puerto_Rico");
+      expect(result.localTime).toBe("12:00");
+    }
+  });
+
+  it("blocks at 23:00 AST in Puerto Rico (03:00Z next day)", () => {
+    const result = checkQuietHours("PR", new Date("2026-06-16T03:00:00Z"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("outside_window");
+      expect(result.localTime).toBe("23:00");
+    }
+  });
+
+  it("still returns unknown_state for an unmapped code after the territory additions (fail-closed default intact)", () => {
+    const result = checkQuietHours("XX", MID_DAY);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("unknown_state");
+  });
 });
