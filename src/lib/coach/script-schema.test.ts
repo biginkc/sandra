@@ -27,8 +27,10 @@ const FORBIDDEN_ESIGN_PHRASES = [
 
 function normalizeForPhraseScan(value: string): string {
   return value
+    .normalize("NFKC") // folds fullwidth/compatibility punctuation (e.g. U+FF0D fullwidth hyphen) to ASCII
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2") // camelCase word boundary -> space, before lowercasing
     .toLowerCase()
-    .replace(/[-_‐-―]/g, " ") // hyphen, underscore, and every unicode dash (en/em dash included)
+    .replace(/[-_‐-―]/g, " ") // hyphen, underscore, and every unicode dash NFKC doesn't fold (en/em dash included)
     .replace(/\s+/g, " ");
 }
 
@@ -182,7 +184,7 @@ describe("assertValidClosrScript", () => {
     // spellings can't dodge the check either.
     const normalizedBlob = [...collectAllStrings(scriptJson), ...collectAllStrings(sectionsJson)]
       .map(normalizeForPhraseScan)
-      .join("   ");
+      .join("   ");
     for (const phrase of FORBIDDEN_ESIGN_PHRASES) {
       expect(normalizedBlob, `forbidden phrase "${phrase}" found somewhere in the script or section manifest`).not.toContain(phrase);
     }
