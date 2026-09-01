@@ -25,10 +25,22 @@ const { router, toast } = vi.hoisted(() => ({
   router: { push: vi.fn(), replace: vi.fn(), refresh: vi.fn() },
   toast: { warning: vi.fn() },
 }));
+const navigationBoundary = vi.hoisted(() => ({
+  install: vi.fn(
+    (iframe: HTMLIFrameElement, onBeforeReturn?: () => void) => {
+      void iframe;
+      void onBeforeReturn;
+      return vi.fn();
+    },
+  ),
+}));
 vi.mock("next/navigation", () => ({
   useRouter: () => router,
 }));
 vi.mock("sonner", () => ({ toast }));
+vi.mock("./embedded-editor-navigation-history", () => ({
+  installEmbeddedEditorNavigationBoundary: navigationBoundary.install,
+}));
 
 describe("EmbeddedTemplateEditor", () => {
   afterEach(() => vi.clearAllMocks());
@@ -388,7 +400,7 @@ describe("EmbeddedTemplateEditor", () => {
     );
   });
 
-  it("hands the stored create-response session to the editor exactly once", async () => {
+  it("restores the taken create-response session only for browser history return", async () => {
     const first = makeClient();
     const actions = makeActions();
     const loadClient = vi.fn().mockResolvedValue(first.client);
@@ -431,6 +443,29 @@ describe("EmbeddedTemplateEditor", () => {
     );
     expect(actions.startEditor).not.toHaveBeenCalled();
     expect(loadClient).toHaveBeenCalledWith("client-initial");
+
+    const preserveForHistoryReturn = navigationBoundary.install.mock.calls.at(-1)?.[1];
+    expect(preserveForHistoryReturn).toEqual(expect.any(Function));
+    if (!preserveForHistoryReturn) throw new Error("Missing history return callback");
+    preserveForHistoryReturn();
+    view.rerender(
+      <InitialEditorSessionProvider>
+        <Seed />
+      </InitialEditorSessionProvider>,
+    );
+    view.rerender(
+      <InitialEditorSessionProvider>
+        <Seed />
+        <InitialSessionEmbeddedTemplateEditor
+          template={template}
+          actions={actions}
+          loadClient={loadClient}
+        />
+      </InitialEditorSessionProvider>,
+    );
+
+    await waitFor(() => expect(first.client.open).toHaveBeenCalledTimes(2));
+    expect(actions.startEditor).not.toHaveBeenCalled();
   });
 
   it("syncs finish before close, but abandons cancel only after close", async () => {
@@ -491,7 +526,11 @@ function makeClient() {
   const client: EmbeddedTemplateClient = {
     on: vi.fn((event, listener) => listeners.set(event, listener as never)),
     off: vi.fn(),
-    open: vi.fn(),
+    open: vi.fn((_url, options) => {
+      const iframe = document.createElement("iframe");
+      iframe.title = "Dropbox Sign template editor";
+      options.container.append(iframe);
+    }),
     close: vi.fn(),
   };
   return { client, listeners };

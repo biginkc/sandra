@@ -15,6 +15,12 @@ const mocks = vi.hoisted(() => ({
     open: vi.fn(),
     close: vi.fn(),
   },
+  removeNavigationBoundary: vi.fn(),
+  installNavigationBoundary: vi.fn(),
+}));
+
+vi.mock("./embedded-editor-navigation-history", () => ({
+  installEmbeddedEditorNavigationBoundary: mocks.installNavigationBoundary,
 }));
 
 vi.mock("hellosign-embedded", () => ({
@@ -33,21 +39,35 @@ describe("mountEmbeddedTemplateClient", () => {
     const client: EmbeddedTemplateClient = {
       on: vi.fn((event, listener) => { calls.push(`on:${event}`); listeners.set(event, listener as never); }),
       off: vi.fn((event) => { calls.push(`off:${event}`); }),
-      open: vi.fn(() => { calls.push("open"); }),
+      open: vi.fn(() => {
+        calls.push("open");
+      }),
       close: vi.fn(() => { calls.push("close"); }),
     };
     const container = {
       querySelector: vi.fn().mockReturnValue(null),
     } as unknown as HTMLElement;
+    const iframe = {} as HTMLIFrameElement;
+    container.querySelector = vi.fn().mockReturnValue(iframe);
+    mocks.installNavigationBoundary.mockReturnValue(
+      mocks.removeNavigationBoundary,
+    );
+    const onBeforeHistoryReturn = vi.fn();
     const cleanup = mountEmbeddedTemplateClient({
       client,
       session: { providerTemplateId: "provider-1", editUrl: "https://edit", expiresAt: 123, clientId: "client-1" },
       container,
       skipDomainVerification: false,
       listeners: { onFinish: vi.fn(), onCancel: vi.fn(), onClose: vi.fn(), onError: vi.fn() },
+      onBeforeHistoryReturn,
     });
     expect(calls.slice(0, 5)).toEqual(["on:finish", "on:cancel", "on:close", "on:error", "open"]);
+    expect(mocks.installNavigationBoundary).toHaveBeenCalledWith(
+      iframe,
+      onBeforeHistoryReturn,
+    );
     cleanup();
+    expect(mocks.removeNavigationBoundary).toHaveBeenCalledTimes(1);
     expect(calls.at(-1)).toBe("close");
     cleanup();
     expect(client.close).toHaveBeenCalledTimes(1);

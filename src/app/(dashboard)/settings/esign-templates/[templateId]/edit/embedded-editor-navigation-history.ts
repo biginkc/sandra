@@ -37,6 +37,7 @@ type HistorySnapshot = Readonly<{
  */
 export function installEmbeddedEditorNavigationBoundary(
   iframe: HTMLIFrameElement,
+  onBeforeReturnToLibrary?: () => void,
   targetWindow: NavigationWindow = window as NavigationWindow,
 ): () => void {
   const navigation = targetWindow.navigation;
@@ -47,6 +48,9 @@ export function installEmbeddedEditorNavigationBoundary(
     typeof navigation.entries !== "function" ||
     typeof navigation.traverseTo !== "function"
   ) {
+    // Safe no-op outside Chromium's current Navigation API coverage. Firefox
+    // before 147 and Safari before 26.2 do not expose the API this boundary
+    // needs; their ordinary browser history behavior remains unchanged.
     return () => undefined;
   }
 
@@ -56,7 +60,7 @@ export function installEmbeddedEditorNavigationBoundary(
   );
   const returnEntry = storedReturnEntryKey
     ? entries.find((entry) => entry.key === storedReturnEntryKey)
-    : entries.find((entry) => entry.index === currentEntry.index - 1);
+    : findPrecedingTemplateLibraryEntry(entries, currentEntry);
   if (!returnEntry?.url) return () => undefined;
 
   const editorUrl = new URL(targetWindow.location.href);
@@ -81,6 +85,9 @@ export function installEmbeddedEditorNavigationBoundary(
     ) {
       return;
     }
+    // Back/Forward restoration can leave a real top-level destination ahead
+    // of the editor. Pushing guards here would truncate that Forward history.
+    if (hasLegitimateForwardEntry(navigation, editorUrl)) return;
     // Two adjacent top-level entries guarantee the first Back dispatches a
     // top-level popstate. A single entry can land directly on a child-frame
     // entry, where Chrome dispatches popstate only inside the provider frame.
@@ -123,6 +130,7 @@ export function installEmbeddedEditorNavigationBoundary(
     // traverseTo nondeterministically.
     traversalTimer = targetWindow.setTimeout(() => {
       try {
+        onBeforeReturnToLibrary?.();
         void navigation.traverseTo(returnEntry.key).finished.catch(() => {
           traversing = false;
         });
@@ -133,7 +141,6 @@ export function installEmbeddedEditorNavigationBoundary(
   };
 
   targetWindow.addEventListener("popstate", handlePopState);
-  targetWindow.addEventListener("pageshow", arm);
   iframe.addEventListener("load", arm);
   animationFrame = targetWindow.requestAnimationFrame(watchHistory);
 
@@ -142,9 +149,38 @@ export function installEmbeddedEditorNavigationBoundary(
     targetWindow.cancelAnimationFrame(animationFrame);
     targetWindow.clearTimeout(traversalTimer);
     targetWindow.removeEventListener("popstate", handlePopState);
-    targetWindow.removeEventListener("pageshow", arm);
     iframe.removeEventListener("load", arm);
   };
+}
+
+function findPrecedingTemplateLibraryEntry(
+  entries: readonly NavigationEntry[],
+  currentEntry: NavigationEntry,
+): NavigationEntry | undefined {
+  return entries.findLast((entry) => {
+    if (entry.index >= currentEntry.index || !entry.url) return false;
+    try {
+      return new URL(entry.url).pathname === TEMPLATE_LIBRARY_PATH;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function hasLegitimateForwardEntry(
+  navigation: AppNavigation,
+  editorUrl: URL,
+): boolean {
+  const currentIndex = navigation.currentEntry?.index;
+  if (currentIndex === undefined) return false;
+  return navigation.entries().some((entry) => {
+    if (entry.index <= currentIndex || !entry.url) return false;
+    try {
+      return new URL(entry.url).href !== editorUrl.href;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function readStoredReturnEntryKey(state: unknown): string | null {

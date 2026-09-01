@@ -75,6 +75,7 @@ export function mountEmbeddedTemplateClient(input: {
   container: HTMLElement;
   skipDomainVerification: boolean;
   listeners: EmbeddedTemplateListeners;
+  onBeforeHistoryReturn?: () => void;
 }): () => void {
   let closed = false;
   const subscriptions = [
@@ -95,7 +96,10 @@ export function mountEmbeddedTemplateClient(input: {
   });
   const iframe = input.container.querySelector("iframe");
   const removeNavigationBoundary = iframe
-    ? installEmbeddedEditorNavigationBoundary(iframe)
+    ? installEmbeddedEditorNavigationBoundary(
+        iframe,
+        input.onBeforeHistoryReturn,
+      )
     : () => undefined;
 
   return () => {

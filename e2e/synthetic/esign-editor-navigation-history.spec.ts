@@ -4,6 +4,7 @@ import { expect, test } from "@playwright/test";
 import * as esbuild from "esbuild";
 
 let harnessBundle = "";
+const pageErrors = new WeakMap<import("@playwright/test").Page, Error[]>();
 
 test.beforeAll(() => {
   const result = esbuild.buildSync({
@@ -24,11 +25,10 @@ test.beforeAll(() => {
   harnessBundle = result.outputFiles[0].text;
 });
 
-test("Back returns to the template library and Forward reopens the editor after provider iframe navigation", async ({
-  page,
-}) => {
-  const pageErrors: Error[] = [];
-  page.on("pageerror", (error) => pageErrors.push(error));
+test.beforeEach(async ({ page }) => {
+  const errors: Error[] = [];
+  pageErrors.set(page, errors);
+  page.on("pageerror", (error) => errors.push(error));
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.hostname === "provider.test") {
@@ -40,97 +40,117 @@ test("Back returns to the template library and Forward reopens the editor after 
       });
       return;
     }
-
     await route.fulfill({
       contentType: "text/html",
-      body:
-        url.pathname === "/settings/esign-templates/template-1/edit"
-          ? `<h1>Template editor</h1><a href="/settings/esign-templates">Template library</a><div id="editor-container"></div><script>${harnessBundle}<\/script>`
-          : `<h1>Template library</h1><a href="/settings/esign-templates/template-1/edit">Edit template</a>`,
+      body: `<main id="app"></main><script>${harnessBundle}<\/script>`,
     });
   });
-
   await page.goto("https://sandra.test/settings/esign-templates");
-  await page.getByRole("link", { name: "Edit template" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Template editor" }),
-  ).toBeVisible();
-  const providerFrame = page.frameLocator(
-    'iframe[title="Dropbox Sign template editor"]',
-  );
-  await expect(
-    providerFrame.getByText("Provider editor is usable"),
-  ).toBeVisible();
-  const guardSequenceBeforeProviderNavigation =
-    await waitForNavigationBoundary(page);
+});
+
+test.afterEach(async ({ page }) => {
+  expect(pageErrors.get(page)).toEqual([]);
+});
+
+test("Forward reuses the take-once session for an unfinished initial draft", async ({
+  page,
+}) => {
+  await page.getByRole("link", { name: "Create unfinished draft" }).click();
+  await expectEditorReady(page);
+  const guardBeforeProviderNavigation = await waitForNavigationBoundary(page);
   const providerPage = page
     .frames()
     .find((frame) => new URL(frame.url()).hostname === "provider.test");
   expect(providerPage).toBeDefined();
   await providerPage?.evaluate(() => {
     localStorage.setItem("placed-field", "Seller signature placed");
-    const placedField = document.querySelector("#placed-field");
-    if (placedField) placedField.textContent = "Seller signature placed";
-    history.pushState({ providerStep: 1 }, "", "/editor/fields");
-    history.pushState({ providerStep: 2 }, "", "/editor/roles");
+    document.querySelector("#placed-field")!.textContent =
+      "Seller signature placed";
+    history.pushState({ providerStep: 1 }, "", `${location.pathname}/fields`);
+    history.pushState({ providerStep: 2 }, "", `${location.pathname}/roles`);
   });
   await expect
-    .poll(() => providerPage?.url())
-    .toBe("https://provider.test/editor/roles");
-  await expect
     .poll(() => readNavigationBoundarySequence(page))
-    .toBeGreaterThan(guardSequenceBeforeProviderNavigation);
+    .toBeGreaterThan(guardBeforeProviderNavigation);
 
   await page.evaluate(() => history.back());
-  await expect(page).toHaveURL("https://sandra.test/settings/esign-templates");
+  await expectLibrary(page);
+  await page.evaluate(() => history.forward());
+
+  await expectEditorReady(page);
   await expect(
-    page.getByRole("heading", { name: "Template library" }),
+    page
+      .frameLocator('iframe[title="Dropbox Sign template editor"]')
+      .getByText("Seller signature placed"),
+  ).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & {
+            __startEditorAttempts?: Record<string, number>;
+          }).__startEditorAttempts?.["template-1"] ?? 0,
+      ),
+    )
+    .toBe(0);
+});
+
+test("Back restoration preserves the legitimate Forward destination", async ({
+  page,
+}) => {
+  await page.getByRole("link", { name: "Edit finalized template" }).click();
+  await expectEditorReady(page);
+  await waitForNavigationBoundary(page);
+  await page.getByRole("link", { name: "Another route" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Another route" }),
   ).toBeVisible();
 
+  await page.evaluate(() => history.back());
+  await expectEditorReady(page);
   await page.evaluate(() => history.forward());
+
+  await expect(page).toHaveURL("https://sandra.test/another-route");
+  await expect(
+    page.getByRole("heading", { name: "Another route" }),
+  ).toBeVisible();
+});
+
+test("Back from a restarted replacement returns to the library", async ({
+  page,
+}) => {
+  await page.getByRole("link", { name: "Create unfinished draft" }).click();
+  await expectEditorReady(page);
+  await waitForNavigationBoundary(page);
+  await page.getByRole("button", { name: "Restart placement" }).click();
   await expect(page).toHaveURL(
-    "https://sandra.test/settings/esign-templates/template-1/edit",
+    "https://sandra.test/settings/esign-templates/replacement-1/edit",
   );
+  await expectEditorReady(page);
+  await waitForNavigationBoundary(page);
+
+  await page.evaluate(() => history.back());
+  await expectLibrary(page);
+});
+
+async function expectEditorReady(page: import("@playwright/test").Page) {
   await expect(
     page.getByRole("heading", { name: "Template editor" }),
   ).toBeVisible();
   await expect(
-    providerFrame.getByText("Provider editor is usable"),
+    page
+      .frameLocator('iframe[title="Dropbox Sign template editor"]')
+      .getByText("Provider editor is usable"),
   ).toBeVisible();
-  await expect(
-    providerFrame.getByText("Seller signature placed"),
-  ).toBeVisible();
-  await waitForNavigationBoundary(page);
+}
 
-  await page.getByRole("link", { name: "Template library" }).click();
+async function expectLibrary(page: import("@playwright/test").Page) {
   await expect(page).toHaveURL("https://sandra.test/settings/esign-templates");
-  await page.evaluate(() => history.back());
-  await expect(page).toHaveURL(
-    "https://sandra.test/settings/esign-templates/template-1/edit",
-  );
   await expect(
-    providerFrame.getByText("Provider editor is usable"),
+    page.getByRole("heading", { name: "Template library" }),
   ).toBeVisible();
-  await expect(
-    providerFrame.getByText("Seller signature placed"),
-  ).toBeVisible();
-  await waitForNavigationBoundary(page);
-
-  await page.evaluate(() => history.back());
-  await expect(page).toHaveURL("https://sandra.test/settings/esign-templates");
-  await page.evaluate(() => history.forward());
-  await expect(page).toHaveURL(
-    "https://sandra.test/settings/esign-templates/template-1/edit",
-  );
-  await expect(
-    providerFrame.getByText("Provider editor is usable"),
-  ).toBeVisible();
-  await expect(
-    providerFrame.getByText("Seller signature placed"),
-  ).toBeVisible();
-  await waitForNavigationBoundary(page);
-  expect(pageErrors).toEqual([]);
-});
+}
 
 async function waitForNavigationBoundary(
   page: import("@playwright/test").Page,
@@ -145,9 +165,6 @@ async function readNavigationBoundarySequence(
   page: import("@playwright/test").Page,
 ): Promise<number> {
   return page.evaluate(() => {
-    if (typeof history.state?.__sandraEsignEditorReturnEntry !== "string") {
-      return 0;
-    }
     const sequence = history.state?.__sandraEsignEditorGuardSequence;
     return typeof sequence === "number" ? sequence : 0;
   });
