@@ -76,6 +76,16 @@ export const STATE_TO_TZ: Record<string, string> = {
   WV: "America/New_York",
   WI: "America/Chicago",
   WY: "America/Denver",
+
+  // US territories — previously unmapped, so any property with a
+  // territory `state` fell through STATE_TO_TZ[state] === undefined and
+  // failed closed as unknown_state (checkQuietHours refuses to send
+  // rather than guess a zone). Alpha order, matching the block above.
+  AS: "Pacific/Pago_Pago", // American Samoa
+  GU: "Pacific/Guam",
+  MP: "Pacific/Saipan", // Northern Mariana Islands — same UTC+10 offset as Guam, distinct IANA zone
+  PR: "America/Puerto_Rico",
+  VI: "America/St_Thomas", // US Virgin Islands
 };
 
 export type QuietHoursCheck =
