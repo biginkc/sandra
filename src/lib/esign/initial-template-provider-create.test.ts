@@ -339,7 +339,10 @@ describe("initial template provider-create CAS", () => {
       data: {
         templateId: "template-1",
         providerTemplateId: "provider-1",
-        initialEditorSession: null,
+        // The invoke succeeded, so the captured first editor session must
+        // survive response-loss reconciliation (it is the only edit URL that
+        // works before Dropbox Sign finishes processing the draft).
+        initialEditorSession,
       },
     });
     expect(p.provider.invoke).toHaveBeenCalledTimes(1);

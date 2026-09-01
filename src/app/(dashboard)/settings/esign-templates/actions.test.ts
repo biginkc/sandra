@@ -151,6 +151,40 @@ describe("template server action boundary", () => {
     expect(mocks.factory).not.toHaveBeenCalled();
   });
 
+  it("returns the provider's initial editor session through the Server Action", async () => {
+    const initialEditorSession = {
+      providerTemplateId: "provider-1",
+      editUrl: "https://app.hellosign.com/editor/initial",
+      expiresAt: 1_999_999_999,
+      clientId: "client-1",
+    };
+    mocks.createInitial.mockResolvedValueOnce({
+      ok: true,
+      data: { templateId: "template-1", initialEditorSession },
+    });
+    const result = await createTemplateDraftAction({
+      name: "Offer",
+      documentType: "Purchase agreement",
+      source: {
+        stagingSourceId: "123e4567-e89b-42d3-a456-426614174000",
+        bucket: "esign-staging",
+        storagePath: "org-1/123e4567-e89b-42d3-a456-426614174000.pdf",
+        filename: "offer.pdf",
+        size: 14,
+        mimeType: "application/pdf",
+        sha256: "a".repeat(64),
+        origin: "upload",
+      },
+      signerRoles: [{ name: "Seller", order: 0 }],
+      sellerRoleName: "Seller",
+      mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
+    });
+    expect(result).toEqual({
+      ok: true,
+      data: { templateId: "template-1", initialEditorSession },
+    });
+  });
+
   it("passes only the small staged reference through the Server Action", async () => {
     const result = await createTemplateDraftAction({
       name: "Offer",

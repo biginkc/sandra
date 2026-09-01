@@ -9,7 +9,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { TemplateEditorActions } from "../../types";
 import type { EmbeddedTemplateClient } from "./embedded-template-client";
-import { EmbeddedTemplateEditor } from "./embedded-template-editor";
+import {
+  EmbeddedTemplateEditor,
+  InitialSessionEmbeddedTemplateEditor,
+} from "./embedded-template-editor";
+import {
+  InitialEditorSessionProvider,
+  useInitialEditorSessionStore,
+} from "../../initial-editor-session";
+
+const FUTURE_EXPIRES_AT = Math.floor(Date.now() / 1000) + 3600;
 
 const router = { push: vi.fn(), refresh: vi.fn() };
 vi.mock("next/navigation", () => ({
@@ -186,7 +195,7 @@ describe("EmbeddedTemplateEditor", () => {
         initialSession={{
           providerTemplateId: "provider-1",
           editUrl: "https://app.hellosign.com/editor/initial",
-          expiresAt: 123,
+          expiresAt: FUTURE_EXPIRES_AT,
           clientId: "client-initial",
         }}
       />,
@@ -211,6 +220,78 @@ describe("EmbeddedTemplateEditor", () => {
     await waitFor(() => expect(second.client.open).toHaveBeenCalled());
     expect(actions.startEditor).toHaveBeenCalledTimes(1);
     expect(loadClient).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards an expired initial session and requests a fresh one instead", async () => {
+    const fresh = makeClient();
+    const actions = makeActions();
+    const loadClient = vi.fn().mockResolvedValue(fresh.client);
+
+    render(
+      <EmbeddedTemplateEditor
+        template={template}
+        actions={actions}
+        loadClient={loadClient}
+        initialSession={{
+          providerTemplateId: "provider-1",
+          editUrl: "https://app.hellosign.com/editor/expired",
+          expiresAt: 123,
+          clientId: "client-initial",
+        }}
+      />,
+    );
+
+    await waitFor(() => expect(fresh.client.open).toHaveBeenCalled());
+    expect(actions.startEditor).toHaveBeenCalledTimes(1);
+    expect(fresh.client.open).not.toHaveBeenCalledWith(
+      "https://app.hellosign.com/editor/expired",
+      expect.any(Object),
+    );
+  });
+
+  it("hands the stored create-response session to the editor exactly once", async () => {
+    const first = makeClient();
+    const actions = makeActions();
+    const loadClient = vi.fn().mockResolvedValue(first.client);
+    const storedSession = {
+      providerTemplateId: "provider-1",
+      editUrl: "https://app.hellosign.com/editor/initial",
+      expiresAt: FUTURE_EXPIRES_AT,
+      clientId: "client-initial",
+    };
+    function Seed() {
+      const store = useInitialEditorSessionStore();
+      return (
+        <button onClick={() => store.put(template.id, storedSession)}>
+          Seed session
+        </button>
+      );
+    }
+    const view = render(
+      <InitialEditorSessionProvider>
+        <Seed />
+      </InitialEditorSessionProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Seed session" }));
+    view.rerender(
+      <InitialEditorSessionProvider>
+        <Seed />
+        <InitialSessionEmbeddedTemplateEditor
+          template={template}
+          actions={actions}
+          loadClient={loadClient}
+        />
+      </InitialEditorSessionProvider>,
+    );
+
+    await waitFor(() =>
+      expect(first.client.open).toHaveBeenCalledWith(
+        "https://app.hellosign.com/editor/initial",
+        expect.any(Object),
+      ),
+    );
+    expect(actions.startEditor).not.toHaveBeenCalled();
+    expect(loadClient).toHaveBeenCalledWith("client-initial");
   });
 
   it("syncs finish before close, but abandons cancel only after close", async () => {

@@ -37,6 +37,9 @@ import {
 import { MergeFieldLegend } from "./merge-field-legend";
 import { TemplateFileStrip } from "./template-file-strip";
 
+// Dropbox Sign reports expires_at as an epoch-seconds Unix timestamp.
+const INITIAL_SESSION_EXPIRY_MARGIN_SECONDS = 30;
+
 type EditorState =
   | { status: "unavailable" }
   | { status: "loading" }
@@ -137,8 +140,16 @@ export function EmbeddedTemplateEditor({
     let disposed = false;
     setState({ status: "loading" });
     terminalReason.current = null;
-    const suppliedSession = generation === 0 ? initialSessionRef.current : null;
+    const candidateSession =
+      generation === 0 ? initialSessionRef.current : null;
     initialSessionRef.current = null;
+    const suppliedSession =
+      candidateSession &&
+      (candidateSession.expiresAt === null ||
+        candidateSession.expiresAt >
+          Date.now() / 1000 + INITIAL_SESSION_EXPIRY_MARGIN_SECONDS)
+        ? candidateSession
+        : null;
     const sessionRequest = suppliedSession
       ? Promise.resolve({ ok: true as const, data: suppliedSession })
       : editorActions.startEditor();

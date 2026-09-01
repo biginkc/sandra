@@ -2,7 +2,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { AddTemplateDialog } from "./add-template-dialog";
-import { InitialEditorSessionProvider } from "./initial-editor-session";
+import {
+  InitialEditorSessionProvider,
+  useInitialEditorSessionStore,
+} from "./initial-editor-session";
 import { ESIGN_MERGE_FIELD_NAMES, type TemplateLibraryActions } from "./types";
 
 const push = vi.fn();
@@ -132,6 +135,55 @@ describe("AddTemplateDialog", () => {
       }),
     );
     expect(push).toHaveBeenCalledWith("/settings/esign-templates/local-1/edit");
+  });
+
+  it("stores the create-response editor session for the new template's editor", async () => {
+    const initialEditorSession = {
+      providerTemplateId: "provider-1",
+      editUrl: "https://app.hellosign.com/editor/initial",
+      expiresAt: 1_999_999_999,
+      clientId: "client-initial",
+    };
+    const createDraft = vi.fn().mockResolvedValue({
+      ok: true,
+      data: { templateId: "local-1", initialEditorSession },
+    });
+    const taken: Array<unknown> = [];
+    function TakeProbe() {
+      const store = useInitialEditorSessionStore();
+      return (
+        <button onClick={() => taken.push(store.take("local-1"))}>
+          Probe take
+        </button>
+      );
+    }
+    render(
+      <InitialEditorSessionProvider>
+        <AddTemplateDialog actions={makeActions({ createDraft })} />
+        <TakeProbe />
+      </InitialEditorSessionProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Add template" }));
+    fireEvent.change(screen.getByLabelText("Template name"), {
+      target: { value: "Offer" },
+    });
+    fireEvent.change(screen.getByLabelText("Upload PDF"), {
+      target: {
+        files: [
+          new File(["%PDF-1.7"], "offer.pdf", { type: "application/pdf" }),
+        ],
+      },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Upload and place fields" }),
+    );
+    await waitFor(() =>
+      expect(push).toHaveBeenCalledWith("/settings/esign-templates/local-1/edit"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Probe take" }));
+    expect(taken).toEqual([initialEditorSession]);
+    fireEvent.click(screen.getByRole("button", { name: "Probe take" }));
+    expect(taken[1]).toBeNull();
   });
 
   it("aborts the active upload attempt when the dialog is canceled", async () => {

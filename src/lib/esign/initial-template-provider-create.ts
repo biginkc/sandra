@@ -249,7 +249,7 @@ export async function runInitialProviderCreate(
           return success({
             templateId: replay.templateId,
             providerTemplateId,
-            initialEditorSession: null,
+            initialEditorSession,
           });
         }
       } catch {
