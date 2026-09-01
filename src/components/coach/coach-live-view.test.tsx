@@ -565,6 +565,53 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getByTestId("objection-help")).toBeEnabled();
   });
 
+  it("mutually disables Follow-up Questions and Objection Help while the other is in flight (both directions)", async () => {
+    const user = userEvent.setup();
+    let resolveObjection!: (value: CoachRecommendationResult) => void;
+    let resolveFollowUp!: (value: CoachRecommendationResult) => void;
+    const recommendationRequest = vi.fn((input: CoachRecommendationRequest): Promise<CoachRecommendationResult> =>
+      new Promise((resolve) => {
+        if (input.mode === "objection_help") resolveObjection = resolve;
+        else resolveFollowUp = resolve;
+      }));
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    broadcast({ type: "transcript", speaker: "seller", text: "I need to talk to my spouse before deciding.", isFinal: true, ts: "seller-objection" });
+
+    // Direction 1: Objection Help in flight -> Follow-up Questions disabled.
+    await user.click(screen.getByTestId("objection-help"));
+    expect(screen.getByTestId("objection-help")).toBeDisabled();
+    expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
+
+    resolveObjection({
+      ok: true,
+      requestId: recommendationRequest.mock.calls[0][0].requestId,
+      callId: "call-1",
+      activeSectionId: "introduction.opener",
+      mode: "objection_help",
+      objectionId: null,
+      evidenceQuote: null,
+    });
+    await waitFor(() => expect(screen.getByTestId("objection-help")).toBeEnabled());
+    await waitFor(() => expect(screen.getByTestId("follow-up-questions")).toBeEnabled());
+
+    // Direction 2: Follow-up Questions in flight -> Objection Help disabled.
+    await user.click(screen.getByTestId("follow-up-questions"));
+    expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
+    expect(screen.getByTestId("objection-help")).toBeDisabled();
+
+    resolveFollowUp({
+      ok: true,
+      requestId: recommendationRequest.mock.calls[1][0].requestId,
+      callId: "call-1",
+      activeSectionId: "introduction.opener",
+      mode: "follow_up",
+      followUpQuestions: ["A?", "B?", "C?"],
+    });
+    await waitFor(() => expect(screen.getByTestId("follow-up-questions")).toBeEnabled());
+    expect(screen.getByTestId("objection-help")).toBeEnabled();
+  });
+
   it("parses legacy guidance events without rendering them or covering the script", async () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());

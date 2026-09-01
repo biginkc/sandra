@@ -391,18 +391,50 @@ describe("CoachRecommendationController", () => {
     });
   });
 
-  it("rejects a stale Objection Help state once the call or section changes", async () => {
-    const request = vi.fn(async (input: CoachRecommendationRequest) => success(input));
+  it("rejects a genuinely in-flight Objection Help response that arrives after BOTH a call change and a section change", async () => {
+    // Holds one real pending request (never resolved until explicitly told
+    // to) across two separate, sequential context changes — a call change
+    // and then a section change on the new call — before finally letting
+    // it resolve. Resolving after the fact, once state has already moved
+    // on twice, is the genuine race this guards; resolving before any
+    // context change (the old version of this test) proves nothing about
+    // staleness rejection.
+    let resolveObjection!: (value: CoachRecommendationResult) => void;
+    const request = vi.fn((input: CoachRecommendationRequest) => new Promise<CoachRecommendationResult>((done) => {
+      resolveObjection = done;
+      void input;
+    }));
     const controller = makeController(request);
     const transcript = [
       { speaker: "seller" as const, text: "I don't trust wholesalers because I heard bad things.", isFinal: true },
     ];
 
-    await expect(controller.requestObjectionHelp(transcript, objectionTokens, "owner_occupied")).resolves.toBe(true);
-    expect(controller.getSnapshot().objectionHelp).toMatchObject({ kind: "match", objectionId: "dont_trust" });
+    const pending = controller.requestObjectionHelp(transcript, objectionTokens, "owner_occupied");
+    await Promise.resolve();
+    const sentInput = request.mock.calls[0][0];
+    expect(controller.getSnapshot().loadingMode).toBe("objection_help");
 
+    // Call change, still mid-flight.
     controller.setContext({ callId: "call-2", activeSectionId: "introduction.opener", branchOverrides: {} });
+    expect(controller.getSnapshot()).toMatchObject({ objectionHelp: null, loadingMode: null });
+
+    // Section change on the NEW call, still the same original request held.
+    controller.setContext({ callId: "call-2", activeSectionId: "introduction.qualification-frame", branchOverrides: {} });
+    expect(controller.getSnapshot()).toMatchObject({ objectionHelp: null, loadingMode: null });
+
+    // The original (now doubly-stale) request finally resolves as a match.
+    resolveObjection(success(sentInput));
+    await expect(pending).resolves.toBe(false);
     expect(controller.getSnapshot().objectionHelp).toBeNull();
+    expect(request).toHaveBeenCalledTimes(1);
+
+    // A fresh request against the current (call-2, qualification-frame)
+    // context still works normally afterward.
+    const current = controller.requestObjectionHelp(transcript, objectionTokens, "owner_occupied");
+    await Promise.resolve();
+    resolveObjection(success(request.mock.calls[1][0]));
+    await expect(current).resolves.toBe(true);
+    expect(controller.getSnapshot().objectionHelp).toMatchObject({ kind: "match", objectionId: "dont_trust" });
   });
 
   it("Objection Help and Follow-up Questions share one in-flight slot: each rejects the other as busy", async () => {

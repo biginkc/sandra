@@ -455,6 +455,15 @@ export function buildObjectionClassificationTool(catalogIds: readonly string[]) 
   return {
     name: "submit_objection_classification",
     description: "Identify the single catalog objection the seller is most clearly and currently voicing, if any.",
+    // Strict tool use: forced tool_choice only makes Claude call THIS tool,
+    // it does not by itself guarantee the input matches input_schema
+    // (extra properties, an out-of-enum string, all still just JSON the
+    // model produced). strict:true asks the API to constrain generation so
+    // tool_use.input validates exactly against the schema below. It is
+    // still not the security boundary — parseObjectionClassification below
+    // re-validates every field from scratch regardless, in case this ever
+    // runs against a provider/SDK path that ignores strict.
+    strict: true,
     input_schema: {
       type: "object" as const,
       additionalProperties: false,
@@ -474,33 +483,50 @@ export function buildObjectionClassificationTool(catalogIds: readonly string[]) 
   };
 }
 
+const OBJECTION_CLASSIFICATION_KEYS = new Set(["objectionId", "evidenceQuote"]);
+
 /** Strict, no-guess parsing of the model's classification: any shape that
  * is not a clean, verifiable match resolves to "no clear objection" rather
- * than a best-effort guess — an unrecognized id, the literal "none", a
- * missing/malformed tool call, and an evidenceQuote that cannot be found
- * verbatim in the seller's own bounded statements (a hallucinated quote is
- * unverifiable evidence, so the classification it supports is untrusted
- * too) are all treated identically. Only a thrown SDK/network error
- * surfaces as a distinct provider_error — everything the model itself
- * returns, however malformed, resolves as a truthful "no clear objection". */
+ * than a best-effort guess — an unrecognized id, the literal "none", any
+ * property outside {objectionId, evidenceQuote}, a missing/malformed tool
+ * call, and an evidenceQuote that isn't verbatim in the seller's own
+ * bounded statements all resolve identically. "Verbatim" and "recognized"
+ * are checked with zero normalization on our side: no trim before the enum
+ * check (" dont_trust " is not "dont_trust"), no case/punctuation folding
+ * before the substring check ("HEARD---BAD THINGS" is not "heard bad
+ * things" — schema `strict`/`enum` constrain generation, they do not
+ * replace this). A hallucinated quote is unverifiable evidence, so the
+ * classification it supports is untrusted too. Only a thrown SDK/network
+ * error surfaces as a distinct provider_error — everything the model
+ * itself returns, however malformed, resolves as a truthful "no clear
+ * objection". */
 function parseObjectionClassification(
   toolInput: unknown,
   catalogIds: ReadonlySet<string>,
   sellerStatements: readonly string[],
 ): { objectionId: string | null; evidenceQuote: string | null } {
-  if (!isRecord(toolInput) || typeof toolInput.objectionId !== "string") {
+  if (!isRecord(toolInput)) return { objectionId: null, evidenceQuote: null };
+  if (Object.keys(toolInput).some((key) => !OBJECTION_CLASSIFICATION_KEYS.has(key))) {
     return { objectionId: null, evidenceQuote: null };
   }
-  const objectionId = toolInput.objectionId.trim();
-  if (!objectionId || objectionId === "none" || !catalogIds.has(objectionId)) {
-    return { objectionId: null, evidenceQuote: null };
-  }
+  if (typeof toolInput.objectionId !== "string") return { objectionId: null, evidenceQuote: null };
 
-  const evidenceQuote = typeof toolInput.evidenceQuote === "string" ? toolInput.evidenceQuote.trim() : "";
+  // No trim/normalize: exact set membership only. Padding whitespace or
+  // any other deviation from an actual catalog id is not that id.
+  const objectionId = toolInput.objectionId;
+  if (!catalogIds.has(objectionId)) return { objectionId: null, evidenceQuote: null };
+
+  if (typeof toolInput.evidenceQuote !== "string") return { objectionId: null, evidenceQuote: null };
+  const evidenceQuote = toolInput.evidenceQuote;
   if (
     !evidenceQuote
     || evidenceQuote.length > 300
-    || !sellerStatements.some((statement) => containsWholeGroundingPhrase(statement, evidenceQuote))
+    // Exact, case-sensitive, punctuation-sensitive substring of the actual
+    // redacted text sent to the model — not the fuzzy, case/punctuation-
+    // folding containsWholeGroundingPhrase follow_up's groundingPhrase
+    // uses. "Verbatim" here means verbatim: the model does not get credit
+    // for a quote that only matches after we clean it up for it.
+    || !sellerStatements.some((statement) => statement.includes(evidenceQuote))
   ) {
     return { objectionId: null, evidenceQuote: null };
   }

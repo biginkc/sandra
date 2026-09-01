@@ -6,7 +6,6 @@ import {
   FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL,
   MAX_RECOMMENDATION_TRANSCRIPT_CHARS,
   MAX_RECOMMENDATION_TRANSCRIPT_LINES,
-  OBJECTION_HELP_LIMIT_PER_CALL,
   boundFinalTranscript,
   buildObjectionClassificationTool,
   createInMemoryCoachRecommendationLimiter,
@@ -617,11 +616,15 @@ describe("coach recommendation server boundary — objection_help mode", () => {
       objectionId: "dont_trust",
       evidenceQuote: "heard bad things",
     });
+    // Deliberately duplicated as a literal, not a reference to the
+    // production OBJECTION_HELP_LIMIT_PER_CALL constant — comparing that
+    // constant to itself can never catch an accidental change to it.
+    const EXPECTED_OBJECTION_HELP_LIMIT_PER_CALL = 20;
     expect(dependencies.limiter.consume).toHaveBeenCalledWith({
       userId: "user-1",
       callId: "call-1",
       mode: "objection_help",
-      limit: OBJECTION_HELP_LIMIT_PER_CALL,
+      limit: EXPECTED_OBJECTION_HELP_LIMIT_PER_CALL,
     });
     // Classification depends only on the seller's own bounded words —
     // loading trusted script content or lead/property context for it would
@@ -696,13 +699,15 @@ describe("coach recommendation server boundary — objection_help mode", () => {
       expect(serialized).toContain(objection.id);
     }
     expect(serialized).toContain("wholesaler");
-    // ...but never the authored acknowledge/disarm/overcome guidance — the
-    // model only names which objection was raised, it never sees or writes
-    // the representative's response to it.
+    // ...but never any authored display field — the model only names which
+    // objection was raised, it never sees or writes the representative's
+    // response to it, its delivery tone, or any authored template guidance.
     for (const objection of CLOSR_SCRIPT.objections) {
       expect(serialized).not.toContain(objection.display.acknowledge);
       expect(serialized).not.toContain(objection.display.disarm);
       expect(serialized).not.toContain(objection.display.overcome);
+      if (objection.display.tonality) expect(serialized).not.toContain(objection.display.tonality);
+      if (objection.display.template_note) expect(serialized).not.toContain(objection.display.template_note);
     }
     // The same phone-redaction pipeline follow_up uses is reused here — no
     // raw phone digits reach the provider prompt.
@@ -773,6 +778,49 @@ describe("coach recommendation server boundary — objection_help mode", () => {
     });
   });
 
+  // Codex's three exact public-boundary probes (PR #457 review round 2):
+  // each demonstrated that the old parser's normalization (.trim() before
+  // the enum check, and containsWholeGroundingPhrase's case/punctuation
+  // folding for evidenceQuote) let something that was NOT actually a valid
+  // catalog id, or NOT actually verbatim seller speech, pass as if it were.
+  it("[Codex probe 1] treats a catalog id with padding whitespace as unrecognized, not the real id trimmed", async () => {
+    const dependencies = deps({
+      anthropic: objectionAnthropicReturning({ objectionId: " dont_trust ", evidenceQuote: "heard bad things" }),
+    });
+    const result = await requestCoachRecommendationsWithDeps(objectionRequest(), dependencies);
+    expect(result).toMatchObject({ ok: true, mode: "objection_help", objectionId: null, evidenceQuote: null });
+  });
+
+  it("[Codex probe 2] rejects a tool call carrying any property outside {objectionId, evidenceQuote}", async () => {
+    const dependencies = deps({
+      anthropic: objectionAnthropicReturning({
+        objectionId: "dont_trust",
+        evidenceQuote: "heard bad things",
+        confidence: 0.99,
+      }),
+    });
+    const result = await requestCoachRecommendationsWithDeps(objectionRequest(), dependencies);
+    expect(result).toMatchObject({ ok: true, mode: "objection_help", objectionId: null, evidenceQuote: null });
+  });
+
+  it("[Codex probe 3] rejects an evidenceQuote that only matches the transcript after case/punctuation folding", async () => {
+    const dependencies = deps({
+      anthropic: objectionAnthropicReturning({ objectionId: "dont_trust", evidenceQuote: "HEARD---BAD THINGS" }),
+    });
+    const result = await requestCoachRecommendationsWithDeps(objectionRequest(), dependencies);
+    expect(result).toMatchObject({ ok: true, mode: "objection_help", objectionId: null, evidenceQuote: null });
+  });
+
+  it("accepts an evidenceQuote only when it is an exact, case-sensitive substring of what was actually sent to the model", async () => {
+    // Positive control for probe 3, proving the exact-match path still
+    // works for genuine verbatim quotes (not just that folded ones fail).
+    const dependencies = deps({
+      anthropic: objectionAnthropicReturning({ objectionId: "dont_trust", evidenceQuote: "heard bad things" }),
+    });
+    const result = await requestCoachRecommendationsWithDeps(objectionRequest(), dependencies);
+    expect(result).toMatchObject({ ok: true, mode: "objection_help", objectionId: "dont_trust", evidenceQuote: "heard bad things" });
+  });
+
   it("surfaces a genuinely missing tool call as provider_error, distinct from a present-but-malformed one", async () => {
     // The one case that IS a real infrastructure failure worth retrying —
     // the model never called the tool at all — surfaces as provider_error
@@ -789,9 +837,12 @@ describe("coach recommendation server boundary — objection_help mode", () => {
     expect(result).toMatchObject({ ok: false, code: "provider_error" });
   });
 
-  it("builds a tool schema whose enum is exactly the catalog ids plus \"none\"", () => {
+  it("builds a strict tool schema whose enum is exactly the catalog ids plus \"none\", with no other properties allowed", () => {
     const catalogIds = CLOSR_SCRIPT.objections.map((objection) => objection.id);
     const tool = buildObjectionClassificationTool(catalogIds);
+    expect(tool.strict).toBe(true);
+    expect(tool.input_schema.additionalProperties).toBe(false);
+    expect(tool.input_schema.required).toEqual(["objectionId"]);
     expect(tool.input_schema.properties.objectionId.enum).toEqual([...catalogIds, "none"]);
   });
 });
