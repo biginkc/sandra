@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
 import type { LeadMediaPresentation } from "./lead-media";
@@ -41,6 +41,32 @@ export function LeadMediaHero({
         : failedImage === "aerial"
           ? "flat"
           : "aerial";
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const reconcileImageFailure = useCallback(() => {
+    setFailureState((current) => {
+      const failedImageForCurrentRender =
+        renderedKind === "streetView" ? "streetView" : "aerial";
+
+      if (
+        current.mediaIdentity === mediaIdentity &&
+        current.failedImage === failedImageForCurrentRender
+      ) {
+        return current;
+      }
+
+      return {
+        mediaIdentity,
+        failedImage: failedImageForCurrentRender,
+      };
+    });
+  }, [mediaIdentity, renderedKind]);
+
+  useEffect(() => {
+    const image = imageRef.current;
+    if (image?.complete && image.naturalWidth === 0) {
+      reconcileImageFailure();
+    }
+  }, [mediaIdentity, reconcileImageFailure, renderedKind]);
 
   if (renderedKind === "flat") {
     return (
@@ -133,6 +159,7 @@ export function LeadMediaHero({
             the image bottom-aligned so full-bleed trimming affects only the
             top of the scene, never Google's bottom attribution edges. */}
         <img
+          ref={imageRef}
           src={renderedImages.small}
           alt=""
           className="pointer-events-none absolute inset-0 h-full w-full bg-slate-900 object-cover object-bottom"
@@ -141,15 +168,7 @@ export function LeadMediaHero({
           referrerPolicy="strict-origin-when-cross-origin"
           draggable={false}
           data-testid="lead-media-image"
-          onError={() =>
-            setFailureState({
-              mediaIdentity,
-              failedImage:
-                renderedKind === "streetView" && failedImage === null
-                  ? "streetView"
-                  : "aerial",
-            })
-          }
+          onError={reconcileImageFailure}
         />
         </picture>
       </div>
