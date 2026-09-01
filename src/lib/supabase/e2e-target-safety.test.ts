@@ -72,13 +72,41 @@ describe("E2E Supabase target safety", () => {
         "https://ncsngxlcyxylaeskiteu.supabase.co",
         { ...ci, E2E_CI_SUPABASE_PROJECT_REF: "bnkipfoqggwyttbykjfn" },
       ),
-    ).toThrow(/does not match/i);
+    ).toThrow(/does not exactly match/i);
+    expect(() =>
+      assertSafeE2ESupabaseTargetFromEnvironment(
+        "https://ncsngxlcyxylaeskiteu.supabase.co",
+        { ...ci, E2E_CI_SUPABASE_PROJECT_REF: "ncsngxlcyxylaeskiteu" },
+      ),
+    ).toThrow(/not approved/i);
+    expect(() =>
+      assertSafeE2ESupabaseTargetFromEnvironment(
+        "https://abcdefghijklmnopqrst.supabase.co",
+        { ...ci, E2E_CI_SUPABASE_PROJECT_REF: "abcdefghijklmnopqrst" },
+      ),
+    ).toThrow(/not approved/i);
     expect(() =>
       assertSafeE2ESupabaseTargetFromEnvironment(
         "https://bnkipfoqggwyttbykjfn.supabase.co",
         { ...ci, E2E_CI_SUPABASE_PROJECT_REF: "bnkipfoqggwyttbykjfn" },
       ),
     ).not.toThrow();
+  });
+
+  it.each([
+    "http://bnkipfoqggwyttbykjfn.supabase.co",
+    "https://bnkipfoqggwyttbykjfn.supabase.co:444",
+    "https://user:password@bnkipfoqggwyttbykjfn.supabase.co",
+    "https://bnkipfoqggwyttbykjfn.supabase.co/rest/v1",
+    "https://bnkipfoqggwyttbykjfn.supabase.co?mode=test",
+    "https://bnkipfoqggwyttbykjfn.supabase.co#fragment",
+  ])("rejects a non-origin CI Supabase URL: %s", (url) => {
+    expect(() =>
+      assertSafeE2ESupabaseTargetFromEnvironment(url, {
+        CI: "1",
+        E2E_CI_SUPABASE_PROJECT_REF: "bnkipfoqggwyttbykjfn",
+      }),
+    ).toThrow(/does not exactly match/i);
   });
 
   it("preserves non-CI shared-project and explicitly enabled local behavior", () => {

@@ -312,7 +312,8 @@ export function assertBrowserQaSnapshotUnchanged(
     before.version !== 1 ||
     after.version !== 1 ||
     before.count !== after.count ||
-    JSON.stringify(before.fingerprints) !== JSON.stringify(after.fingerprints)
+    JSON.stringify(stableValue(before.fingerprints)) !==
+      JSON.stringify(stableValue(after.fingerprints))
   ) {
     throw new Error(
       "Protected browser-QA auth identities changed during the E2E job.",

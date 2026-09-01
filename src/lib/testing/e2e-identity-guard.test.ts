@@ -180,10 +180,16 @@ describe("E2E identity policy", () => {
         updated_at: "2026-08-31T01:00:00Z",
         app_metadata: { owner: "browser-qa" },
       },
+      {
+        id: "qa-b",
+        email: "e2e-assignee@bmhgroupkc.com",
+        updated_at: "2026-08-31T01:00:00Z",
+        app_metadata: { owner: "browser-qa" },
+      },
     ];
     const before = snapshotProtectedBrowserQaUsers(beforeUsers);
     const unchanged = snapshotProtectedBrowserQaUsers([
-      ...beforeUsers,
+      ...beforeUsers.toReversed(),
       {
         id: "ci-user",
         email: RUN.email,
@@ -196,6 +202,7 @@ describe("E2E identity policy", () => {
 
     const changed = snapshotProtectedBrowserQaUsers([
       { ...beforeUsers[0], updated_at: "2026-08-31T02:00:00Z" },
+      beforeUsers[1],
     ]);
     expect(() => assertBrowserQaSnapshotUnchanged(before, changed)).toThrow(
       /browser-QA auth identities changed/,
@@ -203,6 +210,7 @@ describe("E2E identity policy", () => {
 
     const signedIn = snapshotProtectedBrowserQaUsers([
       { ...beforeUsers[0], last_sign_in_at: "2026-08-31T02:00:00Z" },
+      beforeUsers[1],
     ]);
     expect(() => assertBrowserQaSnapshotUnchanged(before, signedIn)).toThrow(
       /browser-QA auth identities changed/,

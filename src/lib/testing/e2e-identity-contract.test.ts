@@ -1,10 +1,21 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 function source(relativePath: string): string {
   return readFileSync(path.join(process.cwd(), relativePath), "utf8");
+}
+
+function typescriptFilesUnder(relativeDirectory: string): string[] {
+  const absoluteDirectory = path.join(process.cwd(), relativeDirectory);
+  return readdirSync(absoluteDirectory, { withFileTypes: true }).flatMap(
+    (entry) => {
+      const relativePath = path.join(relativeDirectory, entry.name);
+      if (entry.isDirectory()) return typescriptFilesUnder(relativePath);
+      return entry.isFile() && entry.name.endsWith(".ts") ? [relativePath] : [];
+    },
+  );
 }
 
 describe("E2E identity source contract", () => {
@@ -82,19 +93,40 @@ describe("E2E identity source contract", () => {
   });
 
   it("contains no E2E password repair or shared default password path", () => {
-    const relevantSource = [
-      "e2e/fixtures.ts",
-      "e2e/auth.setup.ts",
-      "e2e/cockpit-assignment.spec.ts",
-      "e2e/leads-board-v2-foundation.spec.ts",
-      "scripts/e2e-identity-lifecycle.ts",
-    ]
-      .map(source)
-      .join("\n");
+    const executableFiles = [
+      ...typescriptFilesUnder("e2e"),
+      ...readdirSync(path.join(process.cwd(), "scripts"))
+        .filter((name) => /^e2e-.*\.ts$/.test(name))
+        .map((name) => path.join("scripts", name)),
+      "playwright.config.ts",
+    ].sort();
 
-    expect(relevantSource).not.toContain("repairPassword");
-    expect(relevantSource).not.toContain("updateUserById");
-    expect(relevantSource).not.toContain("test12345");
+    const forbiddenTokens = [
+      "repairPassword",
+      "updateUserById",
+      "test12345",
+      "e2e-test@bmhgroupkc.com",
+      "e2e-assignee@bmhgroupkc.com",
+      "e2e-leads-teammate@bmhgroupkc.com",
+    ];
+    for (const relativePath of executableFiles) {
+      const contents = source(relativePath);
+      for (const token of forbiddenTokens) {
+        expect(contents, `${relativePath} contains ${token}`).not.toContain(
+          token,
+        );
+      }
+    }
+
+    const authMutationCalls = executableFiles.flatMap((relativePath) =>
+      [...source(relativePath).matchAll(/\b(createUser|deleteUser)\s*\(/g)].map(
+        (match) => `${relativePath}:${match[1]}`,
+      ),
+    );
+    expect(authMutationCalls).toEqual([
+      "e2e/fixtures.ts:createUser",
+      "scripts/e2e-identity-lifecycle.ts:deleteUser",
+    ]);
   });
 
   it("masks the generated password before writing it to GITHUB_ENV", () => {

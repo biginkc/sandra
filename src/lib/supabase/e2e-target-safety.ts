@@ -1,4 +1,5 @@
 const SHARED_E2E_PROJECT_REF = "ncsngxlcyxylaeskiteu";
+const APPROVED_CI_E2E_PROJECT_REFS = new Set(["bnkipfoqggwyttbykjfn"]);
 const SUPABASE_PROJECT_REF_PATTERN = /^[a-z0-9]{20}$/;
 
 type E2ETargetSafetyOptions = {
@@ -8,6 +9,19 @@ type E2ETargetSafetyOptions = {
 };
 
 type E2ETargetEnvironment = Readonly<Record<string, string | undefined>>;
+
+function isExactHostedProjectUrl(url: URL, projectRef: string): boolean {
+  return (
+    url.protocol === "https:" &&
+    url.username === "" &&
+    url.password === "" &&
+    url.hostname === `${projectRef}.supabase.co` &&
+    url.port === "" &&
+    url.pathname === "/" &&
+    url.search === "" &&
+    url.hash === ""
+  );
+}
 
 export function assertSafeE2ESupabaseTarget(
   rawUrl: string,
@@ -28,15 +42,20 @@ export function assertSafeE2ESupabaseTarget(
     if (!SUPABASE_PROJECT_REF_PATTERN.test(expectedProjectRef)) {
       throw new Error("E2E CI received a malformed Supabase project ref.");
     }
-    if (url.hostname !== `${expectedProjectRef}.supabase.co`) {
+    if (!APPROVED_CI_E2E_PROJECT_REFS.has(expectedProjectRef)) {
       throw new Error(
-        "E2E CI Supabase URL does not match the expected project ref.",
+        "E2E CI received a Supabase project ref that is not approved.",
+      );
+    }
+    if (!isExactHostedProjectUrl(url, expectedProjectRef)) {
+      throw new Error(
+        "E2E CI Supabase URL does not exactly match the approved project origin.",
       );
     }
     return;
   }
 
-  if (url.hostname === `${SHARED_E2E_PROJECT_REF}.supabase.co`) return;
+  if (isExactHostedProjectUrl(url, SHARED_E2E_PROJECT_REF)) return;
 
   const isLocalHost =
     url.hostname === "127.0.0.1" || url.hostname === "localhost";
