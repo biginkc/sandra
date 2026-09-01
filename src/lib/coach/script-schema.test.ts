@@ -17,6 +17,11 @@ function validScript(): Record<string, unknown> {
  * and regardless of hyphen/underscore/en-dash/em-dash spelling.
  */
 const FORBIDDEN_ESIGN_PHRASES = [
+  "share your screen",
+  "screen share",
+  "click the link",
+  "walk you through signing",
+  "walk through signing",
   "view documents",
   "red flashing box",
   "adopt and sign",
@@ -30,8 +35,10 @@ function normalizeForPhraseScan(value: string): string {
     .normalize("NFKC") // folds fullwidth/compatibility punctuation (e.g. U+FF0D fullwidth hyphen) to ASCII
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2") // camelCase word boundary -> space, before lowercasing
     .toLowerCase()
-    .replace(/[-_‐-―]/g, " ") // hyphen, underscore, and every unicode dash NFKC doesn't fold (en/em dash included)
-    .replace(/\s+/g, " ");
+    .replace(/&/g, " and ")
+    .replace(/\p{Cf}+/gu, " ") // format controls such as zero-width spaces must not split a forbidden phrase invisibly
+    .replace(/[^\p{L}\p{N}]+/gu, " ") // punctuation variants (/, &, dashes, underscores, etc.) are word separators
+    .trim();
 }
 
 /** Recursively collects every string leaf value from a JSON-shaped structure. */
@@ -188,6 +195,19 @@ describe("assertValidClosrScript", () => {
     for (const phrase of FORBIDDEN_ESIGN_PHRASES) {
       expect(normalizedBlob, `forbidden phrase "${phrase}" found somewhere in the script or section manifest`).not.toContain(phrase);
     }
+  });
+
+  it.each([
+    "click the link",
+    "walk you through signing",
+    "share your screen",
+    "screen-share",
+    "view/documents",
+    "adopt & sign",
+    "view\u200b documents",
+  ])("normalizes prohibited walkthrough mutation %j into a forbidden phrase", (mutation) => {
+    const normalized = normalizeForPhraseScan(mutation);
+    expect(FORBIDDEN_ESIGN_PHRASES.some((phrase) => normalized.includes(phrase))).toBe(true);
   });
 
   it("uses Plan Zero's exact replacement line for the removed e-sign walkthrough, exactly once", () => {

@@ -199,8 +199,9 @@ test("preserves the official multiline outcomes and seller-facing e-sign wrap-up
   await page.getByTestId("coach-next").click();
   await page.getByTestId("coach-next").click();
   const scriptText = page.getByTestId("current-section-script");
+  await expect(scriptText).toContainText("Awesome, I just sent it to your email. Please pull it up for me.");
   await expect(scriptText).toContainText("72 hours to schedule the initial walkthrough");
-  await expect(scriptText).not.toContainText(/view documents|adopt and sign|red flashing box|second red box|second novation box|share[\s_-]?back/i);
+  await expect(scriptText).not.toContainText(/share your screen|screen[\s_/-]?share|click the link|walk you through signing|walk through signing|view[\s_/-]?documents|adopt[\s_&/-]?(?:and)?[\s_/-]?sign|red flashing box|second red box|second novation box|share[\s_/-]?back/i);
 });
 
 test("jumps each phase to its first manual section and legacy events are navigation/rendering no-ops", async ({ page }) => {
