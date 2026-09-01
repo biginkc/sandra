@@ -66,7 +66,6 @@
                 { "id": "introduction.pen-paper-contact-details.default.03", "type": "say", "text": "Our Company Name is BMH Group" },
                 { "id": "introduction.pen-paper-contact-details.default.04", "type": "say", "text": "Our website is bmhgroupkc.com where you can see all of our testimonials, reviews, and see how our process works." },
                 { "id": "introduction.pen-paper-contact-details.default.05", "type": "say", "text": "My phone number is: {rep_phone} so in the case we get disconnected you can call or text me anytime here! Could you repeat that back to me just so I know you have the right number? Ok thank you, and for you is this a landline or cellphone?" },
-                { "id": "introduction.pen-paper-contact-details.default.08", "type": "say", "text": "What's the best email address for you?" },
                 { "id": "introduction.pen-paper-contact-details.default.06", "type": "say", "text": "And finally your most important the file #... your file number will be {file_number} this is where you can call back at any time to ask for updates on your file!" },
                 { "id": "introduction.pen-paper-contact-details.default.07", "type": "say", "text": "You got it?\n\nAwesome." }
               ] }
@@ -325,7 +324,8 @@
                 { "id": "secure_positioning.back-from-hold-final-questions.default.05", "type": "say", "text": "Is it on septic or sewer?" },
                 { "id": "secure_positioning.back-from-hold-final-questions.default.11", "type": "say", "text": "Is it well or city water?" },
                 { "id": "secure_positioning.back-from-hold-final-questions.default.06", "type": "say", "text": "Is there internet available? What about fiber optic?" },
-                { "id": "secure_positioning.back-from-hold-final-questions.default.07", "type": "say", "text": "And a couple more questions for the final approval: If they come back with an approval and an offer that makes sense for you, are you ready to approve an agreement and get the process rolling now so we can get you to the closing table on the day we promise?" }
+                { "id": "secure_positioning.back-from-hold-final-questions.default.07", "type": "say", "text": "And a couple more questions for the final approval: If they come back with an approval and an offer that makes sense for you, are you ready to approve an agreement and get the process rolling now so we can get you to the closing table on the day we promise?" },
+                { "id": "secure_positioning.back-from-hold-final-questions.default.08", "type": "say", "text": "What's the best email address for you?" }
               ] }
             ]
           },
