@@ -91,13 +91,13 @@ jobs:
           BROWSER_QA_C_EMAIL: ${{ secrets.BROWSER_QA_C_EMAIL }}
         run: |
           set -euo pipefail
-          test -n "$COACH_CI_OWNER_EMAIL"
-          test -n "$COACH_CI_FOREIGN_EMAIL"
+          test -n "$COACH_CI_OWNER_EMAIL" || { echo 'COACH_PREFLIGHT_FAILED: owner_missing' >&2; exit 1; }
+          test -n "$COACH_CI_FOREIGN_EMAIL" || { echo 'COACH_PREFLIGHT_FAILED: foreign_missing' >&2; exit 1; }
           python - <<'PY'
           import os, sys
           values = [os.environ.get(k, '').strip().lower() for k in ('COACH_CI_OWNER_EMAIL','COACH_CI_FOREIGN_EMAIL','BROWSER_QA_A_EMAIL','BROWSER_QA_B_EMAIL','BROWSER_QA_C_EMAIL')]
           if not all(values) or len(set(values)) != len(values) or any(v.startswith('e2e-ci+') for v in values[:2]):
-              print('Coach CI identity collision or missing identity input', file=sys.stderr); raise SystemExit(1)
+              print('COACH_PREFLIGHT_FAILED: identity_missing_duplicate_or_namespace', file=sys.stderr); raise SystemExit(1)
           PY
 
       - name: Run the coach realtime authorization canary

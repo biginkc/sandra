@@ -70,7 +70,7 @@ function withoutSqlComments(sql: string): string {
 describe("coach realtime authorization CI security contract", () => {
   it("requires explicit Coach CI owner-purpose markers and collision preflight", () => {
     expect(coachWorkflow).toContain("Assert Coach identities are explicitly isolated");
-    expect(coachWorkflow).toContain("Coach CI identity collision");
+    expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: identity_missing_duplicate_or_namespace");
     expect(withoutSqlComments(ciTestProjectSetup)).toContain("raw_app_meta_data->>'owner'");
     expect(withoutSqlComments(ciTestProjectSetup)).toContain("raw_app_meta_data->>'purpose'");
     expect(withoutSqlComments(ciTestProjectSetup)).toContain("email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')");
@@ -88,6 +88,16 @@ describe("coach realtime authorization CI security contract", () => {
     expect(e2eWorkflow).toContain("parsed.hostname !== `${ciRef}.supabase.co`");
     expect(e2eWorkflow).not.toContain("ciUrl.includes");
     expect(e2eWorkflow).toContain('E2E_DEDICATED_CI: "1"');
+    expect(e2eWorkflow).toContain("E2E_PREFLIGHT_FAILED: identity_missing_duplicate_or_namespace");
+    expect(e2eWorkflow).toContain("E2E_PREFLIGHT_FAILED: url_shape");
+    expect(e2eWorkflow).toContain("E2E_PREFLIGHT_FAILED: project_ref_or_url_shape");
+  });
+  it("labels Coach preflight failures without exposing identity values", () => {
+    expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: owner_missing");
+    expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: foreign_missing");
+    expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: identity_missing_duplicate_or_namespace");
+    expect(coachWorkflow).not.toMatch(/console\.log\(/);
+    expect(coachWorkflow).not.toMatch(/print\([^)]*(os\.environ|values|EMAIL|PASSWORD)/);
   });
   it("masks the generated CI password before writing it to the runner environment", () => {
     const passwordAssignment = e2eWorkflow.indexOf('password="$(openssl rand -base64 36');
