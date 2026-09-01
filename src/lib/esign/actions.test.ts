@@ -159,7 +159,7 @@ describe("eSign server actions", () => {
       org_id: "org-1",
       role: "member",
     });
-    expect(await setEsignSendingEnabledAction(true)).toMatchObject({
+    expect(await setEsignSendingEnabledAction(true, true)).toMatchObject({
       ok: false,
       error: { code: "AUTHORIZATION" },
     });
@@ -180,7 +180,10 @@ describe("eSign server actions", () => {
     const result = await connectDropboxSignAction("dropbox-api-key-1234");
     expect(result).toMatchObject({
       ok: false,
-      error: { code: "AUTHORIZATION", message: expect.stringMatching(/single/i) },
+      error: {
+        code: "AUTHORIZATION",
+        message: expect.stringMatching(/single/i),
+      },
     });
     expect(mocks.validateCredentials).not.toHaveBeenCalled();
     expect(mocks.saveEsignCredentials).not.toHaveBeenCalled();
@@ -205,7 +208,7 @@ describe("eSign server actions", () => {
     mocks.adminUpdate.mockResolvedValue({
       error: { message: "not found", code: "P0002" },
     });
-    const result = await setEsignSendingEnabledAction(true);
+    const result = await setEsignSendingEnabledAction(true, true);
     expect(result).toMatchObject({
       ok: false,
       error: {
@@ -219,7 +222,7 @@ describe("eSign server actions", () => {
     mocks.adminUpdate.mockResolvedValue({
       error: { message: "constraint detail", code: "23514" },
     });
-    const result = await setEsignSendingEnabledAction(true);
+    const result = await setEsignSendingEnabledAction(true, true);
     expect(result).toMatchObject({
       ok: false,
       error: {
@@ -233,7 +236,7 @@ describe("eSign server actions", () => {
     mocks.adminUpdate.mockResolvedValue({
       error: { message: "private database diagnostic", code: "XX000" },
     });
-    const result = await setEsignSendingEnabledAction(true);
+    const result = await setEsignSendingEnabledAction(true, true);
     expect(mocks.adminUpdate).toHaveBeenCalledWith(
       "set_org_esign_sending_enabled",
       {
@@ -250,6 +253,42 @@ describe("eSign server actions", () => {
       },
     });
     expect(JSON.stringify(result)).not.toContain("private database diagnostic");
+  });
+
+  it.each([false, undefined])(
+    "rejects a sending change unless operator confirmation is literally true (%s)",
+    async (operatorConfirmed) => {
+      const result = await setEsignSendingEnabledAction(
+        true,
+        operatorConfirmed as boolean,
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message: expect.stringMatching(/confirm/i),
+        },
+      });
+      expect(mocks.adminUpdate).not.toHaveBeenCalled();
+      expect(mocks.revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
+  it("allows a confirmed disable through the same database-only boundary", async () => {
+    await expect(setEsignSendingEnabledAction(false, true)).resolves.toEqual({
+      ok: true,
+      data: null,
+    });
+    expect(mocks.adminUpdate).toHaveBeenCalledWith(
+      "set_org_esign_sending_enabled",
+      {
+        p_org_id: "org-1",
+        p_actor_id: "owner-1",
+        p_enabled: false,
+      },
+    );
+    expect(mocks.revalidatePath).toHaveBeenCalledWith("/settings/integrations");
   });
 
   it("passes the owner identity into fail-closed disconnect", async () => {

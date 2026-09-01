@@ -26,7 +26,12 @@ const {
   })),
   disconnectDropboxSignAction: vi.fn(async () => ({ ok: true, data: null })),
   disconnectIntegration: vi.fn(async () => ({ ok: true, data: null })),
-  setEsignSendingEnabledAction: vi.fn(async () => ({ ok: true, data: null })),
+  setEsignSendingEnabledAction: vi.fn(
+    async (): Promise<
+      | { ok: true; data: null }
+      | { ok: false; error: { code: string; message: string } }
+    > => ({ ok: true, data: null }),
+  ),
   setChannelEnabledAction: vi.fn(async () => ({ ok: true, data: null })),
   setReminderPhoneAction: vi.fn(async () => ({ ok: true, data: null })),
   setTimezoneAction: vi.fn(async () => ({ ok: true, data: null })),
@@ -211,6 +216,11 @@ function status(overrides: Partial<IntegrationStatus> = {}): IntegrationStatus {
 }
 
 describe("<IntegrationsForm /> — Dropbox Sign", () => {
+  beforeEach(() => {
+    setEsignSendingEnabledAction.mockReset();
+    setEsignSendingEnabledAction.mockResolvedValue({ ok: true, data: null });
+  });
+
   it("connects with an owner-entered API key and never renders it as text", async () => {
     const user = userEvent.setup();
     render(<IntegrationsForm initial={status()} />);
@@ -234,7 +244,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
     expect(screen.getByText(/Connected ·••••1234/)).toBeVisible();
   });
 
-  it("toggles sending when connected", async () => {
+  it("opens confirmation without changing the committed switch or calling the action", async () => {
     const user = userEvent.setup();
     render(
       <IntegrationsForm
@@ -250,16 +260,179 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("switch", { name: "Enable contract sending" }),
-    );
-    expect(screen.getByText(/Requires a verified callback/i)).toBeVisible();
-    await waitFor(() => {
-      expect(setEsignSendingEnabledAction).toHaveBeenCalledWith(true);
+    const toggle = screen.getByRole("switch", {
+      name: "Enable contract sending",
     });
+    const manageTemplates = screen.getByRole("link", {
+      name: "Manage templates",
+    });
+    await user.click(toggle);
     expect(
-      screen.getByRole("link", { name: "Manage templates" }),
-    ).toHaveAttribute("href", "/settings/esign-templates");
+      screen.getByRole("heading", { name: "Turn on contract sending?" }),
+    ).toBeVisible();
+    expect(screen.getByText(/Requires a verified callback/i)).toBeVisible();
+    expect(toggle).not.toBeChecked();
+    expect(setEsignSendingEnabledAction).not.toHaveBeenCalled();
+    expect(manageTemplates).toHaveAttribute(
+      "href",
+      "/settings/esign-templates",
+    );
+  });
+
+  it("cancels an enable with no action and returns focus to the switch", async () => {
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: true,
+            sendingEnabled: false,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+        })}
+      />,
+    );
+    const toggle = screen.getByRole("switch", {
+      name: "Enable contract sending",
+    });
+
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(toggle).toHaveFocus());
+    expect(toggle).not.toBeChecked();
+    expect(setEsignSendingEnabledAction).not.toHaveBeenCalled();
+  });
+
+  it("dismisses confirmation with Escape or X without calling the action", async () => {
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: true,
+            sendingEnabled: false,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+        })}
+      />,
+    );
+    const toggle = screen.getByRole("switch", {
+      name: "Enable contract sending",
+    });
+
+    await user.click(toggle);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(toggle).toHaveFocus());
+    expect(setEsignSendingEnabledAction).not.toHaveBeenCalled();
+
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(toggle).toHaveFocus());
+    expect(toggle).not.toBeChecked();
+    expect(setEsignSendingEnabledAction).not.toHaveBeenCalled();
+  });
+
+  it("enables sending only after explicit confirmation succeeds", async () => {
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: true,
+            sendingEnabled: false,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+        })}
+      />,
+    );
+    const toggle = screen.getByRole("switch", {
+      name: "Enable contract sending",
+    });
+
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "Turn on sending" }));
+
+    await waitFor(() => {
+      expect(setEsignSendingEnabledAction).toHaveBeenCalledOnce();
+      expect(setEsignSendingEnabledAction).toHaveBeenCalledWith(true, true);
+      expect(toggle).toBeChecked();
+    });
+  });
+
+  it("keeps the committed switch unchanged when confirmation fails", async () => {
+    setEsignSendingEnabledAction.mockResolvedValueOnce({
+      ok: false,
+      error: { code: "DATABASE", message: "Sending could not be updated." },
+    });
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: true,
+            sendingEnabled: false,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+        })}
+      />,
+    );
+    const toggle = screen.getByRole("switch", {
+      name: "Enable contract sending",
+    });
+
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "Turn on sending" }));
+
+    await waitFor(() => {
+      expect(setEsignSendingEnabledAction).toHaveBeenCalledWith(true, true);
+      expect(
+        screen.queryByRole("heading", { name: "Turn on contract sending?" }),
+      ).toBeNull();
+    });
+    expect(toggle).not.toBeChecked();
+  });
+
+  it("requires confirmation before disabling and updates only after success", async () => {
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: true,
+            sendingEnabled: true,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+        })}
+      />,
+    );
+    const toggle = screen.getByRole("switch", {
+      name: "Enable contract sending",
+    });
+
+    await user.click(toggle);
+    expect(
+      screen.getByRole("heading", { name: "Turn off contract sending?" }),
+    ).toBeVisible();
+    expect(toggle).toBeChecked();
+    expect(setEsignSendingEnabledAction).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Turn off sending" }));
+    await waitFor(() => {
+      expect(setEsignSendingEnabledAction).toHaveBeenCalledOnce();
+      expect(setEsignSendingEnabledAction).toHaveBeenCalledWith(false, true);
+      expect(toggle).not.toBeChecked();
+    });
   });
 
   it("prevents members from changing or disconnecting the org connection", () => {
