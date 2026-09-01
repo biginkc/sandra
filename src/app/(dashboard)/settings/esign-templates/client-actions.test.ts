@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   prepare: vi.fn(),
   create: vi.fn(),
   upload: vi.fn(),
+  promoteStale: vi.fn(),
 }));
 
 vi.mock("@/lib/errors/call-action", () => ({
@@ -29,8 +30,9 @@ vi.mock("./actions", () => ({
   duplicateTemplateAction: vi.fn(),
   retryTemplateSourceCleanupAction: vi.fn(),
   retryUnattachedTemplateSourceCleanupAction: vi.fn(),
+  retryInitialTemplateProviderCreateAction: vi.fn(),
   reconcileUnknownTemplateProviderAction: vi.fn(),
-  promoteStaleInitialTemplateProviderCreateAction: vi.fn(),
+  promoteStaleInitialTemplateProviderCreateAction: mocks.promoteStale,
 }));
 
 import { ESIGN_MERGE_FIELD_NAMES } from "./types";
@@ -52,6 +54,20 @@ describe("template browser staging transport", () => {
       ok: true,
       data: { templateId: "template-1", initialEditorSession: null },
     });
+    mocks.promoteStale.mockResolvedValue({
+      ok: true,
+      data: { templateId: "template-1", providerCreateState: "unknown" },
+    });
+  });
+
+  it("exposes stale provider-create promotion to the recovery UI", async () => {
+    await expect(
+      templateLibraryActions.promoteStaleProviderCreate?.("template-1"),
+    ).resolves.toEqual({
+      ok: true,
+      data: { templateId: "template-1", providerCreateState: "unknown" },
+    });
+    expect(mocks.promoteStale).toHaveBeenCalledWith("template-1");
   });
 
   it("fails safely when Dropbox Chooser has no approved app key", async () => {

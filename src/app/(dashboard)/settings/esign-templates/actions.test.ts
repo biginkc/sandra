@@ -7,9 +7,11 @@ const mocks = vi.hoisted(() => ({
   initialFactory: vi.fn(),
   prepareUpload: vi.fn(),
   createInitial: vi.fn(),
+  createReplacement: vi.fn(),
   cleanupInitial: vi.fn(),
   reconcileInitial: vi.fn(),
   promoteInitial: vi.fn(),
+  retryProviderInitial: vi.fn(),
   revalidate: vi.fn(),
   verifyStagedSource: vi.fn(),
   add: vi.fn(),
@@ -45,6 +47,8 @@ import {
   prepareTemplateUploadAction,
   reconcileUnknownTemplateProviderAction,
   promoteStaleInitialTemplateProviderCreateAction,
+  retryInitialTemplateProviderCreateAction,
+  restartTemplatePlacementAction,
 } from "./actions";
 
 describe("template server action boundary", () => {
@@ -65,6 +69,31 @@ describe("template server action boundary", () => {
       ok: true,
       data: { templateId: "template-1", initialEditorSession: null },
     });
+    mocks.createReplacement.mockImplementation(
+      async (
+        _templateId: string,
+        beforeProviderCreate: (replacementTemplateId: string) => Promise<unknown>,
+      ) => {
+        const retired = await beforeProviderCreate("replacement-1") as {
+          ok: boolean;
+          data?: { cleanupAttention: boolean };
+        };
+        if (!retired.ok) return retired;
+        return {
+          ok: true,
+          data: {
+            templateId: "replacement-1",
+            initialEditorSession: {
+              providerTemplateId: "provider-replacement",
+              editUrl: "https://app.hellosign.com/editor/replacement",
+              expiresAt: 1_999_999_999,
+              clientId: "client-1",
+            },
+            cleanupAttention: retired.data?.cleanupAttention ?? false,
+          },
+        };
+      },
+    );
     mocks.cleanupInitial.mockResolvedValue({ ok: true, data: null });
     mocks.reconcileInitial.mockResolvedValue({
       ok: true,
@@ -74,12 +103,26 @@ describe("template server action boundary", () => {
       ok: true,
       data: { templateId: "template-1", providerCreateState: "unknown" },
     });
+    mocks.retryProviderInitial.mockResolvedValue({
+      ok: true,
+      data: {
+        templateId: "template-1",
+        initialEditorSession: {
+          providerTemplateId: "provider-1",
+          editUrl: "https://app.hellosign.com/editor/retry",
+          expiresAt: 1_999_999_999,
+          clientId: "client-1",
+        },
+      },
+    });
     mocks.initialFactory.mockResolvedValue({
       prepare: mocks.prepareUpload,
       create: mocks.createInitial,
+      createReplacementFromRetainedSource: mocks.createReplacement,
       cleanupSource: mocks.cleanupInitial,
       reconcileUnknown: mocks.reconcileInitial,
       promoteStaleProviderCreate: mocks.promoteInitial,
+      retryProviderCreate: mocks.retryProviderInitial,
     });
     mocks.verifyStagedSource.mockResolvedValue({
       ok: true,
@@ -183,6 +226,188 @@ describe("template server action boundary", () => {
       ok: true,
       data: { templateId: "template-1", initialEditorSession },
     });
+  });
+
+  it("retries a released provider create through the owner-scoped runtime", async () => {
+    await expect(retryInitialTemplateProviderCreateAction("template-1")).resolves.toEqual({
+      ok: true,
+      data: {
+        templateId: "template-1",
+        initialEditorSession: {
+          providerTemplateId: "provider-1",
+          editUrl: "https://app.hellosign.com/editor/retry",
+          expiresAt: 1_999_999_999,
+          clientId: "client-1",
+        },
+      },
+    });
+    expect(mocks.retryProviderInitial).toHaveBeenCalledWith("template-1");
+    expect(mocks.revalidate).toHaveBeenCalledWith("/settings/esign-templates");
+  });
+
+  it("retires the stuck provider draft before creating its replacement", async () => {
+    const order: string[] = [];
+    mocks.abandon.mockImplementation(async () => {
+      order.push("retire-original-provider");
+      return { ok: true, data: null };
+    });
+    mocks.createReplacement.mockImplementationOnce(
+      async (_templateId: string, beforeProviderCreate: (replacementTemplateId: string) => Promise<unknown>) => {
+        order.push("reserve-replacement");
+        await beforeProviderCreate("replacement-1");
+        order.push("create-replacement-provider");
+        return {
+          ok: true,
+          data: {
+            templateId: "replacement-1",
+            initialEditorSession: {
+              providerTemplateId: "provider-replacement",
+              editUrl: "https://app.hellosign.com/editor/replacement",
+              expiresAt: 1_999_999_999,
+              clientId: "client-1",
+            },
+            cleanupAttention: false,
+          },
+        };
+      },
+    );
+    const result = await restartTemplatePlacementAction("template-1");
+
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        templateId: "replacement-1",
+        initialEditorSession: {
+          providerTemplateId: "provider-replacement",
+          editUrl: "https://app.hellosign.com/editor/replacement",
+          expiresAt: 1_999_999_999,
+          clientId: "client-1",
+        },
+        cleanupAttention: false,
+      },
+    });
+    expect(mocks.createReplacement).toHaveBeenCalledWith(
+      "template-1",
+      expect.any(Function),
+    );
+    expect(order).toEqual([
+      "reserve-replacement",
+      "retire-original-provider",
+      "create-replacement-provider",
+    ]);
+    expect(mocks.abandon).toHaveBeenCalledWith("template-1");
+    expect(mocks.abandon).not.toHaveBeenCalledWith("replacement-1");
+    expect(mocks.revalidate).toHaveBeenCalledWith("/settings/esign-templates");
+  });
+
+  it("keeps the replacement usable while surfacing original-source cleanup attention", async () => {
+    mocks.abandon.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: "SOURCE_CLEANUP_FAILED",
+        message: "The draft was removed but its private source still needs cleanup.",
+      },
+    });
+
+    const result = await restartTemplatePlacementAction("template-1");
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        templateId: "replacement-1",
+        cleanupAttention: true,
+      },
+    });
+    expect(mocks.abandon).toHaveBeenCalledTimes(1);
+    expect(mocks.revalidate).toHaveBeenCalledWith("/settings/esign-templates");
+  });
+
+  it("does not create a provider replacement until the original slot is released", async () => {
+    mocks.abandon.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: "PLACEMENT_RESTART_PROVIDER_RETIRE_FAILED",
+        message: "Dropbox Sign could not release the unfinished template slot.",
+      },
+    });
+
+    const result = await restartTemplatePlacementAction("template-1");
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "PLACEMENT_RESTART_PROVIDER_RETIRE_FAILED",
+        message: "Dropbox Sign could not release the unfinished template slot.",
+      },
+    });
+    expect(mocks.abandon).toHaveBeenCalledOnce();
+    expect(mocks.revalidate).not.toHaveBeenCalled();
+  });
+
+  it("does not create the provider replacement until local retirement is durable", async () => {
+    mocks.abandon.mockResolvedValueOnce({
+        ok: false,
+        error: {
+          code: "ABANDON_LOCAL_FAILED",
+          message: "The provider draft was removed but local retirement failed.",
+        },
+      });
+
+    const result = await restartTemplatePlacementAction("template-1");
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "ABANDON_LOCAL_FAILED" },
+    });
+    expect(mocks.abandon).toHaveBeenCalledOnce();
+    expect(mocks.abandon).not.toHaveBeenCalledWith("replacement-1");
+    expect(mocks.revalidate).not.toHaveBeenCalled();
+  });
+
+  it("runs both concurrent restarts while preserving the winner's one-time session", async () => {
+    let call = 0;
+    mocks.createReplacement.mockImplementation(
+      async (_templateId: string, beforeProviderCreate: (replacementTemplateId: string) => Promise<unknown>) => {
+        await beforeProviderCreate("replacement-1");
+        call += 1;
+        return {
+          ok: true,
+          data: {
+            templateId: "replacement-1",
+            initialEditorSession:
+              call === 1
+                ? {
+                    providerTemplateId: "provider-replacement",
+                    editUrl: "https://app.hellosign.com/editor/replacement",
+                    expiresAt: 1_999_999_999,
+                    clientId: "client-1",
+                  }
+                : null,
+            cleanupAttention: false,
+          },
+        };
+      },
+    );
+
+    const [winner, follower] = await Promise.all([
+      restartTemplatePlacementAction("template-1"),
+      restartTemplatePlacementAction("template-1"),
+    ]);
+
+    expect(winner).toMatchObject({
+      ok: true,
+      data: { templateId: "replacement-1" },
+    });
+    expect(follower).toEqual({
+      ok: false,
+      error: {
+        code: "PLACEMENT_RESTART_IN_PROGRESS",
+        message:
+          "Another restart already created this replacement. Return to the template library to continue or clean it up.",
+      },
+    });
+    expect(mocks.createReplacement).toHaveBeenCalledTimes(2);
+    expect(mocks.abandon).toHaveBeenCalledTimes(2);
   });
 
   it("passes only the small staged reference through the Server Action", async () => {

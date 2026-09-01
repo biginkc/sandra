@@ -9,10 +9,12 @@ import {
   checkTemplateEditorReadinessAction,
   createTemplateDraftAction,
   prepareTemplateUploadAction,
+  promoteStaleInitialTemplateProviderCreateAction,
   deleteTemplateAction,
   duplicateTemplateAction,
   retryTemplateSourceCleanupAction,
   retryUnattachedTemplateSourceCleanupAction,
+  retryInitialTemplateProviderCreateAction,
 } from "./actions";
 import { chooseDropboxPdf, type DropboxChooserSdk } from "./dropbox-chooser";
 import { AmbiguousTusTerminationError, uploadStagedPdf } from "./staged-pdf-upload";
@@ -73,6 +75,17 @@ export const templateLibraryActions: TemplateLibraryActions = {
     return safeTemplateCallAction(retryUnattachedTemplateSourceCleanupAction(sourceId), {
       fallbackMessage: "The private upload cleanup could not be retried.",
     });
+  },
+  retryProviderCreate(templateId) {
+    return safeTemplateCallAction(retryInitialTemplateProviderCreateAction(templateId), {
+      fallbackMessage: "The provider setup could not be retried.",
+    });
+  },
+  promoteStaleProviderCreate(templateId) {
+    return safeTemplateCallAction(
+      promoteStaleInitialTemplateProviderCreateAction(templateId),
+      { fallbackMessage: "Provider recovery could not be checked." },
+    );
   },
   deleteTemplate(templateId, confirmRecentSends = false) {
     return safeTemplateCallAction(deleteTemplateAction(templateId, confirmRecentSends), {

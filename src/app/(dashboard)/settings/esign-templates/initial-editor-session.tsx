@@ -27,7 +27,6 @@ export function InitialEditorSessionProvider({
   const store = useMemo<InitialEditorSessionStore>(
     () => ({
       put(templateId, session) {
-        sessions.current.clear();
         sessions.current.set(templateId, session);
       },
       take(templateId) {

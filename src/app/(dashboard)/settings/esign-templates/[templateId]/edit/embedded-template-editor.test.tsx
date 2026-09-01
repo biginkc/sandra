@@ -6,6 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 
 import type { TemplateEditorActions } from "../../types";
 import type { EmbeddedTemplateClient } from "./embedded-template-client";
@@ -20,10 +21,14 @@ import {
 
 const FUTURE_EXPIRES_AT = Math.floor(Date.now() / 1000) + 3600;
 
-const router = { push: vi.fn(), refresh: vi.fn() };
+const { router, toast } = vi.hoisted(() => ({
+  router: { push: vi.fn(), replace: vi.fn(), refresh: vi.fn() },
+  toast: { warning: vi.fn() },
+}));
 vi.mock("next/navigation", () => ({
   useRouter: () => router,
 }));
+vi.mock("sonner", () => ({ toast }));
 
 describe("EmbeddedTemplateEditor", () => {
   afterEach(() => vi.clearAllMocks());
@@ -46,6 +51,7 @@ describe("EmbeddedTemplateEditor", () => {
           clientId: "client-1",
         },
       }),
+      restartPlacement: vi.fn(),
       syncFinishedTemplate: vi.fn().mockResolvedValue({
         ok: true,
         data: {
@@ -176,6 +182,83 @@ describe("EmbeddedTemplateEditor", () => {
     expect(actions.startEditor).toHaveBeenCalledTimes(2);
     expect(loadClient).toHaveBeenCalledTimes(2);
     expect(first.client.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces a terminal lost draft with a fresh take-once placement session", async () => {
+    const actions = makeActions();
+    vi.mocked(actions.startEditor).mockResolvedValue({
+      ok: false,
+      error: {
+        code: "DRAFT_EDITOR_SESSION_LOST",
+        message:
+          "This unfinished draft's first editor session is no longer available. Restart field placement to continue.",
+      },
+    });
+    vi.mocked(actions.restartPlacement).mockResolvedValue({
+      ok: true,
+      data: {
+        templateId: "replacement-1",
+        initialEditorSession: {
+          providerTemplateId: "provider-replacement",
+          editUrl: "https://app.hellosign.com/editor/replacement",
+          expiresAt: FUTURE_EXPIRES_AT,
+          clientId: "client-replacement",
+        },
+        cleanupAttention: true,
+      },
+    });
+    function TakeReplacement() {
+      const sessions = useInitialEditorSessionStore();
+      const [value, setValue] = useState("absent");
+      return (
+        <button
+          onClick={() =>
+            setValue(
+              sessions.take("replacement-1")?.editUrl ?? "absent",
+            )
+          }
+        >
+          {value}
+        </button>
+      );
+    }
+    const view = render(
+      <InitialEditorSessionProvider>
+        <EmbeddedTemplateEditor
+          template={template}
+          actions={actions}
+          loadClient={vi.fn()}
+        />
+      </InitialEditorSessionProvider>,
+    );
+
+    const restart = await screen.findByRole("button", {
+      name: "Restart placement",
+    });
+    expect(screen.queryByRole("button", { name: "Reload editor" })).not.toBeInTheDocument();
+    fireEvent.click(restart);
+
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith(
+        "/settings/esign-templates/replacement-1/edit",
+      ),
+    );
+    expect(actions.restartPlacement).toHaveBeenCalledTimes(1);
+    expect(toast.warning).toHaveBeenCalledWith(
+      "The replacement is ready, but the template library still has cleanup to retry.",
+      { duration: Infinity },
+    );
+    view.rerender(
+      <InitialEditorSessionProvider>
+        <TakeReplacement />
+      </InitialEditorSessionProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "absent" }));
+    expect(
+      screen.getByRole("button", {
+        name: "https://app.hellosign.com/editor/replacement",
+      }),
+    ).toBeVisible();
   });
 
   it("retries pending synchronization from the rendered control without reopening Dropbox", async () => {
@@ -423,6 +506,13 @@ function makeActions(): TemplateEditorActions {
         editUrl: "https://edit",
         expiresAt: 123,
         clientId: "client-1",
+      },
+    }),
+    restartPlacement: vi.fn().mockResolvedValue({
+      ok: false,
+      error: {
+        code: "PLACEMENT_RESTART_UNAVAILABLE",
+        message: "Field placement could not be restarted.",
       },
     }),
     syncFinishedTemplate: vi.fn().mockResolvedValue({

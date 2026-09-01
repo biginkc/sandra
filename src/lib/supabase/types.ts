@@ -4690,6 +4690,23 @@ export type Database = {
           template_id: string
         }[]
       }
+      begin_definitive_esign_template_provider_create_retry: {
+        Args: {
+          p_actor_id: string
+          p_org_id: string
+          p_source_id: string
+          p_template_id: string
+        }
+        Returns: {
+          claim_token: string
+          created_by: string
+          outcome: string
+          provider_account_id: string
+          provider_create_state: string
+          provider_template_id: string | null
+          template_id: string
+        }[]
+      }
       claim_esign_request_void: {
         Args: {
           p_claim_token: string
@@ -5063,6 +5080,16 @@ export type Database = {
           template_id: string
         }[]
       }
+      list_retryable_esign_template_provider_creates: {
+        Args: { p_actor_id: string; p_org_id: string }
+        Returns: {
+          created_at: string
+          created_by: string
+          name: string
+          source_id: string
+          template_id: string
+        }[]
+      }
       list_pending_esign_template_source_uploads: {
         Args: { p_actor_id: string; p_org_id: string }
         Returns: {
@@ -5094,6 +5121,21 @@ export type Database = {
         Returns: undefined
       }
       mark_esign_template_provider_create_unknown: {
+        Args: {
+          p_actor_id: string
+          p_claim_token: string
+          p_error_code: string
+          p_org_id: string
+          p_source_id: string
+          p_template_id: string
+        }
+        Returns: {
+          created_by: string
+          outcome: string
+          template_id: string
+        }[]
+      }
+      record_definitive_esign_template_provider_create_failure: {
         Args: {
           p_actor_id: string
           p_claim_token: string

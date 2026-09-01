@@ -41,8 +41,13 @@ export type PendingTemplateCopy = Readonly<{
   name: string;
   lifecycle:
     "preparing" | "editing" | "cleanup_attention" | "provider_attention";
-  kind?: "copy" | "edit_revision" | "source_cleanup" | "provider_create";
-  providerCreateState?: "claimed" | "invoking" | "unknown" | "attached";
+  kind?:
+    | "copy"
+    | "edit_revision"
+    | "placement_restart"
+    | "source_cleanup"
+    | "provider_create";
+  providerCreateState?: "unstarted" | "claimed" | "invoking" | "unknown" | "attached";
 }>;
 
 export type PendingTemplateCopiesLoadResult = TemplateLaneResult<
@@ -106,6 +111,17 @@ export type CreatedTemplateDraft = Readonly<{
   initialEditorSession: EmbeddedTemplateSession | null;
 }>;
 
+export type RestartedTemplateDraft = Readonly<{
+  templateId: string;
+  initialEditorSession: EmbeddedTemplateSession;
+  cleanupAttention: boolean;
+}>;
+
+export type RetriedTemplateDraft = Readonly<{
+  templateId: string;
+  initialEditorSession: EmbeddedTemplateSession;
+}>;
+
 export type TemplateLibraryActions = Readonly<{
   createDraft(
     input: CreateTemplateDraftInput,
@@ -129,6 +145,17 @@ export type TemplateLibraryActions = Readonly<{
   abandonDraft(templateId: string): Promise<TemplateLaneResult<null>>;
   retryCleanup(templateId: string): Promise<TemplateLaneResult<null>>;
   retrySourceCleanup?(sourceId: string): Promise<TemplateLaneResult<null>>;
+  retryProviderCreate?(
+    templateId: string,
+  ): Promise<TemplateLaneResult<RetriedTemplateDraft>>;
+  promoteStaleProviderCreate?(
+    templateId: string,
+  ): Promise<
+    TemplateLaneResult<{
+      templateId: string;
+      providerCreateState: "unknown" | "attached";
+    }>
+  >;
   deleteTemplate(
     templateId: string,
     confirmRecentSends?: boolean,
@@ -137,6 +164,7 @@ export type TemplateLibraryActions = Readonly<{
 
 export type TemplateEditorActions = Readonly<{
   startEditor(): Promise<TemplateLaneResult<EmbeddedTemplateSession>>;
+  restartPlacement(): Promise<TemplateLaneResult<RestartedTemplateDraft>>;
   syncFinishedTemplate(
     input: Readonly<{ name: string }>,
   ): Promise<TemplateLaneResult<TemplateOption>>;

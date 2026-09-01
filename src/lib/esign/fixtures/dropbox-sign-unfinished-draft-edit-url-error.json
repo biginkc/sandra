@@ -1,0 +1,34 @@
+{
+  "provenance": {
+    "capturedAt": "2026-09-01T18:10:53Z",
+    "projectRef": "rlcghbdohivwlgxwkhgs",
+    "localTemplateId": "eeb6ae19-5ddc-4d70-b050-7735e3532382",
+    "providerTemplateId": "40f5f1a25dad615f49be5824f8d5825593650adb",
+    "localLifecycleState": "editing",
+    "localProviderCreateState": "attached",
+    "request": {
+      "operation": "embeddedEditUrl",
+      "forceSignerRoles": true,
+      "testMode": true
+    },
+    "preflightRequest": {
+      "capturedAt": "2026-09-01T18:45:04Z",
+      "operation": "templateGet"
+    },
+    "credentialSource": "QA org integration decrypted in project through the approved read-only management SQL endpoint"
+  },
+  "preflightResponse": {
+    "statusCode": 404,
+    "errorName": "not_found",
+    "normalizedProviderCode": "not_found",
+    "errorMsg": "Template not found: 40f5f1a25dad615f49be5824f8d5825593650adb",
+    "errorPath": null
+  },
+  "response": {
+    "statusCode": 404,
+    "errorName": "not_found",
+    "normalizedProviderCode": "not_found",
+    "errorMsg": "Template not found: 40f5f1a25dad615f49be5824f8d5825593650adb",
+    "errorPath": null
+  }
+}

@@ -23,6 +23,7 @@
     "verify:migration-safety-unit": "node --test scripts/check-migration-safety.test.mjs",
     "verify:migration-safety-rehearsal": "LC_ALL=C node scripts/check-migration-safety.rehearsal.mjs",
     "verify:esign-atomic-packet": "node --test scripts/apply-esign-production-migrations-atomically.test.mjs",
+    "verify:esign-draft-restart-mutations": "node scripts/verify-esign-draft-restart-mutations.mjs",
     "verify:csv-import-migration": "LC_ALL=C node scripts/rehearse-csv-import-truthfulness.mjs",
     "verify:promote-leads-migration": "LC_ALL=C node scripts/rehearse-promote-leads.mjs",
     "verify:leads-urgency-sql": "LC_ALL=C bash scripts/rehearse-leads-urgency-paging.sh",

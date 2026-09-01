@@ -39,7 +39,7 @@ export type PendingTemplateCopy = Readonly<{
   orgId: string;
   name: string;
   lifecycle: "preparing" | "editing" | "cleanup_attention";
-  kind?: "copy" | "edit_revision";
+  kind?: "copy" | "edit_revision" | "placement_restart";
 }>;
 
 export type TemplateUpload = Readonly<{
@@ -159,6 +159,7 @@ export type TemplateProviderPort = Readonly<{
   isNotFound(error: unknown): boolean;
   classifyTemplateReadError(error: unknown): "not_found" | "terminal";
   isAmbiguousMutation(error: unknown): boolean;
+  isRestartableEditorSessionError(error: unknown): boolean;
 }>;
 
 export type TemplateOrchestratorPorts = Readonly<{
@@ -424,12 +425,42 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
         return failure("TEMPLATE_NOT_FOUND", "The template is unavailable.");
       }
       if (!template.providerTemplateId) return failure("PROVIDER_ID_PENDING", "The template is still being prepared.");
+      let provider: ProviderTemplateState;
       try {
-        const provider = await ports.provider.getTemplate(template.providerTemplateId);
-        if (provider.providerTemplateId !== template.providerTemplateId) {
-          return failure("PROVIDER_ID_MISMATCH", "Dropbox Sign returned a different template identifier.");
+        provider = await ports.provider.getTemplate(template.providerTemplateId);
+      } catch (error) {
+        if (
+          template.stagingSourceId &&
+          !template.supersedesTemplateId &&
+          ports.provider.isRestartableEditorSessionError(error)
+        ) {
+          return failure(
+            "DRAFT_EDITOR_SESSION_LOST",
+            "This unfinished draft's first editor session is no longer available. Restart field placement to continue.",
+          );
         }
-        const session = await ports.provider.getFreshEditUrl(template.providerTemplateId);
+        return failure("EDITOR_SESSION_FAILED", "Dropbox Sign could not open a fresh editor session.");
+      }
+      if (provider.providerTemplateId !== template.providerTemplateId) {
+        return failure("PROVIDER_ID_MISMATCH", "Dropbox Sign returned a different template identifier.");
+      }
+      let session: { editUrl: string; expiresAt: number | null };
+      try {
+        session = await ports.provider.getFreshEditUrl(template.providerTemplateId);
+      } catch (error) {
+        if (
+          template.stagingSourceId &&
+          !template.supersedesTemplateId &&
+          ports.provider.isRestartableEditorSessionError(error)
+        ) {
+          return failure(
+            "DRAFT_EDITOR_SESSION_LOST",
+            "This unfinished draft's first editor session is no longer available. Restart field placement to continue.",
+          );
+        }
+        return failure("EDITOR_SESSION_FAILED", "Dropbox Sign could not open a fresh editor session.");
+      }
+      try {
         const clientId = await ports.provider.getEmbeddedClientId();
         return success({
           providerTemplateId: template.providerTemplateId,
@@ -537,7 +568,10 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       } catch {
         return failure("TEMPLATE_READ_FAILED", "The template could not be loaded.");
       }
-      if (!draft || draft.orgId !== access.data.orgId || !["preparing", "editing"].includes(draft.lifecycle)) return failure("DRAFT_STALE", "The template draft is no longer available.");
+      if (!draft || draft.orgId !== access.data.orgId || !["preparing", "editing", "abandoned"].includes(draft.lifecycle)) return failure("DRAFT_STALE", "The template draft is no longer available.");
+      if (draft.lifecycle === "abandoned") {
+        return cleanupSource(ports, draft);
+      }
       if (draft.providerTemplateId) {
         try {
           await ports.provider.deleteTemplate(draft.providerTemplateId);
@@ -547,6 +581,16 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       }
       try {
         if (!(await ports.repository.markAbandoned(access.data.orgId, templateId))) {
+          const concurrent = await ports.repository.getTemplate(
+            access.data.orgId,
+            templateId,
+          );
+          if (
+            concurrent?.orgId === access.data.orgId &&
+            concurrent.lifecycle === "abandoned"
+          ) {
+            return cleanupSource(ports, concurrent);
+          }
           return failure("ABANDON_LOCAL_FAILED", "Sandra could not record the abandoned draft.");
         }
       } catch {

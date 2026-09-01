@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ProviderError } from "@/lib/errors/classes";
 
 const mocks = vi.hoisted(() => ({
   rpc: vi.fn(),
+  from: vi.fn(),
   download: vi.fn(),
+  upload: vi.fn(),
   remove: vi.fn(),
   credentials: vi.fn(),
   providerFactory: vi.fn(),
@@ -18,8 +21,13 @@ vi.mock("@/lib/auth/memberships", () => ({
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     rpc: mocks.rpc,
+    from: mocks.from,
     storage: {
-      from: () => ({ download: mocks.download, remove: mocks.remove }),
+      from: () => ({
+        download: mocks.download,
+        upload: mocks.upload,
+        remove: mocks.remove,
+      }),
     },
   }),
 }));
@@ -58,6 +66,56 @@ const initialEditorSession = {
   expiresAt: 123,
   clientId: "client",
 };
+const retireOriginal = vi.fn().mockResolvedValue({
+  ok: true,
+  data: { cleanupAttention: false },
+});
+
+function restartableDraft(templateId: string) {
+  return {
+    id: templateId,
+    org_id: "org-1",
+    name: "Offer",
+    document_type: "Purchase agreement",
+    seller_role: "Seller",
+    signer_roles: [{ name: "Seller", order: 0 }],
+    merge_field_names: [
+      "seller_name",
+      "property_address",
+      "offer_price",
+      "closing_date",
+      "earnest_money",
+    ],
+    sign_template_id: "provider-stuck",
+    staging_source_id: sourceId,
+    source_filename: "offer.pdf",
+    source_size_bytes: bytes.length,
+    source_content_type: "application/pdf",
+    source_sha256: sha256,
+    staging_path: source.storagePath,
+    staging_deleted_at: null,
+    lifecycle_state: "editing",
+    provider_create_state: "attached",
+    duplicate_of_template_id: null,
+    supersedes_template_id: null,
+    finalized_at: null,
+    deleted_at: null,
+    abandoned_at: null,
+  };
+}
+
+function retryableProviderDraft(templateId: string) {
+  return {
+    ...restartableDraft(templateId),
+    sign_template_id: null,
+    lifecycle_state: "preparing",
+    provider_account_id: "account-1",
+    provider_create_state: "unknown",
+    provider_create_claim_token_hash: "claim-token-hash",
+    provider_create_last_released_token_hash: null,
+    provider_create_error_code: "PROVIDER_REQUEST_REJECTED",
+  };
+}
 
 function successfulRpc(name: string, args: Record<string, unknown>) {
   if (name === "prepare_esign_template_source_upload")
@@ -97,6 +155,21 @@ function successfulRpc(name: string, args: Record<string, unknown>) {
           template_id: "template-1",
           provider_create_state: "claimed",
           claim_token: "claim-1",
+          provider_template_id: null,
+          provider_account_id: "account-1",
+          created_by: "owner-1",
+        },
+      ],
+      error: null,
+    };
+  if (name === "begin_definitive_esign_template_provider_create_retry")
+    return {
+      data: [
+        {
+          outcome: "started",
+          template_id: "template-1",
+          provider_create_state: "invoking",
+          claim_token: "claim-retry-1",
           provider_template_id: null,
           provider_account_id: "account-1",
           created_by: "owner-1",
@@ -150,9 +223,21 @@ function successfulRpc(name: string, args: Record<string, unknown>) {
       ],
       error: null,
     };
+  if (name === "record_definitive_esign_template_provider_create_failure")
+    return {
+      data: [
+        {
+          outcome: "recorded_failure",
+          template_id: "template-1",
+          created_by: "owner-1",
+        },
+      ],
+      error: null,
+    };
   if (
     name === "list_pending_esign_template_source_uploads" ||
-    name === "list_pending_esign_template_provider_creates"
+    name === "list_pending_esign_template_provider_creates" ||
+    name === "list_retryable_esign_template_provider_creates"
   )
     return { data: [], error: null };
   throw new Error(`unexpected RPC ${name}`);
@@ -161,11 +246,25 @@ function successfulRpc(name: string, args: Record<string, unknown>) {
 describe("foundation initial-template runtime", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    retireOriginal.mockResolvedValue({
+      ok: true,
+      data: { cleanupAttention: false },
+    });
     mocks.rpc.mockImplementation(successfulRpc);
     mocks.download.mockResolvedValue({
       data: new Blob([bytes], { type: "application/pdf" }),
       error: null,
     });
+    mocks.upload.mockResolvedValue({ data: { path: "copied.pdf" }, error: null });
+    const query = {
+      select: vi.fn(),
+      eq: vi.fn(),
+      maybeSingle: vi.fn(),
+    };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    query.maybeSingle.mockResolvedValue({ data: null, error: null });
+    mocks.from.mockReturnValue(query);
     mocks.credentials.mockResolvedValue({
       apiKey: "secret",
       clientId: "client",
@@ -361,6 +460,499 @@ describe("foundation initial-template runtime", () => {
     });
   });
 
+  it("rediscovers a definitively rejected provider create as safely retryable", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    mocks.rpc.mockImplementation(async (name: string) => {
+      if (name === "list_pending_esign_template_source_uploads") return { data: [], error: null };
+      if (name === "list_pending_esign_template_provider_creates") return {
+        data: [{ template_id: templateId, source_id: sourceId, name: "Offer", provider_create_state: "unknown" }],
+        error: null,
+      };
+      if (name === "list_retryable_esign_template_provider_creates") return {
+        data: [{ template_id: templateId, source_id: sourceId, name: "Offer" }],
+        error: null,
+      };
+      return successfulRpc(name, {});
+    });
+    await expect((await createInitialTemplateRuntime()).listRecoveries()).resolves.toEqual({
+      ok: true,
+      data: [{ id: templateId, name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "unstarted" }],
+    });
+  });
+
+  it("keeps recovery on manual reconciliation when the retry capability RPC is absent", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    mocks.rpc.mockImplementation(async (name: string) => {
+      if (name === "list_pending_esign_template_source_uploads") {
+        return { data: [], error: null };
+      }
+      if (name === "list_pending_esign_template_provider_creates") {
+        return {
+          data: [
+            {
+              template_id: templateId,
+              source_id: sourceId,
+              name: "Offer",
+              provider_create_state: "unknown",
+            },
+          ],
+          error: null,
+        };
+      }
+      if (name === "list_retryable_esign_template_provider_creates") {
+        return { data: null, error: new Error("function not found") };
+      }
+      return successfulRpc(name, {});
+    });
+
+    await expect(
+      (await createInitialTemplateRuntime()).listRecoveries(),
+    ).resolves.toEqual({
+      ok: true,
+      data: [
+        {
+          id: templateId,
+          name: "Offer",
+          lifecycle: "provider_attention",
+          kind: "provider_create",
+          providerCreateState: "unknown",
+        },
+      ],
+    });
+  });
+
+  it("revalidates the released draft and retained PDF before retrying provider creation", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    query.maybeSingle.mockResolvedValue({ data: retryableProviderDraft(templateId), error: null });
+    mocks.from.mockReturnValue(query);
+    mocks.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+      if (name === "list_retryable_esign_template_provider_creates") return {
+        data: [{ template_id: templateId, source_id: sourceId, name: "Offer" }],
+        error: null,
+      };
+      const result = successfulRpc(name, args);
+      if (["claim_esign_template_provider_create", "begin_definitive_esign_template_provider_create_retry", "begin_esign_template_provider_create", "complete_esign_template_provider_create"].includes(name)) {
+        return { ...result, data: result.data?.map((row) => ({ ...row, template_id: templateId })) };
+      }
+      return result;
+    });
+    await expect((await createInitialTemplateRuntime()).retryProviderCreate(templateId)).resolves.toEqual({
+      ok: true,
+      data: { templateId, initialEditorSession },
+    });
+    expect(mocks.download).toHaveBeenCalledWith(source.storagePath);
+    expect(mocks.providerCreate).toHaveBeenCalledTimes(1);
+    expect(mocks.rpc).toHaveBeenCalledWith("begin_definitive_esign_template_provider_create_retry", expect.objectContaining({ p_template_id: templateId, p_source_id: sourceId }));
+    expect(mocks.rpc).not.toHaveBeenCalledWith("begin_esign_template_provider_create", expect.anything());
+  });
+
+  it("checks retry credentials before atomically beginning provider invocation", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    query.maybeSingle.mockResolvedValue({ data: retryableProviderDraft(templateId), error: null });
+    mocks.from.mockReturnValue(query);
+    mocks.credentials.mockResolvedValue(null);
+    mocks.rpc.mockImplementation(async (name: string) => {
+      if (name === "list_retryable_esign_template_provider_creates") return {
+        data: [{ template_id: templateId, source_id: sourceId, name: "Offer" }],
+        error: null,
+      };
+      return successfulRpc(name, {});
+    });
+
+    await expect((await createInitialTemplateRuntime()).retryProviderCreate(templateId)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_CONFIGURATION_FAILED" },
+    });
+    expect(mocks.rpc).not.toHaveBeenCalledWith(
+      "begin_definitive_esign_template_provider_create_retry",
+      expect.anything(),
+    );
+    expect(mocks.rpc).not.toHaveBeenCalledWith(
+      "release_esign_template_provider_create_claim",
+      expect.anything(),
+    );
+  });
+
+  it("checks retry account identity before atomically beginning provider invocation", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    query.maybeSingle.mockResolvedValue({ data: retryableProviderDraft(templateId), error: null });
+    mocks.from.mockReturnValue(query);
+    mocks.credentials.mockResolvedValue({
+      apiKey: "secret",
+      clientId: "client",
+      providerAccountId: "different-account",
+    });
+    mocks.rpc.mockImplementation(async (name: string) => {
+      if (name === "list_retryable_esign_template_provider_creates") return {
+        data: [{ template_id: templateId, source_id: sourceId, name: "Offer" }],
+        error: null,
+      };
+      return successfulRpc(name, {});
+    });
+
+    await expect((await createInitialTemplateRuntime()).retryProviderCreate(templateId)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_ACCOUNT_MISMATCH" },
+    });
+    expect(mocks.rpc).not.toHaveBeenCalledWith(
+      "begin_definitive_esign_template_provider_create_retry",
+      expect.anything(),
+    );
+  });
+
+  it("refuses an unknown draft without the definitive-failure retry tag", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    query.maybeSingle.mockResolvedValue({
+      data: {
+        ...retryableProviderDraft(templateId),
+        provider_create_error_code: "PROVIDER_RESPONSE_UNKNOWN",
+      },
+      error: null,
+    });
+    mocks.from.mockReturnValue(query);
+    mocks.rpc.mockImplementation(async (name: string) => {
+      if (name === "list_retryable_esign_template_provider_creates") return {
+        data: [{ template_id: templateId, source_id: sourceId, name: "Offer" }],
+        error: null,
+      };
+      return successfulRpc(name, {});
+    });
+    await expect((await createInitialTemplateRuntime()).retryProviderCreate(templateId)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_RETRY_CONTRACT_MISMATCH" },
+    });
+    expect(mocks.providerCreate).not.toHaveBeenCalled();
+  });
+
+  it("refuses to route a successful retry that cannot return its one-time editor session", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    query.maybeSingle.mockResolvedValue({
+      data: retryableProviderDraft(templateId),
+      error: null,
+    });
+    mocks.from.mockReturnValue(query);
+    mocks.rpc.mockImplementation(
+      async (name: string, args: Record<string, unknown>) => {
+        if (name === "list_retryable_esign_template_provider_creates") {
+          return {
+            data: [{ template_id: templateId, source_id: sourceId, name: "Offer" }],
+            error: null,
+          };
+        }
+        if (name === "begin_definitive_esign_template_provider_create_retry") {
+          return {
+            data: [
+              {
+                outcome: "already_attached",
+                template_id: templateId,
+                provider_create_state: "attached",
+                claim_token: null,
+                provider_template_id: "provider-1",
+                provider_account_id: "account-1",
+                created_by: "owner-1",
+              },
+            ],
+            error: null,
+          };
+        }
+        return successfulRpc(name, args);
+      },
+    );
+
+    await expect(
+      (await createInitialTemplateRuntime()).retryProviderCreate(templateId),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_RETRY_SESSION_MISSING" },
+    });
+  });
+
+  it("copies the retained private PDF into the fenced initial-create path", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = mocks.from() as {
+      maybeSingle: ReturnType<typeof vi.fn>;
+    };
+    query.maybeSingle.mockResolvedValue({
+      data: restartableDraft(templateId),
+      error: null,
+    });
+    mocks.rpc.mockImplementation(
+      async (name: string, args: Record<string, unknown>) => {
+        if (name === "verify_esign_template_source_upload") {
+          return {
+            data: [
+              {
+                outcome: "verified",
+                source_id: args.p_source_id,
+                verification_state: "verified",
+              },
+            ],
+            error: null,
+          };
+        }
+        return successfulRpc(name, args);
+      },
+    );
+
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).createReplacementFromRetainedSource(templateId, retireOriginal);
+
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        templateId: "template-1",
+        initialEditorSession,
+        cleanupAttention: false,
+      },
+    });
+    expect(mocks.upload).toHaveBeenCalledWith(
+      `org-1/${templateId}.pdf`,
+      bytes,
+      { contentType: "application/pdf", upsert: false },
+    );
+    expect(mocks.upload.mock.calls[0]?.[0]).not.toBe(source.storagePath);
+    expect(mocks.providerCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        localTemplateId: "template-1",
+        title: "Offer",
+      }),
+    );
+    expect(retireOriginal).toHaveBeenCalledWith("template-1");
+    expect(retireOriginal.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.providerCreate.mock.invocationCallOrder[0]!,
+    );
+    expect(JSON.stringify(mocks.rpc.mock.calls)).not.toContain(
+      initialEditorSession.editUrl,
+    );
+  });
+
+  it("reconciles a concurrent restart onto the same durable source reservation", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = mocks.from() as {
+      maybeSingle: ReturnType<typeof vi.fn>;
+    };
+    query.maybeSingle.mockResolvedValue({
+      data: restartableDraft(templateId),
+      error: null,
+    });
+    mocks.upload.mockResolvedValueOnce({
+      data: null,
+      error: new Error("object already exists"),
+    });
+    mocks.rpc.mockImplementation(
+      (name: string, args: Record<string, unknown>) =>
+        name === "verify_esign_template_source_upload"
+          ? {
+              data: [
+                {
+                  outcome: "already_verified",
+                  source_id: args.p_source_id,
+                  verification_state: "verified",
+                },
+              ],
+              error: null,
+            }
+          : successfulRpc(name, args),
+    );
+
+    let claimCount = 0;
+    const baseImplementation = mocks.rpc.getMockImplementation()!;
+    mocks.rpc.mockImplementation(
+      async (name: string, args: Record<string, unknown>) => {
+        if (name === "claim_esign_template_provider_create") {
+          claimCount += 1;
+          if (claimCount === 2) {
+            return {
+              data: [
+                {
+                  outcome: "already_in_progress",
+                  template_id: "template-1",
+                  provider_create_state: "invoking",
+                  claim_token: null,
+                  provider_template_id: null,
+                  provider_account_id: "account-1",
+                  created_by: "owner-1",
+                },
+              ],
+              error: null,
+            };
+          }
+        }
+        return baseImplementation(name, args);
+      },
+    );
+    const runtime = await createInitialTemplateRuntime();
+    const results = await Promise.all([
+      runtime.createReplacementFromRetainedSource(templateId, retireOriginal),
+      runtime.createReplacementFromRetainedSource(templateId, retireOriginal),
+    ]);
+
+    expect(results).toContainEqual({
+      ok: true,
+      data: {
+        templateId: "template-1",
+        initialEditorSession,
+        cleanupAttention: false,
+      },
+    });
+    expect(results).toContainEqual(
+      expect.objectContaining({
+        ok: false,
+        error: expect.objectContaining({ code: "PROVIDER_CREATE_IN_PROGRESS" }),
+      }),
+    );
+    expect(mocks.rpc).toHaveBeenCalledWith(
+      "prepare_esign_template_source_upload",
+      expect.objectContaining({ p_source_id: templateId }),
+    );
+    expect(retireOriginal).toHaveBeenCalledTimes(2);
+    expect(mocks.providerCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a conflicting object at the durable restart reservation", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = mocks.from() as {
+      maybeSingle: ReturnType<typeof vi.fn>;
+    };
+    query.maybeSingle.mockResolvedValue({
+      data: restartableDraft(templateId),
+      error: null,
+    });
+    mocks.download
+      .mockResolvedValueOnce({
+        data: new Blob([bytes], { type: "application/pdf" }),
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: new Blob([new TextEncoder().encode("%PDF-conflict")], {
+          type: "application/pdf",
+        }),
+        error: null,
+      });
+    mocks.upload.mockResolvedValueOnce({
+      data: null,
+      error: new Error("object already exists"),
+    });
+    mocks.rpc.mockImplementation(
+      async (name: string, args: Record<string, unknown>) => {
+        if (name === "verify_esign_template_source_upload") {
+          return {
+            data: [
+              {
+                outcome: "already_verified",
+                source_id: args.p_source_id,
+                verification_state: "verified",
+              },
+            ],
+            error: null,
+          };
+        }
+        return successfulRpc(name, args);
+      },
+    );
+
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).createReplacementFromRetainedSource(templateId, retireOriginal);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PLACEMENT_RESTART_COPY_FAILED" },
+    });
+    expect(mocks.providerCreate).not.toHaveBeenCalled();
+  });
+
+  it("resumes the same replacement reservation after the original was retired", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = mocks.from() as {
+      maybeSingle: ReturnType<typeof vi.fn>;
+    };
+    query.maybeSingle.mockResolvedValue({
+      data: {
+        ...restartableDraft(templateId),
+        lifecycle_state: "abandoned",
+        abandoned_at: "2026-09-01T18:00:00Z",
+        staging_deleted_at: "2026-09-01T18:00:00Z",
+      },
+      error: null,
+    });
+    mocks.upload.mockResolvedValueOnce({
+      data: null,
+      error: new Error("object already exists"),
+    });
+    mocks.rpc.mockImplementation(
+      async (name: string, args: Record<string, unknown>) => {
+        if (name === "verify_esign_template_source_upload") {
+          return {
+            data: [
+              {
+                outcome: "already_verified",
+                source_id: args.p_source_id,
+                verification_state: "verified",
+              },
+            ],
+            error: null,
+          };
+        }
+        return successfulRpc(name, args);
+      },
+    );
+
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).createReplacementFromRetainedSource(templateId, retireOriginal);
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: { templateId: "template-1", cleanupAttention: false },
+    });
+    expect(mocks.download).toHaveBeenNthCalledWith(
+      1,
+      `org-1/${templateId}.pdf`,
+    );
+    expect(retireOriginal).toHaveBeenCalledWith("template-1");
+    expect(mocks.providerCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to copy a draft that is no longer in the unfinished editing state", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = mocks.from() as {
+      maybeSingle: ReturnType<typeof vi.fn>;
+    };
+    query.maybeSingle.mockResolvedValue({
+      data: { ...restartableDraft(templateId), lifecycle_state: "finalized" },
+      error: null,
+    });
+
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).createReplacementFromRetainedSource(templateId, retireOriginal);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PLACEMENT_RESTART_UNAVAILABLE" },
+    });
+    expect(mocks.download).not.toHaveBeenCalled();
+    expect(mocks.upload).not.toHaveBeenCalled();
+    expect(mocks.providerCreate).not.toHaveBeenCalled();
+  });
+
   it("constructs and invokes Dropbox only after a successful token-fenced begin", async () => {
     const order: string[] = [];
     mocks.rpc.mockImplementation(
@@ -487,6 +1079,108 @@ describe("foundation initial-template runtime", () => {
     expect(mocks.rpc).toHaveBeenCalledWith(
       "mark_esign_template_provider_create_unknown",
       expect.objectContaining({ p_error_code: "PROVIDER_ATTACH_UNKNOWN" }),
+    );
+  });
+
+  it("returns a definitive provider 4xx to retryable state instead of manual reconciliation", async () => {
+    mocks.providerCreate.mockRejectedValueOnce(
+      new ProviderError("Template quota reached", "dropbox_sign", {
+        statusCode: 400,
+        providerCode: "bad_request",
+        retryable: false,
+      }),
+    );
+
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).create({
+      source,
+      name: "Offer",
+      documentType: "Purchase agreement",
+      signerRoles: [{ name: "Seller", order: 0 }],
+      sellerRoleName: "Seller",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_CREATE_REJECTED" },
+    });
+    expect(mocks.rpc).toHaveBeenCalledWith(
+      "record_definitive_esign_template_provider_create_failure",
+      expect.objectContaining({
+        p_claim_token: "claim-1",
+        p_error_code: "PROVIDER_REQUEST_REJECTED",
+      }),
+    );
+    expect(mocks.rpc).not.toHaveBeenCalledWith(
+      "mark_esign_template_provider_create_unknown",
+      expect.anything(),
+    );
+  });
+
+  it("falls back to refresh-safe manual reconciliation when the definitive-failure RPC is not deployed", async () => {
+    mocks.providerCreate.mockRejectedValueOnce(
+      new ProviderError("Template quota reached", "dropbox_sign", {
+        statusCode: 400,
+        providerCode: "bad_request",
+        retryable: false,
+      }),
+    );
+    mocks.rpc.mockImplementation(
+      async (name: string, args: Record<string, unknown>) => {
+        if (name === "record_definitive_esign_template_provider_create_failure") {
+          return { data: null, error: new Error("function not found") };
+        }
+        return successfulRpc(name, args);
+      },
+    );
+
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).create({
+      source,
+      name: "Offer",
+      documentType: "Purchase agreement",
+      signerRoles: [{ name: "Seller", order: 0 }],
+      sellerRoleName: "Seller",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_CREATE_UNKNOWN" },
+    });
+    expect(mocks.rpc).toHaveBeenCalledWith(
+      "mark_esign_template_provider_create_unknown",
+      expect.objectContaining({
+        p_error_code: "PROVIDER_DEFINITIVE_FAILURE_RECORD_UNAVAILABLE",
+      }),
+    );
+  });
+
+  it("keeps an ambiguous provider create fenced for manual reconciliation", async () => {
+    mocks.providerCreate.mockRejectedValueOnce(new Error("connection reset"));
+
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).create({
+      source,
+      name: "Offer",
+      documentType: "Purchase agreement",
+      signerRoles: [{ name: "Seller", order: 0 }],
+      sellerRoleName: "Seller",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_CREATE_UNKNOWN" },
+    });
+    expect(mocks.rpc).toHaveBeenCalledWith(
+      "mark_esign_template_provider_create_unknown",
+      expect.objectContaining({ p_error_code: "PROVIDER_RESPONSE_UNKNOWN" }),
+    );
+    expect(mocks.rpc).not.toHaveBeenCalledWith(
+      "record_definitive_esign_template_provider_create_failure",
+      expect.anything(),
     );
   });
 });

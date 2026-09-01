@@ -12,6 +12,8 @@ import type {
   CreateTemplateDraftActionInput,
   PreparedTemplateUpload,
   PrepareTemplateUploadInput,
+  RetriedTemplateDraft,
+  RestartedTemplateDraft,
   TemplateLaneResult,
 } from "./types";
 import type { TemplateOption } from "@/lib/esign/contracts";
@@ -107,6 +109,52 @@ export async function startTemplateEditorAction(templateId: string) {
   return run("esign_template_start_editor", (orchestrator) =>
     orchestrator.startEditor(templateId),
   );
+}
+
+export async function restartTemplatePlacementAction(
+  templateId: string,
+): Promise<TemplateLaneResult<RestartedTemplateDraft>> {
+  try {
+    const runtime = await createInitialTemplateRuntime();
+    const orchestrator = await createFoundationTemplateOrchestrator();
+    const replacement = await runtime.createReplacementFromRetainedSource(
+      templateId,
+      async () => {
+        const retired = await orchestrator.abandon(templateId);
+        if (retired.ok) {
+          return { ok: true, data: { cleanupAttention: false } };
+        }
+        if (retired.error.code.startsWith("SOURCE_CLEANUP_")) {
+          return { ok: true, data: { cleanupAttention: true } };
+        }
+        return retired;
+      },
+    );
+    if (!replacement.ok) return replacement;
+    if (!replacement.data.initialEditorSession) {
+      return {
+        ok: false,
+        error: {
+          code: "PLACEMENT_RESTART_IN_PROGRESS",
+          message:
+            "Another restart already created this replacement. Return to the template library to continue or clean it up.",
+        },
+      };
+    }
+
+    revalidatePath("/settings/esign-templates");
+    return {
+      ok: true,
+      data: {
+        templateId: replacement.data.templateId,
+        initialEditorSession: replacement.data.initialEditorSession,
+        cleanupAttention: replacement.data.cleanupAttention,
+      },
+    };
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_template_restart_placement" } });
+    return { ok: false, error: SAFE_FAILURE };
+  }
 }
 
 export async function beginTemplateEditRevisionAction(
@@ -214,6 +262,19 @@ export async function promoteStaleInitialTemplateProviderCreateAction(
     reportError(error, {
       tags: { surface: "esign_template_provider_promote_stale" },
     });
+    return { ok: false, error: SAFE_FAILURE };
+  }
+}
+
+export async function retryInitialTemplateProviderCreateAction(
+  templateId: string,
+): Promise<TemplateLaneResult<RetriedTemplateDraft>> {
+  try {
+    const result = await (await createInitialTemplateRuntime()).retryProviderCreate(templateId);
+    if (result.ok) revalidatePath("/settings/esign-templates");
+    return result;
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_template_provider_retry" } });
     return { ok: false, error: SAFE_FAILURE };
   }
 }

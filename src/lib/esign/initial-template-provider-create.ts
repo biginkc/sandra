@@ -1,4 +1,5 @@
 import type { TemplateActionResult } from "./template-orchestrator";
+import { classifyProviderFailure } from "./provider-failure";
 
 export type ProviderCreateState =
   "unstarted" | "claimed" | "invoking" | "unknown" | "attached";
@@ -57,6 +58,18 @@ export type InitialProviderCreatePorts = Readonly<{
     actorId: string;
   }): Promise<{
     outcome: "recorded_unknown" | "already_unknown" | "already_attached";
+    templateId: string;
+    createdBy: string;
+  }>;
+  recordDefinitiveFailure(input: {
+    orgId: string;
+    templateId: string;
+    sourceId: string;
+    claimToken: string;
+    errorCode: string;
+    actorId: string;
+  }): Promise<{
+    outcome: "recorded_failure" | "already_recorded" | "already_attached";
     templateId: string;
     createdBy: string;
   }>;
@@ -191,7 +204,47 @@ export async function runInitialProviderCreate(
   let initialEditorSession: InitialProviderEditorSession;
   try {
     initialEditorSession = await ports.provider.invoke();
-  } catch {
+  } catch (error) {
+    if (classifyProviderFailure(error) === "definitive_failure") {
+      try {
+        const recorded = await ports.recordDefinitiveFailure({
+          ...claimed,
+          errorCode: "PROVIDER_REQUEST_REJECTED",
+        });
+        if (
+          recorded.templateId === input.templateId &&
+          ["recorded_failure", "already_recorded"].includes(recorded.outcome)
+        ) {
+          return failure(
+            "PROVIDER_CREATE_REJECTED",
+            "Dropbox Sign rejected the template create request before creating a template. Return to the template library to retry setup.",
+          );
+        }
+      } catch {
+        // During code-before-migration deploys the retry RPC does not exist.
+        // Fall back to the older, refresh-safe manual-reconciliation state so
+        // the row never remains stranded in invoking.
+        const unknown = await markUnknownBestEffort(
+          ports,
+          claimed,
+          "PROVIDER_DEFINITIVE_FAILURE_RECORD_UNAVAILABLE",
+        );
+        if (
+          unknown &&
+          unknown.templateId === input.templateId &&
+          ["recorded_unknown", "already_unknown"].includes(unknown.outcome)
+        ) {
+          return failure(
+            "PROVIDER_CREATE_UNKNOWN",
+            "Dropbox Sign rejected the request, but safe retry is not available yet. Manual reconciliation is required.",
+          );
+        }
+      }
+      return failure(
+        "PROVIDER_CREATE_FAILURE_RECORD_FAILED",
+        "Dropbox Sign rejected the template create request, but Sandra could not restore safe retry state.",
+      );
+    }
     await markUnknownBestEffort(ports, claimed, "PROVIDER_RESPONSE_UNKNOWN");
     return failure(
       "PROVIDER_CREATE_UNKNOWN",

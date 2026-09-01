@@ -9,6 +9,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { ESIGN_MERGE_FIELD_NAMES, type TemplateOption, type TemplateSignerRole } from "./contracts";
 import { getEsignCredentials, configuredDropboxSignEmbeddedDomain } from "./credentials";
 import { createDropboxSignProvider } from "./dropbox-sign";
+import { isRestartableDraftEditorFailure } from "./provider-failure";
 import {
   createTemplateOrchestrator,
   type StagedTemplateSource,
@@ -131,9 +132,8 @@ export async function createFoundationTemplateOrchestrator() {
       if (error) throw error;
       const { data: abandoned, error: abandonedError } = await admin
         .from("esign_templates")
-        .select("id,org_id,name,lifecycle_state,staging_source_id,supersedes_template_id")
+        .select("id,org_id,name,lifecycle_state,staging_source_id,duplicate_of_template_id,supersedes_template_id")
         .eq("org_id", orgId)
-        .or("duplicate_of_template_id.not.is.null,supersedes_template_id.not.is.null")
         .in("lifecycle_state", ["abandoned", "finalized"])
         .not("staging_source_id", "is", null)
         .is("deleted_at", null)
@@ -151,6 +151,24 @@ export async function createFoundationTemplateOrchestrator() {
         if (stageError) throw stageError;
         cleanupStageIds = new Set((stages ?? []).map((stage) => stage.id));
       }
+      const abandonedIds = (abandoned ?? []).map((row) => row.id);
+      let placementRestartOriginalIds = new Set<string>();
+      if (abandonedIds.length > 0) {
+        const { data: replacements, error: replacementError } = await admin
+          .from("esign_templates")
+          .select("staging_source_id")
+          .eq("org_id", orgId)
+          .in("staging_source_id", abandonedIds)
+          .in("lifecycle_state", ["preparing", "editing", "finalized"])
+          .is("deleted_at", null)
+          .is("abandoned_at", null);
+        if (replacementError) throw replacementError;
+        placementRestartOriginalIds = new Set(
+          (replacements ?? []).flatMap((row) =>
+            row.staging_source_id ? [row.staging_source_id] : [],
+          ),
+        );
+      }
       const activeCopies = (active ?? []).map((row) => ({
         id: row.id,
         orgId: row.org_id,
@@ -158,13 +176,31 @@ export async function createFoundationTemplateOrchestrator() {
         lifecycle: row.lifecycle_state as "preparing" | "editing",
         kind: row.supersedes_template_id ? "edit_revision" as const : "copy" as const,
       }));
-      const cleanupCopies = (abandoned ?? []).flatMap((row) => row.staging_source_id && cleanupStageIds.has(row.staging_source_id) ? [{
-        id: row.id,
-        orgId: row.org_id,
-        name: row.name,
-        lifecycle: "cleanup_attention" as const,
-        kind: row.supersedes_template_id ? "edit_revision" as const : "copy" as const,
-      }] : []);
+      const cleanupCopies = (abandoned ?? []).flatMap((row) => {
+        if (
+          !row.staging_source_id ||
+          !cleanupStageIds.has(row.staging_source_id) ||
+          (row.lifecycle_state !== "abandoned" &&
+            !row.duplicate_of_template_id &&
+            !row.supersedes_template_id)
+        ) {
+          return [];
+        }
+        const kind = row.supersedes_template_id
+          ? "edit_revision" as const
+          : row.duplicate_of_template_id
+            ? "copy" as const
+            : placementRestartOriginalIds.has(row.id)
+              ? "placement_restart" as const
+              : null;
+        return [{
+          id: row.id,
+          orgId: row.org_id,
+          name: row.name,
+          lifecycle: "cleanup_attention" as const,
+          ...(kind ? { kind } : {}),
+        }];
+      });
       return [...activeCopies, ...cleanupCopies];
     },
 
@@ -481,6 +517,9 @@ export async function createFoundationTemplateOrchestrator() {
       isAmbiguousMutation(error) {
         return error instanceof ProviderError
           && (typeof error.details?.statusCode !== "number" || error.details.statusCode >= 500);
+      },
+      isRestartableEditorSessionError(error) {
+        return isRestartableDraftEditorFailure(error);
       },
     },
     randomId: randomUUID,

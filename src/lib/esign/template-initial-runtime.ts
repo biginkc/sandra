@@ -121,7 +121,7 @@ export async function createInitialTemplateRuntime() {
       },
     );
 
-  return {
+  const runtime = {
     async listRecoveries(): Promise<
       TemplateActionResult<
         readonly (
@@ -137,17 +137,21 @@ export async function createInitialTemplateRuntime() {
               lifecycle: "provider_attention";
               kind: "provider_create";
               providerCreateState:
-                "claimed" | "invoking" | "unknown" | "attached";
+                "unstarted" | "claimed" | "invoking" | "unknown" | "attached";
             }
         )[]
       >
     > {
-      const [sources, providers] = await Promise.all([
+      const [sources, providers, retryableProviders] = await Promise.all([
         admin.rpc("list_pending_esign_template_source_uploads", {
           p_org_id: orgId,
           p_actor_id: actorId,
         }),
         admin.rpc("list_pending_esign_template_provider_creates", {
+          p_org_id: orgId,
+          p_actor_id: actorId,
+        }),
+        admin.rpc("list_retryable_esign_template_provider_creates", {
           p_org_id: orgId,
           p_actor_id: actorId,
         }),
@@ -157,6 +161,15 @@ export async function createInitialTemplateRuntime() {
           "TEMPLATE_RECOVERY_LIST_FAILED",
           "Template recovery state could not be loaded.",
         );
+      // The retryable-list RPC is deliberately optional during a rolling
+      // deploy. Before its migration exists, definitive provider failures
+      // still fall back to the existing unknown/manual-reconciliation state.
+      const retryableRows = retryableProviders.error
+        ? []
+        : (retryableProviders.data ?? []);
+      const retryableIds = new Set(
+        retryableRows.map((row) => row.template_id),
+      );
       return success([
         ...(sources.data ?? []).map((row) => ({
           id: row.source_id,
@@ -164,13 +177,22 @@ export async function createInitialTemplateRuntime() {
           lifecycle: "cleanup_attention" as const,
           kind: "source_cleanup" as const,
         })),
-        ...(providers.data ?? []).map((row) => ({
+        ...(providers.data ?? [])
+          .filter((row) => !retryableIds.has(row.template_id))
+          .map((row) => ({
           id: row.template_id,
           name: row.name,
           lifecycle: "provider_attention" as const,
           kind: "provider_create" as const,
           providerCreateState: row.provider_create_state as
-            "claimed" | "invoking" | "unknown" | "attached",
+            "unstarted" | "claimed" | "invoking" | "unknown" | "attached",
+          })),
+        ...retryableRows.map((row) => ({
+          id: row.template_id,
+          name: row.name,
+          lifecycle: "provider_attention" as const,
+          kind: "provider_create" as const,
+          providerCreateState: "unstarted" as const,
         })),
       ]);
     },
@@ -440,6 +462,9 @@ export async function createInitialTemplateRuntime() {
       documentType: string;
       signerRoles: readonly TemplateSignerRole[];
       sellerRoleName: string;
+      beforeProviderCreate?: (
+        replacementTemplateId: string,
+      ) => Promise<TemplateActionResult<{ cleanupAttention: boolean }>>;
     }): Promise<
       TemplateActionResult<{
         templateId: string;
@@ -449,6 +474,7 @@ export async function createInitialTemplateRuntime() {
           expiresAt: number | null;
           clientId: string;
         } | null;
+        cleanupAttention?: boolean;
       }>
     > {
       const expectedPath = `${orgId}/${input.source.stagingSourceId}.pdf`;
@@ -536,6 +562,13 @@ export async function createInitialTemplateRuntime() {
         );
       }
 
+      let cleanupAttention: boolean | undefined;
+      if (input.beforeProviderCreate) {
+        const retired = await input.beforeProviderCreate(consumed.template_id);
+        if (!retired.ok) return retired;
+        cleanupAttention = retired.data.cleanupAttention;
+      }
+
       let cachedCredentials: Awaited<ReturnType<typeof getEsignCredentials>> =
         null;
       const providerResult = await runInitialProviderCreate(
@@ -558,15 +591,294 @@ export async function createInitialTemplateRuntime() {
           },
         }),
       );
-      return providerResult.ok
-        ? success({
-            templateId: providerResult.data.templateId,
-            initialEditorSession: providerResult.data.initialEditorSession,
-          })
-        : providerResult;
+      if (!providerResult.ok) return providerResult;
+      const created = {
+        templateId: providerResult.data.templateId,
+        initialEditorSession: providerResult.data.initialEditorSession,
+      };
+      return success(
+        cleanupAttention === undefined
+          ? created
+          : { ...created, cleanupAttention },
+      );
+    },
+    async retryProviderCreate(
+      templateId: string,
+    ): Promise<
+      TemplateActionResult<{
+        templateId: string;
+        initialEditorSession: {
+          providerTemplateId: string;
+          editUrl: string;
+          expiresAt: number | null;
+          clientId: string;
+        };
+      }>
+    > {
+      if (!isOpaqueId(templateId)) {
+        return failure("PROVIDER_RETRY_INVALID", "The hidden template reference is invalid.");
+      }
+      const { data: pending, error: pendingError } = await admin.rpc(
+        "list_retryable_esign_template_provider_creates",
+        { p_org_id: orgId, p_actor_id: actorId },
+      );
+      const recovery = pending?.find((row) => row.template_id === templateId);
+      if (pendingError || !recovery) {
+        return failure("PROVIDER_RETRY_UNAVAILABLE", "This template is not awaiting a safe provider retry.");
+      }
+      const { data: draft, error: draftError } = await admin
+        .from("esign_templates")
+        .select("id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,sign_template_id,staging_source_id,source_filename,source_size_bytes,source_content_type,source_sha256,staging_path,lifecycle_state,provider_account_id,provider_create_state,provider_create_claim_token_hash,provider_create_last_released_token_hash,provider_create_error_code,duplicate_of_template_id,supersedes_template_id,finalized_at,deleted_at,abandoned_at")
+        .eq("org_id", orgId)
+        .eq("id", templateId)
+        .maybeSingle();
+      if (
+        draftError || !draft || draft.org_id !== orgId || draft.id !== templateId ||
+        draft.lifecycle_state !== "preparing" || draft.provider_create_state !== "unknown" ||
+        draft.provider_create_error_code !== "PROVIDER_REQUEST_REJECTED" ||
+        !draft.provider_account_id || !draft.provider_create_claim_token_hash ||
+        draft.provider_create_last_released_token_hash !== null || draft.sign_template_id !== null ||
+        draft.staging_source_id !== recovery.source_id ||
+        draft.staging_path !== `${orgId}/${recovery.source_id}.pdf` ||
+        draft.duplicate_of_template_id !== null || draft.supersedes_template_id !== null ||
+        draft.finalized_at !== null || draft.deleted_at !== null || draft.abandoned_at !== null ||
+        !draft.source_filename || !draft.source_size_bytes ||
+        draft.source_content_type !== "application/pdf" || !draft.source_sha256
+      ) {
+        return failure("PROVIDER_RETRY_CONTRACT_MISMATCH", "The hidden retryable template contract could not be verified.");
+      }
+      const signerRoles = parseSignerRoles(draft.signer_roles);
+      if (
+        signerRoles.length === 0 ||
+        !signerRoles.some((role) => role.name === draft.seller_role) ||
+        !exactFiveFields(draft.merge_field_names)
+      ) {
+        return failure("PROVIDER_RETRY_CONTRACT_MISMATCH", "The hidden retryable template contract could not be verified.");
+      }
+      let bytes: Uint8Array;
+      try {
+        const { data, error } = await admin.storage.from(BUCKET).download(draft.staging_path);
+        if (error) throw error;
+        bytes = new Uint8Array(await data.arrayBuffer());
+      } catch {
+        return failure("PROVIDER_RETRY_SOURCE_UNAVAILABLE", "The retained private PDF could not be read for retry.");
+      }
+      const actualSha = createHash("sha256").update(bytes).digest("hex");
+      if (
+        bytes.byteLength !== draft.source_size_bytes || bytes.byteLength === 0 ||
+        bytes.byteLength > ESIGN_TEMPLATE_MAX_PDF_BYTES || !hasPdfMagic(bytes) ||
+        actualSha !== draft.source_sha256
+      ) {
+        return failure("PROVIDER_RETRY_SOURCE_MISMATCH", "The retained private PDF no longer matches the retryable draft.");
+      }
+      let retryCredentials: Awaited<ReturnType<typeof getEsignCredentials>>;
+      try {
+        retryCredentials = await getEsignCredentials(orgId);
+      } catch {
+        return failure(
+          "PROVIDER_CONFIGURATION_FAILED",
+          "Dropbox Sign is not connected. The hidden draft was not sent to the provider.",
+        );
+      }
+      if (!retryCredentials) {
+        return failure(
+          "PROVIDER_CONFIGURATION_FAILED",
+          "Dropbox Sign is not connected. The hidden draft was not sent to the provider.",
+        );
+      }
+      if (retryCredentials.providerAccountId !== draft.provider_account_id) {
+        return failure(
+          "PROVIDER_ACCOUNT_MISMATCH",
+          "Dropbox Sign changed before provider creation could begin.",
+        );
+      }
+      const result = await runInitialProviderCreate(
+        { orgId, templateId, sourceId: recovery.source_id, actorId },
+        providerPorts({
+          admin, orgId, actorId, localTemplateId: templateId, bytes,
+          retryAlreadyBegun: true,
+          input: {
+            source: {
+              stagingSourceId: recovery.source_id, bucket: BUCKET,
+              storagePath: draft.staging_path, filename: draft.source_filename,
+              size: draft.source_size_bytes, mimeType: "application/pdf",
+              sha256: draft.source_sha256,
+            },
+            name: draft.name, documentType: draft.document_type,
+            signerRoles, sellerRoleName: draft.seller_role,
+          },
+          getCredentials: async () => retryCredentials,
+        }),
+      );
+      if (!result.ok) return result;
+      if (!result.data.initialEditorSession) {
+        return failure(
+          "PROVIDER_RETRY_SESSION_MISSING",
+          "The provider setup completed without a usable editor session. Reload the template library to reconcile it.",
+        );
+      }
+      return success({
+        templateId: result.data.templateId,
+        initialEditorSession: result.data.initialEditorSession,
+      });
+    },
+    async createReplacementFromRetainedSource(
+      templateId: string,
+      retireOriginal: (
+        replacementTemplateId: string,
+      ) => Promise<TemplateActionResult<{ cleanupAttention: boolean }>>,
+    ): Promise<
+      TemplateActionResult<{
+        templateId: string;
+        initialEditorSession: {
+          providerTemplateId: string;
+          editUrl: string;
+          expiresAt: number | null;
+          clientId: string;
+        } | null;
+        cleanupAttention: boolean;
+      }>
+    > {
+      if (!isOpaqueId(templateId)) {
+        return failure(
+          "PLACEMENT_RESTART_INVALID",
+          "The unfinished template reference is invalid.",
+        );
+      }
+      const { data: draft, error: draftError } = await admin
+        .from("esign_templates")
+        .select(
+          "id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,sign_template_id,staging_source_id,source_filename,source_size_bytes,source_content_type,source_sha256,staging_path,staging_deleted_at,lifecycle_state,provider_create_state,duplicate_of_template_id,supersedes_template_id,finalized_at,deleted_at,abandoned_at",
+        )
+        .eq("org_id", orgId)
+        .eq("id", templateId)
+        .maybeSingle();
+      if (
+        draftError ||
+        !draft ||
+        draft.org_id !== orgId ||
+        !["editing", "abandoned"].includes(draft.lifecycle_state) ||
+        draft.provider_create_state !== "attached" ||
+        !draft.sign_template_id ||
+        !draft.staging_source_id ||
+        draft.staging_path !== `${orgId}/${draft.staging_source_id}.pdf` ||
+        draft.duplicate_of_template_id !== null ||
+        draft.supersedes_template_id !== null ||
+        draft.finalized_at !== null ||
+        draft.deleted_at !== null ||
+        (draft.lifecycle_state === "editing" && draft.abandoned_at !== null) ||
+        (draft.lifecycle_state === "abandoned" && draft.abandoned_at === null) ||
+        !draft.source_filename ||
+        !draft.source_size_bytes ||
+        draft.source_content_type !== "application/pdf" ||
+        !draft.source_sha256
+      ) {
+        return failure(
+          "PLACEMENT_RESTART_UNAVAILABLE",
+          "Only an attached unfinished template with its retained PDF can restart field placement.",
+        );
+      }
+      const signerRoles = parseSignerRoles(draft.signer_roles);
+      if (
+        signerRoles.length === 0 ||
+        !signerRoles.some((role) => role.name === draft.seller_role) ||
+        !exactFiveFields(draft.merge_field_names)
+      ) {
+        return failure(
+          "PLACEMENT_RESTART_CONTRACT_MISMATCH",
+          "The unfinished template contract could not be verified safely.",
+        );
+      }
+      let bytes: Uint8Array;
+      try {
+        const retainedPath =
+          draft.lifecycle_state === "abandoned"
+            ? `${orgId}/${templateId}.pdf`
+            : draft.staging_path;
+        const { data, error } = await admin.storage
+          .from(BUCKET)
+          .download(retainedPath);
+        if (error) throw error;
+        bytes = new Uint8Array(await data.arrayBuffer());
+      } catch {
+        return failure(
+          "PLACEMENT_RESTART_SOURCE_UNAVAILABLE",
+          "The retained private PDF could not be read. The original draft was not changed.",
+        );
+      }
+      const actualSha = createHash("sha256").update(bytes).digest("hex");
+      if (
+        bytes.byteLength !== draft.source_size_bytes ||
+        bytes.byteLength === 0 ||
+        bytes.byteLength > ESIGN_TEMPLATE_MAX_PDF_BYTES ||
+        !hasPdfMagic(bytes) ||
+        actualSha !== draft.source_sha256
+      ) {
+        return failure(
+          "PLACEMENT_RESTART_SOURCE_MISMATCH",
+          "The retained private PDF no longer matches the original draft. The original draft was not changed.",
+        );
+      }
+      // One retained draft gets one durable replacement reservation. Concurrent
+      // and post-retirement retry requests therefore converge on the same local
+      // draft, while the provider-create claim admits only one Dropbox mutation.
+      const replacementSourceId = templateId;
+      const metadata: PreparedSourceMetadata = {
+        stagingSourceId: replacementSourceId,
+        filename: draft.source_filename,
+        size: bytes.byteLength,
+        mimeType: "application/pdf",
+        sha256: actualSha,
+      };
+      const prepared = await runtime.prepare(metadata);
+      if (!prepared.ok) return prepared;
+      try {
+        const { error } = await admin.storage
+          .from(BUCKET)
+          .upload(prepared.data.storagePath, bytes, {
+            contentType: "application/pdf",
+            upsert: false,
+          });
+        if (error) {
+          const { data: existing, error: readError } = await admin.storage
+            .from(BUCKET)
+            .download(prepared.data.storagePath);
+          if (readError) throw error;
+          const existingBytes = new Uint8Array(await existing.arrayBuffer());
+          const existingSha = createHash("sha256")
+            .update(existingBytes)
+            .digest("hex");
+          if (
+            existingBytes.byteLength !== bytes.byteLength ||
+            existingSha !== actualSha
+          ) {
+            throw error;
+          }
+        }
+      } catch {
+        return failure(
+          "PLACEMENT_RESTART_COPY_FAILED",
+          "The retained PDF could not be copied or reconciled for a safe restart. The original draft was not changed.",
+        );
+      }
+      const replacement = await runtime.create({
+        source: { ...prepared.data, ...metadata },
+        name: draft.name,
+        documentType: draft.document_type,
+        signerRoles,
+        sellerRoleName: draft.seller_role,
+        beforeProviderCreate: retireOriginal,
+      });
+      if (!replacement.ok) return replacement;
+      return success({
+        templateId: replacement.data.templateId,
+        initialEditorSession: replacement.data.initialEditorSession,
+        cleanupAttention: replacement.data.cleanupAttention ?? false,
+      });
     },
     cleanup,
   };
+  return runtime;
 }
 
 function providerPorts(context: {
@@ -583,12 +895,15 @@ function providerPorts(context: {
     sellerRoleName: string;
   };
   getCredentials(): ReturnType<typeof getEsignCredentials>;
+  retryAlreadyBegun?: boolean;
 }): InitialProviderCreatePorts {
   const rpc = async (
     name:
       | "claim_esign_template_provider_create"
+      | "begin_definitive_esign_template_provider_create_retry"
       | "begin_esign_template_provider_create"
       | "release_esign_template_provider_create_claim"
+      | "record_definitive_esign_template_provider_create_failure"
       | "mark_esign_template_provider_create_unknown"
       | "complete_esign_template_provider_create",
     args: Record<string, string>,
@@ -600,17 +915,24 @@ function providerPorts(context: {
   };
   return {
     async claim(input) {
-      const row = await rpc("claim_esign_template_provider_create", {
+      const row = await rpc(
+        context.retryAlreadyBegun
+          ? "begin_definitive_esign_template_provider_create_retry"
+          : "claim_esign_template_provider_create",
+        {
         p_org_id: input.orgId,
         p_template_id: input.templateId,
         p_source_id: input.sourceId,
         p_actor_id: input.actorId,
-      });
+        },
+      );
       return {
-        outcome: row.outcome as
+        outcome: (row.outcome === "started" ? "claimed" : row.outcome) as
           "claimed" | "already_in_progress" | "already_attached",
         templateId: row.template_id!,
-        providerCreateState: row.provider_create_state as ProviderCreateState,
+        providerCreateState: (row.outcome === "started"
+          ? "claimed"
+          : row.provider_create_state) as ProviderCreateState,
         claimToken: row.claim_token,
         providerTemplateId: row.provider_template_id,
         providerAccountId: row.provider_account_id,
@@ -618,6 +940,14 @@ function providerPorts(context: {
       };
     },
     async begin(input) {
+      if (context.retryAlreadyBegun) {
+        return {
+          outcome: "started",
+          templateId: input.templateId,
+          providerCreateState: "invoking",
+          createdBy: context.actorId,
+        };
+      }
       const row = await rpc("begin_esign_template_provider_create", {
         p_org_id: input.orgId,
         p_template_id: input.templateId,
@@ -661,6 +991,27 @@ function providerPorts(context: {
       return {
         outcome: row.outcome as
           "recorded_unknown" | "already_unknown" | "already_attached",
+        templateId: row.template_id!,
+        createdBy: row.created_by!,
+      };
+    },
+    async recordDefinitiveFailure(input) {
+      const row = await rpc(
+        "record_definitive_esign_template_provider_create_failure",
+        {
+          p_org_id: input.orgId,
+          p_template_id: input.templateId,
+          p_source_id: input.sourceId,
+          p_claim_token: input.claimToken,
+          p_error_code: input.errorCode,
+          p_actor_id: input.actorId,
+        },
+      );
+      return {
+        outcome: row.outcome as
+          | "recorded_failure"
+          | "already_recorded"
+          | "already_attached",
         templateId: row.template_id!,
         createdBy: row.created_by!,
       };

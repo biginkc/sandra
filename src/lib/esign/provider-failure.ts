@@ -13,12 +13,22 @@ export function classifyProviderFailure(
     if (
       error.details?.retryable === true ||
       status === 408 ||
-      status === 429 ||
-      status >= 500
+      status === 429
     ) {
       return "ambiguous";
     }
     if (status >= 400 && status < 500) return "definitive_failure";
   }
   return "ambiguous";
+}
+
+export function isRestartableDraftEditorFailure(error: unknown): boolean {
+  if (!(error instanceof ProviderError) || error.provider !== "dropbox_sign") {
+    return false;
+  }
+  return (
+    error.details?.statusCode === 404 &&
+    error.details?.providerCode === "not_found" &&
+    error.details?.retryable !== true
+  );
 }

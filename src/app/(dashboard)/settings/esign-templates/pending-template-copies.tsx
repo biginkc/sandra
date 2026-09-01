@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
 
 import { templateLibraryActions } from "./client-actions";
+import { useInitialEditorSessionStore } from "./initial-editor-session";
 import type { PendingTemplateCopiesLoadResult, TemplateLibraryActions } from "./types";
 
 export function PendingTemplateCopies({
@@ -42,7 +43,7 @@ function PendingTemplateCopyRow({
   copy,
   actions,
 }: {
-  copy: { id: string; name: string; lifecycle: "preparing" | "editing" | "cleanup_attention" | "provider_attention"; kind?: "copy" | "edit_revision" | "source_cleanup" | "provider_create"; providerCreateState?: "claimed" | "invoking" | "unknown" | "attached" };
+  copy: { id: string; name: string; lifecycle: "preparing" | "editing" | "cleanup_attention" | "provider_attention"; kind?: "copy" | "edit_revision" | "placement_restart" | "source_cleanup" | "provider_create"; providerCreateState?: "unstarted" | "claimed" | "invoking" | "unknown" | "attached" };
   actions?: TemplateLibraryActions;
 }) {
   const router = useRouter();
@@ -97,6 +98,17 @@ function PendingTemplateCopyRow({
     router.refresh();
   });
 
+  const checkStaleProviderCreate = () =>
+    actions?.promoteStaleProviderCreate &&
+    !routedRef.current &&
+    !readinessPromiseRef.current &&
+    startTransition(async () => {
+      setError(null);
+      const result = await actions.promoteStaleProviderCreate!(copy.id);
+      if (!result.ok) return setError(result.error.message);
+      router.refresh();
+    });
+
   const cleanupAttention = copy.lifecycle === "cleanup_attention";
   const providerAttention = copy.lifecycle === "provider_attention";
   const preparingMessage = copy.kind === "edit_revision" ? "Edit revision is still preparing" : "Copy is still preparing";
@@ -109,6 +121,7 @@ function PendingTemplateCopyRow({
         {providerAttention && copy.providerCreateState && (
           <p className="text-muted-foreground mt-1 text-sm">
             {copy.providerCreateState === "claimed" && "Provider creation is safely claimed. Reload this page later; Sandra will not start a second provider template."}
+            {copy.providerCreateState === "unstarted" && "Dropbox Sign rejected the previous request without creating a template. Correct the provider issue, then retry setup."}
             {copy.providerCreateState === "invoking" && "Dropbox Sign may have created this template. Do not retry creation. Contact an administrator for provider recovery."}
             {copy.providerCreateState === "unknown" && "Dropbox Sign creation is uncertain. Contact an administrator for provider recovery."}
             {copy.providerCreateState === "attached" && "Provider setup is attached. Continue to finish setup."}
@@ -122,19 +135,44 @@ function PendingTemplateCopyRow({
             <RefreshCwIcon data-icon="inline-start" /> {isPending ? "Retrying…" : "Retry cleanup"}
           </Button>
         ) : providerAttention ? (
-          copy.providerCreateState === "claimed" ? (
+          copy.providerCreateState === "unstarted" ? (
+            <RetryProviderCreateButton
+              templateId={copy.id}
+              retryProviderCreate={actions?.retryProviderCreate}
+              onError={setError}
+              onRoute={() => {
+                routedRef.current = true;
+                setRouted(true);
+              }}
+              disabled={isPending || routed}
+            />
+          ) : copy.providerCreateState === "invoking" ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={checkStaleProviderCreate}
+              disabled={!actions?.promoteStaleProviderCreate || isPending || routed}
+            >
+              <RefreshCwIcon data-icon="inline-start" /> {isPending ? "Checking…" : "Check recovery"}
+            </Button>
+          ) : copy.providerCreateState === "claimed" ? (
             <Button size="sm" variant="outline" onClick={() => router.refresh()} disabled={isPending || routed}>
               <RefreshCwIcon data-icon="inline-start" /> Reload
             </Button>
           ) : copy.providerCreateState === "attached" ? (
-            <Button size="sm" variant="outline" onClick={() => {
-              if (routedRef.current) return;
-              routedRef.current = true;
-              setRouted(true);
-              router.push(`/settings/esign-templates/${copy.id}/edit`);
-            }} disabled={routed}>
-              Continue setup
-            </Button>
+            <>
+              <Button size="sm" variant="outline" onClick={() => {
+                if (routedRef.current) return;
+                routedRef.current = true;
+                setRouted(true);
+                router.push(`/settings/esign-templates/${copy.id}/edit`);
+              }} disabled={routed}>
+                Continue setup
+              </Button>
+              <Button size="sm" variant="ghost" onClick={cancel} disabled={!actions || isPending || routed}>
+                <XIcon data-icon="inline-start" /> Cancel
+              </Button>
+            </>
           ) : (
             <Button size="sm" variant="outline" onClick={() => router.refresh()} disabled={isPending || routed}>
               <RefreshCwIcon data-icon="inline-start" /> Reload
@@ -150,5 +188,53 @@ function PendingTemplateCopyRow({
         </>}
       </div>
     </div>
+  );
+}
+
+function RetryProviderCreateButton({
+  templateId,
+  retryProviderCreate,
+  onError,
+  onRoute,
+  disabled,
+}: {
+  templateId: string;
+  retryProviderCreate: TemplateLibraryActions["retryProviderCreate"];
+  onError(message: string): void;
+  onRoute(): void;
+  disabled: boolean;
+}) {
+  const router = useRouter();
+  const sessions = useInitialEditorSessionStore();
+  const [isPending, startTransition] = useTransition();
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={!retryProviderCreate || isPending || disabled}
+      onClick={() =>
+        retryProviderCreate &&
+        startTransition(async () => {
+          onError("");
+          const result = await retryProviderCreate(templateId);
+          if (!result.ok) {
+            onError(result.error.message);
+            return;
+          }
+          sessions.put(
+            result.data.templateId,
+            result.data.initialEditorSession,
+          );
+          onRoute();
+          router.push(
+            `/settings/esign-templates/${result.data.templateId}/edit`,
+          );
+        })
+      }
+    >
+      <RefreshCwIcon data-icon="inline-start" />
+      {isPending ? "Retrying…" : "Retry setup"}
+    </Button>
   );
 }
