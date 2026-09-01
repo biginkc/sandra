@@ -5147,6 +5147,19 @@ export type Database = {
         }
         Returns: undefined
       }
+      reconcile_esign_reminder_callback: {
+        Args: {
+          p_lease_id: string
+          p_org_id: string
+          p_provider_event_at: string
+          p_provider_signature_id: string
+          p_receipt_id: string
+          p_request_id: string
+        }
+        Returns: {
+          outcome: string
+        }[]
+      }
       reconcile_unknown_esign_template_provider_create: {
         Args: {
           p_actor_id: string

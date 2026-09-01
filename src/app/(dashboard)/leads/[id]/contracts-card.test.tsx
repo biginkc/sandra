@@ -82,6 +82,7 @@ function contract(overrides: Partial<LeadContractRow> = {}): LeadContractRow {
     voidRequestedAt: null,
     signedPdfFileId: null,
     errorMessage: null,
+    retryConsumed: false,
     ...overrides,
   };
 }
@@ -189,6 +190,22 @@ describe("ContractActions", () => {
     expect(screen.getByText("Retry send")).toBeInTheDocument();
     expect(screen.queryByText("Send reminder")).not.toBeInTheDocument();
     expect(screen.queryByText("Void contract")).not.toBeInTheDocument();
+  });
+
+  it("hides retry after a failed source has been consumed by a child", async () => {
+    render(
+      <ContractActions
+        contract={contract({
+          status: "error",
+          deliveryState: "failed",
+          retryConsumed: true,
+        })}
+        actions={actionHandlers()}
+      />,
+    );
+
+    expect(screen.queryByText("Retry send")).not.toBeInTheDocument();
+    expect(screen.getByText("View in Dropbox Sign")).toBeInTheDocument();
   });
 
   it("downloads only through the injected authorized file action", async () => {

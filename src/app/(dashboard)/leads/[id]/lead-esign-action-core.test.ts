@@ -579,7 +579,16 @@ describe("lead eSign action orchestration", () => {
   it("retries only failed requests and creates a new linked intent", async () => {
     const h = harness();
     h.repository.findRequest.mockResolvedValue(
-      request({ deliveryState: "failed", status: "error" }),
+      request({
+        deliveryState: "failed",
+        status: "error",
+        signers: sendInput.signers.map((signer, index) => ({
+          ...signer,
+          id: `stored-signer-${index + 1}`,
+          status: "error" as const,
+          lastRemindedAt: "2026-08-29T19:00:00.000Z",
+        })),
+      }),
     );
 
     const result = await h.core.retry({ requestId: "request-1" });
@@ -592,8 +601,23 @@ describe("lead eSign action orchestration", () => {
       expect.objectContaining({
         sendIntentId: "22222222-2222-4222-8222-222222222222",
         retryOfRequestId: "request-1",
+        signers: sendInput.signers,
       }),
     );
+  });
+
+  it("fails a consumed retry without a second provider dispatch", async () => {
+    const h = harness();
+    h.repository.findRequest.mockResolvedValue(
+      request({ deliveryState: "failed", status: "error" }),
+    );
+    h.repository.claimSend.mockResolvedValue({ outcome: "retry_ineligible" });
+
+    expect(await h.core.retry({ requestId: "request-1" })).toMatchObject({
+      ok: false,
+      error: { code: "RETRY_INELIGIBLE" },
+    });
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });
 
   it("rejects retry for a nonfailed or cross-org request", async () => {

@@ -21,6 +21,7 @@ export const ESIGN_WEBHOOK_RPC_NAMES = {
   CLAIM_RECEIPT: "claim_esign_webhook_receipt",
   FIND_REQUEST: "find_esign_webhook_request",
   APPLY_STATUS: "apply_esign_webhook_status_decision",
+  RECONCILE_REMINDER: "reconcile_esign_reminder_callback",
   LINK_ARTIFACT: "link_esign_signed_artifact",
   COMPLETE_RECEIPT: "complete_esign_webhook_receipt",
 } as const;
@@ -83,6 +84,20 @@ export type EsignWebhookRpcContract = {
       p_lead_event_payload: EsignMaterialEventPayload | null;
     };
     result: Array<ApplyStatusDecisionResult>;
+  };
+  reconcile_esign_reminder_callback: {
+    args: {
+      p_org_id: string;
+      p_request_id: string;
+      p_receipt_id: string;
+      p_lease_id: string;
+      p_provider_signature_id: string;
+      p_provider_event_at: string;
+    };
+    result: Array<{
+      outcome:
+        "applied" | "already_reconciled" | "stale_ignored" | "superseded";
+    }>;
   };
   link_esign_signed_artifact: {
     args: {
@@ -238,6 +253,24 @@ export function createEsignWebhookDatabaseAdapter(
       return row;
     },
 
+    async reconcileReminderCallback(input) {
+      const rows = await callRpc(
+        client,
+        ESIGN_WEBHOOK_RPC_NAMES.RECONCILE_REMINDER,
+        {
+          p_org_id: input.orgId,
+          p_request_id: input.requestId,
+          p_receipt_id: input.claim.receiptId,
+          p_lease_id: input.claim.leaseId,
+          p_provider_signature_id: input.providerSignatureId,
+          p_provider_event_at: input.providerEventAt.toISOString(),
+        },
+      );
+      const row = exactlyOne(rows);
+      if (!isReminderReconciliationOutcome(row.outcome)) invalidResponse();
+      return row.outcome;
+    },
+
     async markReceiptProcessed(claim) {
       await completeReceipt(client, claim, "processed", null);
     },
@@ -357,6 +390,17 @@ function isApplyOutcome(
     value === "applied" ||
     value === "no_change" ||
     value === "terminal_ignored"
+  );
+}
+
+function isReminderReconciliationOutcome(
+  value: unknown,
+): value is "applied" | "already_reconciled" | "stale_ignored" | "superseded" {
+  return (
+    value === "applied" ||
+    value === "already_reconciled" ||
+    value === "stale_ignored" ||
+    value === "superseded"
   );
 }
 

@@ -335,7 +335,7 @@ describe("<LeadEventPill />", () => {
   });
 
   it.each([
-    ["esign_awaiting", "System sent Purchase agreement for signature"],
+    ["esign_awaiting", "System prepared Purchase agreement for signature"],
     ["esign_viewed", "System recorded Purchase agreement as viewed"],
     ["esign_signed", "System recorded Purchase agreement as signed"],
     ["esign_declined", "System recorded Purchase agreement as declined"],
@@ -357,6 +357,22 @@ describe("<LeadEventPill />", () => {
         "private-user",
       ),
     ).toBe(expected);
+  });
+
+  it("never presents the pre-provider activity as a sent contract", () => {
+    const sentence = formatLeadEventSentence(
+      makeEvent("event-esign-prepared", "2026-08-25T17:00:00.000Z", {
+        actor_type: "system",
+        actor_id: null,
+        event_type: "esign_awaiting",
+        payload: { template_title: "Purchase agreement" },
+      }),
+      {},
+      null,
+    );
+
+    expect(sentence).toBe("System prepared Purchase agreement for signature");
+    expect(sentence).not.toMatch(/\bsent\b/i);
   });
 
   it.each<{ payload: LeadEvent["payload"]; label: string }>([
@@ -494,7 +510,7 @@ describe("<LeadEventPill />", () => {
         {},
         null,
       ),
-    ).toBe(`System sent ${exact} for signature`);
+    ).toBe(`System prepared ${exact} for signature`);
     expect(
       formatLeadEventSentence(
         { ...base, payload: { template_title: `${exact}X` } },
@@ -511,7 +527,7 @@ describe("<LeadEventPill />", () => {
         {},
         null,
       ),
-    ).toBe(`System sent ${eightySurrogatePairs} for signature`);
+    ).toBe(`System prepared ${eightySurrogatePairs} for signature`);
     expect(
       formatLeadEventSentence(
         { ...base, payload: { template_title: `${eightySurrogatePairs}X` } },

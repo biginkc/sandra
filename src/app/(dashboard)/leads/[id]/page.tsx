@@ -704,7 +704,9 @@ export default async function LeadDetailPage({
         preflightAction={loadLeadEsignPreflightAction}
         sendAction={sendContractAction}
       />
-      <SkipTraceButton propertyId={lead.id} />
+      {!lead.homeowner || !lead.homeowner.phone_1 ? (
+        <SkipTraceButton propertyId={lead.id} />
+      ) : null}
       <span className="border-border inline-flex overflow-hidden rounded-full border [&_[data-slot=button]]:rounded-none [&_[data-slot=button]]:border-0">
         {prevId ? (
           <Link href={`/leads/${prevId}`}>

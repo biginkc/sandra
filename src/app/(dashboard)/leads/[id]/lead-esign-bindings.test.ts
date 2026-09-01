@@ -4,6 +4,8 @@ import { ProviderError } from "@/lib/errors/classes";
 import { classifyProviderFailure } from "@/lib/esign/provider-failure";
 
 import {
+  consumedRetryRequestIds,
+  isConsumedRetryConstraint,
   mapAtomicSendBlocker,
   mapProviderMutationClaimOutcome,
 } from "./lead-esign-bindings";
@@ -16,6 +18,46 @@ describe("atomic eSign send blocker mapping", () => {
     const result = mapAtomicSendBlocker(code);
     expect(result).toEqual({ outcome });
     expect(JSON.stringify(result)).not.toMatch(/property id|email|address/i);
+  });
+});
+
+describe("atomic retry consumption binding", () => {
+  it("maps only the exact retry-lineage uniqueness violation", () => {
+    expect(
+      isConsumedRetryConstraint(
+        {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "esign_requests_one_retry_child_per_source_idx"',
+        },
+        "failed-source-1",
+      ),
+    ).toBe(true);
+    expect(
+      isConsumedRetryConstraint(
+        { code: "23505", message: "another_unique_constraint" },
+        "failed-source-1",
+      ),
+    ).toBe(false);
+    expect(
+      isConsumedRetryConstraint(
+        {
+          code: "23505",
+          message: "esign_requests_one_retry_child_per_source_idx",
+        },
+        null,
+      ),
+    ).toBe(false);
+  });
+
+  it("marks only failed sources that already have a child", () => {
+    expect(
+      [...consumedRetryRequestIds([
+        { retry_of_request_id: null },
+        { retry_of_request_id: "failed-source-1" },
+        { retry_of_request_id: "failed-source-2" },
+      ])],
+    ).toEqual(["failed-source-1", "failed-source-2"]);
   });
 });
 

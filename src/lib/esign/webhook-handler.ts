@@ -104,6 +104,25 @@ export async function handleDropboxSignWebhook(input: {
       throw new SafeWebhookProcessingError("REQUEST_NOT_FOUND", 503);
     }
 
+    if (replay.eventType === "signature_request_remind") {
+      if (replay.relatedSignatureId === null) {
+        await input.dependencies.persistence.markReceiptIgnored(
+          activeClaim,
+          "REMINDER_WITHOUT_SIGNATURE",
+        );
+        return acknowledgement();
+      }
+      await input.dependencies.persistence.reconcileReminderCallback({
+        orgId: identity.orgId,
+        requestId: request.id,
+        claim: activeClaim,
+        providerSignatureId: replay.relatedSignatureId,
+        providerEventAt: providerEventDate(replay),
+      });
+      await input.dependencies.persistence.markReceiptProcessed(activeClaim);
+      return acknowledgement();
+    }
+
     const normalized = normalizeDropboxSignLifecycleEvent(replay.eventType);
     const decision = reduceEsignStatus(request.status, normalized);
     if (normalized.requestedStatus === null && !normalized.artifactReady) {

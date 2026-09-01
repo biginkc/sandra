@@ -444,7 +444,12 @@ async function retry(
       propertyId: source.propertyId,
       templateId: source.template.id,
       sendIntentId: dependencies.newId(),
-      signers: source.signers,
+      signers: source.signers.map(({ role, order, name, emailAddress }) => ({
+        role,
+        order,
+        name,
+        emailAddress,
+      })),
       mergeValues: source.mergeValues,
     },
     source.id,

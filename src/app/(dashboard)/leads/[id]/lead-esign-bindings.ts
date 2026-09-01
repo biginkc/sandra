@@ -212,6 +212,27 @@ async function releaseReminderRpc(
   return data === "released" ? ("released" as const) : ("lease_lost" as const);
 }
 
+export function isConsumedRetryConstraint(
+  error: Readonly<{ code?: string; message?: string }>,
+  retryOfRequestId: string | null,
+): boolean {
+  return Boolean(
+    retryOfRequestId &&
+    error.code === "23505" &&
+    error.message?.includes("esign_requests_one_retry_child_per_source_idx"),
+  );
+}
+
+export function consumedRetryRequestIds(
+  requests: readonly Readonly<{ retry_of_request_id: string | null }>[],
+): ReadonlySet<string> {
+  return new Set(
+    requests.flatMap((request) =>
+      request.retry_of_request_id ? [request.retry_of_request_id] : [],
+    ),
+  );
+}
+
 async function releaseVoidRpc(
   orgId: string,
   requestId: string,
@@ -372,7 +393,12 @@ async function claimSend(
       p_actor_id: input.actor.userId,
     },
   );
-  if (error) throw error;
+  if (error) {
+    if (isConsumedRetryConstraint(error, input.retryOfRequestId)) {
+      return { outcome: "retry_ineligible" };
+    }
+    throw error;
+  }
   const row = data?.[0];
   if (!row) throw new Error("Missing send claim result.");
   if (row.outcome === "intent_conflict") return { outcome: "intent_conflict" };
@@ -644,7 +670,7 @@ export async function loadLeadEsignPageModel(
   const [requestsResult, filesResult] = await Promise.all([
     admin
       .from("esign_requests")
-      .select("id")
+      .select("id,retry_of_request_id")
       .eq("org_id", actor.orgId)
       .eq("property_id", propertyId)
       .order("created_at", { ascending: false })
@@ -660,6 +686,7 @@ export async function loadLeadEsignPageModel(
   ]);
   const contracts: LeadContractRow[] = [];
   if (!requestsResult.error) {
+    const consumedRequestIds = consumedRetryRequestIds(requestsResult.data ?? []);
     for (const item of requestsResult.data ?? []) {
       const request = await loadRequest(actor.orgId, item.id);
       if (!request) continue;
@@ -681,6 +708,7 @@ export async function loadLeadEsignPageModel(
         voidRequestedAt: request.voidRequestedAt,
         signedPdfFileId: request.signedPdfFileId,
         errorMessage: row?.error_message ?? null,
+        retryConsumed: consumedRequestIds.has(request.id),
       });
     }
   }

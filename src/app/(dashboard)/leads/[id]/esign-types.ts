@@ -98,6 +98,7 @@ export type LeadContractRow = Readonly<{
   voidRequestedAt: string | null;
   signedPdfFileId: string | null;
   errorMessage: string | null;
+  retryConsumed: boolean;
 }>;
 
 export type RemindContractInput = Readonly<{

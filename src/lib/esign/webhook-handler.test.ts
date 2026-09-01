@@ -26,6 +26,7 @@ function callbackRequest(input: {
   eventType?: string;
   eventHash?: string;
   signRequestId?: string | null;
+  relatedSignatureId?: string | null;
 } = {}): Request {
   const eventTime = "1788054000";
   const eventType = input.eventType ?? "signature_request_viewed";
@@ -41,7 +42,12 @@ function callbackRequest(input: {
         event_type: eventType,
         event_hash: eventHash,
         event_metadata: {
-          related_signature_id: "provider-signature-1",
+          ...(input.relatedSignatureId === null
+            ? {}
+            : {
+                related_signature_id:
+                  input.relatedSignatureId ?? "provider-signature-1",
+              }),
           reported_for_app_id: "client-1",
         },
       },
@@ -80,6 +86,7 @@ function dependencies(
       outcome: "applied" as const,
       status: decision.nextStatus,
     })),
+    reconcileReminderCallback: vi.fn(async () => "applied" as const),
     markReceiptProcessed: vi.fn(async () => undefined),
     markReceiptIgnored: vi.fn(async () => undefined),
     markReceiptFailed: vi.fn(async () => undefined),
@@ -185,6 +192,45 @@ describe("injectable Dropbox Sign webhook handler", () => {
     expect(deps.persistence.markReceiptIgnored).toHaveBeenCalledWith(
       CLAIM,
       "AUDIT_ONLY_EVENT",
+    );
+  });
+
+  it("reconciles a verified reminder callback before completing its receipt", async () => {
+    const deps = dependencies();
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({ eventType: "signature_request_remind" }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(deps.persistence.reconcileReminderCallback).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      requestId: REQUEST_ID,
+      claim: CLAIM,
+      providerSignatureId: "provider-signature-1",
+      providerEventAt: new Date("2026-08-30T01:40:00.000Z"),
+    });
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
+    expect(deps.persistence.markReceiptIgnored).not.toHaveBeenCalled();
+  });
+
+  it("does not clear a reminder fence without provider signer identity", async () => {
+    const deps = dependencies();
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        eventType: "signature_request_remind",
+        relatedSignatureId: null,
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(deps.persistence.reconcileReminderCallback).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptIgnored).toHaveBeenCalledWith(
+      CLAIM,
+      "REMINDER_WITHOUT_SIGNATURE",
     );
   });
 

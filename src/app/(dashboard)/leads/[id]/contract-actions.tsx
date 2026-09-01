@@ -69,7 +69,8 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
     !contract.voidRequestedAt &&
     Boolean(reminderTarget);
   const canVoid = delivered && !terminal && !contract.voidRequestedAt;
-  const canRetry = contract.deliveryState === "failed";
+  const canRetry =
+    contract.deliveryState === "failed" && !contract.retryConsumed;
   const canDownload = Boolean(contract.signedPdfFileId);
   const hasAnyAction =
     contract.detailsAvailable ||

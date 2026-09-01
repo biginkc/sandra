@@ -11,6 +11,10 @@ const reconciliationFenceSql = readFileSync(
   "supabase/migrations/20260901010000_esign_provider_mutation_reconciliation_fence.sql",
   "utf8",
 );
+const retryReminderFenceSql = readFileSync(
+  "supabase/migrations/20260901020000_esign_retry_and_reminder_callback_fences.sql",
+  "utf8",
+);
 const sourceUrl = process.env.TEST_SUPABASE_DB_URL;
 const databaseName = `sandra_esign_race_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 let admin: Client;
@@ -128,6 +132,7 @@ beforeAll(async () => {
   `);
   await setup.query(migrationSql);
   await setup.query(reconciliationFenceSql);
+  await setup.query(retryReminderFenceSql);
 }, 60_000);
 
 afterAll(async () => {
@@ -734,6 +739,295 @@ describe("eSign foundation production lease contention", () => {
         { lifecycle_state: "editing", count: 1 },
         { lifecycle_state: "finalized", count: 1 },
       ]);
+    } finally {
+      await Promise.all([first.end(), second.end()]);
+    }
+  });
+
+  it("serializes retry children and reminder callback reconciliation", async () => {
+    const orgId = crypto.randomUUID();
+    const userId = crypto.randomUUID();
+    const contactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const sourceId = crypto.randomUUID();
+    const templateId = crypto.randomUUID();
+    const failedRequestId = crypto.randomUUID();
+    const deliveredRequestId = crypto.randomUUID();
+    const signerId = crypto.randomUUID();
+    const receiptId = crypto.randomUUID();
+    const receiptLease = crypto.randomUUID();
+    const callbackAt = new Date("2026-09-01T12:00:00.000Z");
+    const signerSnapshot = JSON.stringify([
+      {
+        role: "Seller",
+        name: "Test Seller",
+        emailAddress: "seller@example.com",
+      },
+    ]);
+    const mergeSnapshot = JSON.stringify({
+      seller_name: "Test Seller",
+      property_address: "123 Test",
+      offer_price: "1",
+      closing_date: "2026-09-30",
+      earnest_money: "1",
+    });
+
+    await setServiceRole(setup);
+    await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into public.organizations values ($1)", [orgId]);
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
+      [userId, orgId],
+    );
+    await setup.query(
+      "insert into public.contacts (id,org_id,email) values ($1,$2,'seller@example.com')",
+      [contactId, orgId],
+    );
+    await setup.query(
+      "insert into public.properties (id,org_id,homeowner_contact_id) values ($1,$2,$3)",
+      [propertyId, orgId, contactId],
+    );
+    await setup.query(
+      `insert into public.esign_template_staging_sources (
+         id,org_id,storage_path,source_filename,source_size_bytes,
+         content_type,source_sha256,created_by
+       ) values ($1,$2,($2::uuid)::text || '/' || ($1::uuid)::text || '.pdf','source.pdf',1024,
+         'application/pdf',repeat('a',64),$3)`,
+      [sourceId, orgId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_templates (
+         id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,
+         sign_template_id,staging_source_id,source_filename,source_size_bytes,
+         source_content_type,source_sha256,staging_path,finalized_at,lifecycle_state,
+         created_by,updated_by
+       ) values (
+         $1,$2,'Purchase agreement','purchase_agreement','Seller',
+         '[{"name":"Seller","order":0}]'::jsonb,
+         array['seller_name','property_address','offer_price','closing_date','earnest_money'],
+         'provider-template',$3,'source.pdf',1024,'application/pdf',repeat('a',64),
+         ($2::uuid)::text || '/' || ($3::uuid)::text || '.pdf',now(),'finalized',$4,$4
+       )`,
+      [templateId, orgId, sourceId, userId],
+    );
+    await setup.query(
+      `select public.upsert_org_esign_integration(
+         $1,'synthetic-api-key','-key','synthetic-client',repeat('f',64),
+         $2,'synthetic-encryption-key'
+       )`,
+      [orgId, userId],
+    );
+
+    await setup.query(
+      `insert into public.esign_requests (
+         id,org_id,property_id,template_id,signer_snapshot,merge_value_snapshot,
+         status,delivery_state,error_message,completed_at,send_intent_id,payload_hash,
+         created_by,created_at
+       ) values (
+         $1,$2,$3,$4,$5::jsonb,$6::jsonb,'error','failed','PROVIDER_REJECTED',now(),
+         gen_random_uuid(),repeat('b',64),$7,now()-interval '1 minute'
+       )`,
+      [
+        failedRequestId,
+        orgId,
+        propertyId,
+        templateId,
+        signerSnapshot,
+        mergeSnapshot,
+        userId,
+      ],
+    );
+
+    const first = new Client({ connectionString: isolatedUrl });
+    const second = new Client({ connectionString: isolatedUrl });
+    await Promise.all([first.connect(), second.connect()]);
+    await Promise.all([setServiceRole(first), setServiceRole(second)]);
+    const retryInsert = `insert into public.esign_requests (
+      id,org_id,property_id,template_id,signer_snapshot,merge_value_snapshot,
+      delivery_state,send_intent_id,payload_hash,retry_of_request_id,created_by
+    ) values (gen_random_uuid(),$1,$2,$3,$4::jsonb,$5::jsonb,'sending',
+      gen_random_uuid(),repeat('c',64),$6,$7)`;
+    try {
+      const retryRace = await Promise.allSettled([
+        first.query(retryInsert, [
+          orgId,
+          propertyId,
+          templateId,
+          signerSnapshot,
+          mergeSnapshot,
+          failedRequestId,
+          userId,
+        ]),
+        second.query(retryInsert, [
+          orgId,
+          propertyId,
+          templateId,
+          signerSnapshot,
+          mergeSnapshot,
+          failedRequestId,
+          userId,
+        ]),
+      ]);
+      expect(
+        retryRace.filter((result) => result.status === "fulfilled"),
+      ).toHaveLength(1);
+      const retryFailure = retryRace.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      expect(retryFailure?.reason).toMatchObject({
+        code: "23505",
+        constraint: "esign_requests_one_retry_child_per_source_idx",
+      });
+
+      await setup.query(
+        `insert into public.esign_requests (
+           id,org_id,property_id,template_id,signer_snapshot,merge_value_snapshot,
+           delivery_state,sign_request_id,sent_at,send_intent_id,payload_hash,created_by
+         ) values ($1,$2,$3,$4,$5::jsonb,$6::jsonb,'sent','provider-request',now(),
+           gen_random_uuid(),repeat('d',64),$7)`,
+        [
+          deliveredRequestId,
+          orgId,
+          propertyId,
+          templateId,
+          signerSnapshot,
+          mergeSnapshot,
+          userId,
+        ],
+      );
+      await setup.query(
+        `insert into public.esign_request_signers (
+           id,org_id,request_id,role_name,signer_order,signer_name,signer_email,
+           provider_signature_id,reminder_claim_token,reminder_claimed_at
+         ) values ($1,$2,$3,'Seller',0,'Test Seller','seller@example.com',
+           'provider-signature',$4,$5)`,
+        [
+          signerId,
+          orgId,
+          deliveredRequestId,
+          crypto.randomUUID(),
+          new Date(callbackAt.getTime() - 500),
+        ],
+      );
+      const consumer = await setup.query<{ callback_consumer_id: string }>(
+        "select callback_consumer_id from public.org_esign_integrations where org_id=$1",
+        [orgId],
+      );
+      await setup.query(
+        `insert into public.esign_webhook_receipts (
+           id,org_id,callback_consumer_id,esign_request_id,event_hash,event_fingerprint,
+           payload_hash,event_type,sign_request_id,related_signature_id,provider_event_at,
+           safe_event_data,received_at,processing_status,processing_started_at,
+           processing_lease_id,attempt_count
+         ) values ($1,$2,$3,$4,repeat('e',64),repeat('f',64),repeat('a',64),
+           'signature_request_remind','provider-request','provider-signature',$5,
+           jsonb_build_object(
+             'event_time',extract(epoch from $5::timestamptz)::bigint::text,
+             'event_type','signature_request_remind',
+             'sign_request_id','provider-request',
+             'related_signature_id','provider-signature',
+             'reported_for_app_id',null
+           ),now(),'processing',now(),$6,1)`,
+        [
+          receiptId,
+          orgId,
+          consumer.rows[0].callback_consumer_id,
+          deliveredRequestId,
+          callbackAt,
+          receiptLease,
+        ],
+      );
+      const reconcileSql = `select outcome from public.reconcile_esign_reminder_callback(
+        $1,$2,$3,$4,'provider-signature',$5
+      )`;
+      const callbackRace = await Promise.all([
+        first.query<{ outcome: string }>(reconcileSql, [
+          orgId,
+          deliveredRequestId,
+          receiptId,
+          receiptLease,
+          callbackAt,
+        ]),
+        second.query<{ outcome: string }>(reconcileSql, [
+          orgId,
+          deliveredRequestId,
+          receiptId,
+          receiptLease,
+          callbackAt,
+        ]),
+      ]);
+      expect(
+        callbackRace.map((result) => result.rows[0].outcome).sort(),
+      ).toEqual(["already_reconciled", "applied"]);
+      expect(
+        (
+          await setup.query<{
+            reminder_claim_token: string | null;
+            last_reminded_at: Date;
+          }>(
+            "select reminder_claim_token,last_reminded_at from public.esign_request_signers where id=$1",
+            [signerId],
+          )
+        ).rows[0],
+      ).toMatchObject({
+        reminder_claim_token: null,
+        last_reminded_at: callbackAt,
+      });
+
+      const staleReceiptId = crypto.randomUUID();
+      const staleReceiptLease = crypto.randomUUID();
+      const newerClaimToken = crypto.randomUUID();
+      const staleCallbackAt = new Date(callbackAt.getTime() + 1_000);
+      const newerClaimedAt = new Date(callbackAt.getTime() + 5_000);
+      await setup.query(
+        `update public.esign_request_signers
+         set reminder_claim_token=$2,reminder_claimed_at=$3 where id=$1`,
+        [signerId, newerClaimToken, newerClaimedAt],
+      );
+      await setup.query(
+        `insert into public.esign_webhook_receipts (
+           id,org_id,callback_consumer_id,esign_request_id,event_hash,event_fingerprint,
+           payload_hash,event_type,sign_request_id,related_signature_id,provider_event_at,
+           safe_event_data,received_at,processing_status,processing_started_at,
+           processing_lease_id,attempt_count
+         ) values ($1,$2,$3,$4,repeat('b',64),repeat('c',64),repeat('d',64),
+           'signature_request_remind','provider-request','provider-signature',$5,
+           jsonb_build_object(
+             'event_time',extract(epoch from $5::timestamptz)::bigint::text,
+             'event_type','signature_request_remind',
+             'sign_request_id','provider-request',
+             'related_signature_id','provider-signature',
+             'reported_for_app_id',null
+           ),now(),'processing',now(),$6,1)`,
+        [
+          staleReceiptId,
+          orgId,
+          consumer.rows[0].callback_consumer_id,
+          deliveredRequestId,
+          staleCallbackAt,
+          staleReceiptLease,
+        ],
+      );
+      expect(
+        (
+          await first.query<{ outcome: string }>(reconcileSql, [
+            orgId,
+            deliveredRequestId,
+            staleReceiptId,
+            staleReceiptLease,
+            staleCallbackAt,
+          ])
+        ).rows[0],
+      ).toEqual({ outcome: "stale_ignored" });
+      expect(
+        (
+          await setup.query<{ reminder_claim_token: string }>(
+            "select reminder_claim_token from public.esign_request_signers where id=$1",
+            [signerId],
+          )
+        ).rows[0].reminder_claim_token,
+      ).toBe(newerClaimToken);
     } finally {
       await Promise.all([first.end(), second.end()]);
     }

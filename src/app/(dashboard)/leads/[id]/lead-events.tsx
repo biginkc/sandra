@@ -274,7 +274,7 @@ export function formatLeadEventSentence(
       return formatEsignEventSentence(
         event,
         payload,
-        (title) => `System sent ${title} for signature`,
+        (title) => `System prepared ${title} for signature`,
       );
     case "esign_viewed":
       return formatEsignEventSentence(
