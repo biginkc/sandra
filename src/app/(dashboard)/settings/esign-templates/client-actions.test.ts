@@ -13,7 +13,8 @@ vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
     storage: {
       from: (bucket: string) => ({
-        upload: (path: string, file: File, options: unknown) => mocks.upload(bucket, path, file, options),
+        upload: (path: string, file: File, options: unknown) =>
+          mocks.upload(bucket, path, file, options),
       }),
     },
   }),
@@ -47,7 +48,10 @@ describe("template browser staging transport", () => {
       },
     });
     mocks.upload.mockResolvedValue({ error: null });
-    mocks.create.mockResolvedValue({ ok: true, data: { templateId: "template-1" } });
+    mocks.create.mockResolvedValue({
+      ok: true,
+      data: { templateId: "template-1", initialEditorSession: null },
+    });
   });
 
   it("fails safely when Dropbox Chooser has no approved app key", async () => {
@@ -62,15 +66,24 @@ describe("template browser staging transport", () => {
   });
 
   it("uploads PDF bytes directly to the authorized private path and sends only compact metadata to the action", async () => {
-    const file = new File([new TextEncoder().encode("%PDF-1.7\nbody")], "offer.pdf", { type: "application/pdf" });
-    await expect(templateLibraryActions.createDraft({
-      name: "Offer",
-      documentType: "Purchase agreement",
-      source: { file, origin: "upload" },
-      signerRoles: [{ name: "Seller", order: 0 }],
-      sellerRoleName: "Seller",
-      mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
-    })).resolves.toEqual({ ok: true, data: { templateId: "template-1" } });
+    const file = new File(
+      [new TextEncoder().encode("%PDF-1.7\nbody")],
+      "offer.pdf",
+      { type: "application/pdf" },
+    );
+    await expect(
+      templateLibraryActions.createDraft({
+        name: "Offer",
+        documentType: "Purchase agreement",
+        source: { file, origin: "upload" },
+        signerRoles: [{ name: "Seller", order: 0 }],
+        sellerRoleName: "Seller",
+        mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      data: { templateId: "template-1", initialEditorSession: null },
+    });
 
     expect(mocks.upload).toHaveBeenCalledWith(
       "esign-staging",
@@ -79,15 +92,17 @@ describe("template browser staging transport", () => {
       { contentType: "application/pdf", upsert: false },
     );
     const payload = mocks.create.mock.calls[0]?.[0];
-    expect(payload.source).toEqual(expect.objectContaining({
-      stagingSourceId: "123e4567-e89b-42d3-a456-426614174000",
-      bucket: "esign-staging",
-      storagePath: "org-1/123e4567-e89b-42d3-a456-426614174000.pdf",
-      filename: "offer.pdf",
-      size: file.size,
-      mimeType: "application/pdf",
-      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-    }));
+    expect(payload.source).toEqual(
+      expect.objectContaining({
+        stagingSourceId: "123e4567-e89b-42d3-a456-426614174000",
+        bucket: "esign-staging",
+        storagePath: "org-1/123e4567-e89b-42d3-a456-426614174000.pdf",
+        filename: "offer.pdf",
+        size: file.size,
+        mimeType: "application/pdf",
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    );
     expect(payload.source).not.toHaveProperty("file");
     expect(payload.source).not.toHaveProperty("bytes");
     expect(JSON.stringify(payload).length).toBeLessThan(2_048);
@@ -112,12 +127,18 @@ describe("template browser staging transport", () => {
     });
 
     expect(mocks.prepare).toHaveBeenCalledTimes(2);
-    expect(mocks.prepare).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      stagingSourceId: "123e4567-e89b-42d3-a456-426614174000",
-    }));
-    expect(mocks.prepare).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      stagingSourceId: "123e4567-e89b-42d3-a456-426614174000",
-    }));
+    expect(mocks.prepare).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        stagingSourceId: "123e4567-e89b-42d3-a456-426614174000",
+      }),
+    );
+    expect(mocks.prepare).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        stagingSourceId: "123e4567-e89b-42d3-a456-426614174000",
+      }),
+    );
   });
 
   it("never invokes the create action when direct private upload fails", async () => {
@@ -131,27 +152,40 @@ describe("template browser staging transport", () => {
       sellerRoleName: "Seller",
       mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
     });
-    expect(result).toMatchObject({ ok: false, error: { code: "STAGING_UPLOAD_REQUIRES_RECOVERY" } });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "STAGING_UPLOAD_REQUIRES_RECOVERY" },
+    });
     expect(mocks.create).not.toHaveBeenCalled();
   });
 
   it("never invokes create after a standard upload resolves late following cancellation", async () => {
     let finishUpload!: (value: { error: null }) => void;
-    mocks.upload.mockReturnValueOnce(new Promise((resolve) => { finishUpload = resolve; }));
+    mocks.upload.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishUpload = resolve;
+      }),
+    );
     const controller = new AbortController();
     const file = new File(["%PDF-"], "offer.pdf", { type: "application/pdf" });
-    const pending = templateLibraryActions.createDraft({
-      name: "Offer",
-      documentType: "Purchase agreement",
-      source: { file, origin: "upload" },
-      signerRoles: [{ name: "Seller", order: 0 }],
-      sellerRoleName: "Seller",
-      mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
-    }, { signal: controller.signal });
+    const pending = templateLibraryActions.createDraft(
+      {
+        name: "Offer",
+        documentType: "Purchase agreement",
+        source: { file, origin: "upload" },
+        signerRoles: [{ name: "Seller", order: 0 }],
+        sellerRoleName: "Seller",
+        mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
+      },
+      { signal: controller.signal },
+    );
     await vi.waitFor(() => expect(mocks.upload).toHaveBeenCalledOnce());
     controller.abort();
     finishUpload({ error: null });
-    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: "STAGING_UPLOAD_REQUIRES_RECOVERY" } });
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: { code: "STAGING_UPLOAD_REQUIRES_RECOVERY" },
+    });
     expect(mocks.create).not.toHaveBeenCalled();
   });
 
@@ -159,14 +193,19 @@ describe("template browser staging transport", () => {
     const controller = new AbortController();
     controller.abort();
     const file = new File(["%PDF-"], "offer.pdf", { type: "application/pdf" });
-    await expect(templateLibraryActions.createDraft({
-      name: "Offer",
-      documentType: "Purchase agreement",
-      source: { file, origin: "upload" },
-      signerRoles: [{ name: "Seller", order: 0 }],
-      sellerRoleName: "Seller",
-      mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
-    }, { signal: controller.signal })).resolves.toMatchObject({
+    await expect(
+      templateLibraryActions.createDraft(
+        {
+          name: "Offer",
+          documentType: "Purchase agreement",
+          source: { file, origin: "upload" },
+          signerRoles: [{ name: "Seller", order: 0 }],
+          sellerRoleName: "Seller",
+          mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
+        },
+        { signal: controller.signal },
+      ),
+    ).resolves.toMatchObject({
       ok: false,
       error: { code: "STAGING_UPLOAD_REQUIRES_RECOVERY" },
     });
@@ -178,10 +217,17 @@ describe("template browser staging transport", () => {
     mocks.upload.mockResolvedValue({ error: { message: "ambiguous" } });
     const file = new File(["%PDF-"], "offer.pdf", { type: "application/pdf" });
     const result = await templateLibraryActions.createDraft({
-      name: "Offer", documentType: "Purchase agreement", source: { file, origin: "upload" },
-      signerRoles: [{ name: "Seller", order: 0 }], sellerRoleName: "Seller", mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
+      name: "Offer",
+      documentType: "Purchase agreement",
+      source: { file, origin: "upload" },
+      signerRoles: [{ name: "Seller", order: 0 }],
+      sellerRoleName: "Seller",
+      mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
     });
-    expect(result).toMatchObject({ ok: false, error: { code: "STAGING_UPLOAD_REQUIRES_RECOVERY" } });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "STAGING_UPLOAD_REQUIRES_RECOVERY" },
+    });
     expect(mocks.create).not.toHaveBeenCalled();
   });
 });

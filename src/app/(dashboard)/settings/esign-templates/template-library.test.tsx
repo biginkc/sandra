@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ESIGN_MERGE_FIELD_NAMES, type EsignTemplateRow } from "./types";
 import { TemplateLibrary } from "./template-library";
+import { InitialEditorSessionProvider } from "./initial-editor-session";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
@@ -40,14 +41,22 @@ describe("TemplateLibrary", () => {
   });
 
   it("renders the dedicated empty state", () => {
-    render(<TemplateLibrary result={{ ok: true, data: [] }} />);
+    render(
+      <InitialEditorSessionProvider>
+        <TemplateLibrary result={{ ok: true, data: [] }} />
+      </InitialEditorSessionProvider>,
+    );
     expect(screen.getByText("No templates yet")).toBeVisible();
     expect(screen.getByText(/Every send after that is two clicks from a lead/)).toBeVisible();
     expect(screen.getByText("PDF up to 40 MB · or pick a file from Dropbox")).toBeVisible();
   });
 
   it("sorts provider roles by order and warns before deleting recent usage", () => {
-    render(<TemplateLibrary result={{ ok: true, data: [row] }} />);
+    render(
+      <InitialEditorSessionProvider>
+        <TemplateLibrary result={{ ok: true, data: [row] }} />
+      </InitialEditorSessionProvider>,
+    );
     const list = screen.getByRole("list", {
       name: "Required signer roles for Missouri purchase agreement",
     });

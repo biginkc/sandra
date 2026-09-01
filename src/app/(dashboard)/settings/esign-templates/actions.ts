@@ -7,7 +7,13 @@ import { createFoundationTemplateOrchestrator } from "@/lib/esign/template-found
 import { createInitialTemplateRuntime } from "@/lib/esign/template-initial-runtime";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 
-import type { CreateTemplateDraftActionInput, PreparedTemplateUpload, PrepareTemplateUploadInput, TemplateLaneResult } from "./types";
+import type {
+  CreatedTemplateDraft,
+  CreateTemplateDraftActionInput,
+  PreparedTemplateUpload,
+  PrepareTemplateUploadInput,
+  TemplateLaneResult,
+} from "./types";
 import type { TemplateOption } from "@/lib/esign/contracts";
 
 const SAFE_FAILURE = {
@@ -15,11 +21,32 @@ const SAFE_FAILURE = {
   message: "The eSign template action could not be completed.",
 } as const;
 
-async function run<T>(surface: string, operation: (orchestrator: Awaited<ReturnType<typeof createFoundationTemplateOrchestrator>>) => Promise<TemplateLaneResult<T>>): Promise<TemplateLaneResult<T>> {
+async function run<T>(
+  surface: string,
+  operation: (
+    orchestrator: Awaited<
+      ReturnType<typeof createFoundationTemplateOrchestrator>
+    >,
+  ) => Promise<TemplateLaneResult<T>>,
+): Promise<TemplateLaneResult<T>> {
   try {
     const membership = (await getCallerMemberships())[0];
-    if (!membership) return { ok: false, error: { code: "AUTH_REQUIRED", message: "Sign in to manage eSign templates." } };
-    if (membership.role !== "owner") return { ok: false, error: { code: "OWNER_REQUIRED", message: "Only an organization owner can manage eSign templates." } };
+    if (!membership)
+      return {
+        ok: false,
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Sign in to manage eSign templates.",
+        },
+      };
+    if (membership.role !== "owner")
+      return {
+        ok: false,
+        error: {
+          code: "OWNER_REQUIRED",
+          message: "Only an organization owner can manage eSign templates.",
+        },
+      };
     return await operation(await createFoundationTemplateOrchestrator());
   } catch (error) {
     reportError(error, { tags: { surface } });
@@ -27,11 +54,27 @@ async function run<T>(surface: string, operation: (orchestrator: Awaited<ReturnT
   }
 }
 
-export async function prepareTemplateUploadAction(input: PrepareTemplateUploadInput): Promise<TemplateLaneResult<PreparedTemplateUpload>> {
+export async function prepareTemplateUploadAction(
+  input: PrepareTemplateUploadInput,
+): Promise<TemplateLaneResult<PreparedTemplateUpload>> {
   try {
     const membership = (await getCallerMemberships())[0];
-    if (!membership) return { ok: false, error: { code: "AUTH_REQUIRED", message: "Sign in to manage eSign templates." } };
-    if (membership.role !== "owner") return { ok: false, error: { code: "OWNER_REQUIRED", message: "Only an organization owner can manage eSign templates." } };
+    if (!membership)
+      return {
+        ok: false,
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Sign in to manage eSign templates.",
+        },
+      };
+    if (membership.role !== "owner")
+      return {
+        ok: false,
+        error: {
+          code: "OWNER_REQUIRED",
+          message: "Only an organization owner can manage eSign templates.",
+        },
+      };
     return await (await createInitialTemplateRuntime()).prepare(input);
   } catch (error) {
     reportError(error, { tags: { surface: "esign_template_prepare_upload" } });
@@ -39,9 +82,13 @@ export async function prepareTemplateUploadAction(input: PrepareTemplateUploadIn
   }
 }
 
-export async function createTemplateDraftAction(input: CreateTemplateDraftActionInput): Promise<TemplateLaneResult<{ templateId: string }>> {
+export async function createTemplateDraftAction(
+  input: CreateTemplateDraftActionInput,
+): Promise<TemplateLaneResult<CreatedTemplateDraft>> {
   try {
-    const result = await (await createInitialTemplateRuntime()).create({
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).create({
       source: input.source,
       name: input.name,
       documentType: input.documentType,
@@ -57,10 +104,16 @@ export async function createTemplateDraftAction(input: CreateTemplateDraftAction
 }
 
 export async function startTemplateEditorAction(templateId: string) {
-  return run("esign_template_start_editor", (orchestrator) => orchestrator.startEditor(templateId));
+  return run("esign_template_start_editor", (orchestrator) =>
+    orchestrator.startEditor(templateId),
+  );
 }
 
-export async function beginTemplateEditRevisionAction(templateId: string): Promise<TemplateLaneResult<{ templateId: string; readiness: "ready" | "pending" }>> {
+export async function beginTemplateEditRevisionAction(
+  templateId: string,
+): Promise<
+  TemplateLaneResult<{ templateId: string; readiness: "ready" | "pending" }>
+> {
   return run("esign_template_begin_edit_revision", async (orchestrator) => {
     const result = await orchestrator.beginEditRevision(templateId);
     if (result.ok) revalidatePath("/settings/esign-templates");
@@ -68,11 +121,18 @@ export async function beginTemplateEditRevisionAction(templateId: string): Promi
   });
 }
 
-export async function checkTemplateEditorReadinessAction(templateId: string): Promise<TemplateLaneResult<{ readiness: "ready" | "pending" }>> {
-  return run("esign_template_editor_readiness", (orchestrator) => orchestrator.checkEditorReadiness(templateId));
+export async function checkTemplateEditorReadinessAction(
+  templateId: string,
+): Promise<TemplateLaneResult<{ readiness: "ready" | "pending" }>> {
+  return run("esign_template_editor_readiness", (orchestrator) =>
+    orchestrator.checkEditorReadiness(templateId),
+  );
 }
 
-export async function syncFinishedTemplateAction(templateId: string, _input: { name: string }): Promise<TemplateLaneResult<TemplateOption>> {
+export async function syncFinishedTemplateAction(
+  templateId: string,
+  _input: { name: string },
+): Promise<TemplateLaneResult<TemplateOption>> {
   void _input;
   return run("esign_template_finish", async (orchestrator) => {
     const result = await orchestrator.finishSync(templateId);
@@ -81,7 +141,9 @@ export async function syncFinishedTemplateAction(templateId: string, _input: { n
   });
 }
 
-export async function abandonTemplateDraftAction(templateId: string): Promise<TemplateLaneResult<null>> {
+export async function abandonTemplateDraftAction(
+  templateId: string,
+): Promise<TemplateLaneResult<null>> {
   return run("esign_template_abandon", async (orchestrator) => {
     const result = await orchestrator.abandon(templateId);
     if (result.ok) revalidatePath("/settings/esign-templates");
@@ -89,7 +151,9 @@ export async function abandonTemplateDraftAction(templateId: string): Promise<Te
   });
 }
 
-export async function retryTemplateSourceCleanupAction(templateId: string): Promise<TemplateLaneResult<null>> {
+export async function retryTemplateSourceCleanupAction(
+  templateId: string,
+): Promise<TemplateLaneResult<null>> {
   return run("esign_template_retry_cleanup", async (orchestrator) => {
     const result = await orchestrator.retryCleanup(templateId);
     if (result.ok) revalidatePath("/settings/esign-templates");
@@ -97,40 +161,69 @@ export async function retryTemplateSourceCleanupAction(templateId: string): Prom
   });
 }
 
-export async function retryUnattachedTemplateSourceCleanupAction(sourceId: string): Promise<TemplateLaneResult<null>> {
+export async function retryUnattachedTemplateSourceCleanupAction(
+  sourceId: string,
+): Promise<TemplateLaneResult<null>> {
   try {
-    const result = await (await createInitialTemplateRuntime()).cleanupSource(sourceId);
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).cleanupSource(sourceId);
     if (result.ok) revalidatePath("/settings/esign-templates");
     return result;
   } catch (error) {
-    reportError(error, { tags: { surface: "esign_template_unattached_cleanup" } });
+    reportError(error, {
+      tags: { surface: "esign_template_unattached_cleanup" },
+    });
     return { ok: false, error: SAFE_FAILURE };
   }
 }
 
-export async function reconcileUnknownTemplateProviderAction(templateId: string, providerTemplateId: string): Promise<TemplateLaneResult<{ templateId: string }>> {
+export async function reconcileUnknownTemplateProviderAction(
+  templateId: string,
+  providerTemplateId: string,
+): Promise<TemplateLaneResult<{ templateId: string }>> {
   try {
-    const result = await (await createInitialTemplateRuntime()).reconcileUnknown(templateId, providerTemplateId);
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).reconcileUnknown(templateId, providerTemplateId);
     if (result.ok) revalidatePath("/settings/esign-templates");
     return result;
   } catch (error) {
-    reportError(error, { tags: { surface: "esign_template_provider_reconcile" } });
+    reportError(error, {
+      tags: { surface: "esign_template_provider_reconcile" },
+    });
     return { ok: false, error: SAFE_FAILURE };
   }
 }
 
-export async function promoteStaleInitialTemplateProviderCreateAction(templateId: string): Promise<TemplateLaneResult<{ templateId: string; providerCreateState: "unknown" | "attached" }>> {
+export async function promoteStaleInitialTemplateProviderCreateAction(
+  templateId: string,
+): Promise<
+  TemplateLaneResult<{
+    templateId: string;
+    providerCreateState: "unknown" | "attached";
+  }>
+> {
   try {
-    const result = await (await createInitialTemplateRuntime()).promoteStaleProviderCreate(templateId);
+    const result = await (
+      await createInitialTemplateRuntime()
+    ).promoteStaleProviderCreate(templateId);
     if (result.ok) revalidatePath("/settings/esign-templates");
     return result;
   } catch (error) {
-    reportError(error, { tags: { surface: "esign_template_provider_promote_stale" } });
+    reportError(error, {
+      tags: { surface: "esign_template_provider_promote_stale" },
+    });
     return { ok: false, error: SAFE_FAILURE };
   }
 }
 
-export async function duplicateTemplateAction(templateId: string, name: string): Promise<TemplateLaneResult<{ templateId: string; readiness: "ready" | "pending" }>> {
+export async function duplicateTemplateAction(
+  templateId: string,
+  name: string,
+): Promise<
+  TemplateLaneResult<{ templateId: string; readiness: "ready" | "pending" }>
+> {
   return run("esign_template_duplicate", async (orchestrator) => {
     const result = await orchestrator.duplicate(templateId, name);
     if (!result.ok) return result;
@@ -139,7 +232,10 @@ export async function duplicateTemplateAction(templateId: string, name: string):
   });
 }
 
-export async function deleteTemplateAction(templateId: string, confirmRecentSends = false): Promise<TemplateLaneResult<null>> {
+export async function deleteTemplateAction(
+  templateId: string,
+  confirmRecentSends = false,
+): Promise<TemplateLaneResult<null>> {
   return run("esign_template_delete", async (orchestrator) => {
     const result = await orchestrator.delete(templateId, confirmRecentSends);
     if (!result.ok) return result;
