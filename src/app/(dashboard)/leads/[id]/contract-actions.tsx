@@ -27,6 +27,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { callAction } from "@/lib/errors/call-action";
+import {
+  navigateAuthorizedPopup,
+  openAuthorizedPopup,
+} from "@/lib/esign/authorized-popup";
+import {
+  cancelPendingDialogClose,
+  type DialogCloseEventDetails,
+} from "@/lib/esign/pending-dialog";
 
 import type {
   ContractActionHandlers,
@@ -70,9 +78,19 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
     canRetry ||
     canDownload;
 
-  const close = () => {
+  const closeAfterSuccess = () => {
     setMode(null);
     setError(null);
+  };
+
+  const requestClose = () => {
+    if (pending) return;
+    closeAfterSuccess();
+  };
+
+  const openMode = (nextMode: Exclude<ActionMode, null>) => {
+    setError(null);
+    setMode(nextMode);
   };
 
   const run = () => {
@@ -109,7 +127,7 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
         setError(result.error.message);
         return;
       }
-      close();
+      closeAfterSuccess();
       onChanged?.();
     });
   };
@@ -117,21 +135,53 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
   const download = () => {
     const fileId = contract.signedPdfFileId;
     if (!fileId) return;
+    setError(null);
+    const popup = openAuthorizedPopup();
+    if (!popup) {
+      setError(
+        "Your browser blocked the signed PDF window. Allow popups and try again.",
+      );
+      return;
+    }
     startTransition(async () => {
       const result = await callAction(actions.downloadAction({ fileId }), {
         fallbackMessage: "Could not prepare the signed PDF",
       });
-      if (!result.ok) return;
-      window.open(result.data.url, "_blank", "noopener,noreferrer");
+      if (!result.ok) {
+        popup.close();
+        setError(result.error.message);
+        return;
+      }
+      if (!navigateAuthorizedPopup(popup, result.data.url)) {
+        setError("Could not open the signed PDF.");
+      }
     });
   };
 
   const view = () => {
+    setError(null);
+    const popup = openAuthorizedPopup();
+    if (!popup) {
+      setError(
+        "Your browser blocked the Dropbox Sign window. Allow popups and try again.",
+      );
+      return;
+    }
     startTransition(async () => {
-      const result = await callAction(actions.viewAction({ requestId: contract.id }), {
-        fallbackMessage: "Could not open Dropbox Sign details",
-      });
-      if (result.ok) window.open(result.data.detailsUrl, "_blank", "noopener,noreferrer");
+      const result = await callAction(
+        actions.viewAction({ requestId: contract.id }),
+        {
+          fallbackMessage: "Could not open Dropbox Sign details",
+        },
+      );
+      if (!result.ok) {
+        popup.close();
+        setError(result.error.message);
+        return;
+      }
+      if (!navigateAuthorizedPopup(popup, result.data.detailsUrl)) {
+        setError("Could not open Dropbox Sign details.");
+      }
     });
   };
 
@@ -153,9 +203,7 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
         />
         <DropdownMenuContent align="end" className="w-48">
           {contract.detailsAvailable ? (
-            <DropdownMenuItem
-              onClick={view}
-            >
+            <DropdownMenuItem onClick={view}>
               <ExternalLinkIcon className="size-4" aria-hidden />
               View in Dropbox Sign
             </DropdownMenuItem>
@@ -170,7 +218,7 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
             <DropdownMenuSeparator />
           ) : null}
           {canRemind ? (
-            <DropdownMenuItem onClick={() => setMode("remind")}>
+            <DropdownMenuItem onClick={() => openMode("remind")}>
               <SendIcon className="size-4" aria-hidden />
               Send reminder
             </DropdownMenuItem>
@@ -178,14 +226,14 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
           {canVoid ? (
             <DropdownMenuItem
               variant="destructive"
-              onClick={() => setMode("void")}
+              onClick={() => openMode("void")}
             >
               <ShieldXIcon className="size-4" aria-hidden />
               Void contract
             </DropdownMenuItem>
           ) : null}
           {canRetry ? (
-            <DropdownMenuItem onClick={() => setMode("retry")}>
+            <DropdownMenuItem onClick={() => openMode("retry")}>
               <RefreshCwIcon className="size-4" aria-hidden />
               Retry send
             </DropdownMenuItem>
@@ -193,8 +241,21 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <Dialog open={mode !== null} onOpenChange={(open) => !open && close()}>
-        <DialogContent>
+      {error && mode === null ? (
+        <p role="alert" className="mt-1 text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+
+      <Dialog
+        open={mode !== null}
+        onOpenChange={(open, eventDetails: DialogCloseEventDetails) => {
+          if (cancelPendingDialogClose(open, pending, eventDetails)) return;
+          if (!open) requestClose();
+        }}
+        disablePointerDismissal={pending}
+      >
+        <DialogContent showCloseButton={!pending}>
           <DialogHeader>
             <DialogTitle>{dialogTitle(mode)}</DialogTitle>
             <DialogDescription>
@@ -216,7 +277,7 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
             <Button
               type="button"
               variant="outline"
-              onClick={close}
+              onClick={requestClose}
               disabled={pending}
             >
               Cancel
@@ -227,7 +288,9 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
               onClick={run}
               disabled={pending}
             >
-              {dialogConfirmLabel(mode)}
+              <span role="status" aria-live="polite" aria-busy={pending}>
+                {pending ? dialogPendingLabel(mode) : dialogConfirmLabel(mode)}
+              </span>
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -276,4 +339,11 @@ function dialogConfirmLabel(mode: ActionMode): string {
   if (mode === "void") return "Request void";
   if (mode === "retry") return "Retry send";
   return "Continue";
+}
+
+function dialogPendingLabel(mode: ActionMode): string {
+  if (mode === "remind") return "Sending reminder…";
+  if (mode === "void") return "Requesting void…";
+  if (mode === "retry") return "Retrying contract…";
+  return "Working…";
 }

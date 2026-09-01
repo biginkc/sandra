@@ -7,6 +7,10 @@ const migrationSql = readFileSync(
   "supabase/migrations/20260829194500_esign_foundation.sql",
   "utf8",
 );
+const reconciliationFenceSql = readFileSync(
+  "supabase/migrations/20260901010000_esign_provider_mutation_reconciliation_fence.sql",
+  "utf8",
+);
 const sourceUrl = process.env.TEST_SUPABASE_DB_URL;
 const databaseName = `sandra_esign_race_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 let admin: Client;
@@ -21,7 +25,9 @@ function databaseUrl(name: string): string {
 }
 
 async function setServiceRole(client: Client): Promise<void> {
-  await client.query("select set_config('request.jwt.claim.role','service_role',false)");
+  await client.query(
+    "select set_config('request.jwt.claim.role','service_role',false)",
+  );
 }
 
 beforeAll(async () => {
@@ -121,6 +127,7 @@ beforeAll(async () => {
       language sql immutable as $$ select string_to_array($1, '/') $$;
   `);
   await setup.query(migrationSql);
+  await setup.query(reconciliationFenceSql);
 }, 60_000);
 
 afterAll(async () => {
@@ -219,10 +226,9 @@ describe("eSign foundation production lease contention", () => {
           [orgId, requestId, signerId, reminderTokens[1]],
         ),
       ]);
-      expect(reminderRace.map((result) => result.rows[0].outcome).sort()).toEqual([
-        "claimed",
-        "in_progress",
-      ]);
+      expect(
+        reminderRace.map((result) => result.rows[0].outcome).sort(),
+      ).toEqual(["claimed", "in_progress"]);
 
       await setup.query(
         "update public.esign_request_signers set reminder_claim_token=null, reminder_claimed_at=null where id=$1",
@@ -291,7 +297,15 @@ describe("eSign foundation production lease contention", () => {
             [orgId, requestId, crypto.randomUUID()],
           )
         ).rows[0].outcome,
-      ).toBe("claimed");
+      ).toBe("reconciliation_required");
+      expect(
+        (
+          await setup.query<{ void_claim_token: string }>(
+            "select void_claim_token from public.esign_requests where id=$1",
+            [requestId],
+          )
+        ).rows[0].void_claim_token,
+      ).not.toBeNull();
       await setup.query(
         "update public.esign_requests set void_claim_token=null, void_claimed_at=null where id=$1",
         [requestId],
@@ -323,7 +337,23 @@ describe("eSign foundation production lease contention", () => {
             [orgId, requestId, signerId, crypto.randomUUID()],
           )
         ).rows[0].outcome,
-      ).toBe("claimed");
+      ).toBe("reconciliation_required");
+      expect(
+        (
+          await setup.query<{ reminder_claim_token: string }>(
+            "select reminder_claim_token from public.esign_request_signers where id=$1",
+            [signerId],
+          )
+        ).rows[0].reminder_claim_token,
+      ).not.toBeNull();
+      expect(
+        (
+          await first.query<{ outcome: string }>(
+            "select outcome from public.claim_esign_request_void($1,$2,$3)",
+            [orgId, requestId, crypto.randomUUID()],
+          )
+        ).rows[0].outcome,
+      ).toBe("reconciliation_required");
     } finally {
       await Promise.all([first.end(), second.end()]);
     }
@@ -371,32 +401,34 @@ describe("eSign foundation production lease contention", () => {
     )`;
     try {
       const claims = await Promise.all([
-        first.query<{ outcome: string; receipt_id: string; lease_id: string | null }>(
-          claimSql,
-          [
-            orgId,
-            consumerId,
-            "c".repeat(64),
-            "d".repeat(64),
-            "e".repeat(64),
-            eventAt,
-            safeData,
-            leaseIds[0],
-          ],
-        ),
-        second.query<{ outcome: string; receipt_id: string; lease_id: string | null }>(
-          claimSql,
-          [
-            orgId,
-            consumerId,
-            "c".repeat(64),
-            "d".repeat(64),
-            "e".repeat(64),
-            eventAt,
-            safeData,
-            leaseIds[1],
-          ],
-        ),
+        first.query<{
+          outcome: string;
+          receipt_id: string;
+          lease_id: string | null;
+        }>(claimSql, [
+          orgId,
+          consumerId,
+          "c".repeat(64),
+          "d".repeat(64),
+          "e".repeat(64),
+          eventAt,
+          safeData,
+          leaseIds[0],
+        ]),
+        second.query<{
+          outcome: string;
+          receipt_id: string;
+          lease_id: string | null;
+        }>(claimSql, [
+          orgId,
+          consumerId,
+          "c".repeat(64),
+          "d".repeat(64),
+          "e".repeat(64),
+          eventAt,
+          safeData,
+          leaseIds[1],
+        ]),
       ]);
       const rows = claims.map((claim) => claim.rows[0]);
       expect(rows.map((row) => row.outcome).sort()).toEqual([
@@ -537,7 +569,11 @@ describe("eSign foundation production lease contention", () => {
       expect(new Set(rows.map((row) => row.id)).size).toBe(1);
       expect(
         (
-          await setup.query<{ requests: number; signers: number; events: number }>(
+          await setup.query<{
+            requests: number;
+            signers: number;
+            events: number;
+          }>(
             `select
                (select count(*)::int from public.esign_requests where org_id=$1 and send_intent_id=$2) as requests,
                (select count(*)::int from public.esign_request_signers signer

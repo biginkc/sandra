@@ -1,7 +1,7 @@
 "use client";
 
 import { DownloadIcon, FileTextIcon, FolderOpenIcon } from "lucide-react";
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,6 +12,10 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { callAction } from "@/lib/errors/call-action";
+import {
+  navigateAuthorizedPopup,
+  openAuthorizedPopup,
+} from "@/lib/esign/authorized-popup";
 
 import type { ContractActionHandlers, LeadFileRow } from "./esign-types";
 
@@ -27,14 +31,29 @@ export function LeadFilesCard({
   loadError = null,
 }: Props) {
   const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
 
   const download = (fileId: string) => {
+    setError(null);
+    const popup = openAuthorizedPopup();
+    if (!popup) {
+      setError(
+        "Your browser blocked the file window. Allow popups and try again.",
+      );
+      return;
+    }
     startTransition(async () => {
       const result = await callAction(downloadAction({ fileId }), {
         fallbackMessage: "Could not prepare this file",
       });
-      if (!result.ok) return;
-      window.open(result.data.url, "_blank", "noopener,noreferrer");
+      if (!result.ok) {
+        popup.close();
+        setError(result.error.message);
+        return;
+      }
+      if (!navigateAuthorizedPopup(popup, result.data.url)) {
+        setError("Could not open this file.");
+      }
     });
   };
 
@@ -48,6 +67,11 @@ export function LeadFilesCard({
         <CardDescription>Documents saved for this lead.</CardDescription>
       </CardHeader>
       <CardContent>
+        {error ? (
+          <p role="alert" className="mb-3 text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
         {loadError ? (
           <p role="alert" className="text-sm text-destructive">
             Files did not load. {loadError}

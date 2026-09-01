@@ -1,4 +1,10 @@
-import { render, screen } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -35,7 +41,12 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
 
 function actionHandlers(): ContractActionHandlers {
   return {
-    viewAction: vi.fn().mockResolvedValue({ ok: true, data: { detailsUrl: "https://app.hellosign.com/home/manage?guid=request-1" } }),
+    viewAction: vi.fn().mockResolvedValue({
+      ok: true,
+      data: {
+        detailsUrl: "https://app.hellosign.com/home/manage?guid=request-1",
+      },
+    }),
     remindAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
     voidAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
     retryAction: vi
@@ -183,7 +194,19 @@ describe("ContractActions", () => {
   it("downloads only through the injected authorized file action", async () => {
     const user = userEvent.setup();
     const actions = actionHandlers();
-    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const popup = popupWindow();
+    const events: string[] = [];
+    const open = vi.spyOn(window, "open").mockImplementation(() => {
+      events.push("open");
+      return popup.window;
+    });
+    vi.mocked(actions.downloadAction).mockImplementation(async () => {
+      events.push("authorize");
+      return {
+        ok: true,
+        data: { url: "https://authorized.example/signed.pdf" },
+      };
+    });
     render(
       <ContractActions
         contract={contract({
@@ -199,12 +222,88 @@ describe("ContractActions", () => {
     );
     await user.click(screen.getByText("Download signed PDF"));
 
-    expect(actions.downloadAction).toHaveBeenCalledWith({ fileId: "file-1" });
-    expect(open).toHaveBeenCalledWith(
-      "https://authorized.example/signed.pdf",
-      "_blank",
-      "noopener,noreferrer",
+    await waitFor(() =>
+      expect(actions.downloadAction).toHaveBeenCalledWith({ fileId: "file-1" }),
     );
+    expect(open).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(events).toEqual(["open", "authorize"]);
+    expect(popup.window.opener).toBeNull();
+    expect(popup.location.href).toBe("https://authorized.example/signed.pdf");
+  });
+
+  it("closes a placeholder on authorization failure and reports popup blocking", async () => {
+    const user = userEvent.setup();
+    const actions = actionHandlers();
+    const popup = popupWindow();
+    const open = vi
+      .spyOn(window, "open")
+      .mockReturnValueOnce(popup.window)
+      .mockReturnValueOnce(null);
+    vi.mocked(actions.viewAction).mockResolvedValue({
+      ok: false,
+      error: { code: "DETAILS_UNAVAILABLE", message: "Details unavailable." },
+    });
+    render(<ContractActions contract={contract()} actions={actions} />);
+
+    await user.click(screen.getByText("View in Dropbox Sign"));
+    await waitFor(() => expect(popup.close).toHaveBeenCalledTimes(1));
+    expect(popup.location.href).toBe("about:blank");
+
+    await user.click(screen.getByText("View in Dropbox Sign"));
+    expect(actions.viewAction).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Your browser blocked the Dropbox Sign window.",
+    );
+    expect(open).toHaveBeenLastCalledWith("about:blank", "_blank");
+  });
+
+  it("surfaces a safe error when the authorized details window closes before navigation", async () => {
+    const user = userEvent.setup();
+    const actions = actionHandlers();
+    const popup = popupWindow({ closed: true });
+    vi.spyOn(window, "open").mockReturnValue(popup.window);
+    render(<ContractActions contract={contract()} actions={actions} />);
+
+    await user.click(screen.getByText("View in Dropbox Sign"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Could not open Dropbox Sign details.",
+      ),
+    );
+    expect(actions.viewAction).toHaveBeenCalledWith({
+      requestId: "request-1",
+    });
+    expect(popup.replace).not.toHaveBeenCalled();
+    expect(popup.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a safe error when signed-PDF navigation throws", async () => {
+    const user = userEvent.setup();
+    const actions = actionHandlers();
+    const popup = popupWindow({ replaceThrows: true });
+    vi.spyOn(window, "open").mockReturnValue(popup.window);
+    render(
+      <ContractActions
+        contract={contract({
+          status: "signed",
+          signedPdfFileId: "file-1",
+        })}
+        actions={actions}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Purchase agreement" }),
+    );
+    await user.click(screen.getByText("Download signed PDF"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Could not open the signed PDF.",
+      ),
+    );
+    expect(popup.close).toHaveBeenCalledTimes(1);
   });
 
   it("reminds only the first unfinished signer in provider order", async () => {
@@ -295,4 +394,96 @@ describe("ContractActions", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it.each([
+    ["remind", "Send reminder", "Send reminder", "Sending reminder…", {}],
+    ["void", "Void contract", "Request void", "Requesting void…", {}],
+    [
+      "retry",
+      "Retry send",
+      "Retry send",
+      "Retrying contract…",
+      { status: "error", deliveryState: "failed" },
+    ],
+  ] as const)(
+    "guards pending %s dismissal and announces its exact busy label",
+    async (mode, menuLabel, confirmLabel, busyLabel, overrides) => {
+      const user = userEvent.setup();
+      const actions = actionHandlers();
+      const pending = deferred<unknown>();
+      if (mode === "remind") {
+        vi.mocked(actions.remindAction).mockReturnValue(
+          pending.promise as never,
+        );
+      } else if (mode === "void") {
+        vi.mocked(actions.voidAction).mockReturnValue(pending.promise as never);
+      } else {
+        vi.mocked(actions.retryAction).mockReturnValue(
+          pending.promise as never,
+        );
+      }
+      render(
+        <ContractActions
+          contract={contract(overrides as Partial<LeadContractRow>)}
+          actions={actions}
+        />,
+      );
+      await user.click(screen.getByText(menuLabel));
+      await user.click(screen.getByRole("button", { name: confirmLabel }));
+
+      expect(await screen.findByRole("status")).toHaveTextContent(busyLabel);
+      expect(
+        screen.queryByRole("button", { name: "Close" }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+      await user.keyboard("{Escape}");
+      const overlay = document.querySelector('[data-slot="dialog-overlay"]');
+      expect(overlay).not.toBeNull();
+      fireEvent.pointerDown(overlay!);
+      expect(screen.getByRole("status")).toHaveTextContent(busyLabel);
+
+      await act(async () => {
+        pending.resolve(
+          mode === "retry"
+            ? { ok: true, data: { requestId: "request-retry" } }
+            : { ok: true, data: null },
+        );
+        await pending.promise;
+      });
+      await waitFor(() =>
+        expect(screen.queryByRole("status")).not.toBeInTheDocument(),
+      );
+    },
+  );
 });
+
+function popupWindow(
+  options: { closed?: boolean; replaceThrows?: boolean } = {},
+) {
+  const location = { href: "about:blank" };
+  const close = vi.fn();
+  const replace = vi.fn((url: string) => {
+    if (options.replaceThrows) throw new Error("navigation denied");
+    location.href = url;
+  });
+  const document = {
+    head: { append: vi.fn() },
+    createElement: vi.fn(() => ({ name: "", content: "" })),
+  };
+  const window = {
+    opener: {},
+    closed: options.closed ?? false,
+    location: { replace },
+    document,
+    close,
+  } as unknown as Window;
+  return { window, location, close, replace };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}

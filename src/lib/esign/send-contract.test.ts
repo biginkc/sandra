@@ -159,6 +159,29 @@ describe("sendContractWithTemplate", () => {
     },
   );
 
+  it.each([
+    "seller@@example.com",
+    "seller name@example.com",
+    "seller@exa mple.com",
+    "@example.com",
+    "seller@",
+  ])(
+    "rejects malformed signer email %j before provider dispatch",
+    async (emailAddress) => {
+      const adapter = provider();
+
+      await expect(
+        sendContractWithTemplate(
+          adapter,
+          input({
+            signers: [{ ...signers[0], emailAddress }, signers[1]],
+          }),
+        ),
+      ).rejects.toThrow("Assign exactly one signer to every template role.");
+      expect(adapter.sendWithTemplate).not.toHaveBeenCalled();
+    },
+  );
+
   it("rejects a stale template role snapshot", async () => {
     const adapter = provider();
     const staleTemplate = {

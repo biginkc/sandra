@@ -1,4 +1,11 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -225,4 +232,130 @@ describe("SendForSignature", () => {
     await waitFor(() => expect(sendAction).toHaveBeenCalledTimes(2));
     expect(sendAction.mock.calls[1][0].sendIntentId).toBe(firstIntent);
   });
+
+  it.each([
+    ["Seller name", "Changed Seller"],
+    ["Property address", "456 Oak St"],
+    ["Offer price", "$140,000"],
+    ["Closing date", "2026-10-15"],
+    ["Earnest money", "$2,000"],
+  ] as const)(
+    "clears review confirmation after editing %s",
+    async (label, value) => {
+      const user = userEvent.setup();
+      const { preflightAction, sendAction } = actions({
+        ...preflight,
+        templates: [
+          { ...template, signerRoles: [{ name: "Seller", order: 0 }] },
+        ],
+      });
+      render(
+        <SendForSignature
+          propertyId="property-1"
+          initialBlockers={[]}
+          preflightAction={preflightAction}
+          sendAction={sendAction}
+        />,
+      );
+      await user.click(screen.getByTestId("send-for-signature-trigger"));
+      await screen.findByDisplayValue("seller@example.com");
+      const confirmation = screen.getByRole("checkbox");
+      await user.click(confirmation);
+      expect(confirmation).toBeChecked();
+
+      const field = screen.getByLabelText(label);
+      await user.clear(field);
+      await user.type(field, value);
+
+      expect(confirmation).not.toBeChecked();
+      expect(screen.getByTestId("send-for-signature-submit")).toBeDisabled();
+    },
+  );
+
+  it.each([
+    "seller@@example.com",
+    "seller name@example.com",
+    "seller@exa mple.com",
+  ])("rejects malformed email %j with an accessible error", async (email) => {
+    const user = userEvent.setup();
+    const { preflightAction, sendAction } = actions({
+      ...preflight,
+      templates: [{ ...template, signerRoles: [{ name: "Seller", order: 0 }] }],
+    });
+    render(
+      <SendForSignature
+        propertyId="property-1"
+        initialBlockers={[]}
+        preflightAction={preflightAction}
+        sendAction={sendAction}
+      />,
+    );
+    await user.click(screen.getByTestId("send-for-signature-trigger"));
+    const input = await screen.findByLabelText("Email");
+    await user.clear(input);
+    await user.type(input, email);
+    await user.click(screen.getByRole("checkbox"));
+
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input).toHaveAccessibleDescription(
+      "Enter one email address without spaces.",
+    );
+    expect(screen.getByTestId("send-for-signature-submit")).toBeDisabled();
+    expect(sendAction).not.toHaveBeenCalled();
+  });
+
+  it("blocks X, Escape, backdrop, and Cancel while sending but closes after success", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Awaited<ReturnType<SendContractAction>>>();
+    const { preflightAction, sendAction } = actions({
+      ...preflight,
+      templates: [{ ...template, signerRoles: [{ name: "Seller", order: 0 }] }],
+    });
+    sendAction.mockReturnValue(pending.promise);
+    render(
+      <SendForSignature
+        propertyId="property-1"
+        initialBlockers={[]}
+        preflightAction={preflightAction}
+        sendAction={sendAction}
+      />,
+    );
+    await user.click(screen.getByTestId("send-for-signature-trigger"));
+    await screen.findByDisplayValue("seller@example.com");
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByTestId("send-for-signature-submit"));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Sending contract for signature…",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Close" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    await user.keyboard("{Escape}");
+    const overlay = document.querySelector('[data-slot="dialog-overlay"]');
+    expect(overlay).not.toBeNull();
+    fireEvent.pointerDown(overlay!);
+    expect(
+      screen.getByRole("heading", { name: "Send for signature" }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      pending.resolve({ ok: true, data: { requestId: "request-1" } });
+      await pending.promise;
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: "Send for signature" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}

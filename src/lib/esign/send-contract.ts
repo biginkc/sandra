@@ -1,6 +1,7 @@
 import "server-only";
 
 import { ValidationError } from "@/lib/errors/classes";
+import { isValidEsignEmail } from "@/lib/esign/email";
 
 import {
   ESIGN_MERGE_FIELD_NAMES,
@@ -109,7 +110,7 @@ function assertExactSignerAssignments(
         actual[index]?.role === role.name &&
         actual[index]?.order === role.order &&
         actual[index]?.name.trim() &&
-        isEmail(actual[index]?.emailAddress ?? ""),
+        isValidEsignEmail(actual[index]?.emailAddress ?? ""),
     );
   if (!matches) {
     throw new ValidationError(
@@ -159,11 +160,4 @@ function assertProviderSignatures(
       "Dropbox Sign returned signer details that do not match this send.",
     );
   }
-}
-
-function isEmail(value: string): boolean {
-  const trimmed = value.trim();
-  return (
-    trimmed.includes("@") && !trimmed.startsWith("@") && !trimmed.endsWith("@")
-  );
 }

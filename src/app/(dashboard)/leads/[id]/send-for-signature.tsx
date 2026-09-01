@@ -15,6 +15,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { callAction } from "@/lib/errors/call-action";
+import { isValidEsignEmail } from "@/lib/esign/email";
+import {
+  cancelPendingDialogClose,
+  type DialogCloseEventDetails,
+} from "@/lib/esign/pending-dialog";
 import type {
   EsignMergeFieldName,
   TemplateOption,
@@ -209,9 +214,24 @@ export function SendForSignatureDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, propertyId]);
 
-  const handleOpenChange = (next: boolean) => {
+  const handleOpenChange = (
+    next: boolean,
+    eventDetails: DialogCloseEventDetails,
+  ) => {
+    if (cancelPendingDialogClose(next, pending, eventDetails)) return;
     if (!next) reset();
     onOpenChange(next);
+  };
+
+  const requestClose = () => {
+    if (pending) return;
+    reset();
+    onOpenChange(false);
+  };
+
+  const closeAfterSuccess = () => {
+    reset();
+    onOpenChange(false);
   };
 
   const selectedTemplate = useMemo(
@@ -229,7 +249,8 @@ export function SendForSignatureDialog({
     selectedTemplate !== null &&
     signers.length === selectedTemplate.signerRoles.length &&
     signers.every(
-      (signer) => signer.name.trim().length > 0 && isEmail(signer.emailAddress),
+      (signer) =>
+        signer.name.trim().length > 0 && isValidEsignEmail(signer.emailAddress),
     );
   const canSend =
     !loading &&
@@ -276,14 +297,21 @@ export function SendForSignatureDialog({
         return;
       }
       const requestId = result.data.requestId;
-      handleOpenChange(false);
+      closeAfterSuccess();
       onFinished?.(requestId);
     });
   };
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-2xl">
+    <Dialog
+      open={open}
+      onOpenChange={handleOpenChange}
+      disablePointerDismissal={pending}
+    >
+      <DialogContent
+        className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-2xl"
+        showCloseButton={!pending}
+      >
         <DialogHeader>
           <DialogTitle>Send for signature</DialogTitle>
           <DialogDescription>
@@ -292,8 +320,15 @@ export function SendForSignatureDialog({
         </DialogHeader>
 
         {loading || pending ? (
-          <p className="py-6 text-sm text-muted-foreground">
-            Checking templates and sending access...
+          <p
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+            className="py-6 text-sm text-muted-foreground"
+          >
+            {pending
+              ? "Sending contract for signature…"
+              : "Checking templates and sending access…"}
           </p>
         ) : error && !preflight ? (
           <div className="space-y-3 py-4">
@@ -377,12 +412,31 @@ export function SendForSignatureDialog({
                         id={`esign-signer-email-${index}`}
                         type="email"
                         value={signer.emailAddress}
+                        required
+                        aria-invalid={
+                          isValidEsignEmail(signer.emailAddress)
+                            ? undefined
+                            : true
+                        }
+                        aria-describedby={
+                          isValidEsignEmail(signer.emailAddress)
+                            ? undefined
+                            : `esign-signer-email-error-${index}`
+                        }
                         onChange={(event) =>
                           updateSigner(index, {
                             emailAddress: event.target.value,
                           })
                         }
                       />
+                      {!isValidEsignEmail(signer.emailAddress) ? (
+                        <p
+                          id={`esign-signer-email-error-${index}`}
+                          className="text-xs text-destructive"
+                        >
+                          Enter one email address without spaces.
+                        </p>
+                      ) : null}
                     </div>
                   </div>
                 ))}
@@ -411,11 +465,7 @@ export function SendForSignatureDialog({
                       placeholder={field.placeholder}
                       value={mergeValues[field.name]}
                       onChange={(event) =>
-                        setMergeValues((current) =>
-                          current
-                            ? { ...current, [field.name]: event.target.value }
-                            : current,
-                        )
+                        updateMergeValue(field.name, event.target.value)
                       }
                       className="mt-1.5"
                     />
@@ -447,7 +497,7 @@ export function SendForSignatureDialog({
             type="button"
             variant="outline"
             disabled={pending}
-            onClick={() => handleOpenChange(false)}
+            onClick={requestClose}
           >
             Cancel
           </Button>
@@ -475,6 +525,13 @@ export function SendForSignatureDialog({
     );
     setConfirmed(false);
   }
+
+  function updateMergeValue(name: EsignMergeFieldName, value: string) {
+    setMergeValues((current) =>
+      current ? { ...current, [name]: value } : current,
+    );
+    setConfirmed(false);
+  }
 }
 
 function assignmentsFor(
@@ -495,13 +552,6 @@ function assignmentsFor(
           ? preflight.sellerDefaults.emailAddress
           : "",
     }));
-}
-
-function isEmail(value: string): boolean {
-  const trimmed = value.trim();
-  return (
-    trimmed.includes("@") && !trimmed.startsWith("@") && !trimmed.endsWith("@")
-  );
 }
 
 function createSendIntentId(): string {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ESIGN_MERGE_FIELD_NAMES,
@@ -17,6 +17,12 @@ import {
   type LeadEsignActionDependencies,
   type LeadSendContext,
 } from "./lead-esign-action-core";
+
+const reportMocks = vi.hoisted(() => ({ reportError: vi.fn() }));
+
+vi.mock("@/lib/errors/report", () => ({
+  reportError: reportMocks.reportError,
+}));
 
 const NOW = new Date("2026-08-29T20:00:00.000Z");
 
@@ -138,7 +144,7 @@ function harness() {
         "https://app.hellosign.com/home/manage?guid=provider-request-1",
       signatures,
     }),
-    remind: vi.fn().mockResolvedValue("sent"),
+    remind: vi.fn().mockResolvedValue("accepted"),
     cancel: vi.fn().mockResolvedValue("accepted"),
   } as unknown as EsignActionProvider;
   const files = {
@@ -176,6 +182,10 @@ function harness() {
 }
 
 describe("lead eSign action orchestration", () => {
+  beforeEach(() => {
+    reportMocks.reportError.mockClear();
+  });
+
   it("returns live preflight blockers and safe seller defaults", async () => {
     const h = harness();
     h.repository.loadLeadSendContext.mockResolvedValue(
@@ -249,18 +259,21 @@ describe("lead eSign action orchestration", () => {
       code: "AUTHORIZATION_CHANGED",
     },
     { outcome: "not_found" as const, code: "NOT_FOUND" },
-  ])("returns a safe $code result for an atomic $outcome claim", async ({ outcome, code }) => {
-    const h = harness();
-    h.repository.claimSend.mockResolvedValue({ outcome });
+  ])(
+    "returns a safe $code result for an atomic $outcome claim",
+    async ({ outcome, code }) => {
+      const h = harness();
+      h.repository.claimSend.mockResolvedValue({ outcome });
 
-    const result = await h.core.send(sendInput);
+      const result = await h.core.send(sendInput);
 
-    expect(result).toMatchObject({ ok: false, error: { code } });
-    expect(JSON.stringify(result)).not.toMatch(
-      /seller@example\.com|123 Main|provider-template|property-private/i,
-    );
-    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
-  });
+      expect(result).toMatchObject({ ok: false, error: { code } });
+      expect(JSON.stringify(result)).not.toMatch(
+        /seller@example\.com|123 Main|provider-template|property-private/i,
+      );
+      expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+    },
+  );
 
   it("rejects a cross-org or mismatched send claim before provider dispatch", async () => {
     const h = harness();
@@ -399,8 +412,62 @@ describe("lead eSign action orchestration", () => {
         deliveryState: "send_unknown",
         safeErrorMessage: null,
       });
-      expect(duplicate).toEqual({ ok: true, data: { requestId: "request-1" } });
+      expect(duplicate).toMatchObject({
+        ok: false,
+        error: { code: "SEND_UNKNOWN" },
+      });
       expect(h.provider.sendWithTemplate).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    ["sent", null],
+    ["sending", "SEND_IN_PROGRESS"],
+    ["send_unknown", "SEND_UNKNOWN"],
+    ["failed", "SEND_FAILED"],
+  ] as const)(
+    "maps a pre-claim same-intent %s row without redispatch",
+    async (deliveryState, code) => {
+      const h = harness();
+      h.repository.findRequestByIntent.mockResolvedValue(
+        request({ deliveryState }),
+      );
+
+      const result = await h.core.send(sendInput);
+
+      if (code) expect(result).toMatchObject({ ok: false, error: { code } });
+      else
+        expect(result).toEqual({ ok: true, data: { requestId: "request-1" } });
+      expect(h.repository.loadLeadSendContext).not.toHaveBeenCalled();
+      expect(h.repository.claimSend).not.toHaveBeenCalled();
+      expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["sent", null],
+    ["sending", "SEND_IN_PROGRESS"],
+    ["send_unknown", "SEND_UNKNOWN"],
+    ["failed", "SEND_FAILED"],
+  ] as const)(
+    "maps a claim-race same-intent %s row without redispatch",
+    async (deliveryState, code) => {
+      const h = harness();
+      h.repository.claimSend.mockImplementation(async (input) => ({
+        outcome: "existing",
+        request: request({
+          deliveryState,
+          payloadHash: input.payloadHash,
+          sendIntentId: input.sendIntentId,
+        }),
+      }));
+
+      const result = await h.core.send(sendInput);
+
+      if (code) expect(result).toMatchObject({ ok: false, error: { code } });
+      else
+        expect(result).toEqual({ ok: true, data: { requestId: "request-1" } });
+      expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
     },
   );
 
@@ -419,6 +486,73 @@ describe("lead eSign action orchestration", () => {
       deliveryState: "failed",
       safeErrorMessage: "PROVIDER_REJECTED",
     });
+  });
+
+  it.each([
+    ["unknown", "SEND_UNKNOWN"],
+    ["failed", "SEND_FAILED"],
+    ["disconnected", "PROVIDER_DISCONNECTED"],
+  ] as const)(
+    "preserves the authoritative %s outcome when bookkeeping fails",
+    async (mode, code) => {
+      const h = harness();
+      h.repository.markSendOutcome.mockRejectedValue(
+        new Error("private repository failure"),
+      );
+      if (mode === "unknown") {
+        h.provider.sendWithTemplate.mockResolvedValue({ outcome: "ambiguous" });
+      } else if (mode === "failed") {
+        h.provider.sendWithTemplate.mockResolvedValue({
+          outcome: "definitive_failure",
+        });
+      } else {
+        vi.mocked(h.dependencies.providerForOrg).mockResolvedValue(null);
+      }
+
+      const result = await h.core.send(sendInput);
+
+      expect(result).toMatchObject({ ok: false, error: { code } });
+      expect(JSON.stringify(result)).not.toContain(
+        "private repository failure",
+      );
+      expect(reportMocks.reportError).toHaveBeenCalledTimes(1);
+      const [reportedError, context] = reportMocks.reportError.mock.calls[0];
+      expect(reportedError).toEqual(
+        expect.objectContaining({
+          message: "eSign send outcome bookkeeping failed.",
+        }),
+      );
+      expect(context).toEqual({
+        tags: {
+          surface: "esign_send_outcome_bookkeeping",
+          delivery_state: mode === "unknown" ? "send_unknown" : "failed",
+        },
+      });
+      expect(JSON.stringify([reportedError.message, context])).not.toMatch(
+        /private repository failure|seller@example|property-1|request-1/,
+      );
+    },
+  );
+
+  it("marks a claimed send failed when provider setup throws and never calls a provider method", async () => {
+    const h = harness();
+    vi.mocked(h.dependencies.providerForOrg).mockRejectedValue(
+      new Error("private credential setup failure"),
+    );
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_DISCONNECTED" },
+    });
+    expect(h.repository.markSendOutcome).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      deliveryState: "failed",
+      safeErrorMessage: "PROVIDER_SETUP_FAILED",
+    });
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });
 
   it("treats invalid post-send identifiers as send_unknown", async () => {
@@ -526,6 +660,164 @@ describe("lead eSign action orchestration", () => {
     );
   });
 
+  it.each([
+    ["ambiguous", "REMINDER_UNKNOWN", true],
+    ["definitive_failure", "REMINDER_FAILED", false],
+  ] as const)(
+    "handles a %s reminder without replaying the provider mutation",
+    async (outcome, code, finalized) => {
+      const h = harness();
+      h.repository.claimReminder.mockResolvedValue({
+        outcome: "eligible",
+        candidate: {
+          claimToken: "reminder-claim-1",
+          request: request({
+            deliveryState: "sent",
+            providerRequestId: "provider-request-1",
+          }),
+          signer: {
+            id: "signature-1",
+            name: "Seller Owner",
+            emailAddress: "seller@example.com",
+            status: "awaiting",
+            lastRemindedAt: null,
+          },
+        },
+      });
+      h.provider.remind.mockResolvedValue(outcome);
+
+      const result = await h.core.remind({
+        requestId: "request-1",
+        signerId: "signature-1",
+      });
+
+      expect(result).toMatchObject({ ok: false, error: { code } });
+      expect(h.provider.remind).toHaveBeenCalledTimes(1);
+      if (finalized) {
+        expect(h.repository.finalizeReminder).toHaveBeenCalledWith({
+          orgId: "org-1",
+          requestId: "request-1",
+          signerId: "signature-1",
+          claimToken: "reminder-claim-1",
+        });
+        expect(h.repository.releaseReminder).not.toHaveBeenCalled();
+      } else {
+        expect(h.repository.finalizeReminder).not.toHaveBeenCalled();
+        expect(h.repository.releaseReminder).toHaveBeenCalledWith({
+          orgId: "org-1",
+          requestId: "request-1",
+          signerId: "signature-1",
+          claimToken: "reminder-claim-1",
+        });
+      }
+    },
+  );
+
+  it("fails closed on a reminder reconciliation fence without loading a provider", async () => {
+    const h = harness();
+    h.repository.claimReminder.mockResolvedValue({
+      outcome: "reconciliation_required",
+    });
+
+    expect(
+      await h.core.remind({
+        requestId: "request-1",
+        signerId: "signature-1",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "REMINDER_UNKNOWN" } });
+    expect(h.dependencies.providerForOrg).not.toHaveBeenCalled();
+    expect(h.provider.remind).not.toHaveBeenCalled();
+    expect(h.repository.finalizeReminder).not.toHaveBeenCalled();
+    expect(h.repository.releaseReminder).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["accepted", "throws"],
+    ["accepted", "lease_lost"],
+    ["ambiguous", "throws"],
+    ["ambiguous", "lease_lost"],
+  ] as const)(
+    "preserves a reminder claim after provider %s when finalization %s",
+    async (providerOutcome, finalizeOutcome) => {
+      const h = harness();
+      h.repository.claimReminder.mockResolvedValue({
+        outcome: "eligible",
+        candidate: {
+          claimToken: "reminder-claim-fenced",
+          request: request({
+            deliveryState: "sent",
+            providerRequestId: "provider-request-1",
+          }),
+          signer: {
+            id: "signature-1",
+            name: "Seller Owner",
+            emailAddress: "seller@example.com",
+            status: "awaiting",
+            lastRemindedAt: null,
+          },
+        },
+      });
+      h.provider.remind.mockResolvedValue(providerOutcome);
+      if (finalizeOutcome === "throws") {
+        h.repository.finalizeReminder.mockRejectedValue(
+          new Error("finalization failed"),
+        );
+      } else {
+        h.repository.finalizeReminder.mockResolvedValue("lease_lost");
+      }
+
+      expect(
+        await h.core.remind({
+          requestId: "request-1",
+          signerId: "signature-1",
+        }),
+      ).toMatchObject({ ok: false, error: { code: "REMINDER_UNKNOWN" } });
+      expect(h.provider.remind).toHaveBeenCalledTimes(1);
+      expect(h.repository.releaseReminder).not.toHaveBeenCalled();
+    },
+  );
+
+  it("releases an exact reminder lease when provider setup throws and makes no provider call", async () => {
+    const h = harness();
+    h.repository.claimReminder.mockResolvedValue({
+      outcome: "eligible",
+      candidate: {
+        claimToken: "reminder-claim-setup",
+        request: request({
+          deliveryState: "sent",
+          providerRequestId: "provider-request-1",
+        }),
+        signer: {
+          id: "signature-1",
+          name: "Seller Owner",
+          emailAddress: "seller@example.com",
+          status: "awaiting",
+          lastRemindedAt: null,
+        },
+      },
+    });
+    vi.mocked(h.dependencies.providerForOrg).mockRejectedValue(
+      new Error("private provider setup"),
+    );
+
+    const result = await h.core.remind({
+      requestId: "request-1",
+      signerId: "signature-1",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_DISCONNECTED" },
+    });
+    expect(h.repository.releaseReminder).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      signerId: "signature-1",
+      claimToken: "reminder-claim-setup",
+    });
+    expect(h.provider.remind).not.toHaveBeenCalled();
+  });
+
   it("independently rejects a stale eligible reminder claim inside one hour", async () => {
     const h = harness();
     h.repository.claimReminder.mockResolvedValue({
@@ -626,6 +918,127 @@ describe("lead eSign action orchestration", () => {
     });
     expect(awaiting.status).toBe("awaiting");
     expect(awaiting.voidRequestedAt).toBeNull();
+  });
+
+  it.each([
+    ["ambiguous", "VOID_UNKNOWN", true],
+    ["definitive_failure", "VOID_FAILED", false],
+  ] as const)(
+    "handles a %s void without replaying or marking the contract voided",
+    async (outcome, code, finalized) => {
+      const h = harness();
+      const awaiting = request({
+        deliveryState: "sent",
+        providerRequestId: "provider-request-1",
+      });
+      h.repository.claimVoid.mockResolvedValue({
+        outcome: "eligible",
+        request: awaiting,
+        claimToken: "void-claim-1",
+      });
+      h.provider.cancel.mockResolvedValue(outcome);
+
+      const result = await h.core.void({ requestId: "request-1" });
+
+      expect(result).toMatchObject({ ok: false, error: { code } });
+      expect(h.provider.cancel).toHaveBeenCalledTimes(1);
+      expect(awaiting.status).toBe("awaiting");
+      expect(awaiting.voidRequestedAt).toBeNull();
+      if (finalized) {
+        expect(h.repository.finalizeVoid).toHaveBeenCalledWith({
+          orgId: "org-1",
+          requestId: "request-1",
+          claimToken: "void-claim-1",
+        });
+        expect(h.repository.releaseVoid).not.toHaveBeenCalled();
+      } else {
+        expect(h.repository.finalizeVoid).not.toHaveBeenCalled();
+        expect(h.repository.releaseVoid).toHaveBeenCalledWith({
+          orgId: "org-1",
+          requestId: "request-1",
+          claimToken: "void-claim-1",
+        });
+      }
+    },
+  );
+
+  it("fails closed on a void reconciliation fence without loading a provider", async () => {
+    const h = harness();
+    h.repository.claimVoid.mockResolvedValue({
+      outcome: "reconciliation_required",
+    });
+
+    expect(await h.core.void({ requestId: "request-1" })).toMatchObject({
+      ok: false,
+      error: { code: "VOID_UNKNOWN" },
+    });
+    expect(h.dependencies.providerForOrg).not.toHaveBeenCalled();
+    expect(h.provider.cancel).not.toHaveBeenCalled();
+    expect(h.repository.finalizeVoid).not.toHaveBeenCalled();
+    expect(h.repository.releaseVoid).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["accepted", "throws"],
+    ["accepted", "lease_lost"],
+    ["ambiguous", "throws"],
+    ["ambiguous", "lease_lost"],
+  ] as const)(
+    "preserves a void claim after provider %s when finalization %s",
+    async (providerOutcome, finalizeOutcome) => {
+      const h = harness();
+      h.repository.claimVoid.mockResolvedValue({
+        outcome: "eligible",
+        request: request({
+          deliveryState: "sent",
+          providerRequestId: "provider-request-1",
+        }),
+        claimToken: "void-claim-fenced",
+      });
+      h.provider.cancel.mockResolvedValue(providerOutcome);
+      if (finalizeOutcome === "throws") {
+        h.repository.finalizeVoid.mockRejectedValue(
+          new Error("finalization failed"),
+        );
+      } else {
+        h.repository.finalizeVoid.mockResolvedValue("lease_lost");
+      }
+
+      expect(await h.core.void({ requestId: "request-1" })).toMatchObject({
+        ok: false,
+        error: { code: "VOID_UNKNOWN" },
+      });
+      expect(h.provider.cancel).toHaveBeenCalledTimes(1);
+      expect(h.repository.releaseVoid).not.toHaveBeenCalled();
+    },
+  );
+
+  it("releases an exact void lease when provider setup throws and makes no provider call", async () => {
+    const h = harness();
+    h.repository.claimVoid.mockResolvedValue({
+      outcome: "eligible",
+      request: request({
+        deliveryState: "sent",
+        providerRequestId: "provider-request-1",
+      }),
+      claimToken: "void-claim-setup",
+    });
+    vi.mocked(h.dependencies.providerForOrg).mockRejectedValue(
+      new Error("private provider setup"),
+    );
+
+    const result = await h.core.void({ requestId: "request-1" });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_DISCONNECTED" },
+    });
+    expect(h.repository.releaseVoid).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      claimToken: "void-claim-setup",
+    });
+    expect(h.provider.cancel).not.toHaveBeenCalled();
   });
 
   it("rejects an already void-pending request without another provider call", async () => {

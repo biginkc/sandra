@@ -3,6 +3,7 @@ import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 
 import { ValidationError } from "@/lib/errors/classes";
+import { reportError } from "@/lib/errors/report";
 import { err, ok, type Result } from "@/lib/errors/result";
 import {
   ESIGN_MERGE_FIELD_NAMES,
@@ -53,11 +54,12 @@ export type EsignRequestRecord = Readonly<{
   orgId: string;
   propertyId: string;
   template: TemplateOption;
-  signers: readonly (SignerAssignment & Readonly<{
-    id?: string;
-    status?: "awaiting" | "viewed" | "signed" | "declined" | "error";
-    lastRemindedAt?: string | null;
-  }>)[];
+  signers: readonly (SignerAssignment &
+    Readonly<{
+      id?: string;
+      status?: "awaiting" | "viewed" | "signed" | "declined" | "error";
+      lastRemindedAt?: string | null;
+    }>)[];
   mergeValues: ContractMergeValues;
   sendIntentId: string;
   payloadHash: string;
@@ -138,6 +140,7 @@ export type EsignActionRepository = Readonly<{
     | Readonly<{ outcome: "eligible"; candidate: ReminderCandidate }>
     | Readonly<{ outcome: "cooldown" }>
     | Readonly<{ outcome: "in_progress" }>
+    | Readonly<{ outcome: "reconciliation_required" }>
     | Readonly<{ outcome: "ineligible" }>
   >;
   finalizeReminder(input: {
@@ -152,12 +155,14 @@ export type EsignActionRepository = Readonly<{
     signerId: string;
     claimToken: string;
   }): Promise<"released" | "lease_lost">;
-  claimVoid(input: {
-    orgId: string;
-    requestId: string;
-  }): Promise<
-    | Readonly<{ outcome: "eligible"; request: EsignRequestRecord; claimToken: string }>
+  claimVoid(input: { orgId: string; requestId: string }): Promise<
+    | Readonly<{
+        outcome: "eligible";
+        request: EsignRequestRecord;
+        claimToken: string;
+      }>
     | Readonly<{ outcome: "in_progress" }>
+    | Readonly<{ outcome: "reconciliation_required" }>
     | Readonly<{ outcome: "ineligible" }>
   >;
   finalizeVoid(input: {
@@ -186,6 +191,9 @@ export type ProviderDispatchOutcome =
   | Readonly<{ outcome: "ambiguous" }>
   | Readonly<{ outcome: "definitive_failure" }>;
 
+export type ProviderMutationOutcome =
+  "accepted" | "ambiguous" | "definitive_failure";
+
 export type EsignActionProvider = Readonly<{
   sendWithTemplate(input: {
     localRequestId: string;
@@ -199,8 +207,11 @@ export type EsignActionProvider = Readonly<{
     signerName: string;
     signerEmailAddress: string;
     signal: AbortSignal;
-  }): Promise<"sent" | "failed">;
-  cancel(input: { providerRequestId: string; signal: AbortSignal }): Promise<"accepted" | "failed">;
+  }): Promise<ProviderMutationOutcome>;
+  cancel(input: {
+    providerRequestId: string;
+    signal: AbortSignal;
+  }): Promise<ProviderMutationOutcome>;
 }>;
 
 export type EsignActionFiles = Readonly<{
@@ -325,7 +336,10 @@ async function send(
   if (claim.outcome === "retry_ineligible")
     fail("RETRY_INELIGIBLE", "Only failed contracts can be retried.");
   if (claim.outcome === "intent_conflict")
-    fail("SEND_INTENT_CONFLICT", "This send key was already used for different contract details.");
+    fail(
+      "SEND_INTENT_CONFLICT",
+      "This send key was already used for different contract details.",
+    );
   if (claim.outcome === "authorization_changed")
     fail(
       "AUTHORIZATION_CHANGED",
@@ -349,7 +363,13 @@ async function dispatchClaimed(
   dependencies: LeadEsignActionDependencies,
   request: EsignRequestRecord,
 ): Promise<SendContractOutput> {
-  const provider = await dependencies.providerForOrg(request.orgId);
+  let provider: EsignActionProvider | null;
+  try {
+    provider = await dependencies.providerForOrg(request.orgId);
+  } catch {
+    await markFailed(dependencies, request, "PROVIDER_SETUP_FAILED");
+    fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
+  }
   if (!provider) {
     await markFailed(dependencies, request, "PROVIDER_DISCONNECTED");
     fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
@@ -357,13 +377,15 @@ async function dispatchClaimed(
 
   let outcome: ProviderDispatchOutcome;
   try {
-    outcome = await withProviderTimeout((signal) => provider.sendWithTemplate({
-      localRequestId: request.id,
-      providerTemplateId: request.template.providerTemplateId,
-      signers: request.signers,
-      mergeValues: request.mergeValues,
-      signal,
-    }));
+    outcome = await withProviderTimeout((signal) =>
+      provider.sendWithTemplate({
+        localRequestId: request.id,
+        providerTemplateId: request.template.providerTemplateId,
+        signers: request.signers,
+        mergeValues: request.mergeValues,
+        signal,
+      }),
+    );
   } catch {
     await markUnknown(dependencies, request);
     fail(
@@ -379,11 +401,7 @@ async function dispatchClaimed(
     );
   }
   if (outcome.outcome === "definitive_failure") {
-    await markFailed(
-      dependencies,
-      request,
-      "PROVIDER_REJECTED",
-    );
+    await markFailed(dependencies, request, "PROVIDER_REJECTED");
     fail("SEND_FAILED", "Dropbox Sign could not send this contract.");
   }
 
@@ -446,7 +464,15 @@ async function remind(
     now,
   });
   if (claim.outcome === "in_progress")
-    fail("REMINDER_IN_PROGRESS", "A reminder or void request is already in progress.");
+    fail(
+      "REMINDER_IN_PROGRESS",
+      "A reminder or void request is already in progress.",
+    );
+  if (claim.outcome === "reconciliation_required")
+    fail(
+      "REMINDER_UNKNOWN",
+      "A prior reminder may have been sent. Reconcile it before trying again.",
+    );
   if (claim.outcome === "cooldown")
     fail(
       "REMINDER_COOLDOWN",
@@ -478,35 +504,76 @@ async function remind(
     );
     fail("REMINDER_INELIGIBLE", "This signer cannot be reminded.");
   }
-  const provider = await dependencies.providerForOrg(actor.orgId);
-  if (!provider) {
-    await releaseReminder(dependencies, actor.orgId, request.id, input.signerId, claim.candidate.claimToken);
+  let provider: EsignActionProvider | null;
+  try {
+    provider = await dependencies.providerForOrg(actor.orgId);
+  } catch {
+    await releaseReminder(
+      dependencies,
+      actor.orgId,
+      request.id,
+      input.signerId,
+      claim.candidate.claimToken,
+    );
     fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
   }
-  let outcome: "sent" | "failed";
+  if (!provider) {
+    await releaseReminder(
+      dependencies,
+      actor.orgId,
+      request.id,
+      input.signerId,
+      claim.candidate.claimToken,
+    );
+    fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
+  }
+  let outcome: ProviderMutationOutcome;
   try {
-    outcome = await withProviderTimeout((signal) => provider.remind({
-      providerRequestId: request.providerRequestId!,
-      signerName: signer.name,
-      signerEmailAddress: signer.emailAddress,
-      signal,
-    }));
+    outcome = await withProviderTimeout((signal) =>
+      provider.remind({
+        providerRequestId: request.providerRequestId!,
+        signerName: signer.name,
+        signerEmailAddress: signer.emailAddress,
+        signal,
+      }),
+    );
   } catch {
-    await releaseReminder(dependencies, actor.orgId, request.id, input.signerId, claim.candidate.claimToken);
+    outcome = "ambiguous";
+  }
+  if (outcome === "definitive_failure") {
+    await releaseReminder(
+      dependencies,
+      actor.orgId,
+      request.id,
+      input.signerId,
+      claim.candidate.claimToken,
+    );
     fail("REMINDER_FAILED", "Dropbox Sign could not send the reminder.");
   }
-  if (outcome !== "sent") {
-    await releaseReminder(dependencies, actor.orgId, request.id, input.signerId, claim.candidate.claimToken);
-    fail("REMINDER_FAILED", "Dropbox Sign could not send the reminder.");
+  let finalized: "applied" | "lease_lost";
+  try {
+    finalized = await dependencies.repository.finalizeReminder({
+      orgId: actor.orgId,
+      requestId: request.id,
+      signerId: input.signerId,
+      claimToken: claim.candidate.claimToken,
+    });
+  } catch {
+    fail(
+      "REMINDER_UNKNOWN",
+      "Dropbox Sign may have sent the reminder. Reconcile it before trying again.",
+    );
   }
-  const finalized = await dependencies.repository.finalizeReminder({
-    orgId: actor.orgId,
-    requestId: request.id,
-    signerId: input.signerId,
-    claimToken: claim.candidate.claimToken,
-  });
   if (finalized === "lease_lost")
-    fail("REMINDER_LEASE_LOST", "The reminder state changed before it could be recorded.");
+    fail(
+      "REMINDER_UNKNOWN",
+      "Dropbox Sign may have sent the reminder. Reconcile it before trying again.",
+    );
+  if (outcome === "ambiguous")
+    fail(
+      "REMINDER_UNKNOWN",
+      "Dropbox Sign may have sent the reminder. Wait one hour before trying again.",
+    );
   return null;
 }
 
@@ -520,7 +587,15 @@ async function requestVoid(
     requestId: input.requestId,
   });
   if (claim.outcome === "in_progress")
-    fail("VOID_IN_PROGRESS", "A reminder or void request is already in progress.");
+    fail(
+      "VOID_IN_PROGRESS",
+      "A reminder or void request is already in progress.",
+    );
+  if (claim.outcome === "reconciliation_required")
+    fail(
+      "VOID_UNKNOWN",
+      "A prior void request may have been accepted. Reconcile it before trying again.",
+    );
   if (claim.outcome !== "eligible")
     fail("VOID_INELIGIBLE", "This contract cannot be voided.");
   const request = claim.request;
@@ -531,39 +606,58 @@ async function requestVoid(
     request.voidRequestedAt ||
     !["awaiting", "viewed"].includes(request.status)
   ) {
-    await releaseVoid(
-      dependencies,
-      actor.orgId,
-      request.id,
-      claim.claimToken,
-    );
+    await releaseVoid(dependencies, actor.orgId, request.id, claim.claimToken);
     fail("VOID_INELIGIBLE", "This contract cannot be voided.");
   }
-  const provider = await dependencies.providerForOrg(actor.orgId);
+  let provider: EsignActionProvider | null;
+  try {
+    provider = await dependencies.providerForOrg(actor.orgId);
+  } catch {
+    await releaseVoid(dependencies, actor.orgId, request.id, claim.claimToken);
+    fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
+  }
   if (!provider) {
     await releaseVoid(dependencies, actor.orgId, request.id, claim.claimToken);
     fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
   }
-  let accepted = false;
+  let outcome: ProviderMutationOutcome;
   try {
-    accepted = (await withProviderTimeout((signal) => provider.cancel({
-      providerRequestId: request.providerRequestId!, signal,
-    }))) === "accepted";
+    outcome = await withProviderTimeout((signal) =>
+      provider.cancel({
+        providerRequestId: request.providerRequestId!,
+        signal,
+      }),
+    );
   } catch {
+    outcome = "ambiguous";
+  }
+  if (outcome === "definitive_failure") {
     await releaseVoid(dependencies, actor.orgId, request.id, claim.claimToken);
     fail("VOID_FAILED", "Dropbox Sign could not accept the void request.");
   }
-  if (!accepted) {
-    await releaseVoid(dependencies, actor.orgId, request.id, claim.claimToken);
-    fail("VOID_FAILED", "Dropbox Sign could not accept the void request.");
+  let finalized: "applied" | "lease_lost";
+  try {
+    finalized = await dependencies.repository.finalizeVoid({
+      orgId: actor.orgId,
+      requestId: request.id,
+      claimToken: claim.claimToken,
+    });
+  } catch {
+    fail(
+      "VOID_UNKNOWN",
+      "Dropbox Sign may have accepted the void request. Reconcile it before trying again.",
+    );
   }
-  const finalized = await dependencies.repository.finalizeVoid({
-    orgId: actor.orgId,
-    requestId: request.id,
-    claimToken: claim.claimToken,
-  });
   if (finalized === "lease_lost")
-    fail("VOID_LEASE_LOST", "The contract state changed before the void request was recorded.");
+    fail(
+      "VOID_UNKNOWN",
+      "Dropbox Sign may have accepted the void request. Reconcile it before trying again.",
+    );
+  if (outcome === "ambiguous")
+    fail(
+      "VOID_UNKNOWN",
+      "Dropbox Sign may have accepted the void request. Check its status before trying again.",
+    );
   return null;
 }
 
@@ -722,7 +816,20 @@ function resolveExistingIntent(
       "This send was already submitted with different contract details.",
     );
   }
-  return { requestId: request.id };
+  if (request.deliveryState === "sent") return { requestId: request.id };
+  if (request.deliveryState === "sending") {
+    fail("SEND_IN_PROGRESS", "This contract send is already in progress.");
+  }
+  if (request.deliveryState === "send_unknown") {
+    fail(
+      "SEND_UNKNOWN",
+      "Dropbox Sign may have received this contract. Check its status before retrying.",
+    );
+  }
+  fail(
+    "SEND_FAILED",
+    "This contract send failed. Use Retry to send a new request.",
+  );
 }
 
 function assertClaimedRequest(
@@ -782,16 +889,21 @@ function isSafeDownload(
 }
 
 function isAuthorizedDownloadUrl(value: string): boolean {
-  if (value.startsWith("/api/leads/files/") && !value.startsWith("//")) return true;
+  if (value.startsWith("/api/leads/files/") && !value.startsWith("//"))
+    return true;
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && /\.supabase\.(co|in)$/.test(url.hostname);
+    return (
+      url.protocol === "https:" && /\.supabase\.(co|in)$/.test(url.hostname)
+    );
   } catch {
     return false;
   }
 }
 
-async function withProviderTimeout<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function withProviderTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ESIGN_PROVIDER_TIMEOUT_MS);
   try {
@@ -851,12 +963,16 @@ async function markUnknown(
   dependencies: LeadEsignActionDependencies,
   request: EsignRequestRecord,
 ): Promise<void> {
-  await dependencies.repository.markSendOutcome({
-    orgId: request.orgId,
-    requestId: request.id,
-    deliveryState: "send_unknown",
-    safeErrorMessage: null,
-  });
+  try {
+    await dependencies.repository.markSendOutcome({
+      orgId: request.orgId,
+      requestId: request.id,
+      deliveryState: "send_unknown",
+      safeErrorMessage: null,
+    });
+  } catch {
+    reportSendOutcomePersistenceFailure("send_unknown");
+  }
 }
 
 async function markFailed(
@@ -864,11 +980,26 @@ async function markFailed(
   request: EsignRequestRecord,
   safeErrorMessage: string,
 ): Promise<void> {
-  await dependencies.repository.markSendOutcome({
-    orgId: request.orgId,
-    requestId: request.id,
-    deliveryState: "failed",
-    safeErrorMessage,
+  try {
+    await dependencies.repository.markSendOutcome({
+      orgId: request.orgId,
+      requestId: request.id,
+      deliveryState: "failed",
+      safeErrorMessage,
+    });
+  } catch {
+    reportSendOutcomePersistenceFailure("failed");
+  }
+}
+
+function reportSendOutcomePersistenceFailure(
+  deliveryState: "send_unknown" | "failed",
+): void {
+  reportError(new Error("eSign send outcome bookkeeping failed."), {
+    tags: {
+      surface: "esign_send_outcome_bookkeeping",
+      delivery_state: deliveryState,
+    },
   });
 }
 

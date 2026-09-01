@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -46,8 +46,24 @@ describe("LeadFilesCard", () => {
 
   it("uses a short-lived authorized download instead of a stored public URL", async () => {
     const user = userEvent.setup();
-    const open = vi.spyOn(window, "open").mockImplementation(() => null);
-    render(<LeadFilesCard files={[file]} downloadAction={downloadAction} />);
+    const popup = popupWindow();
+    const events: string[] = [];
+    const open = vi.spyOn(window, "open").mockImplementation(() => {
+      events.push("open");
+      return popup.window;
+    });
+    const authorizedDownload = vi
+      .fn(downloadAction)
+      .mockImplementation(async () => {
+        events.push("authorize");
+        return {
+          ok: true,
+          data: { url: "https://authorized.example/file.pdf" },
+        };
+      });
+    render(
+      <LeadFilesCard files={[file]} downloadAction={authorizedDownload} />,
+    );
 
     expect(
       screen.getByText("Signed purchase agreement.pdf"),
@@ -59,11 +75,88 @@ describe("LeadFilesCard", () => {
       }),
     );
 
-    expect(downloadAction).toHaveBeenCalledWith({ fileId: "file-1" });
-    expect(open).toHaveBeenCalledWith(
-      "https://authorized.example/file.pdf",
-      "_blank",
-      "noopener,noreferrer",
+    await waitFor(() =>
+      expect(authorizedDownload).toHaveBeenCalledWith({ fileId: "file-1" }),
+    );
+    expect(open).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(events).toEqual(["open", "authorize"]);
+    expect(popup.window.opener).toBeNull();
+    expect(popup.location.href).toBe("https://authorized.example/file.pdf");
+  });
+
+  it("closes failed placeholders and surfaces popup blocking without authorization", async () => {
+    const user = userEvent.setup();
+    const popup = popupWindow();
+    vi.spyOn(window, "open")
+      .mockReturnValueOnce(popup.window)
+      .mockReturnValueOnce(null);
+    const action = vi
+      .fn<ContractActionHandlers["downloadAction"]>()
+      .mockResolvedValue({
+        ok: false,
+        error: { code: "FILE_NOT_FOUND", message: "File unavailable." },
+      });
+    render(<LeadFilesCard files={[file]} downloadAction={action} />);
+    const button = screen.getByRole("button", {
+      name: "Download Signed purchase agreement.pdf",
+    });
+
+    await user.click(button);
+    await waitFor(() => expect(popup.close).toHaveBeenCalledTimes(1));
+    await user.click(button);
+
+    expect(action).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Your browser blocked the file window.",
     );
   });
+
+  it("surfaces the existing inline error when authorized navigation fails", async () => {
+    const user = userEvent.setup();
+    const popup = popupWindow({ replaceThrows: true });
+    vi.spyOn(window, "open").mockReturnValue(popup.window);
+    const action = vi
+      .fn<ContractActionHandlers["downloadAction"]>()
+      .mockResolvedValue({
+        ok: true,
+        data: { url: "https://authorized.example/file.pdf" },
+      });
+    render(<LeadFilesCard files={[file]} downloadAction={action} />);
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Download Signed purchase agreement.pdf",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Could not open this file.",
+      ),
+    );
+    expect(popup.close).toHaveBeenCalledTimes(1);
+  });
 });
+
+function popupWindow(
+  options: { closed?: boolean; replaceThrows?: boolean } = {},
+) {
+  const location = { href: "about:blank" };
+  const close = vi.fn();
+  const replace = vi.fn((url: string) => {
+    if (options.replaceThrows) throw new Error("navigation denied");
+    location.href = url;
+  });
+  const document = {
+    head: { append: vi.fn() },
+    createElement: vi.fn(() => ({ name: "", content: "" })),
+  };
+  const window = {
+    opener: {},
+    closed: options.closed ?? false,
+    location: { replace },
+    document,
+    close,
+  } as unknown as Window;
+  return { window, location, close, replace };
+}
