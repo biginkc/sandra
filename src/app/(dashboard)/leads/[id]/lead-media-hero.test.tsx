@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import Link from "next/link";
 import { describe, expect, it } from "vitest";
 
 import { LeadMediaHero } from "./lead-media-hero";
@@ -41,6 +42,26 @@ const aerialImages = {
   ultra:
     "https://maps.googleapis.com/maps/api/staticmap?size=640x110&maptype=satellite",
 };
+
+const actionFocusClasses = [
+  "[&_button]:focus-visible:ring-white",
+  "[&_button]:focus-visible:ring-offset-2",
+  "[&_button]:focus-visible:ring-offset-slate-950",
+  "[&_a]:rounded-md",
+  "[&_a]:outline-none",
+  "[&_a]:focus-visible:ring-2",
+  "[&_a]:focus-visible:ring-white",
+  "[&_a]:focus-visible:ring-offset-2",
+  "[&_a]:focus-visible:ring-offset-slate-950",
+  "[&>span]:focus-within:overflow-visible",
+];
+
+function expectVisibleActionFocus() {
+  const actions = screen.getByTestId("lead-media-actions");
+  for (const className of actionFocusClasses) {
+    expect(actions.className).toContain(className);
+  }
+}
 
 describe("<LeadMediaHero />", () => {
   it("renders the official static Street View presentation", () => {
@@ -124,6 +145,7 @@ describe("<LeadMediaHero />", () => {
     expect(screen.getByTestId("lead-media-actions").className).toContain(
       "[&_button]:bg-white/95",
     );
+    expectVisibleActionFocus();
     expect(screen.getByTestId("lead-media-actions")).not.toHaveClass(
       "absolute",
       "xl:absolute",
@@ -224,7 +246,37 @@ describe("<LeadMediaHero />", () => {
     }).parentElement;
     expect(actions).toHaveClass("flex-wrap", "min-w-0");
     expect(actions?.className).toContain("[&_button]:min-h-9");
+    expectVisibleActionFocus();
     expect(screen.getByText(/Street View unavailable/)).toBeVisible();
+  });
+
+  it("keeps linked hero actions visibly focused without clipping their pill", () => {
+    render(
+      <LeadMediaHero
+        {...shared}
+        actions={
+          <>
+            <a href="https://example.com">Zillow</a>
+            <span className="overflow-hidden">
+              <Link href="/leads/previous">Previous</Link>
+              <Link href="/leads/next">Next</Link>
+            </span>
+          </>
+        }
+        media={{
+          kind: "aerial",
+          images: aerialImages,
+          resolvedBy: "address",
+          fallbackReason: "no-coverage",
+        }}
+      />,
+    );
+
+    expectVisibleActionFocus();
+    const previous = screen.getByRole("link", { name: "Previous" });
+    previous.focus();
+    expect(previous).toHaveFocus();
+    expect(previous.parentElement).toHaveClass("overflow-hidden");
   });
 
   it("resets a prior image failure when the resolved lead media changes", () => {
