@@ -199,7 +199,7 @@ describe("buildCoachSectionScriptBlock", () => {
     const text = lines.map((line) => allText(line.segments)).join(" ");
     expect(text).toContain("Awesome, I just sent it to your email. Please pull it up for me.");
     expect(text).toContain("72 hours to schedule the initial walkthrough");
-    expect(text).not.toMatch(/view documents|adopt and sign|red flashing box|second red box|share back with/i);
+    expect(text).not.toMatch(/view documents|adopt and sign|red flashing box|second red box|second novation box|share[\s_-]?back/i);
   });
 });
 

@@ -3,10 +3,45 @@ import { createHash } from "node:crypto";
 
 import { assertValidClosrScript, type ClosrScript } from "./script-schema";
 import scriptJson from "./closr-script-v0.json";
+import sectionsJson from "./closr-sections-v1.json";
 
 function validScript(): Record<string, unknown> {
   // Deep-clone via JSON round-trip so mutation in one test never leaks.
   return JSON.parse(JSON.stringify(scriptJson));
+}
+
+/**
+ * Every forbidden e-sign-platform reference Plan Zero Task 9 requires gone,
+ * normalized to lowercase words. A phrase here must match regardless of where
+ * it hides in the JSON (spoken text, notes, titles, tags, or landmark/line ids)
+ * and regardless of hyphen/underscore/en-dash/em-dash spelling.
+ */
+const FORBIDDEN_ESIGN_PHRASES = [
+  "view documents",
+  "red flashing box",
+  "adopt and sign",
+  "second red box",
+  "second novation box",
+  "share back",
+] as const;
+
+function normalizeForPhraseScan(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[-_‐-―]/g, " ") // hyphen, underscore, and every unicode dash (en/em dash included)
+    .replace(/\s+/g, " ");
+}
+
+/** Recursively collects every string leaf value from a JSON-shaped structure. */
+function collectAllStrings(value: unknown, out: string[] = []): string[] {
+  if (typeof value === "string") {
+    out.push(value);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectAllStrings(item, out);
+  } else if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) collectAllStrings(item, out);
+  }
+  return out;
 }
 
 describe("assertValidClosrScript", () => {
@@ -131,10 +166,26 @@ describe("assertValidClosrScript", () => {
       .filter((line) => line.type === "say")
       .map((line) => line.text)
       .join("\n");
-    expect(sellerFacingCopy).not.toMatch(/view documents|adopt and sign|red flashing box|second red box|share back with/i);
+    expect(sellerFacingCopy).not.toMatch(/view documents|adopt and sign|red flashing box|second red box|second novation box|share[\s_-]?back/i);
     expect(sellerFacingCopy).toContain("72 hours to schedule the initial walkthrough");
 
     expect(close!.match.advance_landmarks.map((landmark) => landmark.id)).not.toContain("esign_steps");
+  });
+
+  it("keeps every forbidden e-sign reference out of EVERY string in both script documents — spoken text, notes, titles, tags, and ids alike", () => {
+    // Codex PR #458 review: the narrower regex above only scans `say` line text
+    // in the close phase, and the landmark check only rejects the literal id
+    // "esign_steps" — a landmark whose id or phrases embed the forbidden
+    // wording (e.g. an id like "close_view_documents_adopt_and_sign") sails
+    // through both undetected. Scan every string leaf in the script and the
+    // coach-section manifest instead, normalized so hyphen/underscore/dash
+    // spellings can't dodge the check either.
+    const normalizedBlob = [...collectAllStrings(scriptJson), ...collectAllStrings(sectionsJson)]
+      .map(normalizeForPhraseScan)
+      .join("   ");
+    for (const phrase of FORBIDDEN_ESIGN_PHRASES) {
+      expect(normalizedBlob, `forbidden phrase "${phrase}" found somewhere in the script or section manifest`).not.toContain(phrase);
+    }
   });
 
   it("uses Plan Zero's exact replacement line for the removed e-sign walkthrough, exactly once", () => {
