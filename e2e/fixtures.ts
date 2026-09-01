@@ -39,6 +39,8 @@ export function adminClient(): SupabaseClient<Database> {
   }
   assertSafeE2ESupabaseTarget(url, {
     allowLocal: process.env.E2E_ALLOW_LOCAL_SUPABASE === "1",
+    dedicatedCi: process.env.E2E_DEDICATED_CI === "1",
+    expectedProjectRef: process.env.E2E_CI_SUPABASE_PROJECT_REF,
   });
   return createClient<Database>(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },

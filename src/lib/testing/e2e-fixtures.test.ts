@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 import { ensureTestUser, TEST_USER_EMAIL } from "../../../e2e/fixtures";
+
+const fixturesSource = readFileSync(path.resolve(__dirname, "../../../e2e/fixtures.ts"), "utf8");
 
 function clientWithMembershipResult(error: { message: string } | null) {
   const upsert = vi.fn().mockResolvedValue({ error });
@@ -25,6 +29,11 @@ function clientWithMembershipResult(error: { message: string } | null) {
 }
 
 describe("ensureTestUser", () => {
+  it("passes dedicated CI identity context to the Supabase target guard", () => {
+    expect(fixturesSource).toContain('dedicatedCi: process.env.E2E_DEDICATED_CI === "1"');
+    expect(fixturesSource).toContain("expectedProjectRef: process.env.E2E_CI_SUPABASE_PROJECT_REF");
+  });
+
   it("upserts the default owner membership without rotating an active session", async () => {
     const client = clientWithMembershipResult(null);
 
