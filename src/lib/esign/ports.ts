@@ -60,6 +60,15 @@ export interface EsignWebhookPersistence {
     providerEventAt: Date;
     templateTitle: string;
   }): Promise<ApplyStatusDecisionResult>;
+  reconcileReminderCallback(input: {
+    orgId: string;
+    requestId: string;
+    claim: ActiveReceiptClaim;
+    providerSignatureId: string;
+    providerEventAt: Date;
+  }): Promise<
+    "applied" | "already_reconciled" | "stale_ignored" | "superseded"
+  >;
   markReceiptProcessed(claim: ActiveReceiptClaim): Promise<void>;
   markReceiptIgnored(
     claim: ActiveReceiptClaim,

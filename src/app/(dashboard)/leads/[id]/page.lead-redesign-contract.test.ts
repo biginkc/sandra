@@ -175,4 +175,13 @@ describe("Lead Detail v2 integration contract", () => {
       ).toBeGreaterThanOrEqual(2);
     }
   });
+
+  it("offers Skip Trace only when the homeowner or primary phone is missing", () => {
+    expect(source).toContain(
+      "!lead.homeowner || !lead.homeowner.phone_1 ? (",
+    );
+    expect(source).not.toContain(
+      "<SkipTraceButton propertyId={lead.id} />\n      <span",
+    );
+  });
 });

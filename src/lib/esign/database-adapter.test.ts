@@ -231,6 +231,32 @@ describe("typed eSign webhook database adapter", () => {
     expect(Object.keys(rpc.mock.calls[0][1])).not.toContain("p_actor_type");
   });
 
+  it.each([
+    "applied",
+    "already_reconciled",
+    "stale_ignored",
+    "superseded",
+  ] as const)("maps the token/time-fenced reminder callback outcome %s", async (outcome) => {
+    const { client, rpc } = clientWith(() => [{ outcome }]);
+    const adapter = createEsignWebhookDatabaseAdapter(client);
+
+    await expect(adapter.reconcileReminderCallback({
+      orgId: ORG_ID,
+      requestId: REQUEST_ID,
+      claim: CLAIM,
+      providerSignatureId: "provider-signature-1",
+      providerEventAt: new Date("2026-08-29T23:00:00.000Z"),
+    })).resolves.toBe(outcome);
+    expect(rpc).toHaveBeenCalledWith("reconcile_esign_reminder_callback", {
+      p_org_id: ORG_ID,
+      p_request_id: REQUEST_ID,
+      p_receipt_id: RECEIPT_ID,
+      p_lease_id: LEASE_ID,
+      p_provider_signature_id: "provider-signature-1",
+      p_provider_event_at: "2026-08-29T23:00:00.000Z",
+    });
+  });
+
   it("allows status convergence with a blank historical title via the presentation fallback payload", async () => {
     const { client, rpc } = clientWith(() => [{ outcome: "applied", status: "viewed" }]);
     const adapter = createEsignWebhookDatabaseAdapter(client);
