@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "version": "1.1.0",
-  "script_version": "1.1.0",
+  "version": "1.2.0",
+  "script_version": "1.2.0",
   "source": "Outbound Script - Official CLOSR Sales Process — conversational word-track transitions; content references closr-script-v0.json without duplication.",
   "sections": [
     {

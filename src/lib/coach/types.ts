@@ -48,7 +48,7 @@ export const COACH_PHASE_ORDER: readonly CoachPhaseId[] = [
  * src/coach/wire-contract.ts in the Jitter repo, WIRE_CONTRACT_VERSION
  * '1.0.0') — required, not optional. An event missing either is malformed.
  * `scriptVersion` is compared against this file's loaded script
- * (CLOSR_SCRIPT.version in script-block.ts, currently "1.1.0") — a
+ * (CLOSR_SCRIPT.version in script-block.ts, currently "1.2.0") — a
  * mismatch surfaces a persistent "coach out of sync" banner that clears
  * itself the moment a later event reports a matching version.
  * `matcherVersion` is captured/tracked but not gated on client-side: it's
