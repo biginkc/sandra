@@ -27,6 +27,7 @@ jobs:
     name: Playwright golden paths
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    environment: e2e-ci
 
     env:
       # Feeds playwright.config.ts + e2e/fixtures.ts. Populate these in

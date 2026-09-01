@@ -78,6 +78,7 @@ describe("coach realtime authorization CI security contract", () => {
   });
 
   it("keeps Playwright service-role access on the dedicated CI project", () => {
+    expect(e2eWorkflow).toMatch(/playwright:[\s\S]*environment:\s*e2e-ci/);
     expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_URL");
     expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_SERVICE_ROLE_KEY");
     expect(e2eWorkflow).not.toContain("secrets.TEST_SUPABASE_SERVICE_ROLE_KEY");
