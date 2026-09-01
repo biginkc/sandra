@@ -89,6 +89,15 @@ describe("coach realtime authorization CI security contract", () => {
     expect(e2eWorkflow).not.toContain("ciUrl.includes");
     expect(e2eWorkflow).toContain('E2E_DEDICATED_CI: "1"');
   });
+  it("masks the generated CI password before writing it to the runner environment", () => {
+    const passwordAssignment = e2eWorkflow.indexOf('password="$(openssl rand -base64 36');
+    const mask = e2eWorkflow.indexOf('echo "::add-mask::$password"');
+    const passwordWrite = e2eWorkflow.indexOf("E2E_TEST_USER_PASSWORD=%s", mask);
+    expect(passwordAssignment).toBeGreaterThan(-1);
+    expect(mask).toBeGreaterThan(passwordAssignment);
+    expect(passwordWrite).toBeGreaterThan(mask);
+    expect(e2eWorkflow).not.toContain("printf 'E2E_TEST_USER_PASSWORD=%s\\n' \"$(openssl");
+  });
   it("is a single job — not split across jobs that would each need their own environment approval", () => {
     const jobsBlockStart = coachWorkflow.indexOf("\njobs:\n");
     expect(jobsBlockStart).toBeGreaterThan(0);

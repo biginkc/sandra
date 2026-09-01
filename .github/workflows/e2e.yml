@@ -61,9 +61,11 @@ jobs:
         run: |
           set -euo pipefail
           slug="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          password="$(openssl rand -base64 36 | tr -d '\n')"
           printf 'E2E_RUN_SLUG=%s\n' "$slug" >> "$GITHUB_ENV"
           printf 'E2E_TEST_USER_EMAIL=e2e-ci+%s@bmhgroupkc.com\n' "$slug" >> "$GITHUB_ENV"
-          printf 'E2E_TEST_USER_PASSWORD=%s\n' "$(openssl rand -base64 36 | tr -d '\n')" >> "$GITHUB_ENV"
+          echo "::add-mask::$password"
+          printf 'E2E_TEST_USER_PASSWORD=%s\n' "$password" >> "$GITHUB_ENV"
           case "$slug" in gha-[1-9]*-[1-9]*) ;; *) echo 'invalid CI identity namespace' >&2; exit 1 ;; esac
 
       - name: Assert CI identity is not browser-QA scoped
