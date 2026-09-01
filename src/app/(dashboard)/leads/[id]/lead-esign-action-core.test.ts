@@ -254,6 +254,25 @@ describe("lead eSign action orchestration", () => {
     },
   );
 
+  it("returns actionable guidance when the seller email disappears before send", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ sellerEmailAddress: null }),
+    );
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "OWNER_EMAIL_MISSING",
+        message: "Save a seller email on the lead before sending.",
+      },
+    });
+    expect(h.repository.claimSend).not.toHaveBeenCalled();
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
   it("honors the atomic claim's final blocker recheck", async () => {
     const h = harness();
     h.repository.claimSend.mockResolvedValue({

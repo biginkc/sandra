@@ -826,7 +826,7 @@ function blockerMessage(blocker: SendBlockerCode): string {
     provider_disconnected: "Dropbox Sign is not connected.",
     sending_disabled: "Sending from leads is turned off.",
     no_templates: "No eSign templates are available.",
-    owner_email_missing: "The seller has no email address.",
+    owner_email_missing: "Save a seller email on the lead before sending.",
   };
   return messages[blocker];
 }

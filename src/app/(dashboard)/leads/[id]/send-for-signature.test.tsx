@@ -123,6 +123,9 @@ describe("SendForSignature", () => {
     const { preflightAction, sendAction } = actions({
       ...preflight,
       blockers: [],
+      templates: [
+        { ...template, signerRoles: [{ name: "Seller", order: 0 }] },
+      ],
       sellerDefaults: { ...preflight.sellerDefaults, emailAddress: "" },
     });
 
@@ -147,7 +150,10 @@ describe("SendForSignature", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Send disabled: save a seller email on the lead before sending.",
     );
-    expect(screen.getByTestId("send-for-signature-submit")).toBeDisabled();
+    await user.click(screen.getByRole("checkbox"));
+    const submit = screen.getByTestId("send-for-signature-submit");
+    expect(submit).toBeDisabled();
+    await user.click(submit);
     expect(sendAction).not.toHaveBeenCalled();
   });
 
