@@ -31,7 +31,8 @@ describe("E2E identity policy", () => {
   });
   it("rejects URL component and hostname smuggling", () => {
     const ref = "ci-project";
-    expect(() => assertDedicatedProjectUrl("https://ci-project.supabase.co/", ref)).not.toThrow();
-    for (const value of ["http://ci-project.supabase.co/", "https://ci-project.supabase.co.evil/", "https://evil/ci-project.supabase.co", "https://ci-project.supabase.co/path", "https://ci-project.supabase.co/?x=1", "https://u:p@ci-project.supabase.co/", "https://ci-project.supabase.co:443/"]) expect(() => assertDedicatedProjectUrl(value, ref)).toThrow();
+    expect(() => assertDedicatedProjectUrl("https://ci-project.supabase.co", ref)).not.toThrow();
+    expect(() => assertDedicatedProjectUrl(" https://ci-project.supabase.co/ ", ref)).not.toThrow();
+    for (const value of ["http://ci-project.supabase.co/", "HTTPS://ci-project.supabase.co/", "https://CI-PROJECT.supabase.co/", "https://ci-project.supabase.co.evil/", "https://evil/ci-project.supabase.co", "https://ci-project.supabase.co/path", "https://ci-project.supabase.co/?x=1", "https://u:p@ci-project.supabase.co/", "https://ci-project.supabase.co:443/", "https://ci-project.supabase.co:443", "https://ci-project.supabase.co//", "https://ci-project.supabase.co/\t"]) expect(() => assertDedicatedProjectUrl(value, ref)).toThrow();
   });
 });

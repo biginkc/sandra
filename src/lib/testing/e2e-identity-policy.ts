@@ -24,9 +24,14 @@ export function assertPairwiseDisjoint(values: readonly string[]): void {
 
 export function assertDedicatedProjectUrl(value: string, projectRef: string): void {
   const ref = normalizeIdentity(projectRef);
+  const raw = value.trim();
+  const expectedOrigin = `https://${ref}.supabase.co`;
+  if (raw !== expectedOrigin && raw !== `${expectedOrigin}/`) {
+    throw new Error("E2E CI project URL is not the exact dedicated project origin.");
+  }
   let parsed: URL;
-  try { parsed = new URL(value); } catch { throw new Error("E2E CI project URL is invalid."); }
-  if (/:\d+(?:\/|$)/.test(value) || parsed.protocol !== "https:" || parsed.hostname !== `${ref}.supabase.co` || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash || parsed.pathname !== "/") {
+  try { parsed = new URL(raw); } catch { throw new Error("E2E CI project URL is invalid."); }
+  if (parsed.protocol !== "https:" || parsed.hostname !== `${ref}.supabase.co` || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash || parsed.pathname !== "/") {
     throw new Error("E2E CI project URL is not the exact dedicated project origin.");
   }
 }
