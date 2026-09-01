@@ -12,7 +12,6 @@ export async function requestCoachRecommendations(
     callId: input.callId,
     activeSectionId: input.activeSectionId,
     mode: input.mode,
-    recommendations: [],
     followUpQuestions: [],
   };
 }

@@ -19,17 +19,16 @@ function fakeCache(): RuntimeCache & { values: Map<string, unknown> } {
 }
 
 describe("Runtime Cache coach recommendation limiter", () => {
-  it("enforces the exact mode-specific per-owner call ceiling", async () => {
+  it("enforces the exact per-owner call ceiling, keyed separately per callId and userId", async () => {
     const cache = fakeCache();
     const limiter = createRuntimeCacheCoachRecommendationLimiter(cache);
-    const automatic = { userId: "user-1", callId: "call-1", mode: "automatic" as const, limit: 2 };
+    const base = { userId: "user-1", callId: "call-1", mode: "follow_up" as const, limit: 2 };
 
-    await expect(limiter.consume(automatic)).resolves.toEqual({ allowed: true });
-    await expect(limiter.consume(automatic)).resolves.toEqual({ allowed: true });
-    await expect(limiter.consume(automatic)).resolves.toEqual({ allowed: false });
-    await expect(limiter.consume({ ...automatic, mode: "follow_up" })).resolves.toEqual({ allowed: true });
-    await expect(limiter.consume({ ...automatic, callId: "call-2" })).resolves.toEqual({ allowed: true });
-    await expect(limiter.consume({ ...automatic, userId: "user-2" })).resolves.toEqual({ allowed: true });
+    await expect(limiter.consume(base)).resolves.toEqual({ allowed: true });
+    await expect(limiter.consume(base)).resolves.toEqual({ allowed: true });
+    await expect(limiter.consume(base)).resolves.toEqual({ allowed: false });
+    await expect(limiter.consume({ ...base, callId: "call-2" })).resolves.toEqual({ allowed: true });
+    await expect(limiter.consume({ ...base, userId: "user-2" })).resolves.toEqual({ allowed: true });
   });
 
   it("serializes concurrent consumption for the same key", async () => {
@@ -53,7 +52,7 @@ describe("Runtime Cache coach recommendation limiter", () => {
     const limiter = createRuntimeCacheCoachRecommendationLimiter(cache);
 
     await expect(
-      limiter.consume({ userId: "user-1", callId: "call-1", mode: "automatic", limit: 40 }),
+      limiter.consume({ userId: "user-1", callId: "call-1", mode: "follow_up", limit: 40 }),
     ).resolves.toEqual({ allowed: false });
   });
 
@@ -64,7 +63,7 @@ describe("Runtime Cache coach recommendation limiter", () => {
     const limiter = createRuntimeCacheCoachRecommendationLimiter(cache);
 
     await expect(
-      limiter.consume({ userId: "user-1", callId: "call-1", mode: "automatic", limit: 40 }),
+      limiter.consume({ userId: "user-1", callId: "call-1", mode: "follow_up", limit: 40 }),
     ).resolves.toEqual({ allowed: false });
     expect(cache.get).toHaveBeenCalledTimes(2);
   });

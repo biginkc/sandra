@@ -91,8 +91,12 @@ describe("coach recommendation server boundary", () => {
 
   it("rejects a request with mode \"automatic\" as invalid — the click-driven path accepts only follow_up", async () => {
     const anthropic = anthropicReturning({ questions: DEFAULT_FOLLOW_UP_QUESTIONS });
+    // requestCoachRecommendationsWithDeps takes unknown input precisely so it
+    // can validate a payload from an untyped caller (a stale client bundle,
+    // a hand-crafted request) — "automatic" is no longer a value the type
+    // system can even express, so this deliberately bypasses it.
     const result = await requestCoachRecommendationsWithDeps(
-      request({ mode: "automatic" }),
+      { ...request(), mode: "automatic" },
       deps({ anthropic }),
     );
 
@@ -256,6 +260,19 @@ describe("coach recommendation server boundary", () => {
     expect(redactPhoneNumbers("Built in 1987 at 1234 Main St")).toBe("Built in 1987 at 1234 Main St");
   });
 
+  it("redacts phone numbers across separator styles, including slash and en dash", () => {
+    // Substring containment isn't enough here: the original regex only ever
+    // matched starting at a digit, so "(816) 555-1212" redacted to
+    // "([phone removed]" — a stray leading paren survived while still
+    // "containing" [phone removed]. Assert the exact output.
+    expect(redactPhoneNumbers("Call me at 816/555/1212 today.")).toBe("Call me at [phone removed] today.");
+    expect(redactPhoneNumbers("Call me at 816–555–1212 today.")).toBe("Call me at [phone removed] today.");
+    expect(redactPhoneNumbers("Call me at (816) 555-1212 today.")).toBe("Call me at [phone removed] today.");
+    expect(redactPhoneNumbers("Call me at 816.555.1212 today.")).toBe("Call me at [phone removed] today.");
+    expect(redactPhoneNumbers("Call me at +1 816 555 1212 today.")).toBe("Call me at [phone removed] today.");
+    expect(redactPhoneNumbers("Built in 1987 at 1234 Main St")).toBe("Built in 1987 at 1234 Main St");
+  });
+
   it("returns exactly three distinct follow-up questions and rejects malformed tool output", async () => {
     const good = deps({
       anthropic: {
@@ -276,7 +293,7 @@ describe("coach recommendation server boundary", () => {
       },
     });
     const result = await requestCoachRecommendationsWithDeps(request({ mode: "follow_up" }), good);
-    expect(result).toMatchObject({ ok: true, recommendations: [], followUpQuestions: expect.arrayContaining([expect.any(String)]) });
+    expect(result).toMatchObject({ ok: true, followUpQuestions: expect.arrayContaining([expect.any(String)]) });
     if (result.ok) expect(result.followUpQuestions).toHaveLength(3);
 
     const duplicate = deps({
@@ -301,6 +318,28 @@ describe("coach recommendation server boundary", () => {
       ok: false,
       code: "provider_error",
     });
+  });
+
+  it("rejects three questions whose grounding phrases differ only by punctuation as not distinct", async () => {
+    // The grounding matcher already ignores punctuation when it accepts a
+    // phrase (containsWholeGroundingPhrase / normalizeGroundingText), so
+    // "roof repairs", "roof-repairs" and "roof, repairs" read as the same
+    // grounded content and must not be able to pass as three distinct
+    // questions just because the model varied the punctuation.
+    const punctuationOnly = deps({
+      anthropic: anthropicReturning({
+        questions: [
+          { template: "tell_more", groundingPhrase: "roof repairs" },
+          { template: "tell_more", groundingPhrase: "roof-repairs" },
+          { template: "tell_more", groundingPhrase: "roof, repairs" },
+        ],
+      }),
+    });
+    const result = await requestCoachRecommendationsWithDeps(
+      request({ transcript: [{ speaker: "seller", text: "The roof repairs are expensive.", isFinal: true }] }),
+      punctuationOnly,
+    );
+    expect(result).toMatchObject({ ok: false, code: "provider_error" });
   });
 
   it("separates seller grounding from script context and rejects script-only or falsely attributed premises", async () => {

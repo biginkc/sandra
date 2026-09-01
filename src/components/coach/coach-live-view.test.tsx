@@ -110,7 +110,6 @@ function baseProps(overrides: Partial<HarnessProps> = {}): HarnessProps {
       callId: input.callId,
       activeSectionId: input.activeSectionId,
       mode: input.mode,
-      recommendations: [],
       followUpQuestions: ["What repairs concern you most?", "How long has that been a problem?", "What happens if nothing changes?"],
     }),
   );
@@ -377,7 +376,6 @@ describe("<CoachLiveView /> manual navigation", () => {
         callId: input.callId,
         activeSectionId: input.activeSectionId,
         mode: input.mode,
-        recommendations: [],
         followUpQuestions: ["What makes selling important now?"],
       }),
     );
@@ -417,7 +415,6 @@ describe("<CoachLiveView /> manual navigation", () => {
         callId: input.callId,
         activeSectionId: input.activeSectionId,
         mode: input.mode,
-        recommendations: [],
         followUpQuestions: [
           "Which repair is weighing on you the most?",
           "How has that affected your moving timeline?",

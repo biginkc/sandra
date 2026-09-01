@@ -189,10 +189,11 @@ function parseRequest(input: unknown): CoachRecommendationRequest | null {
 }
 
 /** Removes digit sequences that can represent a US/international phone number,
- * including common spaces, punctuation and a leading plus. Short numbers such
- * as years, prices and street numbers remain useful to the coach. */
+ * including common spaces, punctuation (including slashes and en/em dashes)
+ * and a leading plus or open parenthesis. Short numbers such as years, prices
+ * and street numbers remain useful to the coach. */
 export function redactPhoneNumbers(text: string): string {
-  return text.replace(/(?:\+?\d[\s().-]*){6,}\d/g, (candidate) => {
+  return text.replace(/\(?(?:\+?\d[\s().\-–—/]*){6,}\d/g, (candidate) => {
     const digitCount = candidate.replace(/\D/g, "").length;
     return digitCount >= 7 && digitCount <= 16 ? "[phone removed]" : candidate;
   });
@@ -267,7 +268,12 @@ function normalizedDistinctStrings(value: unknown, min: number, max: number): st
   if (!Array.isArray(value) || value.length < min || value.length > max) return null;
   const strings = value.map((item) => (typeof item === "string" ? item.trim() : ""));
   if (strings.some((item) => !item || item.length > 300)) return null;
-  const normalized = new Set(strings.map((item) => item.toLowerCase().replace(/\s+/g, " ")));
+  // Distinctness is judged on meaning, not incidental formatting: the
+  // grounding matcher already ignores punctuation when it accepts a phrase,
+  // so "roof repairs", "roof-repairs" and "roof, repairs" must not be able
+  // to pass as three distinct questions here just because they differ by a
+  // hyphen or comma.
+  const normalized = new Set(strings.map((item) => normalizeGroundingText(item)));
   return normalized.size === strings.length ? strings : null;
 }
 
@@ -441,7 +447,6 @@ export async function requestCoachRecommendationsWithDeps(
       callId: input.callId,
       activeSectionId: input.activeSectionId,
       mode: input.mode,
-      recommendations: [],
       ...output,
     };
   } catch {

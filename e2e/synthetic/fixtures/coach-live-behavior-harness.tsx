@@ -50,18 +50,25 @@ declare global {
   }
 }
 
+// Grounds the canned response in the actual finalized seller transcript sent
+// with this specific request, instead of returning static text. A hardcoded
+// answer can't distinguish one request from another, which made it
+// impossible for a spec to prove a stale/late response was rejected instead
+// of merely never checked (both looked identical either way).
 function recommendationSuccess(input: CoachRecommendationRequest): CoachRecommendationResult {
+  const lastSellerStatement = [...input.transcript]
+    .reverse()
+    .find((line) => line.speaker === "seller")?.text ?? "your situation";
   return {
     ok: true,
     requestId: input.requestId,
     callId: input.callId,
     activeSectionId: input.activeSectionId,
     mode: input.mode,
-    recommendations: [],
     followUpQuestions: [
-      "What would moving closer to family make easier for you?",
-      "How soon would you ideally like that move to happen?",
-      "What is making the timing important right now?",
+      `Can you tell me more about "${lastSellerStatement}"?`,
+      `How is "${lastSellerStatement}" affecting you right now?`,
+      `What happens if "${lastSellerStatement}" does not change?`,
     ],
   };
 }

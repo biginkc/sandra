@@ -370,7 +370,11 @@ test("follow-up clicks reject duplicates and keep exactly three grounded questio
   await expect(questions).toHaveCount(3);
   const text = await questions.allTextContents();
   expect(new Set(text).size).toBe(3);
-  expect(text.join(" ")).toContain("family");
+  // Grounded in the actual seller statement just emitted ("We need to sell
+  // before October because the carrying costs are becoming painful."), not
+  // in unrelated canned text.
+  expect(text.join(" ")).toContain("October");
+  expect(text.join(" ")).toContain("carrying costs");
   await page.getByTestId("follow-up-questions").click();
   await expect(page.getByTestId("follow-up-questions")).toBeDisabled();
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2");
@@ -381,27 +385,60 @@ test("follow-up clicks reject duplicates and keep exactly three grounded questio
 test("late section and call responses cannot overwrite newer visible questions", async ({ page }) => {
   await mountCoach(page);
   await emitStimulus(page, "providerDeferred");
-  await emitStimulus(page, "sellerMeaningful");
+  await emitStimulus(page, "sellerMeaningful"); // "...before October because the carrying costs..."
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
   await page.getByTestId("follow-up-questions").click();
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1");
   await expect(page.getByTestId("coach-next")).toBeEnabled();
   await page.getByTestId("coach-next").click();
-  await emitStimulus(page, "sellerSecondMeaningful");
+  // A rep turn breaks transcript grouping so the next seller line stays its
+  // own entry instead of merging into the October statement above — the
+  // harness grounds each response in only the newest seller line.
+  await emitStimulus(page, "repFinal");
+  await emitStimulus(page, "sellerSecondMeaningful"); // "My job is moving and I cannot afford two homes..."
   await page.getByTestId("follow-up-questions").click();
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2");
 
+  // Each response is grounded in the seller statement finalized at the time
+  // of its own request, so the old (October) and new (job-moving) responses
+  // are distinguishable — an overwrite by the stale one would be visible.
   await emitStimulus(page, "resolveNewestDelayed");
   const questions = page.getByTestId("follow-up-question-options").getByRole("listitem");
   await expect(questions).toHaveCount(3);
   const currentSectionQuestions = await questions.allTextContents();
-  await emitStimulus(page, "resolveDelayed");
+  expect(currentSectionQuestions.join(" ")).toContain("job is moving");
+  expect(currentSectionQuestions.join(" ")).not.toContain("October");
+
+  await emitStimulus(page, "resolveDelayed"); // the stale, October-grounded response arrives late
   await expect(questions).toHaveText(currentSectionQuestions);
+  expect((await questions.allTextContents()).join(" ")).not.toContain("October");
 
   await emitStimulus(page, "newCall");
   await expect(page.getByTestId("synthetic-active-call")).toHaveText("synthetic-call-2");
   await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title);
   await expect(page.getByTestId("follow-up-question-options")).toHaveCount(0);
+});
+
+test("a response that arrives after the call changes never renders into the new call", async ({ page }) => {
+  await mountCoach(page);
+  await emitStimulus(page, "providerDeferred");
+  await emitStimulus(page, "sellerMeaningful"); // "...before October because the carrying costs..."
+  await page.getByTestId("follow-up-questions").click();
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1");
+
+  // The request is still genuinely pending (providerDeferred never resolves
+  // it) at the moment the call changes — unlike the section-change test
+  // above, nothing has resolved this response yet.
+  await emitStimulus(page, "newCall");
+  await expect(page.getByTestId("synthetic-active-call")).toHaveText("synthetic-call-2");
+  await expect(page.getByTestId("follow-up-question-options")).toHaveCount(0);
+
+  // The stale, October-grounded response now resolves, after the call has
+  // already moved on. It must never render into the new call.
+  await emitStimulus(page, "resolveDelayed");
+  await page.waitForTimeout(150);
+  await expect(page.getByTestId("follow-up-question-options")).toHaveCount(0);
+  await expect(page.getByText(/October/)).toHaveCount(0);
 });
 
 test("follow-up request cap is enforced through repeated user clicks without an extra provider call", async ({ page }) => {
@@ -431,6 +468,9 @@ test("provider failure preserves prior valid questions and never takes over scri
   await expect(page.getByTestId("follow-up-question-options")).toBeVisible();
   const questions = await page.getByTestId("follow-up-question-options").allTextContents();
   await emitStimulus(page, "providerFailure");
+  // A rep turn breaks transcript grouping so the retry's grounding reflects
+  // only this newer seller line instead of merging into the first statement.
+  await emitStimulus(page, "repFinal");
   await emitStimulus(page, "sellerSecondMeaningful");
   await page.getByTestId("follow-up-questions").click();
   await expect(page.getByTestId("recommendation-error")).toContainText("temporarily unavailable", { timeout: 4_000 });
@@ -442,8 +482,16 @@ test("provider failure preserves prior valid questions and never takes over scri
 
   await emitStimulus(page, "providerImmediate");
   await page.getByTestId("follow-up-questions").click();
-  await expect(page.getByTestId("follow-up-question-options")).toHaveText(questions);
+  // The retry succeeds against the now-expanded transcript (the second
+  // meaningful seller turn fired while the provider was failing), so it is
+  // grounded in that newer statement rather than repeating the original —
+  // wait for that new content to actually land before reading it.
+  const options = page.getByTestId("follow-up-question-options");
+  await expect(options).not.toHaveText(questions);
   await expect(page.getByTestId("recommendation-error")).toHaveCount(0);
+  const retriedQuestions = await options.allTextContents();
+  expect(retriedQuestions.join(" ")).toContain("job is moving");
+  expect(retriedQuestions.join(" ")).not.toContain("October");
 });
 
 test("collapse/reopen persists the live session while a new call completely resets it", async ({ page }) => {

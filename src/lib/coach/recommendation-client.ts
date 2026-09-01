@@ -24,6 +24,7 @@ export type CoachRecommendationContinuity = {
   callId: string | null;
   activeSectionId: string | null;
   selectedSectionBranch: string | null;
+  branchOverrides: Record<string, string>;
   followUpCount: number;
   state: CoachRecommendationClientState;
 };
@@ -62,6 +63,7 @@ export function createCoachRecommendationContinuity(callId: string | null): Coac
     callId,
     activeSectionId: null,
     selectedSectionBranch: null,
+    branchOverrides: {},
     followUpCount: 0,
     state: { ...EMPTY_STATE },
   };
@@ -71,6 +73,13 @@ let requestSequence = 0;
 function nextRequestId(): string {
   requestSequence += 1;
   return `coach-recommendation-${Date.now()}-${requestSequence}`;
+}
+
+function branchOverridesEqual(a: Record<string, string>, b: Record<string, string>): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((key) => a[key] === b[key]);
 }
 
 export class CoachRecommendationController {
@@ -106,6 +115,7 @@ export class CoachRecommendationController {
     this.callId = this.continuity.callId;
     this.activeSectionId = this.continuity.activeSectionId;
     this.selectedSectionBranch = this.continuity.selectedSectionBranch;
+    this.branchOverrides = this.continuity.branchOverrides;
     if (this.continuity.callId) {
       this.followUpCountByCall.set(this.continuity.callId, this.continuity.followUpCount);
     }
@@ -132,10 +142,15 @@ export class CoachRecommendationController {
   }): void {
     const selectedSectionBranch = input.selectedSectionBranch ?? null;
     const callChanged = input.callId !== this.callId;
+    // branchOverrides selects the spoken variant sent to the provider, so a
+    // rep switching variants mid-request must invalidate that request the
+    // same way a section or call change does — otherwise a response
+    // generated for the old variant can render after the new one is chosen.
     const contextChanged =
       input.callId !== this.callId ||
       input.activeSectionId !== this.activeSectionId ||
-      selectedSectionBranch !== this.selectedSectionBranch;
+      selectedSectionBranch !== this.selectedSectionBranch ||
+      !branchOverridesEqual(this.branchOverrides, input.branchOverrides);
     this.callId = input.callId;
     this.activeSectionId = input.activeSectionId;
     this.selectedSectionBranch = selectedSectionBranch;
@@ -143,6 +158,7 @@ export class CoachRecommendationController {
     this.continuity.activeSectionId = input.activeSectionId;
     this.continuity.selectedSectionBranch = selectedSectionBranch;
     this.branchOverrides = { ...input.branchOverrides };
+    this.continuity.branchOverrides = this.branchOverrides;
     if (!contextChanged) return;
 
     this.generation += 1;
@@ -171,6 +187,7 @@ export class CoachRecommendationController {
     const callId = this.callId;
     const activeSectionId = this.activeSectionId;
     const selectedSectionBranch = this.selectedSectionBranch;
+    const branchOverrides = this.branchOverrides;
     if (!callId || !activeSectionId || this.activeRequestToken) return false;
 
     const count = this.followUpCountByCall.get(callId) ?? 0;
@@ -219,6 +236,7 @@ export class CoachRecommendationController {
       callId !== this.callId ||
       activeSectionId !== this.activeSectionId ||
       selectedSectionBranch !== this.selectedSectionBranch ||
+      !branchOverridesEqual(branchOverrides, this.branchOverrides) ||
       result.requestId !== requestId ||
       result.callId !== callId ||
       result.activeSectionId !== activeSectionId ||

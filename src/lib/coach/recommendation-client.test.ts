@@ -25,7 +25,6 @@ function success(input: CoachRecommendationRequest): CoachRecommendationResult {
     callId: input.callId,
     activeSectionId: input.activeSectionId,
     mode: input.mode,
-    recommendations: [],
     followUpQuestions: ["What needs repair?", "How long has it been an issue?", "What happens if you wait?"],
   };
 }
@@ -101,6 +100,45 @@ describe("CoachRecommendationController", () => {
       branchOverrides: { "Price too low": "default" },
     });
     expect(reopened.getSnapshot().followUpQuestions).toHaveLength(3);
+  });
+
+  it("rejects a response made stale by a spoken-variant change alone, with call/section/branch unchanged", async () => {
+    let resolve!: (value: CoachRecommendationResult) => void;
+    const request = vi.fn((input: CoachRecommendationRequest) => new Promise<CoachRecommendationResult>((done) => {
+      resolve = done;
+      void input;
+    }));
+    const controller = new CoachRecommendationController({ request });
+    controller.setContext({
+      callId: "call-1",
+      activeSectionId: "introduction.opener",
+      selectedSectionBranch: "Opener",
+      branchOverrides: { Opener: "default" },
+    });
+
+    const pending = controller.requestFollowUp([meaningfulTurn("seller-1")]);
+    await Promise.resolve();
+    expect(request.mock.calls[0][0].branchOverrides).toEqual({ Opener: "default" });
+
+    // Same call, same section, same selectedSectionBranch — only the spoken
+    // variant changes. This must invalidate the in-flight request exactly
+    // like a section or call change would.
+    controller.setContext({
+      callId: "call-1",
+      activeSectionId: "introduction.opener",
+      selectedSectionBranch: "Opener",
+      branchOverrides: { Opener: "cold_call" },
+    });
+    resolve(success(request.mock.calls[0][0]));
+    await expect(pending).resolves.toBe(false);
+    expect(controller.getSnapshot().followUpQuestions).toEqual([]);
+
+    const current = controller.requestFollowUp([meaningfulTurn("seller-2")]);
+    await Promise.resolve();
+    expect(request.mock.calls[1][0].branchOverrides).toEqual({ Opener: "cold_call" });
+    resolve(success(request.mock.calls[1][0]));
+    await expect(current).resolves.toBe(true);
+    expect(controller.getSnapshot().followUpQuestions).toHaveLength(3);
   });
 
   it("preserves previous valid output on provider error and a client cap", async () => {

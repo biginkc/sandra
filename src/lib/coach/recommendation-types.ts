@@ -1,6 +1,6 @@
 import type { CoachSpeaker } from "./types";
 
-export type CoachRecommendationMode = "automatic" | "follow_up";
+export type CoachRecommendationMode = "follow_up";
 
 export type CoachRecommendationTranscriptLine = {
   id?: string;
@@ -26,7 +26,6 @@ export type CoachRecommendationSuccess = {
   callId: string;
   activeSectionId: string;
   mode: CoachRecommendationMode;
-  recommendations: string[];
   followUpQuestions: string[];
 };
 

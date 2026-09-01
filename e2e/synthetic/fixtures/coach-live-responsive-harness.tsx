@@ -139,7 +139,6 @@ function Harness({ held = false, interrupted = false }: { held?: boolean; interr
         callId: input.callId,
         activeSectionId: input.activeSectionId,
         mode: input.mode,
-        recommendations: [],
         followUpQuestions: ["What would moving closer to family make easier?", "How soon would you like that move to happen?", "What is making the timing important now?"],
       })}
     />
