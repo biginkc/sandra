@@ -42,6 +42,13 @@ describe("E2E identity source contract", () => {
 
   it("retains shared serialization and simulated-provider boundaries", () => {
     const workflow = source(".github/workflows/e2e.yml");
+    // A per-project-ref group was tried and reverted: env-level `vars`
+    // resolves empty at concurrency-evaluation time, and a diverged group
+    // name is exactly what let old and new branches run in parallel
+    // against the same shared database. The static legacy group serializes
+    // every E2E run — old branch or new — against this one database, which
+    // is correct since they all still share it; the DB advisory lock in
+    // e2e/global-setup.ts is the real guard against cross-branch drift.
     expect(workflow).toContain("group: e2e-shared-test-project");
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain('NEXT_PUBLIC_SOFTPHONE_TRANSPORT: "simulated"');

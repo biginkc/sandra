@@ -66,7 +66,7 @@ insert into auth.users (
     'coach-ci-owner@bmhgroupkc.com',
     crypt(encode(gen_random_bytes(24), 'hex'), gen_salt('bf')),
     now(), now(), now(),
-    '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false,
+    '{"provider":"email","providers":["email"],"owner":"github-actions","purpose":"coach-realtime-authorization"}'::jsonb, '{}'::jsonb, false,
     '', '', '', ''
   ),
   (
@@ -75,7 +75,7 @@ insert into auth.users (
     'coach-ci-foreign@bmhgroupkc.com',
     crypt(encode(gen_random_bytes(24), 'hex'), gen_salt('bf')),
     now(), now(), now(),
-    '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false,
+    '{"provider":"email","providers":["email"],"owner":"github-actions","purpose":"coach-realtime-authorization"}'::jsonb, '{}'::jsonb, false,
     '', '', '', ''
   );
 
@@ -188,7 +188,9 @@ declare
 begin
   select count(*) into v_known_count
   from auth.users
-  where email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com');
+  where email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')
+    and (raw_app_meta_data->>'owner') = 'github-actions'
+    and (raw_app_meta_data->>'purpose') = 'coach-realtime-authorization';
   if v_known_count <> 2 then
     raise exception 'coach_ci_seed_ownership: expected exactly 2 known CI test accounts, found %', v_known_count;
   end if;
@@ -197,6 +199,8 @@ begin
     select 1 from auth.users
     where id = auth.uid()
       and email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')
+      and (raw_app_meta_data->>'owner') = 'github-actions'
+      and (raw_app_meta_data->>'purpose') = 'coach-realtime-authorization'
   ) then
     raise exception 'coach_ci_seed_ownership: not permitted for this user';
   end if;
@@ -220,7 +224,9 @@ declare
 begin
   select count(*) into v_known_count
   from auth.users
-  where email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com');
+  where email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')
+    and (raw_app_meta_data->>'owner') = 'github-actions'
+    and (raw_app_meta_data->>'purpose') = 'coach-realtime-authorization';
   if v_known_count <> 2 then
     raise exception 'coach_ci_delete_own_ownership: expected exactly 2 known CI test accounts, found %', v_known_count;
   end if;
@@ -229,6 +235,8 @@ begin
     select 1 from auth.users
     where id = auth.uid()
       and email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')
+      and (raw_app_meta_data->>'owner') = 'github-actions'
+      and (raw_app_meta_data->>'purpose') = 'coach-realtime-authorization'
   ) then
     raise exception 'coach_ci_delete_own_ownership: not permitted for this user';
   end if;

@@ -68,6 +68,47 @@ function withoutSqlComments(sql: string): string {
 }
 
 describe("coach realtime authorization CI security contract", () => {
+  it("requires explicit Coach CI owner-purpose markers and collision preflight", () => {
+    expect(coachWorkflow).toContain("Assert Coach identities are explicitly isolated");
+    expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: identity_missing_duplicate_or_namespace");
+    expect(withoutSqlComments(ciTestProjectSetup)).toContain("raw_app_meta_data->>'owner'");
+    expect(withoutSqlComments(ciTestProjectSetup)).toContain("raw_app_meta_data->>'purpose'");
+    expect(withoutSqlComments(ciTestProjectSetup)).toContain("email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')");
+    expect(withoutSqlComments(ciTestProjectSetup)).toContain("coach-realtime-authorization");
+  });
+
+  it("keeps Playwright service-role access on the dedicated CI project", () => {
+    // The identity-generation/preflight/collision-guard surface that used
+    // to live inline in this workflow (E2E_DEDICATED_CI, the node preflight
+    // script, E2E_PREFLIGHT_FAILED labels) moved to
+    // scripts/e2e-identity-lifecycle.ts + src/lib/supabase/e2e-identity-guard.ts
+    // when PR #455 landed on main — see
+    // src/lib/testing/e2e-identity-contract.test.ts for that surface's own
+    // contract test. What's left here is just: the job still runs against
+    // the dedicated CI project's own secrets, never the shared test project's.
+    expect(e2eWorkflow).toMatch(/playwright:[\s\S]*environment:\s*e2e-ci/);
+    expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_URL");
+    expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_SERVICE_ROLE_KEY");
+    expect(e2eWorkflow).not.toContain("secrets.TEST_SUPABASE_SERVICE_ROLE_KEY");
+    expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_PROJECT_REF");
+  });
+
+  it("holds a DB-level advisory lock for the whole E2E suite run", () => {
+    // GitHub concurrency groups only serialize runs whose *own* checked-out
+    // e2e.yml carries the same group string — a branch that hasn't rebased
+    // onto a group-string change can run in parallel against the same
+    // dedicated CI project. The DB advisory lock is immune to that drift.
+    expect(e2eWorkflow).toContain("secrets.E2E_CI_SUPABASE_DB_URL");
+    expect(withoutComments(e2eWorkflow)).not.toMatch(/echo[^\n]*E2E_CI_SUPABASE_DB_URL/i);
+    expect(withoutComments(e2eWorkflow)).not.toMatch(/console\.log\([^)]*(dbUrl|DB_URL)/i);
+  });
+  it("labels Coach preflight failures without exposing identity values", () => {
+    expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: owner_missing");
+    expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: foreign_missing");
+    expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: identity_missing_duplicate_or_namespace");
+    expect(coachWorkflow).not.toMatch(/console\.log\(/);
+    expect(coachWorkflow).not.toMatch(/print\([^)]*(os\.environ|values|EMAIL|PASSWORD)/);
+  });
   it("is a single job — not split across jobs that would each need their own environment approval", () => {
     const jobsBlockStart = coachWorkflow.indexOf("\njobs:\n");
     expect(jobsBlockStart).toBeGreaterThan(0);
@@ -141,6 +182,12 @@ describe("coach realtime authorization CI security contract", () => {
   it("serializes with the migration and E2E workflows against the shared test project", () => {
     expect(coachWorkflow).toContain("group: e2e-shared-test-project");
     expect(migrationWorkflow).toContain("group: e2e-shared-test-project");
+    // e2e.yml's group stays the static legacy string too — a per-project-ref
+    // group was tried and reverted (env-level `vars` resolves empty at
+    // concurrency-evaluation time, and a diverged group name is exactly
+    // what let old and new branches run in parallel against each other).
+    // See the concurrency block's own comment in e2e.yml.
+    expect(e2eWorkflow).toContain("group: e2e-shared-test-project");
     for (const workflow of [coachWorkflow, migrationWorkflow, e2eWorkflow]) {
       expect(workflow).toContain("queue: max");
     }
