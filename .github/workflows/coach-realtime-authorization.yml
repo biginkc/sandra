@@ -86,15 +86,19 @@ jobs:
         env:
           COACH_CI_OWNER_EMAIL: ${{ secrets.COACH_CI_OWNER_EMAIL }}
           COACH_CI_FOREIGN_EMAIL: ${{ secrets.COACH_CI_FOREIGN_EMAIL }}
+          BROWSER_QA_A_EMAIL: ${{ secrets.BROWSER_QA_A_EMAIL }}
+          BROWSER_QA_B_EMAIL: ${{ secrets.BROWSER_QA_B_EMAIL }}
+          BROWSER_QA_C_EMAIL: ${{ secrets.BROWSER_QA_C_EMAIL }}
         run: |
           set -euo pipefail
           test -n "$COACH_CI_OWNER_EMAIL"
           test -n "$COACH_CI_FOREIGN_EMAIL"
-          test "$COACH_CI_OWNER_EMAIL" != "$COACH_CI_FOREIGN_EMAIL"
-          case "$COACH_CI_OWNER_EMAIL:$COACH_CI_FOREIGN_EMAIL" in
-            *e2e-ci*|*browser-qa*|*PRIMARY_E2E*|*ASSIGNEE_E2E*|*LEADS_TEAMMATE_E2E*)
-              echo 'Coach CI identity collides with a protected browser-QA namespace' >&2; exit 1 ;;
-          esac
+          python - <<'PY'
+          import os, sys
+          values = [os.environ.get(k, '').strip().lower() for k in ('COACH_CI_OWNER_EMAIL','COACH_CI_FOREIGN_EMAIL','BROWSER_QA_A_EMAIL','BROWSER_QA_B_EMAIL','BROWSER_QA_C_EMAIL')]
+          if not all(values) or len(set(values)) != len(values) or any(v.startswith('e2e-ci+') for v in values[:2]):
+              print('Coach CI identity collision or missing identity input', file=sys.stderr); raise SystemExit(1)
+          PY
 
       - name: Run the coach realtime authorization canary
         env:
