@@ -37,6 +37,7 @@ const draft: TemplateDraftRecord = {
   mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
   stagingSourceId: sourceId,
   supersedesTemplateId: null,
+  providerSyncStartedAt: null,
   lifecycle: "editing",
 };
 const finalized = { ...draft, lifecycle: "finalized" as const, stagingSourceId: null };
@@ -60,6 +61,7 @@ function makePorts(): TemplateOrchestratorPorts {
       createHiddenDuplicate: vi.fn().mockResolvedValue({ ...draft, providerTemplateId: null, lifecycle: "preparing" }),
       createHiddenEditRevision: vi.fn().mockResolvedValue({ ...draft, id: "revision-1", providerTemplateId: null, lifecycle: "preparing", supersedesTemplateId: "template-1" }),
       getTemplate: vi.fn().mockResolvedValue(draft),
+      markFinishSyncStarted: vi.fn().mockResolvedValue("2026-08-29T12:00:00.000Z"),
       attachProviderId: vi.fn().mockResolvedValue(true),
       finalizeDraft: vi.fn().mockResolvedValue(true),
       publishEditRevision: vi.fn().mockResolvedValue("published"),
@@ -81,6 +83,7 @@ function makePorts(): TemplateOrchestratorPorts {
       duplicateTemplate: vi.fn().mockResolvedValue({ providerTemplateId: "provider-copy", readiness: "pending" }),
       deleteTemplate: vi.fn().mockResolvedValue(undefined),
       isNotFound: vi.fn().mockReturnValue(false),
+      classifyTemplateReadError: vi.fn().mockReturnValue("terminal"),
       isAmbiguousMutation: vi.fn().mockReturnValue(false),
     },
     randomId: vi.fn().mockReturnValue(sourceId),
@@ -604,8 +607,8 @@ describe("template action orchestration", () => {
         signerRoles: roles,
         mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
       });
-    vi.mocked(ports.provider.isNotFound).mockImplementation(
-      (error) => error === providerPending,
+    vi.mocked(ports.provider.classifyTemplateReadError).mockImplementation(
+      (error) => error === providerPending ? "not_found" : "terminal",
     );
 
     const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
@@ -631,8 +634,8 @@ describe("template action orchestration", () => {
     vi.mocked(ports.provider.getTemplate)
       .mockRejectedValueOnce(providerPending)
       .mockRejectedValueOnce(providerFailure);
-    vi.mocked(ports.provider.isNotFound).mockImplementation(
-      (error) => error === providerPending,
+    vi.mocked(ports.provider.classifyTemplateReadError).mockImplementation(
+      (error) => error === providerPending ? "not_found" : "terminal",
     );
 
     const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
@@ -653,8 +656,8 @@ describe("template action orchestration", () => {
     const missing = new Error("missing");
     vi.mocked(ports.repository.getTemplate).mockResolvedValue(finalized);
     vi.mocked(ports.provider.getTemplate).mockRejectedValue(missing);
-    vi.mocked(ports.provider.isNotFound).mockImplementation(
-      (error) => error === missing,
+    vi.mocked(ports.provider.classifyTemplateReadError).mockImplementation(
+      (error) => error === missing ? "not_found" : "terminal",
     );
 
     const result = await createTemplateOrchestrator(ports).finishSync("template-1");
@@ -694,8 +697,8 @@ describe("template action orchestration", () => {
     const ports = makePorts();
     const providerPending = new Error("not ready");
     vi.mocked(ports.provider.getTemplate).mockRejectedValue(providerPending);
-    vi.mocked(ports.provider.isNotFound).mockImplementation(
-      (error) => error === providerPending,
+    vi.mocked(ports.provider.classifyTemplateReadError).mockImplementation(
+      (error) => error === providerPending ? "not_found" : "terminal",
     );
 
     const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
@@ -711,7 +714,7 @@ describe("template action orchestration", () => {
     expect(ports.provider.getTemplate).toHaveBeenCalledTimes(3);
     await vi.advanceTimersByTimeAsync(1);
     expect(ports.provider.getTemplate).toHaveBeenCalledTimes(4);
-    await vi.advanceTimersByTimeAsync(7_999);
+    await vi.advanceTimersByTimeAsync(6_999);
     expect(ports.provider.getTemplate).toHaveBeenCalledTimes(4);
     await vi.advanceTimersByTimeAsync(1);
 
@@ -720,7 +723,7 @@ describe("template action orchestration", () => {
       error: {
         code: "PROVIDER_SYNC_PENDING",
         message:
-          "Dropbox Sign is still finishing this template. Reload the editor, then click Finish again in Dropbox Sign.",
+          "Dropbox Sign is still finishing this template. Retry synchronization here without reopening the editor.",
       },
     });
     expect(ports.provider.getTemplate).toHaveBeenCalledTimes(5);
@@ -737,6 +740,52 @@ describe("template action orchestration", () => {
       createTemplateOrchestrator(ports).finishSync("template-1"),
     ).resolves.toMatchObject({ ok: true });
     expect(ports.repository.finalizeDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("wall-clock bounds a provider read that ignores cancellation", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    vi.mocked(ports.provider.getTemplate).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+
+    const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(resultPromise).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "PROVIDER_SYNC_TIMEOUT",
+        message: "Dropbox Sign template verification timed out. Retry synchronization without reopening the editor.",
+      },
+    });
+    const signal = vi.mocked(ports.provider.getTemplate).mock.calls[0]?.[1];
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("makes a structured not-found terminal after the documented callback deadline", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    const providerPending = new Error("not ready");
+    vi.mocked(ports.repository.getTemplate).mockResolvedValue({
+      ...draft,
+      providerSyncStartedAt: "2026-08-29T10:59:59.999Z",
+    });
+    vi.mocked(ports.provider.getTemplate).mockRejectedValue(providerPending);
+    vi.mocked(ports.provider.classifyTemplateReadError).mockReturnValue("not_found");
+
+    const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
+    await vi.advanceTimersByTimeAsync(14_000);
+    await expect(resultPromise).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_SYNC_FAILED" },
+    });
+    expect(ports.repository.markFinishSyncStarted).not.toHaveBeenCalled();
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(1);
   });
 
   it("does not claim abandon success when source cleanup fails and audits the failure", async () => {

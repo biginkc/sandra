@@ -178,6 +178,62 @@ describe("EmbeddedTemplateEditor", () => {
     expect(first.client.close).toHaveBeenCalledTimes(1);
   });
 
+  it("retries pending synchronization from the rendered control without reopening Dropbox", async () => {
+    const embedded = makeClient();
+    const actions = makeActions();
+    vi.mocked(actions.syncFinishedTemplate)
+      .mockResolvedValueOnce({
+        ok: false,
+        error: {
+          code: "PROVIDER_SYNC_PENDING",
+          message: "Dropbox Sign is still finishing this template.",
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          id: "local-1",
+          name: "Offer",
+          documentType: "Purchase agreement",
+          providerTemplateId: "provider-1",
+          signerRoles: [{ name: "Seller", order: 0 }],
+          sellerRoleName: "Seller",
+          mergeFieldNames: [
+            "seller_name",
+            "property_address",
+            "offer_price",
+            "closing_date",
+            "earnest_money",
+          ],
+        },
+      });
+    const loadClient = vi.fn().mockResolvedValue(embedded.client);
+
+    render(
+      <EmbeddedTemplateEditor
+        template={template}
+        actions={actions}
+        loadClient={loadClient}
+      />,
+    );
+    await waitFor(() => expect(embedded.client.open).toHaveBeenCalledTimes(1));
+    act(() => embedded.listeners.get("finish")?.(undefined as never));
+
+    const retry = await screen.findByRole("button", {
+      name: "Retry synchronization",
+    });
+    expect(screen.queryByRole("button", { name: "Reload editor" })).not.toBeInTheDocument();
+    fireEvent.click(retry);
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save template" })).toBeEnabled(),
+    );
+    expect(actions.syncFinishedTemplate).toHaveBeenCalledTimes(2);
+    expect(actions.startEditor).toHaveBeenCalledTimes(1);
+    expect(loadClient).toHaveBeenCalledTimes(1);
+    expect(embedded.client.open).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the create response session once, then requests a fresh session on reload", async () => {
     const first = makeClient();
     const second = makeClient();

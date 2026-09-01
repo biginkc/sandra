@@ -133,7 +133,7 @@ export type DropboxSignProvider = {
   getEmbeddedTemplateEditUrl(
     providerTemplateId: string,
   ): Promise<EmbeddedTemplateSession>;
-  getTemplate(providerTemplateId: string): Promise<ProviderTemplateMetadata>;
+  getTemplate(providerTemplateId: string, signal?: AbortSignal): Promise<ProviderTemplateMetadata>;
   getTemplateFiles(providerTemplateId: string): Promise<Buffer>;
   duplicateTemplate(
     providerTemplateId: string,

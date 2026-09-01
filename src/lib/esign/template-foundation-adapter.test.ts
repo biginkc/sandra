@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ProviderError } from "@/lib/errors/classes";
+
 const mocks = vi.hoisted(() => ({
   memberships: vi.fn(),
   credentials: vi.fn(),
@@ -28,7 +30,10 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-import { createFoundationTemplateOrchestrator } from "./template-foundation-adapter";
+import {
+  classifyDropboxTemplateReadError,
+  createFoundationTemplateOrchestrator,
+} from "./template-foundation-adapter";
 
 const orgId = "123e4567-e89b-42d3-a456-426614174001";
 const sourceId = "123e4567-e89b-42d3-a456-426614174000";
@@ -72,4 +77,25 @@ describe("foundation template staging adapter without Dropbox credentials", () =
     expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
 
+});
+
+describe("Dropbox template-read error classifier", () => {
+  it("admits only Dropbox Sign's structured not_found 404 as conversion-pending", () => {
+    expect(classifyDropboxTemplateReadError(new ProviderError(
+      "not found",
+      "dropbox_sign",
+      { statusCode: 404, providerCode: "not_found" },
+    ))).toBe("not_found");
+    expect(classifyDropboxTemplateReadError(new ProviderError(
+      "template failed",
+      "dropbox_sign",
+      { statusCode: 404, providerCode: "template_error" },
+    ))).toBe("terminal");
+    expect(classifyDropboxTemplateReadError(new ProviderError(
+      "unstructured",
+      "dropbox_sign",
+      { statusCode: 404 },
+    ))).toBe("terminal");
+    expect(classifyDropboxTemplateReadError({ statusCode: 404, providerCode: "not_found" })).toBe("terminal");
+  });
 });

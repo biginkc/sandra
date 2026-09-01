@@ -303,7 +303,11 @@ export function EmbeddedTemplateEditor({
               role="alert"
             >
               <div>
-                <h2 className="font-medium">Editor unavailable</h2>
+                <h2 className="font-medium">
+                  {isSynchronizationRetry(state.code)
+                    ? "Synchronization pending"
+                    : "Editor unavailable"}
+                </h2>
                 <p className="text-muted-foreground mt-1 max-w-lg text-sm">
                   {state.message}
                 </p>
@@ -313,13 +317,19 @@ export function EmbeddedTemplateEditor({
                   </p>
                 )}
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setGeneration((value) => value + 1)}
-              >
-                <RefreshCwIcon data-icon="inline-start" /> Reload editor
-              </Button>
+              {isSynchronizationRetry(state.code) ? (
+                <Button variant="outline" size="sm" onClick={() => void syncFinished()}>
+                  <RefreshCwIcon data-icon="inline-start" /> Retry synchronization
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setGeneration((value) => value + 1)}
+                >
+                  <RefreshCwIcon data-icon="inline-start" /> Reload editor
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -333,6 +343,10 @@ export function EmbeddedTemplateEditor({
       )}
     </div>
   );
+}
+
+function isSynchronizationRetry(code: string | undefined): boolean {
+  return code === "PROVIDER_SYNC_PENDING" || code === "PROVIDER_SYNC_TIMEOUT";
 }
 
 export function InitialSessionEmbeddedTemplateEditor(
