@@ -27,13 +27,10 @@ jobs:
     name: Playwright golden paths
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    environment: e2e-ci
 
     env:
-      # Feeds playwright.config.ts + e2e/fixtures.ts. Populate these in
-      # GitHub → repo settings → Secrets and variables → Actions.
-      TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
-      TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
-      TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+      E2E_CI_SUPABASE_PROJECT_REF: ${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
       NEXT_PUBLIC_SOFTPHONE_TRANSPORT: "simulated"
       # Skip the Haiku intent classifier in e2e — no ANTHROPIC_API_KEY here,
       # and the classifier is already unit-tested in
@@ -58,6 +55,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate job-scoped E2E identity
+        run: npx tsx scripts/e2e-identity-lifecycle.ts emit
+
+      - name: Preflight E2E identity and arm browser-QA circuit breaker
+        run: npx tsx scripts/e2e-identity-lifecycle.ts preflight
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
+
       - name: Verify Chrome browser
         run: |
           google-chrome --version
@@ -74,6 +80,10 @@ jobs:
           NODE
 
       - name: Run Playwright E2E suite
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          TEST_SUPABASE_ANON_KEY: ${{ secrets.E2E_CI_SUPABASE_ANON_KEY }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           # Bound each serial group to a fresh Next dev server. Beyond roughly
           # six minutes the CI server has emitted ECONNRESET and stopped
@@ -90,6 +100,13 @@ jobs:
           # the click and URL assertions remain unchanged.
           npm run test:e2e -- --grep 'Leads board v2 foundation is usable at desktop and narrow widths'
           PLAYWRIGHT_WEBPACK_DEV_SERVER=1 npm run test:e2e -- --grep 'switching tabs preserves URL state|sidebar nav links all route correctly' --timeout=120000
+
+      - name: Clean up exact-run E2E identities and verify browser-QA isolation
+        if: always()
+        run: npx tsx scripts/e2e-identity-lifecycle.ts cleanup
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: Upload HTML report on failure
         if: failure()

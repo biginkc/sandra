@@ -19,7 +19,7 @@ const AUTH_FILE = "e2e/.auth/user.json";
  */
 setup("authenticate", async ({ page }) => {
   const admin = adminClient();
-  await ensureTestUser(admin, { repairPassword: true });
+  await ensureTestUser(admin);
 
   await page.goto("/login");
   await expect(
@@ -39,8 +39,7 @@ setup("authenticate", async ({ page }) => {
   const auth = createBrowserClient<Database>(url, anonKey, {
     isSingleton: false,
     cookies: {
-      getAll: () =>
-        [...cookieJar].map(([name, value]) => ({ name, value })),
+      getAll: () => [...cookieJar].map(([name, value]) => ({ name, value })),
       setAll: (cookies) => {
         for (const cookie of cookies) {
           if (cookie.value) cookieJar.set(cookie.name, cookie.value);
