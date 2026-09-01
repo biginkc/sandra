@@ -3,11 +3,23 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DuplicateTemplateDialog } from "./template-row-actions";
 import { PendingTemplateCopies } from "./pending-template-copies";
-import type { EsignTemplateRow, TemplateLibraryActions } from "./types";
+import {
+  InitialEditorSessionProvider,
+} from "./initial-editor-session";
+import {
+  InitialSessionEmbeddedTemplateEditor,
+} from "./[templateId]/edit/embedded-template-editor";
+import type {
+  EsignTemplateRow,
+  TemplateEditorActions,
+  TemplateLibraryActions,
+} from "./types";
 
 const push = vi.fn();
 const refresh = vi.fn();
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push, refresh }) }));
+const replace = vi.fn();
+const router = { push, refresh, replace };
+vi.mock("next/navigation", () => ({ useRouter: () => router }));
 
 const template: EsignTemplateRow = {
   id: "source-1",
@@ -36,7 +48,22 @@ function makeActions(): TemplateLibraryActions {
     abandonDraft: vi.fn().mockResolvedValue({ ok: true, data: null }),
     retryCleanup: vi.fn().mockResolvedValue({ ok: true, data: null }),
     retrySourceCleanup: vi.fn().mockResolvedValue({ ok: true, data: null }),
-    retryProviderCreate: vi.fn().mockResolvedValue({ ok: true, data: { templateId: "template-1" } }),
+    retryProviderCreate: vi.fn().mockResolvedValue({
+      ok: true,
+      data: {
+        templateId: "template-1",
+        initialEditorSession: {
+          providerTemplateId: "provider-1",
+          editUrl: "https://app.hellosign.com/editor/retry",
+          expiresAt: Math.floor(Date.now() / 1000) + 3600,
+          clientId: "client-1",
+        },
+      },
+    }),
+    promoteStaleProviderCreate: vi.fn().mockResolvedValue({
+      ok: true,
+      data: { templateId: "template-1", providerCreateState: "unknown" },
+    }),
     deleteTemplate: vi.fn(),
   };
 }
@@ -172,23 +199,106 @@ describe("PendingTemplateCopies", () => {
     expect(screen.queryByRole("button", { name: "Retry cleanup" })).not.toBeInTheDocument();
   });
 
-  it("retries a definitively rejected provider create and routes only after success", async () => {
+  it("hands Retry setup's editor session to the destination without calling startEditor", async () => {
     const actions = makeActions();
-    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "unstarted" }] }} actions={actions} />);
+    const editorActions: TemplateEditorActions = {
+      startEditor: vi.fn().mockResolvedValue({
+        ok: false,
+        error: { code: "UNEXPECTED_PREFLIGHT", message: "must not run" },
+      }),
+      restartPlacement: vi.fn(),
+      syncFinishedTemplate: vi.fn(),
+      abandonDraft: vi.fn(),
+    };
+    const client = {
+      on: vi.fn(),
+      off: vi.fn(),
+      open: vi.fn(),
+      close: vi.fn(),
+    };
+    const loadClient = vi.fn().mockResolvedValue(client);
+    const view = render(
+      <InitialEditorSessionProvider>
+        <div>
+          <span data-testid="route-provider-anchor" />
+          <PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "unstarted" }] }} actions={actions} />
+        </div>
+      </InitialEditorSessionProvider>,
+    );
     expect(screen.getByText(/rejected the previous request without creating a template/i)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Retry setup" }));
     await waitFor(() => expect(actions.retryProviderCreate).toHaveBeenCalledWith("template-1"));
     await waitFor(() => expect(push).toHaveBeenCalledWith("/settings/esign-templates/template-1/edit"));
     expect(actions.checkEditorReadiness).not.toHaveBeenCalled();
+    view.rerender(
+      <InitialEditorSessionProvider>
+        <div>
+          <span data-testid="route-provider-anchor" />
+          <InitialSessionEmbeddedTemplateEditor
+            template={{
+              id: "template-1",
+              name: "Offer",
+              sourceFilename: "offer.pdf",
+              sourceSizeBytes: 1024,
+              pageCount: 1,
+              fieldCount: 5,
+              isFinalized: false,
+            }}
+            actions={editorActions}
+            loadClient={loadClient}
+          />
+        </div>
+      </InitialEditorSessionProvider>,
+    );
+    await waitFor(() =>
+      expect(client.open).toHaveBeenCalledWith(
+        "https://app.hellosign.com/editor/retry",
+        expect.any(Object),
+      ),
+    );
+    expect(editorActions.startEditor).not.toHaveBeenCalled();
   });
 
-  it.each(["invoking", "unknown"] as const)("keeps %s recovery out of the normal provider-ID UI", (providerCreateState) => {
+  it("checks a possibly stale invoking attempt before refreshing its recovery state", async () => {
     const actions = makeActions();
-    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState }] }} actions={actions} />);
+    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "invoking" }] }} actions={actions} />);
+    expect(screen.getByText(/Contact an administrator for provider recovery/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Check recovery" }));
+    await waitFor(() =>
+      expect(actions.promoteStaleProviderCreate).toHaveBeenCalledWith("template-1"),
+    );
+    await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    expect(actions.retryProviderCreate).not.toHaveBeenCalled();
+  });
+
+  it("keeps a fresh invoking attempt fenced when recovery is checked too early", async () => {
+    const actions = makeActions();
+    vi.mocked(actions.promoteStaleProviderCreate!).mockResolvedValue({
+      ok: false,
+      error: {
+        code: "PROVIDER_RECOVERY_NOT_STALE",
+        message: "Provider creation is still in progress. Try again after the recovery window.",
+      },
+    });
+    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "invoking" }] }} actions={actions} />);
+    fireEvent.click(screen.getByRole("button", { name: "Check recovery" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Provider creation is still in progress",
+      ),
+    );
+    expect(refresh).not.toHaveBeenCalled();
+    expect(actions.retryProviderCreate).not.toHaveBeenCalled();
+  });
+
+  it("keeps unknown recovery out of the normal provider-ID UI", () => {
+    const actions = makeActions();
+    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "unknown" }] }} actions={actions} />);
     expect(screen.getByText(/Contact an administrator for provider recovery/)).toBeVisible();
     expect(screen.queryByPlaceholderText("Provider template ID")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Reload" }));
     expect(refresh).toHaveBeenCalledOnce();
+    expect(actions.promoteStaleProviderCreate).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
   });
 

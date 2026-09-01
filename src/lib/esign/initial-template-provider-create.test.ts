@@ -341,6 +341,30 @@ describe("initial template provider-create CAS", () => {
     expect(p.markUnknown).not.toHaveBeenCalled();
   });
 
+  it("marks a definitive provider 4xx unknown when retry recording is unavailable", async () => {
+    const p = ports();
+    vi.mocked(p.provider.invoke).mockRejectedValue(
+      new ProviderError("quota rejected", "dropbox_sign", {
+        statusCode: 400,
+        providerCode: "bad_request",
+        retryable: false,
+      }),
+    );
+    vi.mocked(p.recordDefinitiveFailure).mockRejectedValue(
+      new Error("RPC missing"),
+    );
+
+    await expect(runInitialProviderCreate(input, p)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_CREATE_UNKNOWN" },
+    });
+    expect(p.markUnknown).toHaveBeenCalledWith({
+      ...input,
+      claimToken: "claim-1",
+      errorCode: "PROVIDER_DEFINITIVE_FAILURE_RECORD_UNAVAILABLE",
+    });
+  });
+
   it("marks unknown when provider returns no stable ID", async () => {
     const p = ports();
     vi.mocked(p.provider.invoke).mockResolvedValue({

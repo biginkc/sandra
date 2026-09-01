@@ -42,6 +42,20 @@ describe("InitialEditorSessionProvider", () => {
     fireEvent.click(screen.getByRole("button", { name: "Take" }));
     expect(screen.getByTestId("result")).toHaveTextContent(session.editUrl);
   });
+
+  it("keeps concurrent one-time sessions isolated by template", () => {
+    render(
+      <InitialEditorSessionProvider>
+        <Probe />
+      </InitialEditorSessionProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Put" }));
+    fireEvent.click(screen.getByRole("button", { name: "Put other" }));
+    fireEvent.click(screen.getByRole("button", { name: "Take" }));
+    expect(screen.getByTestId("result")).toHaveTextContent(session.editUrl);
+    fireEvent.click(screen.getByRole("button", { name: "Take other" }));
+    expect(screen.getByTestId("result")).toHaveTextContent("/other");
+  });
 });
 
 function Probe() {
@@ -50,6 +64,13 @@ function Probe() {
   return (
     <>
       <button onClick={() => store.put("template-1", session)}>Put</button>
+      <button
+        onClick={() =>
+          store.put("template-2", { ...session, editUrl: `${session.editUrl}/other` })
+        }
+      >
+        Put other
+      </button>
       <button
         onClick={() => setResult(store.take("template-1")?.editUrl ?? "absent")}
       >

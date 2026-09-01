@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
 
 import { templateLibraryActions } from "./client-actions";
+import { useInitialEditorSessionStore } from "./initial-editor-session";
 import type { PendingTemplateCopiesLoadResult, TemplateLibraryActions } from "./types";
 
 export function PendingTemplateCopies({
@@ -97,14 +98,16 @@ function PendingTemplateCopyRow({
     router.refresh();
   });
 
-  const retryProviderCreate = () => actions?.retryProviderCreate && !routedRef.current && startTransition(async () => {
-    setError(null);
-    const result = await actions.retryProviderCreate!(copy.id);
-    if (!result.ok) return setError(result.error.message);
-    routedRef.current = true;
-    setRouted(true);
-    router.push(`/settings/esign-templates/${result.data.templateId}/edit`);
-  });
+  const checkStaleProviderCreate = () =>
+    actions?.promoteStaleProviderCreate &&
+    !routedRef.current &&
+    !readinessPromiseRef.current &&
+    startTransition(async () => {
+      setError(null);
+      const result = await actions.promoteStaleProviderCreate!(copy.id);
+      if (!result.ok) return setError(result.error.message);
+      router.refresh();
+    });
 
   const cleanupAttention = copy.lifecycle === "cleanup_attention";
   const providerAttention = copy.lifecycle === "provider_attention";
@@ -133,8 +136,24 @@ function PendingTemplateCopyRow({
           </Button>
         ) : providerAttention ? (
           copy.providerCreateState === "unstarted" ? (
-            <Button size="sm" variant="outline" onClick={retryProviderCreate} disabled={!actions?.retryProviderCreate || isPending || routed}>
-              <RefreshCwIcon data-icon="inline-start" /> {isPending ? "Retrying…" : "Retry setup"}
+            <RetryProviderCreateButton
+              templateId={copy.id}
+              retryProviderCreate={actions?.retryProviderCreate}
+              onError={setError}
+              onRoute={() => {
+                routedRef.current = true;
+                setRouted(true);
+              }}
+              disabled={isPending || routed}
+            />
+          ) : copy.providerCreateState === "invoking" ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={checkStaleProviderCreate}
+              disabled={!actions?.promoteStaleProviderCreate || isPending || routed}
+            >
+              <RefreshCwIcon data-icon="inline-start" /> {isPending ? "Checking…" : "Check recovery"}
             </Button>
           ) : copy.providerCreateState === "claimed" ? (
             <Button size="sm" variant="outline" onClick={() => router.refresh()} disabled={isPending || routed}>
@@ -169,5 +188,53 @@ function PendingTemplateCopyRow({
         </>}
       </div>
     </div>
+  );
+}
+
+function RetryProviderCreateButton({
+  templateId,
+  retryProviderCreate,
+  onError,
+  onRoute,
+  disabled,
+}: {
+  templateId: string;
+  retryProviderCreate: TemplateLibraryActions["retryProviderCreate"];
+  onError(message: string): void;
+  onRoute(): void;
+  disabled: boolean;
+}) {
+  const router = useRouter();
+  const sessions = useInitialEditorSessionStore();
+  const [isPending, startTransition] = useTransition();
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={!retryProviderCreate || isPending || disabled}
+      onClick={() =>
+        retryProviderCreate &&
+        startTransition(async () => {
+          onError("");
+          const result = await retryProviderCreate(templateId);
+          if (!result.ok) {
+            onError(result.error.message);
+            return;
+          }
+          sessions.put(
+            result.data.templateId,
+            result.data.initialEditorSession,
+          );
+          onRoute();
+          router.push(
+            `/settings/esign-templates/${result.data.templateId}/edit`,
+          );
+        })
+      }
+    >
+      <RefreshCwIcon data-icon="inline-start" />
+      {isPending ? "Retrying…" : "Retry setup"}
+    </Button>
   );
 }

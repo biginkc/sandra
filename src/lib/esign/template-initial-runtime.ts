@@ -142,12 +142,16 @@ export async function createInitialTemplateRuntime() {
         )[]
       >
     > {
-      const [sources, providers] = await Promise.all([
+      const [sources, providers, retryableProviders] = await Promise.all([
         admin.rpc("list_pending_esign_template_source_uploads", {
           p_org_id: orgId,
           p_actor_id: actorId,
         }),
         admin.rpc("list_pending_esign_template_provider_creates", {
+          p_org_id: orgId,
+          p_actor_id: actorId,
+        }),
+        admin.rpc("list_retryable_esign_template_provider_creates", {
           p_org_id: orgId,
           p_actor_id: actorId,
         }),
@@ -157,6 +161,15 @@ export async function createInitialTemplateRuntime() {
           "TEMPLATE_RECOVERY_LIST_FAILED",
           "Template recovery state could not be loaded.",
         );
+      // The retryable-list RPC is deliberately optional during a rolling
+      // deploy. Before its migration exists, definitive provider failures
+      // still fall back to the existing unknown/manual-reconciliation state.
+      const retryableRows = retryableProviders.error
+        ? []
+        : (retryableProviders.data ?? []);
+      const retryableIds = new Set(
+        retryableRows.map((row) => row.template_id),
+      );
       return success([
         ...(sources.data ?? []).map((row) => ({
           id: row.source_id,
@@ -164,13 +177,22 @@ export async function createInitialTemplateRuntime() {
           lifecycle: "cleanup_attention" as const,
           kind: "source_cleanup" as const,
         })),
-        ...(providers.data ?? []).map((row) => ({
+        ...(providers.data ?? [])
+          .filter((row) => !retryableIds.has(row.template_id))
+          .map((row) => ({
           id: row.template_id,
           name: row.name,
           lifecycle: "provider_attention" as const,
           kind: "provider_create" as const,
           providerCreateState: row.provider_create_state as
             "unstarted" | "claimed" | "invoking" | "unknown" | "attached",
+          })),
+        ...retryableRows.map((row) => ({
+          id: row.template_id,
+          name: row.name,
+          lifecycle: "provider_attention" as const,
+          kind: "provider_create" as const,
+          providerCreateState: "unstarted" as const,
         })),
       ]);
     },
@@ -582,30 +604,40 @@ export async function createInitialTemplateRuntime() {
     },
     async retryProviderCreate(
       templateId: string,
-    ): Promise<TemplateActionResult<{ templateId: string }>> {
+    ): Promise<
+      TemplateActionResult<{
+        templateId: string;
+        initialEditorSession: {
+          providerTemplateId: string;
+          editUrl: string;
+          expiresAt: number | null;
+          clientId: string;
+        };
+      }>
+    > {
       if (!isOpaqueId(templateId)) {
         return failure("PROVIDER_RETRY_INVALID", "The hidden template reference is invalid.");
       }
       const { data: pending, error: pendingError } = await admin.rpc(
-        "list_pending_esign_template_provider_creates",
+        "list_retryable_esign_template_provider_creates",
         { p_org_id: orgId, p_actor_id: actorId },
       );
-      const recovery = pending?.find((row) =>
-        row.template_id === templateId && row.provider_create_state === "unstarted"
-      );
+      const recovery = pending?.find((row) => row.template_id === templateId);
       if (pendingError || !recovery) {
         return failure("PROVIDER_RETRY_UNAVAILABLE", "This template is not awaiting a safe provider retry.");
       }
       const { data: draft, error: draftError } = await admin
         .from("esign_templates")
-        .select("id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,sign_template_id,staging_source_id,source_filename,source_size_bytes,source_content_type,source_sha256,staging_path,lifecycle_state,provider_create_state,provider_create_last_released_token_hash,duplicate_of_template_id,supersedes_template_id,finalized_at,deleted_at,abandoned_at")
+        .select("id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,sign_template_id,staging_source_id,source_filename,source_size_bytes,source_content_type,source_sha256,staging_path,lifecycle_state,provider_account_id,provider_create_state,provider_create_claim_token_hash,provider_create_last_released_token_hash,provider_create_error_code,duplicate_of_template_id,supersedes_template_id,finalized_at,deleted_at,abandoned_at")
         .eq("org_id", orgId)
         .eq("id", templateId)
         .maybeSingle();
       if (
         draftError || !draft || draft.org_id !== orgId || draft.id !== templateId ||
-        draft.lifecycle_state !== "preparing" || draft.provider_create_state !== "unstarted" ||
-        !draft.provider_create_last_released_token_hash || draft.sign_template_id !== null ||
+        draft.lifecycle_state !== "preparing" || draft.provider_create_state !== "unknown" ||
+        draft.provider_create_error_code !== "PROVIDER_REQUEST_REJECTED" ||
+        !draft.provider_account_id || !draft.provider_create_claim_token_hash ||
+        draft.provider_create_last_released_token_hash !== null || draft.sign_template_id !== null ||
         draft.staging_source_id !== recovery.source_id ||
         draft.staging_path !== `${orgId}/${recovery.source_id}.pdf` ||
         draft.duplicate_of_template_id !== null || draft.supersedes_template_id !== null ||
@@ -639,11 +671,32 @@ export async function createInitialTemplateRuntime() {
       ) {
         return failure("PROVIDER_RETRY_SOURCE_MISMATCH", "The retained private PDF no longer matches the retryable draft.");
       }
-      let cachedCredentials: Awaited<ReturnType<typeof getEsignCredentials>> = null;
+      let retryCredentials: Awaited<ReturnType<typeof getEsignCredentials>>;
+      try {
+        retryCredentials = await getEsignCredentials(orgId);
+      } catch {
+        return failure(
+          "PROVIDER_CONFIGURATION_FAILED",
+          "Dropbox Sign is not connected. The hidden draft was not sent to the provider.",
+        );
+      }
+      if (!retryCredentials) {
+        return failure(
+          "PROVIDER_CONFIGURATION_FAILED",
+          "Dropbox Sign is not connected. The hidden draft was not sent to the provider.",
+        );
+      }
+      if (retryCredentials.providerAccountId !== draft.provider_account_id) {
+        return failure(
+          "PROVIDER_ACCOUNT_MISMATCH",
+          "Dropbox Sign changed before provider creation could begin.",
+        );
+      }
       const result = await runInitialProviderCreate(
         { orgId, templateId, sourceId: recovery.source_id, actorId },
         providerPorts({
           admin, orgId, actorId, localTemplateId: templateId, bytes,
+          retryAlreadyBegun: true,
           input: {
             source: {
               stagingSourceId: recovery.source_id, bucket: BUCKET,
@@ -654,13 +707,20 @@ export async function createInitialTemplateRuntime() {
             name: draft.name, documentType: draft.document_type,
             signerRoles, sellerRoleName: draft.seller_role,
           },
-          getCredentials: async () => {
-            cachedCredentials ??= await getEsignCredentials(orgId);
-            return cachedCredentials;
-          },
+          getCredentials: async () => retryCredentials,
         }),
       );
-      return result.ok ? success({ templateId: result.data.templateId }) : result;
+      if (!result.ok) return result;
+      if (!result.data.initialEditorSession) {
+        return failure(
+          "PROVIDER_RETRY_SESSION_MISSING",
+          "The provider setup completed without a usable editor session. Reload the template library to reconcile it.",
+        );
+      }
+      return success({
+        templateId: result.data.templateId,
+        initialEditorSession: result.data.initialEditorSession,
+      });
     },
     async createReplacementFromRetainedSource(
       templateId: string,
@@ -835,10 +895,12 @@ function providerPorts(context: {
     sellerRoleName: string;
   };
   getCredentials(): ReturnType<typeof getEsignCredentials>;
+  retryAlreadyBegun?: boolean;
 }): InitialProviderCreatePorts {
   const rpc = async (
     name:
       | "claim_esign_template_provider_create"
+      | "begin_definitive_esign_template_provider_create_retry"
       | "begin_esign_template_provider_create"
       | "release_esign_template_provider_create_claim"
       | "record_definitive_esign_template_provider_create_failure"
@@ -853,17 +915,24 @@ function providerPorts(context: {
   };
   return {
     async claim(input) {
-      const row = await rpc("claim_esign_template_provider_create", {
+      const row = await rpc(
+        context.retryAlreadyBegun
+          ? "begin_definitive_esign_template_provider_create_retry"
+          : "claim_esign_template_provider_create",
+        {
         p_org_id: input.orgId,
         p_template_id: input.templateId,
         p_source_id: input.sourceId,
         p_actor_id: input.actorId,
-      });
+        },
+      );
       return {
-        outcome: row.outcome as
+        outcome: (row.outcome === "started" ? "claimed" : row.outcome) as
           "claimed" | "already_in_progress" | "already_attached",
         templateId: row.template_id!,
-        providerCreateState: row.provider_create_state as ProviderCreateState,
+        providerCreateState: (row.outcome === "started"
+          ? "claimed"
+          : row.provider_create_state) as ProviderCreateState,
         claimToken: row.claim_token,
         providerTemplateId: row.provider_template_id,
         providerAccountId: row.provider_account_id,
@@ -871,6 +940,14 @@ function providerPorts(context: {
       };
     },
     async begin(input) {
+      if (context.retryAlreadyBegun) {
+        return {
+          outcome: "started",
+          templateId: input.templateId,
+          providerCreateState: "invoking",
+          createdBy: context.actorId,
+        };
+      }
       const row = await rpc("begin_esign_template_provider_create", {
         p_org_id: input.orgId,
         p_template_id: input.templateId,

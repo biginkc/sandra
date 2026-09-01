@@ -103,7 +103,18 @@ describe("template server action boundary", () => {
       ok: true,
       data: { templateId: "template-1", providerCreateState: "unknown" },
     });
-    mocks.retryProviderInitial.mockResolvedValue({ ok: true, data: { templateId: "template-1" } });
+    mocks.retryProviderInitial.mockResolvedValue({
+      ok: true,
+      data: {
+        templateId: "template-1",
+        initialEditorSession: {
+          providerTemplateId: "provider-1",
+          editUrl: "https://app.hellosign.com/editor/retry",
+          expiresAt: 1_999_999_999,
+          clientId: "client-1",
+        },
+      },
+    });
     mocks.initialFactory.mockResolvedValue({
       prepare: mocks.prepareUpload,
       create: mocks.createInitial,
@@ -220,7 +231,15 @@ describe("template server action boundary", () => {
   it("retries a released provider create through the owner-scoped runtime", async () => {
     await expect(retryInitialTemplateProviderCreateAction("template-1")).resolves.toEqual({
       ok: true,
-      data: { templateId: "template-1" },
+      data: {
+        templateId: "template-1",
+        initialEditorSession: {
+          providerTemplateId: "provider-1",
+          editUrl: "https://app.hellosign.com/editor/retry",
+          expiresAt: 1_999_999_999,
+          clientId: "client-1",
+        },
+      },
     });
     expect(mocks.retryProviderInitial).toHaveBeenCalledWith("template-1");
     expect(mocks.revalidate).toHaveBeenCalledWith("/settings/esign-templates");

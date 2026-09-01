@@ -251,6 +251,7 @@ beforeAll(async () => {
   await pg.connect();
   await pg.query("begin");
   await pg.query(definitiveFailureSql);
+  await pg.query(definitiveFailureSql);
 });
 
 beforeEach(async () => {
@@ -769,6 +770,7 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       "abandon_esign_template_draft(uuid,uuid,uuid)",
       "claim_esign_template_provider_create(uuid,uuid,uuid,uuid)",
       "begin_esign_template_provider_create(uuid,uuid,uuid,uuid,uuid)",
+      "begin_definitive_esign_template_provider_create_retry(uuid,uuid,uuid,uuid)",
       "release_esign_template_provider_create_claim(uuid,uuid,uuid,uuid,uuid)",
       "record_definitive_esign_template_provider_create_failure(uuid,uuid,uuid,uuid,text,uuid)",
       "mark_esign_template_provider_create_unknown(uuid,uuid,uuid,uuid,text,uuid)",
@@ -776,6 +778,7 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       "complete_esign_template_provider_create(uuid,uuid,uuid,uuid,text,uuid)",
       "reconcile_unknown_esign_template_provider_create(uuid,uuid,uuid,text,uuid)",
       "list_pending_esign_template_provider_creates(uuid,uuid)",
+      "list_retryable_esign_template_provider_creates(uuid,uuid)",
       "create_esign_template_duplicate_draft(uuid,uuid,text,uuid)",
       "create_esign_template_edit_revision(uuid,uuid,uuid,uuid)",
       "attach_esign_template_provider_id(uuid,uuid,text,uuid)",
@@ -842,6 +845,22 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
           ),
         /permission denied/i,
       );
+      await expectDbError(
+        () =>
+          pg.query(
+            "select * from public.list_retryable_esign_template_provider_creates($1,$2)",
+            [orgId, creatorId],
+          ),
+        /permission denied/i,
+      );
+      await expectDbError(
+        () =>
+          pg.query(
+            "select * from public.begin_definitive_esign_template_provider_create_retry($1,$2,$3,$4)",
+            [orgId, crypto.randomUUID(), crypto.randomUUID(), creatorId],
+          ),
+        /permission denied/i,
+      );
     }
     await resetRole();
     await setRole("service_role");
@@ -852,6 +871,22 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
              $1,$2,'forbidden.pdf',1,'application/pdf',repeat('c',64),$3
            )`,
           [otherOrgId, crypto.randomUUID(), creatorId],
+        ),
+      /active organization owner required/i,
+    );
+    await expectDbError(
+      () =>
+        pg.query(
+          "select * from public.list_retryable_esign_template_provider_creates($1,$2)",
+          [otherOrgId, creatorId],
+        ),
+      /active organization owner required/i,
+    );
+    await expectDbError(
+      () =>
+        pg.query(
+          "select * from public.begin_definitive_esign_template_provider_create_retry($1,$2,$3,$4)",
+          [otherOrgId, crypto.randomUUID(), crypto.randomUUID(), creatorId],
         ),
       /active organization owner required/i,
     );
@@ -1201,12 +1236,12 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       [draft.template_id],
     );
     expect(state.rows[0]).toEqual({
-      provider_create_state: "unstarted",
-      provider_account_id: null,
-      provider_create_error_code: null,
+      provider_create_state: "unknown",
+      provider_account_id: "account-a",
+      provider_create_error_code: "PROVIDER_REQUEST_REJECTED",
     });
 
-    const recoverable = await pg.query<{
+    const rollbackCompatible = await pg.query<{
       template_id: string;
       source_id: string;
       provider_create_state: string;
@@ -1214,22 +1249,91 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       "select * from public.list_pending_esign_template_provider_creates($1,$2)",
       [orgId, recoveryOwnerId],
     );
+    expect(rollbackCompatible.rows).toEqual([
+      expect.objectContaining({
+        template_id: draft.template_id,
+        source_id: source.id,
+        provider_create_state: "unknown",
+      }),
+    ]);
+    const recoverable = await pg.query<{
+      template_id: string;
+      source_id: string;
+    }>(
+      "select * from public.list_retryable_esign_template_provider_creates($1,$2)",
+      [orgId, recoveryOwnerId],
+    );
     expect(recoverable.rows).toEqual([
       expect.objectContaining({
         template_id: draft.template_id,
         source_id: source.id,
-        provider_create_state: "unstarted",
       }),
     ]);
 
-    const retried = await pg.query<{
+    await pg.query("savepoint rollback_contract");
+    const oldActionCompatible = await pg.query<{ outcome: string }>(
+      "select * from public.reconcile_unknown_esign_template_provider_create($1,$2,$3,$4,$5)",
+      [orgId, draft.template_id, source.id, "provider-manual-recovery", recoveryOwnerId],
+    );
+    expect(oldActionCompatible.rows[0].outcome).toBe("attached");
+    await pg.query("rollback to savepoint rollback_contract");
+    await pg.query("release savepoint rollback_contract");
+
+    await pg.query("savepoint interrupted_retry");
+    const interrupted = await pg.query<{
       outcome: string;
+      provider_create_state: string;
       claim_token: string;
     }>(
-      "select * from public.claim_esign_template_provider_create($1,$2,$3,$4)",
+      "select * from public.begin_definitive_esign_template_provider_create_retry($1,$2,$3,$4)",
       [orgId, draft.template_id, source.id, recoveryOwnerId],
     );
-    expect(retried.rows[0].outcome).toBe("claimed");
+    expect(interrupted.rows[0]).toEqual(expect.objectContaining({
+      outcome: "started",
+      provider_create_state: "invoking",
+    }));
+    expect(interrupted.rows[0].claim_token).not.toBe(token);
+    await pg.query(
+      `update public.esign_templates
+       set provider_create_invocation_started_at = now() - interval '11 minutes'
+       where id = $1`,
+      [draft.template_id],
+    );
+    const promoted = await pg.query<{ outcome: string; provider_create_state: string }>(
+      "select * from public.mark_stale_esign_template_provider_create_unknown($1,$2,$3,$4)",
+      [orgId, draft.template_id, source.id, recoveryOwnerId],
+    );
+    expect(promoted.rows[0]).toEqual(expect.objectContaining({
+      outcome: "recorded_unknown",
+      provider_create_state: "unknown",
+    }));
+    const interruptedRollbackList = await pg.query<{ provider_create_state: string }>(
+      "select * from public.list_pending_esign_template_provider_creates($1,$2)",
+      [orgId, recoveryOwnerId],
+    );
+    expect(interruptedRollbackList.rows).toEqual([
+      expect.objectContaining({ provider_create_state: "unknown" }),
+    ]);
+    const interruptedManualRecovery = await pg.query<{ outcome: string }>(
+      "select * from public.reconcile_unknown_esign_template_provider_create($1,$2,$3,$4,$5)",
+      [orgId, draft.template_id, source.id, "provider-after-interruption", recoveryOwnerId],
+    );
+    expect(interruptedManualRecovery.rows[0].outcome).toBe("attached");
+    await pg.query("rollback to savepoint interrupted_retry");
+    await pg.query("release savepoint interrupted_retry");
+
+    const retried = await pg.query<{
+      outcome: string;
+      provider_create_state: string;
+      claim_token: string;
+    }>(
+      "select * from public.begin_definitive_esign_template_provider_create_retry($1,$2,$3,$4)",
+      [orgId, draft.template_id, source.id, recoveryOwnerId],
+    );
+    expect(retried.rows[0]).toEqual(expect.objectContaining({
+      outcome: "started",
+      provider_create_state: "invoking",
+    }));
     expect(retried.rows[0].claim_token).not.toBe(token);
   });
 

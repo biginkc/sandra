@@ -4687,6 +4687,23 @@ export type Database = {
           template_id: string
         }[]
       }
+      begin_definitive_esign_template_provider_create_retry: {
+        Args: {
+          p_actor_id: string
+          p_org_id: string
+          p_source_id: string
+          p_template_id: string
+        }
+        Returns: {
+          claim_token: string
+          created_by: string
+          outcome: string
+          provider_account_id: string
+          provider_create_state: string
+          provider_template_id: string | null
+          template_id: string
+        }[]
+      }
       claim_esign_request_void: {
         Args: {
           p_claim_token: string
@@ -5056,6 +5073,16 @@ export type Database = {
           provider_create_error_code: string | null
           provider_create_invocation_started_at: string | null
           provider_create_state: string
+          source_id: string
+          template_id: string
+        }[]
+      }
+      list_retryable_esign_template_provider_creates: {
+        Args: { p_actor_id: string; p_org_id: string }
+        Returns: {
+          created_at: string
+          created_by: string
+          name: string
           source_id: string
           template_id: string
         }[]

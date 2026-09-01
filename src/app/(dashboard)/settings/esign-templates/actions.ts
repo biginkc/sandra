@@ -12,6 +12,7 @@ import type {
   CreateTemplateDraftActionInput,
   PreparedTemplateUpload,
   PrepareTemplateUploadInput,
+  RetriedTemplateDraft,
   RestartedTemplateDraft,
   TemplateLaneResult,
 } from "./types";
@@ -267,7 +268,7 @@ export async function promoteStaleInitialTemplateProviderCreateAction(
 
 export async function retryInitialTemplateProviderCreateAction(
   templateId: string,
-): Promise<TemplateLaneResult<{ templateId: string }>> {
+): Promise<TemplateLaneResult<RetriedTemplateDraft>> {
   try {
     const result = await (await createInitialTemplateRuntime()).retryProviderCreate(templateId);
     if (result.ok) revalidatePath("/settings/esign-templates");

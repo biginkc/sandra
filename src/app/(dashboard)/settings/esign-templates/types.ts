@@ -117,6 +117,11 @@ export type RestartedTemplateDraft = Readonly<{
   cleanupAttention: boolean;
 }>;
 
+export type RetriedTemplateDraft = Readonly<{
+  templateId: string;
+  initialEditorSession: EmbeddedTemplateSession;
+}>;
+
 export type TemplateLibraryActions = Readonly<{
   createDraft(
     input: CreateTemplateDraftInput,
@@ -140,7 +145,17 @@ export type TemplateLibraryActions = Readonly<{
   abandonDraft(templateId: string): Promise<TemplateLaneResult<null>>;
   retryCleanup(templateId: string): Promise<TemplateLaneResult<null>>;
   retrySourceCleanup?(sourceId: string): Promise<TemplateLaneResult<null>>;
-  retryProviderCreate?(templateId: string): Promise<TemplateLaneResult<{ templateId: string }>>;
+  retryProviderCreate?(
+    templateId: string,
+  ): Promise<TemplateLaneResult<RetriedTemplateDraft>>;
+  promoteStaleProviderCreate?(
+    templateId: string,
+  ): Promise<
+    TemplateLaneResult<{
+      templateId: string;
+      providerCreateState: "unknown" | "attached";
+    }>
+  >;
   deleteTemplate(
     templateId: string,
     confirmRecentSends?: boolean,

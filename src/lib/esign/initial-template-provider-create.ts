@@ -221,8 +221,24 @@ export async function runInitialProviderCreate(
           );
         }
       } catch {
-        // The provider definitively rejected the request, but durable retry
-        // state could not be proven. Keep the invoking fence intact.
+        // During code-before-migration deploys the retry RPC does not exist.
+        // Fall back to the older, refresh-safe manual-reconciliation state so
+        // the row never remains stranded in invoking.
+        const unknown = await markUnknownBestEffort(
+          ports,
+          claimed,
+          "PROVIDER_DEFINITIVE_FAILURE_RECORD_UNAVAILABLE",
+        );
+        if (
+          unknown &&
+          unknown.templateId === input.templateId &&
+          ["recorded_unknown", "already_unknown"].includes(unknown.outcome)
+        ) {
+          return failure(
+            "PROVIDER_CREATE_UNKNOWN",
+            "Dropbox Sign rejected the request, but safe retry is not available yet. Manual reconciliation is required.",
+          );
+        }
       }
       return failure(
         "PROVIDER_CREATE_FAILURE_RECORD_FAILED",
