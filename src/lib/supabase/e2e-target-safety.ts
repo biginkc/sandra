@@ -1,8 +1,31 @@
 const SHARED_E2E_PROJECT_REF = "ncsngxlcyxylaeskiteu";
+const APPROVED_CI_E2E_PROJECT_REFS = new Set(["bnkipfoqggwyttbykjfn"]);
+const SUPABASE_PROJECT_REF_PATTERN = /^[a-z0-9]{20}$/;
+
+type E2ETargetSafetyOptions = {
+  allowLocal: boolean;
+  expectedProjectRef?: string;
+  requireExpectedProjectRef?: boolean;
+};
+
+type E2ETargetEnvironment = Readonly<Record<string, string | undefined>>;
+
+function isExactHostedProjectUrl(url: URL, projectRef: string): boolean {
+  return (
+    url.protocol === "https:" &&
+    url.username === "" &&
+    url.password === "" &&
+    url.hostname === `${projectRef}.supabase.co` &&
+    url.port === "" &&
+    url.pathname === "/" &&
+    url.search === "" &&
+    url.hash === ""
+  );
+}
 
 export function assertSafeE2ESupabaseTarget(
   rawUrl: string,
-  options: { allowLocal: boolean; dedicatedCi?: boolean; expectedProjectRef?: string },
+  options: E2ETargetSafetyOptions,
 ): void {
   let url: URL;
   try {
@@ -11,33 +34,28 @@ export function assertSafeE2ESupabaseTarget(
     throw new Error("E2E fixtures refusing an invalid Supabase URL.");
   }
 
-  const dedicatedCi = options.dedicatedCi === true;
-  if (dedicatedCi) {
-    const expectedProjectRef = options.expectedProjectRef?.trim().toLowerCase() ?? "";
-    if (!/^[a-z0-9-]+$/.test(expectedProjectRef) || expectedProjectRef === SHARED_E2E_PROJECT_REF) {
-      throw new Error("E2E fixtures refusing an invalid dedicated CI project identity.");
+  const expectedProjectRef = options.expectedProjectRef;
+  if (options.requireExpectedProjectRef || expectedProjectRef) {
+    if (!expectedProjectRef) {
+      throw new Error("E2E CI requires an expected Supabase project ref.");
     }
-    const expectedOrigin = `https://${expectedProjectRef}.supabase.co`;
-    const normalizedRawUrl = rawUrl.trim();
-    if (normalizedRawUrl !== expectedOrigin && normalizedRawUrl !== `${expectedOrigin}/`) {
-      throw new Error("E2E fixtures refusing a non-canonical dedicated CI URL.");
+    if (!SUPABASE_PROJECT_REF_PATTERN.test(expectedProjectRef)) {
+      throw new Error("E2E CI received a malformed Supabase project ref.");
     }
-    if (
-      url.protocol !== "https:" ||
-      url.hostname !== `${expectedProjectRef}.supabase.co` ||
-      url.username ||
-      url.password ||
-      url.port ||
-      url.pathname !== "/" ||
-      url.search ||
-      url.hash
-    ) {
-      throw new Error("E2E fixtures refusing a dedicated CI URL outside the expected project.");
+    if (!APPROVED_CI_E2E_PROJECT_REFS.has(expectedProjectRef)) {
+      throw new Error(
+        "E2E CI received a Supabase project ref that is not approved.",
+      );
+    }
+    if (!isExactHostedProjectUrl(url, expectedProjectRef)) {
+      throw new Error(
+        "E2E CI Supabase URL does not exactly match the approved project origin.",
+      );
     }
     return;
   }
 
-  if (url.hostname === `${SHARED_E2E_PROJECT_REF}.supabase.co`) return;
+  if (isExactHostedProjectUrl(url, SHARED_E2E_PROJECT_REF)) return;
 
   const isLocalHost =
     url.hostname === "127.0.0.1" || url.hostname === "localhost";
@@ -47,4 +65,19 @@ export function assertSafeE2ESupabaseTarget(
   throw new Error(
     "E2E fixtures refusing to run against a database outside the approved test project or explicitly enabled local Supabase.",
   );
+}
+
+export function assertSafeE2ESupabaseTargetFromEnvironment(
+  rawUrl: string,
+  environment: E2ETargetEnvironment = process.env,
+): void {
+  const isCi =
+    environment.GITHUB_ACTIONS === "true" ||
+    environment.CI === "1" ||
+    environment.CI === "true";
+  assertSafeE2ESupabaseTarget(rawUrl, {
+    allowLocal: environment.E2E_ALLOW_LOCAL_SUPABASE === "1",
+    expectedProjectRef: environment.E2E_CI_SUPABASE_PROJECT_REF,
+    requireExpectedProjectRef: isCi,
+  });
 }

@@ -78,19 +78,28 @@ describe("coach realtime authorization CI security contract", () => {
   });
 
   it("keeps Playwright service-role access on the dedicated CI project", () => {
+    // The identity-generation/preflight/collision-guard surface that used
+    // to live inline in this workflow (E2E_DEDICATED_CI, the node preflight
+    // script, E2E_PREFLIGHT_FAILED labels) moved to
+    // scripts/e2e-identity-lifecycle.ts + src/lib/supabase/e2e-identity-guard.ts
+    // when PR #455 landed on main — see
+    // src/lib/testing/e2e-identity-contract.test.ts for that surface's own
+    // contract test. What's left here is just: the job still runs against
+    // the dedicated CI project's own secrets, never the shared test project's.
     expect(e2eWorkflow).toMatch(/playwright:[\s\S]*environment:\s*e2e-ci/);
     expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_URL");
     expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_SERVICE_ROLE_KEY");
     expect(e2eWorkflow).not.toContain("secrets.TEST_SUPABASE_SERVICE_ROLE_KEY");
     expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_PROJECT_REF");
-    expect(e2eWorkflow).toContain("BROWSER_QA_SUPABASE_PROJECT_REF");
-    expect(e2eWorkflow).toContain("new URL(ciUrl)");
-    expect(e2eWorkflow).toContain("parsed.hostname !== `${ciRef}.supabase.co`");
-    expect(e2eWorkflow).not.toContain("ciUrl.includes");
-    expect(e2eWorkflow).toContain('E2E_DEDICATED_CI: "1"');
-    expect(e2eWorkflow).toContain("E2E_PREFLIGHT_FAILED: identity_missing_duplicate_or_namespace");
-    expect(e2eWorkflow).toContain("E2E_PREFLIGHT_FAILED: url_shape");
-    expect(e2eWorkflow).toContain("E2E_PREFLIGHT_FAILED: project_ref_or_url_shape");
+  });
+
+  it("scopes E2E concurrency to its own dedicated project instead of the old shared-project group", () => {
+    // E2E runs against its own dedicated Supabase project now, so it only
+    // needs to serialize against runs sharing that same project — not
+    // against eSign/browser-QA or coach-canary runs on other projects.
+    expect(e2eWorkflow).toContain("group: e2e-dedicated-${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}");
+    expect(e2eWorkflow).not.toContain("group: e2e-shared-test-project");
+    expect(e2eWorkflow).toContain("queue: max");
   });
 
   it("holds a DB-level advisory lock for the whole E2E suite run", () => {
@@ -108,15 +117,6 @@ describe("coach realtime authorization CI security contract", () => {
     expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: identity_missing_duplicate_or_namespace");
     expect(coachWorkflow).not.toMatch(/console\.log\(/);
     expect(coachWorkflow).not.toMatch(/print\([^)]*(os\.environ|values|EMAIL|PASSWORD)/);
-  });
-  it("masks the generated CI password before writing it to the runner environment", () => {
-    const passwordAssignment = e2eWorkflow.indexOf('password="$(openssl rand -base64 36');
-    const mask = e2eWorkflow.indexOf('echo "::add-mask::$password"');
-    const passwordWrite = e2eWorkflow.indexOf("E2E_TEST_USER_PASSWORD=%s", mask);
-    expect(passwordAssignment).toBeGreaterThan(-1);
-    expect(mask).toBeGreaterThan(passwordAssignment);
-    expect(passwordWrite).toBeGreaterThan(mask);
-    expect(e2eWorkflow).not.toContain("printf 'E2E_TEST_USER_PASSWORD=%s\\n' \"$(openssl");
   });
   it("is a single job — not split across jobs that would each need their own environment approval", () => {
     const jobsBlockStart = coachWorkflow.indexOf("\njobs:\n");

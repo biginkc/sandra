@@ -1,8 +1,13 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "../src/lib/supabase/types";
-import { assertBrowserQaProtected, assertIdentity, createIdentity, identityFromEnvironment } from "../src/lib/testing/e2e-identity-policy";
-import { assertSafeE2ESupabaseTarget } from "../src/lib/supabase/e2e-target-safety";
+import {
+  assertExistingUserMatchesIdentity,
+  ensureE2ERunEnvironment,
+  identityForPrincipal,
+  type E2EPrincipal,
+} from "../src/lib/supabase/e2e-identity-guard";
+import { assertSafeE2ESupabaseTargetFromEnvironment } from "../src/lib/supabase/e2e-target-safety";
 import {
   MOCK_PROVIDER_CAMPAIGN_ID,
   MOCK_SENDER_PRIMARY,
@@ -18,11 +23,15 @@ import {
  * without going through the UI.
  */
 
-const PRIMARY_IDENTITY = process.env.CI === "1"
-  ? identityFromEnvironment()
-  : createIdentity("gha-1-1", "local-development-only-password-000000");
-export const TEST_USER_EMAIL = PRIMARY_IDENTITY.email;
-export const TEST_USER_PASSWORD = PRIMARY_IDENTITY.password;
+const E2E_RUN_ENVIRONMENT = ensureE2ERunEnvironment();
+const PRIMARY_E2E_IDENTITY = identityForPrincipal(E2E_RUN_ENVIRONMENT);
+
+export const TEST_USER_EMAIL = PRIMARY_E2E_IDENTITY.email;
+export const TEST_USER_PASSWORD = PRIMARY_E2E_IDENTITY.password;
+export const TEST_ASSIGNEE_EMAIL = identityForPrincipal(
+  E2E_RUN_ENVIRONMENT,
+  "assignee",
+).email;
 export const E2E_MOCK_BUSINESS_NUMBER = MOCK_SENDER_PRIMARY;
 
 export function adminClient(): SupabaseClient<Database> {
@@ -37,11 +46,7 @@ export function adminClient(): SupabaseClient<Database> {
       "E2E fixtures need TEST_SUPABASE_URL + TEST_SUPABASE_SERVICE_ROLE_KEY in the environment.",
     );
   }
-  assertSafeE2ESupabaseTarget(url, {
-    allowLocal: process.env.E2E_ALLOW_LOCAL_SUPABASE === "1",
-    dedicatedCi: process.env.E2E_DEDICATED_CI === "1",
-    expectedProjectRef: process.env.E2E_CI_SUPABASE_PROJECT_REF,
-  });
+  assertSafeE2ESupabaseTargetFromEnvironment(url);
   return createClient<Database>(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -125,8 +130,9 @@ async function seedMockDeliveryCatalog(
 export const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 
 /**
- * Ensure the shared E2E user exists in auth.users, can sign in with the shared
- * test password, AND has an "owner" membership in the default BMH org.
+ * Ensure this run's namespaced E2E user exists in auth.users, can sign in with
+ * the one job-scoped password, AND has the requested membership in the default
+ * BMH org.
  * Idempotent — returns the user's id whether it was found or created.
  *
  * The membership repair is load-bearing post-Stage 1: a freshly-created test
@@ -137,8 +143,15 @@ export const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
  */
 export async function ensureTestUser(
   client: SupabaseClient<Database>,
+  options: {
+    principal?: E2EPrincipal;
+    membershipRole?: "owner" | "member";
+  } = {},
 ): Promise<string> {
-  assertBrowserQaProtected({ email: TEST_USER_EMAIL, app_metadata: PRIMARY_IDENTITY.appMetadata });
+  const identity = identityForPrincipal(
+    E2E_RUN_ENVIRONMENT,
+    options.principal ?? "primary",
+  );
   // Paginate the FULL user list (Codex month-view round 4): the shared
   // test project accumulates users faster than a single 200-row page —
   // when the shared account fell past page one, this helper concluded it
@@ -148,7 +161,7 @@ export async function ensureTestUser(
   // page parsing bug — same locally-bounded pattern as
   // fetchAssigneeEmails).
   const MAX_USER_PAGES = 50;
-  let existing: { id: string; email?: string | null; app_metadata?: unknown } | undefined;
+  let existing: { id: string } | undefined;
   for (let page = 1; page <= MAX_USER_PAGES && !existing; page++) {
     const { data: list, error: listErr } = await client.auth.admin.listUsers({
       page,
@@ -156,25 +169,27 @@ export async function ensureTestUser(
     });
     if (listErr) throw listErr;
     const users = list?.users ?? [];
-    existing = users.find((u) => u.email?.trim().toLowerCase() === TEST_USER_EMAIL);
+    existing = users.find(
+      (user) => user.email?.trim().toLowerCase() === identity.email,
+    );
     if (users.length < 1000) break;
   }
 
   let userId: string;
   if (existing) {
+    assertExistingUserMatchesIdentity(existing, identity);
     userId = existing.id;
-    assertIdentity(existing, PRIMARY_IDENTITY);
   } else {
     const { data: created, error: createErr } =
       await client.auth.admin.createUser({
-        email: TEST_USER_EMAIL,
-        password: TEST_USER_PASSWORD,
+        email: identity.email,
+        password: identity.password,
         email_confirm: true,
-        app_metadata: PRIMARY_IDENTITY.appMetadata,
+        app_metadata: identity.appMetadata,
       });
     if (createErr || !created?.user)
       throw createErr ?? new Error("createUser returned no user");
-    assertIdentity(created.user, PRIMARY_IDENTITY);
+    assertExistingUserMatchesIdentity(created.user, identity);
     userId = created.user.id;
   }
 
@@ -198,12 +213,16 @@ export async function ensureTestUser(
   const { error: membershipErr } = await (client as unknown as MembershipWriter)
     .from("memberships")
     .upsert(
-      { user_id: userId, org_id: DEFAULT_ORG_ID, role: "owner" },
+      {
+        user_id: userId,
+        org_id: DEFAULT_ORG_ID,
+        role: options.membershipRole ?? "owner",
+      },
       { onConflict: "user_id,org_id" },
     );
   if (membershipErr) {
     throw new Error(
-      `ensureTestUser: failed to upsert membership for ${TEST_USER_EMAIL}: ${membershipErr.message}`,
+      `ensureTestUser: failed to upsert the run-scoped membership: ${membershipErr.message}`,
     );
   }
 

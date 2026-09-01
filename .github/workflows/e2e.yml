@@ -21,6 +21,13 @@ on:
 # serialize against runs sharing that same project — not against eSign/browser-QA
 # or coach-canary runs on other projects. Keying the group by project ref keeps
 # same-database runs single-file while letting other tracks run concurrently.
+#
+# This concurrency group alone isn't a complete guard: it only serializes runs
+# whose *own* checked-out e2e.yml carries this same group string. A branch
+# that hasn't rebased onto this change still runs under the old
+# e2e-shared-test-project group and can execute in parallel against the same
+# dedicated project. The DB-level advisory lock taken in e2e/global-setup.ts
+# is the guard that's immune to that drift — see its file comment.
 concurrency:
   group: e2e-dedicated-${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
   cancel-in-progress: false
@@ -34,8 +41,7 @@ jobs:
     environment: e2e-ci
 
     env:
-      # Feeds playwright.config.ts + e2e/fixtures.ts. Populate these in
-      # GitHub → repo settings → Secrets and variables → Actions.
+      E2E_CI_SUPABASE_PROJECT_REF: ${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
       NEXT_PUBLIC_SOFTPHONE_TRANSPORT: "simulated"
       # Skip the Haiku intent classifier in e2e — no ANTHROPIC_API_KEY here,
       # and the classifier is already unit-tested in
@@ -60,39 +66,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate run-scoped CI identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          slug="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          password="$(openssl rand -base64 36 | tr -d '\n')"
-          printf 'E2E_RUN_SLUG=%s\n' "$slug" >> "$GITHUB_ENV"
-          printf 'E2E_TEST_USER_EMAIL=e2e-ci+%s@bmhgroupkc.com\n' "$slug" >> "$GITHUB_ENV"
-          echo "::add-mask::$password"
-          printf 'E2E_TEST_USER_PASSWORD=%s\n' "$password" >> "$GITHUB_ENV"
-          case "$slug" in gha-[1-9]*-[1-9]*) ;; *) echo 'invalid CI identity namespace' >&2; exit 1 ;; esac
+      - name: Generate job-scoped E2E identity
+        run: npx tsx scripts/e2e-identity-lifecycle.ts emit
 
-      - name: Assert CI identity is not browser-QA scoped
+      - name: Preflight E2E identity and arm browser-QA circuit breaker
+        run: npx tsx scripts/e2e-identity-lifecycle.ts preflight
         env:
-          E2E_CI_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
-          E2E_CI_SUPABASE_PROJECT_REF: ${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
-          BROWSER_QA_SUPABASE_PROJECT_REF: ${{ vars.BROWSER_QA_SUPABASE_PROJECT_REF }}
-          BROWSER_QA_A_EMAIL: ${{ secrets.BROWSER_QA_A_EMAIL }}
-          BROWSER_QA_B_EMAIL: ${{ secrets.BROWSER_QA_B_EMAIL }}
-          BROWSER_QA_C_EMAIL: ${{ secrets.BROWSER_QA_C_EMAIL }}
-        run: |
-          set -euo pipefail
-          node - <<'NODE'
-          const values = [process.env.E2E_TEST_USER_EMAIL, process.env.BROWSER_QA_A_EMAIL, process.env.BROWSER_QA_B_EMAIL, process.env.BROWSER_QA_C_EMAIL].map((value) => value?.trim().toLowerCase() ?? "");
-          if (values.some((value) => !value) || new Set(values).size !== values.length || !values[0].startsWith("e2e-ci+")) { console.error("E2E_PREFLIGHT_FAILED: identity_missing_duplicate_or_namespace"); process.exit(1); }
-          const ciRef = process.env.E2E_CI_SUPABASE_PROJECT_REF?.trim().toLowerCase();
-          const browserRef = process.env.BROWSER_QA_SUPABASE_PROJECT_REF?.trim().toLowerCase();
-          const ciUrl = process.env.E2E_CI_SUPABASE_URL?.trim();
-          let parsed;
-          try { parsed = new URL(ciUrl); } catch { console.error("E2E_PREFLIGHT_FAILED: url_shape"); process.exit(1); }
-          const expectedOrigin = `https://${ciRef}.supabase.co`;
-          if (!ciRef || !browserRef || !ciUrl || ciRef === browserRef || (ciUrl !== expectedOrigin && ciUrl !== `${expectedOrigin}/`) || parsed.protocol !== 'https:' || parsed.hostname !== `${ciRef}.supabase.co` || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash || parsed.pathname !== '/') { console.error("E2E_PREFLIGHT_FAILED: project_ref_or_url_shape"); process.exit(1); }
-          NODE
+          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: Verify Chrome browser
         run: |
@@ -114,10 +95,9 @@ jobs:
           TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
           TEST_SUPABASE_ANON_KEY: ${{ secrets.E2E_CI_SUPABASE_ANON_KEY }}
           TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
-          E2E_DEDICATED_CI: "1"
-          E2E_CI_SUPABASE_PROJECT_REF: ${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
-          # Direct-connection URL (db.<ref>.supabase.co:5432) for the
-          # Playwright globalSetup advisory lock — see e2e/global-setup.ts.
+          # Transaction-mode pooler URL (port 6543, sslmode=no-verify — this
+          # project has no direct-connection DNS) for the Playwright
+          # globalSetup advisory-lock transaction — see e2e/global-setup.ts.
           # Never printed; consumed only by the pg client inside Node.
           E2E_CI_SUPABASE_DB_URL: ${{ secrets.E2E_CI_SUPABASE_DB_URL }}
         run: |
@@ -136,6 +116,13 @@ jobs:
           # the click and URL assertions remain unchanged.
           npm run test:e2e -- --grep 'Leads board v2 foundation is usable at desktop and narrow widths'
           PLAYWRIGHT_WEBPACK_DEV_SERVER=1 npm run test:e2e -- --grep 'switching tabs preserves URL state|sidebar nav links all route correctly' --timeout=120000
+
+      - name: Clean up exact-run E2E identities and verify browser-QA isolation
+        if: always()
+        run: npx tsx scripts/e2e-identity-lifecycle.ts cleanup
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: Upload HTML report on failure
         if: failure()

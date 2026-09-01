@@ -39,8 +39,7 @@ setup("authenticate", async ({ page }) => {
   const auth = createBrowserClient<Database>(url, anonKey, {
     isSingleton: false,
     cookies: {
-      getAll: () =>
-        [...cookieJar].map(([name, value]) => ({ name, value })),
+      getAll: () => [...cookieJar].map(([name, value]) => ({ name, value })),
       setAll: (cookies) => {
         for (const cookie of cookies) {
           if (cookie.value) cookieJar.set(cookie.name, cookie.value);
