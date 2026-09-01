@@ -1,5 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import Link from "next/link";
+import { hydrateRoot, type Root } from "react-dom/client";
+import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { LeadMediaHero } from "./lead-media-hero";
@@ -228,6 +230,130 @@ describe("<LeadMediaHero />", () => {
     fireEvent.error(screen.getByTestId("lead-media-image"));
     expect(screen.getByTestId("lead-media-flat")).toBeInTheDocument();
     expect(screen.queryByTestId("lead-media-image")).toBeNull();
+  });
+
+  it("does not skip aerial for duplicate failures from the same Street View render", () => {
+    render(
+      <LeadMediaHero
+        {...shared}
+        media={{
+          kind: "streetView",
+          images: streetImages,
+          aerialImages,
+          aerialResolvedBy: "address",
+          heading: null,
+          panoramaId: "pano-1",
+        }}
+      />,
+    );
+    const image = screen.getByTestId("lead-media-image");
+
+    act(() => {
+      image.dispatchEvent(new Event("error"));
+      image.dispatchEvent(new Event("error"));
+    });
+
+    expect(screen.getByTestId("lead-media-aerial")).toHaveAttribute(
+      "data-media-fallback-reason",
+      "street-image-error",
+    );
+    expect(screen.getByTestId("lead-media-image")).toHaveAttribute(
+      "src",
+      aerialImages.small,
+    );
+    expect(screen.queryByTestId("lead-media-flat")).toBeNull();
+  });
+
+  it("reconciles a Street View image that failed before hydration", async () => {
+    const hero = (
+      <LeadMediaHero
+        {...shared}
+        media={{
+          kind: "streetView",
+          images: streetImages,
+          aerialImages,
+          aerialResolvedBy: "address",
+          heading: null,
+          panoramaId: "pano-1",
+        }}
+      />
+    );
+    const container = document.createElement("div");
+    container.innerHTML = renderToString(hero);
+    document.body.append(container);
+    const image = within(container).getByTestId("lead-media-image");
+    Object.defineProperty(image, "complete", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(image, "naturalWidth", {
+      configurable: true,
+      get: () => (image.getAttribute("src") === streetImages.small ? 0 : 640),
+    });
+    let root: Root | undefined;
+
+    try {
+      await act(async () => {
+        root = hydrateRoot(container, hero);
+      });
+
+      expect(
+        within(container).getByTestId("lead-media-aerial"),
+      ).toHaveAttribute("data-media-fallback-reason", "street-image-error");
+      expect(within(container).getByTestId("lead-media-image")).toHaveAttribute(
+        "src",
+        aerialImages.small,
+      );
+      expect(within(container).queryByTestId("lead-media-flat")).toBeNull();
+    } finally {
+      await act(async () => {
+        root?.unmount();
+      });
+      container.remove();
+    }
+  });
+
+  it("reconciles an aerial image that failed before hydration", async () => {
+    const hero = (
+      <LeadMediaHero
+        {...shared}
+        media={{
+          kind: "aerial",
+          images: aerialImages,
+          resolvedBy: "address",
+          fallbackReason: "no-coverage",
+        }}
+      />
+    );
+    const container = document.createElement("div");
+    container.innerHTML = renderToString(hero);
+    document.body.append(container);
+    const image = within(container).getByTestId("lead-media-image");
+    Object.defineProperty(image, "complete", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(image, "naturalWidth", {
+      configurable: true,
+      value: 0,
+    });
+    let root: Root | undefined;
+
+    try {
+      await act(async () => {
+        root = hydrateRoot(container, hero);
+      });
+
+      expect(
+        within(container).getByTestId("lead-media-flat"),
+      ).toBeInTheDocument();
+      expect(within(container).queryByTestId("lead-media-image")).toBeNull();
+    } finally {
+      await act(async () => {
+        root?.unmount();
+      });
+      container.remove();
+    }
   });
 
   it("uses the flat header only when neither media view resolves", () => {
