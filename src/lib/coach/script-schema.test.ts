@@ -98,7 +98,7 @@ describe("assertValidClosrScript", () => {
       .map((line) => line.text)
       .join("\u0000");
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "6678196aaa580be5e048682dfa74a88c7445c0868d8f9b295479de246605ea87",
+      "c9346789eb924fe4c3f8f2d346e8f1d86fffc4518af38390adc77288e3793181",
     );
   });
 
@@ -135,6 +135,17 @@ describe("assertValidClosrScript", () => {
     expect(sellerFacingCopy).toContain("72 hours to schedule the initial walkthrough");
 
     expect(close!.match.advance_landmarks.map((landmark) => landmark.id)).not.toContain("esign_steps");
+  });
+
+  it("uses Plan Zero's exact replacement line for the removed e-sign walkthrough, exactly once", () => {
+    const script = scriptJson as unknown as ClosrScript;
+    const replacementMatches = script.phases
+      .flatMap((phase) => phase.display.branches)
+      .flatMap((branch) => branch.variants)
+      .flatMap((variant) => variant.lines)
+      .filter((line) => line.type === "say" && line.text === "Awesome, I just sent it to your email. Please pull it up for me.");
+    expect(replacementMatches).toHaveLength(1);
+    expect(replacementMatches[0]?.id).toBe("close.going-over-the-contract.default.03");
   });
 
   it("rejects a phase missing match.entry_landmarks/advance_landmarks", () => {

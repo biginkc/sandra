@@ -484,6 +484,7 @@
               { "key": "default", "label": null, "lines": [
                 { "id": "close.going-over-the-contract.default.01", "type": "say", "text": "Just to confirm {seller_name}, the address is {property_address}, the purchase price we agreed on is {offer_price}. The closing date we agreed on is {closing_date}. The company we will be using to handle closing and wiring you your funds we will let you know via a formal notification! Oh yeah! Do you want your funds via a wire, or a check at closing?" },
                 { "id": "close.going-over-the-contract.default.02", "type": "say", "text": "Awesome, Do you have any other questions?" },
+                { "id": "close.going-over-the-contract.default.03", "type": "say", "text": "Awesome, I just sent it to your email. Please pull it up for me." },
                 { "id": "close.going-over-the-contract.default.04", "type": "say", "text": "Great! Our team will be reaching out within the next 72 hours to schedule the initial walkthrough, it is a blessing being able to help you! Talk soon." }
               ] }
             ]

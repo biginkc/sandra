@@ -188,12 +188,16 @@ describe("buildCoachSectionScriptBlock", () => {
     expect(buildCoachSectionScriptBlock("unknown.section", tokens)).toBeNull();
   });
 
-  it("renders only the seller-facing e-sign wrap-up after contract confirmation", () => {
+  it("renders the Plan Zero e-sign replacement line and the wrap-up after contract confirmation", () => {
     const block = buildCoachSectionScriptBlock("close.esign-and-wrap", tokens);
     expect(block?.branches).toHaveLength(1);
     const lines = block!.branches[0].selected.lines;
-    expect(lines.map((line) => line.id)).toEqual(["close.going-over-the-contract.default.04"]);
+    expect(lines.map((line) => line.id)).toEqual([
+      "close.going-over-the-contract.default.03",
+      "close.going-over-the-contract.default.04",
+    ]);
     const text = lines.map((line) => allText(line.segments)).join(" ");
+    expect(text).toContain("Awesome, I just sent it to your email. Please pull it up for me.");
     expect(text).toContain("72 hours to schedule the initial walkthrough");
     expect(text).not.toMatch(/view documents|adopt and sign|red flashing box|second red box|share back with/i);
   });
