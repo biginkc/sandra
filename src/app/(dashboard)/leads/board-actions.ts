@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { getCallerMemberships } from "@/lib/auth/memberships";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
@@ -63,6 +64,8 @@ export async function loadLeadBoardAction(
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
+    const memberships = await getCallerMemberships();
+    const orgIds = memberships.map((membership) => membership.org_id);
 
     let assigneeId: string | null = null;
     let unassigned = false;
@@ -107,6 +110,7 @@ export async function loadLeadBoardAction(
       unassigned,
       dayStart: dayStart.toISOString(),
       dayEnd: dayEnd.toISOString(),
+      orgIds,
     }, cursors, statuses));
   } catch (error) {
     reportError(error, { tags: { surface: "leads_board_page" } });

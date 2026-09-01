@@ -4,6 +4,12 @@ import { STATUS_ORDER } from "./board-config";
 import type { InboundAttentionFilter, InboundOwnershipFilter } from "./inbound-filters";
 import type { PropertyStatus } from "./actions";
 import type { Database } from "@/lib/supabase/types";
+import {
+  createPipelineSignalLoader,
+  loadPipelineSignals,
+  type PipelineSignalLoader,
+} from "@/lib/esign/pipeline-signal";
+import type { ContractStatusRecord } from "@/lib/esign/contract-status";
 import { truncateMessagePreview } from "../properties/prospects-query";
 import type { UrgencyFilter } from "./urgency";
 
@@ -43,6 +49,7 @@ export type LeadBoardLead = Pick<
   homeowner_sms_opted_out: boolean | null;
   homeowner_sms_opted_out_at: string | null;
   is_dnc_locked?: boolean;
+  latestContract?: ContractStatusRecord | null;
 };
 
 export type ListMembership = { listId: string; name: string; color: string | null };
@@ -65,6 +72,7 @@ export type LeadBoardData = {
   listMemberships: Record<string, ListMembership[]>;
   customTags: Record<string, CustomTag[]>;
   lastMessageByPropertyId: Record<string, LastMessage>;
+  latestContractByPropertyId: Record<string, ContractStatusRecord>;
 };
 
 export type LeadBoardQueryContext = {
@@ -73,6 +81,7 @@ export type LeadBoardQueryContext = {
   unassigned: boolean;
   dayStart: string;
   dayEnd: string;
+  orgIds?: readonly string[];
 };
 
 function rpcFilters(filters: LeadBoardFilters, context: LeadBoardQueryContext) {
@@ -179,8 +188,11 @@ async function fetchCardDecorations(
     last_message_body?: string | null;
     last_message_created_at?: string | null;
   }>,
-): Promise<Pick<LeadBoardData, "listMemberships" | "customTags" | "lastMessageByPropertyId">> {
+  orgIds: readonly string[],
+  pipelineSignalLoader?: PipelineSignalLoader,
+): Promise<Pick<LeadBoardData, "listMemberships" | "customTags" | "lastMessageByPropertyId" | "latestContractByPropertyId">> {
   const ids = rows.map((row) => row.id);
+  const trustedOrgIds = new Set(orgIds.filter(Boolean));
   const membershipRows: Array<{
     property_id: string;
     list_id: string;
@@ -191,10 +203,19 @@ async function fetchCardDecorations(
     tag_id: string;
     tags: { name: string; color: string | null; category: string } | null;
   }> = [];
+  const latestContractByPropertyId: Record<string, ContractStatusRecord> = {};
   for (let start = 0; start < ids.length; start += 50) {
     const chunk = ids.slice(start, start + 50);
-    const [{ data: memberships, error: membershipsError }, { data: tags, error: tagsError }] =
+    const [
+      { data: propertyScopes, error: propertyScopesError },
+      { data: memberships, error: membershipsError },
+      { data: tags, error: tagsError },
+    ] =
       await Promise.all([
+        supabase
+          .from("properties")
+          .select("id, org_id")
+          .in("id", chunk),
         supabase
           .from("property_lists")
           .select("property_id, list_id, lists!property_lists_list_id_fkey(name, color, archived_at)")
@@ -212,6 +233,53 @@ async function fetchCardDecorations(
     }
     if (!tagsError) {
       tagRows.push(...((tags ?? []) as unknown as typeof tagRows));
+    }
+
+    // Board RLS can return cards from every active organization. Resolve each
+    // card's tenant from the trusted properties table, then keep every bounded
+    // eSign lookup inside exactly that tenant. Missing, unauthorized, or
+    // contradictory scope rows fail closed to an undecorated card.
+    if (!propertyScopesError && pipelineSignalLoader && trustedOrgIds.size > 0) {
+      const requestedIds = new Set(chunk);
+      const orgByPropertyId = new Map<string, string>();
+      const conflictingPropertyIds = new Set<string>();
+      for (const scope of propertyScopes ?? []) {
+        if (!requestedIds.has(scope.id) || !trustedOrgIds.has(scope.org_id)) continue;
+        const existingOrgId = orgByPropertyId.get(scope.id);
+        if (existingOrgId && existingOrgId !== scope.org_id) {
+          conflictingPropertyIds.add(scope.id);
+          orgByPropertyId.delete(scope.id);
+          continue;
+        }
+        if (!conflictingPropertyIds.has(scope.id)) {
+          orgByPropertyId.set(scope.id, scope.org_id);
+        }
+      }
+
+      const propertyIdsByOrg = new Map<string, string[]>();
+      for (const [propertyId, propertyOrgId] of orgByPropertyId) {
+        const propertyIds = propertyIdsByOrg.get(propertyOrgId) ?? [];
+        propertyIds.push(propertyId);
+        propertyIdsByOrg.set(propertyOrgId, propertyIds);
+      }
+      const scopedSignals = await Promise.all(
+        [...propertyIdsByOrg].map(async ([propertyOrgId, propertyIds]) =>
+          loadPipelineSignals(pipelineSignalLoader, {
+            orgId: propertyOrgId,
+            propertyIds,
+          }),
+        ),
+      );
+      for (const contractSignals of scopedSignals) {
+        for (const [propertyId, signal] of contractSignals) {
+          if (orgByPropertyId.get(propertyId) !== signal.org_id) continue;
+          latestContractByPropertyId[propertyId] = {
+            id: signal.id,
+            created_at: signal.created_at,
+            status: signal.status,
+          };
+        }
+      }
     }
   }
 
@@ -243,7 +311,12 @@ async function fetchCardDecorations(
       createdAt: row.last_message_created_at,
     };
   }
-  return { listMemberships, customTags, lastMessageByPropertyId };
+  return {
+    listMemberships,
+    customTags,
+    lastMessageByPropertyId,
+    latestContractByPropertyId,
+  };
 }
 
 export async function fetchLeadBoardData(
@@ -252,6 +325,7 @@ export async function fetchLeadBoardData(
   context: LeadBoardQueryContext,
   cursors: Partial<Record<PropertyStatus, LeadBoardCursor | null>> = {},
   statuses: readonly PropertyStatus[] = STATUS_ORDER,
+  pipelineSignalLoader?: PipelineSignalLoader,
 ): Promise<LeadBoardData> {
   const pages = await Promise.all(
     statuses.map(async (status) => ({
@@ -271,13 +345,23 @@ export async function fetchLeadBoardData(
     if (page.nextCursor) nextCursors[status] = page.nextCursor;
   }
   const includeFacets = statuses.length === STATUS_ORDER.length;
+  const resolvedPipelineSignalLoader =
+    pipelineSignalLoader ?? createPipelineSignalLoader(supabase);
   const [decorations, urgencyCounts, baselineTotals] = await Promise.all([
-    fetchCardDecorations(supabase, leads),
+    fetchCardDecorations(
+      supabase,
+      leads,
+      context.orgIds ?? [],
+      resolvedPipelineSignalLoader,
+    ),
     includeFacets ? fetchUrgencyCounts(supabase, filters, context) : Promise.resolve(null),
     includeFacets ? fetchBaselineStageTotals(supabase) : Promise.resolve(null),
   ]);
   return {
-    leads,
+    leads: leads.map((lead) => ({
+      ...lead,
+      latestContract: decorations.latestContractByPropertyId[lead.id] ?? null,
+    })),
     totals,
     baselineTotals,
     urgencyCounts,

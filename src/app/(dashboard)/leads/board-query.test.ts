@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
 import { fetchLeadBoardData, LEADS_COLUMN_PAGE_SIZE, type LeadBoardFilters } from "./board-query";
@@ -35,6 +35,309 @@ const filters: LeadBoardFilters = {
 };
 
 describe("fetchLeadBoardData", () => {
+  it("threads a bounded org-aware latest-contract map into the returned cards", async () => {
+    const lead = {
+      id: "11111111-1111-4111-8111-111111111111",
+      address: "123 Main St",
+      city: "Kansas City",
+      state: "MO",
+      zip: "64111",
+      market: "Jackson County MO",
+      status: "new_lead",
+      is_vacant: false,
+      cass_status: "verified",
+      absentee_flag: false,
+      assigned_user_id: null,
+      motivation_level: null,
+      outreach_dispo: null,
+      has_unread: false,
+      next_task_id: null,
+      next_task_title: null,
+      next_task_due_at: null,
+      homeowner: null,
+      homeowner_sms_opted_out: false,
+      homeowner_sms_opted_out_at: null,
+    };
+    const rpc = vi.fn(async (name: string) => {
+      if (name === "get_leads_board_page") {
+        return {
+          data: [{ rows: [lead], total_count: 1, snapshot_generation: "generation-a" }],
+          error: null,
+        };
+      }
+      if (name === "get_latest_esign_requests_for_properties") {
+        return {
+          data: [{
+            org_id: "22222222-2222-4222-8222-222222222222",
+            property_id: lead.id,
+            id: "33333333-3333-4333-8333-333333333333",
+            created_at: "2026-08-29T12:00:00.000000+00:00",
+            status: "signed",
+          }],
+          error: null,
+        };
+      }
+      return { data: [], error: null };
+    });
+    const client = {
+      rpc,
+      from(table: string) {
+        return {
+          select() {
+            return {
+              async in() {
+                if (table === "properties") {
+                  return {
+                    data: [{
+                      id: lead.id,
+                      org_id: "22222222-2222-4222-8222-222222222222",
+                    }],
+                    error: null,
+                  };
+                }
+                return { data: [], error: null };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as SupabaseClient<Database>;
+    const data = await fetchLeadBoardData(
+      client,
+      filters,
+      {
+        currentUserId: "44444444-4444-4444-8444-444444444444",
+        assigneeId: null,
+        unassigned: false,
+        dayStart: "2026-08-15T05:00:00.000Z",
+        dayEnd: "2026-08-16T05:00:00.000Z",
+        orgIds: ["22222222-2222-4222-8222-222222222222"],
+      },
+      {},
+      ["new_lead"],
+    );
+
+    expect(rpc).toHaveBeenCalledWith(
+      "get_latest_esign_requests_for_properties",
+      {
+        p_org_id: "22222222-2222-4222-8222-222222222222",
+        p_property_ids: [lead.id],
+      },
+    );
+    expect(rpc).not.toHaveBeenCalledWith(
+      "get_latest_esign_requests_for_properties",
+      expect.objectContaining({
+        p_org_id: expect.not.stringMatching(
+          /^22222222-2222-4222-8222-222222222222$/,
+        ),
+      }),
+    );
+    expect(data.latestContractByPropertyId[lead.id]).toEqual({
+      id: "33333333-3333-4333-8333-333333333333",
+      created_at: "2026-08-29T12:00:00.000000+00:00",
+      status: "signed",
+    });
+    expect(data.leads[0].latestContract).toEqual(
+      data.latestContractByPropertyId[lead.id],
+    );
+  });
+
+  it("groups initial board cards by their trusted organization without mixing signals", async () => {
+    const orgA = "22222222-2222-4222-8222-222222222222";
+    const orgB = "33333333-3333-4333-8333-333333333333";
+    const propertyA = "11111111-1111-4111-8111-111111111111";
+    const propertyB = "44444444-4444-4444-8444-444444444444";
+    const lead = (id: string, address: string) => ({
+      id,
+      address,
+      city: "Kansas City",
+      state: "MO",
+      zip: "64111",
+      market: "Jackson County MO",
+      status: "new_lead",
+      is_vacant: false,
+      cass_status: "verified",
+      absentee_flag: false,
+      assigned_user_id: null,
+      motivation_level: null,
+      outreach_dispo: null,
+      has_unread: false,
+      next_task_id: null,
+      next_task_title: null,
+      next_task_due_at: null,
+      homeowner: null,
+      homeowner_sms_opted_out: false,
+      homeowner_sms_opted_out_at: null,
+    });
+    const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
+      if (name === "get_leads_board_page") {
+        return {
+          data: [{
+            rows: [lead(propertyA, "123 Main St"), lead(propertyB, "456 Oak St")],
+            total_count: 2,
+            snapshot_generation: "generation-a",
+          }],
+          error: null,
+        };
+      }
+      if (name === "get_latest_esign_requests_for_properties") {
+        if (args?.p_org_id === orgA) {
+          return {
+            data: [
+              {
+                org_id: orgA,
+                property_id: propertyA,
+                id: "55555555-5555-4555-8555-555555555555",
+                created_at: "2026-08-29T12:00:00.000000+00:00",
+                status: "signed",
+              },
+              {
+                org_id: orgA,
+                property_id: propertyB,
+                id: "66666666-6666-4666-8666-666666666666",
+                created_at: "2026-08-29T13:00:00.000000+00:00",
+                status: "declined",
+              },
+            ],
+            error: null,
+          };
+        }
+        return {
+          data: [{
+            org_id: orgB,
+            property_id: propertyB,
+            id: "77777777-7777-4777-8777-777777777777",
+            created_at: "2026-08-29T14:00:00.000000+00:00",
+            status: "viewed",
+          }],
+          error: null,
+        };
+      }
+      return { data: [], error: null };
+    });
+    const client = {
+      rpc,
+      from(table: string) {
+        return {
+          select() {
+            return {
+              async in() {
+                return table === "properties"
+                  ? {
+                      data: [
+                        { id: propertyA, org_id: orgA },
+                        { id: propertyB, org_id: orgB },
+                      ],
+                      error: null,
+                    }
+                  : { data: [], error: null };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as SupabaseClient<Database>;
+
+    const data = await fetchLeadBoardData(
+      client,
+      filters,
+      {
+        currentUserId: "88888888-8888-4888-8888-888888888888",
+        assigneeId: null,
+        unassigned: false,
+        dayStart: "2026-08-15T05:00:00.000Z",
+        dayEnd: "2026-08-16T05:00:00.000Z",
+        orgIds: [orgA, orgB],
+      },
+      {},
+      ["new_lead"],
+    );
+
+    expect(rpc).toHaveBeenCalledWith("get_latest_esign_requests_for_properties", {
+      p_org_id: orgA,
+      p_property_ids: [propertyA],
+    });
+    expect(rpc).toHaveBeenCalledWith("get_latest_esign_requests_for_properties", {
+      p_org_id: orgB,
+      p_property_ids: [propertyB],
+    });
+    expect(data.latestContractByPropertyId[propertyA]).toMatchObject({
+      id: "55555555-5555-4555-8555-555555555555",
+      status: "signed",
+    });
+    expect(data.latestContractByPropertyId[propertyB]).toMatchObject({
+      id: "77777777-7777-4777-8777-777777777777",
+      status: "viewed",
+    });
+  });
+
+  it("does not invoke the org-scoped loader without a trusted server org id", async () => {
+    const lead = {
+      id: "11111111-1111-4111-8111-111111111111",
+      address: "123 Main St",
+      city: "Kansas City",
+      state: "MO",
+      zip: "64111",
+      market: "Jackson County MO",
+      status: "new_lead",
+      is_vacant: false,
+      cass_status: "verified",
+      absentee_flag: false,
+      assigned_user_id: null,
+      motivation_level: null,
+      outreach_dispo: null,
+      has_unread: false,
+      next_task_id: null,
+      next_task_title: null,
+      next_task_due_at: null,
+      homeowner: null,
+      homeowner_sms_opted_out: false,
+      homeowner_sms_opted_out_at: null,
+    };
+    const client = {
+      async rpc(name: string) {
+        if (name === "get_leads_board_page") {
+          return {
+            data: [{ rows: [lead], total_count: 1, snapshot_generation: "generation-a" }],
+            error: null,
+          };
+        }
+        return { data: [], error: null };
+      },
+      from() {
+        return {
+          select() {
+            return {
+              async in() {
+                return { data: [], error: null };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as SupabaseClient<Database>;
+    const loader = vi.fn().mockResolvedValue([]);
+
+    const data = await fetchLeadBoardData(
+      client,
+      filters,
+      {
+        currentUserId: "44444444-4444-4444-8444-444444444444",
+        assigneeId: null,
+        unassigned: false,
+        dayStart: "2026-08-15T05:00:00.000Z",
+        dayEnd: "2026-08-16T05:00:00.000Z",
+      },
+      {},
+      ["new_lead"],
+      loader,
+    );
+
+    expect(loader).not.toHaveBeenCalled();
+    expect(data.latestContractByPropertyId).toEqual({});
+    expect(data.leads[0].latestContract).toBeNull();
+  });
+
   it("gets exact count and bounded rows from one snapshot RPC", async () => {
     const { client, calls } = clientHarness();
     const data = await fetchLeadBoardData(client, filters, {

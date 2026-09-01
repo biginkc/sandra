@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { LEAD_SOURCES } from "@/lib/leads/sources";
+import { getCallerMemberships } from "@/lib/auth/memberships";
 import { createClient } from "@/lib/supabase/server";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
 
@@ -34,10 +35,15 @@ export default async function LeadsPage({
   const params = await searchParams;
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  const [teamResult, { data: counties }] = await Promise.all([
+  const [teamResult, { data: counties }, memberships] = await Promise.all([
     listOrgUsers(),
     supabase.from("counties").select("market").order("state").order("name"),
+    getCallerMemberships(),
   ]);
+  // Resolve every active organization from the server session. Board cards
+  // can span those organizations, so eSign decoration is scoped per card
+  // rather than selecting an arbitrary first membership.
+  const orgIds = memberships.map((membership) => membership.org_id);
   const teamMembers = teamResult.ok ? teamResult.data : [];
   const inboundFilters = resolveInboundLeadFilters(params, {
     currentUserId: user?.id ?? null,
@@ -70,6 +76,7 @@ export default async function LeadsPage({
       unassigned: inboundFilters.ownership === "unassigned",
       dayStart: dayStart.toISOString(),
       dayEnd: dayEnd.toISOString(),
+      orgIds,
     });
   } catch {
     loadFailed = true;
