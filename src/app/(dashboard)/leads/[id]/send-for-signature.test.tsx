@@ -78,7 +78,7 @@ describe("SendForSignature", () => {
   }>([
     {
       blockers: ["owner_email_missing"],
-      message: "Send disabled: the seller has no email address.",
+      message: "Send disabled: save a seller email on the lead before sending.",
     },
     {
       blockers: ["no_templates"],
@@ -138,7 +138,14 @@ describe("SendForSignature", () => {
     await user.click(screen.getByTestId("send-for-signature-trigger"));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Send disabled: the seller has no email address.",
+      "Send disabled: save a seller email on the lead before sending.",
+    );
+    await user.type(
+      within(screen.getByTestId("esign-signer-0")).getByLabelText("Email"),
+      "seller@example.com",
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Send disabled: save a seller email on the lead before sending.",
     );
     expect(screen.getByTestId("send-for-signature-submit")).toBeDisabled();
     expect(sendAction).not.toHaveBeenCalled();
