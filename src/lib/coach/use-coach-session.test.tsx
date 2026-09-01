@@ -404,7 +404,7 @@ describe("useCoachSession", () => {
     act(() => result.current.dispatch({
       type: "phase",
       phaseId: "close",
-      scriptVersion: "1.1.0",
+      scriptVersion: "1.2.0",
       matcherVersion: "1.0.0",
       ts: "t1",
     }));

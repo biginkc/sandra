@@ -1298,7 +1298,7 @@ describe("SoftphoneProvider coach UI flag", () => {
           text: "hello there",
           isFinal: true,
           ts: "t2",
-          scriptVersion: "1.1.0",
+          scriptVersion: "1.2.0",
           matcherVersion: "3",
         },
       }),

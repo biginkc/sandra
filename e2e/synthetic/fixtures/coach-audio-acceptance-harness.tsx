@@ -143,7 +143,7 @@ function AudioAcceptanceHarness() {
       type: "transcript", speaker: "seller",
       text: "This synthetic conversation contains no personal information.",
       isFinal: true, ts: "synthetic-audio-transcript",
-      scriptVersion: "1.1.0", matcherVersion: "synthetic",
+      scriptVersion: "1.2.0", matcherVersion: "synthetic",
     }), 100);
     return () => clearTimeout(timer);
   }, []);

@@ -148,6 +148,42 @@ test("walks every PDF-aligned section forward and backward with correct boundari
   await expect(page.getByTestId("coach-back")).toBeDisabled();
 });
 
+test("renders the seller email-address request once in underwriting and nowhere in the named excluded paths", async ({ page }) => {
+  await mountCoach(page);
+  const requestPattern = /\b(?:what(?:'s| is)|which|can i get|could we have).{0,80}\bemail(?: address)?\b/i;
+  const visibleRequests: { id: string; title: string; text: string }[] = [];
+
+  for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
+    const section = sections[sectionIndex];
+    const scriptText = page.getByTestId("current-section-script");
+    const visibleText = await scriptText.innerText();
+    if (requestPattern.test(visibleText)) {
+      visibleRequests.push({ id: section.id, title: section.title, text: visibleText });
+    }
+
+    if (section.id === "introduction.contact-details" || section.id === "offer.outcome-tracks") {
+      expect(visibleText, `${section.title} must not request the seller's email address`).not.toMatch(requestPattern);
+    }
+    if (section.id === "close.decision-tracks") {
+      const sellerAccepts = page.getByRole("tab", { name: "Use They accept spoken path for Choose the closing path" });
+      await sellerAccepts.click();
+      expect(
+        await scriptText.innerText(),
+        "They accept must not request the seller's email address",
+      ).not.toMatch(requestPattern);
+    }
+
+    if (sectionIndex < sections.length - 1) await page.getByTestId("coach-next").click();
+  }
+
+  expect(visibleRequests).toHaveLength(1);
+  expect(visibleRequests[0]).toMatchObject({
+    id: "secure_positioning.final-commitment",
+    title: "Confirm readiness and email",
+  });
+  expect(visibleRequests[0].text).toContain("What's the best email address for you?");
+});
+
 test("selects every approved spoken fork and path without changing navigation or call controls", async ({ page }) => {
   await mountCoach(page);
 
@@ -186,7 +222,7 @@ test("selects every approved spoken fork and path without changing navigation or
   }
 });
 
-test("preserves the official document's multiline outcomes and e-sign steps", async ({ page }) => {
+test("preserves the official multiline outcomes and visibly renders only the approved e-sign handoff", async ({ page }) => {
   await mountCoach(page);
 
   for (let step = 0; step < 3; step += 1) await page.getByTestId("coach-next").click();
@@ -198,9 +234,14 @@ test("preserves the official document's multiline outcomes and e-sign steps", as
   await page.getByTestId("phase-rail-close").click();
   await page.getByTestId("coach-next").click();
   await page.getByTestId("coach-next").click();
-  const esign = page.getByTestId("current-section-script").locator("p").filter({ hasText: "Press view documents" });
-  await expect(esign).toHaveCSS("white-space", "pre-line");
-  expect(await esign.innerText()).toContain("\n\nPress view documents");
+  const scriptText = page.getByTestId("current-section-script");
+  await expect(
+    scriptText.getByText("Awesome, I just sent it to your email. Please pull it up for me.", { exact: true }),
+  ).toBeVisible();
+  await expect(scriptText).toContainText("72 hours to schedule the initial walkthrough");
+  await expect(scriptText).not.toContainText(
+    /share your screen|share[\s_/-]?screen|screen[\s_/-]?share|click the link|walk you through signing|walk through signing|view[\s_/-]?documents|press[\s_/-]?sign|adopt[\s_&/-]?(?:and)?[\s_/-]?sign|red flashing box|second red box|second novation box|share[\s_/-]?back/i,
+  );
 });
 
 test("jumps each phase to its first manual section and legacy events are navigation/rendering no-ops", async ({ page }) => {
