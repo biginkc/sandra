@@ -1,6 +1,6 @@
 import type { CoachSpeaker } from "./types";
 
-export type CoachRecommendationMode = "follow_up";
+export type CoachRecommendationMode = "follow_up" | "objection_help";
 
 export type CoachRecommendationTranscriptLine = {
   id?: string;
@@ -20,14 +20,32 @@ export type CoachRecommendationRequest = {
   transcript: CoachRecommendationTranscriptLine[];
 };
 
-export type CoachRecommendationSuccess = {
+export type CoachRecommendationFollowUpSuccess = {
   ok: true;
   requestId: string;
   callId: string;
   activeSectionId: string;
-  mode: CoachRecommendationMode;
+  mode: "follow_up";
   followUpQuestions: string[];
 };
+
+// The model never writes guidance — it only names which catalog objection
+// (if any) the seller is voicing, plus the seller's own words as evidence.
+// The approved acknowledge/disarm/overcome text is always resolved client
+// side from the catalog by objectionId, never sent over the wire.
+export type CoachRecommendationObjectionHelpSuccess = {
+  ok: true;
+  requestId: string;
+  callId: string;
+  activeSectionId: string;
+  mode: "objection_help";
+  objectionId: string | null;
+  evidenceQuote: string | null;
+};
+
+export type CoachRecommendationSuccess =
+  | CoachRecommendationFollowUpSuccess
+  | CoachRecommendationObjectionHelpSuccess;
 
 export type CoachRecommendationFailureCode =
   | "invalid_request"

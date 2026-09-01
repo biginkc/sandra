@@ -133,14 +133,26 @@ function Harness({ held = false, interrupted = false }: { held?: boolean; interr
       onHangup={() => {}}
       onReconnectAudio={() => {}}
       onCollapse={() => {}}
-      recommendationRequest={async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
-        ok: true,
-        requestId: input.requestId,
-        callId: input.callId,
-        activeSectionId: input.activeSectionId,
-        mode: input.mode,
-        followUpQuestions: ["What would moving closer to family make easier?", "How soon would you like that move to happen?", "What is making the timing important now?"],
-      })}
+      recommendationRequest={async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => (
+        input.mode === "objection_help"
+          ? {
+              ok: true,
+              requestId: input.requestId,
+              callId: input.callId,
+              activeSectionId: input.activeSectionId,
+              mode: "objection_help",
+              objectionId: null,
+              evidenceQuote: null,
+            }
+          : {
+              ok: true,
+              requestId: input.requestId,
+              callId: input.callId,
+              activeSectionId: input.activeSectionId,
+              mode: "follow_up",
+              followUpQuestions: ["What would moving closer to family make easier?", "How soon would you like that move to happen?", "What is making the timing important now?"],
+            }
+      )}
     />
   );
 }

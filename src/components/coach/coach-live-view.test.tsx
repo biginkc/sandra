@@ -102,17 +102,40 @@ function DialogLifecycleHarness() {
   );
 }
 
+// Builds a mode-aware recommendationRequest mock: follow_up gets the given
+// canned questions, objection_help gets the given classification (defaults
+// to a truthful no-match so a test that never overrides this doesn't
+// accidentally assert on a fabricated objection).
+function stubRecommendationRequest(
+  followUpQuestions: string[],
+  objection: { objectionId: string | null; evidenceQuote: string | null } = { objectionId: null, evidenceQuote: null },
+) {
+  return vi.fn(async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => (
+    input.mode === "objection_help"
+      ? {
+          ok: true,
+          requestId: input.requestId,
+          callId: input.callId,
+          activeSectionId: input.activeSectionId,
+          mode: "objection_help",
+          objectionId: objection.objectionId,
+          evidenceQuote: objection.evidenceQuote,
+        }
+      : {
+          ok: true,
+          requestId: input.requestId,
+          callId: input.callId,
+          activeSectionId: input.activeSectionId,
+          mode: "follow_up",
+          followUpQuestions,
+        }
+  ));
+}
+
 function baseProps(overrides: Partial<HarnessProps> = {}): HarnessProps {
-  const recommendationRequest: CoachRecommendationRequestFn = vi.fn(
-    async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
-      ok: true,
-      requestId: input.requestId,
-      callId: input.callId,
-      activeSectionId: input.activeSectionId,
-      mode: input.mode,
-      followUpQuestions: ["What repairs concern you most?", "How long has that been a problem?", "What happens if nothing changes?"],
-    }),
-  );
+  const recommendationRequest: CoachRecommendationRequestFn = stubRecommendationRequest([
+    "What repairs concern you most?", "How long has that been a problem?", "What happens if nothing changes?",
+  ]);
   return {
     callName: "Jane Homeowner",
     callStatus: "live",
@@ -369,16 +392,7 @@ describe("<CoachLiveView /> manual navigation", () => {
 
   it("keeps finalized seller speech eligible and AI-visible through a same-speaker interim", async () => {
     const user = userEvent.setup();
-    const recommendationRequest = vi.fn(
-      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
-        ok: true,
-        requestId: input.requestId,
-        callId: input.callId,
-        activeSectionId: input.activeSectionId,
-        mode: input.mode,
-        followUpQuestions: ["What makes selling important now?"],
-      }),
-    );
+    const recommendationRequest = stubRecommendationRequest(["What makes selling important now?"]);
     render(<Harness {...baseProps({ recommendationRequest })} />);
     await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
 
@@ -408,20 +422,11 @@ describe("<CoachLiveView /> manual navigation", () => {
 
   it("enables follow-up questions only after a finalized homeowner turn and sends one grounded request per click", async () => {
     const user = userEvent.setup();
-    const recommendationRequest = vi.fn(
-      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
-        ok: true,
-        requestId: input.requestId,
-        callId: input.callId,
-        activeSectionId: input.activeSectionId,
-        mode: input.mode,
-        followUpQuestions: [
-          "Which repair is weighing on you the most?",
-          "How has that affected your moving timeline?",
-          "What happens if the property stays as-is?",
-        ],
-      }),
-    );
+    const recommendationRequest = stubRecommendationRequest([
+      "Which repair is weighing on you the most?",
+      "How has that affected your moving timeline?",
+      "What happens if the property stays as-is?",
+    ]);
     render(<Harness {...baseProps({ recommendationRequest })} />);
     await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
 
@@ -469,18 +474,9 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
   });
 
-  it("keeps Objection Help click-only, renders the approved three-beat playbook, and leaves the call untouched", async () => {
+  it("classifies through the same authenticated boundary as follow-up questions, renders the approved three-beat playbook by id, and leaves the call untouched", async () => {
     const user = userEvent.setup();
-    const recommendationRequest = vi.fn(
-      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
-        ok: true,
-        requestId: input.requestId,
-        callId: input.callId,
-        activeSectionId: input.activeSectionId,
-        mode: input.mode,
-        followUpQuestions: [],
-      }),
-    );
+    const recommendationRequest = stubRecommendationRequest([], { objectionId: "talk_to_spouse", evidenceQuote: "talk to my spouse" });
     const onHangup = vi.fn();
     render(<Harness {...baseProps({ recommendationRequest, onHangup })} />);
     await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
@@ -496,8 +492,15 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getByTestId("objection-help")).toBeEnabled();
 
     await user.click(screen.getByTestId("objection-help"));
-    expect(recommendationRequest).not.toHaveBeenCalled();
-    expect(screen.getByTestId("objection-help-label")).toHaveTextContent("Talk To Spouse");
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
+    expect(recommendationRequest.mock.calls[0][0]).toMatchObject({
+      callId: "call-1",
+      activeSectionId: "introduction.opener",
+      mode: "objection_help",
+      transcript: [expect.objectContaining({ speaker: "seller", isFinal: true })],
+    });
+
+    await waitFor(() => expect(screen.getByTestId("objection-help-label")).toHaveTextContent("Talk To Spouse"));
     expect(screen.getByTestId("objection-help-match")).toHaveTextContent("talk to my spouse");
     expect(screen.getByTestId("objection-help-acknowledge")).toHaveTextContent("Totally");
     expect(screen.getByTestId("objection-help-disarm")).toHaveTextContent("Jane");
@@ -505,23 +508,20 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
     expect(onHangup).not.toHaveBeenCalled();
 
+    // A second click asks again (the result is advisory, not cached
+    // forever) — it sends a second request and keeps the result visible.
     await user.click(screen.getByTestId("objection-help"));
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(2));
     expect(screen.getByTestId("objection-help-result")).toBeVisible();
-    expect(recommendationRequest).not.toHaveBeenCalled();
   });
 
-  it("reports no clear objection rather than guessing from rep or interim speech", async () => {
+  it("reports no clear objection rather than guessing from rep or interim speech, and never lets the model write guidance", async () => {
     const user = userEvent.setup();
-    const recommendationRequest = vi.fn(
-      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
-        ok: true,
-        requestId: input.requestId,
-        callId: input.callId,
-        activeSectionId: input.activeSectionId,
-        mode: input.mode,
-        followUpQuestions: [],
-      }),
-    );
+    // The catalog id the classifier returns is deliberately unrelated to
+    // "realtor" — proving the truthful no-match rendering here is driven
+    // by the server response (null), not by client-side keyword matching
+    // that no longer exists in this file.
+    const recommendationRequest = stubRecommendationRequest([], { objectionId: null, evidenceQuote: null });
     render(<Harness {...baseProps({ recommendationRequest })} />);
     await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
 
@@ -530,9 +530,39 @@ describe("<CoachLiveView /> manual navigation", () => {
     broadcast({ type: "transcript", speaker: "seller", text: "The house has a new roof and fresh paint.", isFinal: true, ts: "seller-final" });
     await user.click(screen.getByTestId("objection-help"));
 
-    expect(screen.getByTestId("objection-help-no-match")).toHaveTextContent("No clear objection");
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
+    expect(recommendationRequest.mock.calls[0][0].mode).toBe("objection_help");
+    await waitFor(() => expect(screen.getByTestId("objection-help-no-match")).toHaveTextContent("No clear objection"));
     expect(screen.queryByTestId("objection-help-result")).not.toBeInTheDocument();
-    expect(recommendationRequest).not.toHaveBeenCalled();
+  });
+
+  it("shows a busy state while classifying and a retryable error message on provider failure", async () => {
+    const user = userEvent.setup();
+    let resolveRequest!: (value: CoachRecommendationResult) => void;
+    const recommendationRequest = vi.fn((input: CoachRecommendationRequest): Promise<CoachRecommendationResult> =>
+      new Promise((resolve) => { resolveRequest = resolve; }));
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    broadcast({ type: "transcript", speaker: "seller", text: "I need to talk to my spouse before deciding.", isFinal: true, ts: "seller-objection" });
+
+    await user.click(screen.getByTestId("objection-help"));
+    expect(screen.getByTestId("objection-help")).toBeDisabled();
+    expect(screen.getByTestId("objection-help")).toHaveTextContent("Finding the closest objection");
+    // The two requests share one in-flight slot — Follow-up Questions must
+    // be disabled too while Objection Help is still out.
+    expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
+
+    resolveRequest({
+      ok: false,
+      requestId: recommendationRequest.mock.calls[0][0].requestId,
+      callId: "call-1",
+      activeSectionId: "introduction.opener",
+      mode: "objection_help",
+      code: "provider_error",
+    });
+
+    await waitFor(() => expect(screen.getByTestId("objection-help-error")).toHaveTextContent("temporarily unavailable"));
+    expect(screen.getByTestId("objection-help")).toBeEnabled();
   });
 
   it("parses legacy guidance events without rendering them or covering the script", async () => {

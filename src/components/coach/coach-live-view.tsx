@@ -683,20 +683,32 @@ function RecommendationsPanel({
   followUpQuestions,
   loadingMode,
   error,
+  lastErrorMode,
   followUpLimitReached,
   hasFinalSellerTranscript,
   requestFollowUp,
   requestObjectionHelp,
 }: ReturnType<typeof useCoachRecommendations> & { hasFinalSellerTranscript: boolean }) {
   const followUpBusy = loadingMode === "follow_up";
-  const retryableError = Boolean(error && error !== "rate_limited" && error !== "busy");
+  const objectionHelpBusy = loadingMode === "objection_help";
+  const followUpError = lastErrorMode === "follow_up" ? error : null;
+  const objectionHelpError = lastErrorMode === "objection_help" ? error : null;
+  const retryableError = Boolean(followUpError && followUpError !== "rate_limited" && followUpError !== "busy");
   const failureMessage =
-    error === "rate_limited"
+    followUpError === "rate_limited"
       ? "The follow-up question limit for this call has been reached."
-      : error === "busy"
+      : followUpError === "busy"
         ? "Sandra is already preparing follow-up questions."
-        : error
+        : followUpError
           ? "Follow-up questions are temporarily unavailable. Your script and transcript are unaffected."
+          : null;
+  const objectionHelpFailureMessage =
+    objectionHelpError === "rate_limited"
+      ? "The Objection Help limit for this call has been reached."
+      : objectionHelpError === "busy"
+        ? "Sandra is already working on a request."
+        : objectionHelpError
+          ? "Objection Help is temporarily unavailable. Your script and transcript are unaffected."
           : null;
   return (
     <aside
@@ -713,12 +725,19 @@ function RecommendationsPanel({
         type="button"
         variant="outline"
         className="mt-5 w-full"
-        disabled={followUpBusy || !hasFinalSellerTranscript}
+        disabled={followUpBusy || objectionHelpBusy || !hasFinalSellerTranscript}
+        aria-busy={objectionHelpBusy}
         data-testid="objection-help"
         onClick={() => void requestObjectionHelp()}
       >
-        Objection Help
+        {objectionHelpBusy ? <Loader2Icon className="size-4 animate-spin" aria-hidden /> : null}
+        {objectionHelpBusy ? "Finding the closest objection…" : "Objection Help"}
       </Button>
+      {objectionHelpFailureMessage ? (
+        <p role="alert" className="mt-2 text-xs text-muted-foreground" data-testid="objection-help-error">
+          {objectionHelpFailureMessage}
+        </p>
+      ) : null}
       {objectionHelp?.kind === "no_match" ? (
         <p role="status" className="mt-4 rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed" data-testid="objection-help-no-match">
           {objectionHelp.message}
@@ -758,7 +777,7 @@ function RecommendationsPanel({
         type="button"
         variant="outline"
         className="mt-5 w-full"
-        disabled={followUpBusy || !hasFinalSellerTranscript || followUpLimitReached}
+        disabled={followUpBusy || objectionHelpBusy || !hasFinalSellerTranscript || followUpLimitReached}
         aria-busy={followUpBusy}
         data-testid="follow-up-questions"
         onClick={() => void requestFollowUp()}

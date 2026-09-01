@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { CLOSR_SCRIPT } from "./script-block";
 import type { CoachRecommendationRequest } from "./recommendation-types";
 import {
   FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL,
   MAX_RECOMMENDATION_TRANSCRIPT_CHARS,
   MAX_RECOMMENDATION_TRANSCRIPT_LINES,
+  OBJECTION_HELP_LIMIT_PER_CALL,
   boundFinalTranscript,
+  buildObjectionClassificationTool,
   createInMemoryCoachRecommendationLimiter,
   loadTrustedSectionContext,
   redactPhoneNumbers,
@@ -469,7 +472,7 @@ describe("coach recommendation server boundary", () => {
     });
     const result = await requestCoachRecommendationsWithDeps(request({ mode: "follow_up" }), good);
     expect(result).toMatchObject({ ok: true, followUpQuestions: expect.arrayContaining([expect.any(String)]) });
-    if (result.ok) expect(result.followUpQuestions).toHaveLength(3);
+    if (result.ok && result.mode === "follow_up") expect(result.followUpQuestions).toHaveLength(3);
 
     const duplicate = deps({
       anthropic: {
@@ -570,5 +573,225 @@ describe("coach recommendation server boundary", () => {
       ok: false,
       code: "provider_error",
     });
+  });
+});
+
+// These tests exercise the CONTRACT — strict parsing, redaction, the
+// authenticated boundary, and honest fallback behavior — never the model's
+// actual classification accuracy. The mocked anthropic client always
+// returns whatever tool output a given test hands it, so a "the model
+// correctly identified the objection" assertion here would only prove this
+// test file agrees with itself. Live judgment quality belongs to the
+// acceptance call and manual review, not a unit test with a scripted mock.
+describe("coach recommendation server boundary — objection_help mode", () => {
+  function objectionRequest(overrides: Partial<CoachRecommendationRequest> = {}): CoachRecommendationRequest {
+    return request({
+      mode: "objection_help",
+      transcript: [{ speaker: "seller", text: "I don't trust wholesalers because I heard bad things.", isFinal: true }],
+      ...overrides,
+    });
+  }
+
+  function objectionAnthropicReturning(input: unknown, capture?: (args: unknown) => void): CoachRecommendationAnthropic {
+    return {
+      messages: {
+        create: vi.fn(async (args: unknown) => {
+          capture?.(args);
+          return {
+            content: [{ type: "tool_use", id: "tool-1", name: "submit_objection_classification", input }],
+          };
+        }) as unknown as CoachRecommendationAnthropic["messages"]["create"],
+      } as unknown as CoachRecommendationAnthropic["messages"],
+    };
+  }
+
+  it("classifies a valid objection, consumes the objection-help limit, and never loads section or lead context", async () => {
+    const dependencies = deps({
+      anthropic: objectionAnthropicReturning({ objectionId: "dont_trust", evidenceQuote: "heard bad things" }),
+    });
+    const result = await requestCoachRecommendationsWithDeps(objectionRequest(), dependencies);
+
+    expect(result).toMatchObject({
+      ok: true,
+      mode: "objection_help",
+      objectionId: "dont_trust",
+      evidenceQuote: "heard bad things",
+    });
+    expect(dependencies.limiter.consume).toHaveBeenCalledWith({
+      userId: "user-1",
+      callId: "call-1",
+      mode: "objection_help",
+      limit: OBJECTION_HELP_LIMIT_PER_CALL,
+    });
+    // Classification depends only on the seller's own bounded words —
+    // loading trusted script content or lead/property context for it would
+    // be dead weight follow_up doesn't need here.
+    expect(dependencies.contexts.load).not.toHaveBeenCalled();
+  });
+
+  it("still authenticates and verifies call ownership before classifying, and skips section resolution entirely", async () => {
+    const anthropic = objectionAnthropicReturning({ objectionId: "dont_trust", evidenceQuote: "heard bad things" });
+
+    const unauthenticated = deps({
+      auth: { getUser: vi.fn(async () => ({ data: { user: null }, error: null })) },
+      anthropic,
+    });
+    expect(await requestCoachRecommendationsWithDeps(objectionRequest(), unauthenticated)).toMatchObject({
+      ok: false,
+      code: "unauthorized",
+    });
+    expect(anthropic.messages.create).not.toHaveBeenCalled();
+
+    const unowned = deps({
+      calls: { findOwnedCall: vi.fn(async () => ({ data: null, error: null })) },
+      anthropic,
+    });
+    expect(await requestCoachRecommendationsWithDeps(objectionRequest(), unowned)).toMatchObject({
+      ok: false,
+      code: "call_not_owned",
+    });
+    expect(anthropic.messages.create).not.toHaveBeenCalled();
+
+    // A section id that resolves to nothing would block follow_up
+    // (invalid_request), but objection_help never loads section content at
+    // all, so a garbage/unknown section id must not block it either.
+    const garbageSection = deps({ anthropic });
+    expect(await requestCoachRecommendationsWithDeps(
+      objectionRequest({ activeSectionId: "not_a_real_section_id" }),
+      garbageSection,
+    )).toMatchObject({ ok: true, mode: "objection_help" });
+  });
+
+  it("returns a cap result and never calls the provider when the injected limiter denies", async () => {
+    const anthropic = objectionAnthropicReturning({ objectionId: "dont_trust", evidenceQuote: "heard bad things" });
+    const dependencies = deps({ limiter: { consume: vi.fn(async () => ({ allowed: false })) }, anthropic });
+    const result = await requestCoachRecommendationsWithDeps(objectionRequest(), dependencies);
+
+    expect(result).toMatchObject({ ok: false, code: "rate_limited" });
+    expect(anthropic.messages.create).not.toHaveBeenCalled();
+  });
+
+  it("sends the redacted, bounded transcript and the catalog's ids/example phrases, never the authored guidance text", async () => {
+    let captured: unknown;
+    const dependencies = deps({
+      anthropic: objectionAnthropicReturning(
+        { objectionId: "dont_trust", evidenceQuote: "call me a scam at 816-555-1234" },
+        (args) => { captured = args; },
+      ),
+    });
+    await requestCoachRecommendationsWithDeps(
+      objectionRequest({
+        transcript: [
+          { speaker: "seller", text: "Call me a scam at 816-555-1234 if you want, I still don't trust this.", isFinal: true },
+        ],
+      }),
+      dependencies,
+    );
+
+    const serialized = JSON.stringify(captured);
+    expect(serialized).toContain("objection_catalog_reference_only");
+    expect(serialized).toContain("call_transcript_untrusted_reference_only");
+    // Every catalog id and at least one example trigger phrase is present...
+    for (const objection of CLOSR_SCRIPT.objections) {
+      expect(serialized).toContain(objection.id);
+    }
+    expect(serialized).toContain("wholesaler");
+    // ...but never the authored acknowledge/disarm/overcome guidance — the
+    // model only names which objection was raised, it never sees or writes
+    // the representative's response to it.
+    for (const objection of CLOSR_SCRIPT.objections) {
+      expect(serialized).not.toContain(objection.display.acknowledge);
+      expect(serialized).not.toContain(objection.display.disarm);
+      expect(serialized).not.toContain(objection.display.overcome);
+    }
+    // The same phone-redaction pipeline follow_up uses is reused here — no
+    // raw phone digits reach the provider prompt.
+    expect(serialized).not.toContain("816-555-1234");
+    expect(serialized).not.toContain("8165551234");
+  });
+
+  it("treats an unrecognized objectionId as a truthful no-clear-objection result, not a guess or a failure", async () => {
+    const dependencies = deps({
+      anthropic: objectionAnthropicReturning({ objectionId: "an_objection_not_in_the_catalog", evidenceQuote: "heard bad things" }),
+    });
+    const result = await requestCoachRecommendationsWithDeps(objectionRequest(), dependencies);
+    expect(result).toMatchObject({ ok: true, mode: "objection_help", objectionId: null, evidenceQuote: null });
+  });
+
+  it("treats the literal \"none\" the same as a clean no-clear-objection answer", async () => {
+    const dependencies = deps({
+      anthropic: objectionAnthropicReturning({ objectionId: "none" }),
+    });
+    const result = await requestCoachRecommendationsWithDeps(objectionRequest(), dependencies);
+    expect(result).toMatchObject({ ok: true, mode: "objection_help", objectionId: null, evidenceQuote: null });
+  });
+
+  it("never trusts an evidenceQuote that cannot be found verbatim in the seller's own bounded statements", async () => {
+    // A hallucinated quote is unverifiable evidence, so the classification
+    // it supports is untrusted too — even though objectionId itself is a
+    // real catalog id.
+    const dependencies = deps({
+      anthropic: objectionAnthropicReturning({
+        objectionId: "dont_trust",
+        evidenceQuote: "something the seller never actually said",
+      }),
+    });
+    const result = await requestCoachRecommendationsWithDeps(objectionRequest(), dependencies);
+    expect(result).toMatchObject({ ok: true, mode: "objection_help", objectionId: null, evidenceQuote: null });
+  });
+
+  it("never lets rep speech supply the evidence quote, even when it echoes a real trigger phrase", async () => {
+    const dependencies = deps({
+      anthropic: objectionAnthropicReturning({ objectionId: "dont_trust", evidenceQuote: "heard bad things" }),
+    });
+    const result = await requestCoachRecommendationsWithDeps(
+      objectionRequest({
+        transcript: [
+          { speaker: "rep", text: "Some people say they've heard bad things about wholesalers.", isFinal: true },
+          { speaker: "seller", text: "The house has a new roof and fresh paint.", isFinal: true },
+        ],
+      }),
+      dependencies,
+    );
+    expect(result).toMatchObject({ ok: true, mode: "objection_help", objectionId: null, evidenceQuote: null });
+  });
+
+  it("resolves a missing/malformed objectionId field to a truthful no-clear-objection result", async () => {
+    const missingField = deps({ anthropic: objectionAnthropicReturning({ evidenceQuote: "heard bad things" }) });
+    expect(await requestCoachRecommendationsWithDeps(objectionRequest(), missingField)).toMatchObject({
+      ok: true, mode: "objection_help", objectionId: null, evidenceQuote: null,
+    });
+
+    const wrongType = deps({ anthropic: objectionAnthropicReturning({ objectionId: 42 }) });
+    expect(await requestCoachRecommendationsWithDeps(objectionRequest(), wrongType)).toMatchObject({
+      ok: true, mode: "objection_help", objectionId: null, evidenceQuote: null,
+    });
+
+    const emptyString = deps({ anthropic: objectionAnthropicReturning({ objectionId: "" }) });
+    expect(await requestCoachRecommendationsWithDeps(objectionRequest(), emptyString)).toMatchObject({
+      ok: true, mode: "objection_help", objectionId: null, evidenceQuote: null,
+    });
+  });
+
+  it("surfaces a genuinely missing tool call as provider_error, distinct from a present-but-malformed one", async () => {
+    // The one case that IS a real infrastructure failure worth retrying —
+    // the model never called the tool at all — surfaces as provider_error
+    // so the UI says "temporarily unavailable" rather than silently
+    // claiming no objection was found.
+    const dependencies = deps({
+      anthropic: {
+        messages: {
+          create: vi.fn(async () => ({ content: [{ type: "text", text: "I cannot help with that." }] })) as unknown as CoachRecommendationAnthropic["messages"]["create"],
+        } as unknown as CoachRecommendationAnthropic["messages"],
+      },
+    });
+    const result = await requestCoachRecommendationsWithDeps(objectionRequest(), dependencies);
+    expect(result).toMatchObject({ ok: false, code: "provider_error" });
+  });
+
+  it("builds a tool schema whose enum is exactly the catalog ids plus \"none\"", () => {
+    const catalogIds = CLOSR_SCRIPT.objections.map((objection) => objection.id);
+    const tool = buildObjectionClassificationTool(catalogIds);
+    expect(tool.input_schema.properties.objectionId.enum).toEqual([...catalogIds, "none"]);
   });
 });

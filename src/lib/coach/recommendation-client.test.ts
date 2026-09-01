@@ -37,13 +37,32 @@ const meaningfulTurn = (id: string, text = "The repairs have become too expensiv
 });
 
 function success(input: CoachRecommendationRequest): CoachRecommendationResult {
+  if (input.mode === "objection_help") {
+    return objectionSuccess(input, "dont_trust", "heard bad things");
+  }
   return {
     ok: true,
     requestId: input.requestId,
     callId: input.callId,
     activeSectionId: input.activeSectionId,
-    mode: input.mode,
+    mode: "follow_up",
     followUpQuestions: ["What needs repair?", "How long has it been an issue?", "What happens if you wait?"],
+  };
+}
+
+function objectionSuccess(
+  input: CoachRecommendationRequest,
+  objectionId: string | null,
+  evidenceQuote: string | null,
+): CoachRecommendationResult {
+  return {
+    ok: true,
+    requestId: input.requestId,
+    callId: input.callId,
+    activeSectionId: input.activeSectionId,
+    mode: "objection_help",
+    objectionId,
+    evidenceQuote,
   };
 }
 
@@ -330,8 +349,19 @@ describe("CoachRecommendationController", () => {
     await expect(current).resolves.toBe(true);
   });
 
-  it("runs Objection Help only on click, uses finalized seller speech, and never calls the provider", async () => {
-    const request = vi.fn(async (input: CoachRecommendationRequest) => success(input));
+  // Objection Help now goes through the SAME authenticated boundary as
+  // follow-up questions (the request fn), classified server-side — it is
+  // no longer a synchronous local lookup. These tests exercise the client
+  // controller's plumbing around that call (busy guard, timeout, staleness,
+  // error surfacing) exactly the way the follow_up tests above do; they do
+  // not, and cannot, prove classification accuracy — that is the mocked
+  // recommendation-server.test.ts's job.
+  it("calls the provider for Objection Help, uses only finalized seller speech, and builds the guidance card from the returned id", async () => {
+    let captured: CoachRecommendationRequest | undefined;
+    const request = vi.fn(async (input: CoachRecommendationRequest) => {
+      captured = input;
+      return success(input);
+    });
     const controller = makeController(request);
     const transcript = [
       { speaker: "rep" as const, text: "I don't trust this estimate.", isFinal: true },
@@ -340,13 +370,25 @@ describe("CoachRecommendationController", () => {
 
     expect(controller.getSnapshot().objectionHelp).toBeNull();
     await expect(controller.requestObjectionHelp(transcript, objectionTokens, "owner_occupied")).resolves.toBe(true);
-    expect(request).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(captured?.mode).toBe("objection_help");
+    // Only finalized lines reach the wire request — the controller filters
+    // interim text out the same way it does for follow_up.
+    expect(captured?.transcript.every((line) => line.isFinal)).toBe(true);
     expect(controller.getSnapshot().objectionHelp).toMatchObject({ kind: "match", objectionId: "dont_trust" });
+  });
+
+  it("shows the same truthful no-match result when the server returns no objectionId", async () => {
+    const request = vi.fn(async (input: CoachRecommendationRequest) => objectionSuccess(input, null, null));
+    const controller = makeController(request);
 
     await expect(controller.requestObjectionHelp([
       { speaker: "seller", text: "The house is in good shape and I am gathering details.", isFinal: true },
     ], objectionTokens, "owner_occupied")).resolves.toBe(true);
-    expect(controller.getSnapshot().objectionHelp).toEqual(expect.objectContaining({ kind: "no_match" }));
+    expect(controller.getSnapshot().objectionHelp).toEqual({
+      kind: "no_match",
+      message: "No clear objection was found in the finalized homeowner speech.",
+    });
   });
 
   it("rejects a stale Objection Help state once the call or section changes", async () => {
@@ -361,5 +403,56 @@ describe("CoachRecommendationController", () => {
 
     controller.setContext({ callId: "call-2", activeSectionId: "introduction.opener", branchOverrides: {} });
     expect(controller.getSnapshot().objectionHelp).toBeNull();
+  });
+
+  it("Objection Help and Follow-up Questions share one in-flight slot: each rejects the other as busy", async () => {
+    let resolveObjection!: (value: CoachRecommendationResult) => void;
+    let capturedObjectionInput!: CoachRecommendationRequest;
+    const request = vi.fn((input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => {
+      if (input.mode === "objection_help") {
+        capturedObjectionInput = input;
+        return new Promise((done) => { resolveObjection = done; });
+      }
+      return Promise.resolve(success(input));
+    });
+    const controller = makeController(request);
+    const transcript = [meaningfulTurn("seller-1")];
+
+    const inFlight = controller.requestObjectionHelp(transcript, objectionTokens, "owner_occupied");
+    expect(controller.getSnapshot().loadingMode).toBe("objection_help");
+
+    await expect(controller.requestFollowUp(transcript)).resolves.toBe(false);
+    expect(controller.getSnapshot()).toMatchObject({ error: "busy", lastErrorMode: "follow_up" });
+    expect(request).toHaveBeenCalledTimes(1);
+
+    resolveObjection(success(capturedObjectionInput));
+    await expect(inFlight).resolves.toBe(true);
+  });
+
+  it("times out a hung Objection Help request and surfaces a mode-tagged, retryable error", async () => {
+    let hang = false;
+    const request = vi.fn((input: CoachRecommendationRequest): Promise<CoachRecommendationResult> =>
+      hang ? new Promise(() => undefined) : Promise.resolve(success(input)),
+    );
+    const controller = new CoachRecommendationController({ request, requestTimeoutMs: 5_000 });
+    controller.setContext({ callId: "call-1", activeSectionId: "introduction.opener", branchOverrides: {} });
+    const transcript = [
+      { speaker: "seller" as const, text: "I don't trust wholesalers because I heard bad things.", isFinal: true },
+    ];
+
+    hang = true;
+    const timedOut = controller.requestObjectionHelp(transcript, objectionTokens, "owner_occupied");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(timedOut).resolves.toBe(false);
+    expect(controller.getSnapshot()).toMatchObject({
+      loadingMode: null,
+      error: "provider_error",
+      lastErrorMode: "objection_help",
+      objectionHelp: null,
+    });
+
+    hang = false;
+    await expect(controller.requestObjectionHelp(transcript, objectionTokens, "owner_occupied")).resolves.toBe(true);
+    expect(controller.getSnapshot()).toMatchObject({ loadingMode: null, error: null, lastErrorMode: null });
   });
 });

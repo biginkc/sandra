@@ -50,12 +50,48 @@ declare global {
   }
 }
 
+// Synthetic-only stand-in for the server-side objection classifier: this
+// harness never calls a real model, so it maps the fixture's own known
+// stimuli text to a fixed classification. It proves the click -> request ->
+// UI-render wiring (loading state, busy-disabled button, stale rejection,
+// no-match rendering) end to end. It says nothing about real classification
+// accuracy — that is exercised only by recommendation-server.test.ts's
+// mocked-boundary tests against the actual prompt/parsing contract.
+function objectionHelpSuccess(input: CoachRecommendationRequest): CoachRecommendationResult {
+  const sellerText = input.transcript
+    .filter((line) => line.speaker === "seller")
+    .map((line) => line.text)
+    .join(" ");
+  if (sellerText.includes("heard bad things")) {
+    return {
+      ok: true,
+      requestId: input.requestId,
+      callId: input.callId,
+      activeSectionId: input.activeSectionId,
+      mode: "objection_help",
+      objectionId: "dont_trust",
+      evidenceQuote: "heard bad things",
+    };
+  }
+  return {
+    ok: true,
+    requestId: input.requestId,
+    callId: input.callId,
+    activeSectionId: input.activeSectionId,
+    mode: "objection_help",
+    objectionId: null,
+    evidenceQuote: null,
+  };
+}
+
 // Grounds the canned response in the actual finalized seller transcript sent
 // with this specific request, instead of returning static text. A hardcoded
 // answer can't distinguish one request from another, which made it
 // impossible for a spec to prove a stale/late response was rejected instead
 // of merely never checked (both looked identical either way).
 function recommendationSuccess(input: CoachRecommendationRequest): CoachRecommendationResult {
+  if (input.mode === "objection_help") return objectionHelpSuccess(input);
+
   const lastSellerStatement = [...input.transcript]
     .reverse()
     .find((line) => line.speaker === "seller")?.text ?? "your situation";
@@ -64,7 +100,7 @@ function recommendationSuccess(input: CoachRecommendationRequest): CoachRecommen
     requestId: input.requestId,
     callId: input.callId,
     activeSectionId: input.activeSectionId,
-    mode: input.mode,
+    mode: "follow_up",
     followUpQuestions: [
       `Can you tell me more about "${lastSellerStatement}"?`,
       `How is "${lastSellerStatement}" affecting you right now?`,

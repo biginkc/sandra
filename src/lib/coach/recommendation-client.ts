@@ -9,7 +9,7 @@ import type {
   CoachRecommendationResult,
   CoachRecommendationTranscriptLine,
 } from "./recommendation-types";
-import { findObjectionHelp, type CoachObjectionHelp } from "./objection-help";
+import { buildObjectionHelp, type CoachObjectionHelp } from "./objection-help";
 import { FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL } from "./recommendation-policy";
 import type { CoachOccupancy, ResolvedTokens } from "./types";
 
@@ -21,6 +21,10 @@ export type CoachRecommendationClientState = {
   objectionHelp: CoachObjectionHelp | null;
   loadingMode: CoachRecommendationMode | null;
   error: CoachRecommendationFailureCode | "busy" | null;
+  /** Which button's request produced `error` — follow-up and Objection
+   * Help share a single in-flight slot and a single `error` field, so this
+   * tells the UI which of the two failure messages to show. */
+  lastErrorMode: CoachRecommendationMode | null;
   followUpLimitReached: boolean;
 };
 
@@ -60,6 +64,7 @@ const EMPTY_STATE: CoachRecommendationClientState = {
   objectionHelp: null,
   loadingMode: null,
   error: null,
+  lastErrorMode: null,
   followUpLimitReached: false,
 };
 
@@ -177,55 +182,65 @@ export class CoachRecommendationController {
       ...EMPTY_STATE,
       followUpLimitReached,
       error: followUpLimitReached ? "rate_limited" : null,
+      lastErrorMode: followUpLimitReached ? "follow_up" : null,
     });
   }
 
   async requestFollowUp(transcript: readonly CoachRecommendationTranscriptLine[]): Promise<boolean> {
     if (this.activeRequestToken) {
-      this.publish({ error: "busy" });
+      this.publish({ error: "busy", lastErrorMode: "follow_up" });
       return false;
     }
-    return this.startRequest([...transcript]);
+
+    const callId = this.callId;
+    if (!callId) return false;
+    const count = this.followUpCountByCall.get(callId) ?? 0;
+    if (count >= FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL) {
+      this.publish({ error: "rate_limited", lastErrorMode: "follow_up", followUpLimitReached: true });
+      return false;
+    }
+    this.followUpCountByCall.set(callId, count + 1);
+    this.continuity.followUpCount = count + 1;
+
+    return this.startRequest("follow_up", [...transcript]);
   }
 
-  /** Objection Help is a synchronous, click-only read of the validated local
-   * catalog. It never invokes the provider or changes script/call state. */
+  /** Objection Help goes through the SAME authenticated boundary as
+   * follow-up questions (recommendation-server.ts): the server classifies
+   * which single catalog objection, if any, the finalized seller speech
+   * most clearly voices. The model never writes guidance — it only names
+   * the objectionId and quotes the seller's own words as evidence; the
+   * approved acknowledge/disarm/overcome text is always resolved locally
+   * from the catalog by id (see buildObjectionHelp). Advisory only: it
+   * never changes script position or call controls. */
   async requestObjectionHelp(
     transcript: readonly CoachRecommendationTranscriptLine[],
     tokens: ResolvedTokens,
     occupancy: CoachOccupancy | null,
   ): Promise<boolean> {
     if (this.activeRequestToken) {
-      this.publish({ error: "busy" });
+      this.publish({ error: "busy", lastErrorMode: "objection_help" });
       return false;
     }
-    this.publish({
-      objectionHelp: findObjectionHelp(transcript, tokens, occupancy),
-      error: null,
-    });
-    return true;
+    return this.startRequest("objection_help", [...transcript], { tokens, occupancy });
   }
 
-  private async startRequest(transcript: CoachRecommendationTranscriptLine[]): Promise<boolean> {
+  private async startRequest(
+    mode: CoachRecommendationMode,
+    transcript: CoachRecommendationTranscriptLine[],
+    objectionDisplayContext?: { tokens: ResolvedTokens; occupancy: CoachOccupancy | null },
+  ): Promise<boolean> {
     const callId = this.callId;
     const activeSectionId = this.activeSectionId;
     const selectedSectionBranch = this.selectedSectionBranch;
     const branchOverrides = this.branchOverrides;
     if (!callId || !activeSectionId || this.activeRequestToken) return false;
 
-    const count = this.followUpCountByCall.get(callId) ?? 0;
-    if (count >= FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL) {
-      this.publish({ error: "rate_limited", followUpLimitReached: true });
-      return false;
-    }
-
-    this.followUpCountByCall.set(callId, count + 1);
-    this.continuity.followUpCount = count + 1;
     const requestId = nextRequestId();
     const generation = this.generation;
     const requestToken = Symbol(requestId);
     this.activeRequestToken = requestToken;
-    this.publish({ loadingMode: "follow_up", error: null });
+    this.publish({ loadingMode: mode, error: null });
 
     let result: CoachRecommendationResult;
     let requestTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -236,17 +251,17 @@ export class CoachRecommendationController {
         activeSectionId,
         selectedSectionBranch,
         branchOverrides: { ...this.branchOverrides },
-        mode: "follow_up",
+        mode,
         transcript: transcript.filter((line) => line.isFinal),
       });
       const timeoutPromise = new Promise<CoachRecommendationResult>((resolve) => {
         requestTimeoutHandle = this.timer.setTimeout(() => {
-          resolve({ ok: false, requestId, callId, activeSectionId, mode: "follow_up", code: "provider_error" });
+          resolve({ ok: false, requestId, callId, activeSectionId, mode, code: "provider_error" });
         }, this.requestTimeoutMs);
       });
       result = await Promise.race([requestPromise, timeoutPromise]);
     } catch {
-      result = { ok: false, requestId, callId, activeSectionId, mode: "follow_up", code: "provider_error" };
+      result = { ok: false, requestId, callId, activeSectionId, mode, code: "provider_error" };
     } finally {
       if (requestTimeoutHandle) this.timer.clearTimeout(requestTimeoutHandle);
       if (this.activeRequestToken === requestToken) {
@@ -263,13 +278,20 @@ export class CoachRecommendationController {
       result.requestId !== requestId ||
       result.callId !== callId ||
       result.activeSectionId !== activeSectionId ||
-      result.mode !== "follow_up";
+      result.mode !== mode;
 
     if (!stale) {
-      if (result.ok) {
-        this.publish({ loadingMode: null, error: null, followUpQuestions: result.followUpQuestions });
-      } else {
-        this.publish({ loadingMode: null, error: result.code });
+      if (result.ok && result.mode === "follow_up") {
+        this.publish({ loadingMode: null, error: null, lastErrorMode: null, followUpQuestions: result.followUpQuestions });
+      } else if (result.ok && result.mode === "objection_help" && objectionDisplayContext) {
+        this.publish({
+          loadingMode: null,
+          error: null,
+          lastErrorMode: null,
+          objectionHelp: buildObjectionHelp(result, objectionDisplayContext.tokens, objectionDisplayContext.occupancy),
+        });
+      } else if (!result.ok) {
+        this.publish({ loadingMode: null, error: result.code, lastErrorMode: mode });
       }
     }
 

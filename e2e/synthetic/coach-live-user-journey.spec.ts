@@ -351,7 +351,12 @@ test("emulated finalized transcript never requests follow-ups until the rep clic
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1");
 });
 
-test("Objection Help is a deliberate catalog lookup with truthful no-match state", async ({ page }) => {
+test("Objection Help classifies through the same authenticated boundary as follow-up, with a truthful no-match state", async ({ page }) => {
+  // The harness's objection-help stub simulates the server-side classifier
+  // deterministically for exactly the two known stimuli below — it proves
+  // the click -> request -> loading -> render wiring end to end, not real
+  // classification accuracy (that lives in recommendation-server.test.ts's
+  // mocked-boundary unit tests against the actual prompt/parsing contract).
   await mountCoach(page);
   await expect(page.getByTestId("objection-help")).toBeDisabled();
 
@@ -360,20 +365,28 @@ test("Objection Help is a deliberate catalog lookup with truthful no-match state
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
   await page.getByTestId("objection-help").click();
 
-  await expect(page.getByTestId("objection-help-label")).toHaveText("Dont Trust");
+  // Objection Help now goes through the same request boundary as
+  // follow-up, so it shows the same busy state and increments the same
+  // request counter — it is no longer a synchronous local lookup.
+  await expect(page.getByTestId("objection-help")).toBeDisabled();
+  await expect(page.getByTestId("follow-up-questions")).toBeDisabled();
+
+  await expect(page.getByTestId("objection-help-label")).toHaveText("Dont Trust", { timeout: 3_000 });
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1");
   await expect(page.getByTestId("objection-help-acknowledge")).toContainText("completely right");
   await expect(page.getByTestId("objection-help-disarm")).toContainText("don't know enough about us");
   await expect(page.getByTestId("objection-help-overcome")).toContainText("feel more confident");
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
   await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title);
+  await expect(page.getByTestId("objection-help")).toBeEnabled();
+  await expect(page.getByTestId("follow-up-questions")).toBeEnabled();
 
   await emitStimulus(page, "newCall");
   await expect(page.getByTestId("synthetic-active-call")).toHaveText("synthetic-call-2");
   await emitStimulus(page, "sellerNoObjection");
   await page.getByTestId("objection-help").click();
-  await expect(page.getByTestId("objection-help-no-match")).toContainText("No clear objection");
+  await expect(page.getByTestId("objection-help-no-match")).toContainText("No clear objection", { timeout: 3_000 });
   await expect(page.getByTestId("objection-help-result")).toHaveCount(0);
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1");
 });
 
 test("follow-up clicks reject duplicates and keep exactly three grounded questions", async ({ page }) => {
