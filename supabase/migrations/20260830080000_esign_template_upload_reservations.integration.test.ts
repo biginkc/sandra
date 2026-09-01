@@ -13,6 +13,10 @@ const forwardSql = readFileSync(
   "supabase/migrations/20260830080000_esign_template_upload_reservations.sql",
   "utf8",
 );
+const definitiveFailureSql = readFileSync(
+  "supabase/migrations/20260901181004_record_definitive_esign_template_provider_create_failure.sql",
+  "utf8",
+);
 
 let pg: Client;
 let orgId = "";
@@ -246,6 +250,7 @@ beforeAll(async () => {
   pg = new Client({ connectionString: testDbUrl() });
   await pg.connect();
   await pg.query("begin");
+  await pg.query(definitiveFailureSql);
 });
 
 beforeEach(async () => {
@@ -275,6 +280,12 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     expect(forwardSql).toContain("claim_esign_template_provider_create");
     expect(forwardSql).toContain("mark_stale_esign_template_provider_create_unknown");
     expect(forwardSql).not.toContain("create table public.org_esign_integrations");
+    expect(definitiveFailureSql).toContain(
+      "record_definitive_esign_template_provider_create_failure",
+    );
+    expect(definitiveFailureSql).not.toContain(
+      "mark_esign_template_provider_create_unknown(",
+    );
   });
 
   it("keeps authenticated template options free of server-only recovery fields", async () => {
@@ -759,6 +770,7 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       "claim_esign_template_provider_create(uuid,uuid,uuid,uuid)",
       "begin_esign_template_provider_create(uuid,uuid,uuid,uuid,uuid)",
       "release_esign_template_provider_create_claim(uuid,uuid,uuid,uuid,uuid)",
+      "record_definitive_esign_template_provider_create_failure(uuid,uuid,uuid,uuid,text,uuid)",
       "mark_esign_template_provider_create_unknown(uuid,uuid,uuid,uuid,text,uuid)",
       "mark_stale_esign_template_provider_create_unknown(uuid,uuid,uuid,uuid)",
       "complete_esign_template_provider_create(uuid,uuid,uuid,uuid,text,uuid)",
@@ -1003,7 +1015,7 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     });
     const unknownState = await pg.query<{
       provider_create_state: string;
-      provider_create_error_code: string;
+      provider_create_error_code: string | null;
     }>(
       `select provider_create_state,provider_create_error_code
        from public.esign_templates where id=$1`,
@@ -1138,6 +1150,66 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
         ),
       /conflicts/i,
     );
+  });
+
+  it("returns a definitive provider rejection to a token-fenced retryable state", async () => {
+    await connectIntegration(orgId, creatorId, "account-a");
+    const source = await prepareAndVerify();
+    const draft = await consumeDraft(source.id, creatorId);
+    const claim = await pg.query<{ claim_token: string }>(
+      "select * from public.claim_esign_template_provider_create($1,$2,$3,$4)",
+      [orgId, draft.template_id, source.id, creatorId],
+    );
+    const token = claim.rows[0].claim_token;
+    await pg.query(
+      "select * from public.begin_esign_template_provider_create($1,$2,$3,$4,$5)",
+      [orgId, draft.template_id, source.id, token, creatorId],
+    );
+
+    await expectDbError(
+      () =>
+        pg.query(
+          "select * from public.record_definitive_esign_template_provider_create_failure($1,$2,$3,$4,'PROVIDER_REQUEST_REJECTED',$5)",
+          [orgId, draft.template_id, source.id, crypto.randomUUID(), creatorId],
+        ),
+      /cannot record a definitive failure/i,
+    );
+    const recorded = await pg.query<{ outcome: string }>(
+      "select * from public.record_definitive_esign_template_provider_create_failure($1,$2,$3,$4,'PROVIDER_REQUEST_REJECTED',$5)",
+      [orgId, draft.template_id, source.id, token, creatorId],
+    );
+    expect(recorded.rows[0].outcome).toBe("recorded_failure");
+    const replay = await pg.query<{ outcome: string }>(
+      "select * from public.record_definitive_esign_template_provider_create_failure($1,$2,$3,$4,'PROVIDER_REQUEST_REJECTED',$5)",
+      [orgId, draft.template_id, source.id, token, recoveryOwnerId],
+    );
+    expect(replay.rows[0].outcome).toBe("already_recorded");
+
+    const state = await pg.query<{
+      provider_create_state: string;
+      provider_account_id: string | null;
+      provider_create_error_code: string;
+    }>(
+      `select provider_create_state, provider_account_id,
+         provider_create_error_code
+       from public.esign_templates where id=$1`,
+      [draft.template_id],
+    );
+    expect(state.rows[0]).toEqual({
+      provider_create_state: "unstarted",
+      provider_account_id: null,
+      provider_create_error_code: null,
+    });
+
+    const retried = await pg.query<{
+      outcome: string;
+      claim_token: string;
+    }>(
+      "select * from public.claim_esign_template_provider_create($1,$2,$3,$4)",
+      [orgId, draft.template_id, source.id, recoveryOwnerId],
+    );
+    expect(retried.rows[0].outcome).toBe("claimed");
+    expect(retried.rows[0].claim_token).not.toBe(token);
   });
 
   it("lists attached unfinished initial drafts without leaking finalized, duplicate, or edit rows", async () => {

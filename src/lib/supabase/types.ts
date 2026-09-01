@@ -5105,6 +5105,21 @@ export type Database = {
           template_id: string
         }[]
       }
+      record_definitive_esign_template_provider_create_failure: {
+        Args: {
+          p_actor_id: string
+          p_claim_token: string
+          p_error_code: string
+          p_org_id: string
+          p_source_id: string
+          p_template_id: string
+        }
+        Returns: {
+          created_by: string
+          outcome: string
+          template_id: string
+        }[]
+      }
       mark_stale_esign_template_provider_create_unknown: {
         Args: {
           p_actor_id: string

@@ -440,6 +440,9 @@ export async function createInitialTemplateRuntime() {
       documentType: string;
       signerRoles: readonly TemplateSignerRole[];
       sellerRoleName: string;
+      beforeProviderCreate?: (
+        replacementTemplateId: string,
+      ) => Promise<TemplateActionResult<{ cleanupAttention: boolean }>>;
     }): Promise<
       TemplateActionResult<{
         templateId: string;
@@ -449,6 +452,7 @@ export async function createInitialTemplateRuntime() {
           expiresAt: number | null;
           clientId: string;
         } | null;
+        cleanupAttention?: boolean;
       }>
     > {
       const expectedPath = `${orgId}/${input.source.stagingSourceId}.pdf`;
@@ -536,6 +540,13 @@ export async function createInitialTemplateRuntime() {
         );
       }
 
+      let cleanupAttention: boolean | undefined;
+      if (input.beforeProviderCreate) {
+        const retired = await input.beforeProviderCreate(consumed.template_id);
+        if (!retired.ok) return retired;
+        cleanupAttention = retired.data.cleanupAttention;
+      }
+
       let cachedCredentials: Awaited<ReturnType<typeof getEsignCredentials>> =
         null;
       const providerResult = await runInitialProviderCreate(
@@ -558,15 +569,22 @@ export async function createInitialTemplateRuntime() {
           },
         }),
       );
-      return providerResult.ok
-        ? success({
-            templateId: providerResult.data.templateId,
-            initialEditorSession: providerResult.data.initialEditorSession,
-          })
-        : providerResult;
+      if (!providerResult.ok) return providerResult;
+      const created = {
+        templateId: providerResult.data.templateId,
+        initialEditorSession: providerResult.data.initialEditorSession,
+      };
+      return success(
+        cleanupAttention === undefined
+          ? created
+          : { ...created, cleanupAttention },
+      );
     },
     async createReplacementFromRetainedSource(
       templateId: string,
+      retireOriginal: (
+        replacementTemplateId: string,
+      ) => Promise<TemplateActionResult<{ cleanupAttention: boolean }>>,
     ): Promise<
       TemplateActionResult<{
         templateId: string;
@@ -576,6 +594,7 @@ export async function createInitialTemplateRuntime() {
           expiresAt: number | null;
           clientId: string;
         } | null;
+        cleanupAttention: boolean;
       }>
     > {
       if (!isOpaqueId(templateId)) {
@@ -596,17 +615,17 @@ export async function createInitialTemplateRuntime() {
         draftError ||
         !draft ||
         draft.org_id !== orgId ||
-        draft.lifecycle_state !== "editing" ||
+        !["editing", "abandoned"].includes(draft.lifecycle_state) ||
         draft.provider_create_state !== "attached" ||
         !draft.sign_template_id ||
         !draft.staging_source_id ||
         draft.staging_path !== `${orgId}/${draft.staging_source_id}.pdf` ||
-        draft.staging_deleted_at !== null ||
         draft.duplicate_of_template_id !== null ||
         draft.supersedes_template_id !== null ||
         draft.finalized_at !== null ||
         draft.deleted_at !== null ||
-        draft.abandoned_at !== null ||
+        (draft.lifecycle_state === "editing" && draft.abandoned_at !== null) ||
+        (draft.lifecycle_state === "abandoned" && draft.abandoned_at === null) ||
         !draft.source_filename ||
         !draft.source_size_bytes ||
         draft.source_content_type !== "application/pdf" ||
@@ -630,9 +649,13 @@ export async function createInitialTemplateRuntime() {
       }
       let bytes: Uint8Array;
       try {
+        const retainedPath =
+          draft.lifecycle_state === "abandoned"
+            ? `${orgId}/${templateId}.pdf`
+            : draft.staging_path;
         const { data, error } = await admin.storage
           .from(BUCKET)
-          .download(draft.staging_path);
+          .download(retainedPath);
         if (error) throw error;
         bytes = new Uint8Array(await data.arrayBuffer());
       } catch {
@@ -655,8 +678,8 @@ export async function createInitialTemplateRuntime() {
         );
       }
       // One retained draft gets one durable replacement reservation. Concurrent
-      // restart requests therefore converge on the same local draft and the
-      // existing provider-create claim admits only one Dropbox mutation.
+      // and post-retirement retry requests therefore converge on the same local
+      // draft, while the provider-create claim admits only one Dropbox mutation.
       const replacementSourceId = templateId;
       const metadata: PreparedSourceMetadata = {
         stagingSourceId: replacementSourceId,
@@ -696,12 +719,19 @@ export async function createInitialTemplateRuntime() {
           "The retained PDF could not be copied or reconciled for a safe restart. The original draft was not changed.",
         );
       }
-      return runtime.create({
+      const replacement = await runtime.create({
         source: { ...prepared.data, ...metadata },
         name: draft.name,
         documentType: draft.document_type,
         signerRoles,
         sellerRoleName: draft.seller_role,
+        beforeProviderCreate: retireOriginal,
+      });
+      if (!replacement.ok) return replacement;
+      return success({
+        templateId: replacement.data.templateId,
+        initialEditorSession: replacement.data.initialEditorSession,
+        cleanupAttention: replacement.data.cleanupAttention ?? false,
       });
     },
     cleanup,
@@ -729,6 +759,7 @@ function providerPorts(context: {
       | "claim_esign_template_provider_create"
       | "begin_esign_template_provider_create"
       | "release_esign_template_provider_create_claim"
+      | "record_definitive_esign_template_provider_create_failure"
       | "mark_esign_template_provider_create_unknown"
       | "complete_esign_template_provider_create",
     args: Record<string, string>,
@@ -801,6 +832,27 @@ function providerPorts(context: {
       return {
         outcome: row.outcome as
           "recorded_unknown" | "already_unknown" | "already_attached",
+        templateId: row.template_id!,
+        createdBy: row.created_by!,
+      };
+    },
+    async recordDefinitiveFailure(input) {
+      const row = await rpc(
+        "record_definitive_esign_template_provider_create_failure",
+        {
+          p_org_id: input.orgId,
+          p_template_id: input.templateId,
+          p_source_id: input.sourceId,
+          p_claim_token: input.claimToken,
+          p_error_code: input.errorCode,
+          p_actor_id: input.actorId,
+        },
+      );
+      return {
+        outcome: row.outcome as
+          | "recorded_failure"
+          | "already_recorded"
+          | "already_attached",
         templateId: row.template_id!,
         createdBy: row.created_by!,
       };

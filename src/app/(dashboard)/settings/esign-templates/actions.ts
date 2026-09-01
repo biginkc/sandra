@@ -115,8 +115,19 @@ export async function restartTemplatePlacementAction(
 ): Promise<TemplateLaneResult<RestartedTemplateDraft>> {
   try {
     const runtime = await createInitialTemplateRuntime();
+    const orchestrator = await createFoundationTemplateOrchestrator();
     const replacement = await runtime.createReplacementFromRetainedSource(
       templateId,
+      async () => {
+        const retired = await orchestrator.abandon(templateId);
+        if (retired.ok) {
+          return { ok: true, data: { cleanupAttention: false } };
+        }
+        if (retired.error.code.startsWith("SOURCE_CLEANUP_")) {
+          return { ok: true, data: { cleanupAttention: true } };
+        }
+        return retired;
+      },
     );
     if (!replacement.ok) return replacement;
     if (!replacement.data.initialEditorSession) {
@@ -130,42 +141,13 @@ export async function restartTemplatePlacementAction(
       };
     }
 
-    const orchestrator = await createFoundationTemplateOrchestrator();
-    const abandoned = await orchestrator.abandon(templateId);
-    const cleanupAttention =
-      !abandoned.ok &&
-      (abandoned.error.code.startsWith("SOURCE_CLEANUP_") ||
-        abandoned.error.code === "ABANDON_LOCAL_FAILED");
-    if (!abandoned.ok && !cleanupAttention) {
-      const compensated = await orchestrator.abandon(
-        replacement.data.templateId,
-      );
-      return compensated.ok
-        ? {
-            ok: false,
-            error: {
-              code: "PLACEMENT_RESTART_ORIGINAL_RETAINED",
-              message:
-                "The original draft could not be retired, so the replacement was removed safely.",
-            },
-          }
-        : {
-            ok: false,
-            error: {
-              code: "PLACEMENT_RESTART_COMPENSATION_FAILED",
-              message:
-                "The original and replacement drafts require cleanup attention.",
-            },
-          };
-    }
-
     revalidatePath("/settings/esign-templates");
     return {
       ok: true,
       data: {
         templateId: replacement.data.templateId,
         initialEditorSession: replacement.data.initialEditorSession,
-        cleanupAttention,
+        cleanupAttention: replacement.data.cleanupAttention,
       },
     };
   } catch (error) {

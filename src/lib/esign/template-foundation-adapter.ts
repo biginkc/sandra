@@ -129,6 +129,24 @@ export async function createFoundationTemplateOrchestrator() {
         if (stageError) throw stageError;
         cleanupStageIds = new Set((stages ?? []).map((stage) => stage.id));
       }
+      const abandonedIds = (abandoned ?? []).map((row) => row.id);
+      let placementRestartOriginalIds = new Set<string>();
+      if (abandonedIds.length > 0) {
+        const { data: replacements, error: replacementError } = await admin
+          .from("esign_templates")
+          .select("staging_source_id")
+          .eq("org_id", orgId)
+          .in("staging_source_id", abandonedIds)
+          .in("lifecycle_state", ["preparing", "editing", "finalized"])
+          .is("deleted_at", null)
+          .is("abandoned_at", null);
+        if (replacementError) throw replacementError;
+        placementRestartOriginalIds = new Set(
+          (replacements ?? []).flatMap((row) =>
+            row.staging_source_id ? [row.staging_source_id] : [],
+          ),
+        );
+      }
       const activeCopies = (active ?? []).map((row) => ({
         id: row.id,
         orgId: row.org_id,
@@ -136,25 +154,31 @@ export async function createFoundationTemplateOrchestrator() {
         lifecycle: row.lifecycle_state as "preparing" | "editing",
         kind: row.supersedes_template_id ? "edit_revision" as const : "copy" as const,
       }));
-      const cleanupCopies = (abandoned ?? []).flatMap((row) =>
-        row.staging_source_id &&
-        cleanupStageIds.has(row.staging_source_id) &&
-        (row.lifecycle_state === "abandoned" ||
-          row.duplicate_of_template_id ||
-          row.supersedes_template_id)
-          ? [{
-        id: row.id,
-        orgId: row.org_id,
-        name: row.name,
-        lifecycle: "cleanup_attention" as const,
-        kind: row.supersedes_template_id
+      const cleanupCopies = (abandoned ?? []).flatMap((row) => {
+        if (
+          !row.staging_source_id ||
+          !cleanupStageIds.has(row.staging_source_id) ||
+          (row.lifecycle_state !== "abandoned" &&
+            !row.duplicate_of_template_id &&
+            !row.supersedes_template_id)
+        ) {
+          return [];
+        }
+        const kind = row.supersedes_template_id
           ? "edit_revision" as const
           : row.duplicate_of_template_id
             ? "copy" as const
-            : "placement_restart" as const,
-            }]
-          : [],
-      );
+            : placementRestartOriginalIds.has(row.id)
+              ? "placement_restart" as const
+              : null;
+        return [{
+          id: row.id,
+          orgId: row.org_id,
+          name: row.name,
+          lifecycle: "cleanup_attention" as const,
+          ...(kind ? { kind } : {}),
+        }];
+      });
       return [...activeCopies, ...cleanupCopies];
     },
 

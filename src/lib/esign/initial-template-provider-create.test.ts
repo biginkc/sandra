@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { ProviderError } from "@/lib/errors/classes";
+import { classifyProviderFailure } from "./provider-failure";
 
 import {
   runInitialProviderCreate,
@@ -53,6 +55,13 @@ function ports(): InitialProviderCreatePorts {
         templateId: input.templateId,
         createdBy: input.actorId,
       }),
+    recordDefinitiveFailure: vi
+      .fn()
+      .mockResolvedValue({
+        outcome: "recorded_failure",
+        templateId: input.templateId,
+        createdBy: input.actorId,
+      }),
     complete: vi
       .fn()
       .mockResolvedValue({
@@ -71,6 +80,29 @@ function ports(): InitialProviderCreatePorts {
 }
 
 describe("initial template provider-create CAS", () => {
+  it.each([
+    ["explicit retryable", { statusCode: 400, retryable: true }],
+    ["request timeout", { statusCode: 408, retryable: false }],
+    ["rate limit", { statusCode: 429, retryable: false }],
+    ["provider outage", { statusCode: 503, retryable: false }],
+  ])("keeps %s provider failures mutation-fenced", (_name, details) => {
+    expect(
+      classifyProviderFailure(
+        new ProviderError("provider failure", "dropbox_sign", details),
+      ),
+    ).toBe("ambiguous");
+  });
+
+  it("classifies a nonretryable provider 4xx as a definitive rejection", () => {
+    expect(
+      classifyProviderFailure(
+        new ProviderError("rejected", "dropbox_sign", {
+          statusCode: 400,
+          retryable: false,
+        }),
+      ),
+    ).toBe("definitive_failure");
+  });
   it("allows only a fresh claim to begin and invoke Dropbox once", async () => {
     const p = ports();
     await expect(runInitialProviderCreate(input, p)).resolves.toEqual({
@@ -284,6 +316,29 @@ describe("initial template provider-create CAS", () => {
       errorCode: "PROVIDER_RESPONSE_UNKNOWN",
     });
     expect(p.release).not.toHaveBeenCalled();
+  });
+
+  it("records a definitive provider 4xx as retryable without marking unknown", async () => {
+    const p = ports();
+    vi.mocked(p.provider.invoke).mockRejectedValue(
+      new ProviderError("quota rejected", "dropbox_sign", {
+        statusCode: 400,
+        providerCode: "bad_request",
+        retryable: false,
+      }),
+    );
+
+    await expect(runInitialProviderCreate(input, p)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_CREATE_REJECTED" },
+    });
+
+    expect(p.recordDefinitiveFailure).toHaveBeenCalledWith({
+      ...input,
+      claimToken: "claim-1",
+      errorCode: "PROVIDER_REQUEST_REJECTED",
+    });
+    expect(p.markUnknown).not.toHaveBeenCalled();
   });
 
   it("marks unknown when provider returns no stable ID", async () => {

@@ -12,6 +12,7 @@ import {
   type TemplateUpload,
 } from "./template-orchestrator";
 import { isRestartableDraftEditorFailure } from "./provider-failure";
+import unfinishedDraftEditUrlError from "./fixtures/dropbox-sign-unfinished-draft-edit-url-error.json";
 
 const owner = { userId: "user-1", orgId: "org-1", isOwner: true } as const;
 const roles = [{ name: "Seller", order: 0 }, { name: "Buyer", order: 1 }] as const;
@@ -104,15 +105,16 @@ function addInput() {
 
 describe("template action orchestration", () => {
   it("classifies only the observed unfinished-draft Dropbox failure as restartable", () => {
+    const fixture = unfinishedDraftEditUrlError.response;
     expect(
       isRestartableDraftEditorFailure(
         new ProviderError(
-          "This unfinished template cannot receive a later edit URL.",
+          fixture.errorMsg,
           "dropbox_sign",
           {
-          statusCode: 400,
-          providerCode: "bad_request",
-          retryable: false,
+            statusCode: fixture.statusCode,
+            providerCode: fixture.errorName,
+            retryable: false,
           },
         ),
       ),
@@ -123,15 +125,20 @@ describe("template action orchestration", () => {
         providerCode: "bad_request",
         retryable: false,
       }),
+      new ProviderError("same provider code, wrong status", "dropbox_sign", {
+        statusCode: 400,
+        providerCode: "not_found",
+        retryable: false,
+      }),
       new ProviderError("payment", "dropbox_sign", {
         statusCode: 402,
         providerCode: "payment_required",
         retryable: false,
       }),
-      new ProviderError("not found", "dropbox_sign", {
+      new ProviderError("same response but explicitly retryable", "dropbox_sign", {
         statusCode: 404,
         providerCode: "not_found",
-        retryable: false,
+        retryable: true,
       }),
       new ProviderError("conflict", "dropbox_sign", {
         statusCode: 409,
@@ -448,6 +455,32 @@ describe("template action orchestration", () => {
     expect(JSON.stringify(result)).not.toContain("diagnostic");
   });
 
+  it("returns the terminal restart code when the provider preflight has the captured failure", async () => {
+    const ports = makePorts();
+    const lostSession = new ProviderError(
+      unfinishedDraftEditUrlError.preflightResponse.errorMsg,
+      "dropbox_sign",
+      {
+        statusCode: unfinishedDraftEditUrlError.preflightResponse.statusCode,
+        providerCode:
+          unfinishedDraftEditUrlError.preflightResponse.normalizedProviderCode,
+        retryable: false,
+      },
+    );
+    vi.mocked(ports.provider.getTemplate).mockRejectedValue(lostSession);
+    vi.mocked(ports.provider.isRestartableEditorSessionError).mockImplementation(
+      isRestartableDraftEditorFailure,
+    );
+
+    await expect(
+      createTemplateOrchestrator(ports).startEditor("template-1"),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "DRAFT_EDITOR_SESSION_LOST" },
+    });
+    expect(ports.provider.getFreshEditUrl).not.toHaveBeenCalled();
+  });
+
   it("keeps transient later-edit failures retryable", async () => {
     const ports = makePorts();
     vi.mocked(ports.provider.getFreshEditUrl).mockRejectedValue(
@@ -706,6 +739,79 @@ describe("template action orchestration", () => {
     expect(result).toEqual({ ok: true, data: null });
     expect(ports.provider.deleteTemplate).toHaveBeenCalledWith("provider-1");
     expect(ports.repository.markAbandoned).toHaveBeenCalledWith("org-1", "template-1");
+  });
+
+  it("durably retires a stuck draft before cleaning its retained source", async () => {
+    const ports = makePorts();
+
+    await expect(
+      createTemplateOrchestrator(ports).abandon("template-1"),
+    ).resolves.toEqual({ ok: true, data: null });
+
+    expect(ports.provider.deleteTemplate).toHaveBeenCalledWith("provider-1");
+    expect(ports.repository.markAbandoned).toHaveBeenCalledWith(
+      "org-1",
+      "template-1",
+    );
+    expect(ports.storage.deletePrivate).toHaveBeenCalledWith(stage.storagePath);
+    expect(
+      vi.mocked(ports.provider.deleteTemplate).mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(ports.repository.markAbandoned).mock.invocationCallOrder[0]!,
+    );
+    expect(
+      vi.mocked(ports.repository.markAbandoned).mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(ports.storage.deletePrivate).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("records local retirement when the stuck provider draft is already missing", async () => {
+    const ports = makePorts();
+    const missing = new Error("not found");
+    vi.mocked(ports.provider.deleteTemplate).mockRejectedValueOnce(missing);
+    vi.mocked(ports.provider.isNotFound).mockImplementation(
+      (error) => error === missing,
+    );
+
+    await expect(
+      createTemplateOrchestrator(ports).abandon("template-1"),
+    ).resolves.toEqual({ ok: true, data: null });
+
+    expect(ports.repository.markAbandoned).toHaveBeenCalledWith(
+      "org-1",
+      "template-1",
+    );
+  });
+
+  it("idempotently finishes source cleanup after local retirement", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.repository.getTemplate).mockResolvedValueOnce({
+      ...draft,
+      lifecycle: "abandoned",
+    });
+
+    await expect(
+      createTemplateOrchestrator(ports).abandon("template-1"),
+    ).resolves.toEqual({ ok: true, data: null });
+
+    expect(ports.provider.deleteTemplate).not.toHaveBeenCalled();
+    expect(ports.repository.markAbandoned).not.toHaveBeenCalled();
+    expect(ports.storage.deletePrivate).toHaveBeenCalledWith(stage.storagePath);
+  });
+
+  it("converges when a concurrent restart records local retirement first", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.repository.markAbandoned).mockResolvedValueOnce(false);
+    vi.mocked(ports.repository.getTemplate)
+      .mockResolvedValueOnce(draft)
+      .mockResolvedValueOnce({ ...draft, lifecycle: "abandoned" });
+
+    await expect(
+      createTemplateOrchestrator(ports).abandon("template-1"),
+    ).resolves.toEqual({ ok: true, data: null });
+
+    expect(ports.storage.deletePrivate).toHaveBeenCalledWith(stage.storagePath);
   });
 
   it("leaves provider-delete and local-abandon failures retryable", async () => {
