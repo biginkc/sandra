@@ -38,10 +38,9 @@ function harnessState(): CoachState {
     connected: true,
     transcript: [
       { id: "rep-1", speaker: "rep", text: "Walk me through what has you considering a move.", isFinal: true, ts: "t1" },
-      // Finalized seller speech enables the manual follow-up control, while
-      // this intentionally non-meaningful acknowledgement keeps the
-      // screenshot harness static instead of starting the 1.5s automatic
-      // recommendation timer during multi-pass contrast measurement.
+      // Finalized seller speech enables the manual follow-up control. No
+      // request fires on its own, so this line keeps the screenshot harness
+      // static across multi-pass contrast measurement.
       { id: "seller-1", speaker: "seller", text: "Okay", isFinal: true, ts: "t2" },
     ],
   };
@@ -140,10 +139,8 @@ function Harness({ held = false, interrupted = false }: { held?: boolean; interr
         callId: input.callId,
         activeSectionId: input.activeSectionId,
         mode: input.mode,
-        recommendations: input.mode === "automatic" ? ["Ask how being closer to family would change their timeline."] : [],
-        followUpQuestions: input.mode === "follow_up"
-          ? ["What would moving closer to family make easier?", "How soon would you like that move to happen?", "What is making the timing important now?"]
-          : [],
+        recommendations: [],
+        followUpQuestions: ["What would moving closer to family make easier?", "How soon would you like that move to happen?", "What is making the timing important now?"],
       })}
     />
   );

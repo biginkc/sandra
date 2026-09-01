@@ -57,19 +57,12 @@ function recommendationSuccess(input: CoachRecommendationRequest): CoachRecommen
     callId: input.callId,
     activeSectionId: input.activeSectionId,
     mode: input.mode,
-    recommendations: input.mode === "automatic"
-      ? [
-          "Ask how moving closer to family would improve their day-to-day life.",
-          `Current advice for ${input.callId} in ${input.activeSectionId}.`,
-        ]
-      : [],
-    followUpQuestions: input.mode === "follow_up"
-      ? [
-          "What would moving closer to family make easier for you?",
-          "How soon would you ideally like that move to happen?",
-          "What is making the timing important right now?",
-        ]
-      : [],
+    recommendations: [],
+    followUpQuestions: [
+      "What would moving closer to family make easier for you?",
+      "How soon would you ideally like that move to happen?",
+      "What is making the timing important right now?",
+    ],
   };
 }
 

@@ -110,10 +110,8 @@ function baseProps(overrides: Partial<HarnessProps> = {}): HarnessProps {
       callId: input.callId,
       activeSectionId: input.activeSectionId,
       mode: input.mode,
-      recommendations: input.mode === "automatic" ? ["Ask how the repair issue affects their timing."] : [],
-      followUpQuestions: input.mode === "follow_up"
-        ? ["What repairs concern you most?", "How long has that been a problem?", "What happens if nothing changes?"]
-        : [],
+      recommendations: [],
+      followUpQuestions: ["What repairs concern you most?", "How long has that been a problem?", "What happens if nothing changes?"],
     }),
   );
   return {

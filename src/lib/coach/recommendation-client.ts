@@ -9,21 +9,14 @@ import type {
   CoachRecommendationResult,
   CoachRecommendationTranscriptLine,
 } from "./recommendation-types";
-import {
-  AUTOMATIC_RECOMMENDATION_LIMIT_PER_CALL,
-  FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL,
-  isMeaningfulFinalSellerTurn,
-} from "./recommendation-policy";
+import { FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL } from "./recommendation-policy";
 
-export const AUTOMATIC_RECOMMENDATION_DEBOUNCE_MS = 1_500;
 export const COACH_RECOMMENDATION_REQUEST_TIMEOUT_MS = 20_000;
 
 export type CoachRecommendationClientState = {
-  recommendations: string[];
   followUpQuestions: string[];
   loadingMode: CoachRecommendationMode | null;
   error: CoachRecommendationFailureCode | "busy" | null;
-  automaticLimitReached: boolean;
   followUpLimitReached: boolean;
 };
 
@@ -31,8 +24,6 @@ export type CoachRecommendationContinuity = {
   callId: string | null;
   activeSectionId: string | null;
   selectedSectionBranch: string | null;
-  lastAutomaticFingerprint: string | null;
-  automaticCount: number;
   followUpCount: number;
   state: CoachRecommendationClientState;
 };
@@ -45,9 +36,8 @@ type TimerApi = {
 // Browser timer functions are Web IDL methods, not safely detachable plain
 // functions. Keeping them directly on an object and later calling
 // `timer.setTimeout(...)` changes `this` from Window to that object, which
-// Chrome rejects with "Illegal invocation" as soon as finalized seller
-// speech starts the debounce. Wrappers preserve the native receiver in the
-// browser and still work in Node-based tests.
+// Chrome rejects with "Illegal invocation". Wrappers preserve the native
+// receiver in the browser and still work in Node-based tests.
 const DEFAULT_TIMER_API: TimerApi = {
   setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
   clearTimeout: (handle) => globalThis.clearTimeout(handle),
@@ -55,18 +45,15 @@ const DEFAULT_TIMER_API: TimerApi = {
 
 export type CoachRecommendationControllerOptions = {
   request: CoachRecommendationRequestFn;
-  debounceMs?: number;
   requestTimeoutMs?: number;
   timer?: TimerApi;
   continuity?: CoachRecommendationContinuity;
 };
 
 const EMPTY_STATE: CoachRecommendationClientState = {
-  recommendations: [],
   followUpQuestions: [],
   loadingMode: null,
   error: null,
-  automaticLimitReached: false,
   followUpLimitReached: false,
 };
 
@@ -75,8 +62,6 @@ export function createCoachRecommendationContinuity(callId: string | null): Coac
     callId,
     activeSectionId: null,
     selectedSectionBranch: null,
-    lastAutomaticFingerprint: null,
-    automaticCount: 0,
     followUpCount: 0,
     state: { ...EMPTY_STATE },
   };
@@ -88,19 +73,8 @@ function nextRequestId(): string {
   return `coach-recommendation-${Date.now()}-${requestSequence}`;
 }
 
-function latestTranscriptFingerprint(lines: readonly CoachRecommendationTranscriptLine[]): string | null {
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index];
-    if (isMeaningfulFinalSellerTurn(line)) {
-      return `${line.id ?? line.ts ?? index}:${line.text}`;
-    }
-  }
-  return null;
-}
-
 export class CoachRecommendationController {
   private readonly request: CoachRecommendationRequestFn;
-  private readonly debounceMs: number;
   private readonly requestTimeoutMs: number;
   private readonly timer: TimerApi;
   private readonly continuity: CoachRecommendationContinuity;
@@ -112,16 +86,10 @@ export class CoachRecommendationController {
   private branchOverrides: Record<string, string> = {};
   private generation = 0;
   private activeRequestToken: symbol | null = null;
-  private activeRequestMode: CoachRecommendationMode | null = null;
-  private debounceHandle: ReturnType<typeof setTimeout> | null = null;
-  private pendingAutomatic: { fingerprint: string; transcript: CoachRecommendationTranscriptLine[] } | null = null;
-  private lastAutomaticFingerprint: string | null = null;
-  private automaticCountByCall = new Map<string, number>();
   private followUpCountByCall = new Map<string, number>();
 
   constructor(options: CoachRecommendationControllerOptions) {
     this.request = options.request;
-    this.debounceMs = options.debounceMs ?? AUTOMATIC_RECOMMENDATION_DEBOUNCE_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? COACH_RECOMMENDATION_REQUEST_TIMEOUT_MS;
     this.timer = options.timer ?? DEFAULT_TIMER_API;
     this.continuity = options.continuity ?? createCoachRecommendationContinuity(null);
@@ -138,9 +106,7 @@ export class CoachRecommendationController {
     this.callId = this.continuity.callId;
     this.activeSectionId = this.continuity.activeSectionId;
     this.selectedSectionBranch = this.continuity.selectedSectionBranch;
-    this.lastAutomaticFingerprint = this.continuity.lastAutomaticFingerprint;
     if (this.continuity.callId) {
-      this.automaticCountByCall.set(this.continuity.callId, this.continuity.automaticCount);
       this.followUpCountByCall.set(this.continuity.callId, this.continuity.followUpCount);
     }
   }
@@ -182,102 +148,44 @@ export class CoachRecommendationController {
     this.generation += 1;
     this.activeRequestToken = null;
     if (callChanged) {
-      this.lastAutomaticFingerprint = null;
-      this.continuity.lastAutomaticFingerprint = null;
-      this.continuity.automaticCount = 0;
       this.continuity.followUpCount = 0;
     }
-    this.pendingAutomatic = null;
-    if (this.debounceHandle) this.timer.clearTimeout(this.debounceHandle);
-    this.debounceHandle = null;
-    const automaticLimitReached =
-      (this.automaticCountByCall.get(input.callId ?? "") ?? 0) >= AUTOMATIC_RECOMMENDATION_LIMIT_PER_CALL;
     const followUpLimitReached =
       (this.followUpCountByCall.get(input.callId ?? "") ?? 0) >= FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL;
     this.publish({
       ...EMPTY_STATE,
-      automaticLimitReached,
       followUpLimitReached,
-      error: automaticLimitReached || followUpLimitReached ? "rate_limited" : null,
+      error: followUpLimitReached ? "rate_limited" : null,
     });
-  }
-
-  considerAutomatic(transcript: readonly CoachRecommendationTranscriptLine[]): boolean {
-    const fingerprint = latestTranscriptFingerprint(transcript);
-    if (!fingerprint || fingerprint === this.lastAutomaticFingerprint) return false;
-    if (!this.callId || !this.activeSectionId) return false;
-
-    this.lastAutomaticFingerprint = fingerprint;
-    this.continuity.lastAutomaticFingerprint = fingerprint;
-    this.pendingAutomatic = { fingerprint, transcript: [...transcript] };
-    if (this.debounceHandle) this.timer.clearTimeout(this.debounceHandle);
-    this.debounceHandle = this.timer.setTimeout(() => {
-      this.debounceHandle = null;
-      void this.startPendingAutomatic();
-    }, this.debounceMs);
-    return true;
-  }
-
-  private async startPendingAutomatic(): Promise<void> {
-    const pending = this.pendingAutomatic;
-    if (!pending || this.activeRequestToken) return;
-    this.pendingAutomatic = null;
-    await this.startRequest("automatic", pending.transcript);
   }
 
   async requestFollowUp(transcript: readonly CoachRecommendationTranscriptLine[]): Promise<boolean> {
     if (this.activeRequestToken) {
-      if (this.activeRequestMode !== "automatic") {
-        this.publish({ error: "busy" });
-        return false;
-      }
-
-      // A deliberate rep action outranks background advice. The provider call
-      // already in flight cannot be cancelled, but its token and generation
-      // are invalidated before the follow-up request starts, so it can never
-      // replace the rep-requested result when it eventually resolves.
-      this.generation += 1;
-      this.activeRequestToken = null;
-      this.activeRequestMode = null;
+      this.publish({ error: "busy" });
+      return false;
     }
-    this.pendingAutomatic = null;
-    if (this.debounceHandle) this.timer.clearTimeout(this.debounceHandle);
-    this.debounceHandle = null;
-    return this.startRequest("follow_up", [...transcript]);
+    return this.startRequest([...transcript]);
   }
 
-  private async startRequest(
-    mode: CoachRecommendationMode,
-    transcript: CoachRecommendationTranscriptLine[],
-  ): Promise<boolean> {
+  private async startRequest(transcript: CoachRecommendationTranscriptLine[]): Promise<boolean> {
     const callId = this.callId;
     const activeSectionId = this.activeSectionId;
     const selectedSectionBranch = this.selectedSectionBranch;
     if (!callId || !activeSectionId || this.activeRequestToken) return false;
 
-    const counts = mode === "automatic" ? this.automaticCountByCall : this.followUpCountByCall;
-    const limit = mode === "automatic"
-      ? AUTOMATIC_RECOMMENDATION_LIMIT_PER_CALL
-      : FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL;
-    const count = counts.get(callId) ?? 0;
-    if (count >= limit) {
-      this.publish({
-        error: "rate_limited",
-        automaticLimitReached: mode === "automatic" ? true : this.state.automaticLimitReached,
-        followUpLimitReached: mode === "follow_up" ? true : this.state.followUpLimitReached,
-      });
+    const count = this.followUpCountByCall.get(callId) ?? 0;
+    if (count >= FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL) {
+      this.publish({ error: "rate_limited", followUpLimitReached: true });
       return false;
     }
 
-    counts.set(callId, count + 1);
-    if (mode === "automatic") this.continuity.automaticCount = count + 1;
-    else this.continuity.followUpCount = count + 1;
+    this.followUpCountByCall.set(callId, count + 1);
+    this.continuity.followUpCount = count + 1;
     const requestId = nextRequestId();
     const generation = this.generation;
     const requestToken = Symbol(requestId);
     this.activeRequestToken = requestToken;
-    this.activeRequestMode = mode;
-    this.publish({ loadingMode: mode, error: null });
+    this.publish({ loadingMode: "follow_up", error: null });
 
     let result: CoachRecommendationResult;
     let requestTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -288,22 +196,21 @@ export class CoachRecommendationController {
         activeSectionId,
         selectedSectionBranch,
         branchOverrides: { ...this.branchOverrides },
-        mode,
+        mode: "follow_up",
         transcript: transcript.filter((line) => line.isFinal),
       });
       const timeoutPromise = new Promise<CoachRecommendationResult>((resolve) => {
         requestTimeoutHandle = this.timer.setTimeout(() => {
-          resolve({ ok: false, requestId, callId, activeSectionId, mode, code: "provider_error" });
+          resolve({ ok: false, requestId, callId, activeSectionId, mode: "follow_up", code: "provider_error" });
         }, this.requestTimeoutMs);
       });
       result = await Promise.race([requestPromise, timeoutPromise]);
     } catch {
-      result = { ok: false, requestId, callId, activeSectionId, mode, code: "provider_error" };
+      result = { ok: false, requestId, callId, activeSectionId, mode: "follow_up", code: "provider_error" };
     } finally {
       if (requestTimeoutHandle) this.timer.clearTimeout(requestTimeoutHandle);
       if (this.activeRequestToken === requestToken) {
         this.activeRequestToken = null;
-        this.activeRequestMode = null;
       }
     }
 
@@ -315,35 +222,21 @@ export class CoachRecommendationController {
       result.requestId !== requestId ||
       result.callId !== callId ||
       result.activeSectionId !== activeSectionId ||
-      result.mode !== mode;
+      result.mode !== "follow_up";
 
     if (!stale) {
       if (result.ok) {
-        this.publish({
-          loadingMode: null,
-          error: null,
-          ...(mode === "automatic" ? { recommendations: result.recommendations } : {}),
-          ...(mode === "follow_up" ? { followUpQuestions: result.followUpQuestions } : {}),
-        });
+        this.publish({ loadingMode: null, error: null, followUpQuestions: result.followUpQuestions });
       } else {
         this.publish({ loadingMode: null, error: result.code });
       }
     }
 
-    if (this.pendingAutomatic && !this.debounceHandle) {
-      this.debounceHandle = this.timer.setTimeout(() => {
-        this.debounceHandle = null;
-        void this.startPendingAutomatic();
-      }, 0);
-    }
     return !stale && result.ok;
   }
 
   dispose(): void {
     this.generation += 1;
-    this.pendingAutomatic = null;
-    if (this.debounceHandle) this.timer.clearTimeout(this.debounceHandle);
-    this.debounceHandle = null;
     this.listeners.clear();
   }
 }

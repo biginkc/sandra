@@ -25,8 +25,8 @@ function success(input: CoachRecommendationRequest): CoachRecommendationResult {
     callId: input.callId,
     activeSectionId: input.activeSectionId,
     mode: input.mode,
-    recommendations: input.mode === "automatic" ? ["Ask how the repair cost is affecting their timeline."] : [],
-    followUpQuestions: input.mode === "follow_up" ? ["What needs repair?", "How long has it been an issue?", "What happens if you wait?"] : [],
+    recommendations: [],
+    followUpQuestions: ["What needs repair?", "How long has it been an issue?", "What happens if you wait?"],
   };
 }
 
@@ -39,38 +39,6 @@ function makeController(request: CoachRecommendationRequestFn) {
 describe("CoachRecommendationController", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
-
-  it("debounces only a meaningful finalized seller turn for 1.5 seconds and excludes interim lines", async () => {
-    const request = vi.fn(async (input: CoachRecommendationRequest) => success(input));
-    const controller = makeController(request);
-
-    expect(controller.considerAutomatic([{ speaker: "rep", text: "Tell me more", isFinal: true }])).toBe(false);
-    expect(controller.considerAutomatic([{ speaker: "seller", text: "okay", isFinal: true }])).toBe(false);
-    expect(controller.considerAutomatic([{ speaker: "seller", text: "The roof has been leaking", isFinal: false }])).toBe(false);
-    expect(controller.considerAutomatic([
-      { speaker: "rep", text: "interim words", isFinal: false },
-      meaningfulTurn("seller-1"),
-    ])).toBe(true);
-
-    await vi.advanceTimersByTimeAsync(1_499);
-    expect(request).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(request).toHaveBeenCalledTimes(1);
-    expect(request.mock.calls[0][0].transcript.every((line) => line.isFinal)).toBe(true);
-  });
-
-  it("detects a newly finalized seller turn even when an overlapping rep line remains later in transcript order", async () => {
-    const request = vi.fn(async (input: CoachRecommendationRequest) => success(input));
-    const controller = makeController(request);
-    const overlappedTranscript = [
-      meaningfulTurn("seller-1", "The furnace repair is more than I can take on."),
-      { id: "rep-1", speaker: "rep" as const, text: "Tell me more about that.", isFinal: true },
-    ];
-
-    expect(controller.considerAutomatic(overlappedTranscript)).toBe(true);
-    await vi.advanceTimersByTimeAsync(1_500);
-    expect(request).toHaveBeenCalledTimes(1);
-  });
 
   it("allows only one in-flight request and one request per accepted manual click", async () => {
     let resolve!: (value: CoachRecommendationResult) => void;
@@ -85,6 +53,7 @@ describe("CoachRecommendationController", () => {
 
     await expect(controller.requestFollowUp(transcript)).resolves.toBe(false);
     expect(request).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot().error).toBe("busy");
     resolve(success(request.mock.calls[0][0]));
     await expect(first).resolves.toBe(true);
   });
@@ -132,38 +101,6 @@ describe("CoachRecommendationController", () => {
       branchOverrides: { "Price too low": "default" },
     });
     expect(reopened.getSnapshot().followUpQuestions).toHaveLength(3);
-  });
-
-  it("lets a deliberate follow-up request supersede background automatic advice", async () => {
-    const resolvers: Array<(value: CoachRecommendationResult) => void> = [];
-    const request = vi.fn((input: CoachRecommendationRequest) => new Promise<CoachRecommendationResult>((resolve) => {
-      void input;
-      resolvers.push(resolve);
-    }));
-    const controller = makeController(request);
-    const transcript = [meaningfulTurn("seller-1")];
-
-    expect(controller.considerAutomatic(transcript)).toBe(true);
-    await vi.advanceTimersByTimeAsync(1_500);
-    expect(controller.getSnapshot().loadingMode).toBe("automatic");
-
-    const followUp = controller.requestFollowUp(transcript);
-    await Promise.resolve();
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(controller.getSnapshot().loadingMode).toBe("follow_up");
-
-    resolvers[0](success(request.mock.calls[0][0]));
-    await Promise.resolve();
-    expect(controller.getSnapshot()).toMatchObject({ loadingMode: "follow_up", recommendations: [] });
-
-    resolvers[1](success(request.mock.calls[1][0]));
-    await expect(followUp).resolves.toBe(true);
-    expect(controller.getSnapshot()).toMatchObject({
-      loadingMode: null,
-      recommendations: [],
-      followUpQuestions: expect.any(Array),
-    });
-    expect(controller.getSnapshot().followUpQuestions).toHaveLength(3);
   });
 
   it("preserves previous valid output on provider error and a client cap", async () => {
@@ -221,22 +158,6 @@ describe("CoachRecommendationController", () => {
     expect(controller.getSnapshot()).toMatchObject({ loadingMode: null, error: null });
   });
 
-  it("caps automatic generation at 40 requests for one call", async () => {
-    const request = vi.fn(async (input: CoachRecommendationRequest) => success(input));
-    const controller = makeController(request);
-
-    for (let index = 0; index < 40; index += 1) {
-      expect(controller.considerAutomatic([meaningfulTurn(`seller-${index}`)])).toBe(true);
-      await vi.advanceTimersByTimeAsync(1_500);
-    }
-    expect(request).toHaveBeenCalledTimes(40);
-
-    expect(controller.considerAutomatic([meaningfulTurn("seller-41")])).toBe(true);
-    await vi.advanceTimersByTimeAsync(1_500);
-    expect(request).toHaveBeenCalledTimes(40);
-    expect(controller.getSnapshot()).toMatchObject({ error: "rate_limited", automaticLimitReached: true });
-  });
-
   it("rejects stale responses after a section change and resets section output", async () => {
     let resolve!: (value: CoachRecommendationResult) => void;
     const request = vi.fn((input: CoachRecommendationRequest) => new Promise<CoachRecommendationResult>((done) => {
@@ -249,7 +170,7 @@ describe("CoachRecommendationController", () => {
     const sent = request.mock.calls[0][0];
 
     controller.setContext({ callId: "call-1", activeSectionId: "introduction.qualification-frame", branchOverrides: {} });
-    expect(controller.getSnapshot()).toEqual(expect.objectContaining({ recommendations: [], followUpQuestions: [], loadingMode: null }));
+    expect(controller.getSnapshot()).toEqual(expect.objectContaining({ followUpQuestions: [], loadingMode: null }));
     resolve(success(sent));
     await expect(pending).resolves.toBe(false);
     expect(controller.getSnapshot().followUpQuestions).toEqual([]);
@@ -258,14 +179,12 @@ describe("CoachRecommendationController", () => {
   it("preserves exhausted per-call caps across section navigation", async () => {
     const request = vi.fn(async (input: CoachRecommendationRequest) => success(input));
     const continuity = createCoachRecommendationContinuity("call-1");
-    continuity.automaticCount = 40;
     continuity.followUpCount = 20;
     const controller = new CoachRecommendationController({ request, continuity });
     controller.setContext({ callId: "call-1", activeSectionId: "introduction.opener", branchOverrides: {} });
 
     expect(controller.getSnapshot()).toMatchObject({
       error: "rate_limited",
-      automaticLimitReached: true,
       followUpLimitReached: true,
     });
 
@@ -276,7 +195,6 @@ describe("CoachRecommendationController", () => {
     });
     expect(controller.getSnapshot()).toMatchObject({
       error: "rate_limited",
-      automaticLimitReached: true,
       followUpLimitReached: true,
     });
     await expect(controller.requestFollowUp([meaningfulTurn("seller-1")])).resolves.toBe(false);
@@ -292,28 +210,6 @@ describe("CoachRecommendationController", () => {
 
     await expect(controller.requestFollowUp([meaningfulTurn("seller-1")])).resolves.toBe(false);
     expect(controller.getSnapshot().followUpQuestions).toEqual([]);
-  });
-
-  it("does not regenerate the same finalized seller turn after manual section changes or controller remounts", async () => {
-    const request = vi.fn(async (input: CoachRecommendationRequest) => success(input));
-    const continuity = createCoachRecommendationContinuity("call-1");
-    const first = new CoachRecommendationController({ request, continuity });
-    first.setContext({ callId: "call-1", activeSectionId: "introduction.opener", branchOverrides: {} });
-    const transcript = [meaningfulTurn("seller-1")];
-
-    expect(first.considerAutomatic(transcript)).toBe(true);
-    await vi.advanceTimersByTimeAsync(1_500);
-    expect(request).toHaveBeenCalledTimes(1);
-
-    first.setContext({ callId: "call-1", activeSectionId: "introduction.qualification-frame", branchOverrides: {} });
-    expect(first.considerAutomatic(transcript)).toBe(false);
-    first.dispose();
-
-    const reopened = new CoachRecommendationController({ request, continuity });
-    reopened.setContext({ callId: "call-1", activeSectionId: "introduction.qualification-frame", branchOverrides: {} });
-    expect(reopened.considerAutomatic(transcript)).toBe(false);
-    await vi.advanceTimersByTimeAsync(1_500);
-    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("releases a stale request slot immediately when the call section changes", async () => {

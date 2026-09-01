@@ -449,7 +449,6 @@ describe("useCoachSession", () => {
     const firstContinuity = result.current.recommendationContinuity;
     firstContinuity.state = {
       ...firstContinuity.state,
-      recommendations: ["Seller A recommendation"],
       followUpQuestions: ["Seller A question?"],
     };
     expect(result.current.branchOverrides).toEqual({ Opener: "fsbo" });
@@ -459,7 +458,6 @@ describe("useCoachSession", () => {
     rerender({ callId: null });
     expect(result.current.activeSectionId).toBe("introduction.opener");
     expect(result.current.recommendationContinuity).not.toBe(firstContinuity);
-    expect(result.current.recommendationContinuity.state.recommendations).toEqual([]);
     expect(result.current.recommendationContinuity.state.followUpQuestions).toEqual([]);
     rerender({ callId: "call-2" });
     expect(result.current.branchOverrides).toEqual({});

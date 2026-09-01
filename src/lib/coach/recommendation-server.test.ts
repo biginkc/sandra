@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { CoachRecommendationRequest } from "./recommendation-types";
 import {
-  AUTOMATIC_RECOMMENDATION_LIMIT_PER_CALL,
+  FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL,
   MAX_RECOMMENDATION_TRANSCRIPT_CHARS,
   MAX_RECOMMENDATION_TRANSCRIPT_LINES,
   boundFinalTranscript,
@@ -21,22 +21,25 @@ function request(overrides: Partial<CoachRecommendationRequest> = {}): CoachReco
     activeSectionId: "introduction.opener",
     selectedSectionBranch: null,
     branchOverrides: {},
-    mode: "automatic",
+    mode: "follow_up",
     transcript: [{ speaker: "seller", text: "I need to sell because the repairs are too expensive.", isFinal: true }],
     ...overrides,
   };
 }
 
+const DEFAULT_FOLLOW_UP_QUESTIONS = [
+  { template: "tell_more", groundingPhrase: "repairs are too expensive" },
+  { template: "impact", groundingPhrase: "repairs" },
+  { template: "priority", groundingPhrase: "repairs" },
+] as const;
+
 function anthropicReturning(input: unknown, capture?: (args: unknown) => void): CoachRecommendationAnthropic {
-  const toolName = typeof input === "object" && input !== null && "questions" in input
-    ? "submit_follow_up_questions"
-    : "submit_coach_recommendations";
   return {
     messages: {
       create: vi.fn(async (args: unknown) => {
         capture?.(args);
         return {
-          content: [{ type: "tool_use", id: "tool-1", name: toolName, input }],
+          content: [{ type: "tool_use", id: "tool-1", name: "submit_follow_up_questions", input }],
         };
       }) as unknown as CoachRecommendationAnthropic["messages"]["create"],
     } as unknown as CoachRecommendationAnthropic["messages"],
@@ -64,7 +67,7 @@ function deps(overrides: Partial<CoachRecommendationServerDeps> = {}): CoachReco
         error: null,
       })),
     },
-    anthropic: anthropicReturning({ recommendations: ["Ask how the repair burden has affected their plans."] }),
+    anthropic: anthropicReturning({ questions: DEFAULT_FOLLOW_UP_QUESTIONS }),
     limiter: { consume: vi.fn(async () => ({ allowed: true })) },
     ...overrides,
   };
@@ -75,19 +78,30 @@ describe("coach recommendation server boundary", () => {
     const dependencies = deps();
     const result = await requestCoachRecommendationsWithDeps(request(), dependencies);
 
-    expect(result).toMatchObject({ ok: true, mode: "automatic", recommendations: expect.any(Array) });
+    expect(result).toMatchObject({ ok: true, mode: "follow_up", followUpQuestions: expect.any(Array) });
     expect(dependencies.calls.findOwnedCall).toHaveBeenCalledWith({ callId: "call-1", userId: "user-1" });
     expect(dependencies.contexts.load).toHaveBeenCalledWith({ propertyId: "property-1" });
     expect(dependencies.limiter.consume).toHaveBeenCalledWith({
       userId: "user-1",
       callId: "call-1",
-      mode: "automatic",
-      limit: AUTOMATIC_RECOMMENDATION_LIMIT_PER_CALL,
+      mode: "follow_up",
+      limit: FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL,
     });
   });
 
+  it("rejects a request with mode \"automatic\" as invalid — the click-driven path accepts only follow_up", async () => {
+    const anthropic = anthropicReturning({ questions: DEFAULT_FOLLOW_UP_QUESTIONS });
+    const result = await requestCoachRecommendationsWithDeps(
+      request({ mode: "automatic" }),
+      deps({ anthropic }),
+    );
+
+    expect(result).toMatchObject({ ok: false, code: "invalid_request" });
+    expect(anthropic.messages.create).not.toHaveBeenCalled();
+  });
+
   it("rejects unauthenticated and unowned calls before provider use", async () => {
-    const anthropic = anthropicReturning({ recommendations: ["unused"] });
+    const anthropic = anthropicReturning({ questions: DEFAULT_FOLLOW_UP_QUESTIONS });
     const unauthenticated = deps({
       auth: { getUser: vi.fn(async () => ({ data: { user: null }, error: null })) },
       anthropic,
@@ -110,7 +124,7 @@ describe("coach recommendation server boundary", () => {
   });
 
   it("returns a cap result and never calls the provider when the injected limiter denies", async () => {
-    const anthropic = anthropicReturning({ recommendations: ["unused"] });
+    const anthropic = anthropicReturning({ questions: DEFAULT_FOLLOW_UP_QUESTIONS });
     const dependencies = deps({ limiter: { consume: vi.fn(async () => ({ allowed: false })) }, anthropic });
     const result = await requestCoachRecommendationsWithDeps(request(), dependencies);
 
@@ -120,42 +134,24 @@ describe("coach recommendation server boundary", () => {
 
   it("the supplied limiter enforces the exact per-key limit", async () => {
     const limiter = createInMemoryCoachRecommendationLimiter();
-    const input = { userId: "u", callId: "c", mode: "automatic" as const, limit: 2 };
+    const input = { userId: "u", callId: "c", mode: "follow_up" as const, limit: 2 };
     await expect(limiter.consume(input)).resolves.toEqual({ allowed: true });
     await expect(limiter.consume(input)).resolves.toEqual({ allowed: true });
     await expect(limiter.consume(input)).resolves.toEqual({ allowed: false });
     await expect(limiter.consume({ ...input, callId: "other" })).resolves.toEqual({ allowed: true });
   });
 
-  it("rejects interim transcript input and automatic requests without a meaningful final seller turn", async () => {
+  it("rejects interim-only transcript input and a transcript missing a seller line", async () => {
     const interim = request({ transcript: [{ speaker: "seller", text: "The roof is leaking badly", isFinal: false }] });
     expect(await requestCoachRecommendationsWithDeps(interim, deps())).toMatchObject({ ok: false, code: "invalid_request" });
 
-    const filler = request({ transcript: [{ speaker: "seller", text: "okay", isFinal: true }] });
-    expect(await requestCoachRecommendationsWithDeps(filler, deps())).toMatchObject({ ok: false, code: "invalid_request" });
-
     const repOnlyFollowUp = request({
-      mode: "follow_up",
       transcript: [{ speaker: "rep", text: "Tell me more about what has you considering a move.", isFinal: true }],
     });
     expect(await requestCoachRecommendationsWithDeps(repOnlyFollowUp, deps())).toMatchObject({
       ok: false,
       code: "invalid_request",
     });
-  });
-
-  it("accepts an automatic request when overlap leaves the finalized seller line before a later rep line", async () => {
-    const result = await requestCoachRecommendationsWithDeps(
-      request({
-        transcript: [
-          { speaker: "seller", text: "The furnace repair is more than I can take on.", isFinal: true },
-          { speaker: "rep", text: "Tell me more about that.", isFinal: true },
-        ],
-      }),
-      deps(),
-    );
-
-    expect(result).toMatchObject({ ok: true, mode: "automatic" });
   });
 
   it("loads script content by trusted section line references and validates branch variants", () => {
@@ -197,7 +193,7 @@ describe("coach recommendation server boundary", () => {
     let captured: unknown;
     const dependencies = deps({
       anthropic: anthropicReturning(
-        { recommendations: ["Ask what offer amount would solve the seller's problem."] },
+        { questions: DEFAULT_FOLLOW_UP_QUESTIONS },
         (args) => { captured = args; },
       ),
     });
@@ -237,7 +233,11 @@ describe("coach recommendation server boundary", () => {
     let captured: unknown;
     const dependencies = deps({
       anthropic: anthropicReturning(
-        { recommendations: ["Ask how soon they need the repair resolved."] },
+        { questions: [
+          { template: "tell_more", groundingPhrase: "roof issue is urgent" },
+          { template: "impact", groundingPhrase: "roof issue" },
+          { template: "priority", groundingPhrase: "urgent" },
+        ] },
         (args) => { captured = args; },
       ),
     });
