@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import {
   CalendarDays,
   CheckCircle2,
@@ -22,6 +22,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { callAction } from "@/lib/errors/call-action";
 import { cn } from "@/lib/utils";
 import {
@@ -55,6 +63,11 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const [phoneInput, setPhoneInput] = useState(initial.sms.phone ?? "");
   const [esign, setEsign] = useState(initial.esign);
   const [esignApiKey, setEsignApiKey] = useState("");
+  const [esignConfirmation, setEsignConfirmation] = useState<boolean | null>(
+    null,
+  );
+  const esignToggleRef = useRef<HTMLInputElement>(null);
+  const esignConfirmingRef = useRef(false);
   const [pending, startTransition] = useTransition();
 
   const toggleSlack = (next: boolean) => {
@@ -148,18 +161,38 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
     });
   };
 
-  const toggleEsign = (next: boolean) => {
-    const previous = esign.sendingEnabled;
-    setEsign((current) => ({ ...current, sendingEnabled: next }));
+  const returnFocusToEsignToggle = () => {
+    window.setTimeout(() => esignToggleRef.current?.focus(), 0);
+  };
+
+  const closeEsignConfirmation = () => {
+    if (esignConfirmingRef.current) return;
+    setEsignConfirmation(null);
+    returnFocusToEsignToggle();
+  };
+
+  const confirmEsignToggle = () => {
+    const next = esignConfirmation;
+    if (next === null || esignConfirmingRef.current) return;
+    esignConfirmingRef.current = true;
     startTransition(async () => {
-      const result = await callAction(setEsignSendingEnabledAction(next), {
-        successMessage: next
-          ? "eSign sending turned on"
-          : "eSign sending turned off",
-        fallbackMessage: "Could not update eSign sending",
-      });
-      if (!result.ok) {
-        setEsign((current) => ({ ...current, sendingEnabled: previous }));
+      try {
+        const result = await callAction(
+          setEsignSendingEnabledAction(next, true),
+          {
+            successMessage: next
+              ? "eSign sending turned on"
+              : "eSign sending turned off",
+            fallbackMessage: "Could not update eSign sending",
+          },
+        );
+        if (result.ok) {
+          setEsign((current) => ({ ...current, sendingEnabled: next }));
+        }
+      } finally {
+        esignConfirmingRef.current = false;
+        setEsignConfirmation(null);
+        returnFocusToEsignToggle();
       }
     });
   };
@@ -255,14 +288,19 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                     </span>
                   </span>
                   <input
+                    ref={esignToggleRef}
                     type="checkbox"
                     role="switch"
                     checked={esign.sendingEnabled}
                     disabled={pending || !esign.canManage}
-                    onChange={(event) => toggleEsign(event.target.checked)}
+                    onChange={(event) =>
+                      setEsignConfirmation(event.target.checked)
+                    }
                     data-testid="esign-enabled-toggle"
                     className="accent-primary size-5"
                     aria-label="Enable contract sending"
+                    aria-expanded={esignConfirmation !== null}
+                    aria-controls="esign-sending-confirmation"
                   />
                 </label>
                 <div className="flex flex-wrap gap-2">
@@ -415,6 +453,46 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
           </div>
         </section>
       )}
+
+      <Dialog
+        open={esignConfirmation !== null}
+        onOpenChange={(open) => {
+          if (!open) closeEsignConfirmation();
+        }}
+      >
+        <DialogContent id="esign-sending-confirmation">
+          <DialogHeader>
+            <DialogTitle>
+              {esignConfirmation
+                ? "Turn on contract sending?"
+                : "Turn off contract sending?"}
+            </DialogTitle>
+            <DialogDescription>
+              {esignConfirmation
+                ? "New test-mode signature requests can be sent after you confirm."
+                : "New signature requests will stay blocked after you confirm."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending}
+              onClick={closeEsignConfirmation}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              autoFocus
+              disabled={pending}
+              onClick={confirmEsignToggle}
+            >
+              {esignConfirmation ? "Turn on sending" : "Turn off sending"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

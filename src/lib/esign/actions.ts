@@ -9,12 +9,7 @@ import {
   ProviderError,
   ValidationError,
 } from "@/lib/errors/classes";
-import {
-  err,
-  ok,
-  type AppErrorShape,
-  type Result,
-} from "@/lib/errors/result";
+import { err, ok, type AppErrorShape, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -187,10 +182,16 @@ export async function connectDropboxSignAction(
 
 export async function setEsignSendingEnabledAction(
   enabled: boolean,
+  operatorConfirmed: boolean,
 ): Promise<Result<null>> {
   try {
     const membership = await currentMembership();
     requireOwner(membership);
+    if (operatorConfirmed !== true) {
+      throw new ValidationError(
+        "Confirm the contract sending change before it is applied.",
+      );
+    }
     const { error } = await (
       createAdminClient() as unknown as AdminIntegrationClient
     ).rpc("set_org_esign_sending_enabled", {
