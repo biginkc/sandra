@@ -17,19 +17,23 @@ on:
 # the other had just seeded. Symptoms looked like compile-penalty from a static
 # import; the static import was a red herring (PR #131 lazy-load workaround
 # was withdrawn).
-# E2E now runs against its own dedicated Supabase project, so it only needs to
-# serialize against runs sharing that same project — not against eSign/browser-QA
-# or coach-canary runs on other projects. Keying the group by project ref keeps
-# same-database runs single-file while letting other tracks run concurrently.
-#
-# This concurrency group alone isn't a complete guard: it only serializes runs
-# whose *own* checked-out e2e.yml carries this same group string. A branch
-# that hasn't rebased onto this change still runs under the old
-# e2e-shared-test-project group and can execute in parallel against the same
-# dedicated project. The DB-level advisory lock taken in e2e/global-setup.ts
-# is the guard that's immune to that drift — see its file comment.
+# Kept as the exact legacy static string, not a per-project-ref group: a
+# per-database group was tried (e2e-dedicated-${{ vars.E2E_CI_SUPABASE_...
+# }}) and reverted for two reasons Codex review caught. First, env-level
+# `vars` context resolves EMPTY at concurrency-block evaluation time (the
+# concurrency block evaluates before `env:` is available), so the group
+# name silently became "e2e-dedicated-" for every run — not actually
+# scoped by project at all. Second, and more fundamentally: diverging the
+# group name from the legacy string is exactly what let legacy branches
+# (still carrying the old e2e-shared-test-project group) run in parallel
+# against branches that had already picked up the new name — the opposite
+# of the intended fix. The static legacy string serializes every E2E run,
+# old branch or new, against this one shared database — which is correct,
+# since every E2E run (dedicated project or not) still shares it. The DB
+# advisory lock in e2e/global-setup.ts is the real backstop against
+# cross-branch drift in this string; it doesn't depend on YAML matching.
 concurrency:
-  group: e2e-dedicated-${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
+  group: e2e-shared-test-project
   cancel-in-progress: false
   queue: max
 
@@ -95,10 +99,12 @@ jobs:
           TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
           TEST_SUPABASE_ANON_KEY: ${{ secrets.E2E_CI_SUPABASE_ANON_KEY }}
           TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
-          # Transaction-mode pooler URL (port 6543, sslmode=no-verify — this
-          # project has no direct-connection DNS) for the Playwright
-          # globalSetup advisory-lock transaction — see e2e/global-setup.ts.
-          # Never printed; consumed only by the pg client inside Node.
+          # Transaction-mode pooler URL (port 6543 — this project has no
+          # direct-connection DNS) for the Playwright globalSetup
+          # advisory-lock transaction — see e2e/global-setup.ts, which
+          # configures TLS explicitly in code rather than relying on a
+          # query param here. Never printed; consumed only by the pg
+          # client inside Node.
           E2E_CI_SUPABASE_DB_URL: ${{ secrets.E2E_CI_SUPABASE_DB_URL }}
         run: |
           # Bound each serial group to a fresh Next dev server. Beyond roughly

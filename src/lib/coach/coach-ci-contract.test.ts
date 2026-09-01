@@ -93,15 +93,6 @@ describe("coach realtime authorization CI security contract", () => {
     expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_PROJECT_REF");
   });
 
-  it("scopes E2E concurrency to its own dedicated project instead of the old shared-project group", () => {
-    // E2E runs against its own dedicated Supabase project now, so it only
-    // needs to serialize against runs sharing that same project — not
-    // against eSign/browser-QA or coach-canary runs on other projects.
-    expect(e2eWorkflow).toContain("group: e2e-dedicated-${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}");
-    expect(e2eWorkflow).not.toContain("group: e2e-shared-test-project");
-    expect(e2eWorkflow).toContain("queue: max");
-  });
-
   it("holds a DB-level advisory lock for the whole E2E suite run", () => {
     // GitHub concurrency groups only serialize runs whose *own* checked-out
     // e2e.yml carries the same group string — a branch that hasn't rebased
@@ -191,6 +182,12 @@ describe("coach realtime authorization CI security contract", () => {
   it("serializes with the migration and E2E workflows against the shared test project", () => {
     expect(coachWorkflow).toContain("group: e2e-shared-test-project");
     expect(migrationWorkflow).toContain("group: e2e-shared-test-project");
+    // e2e.yml's group stays the static legacy string too — a per-project-ref
+    // group was tried and reverted (env-level `vars` resolves empty at
+    // concurrency-evaluation time, and a diverged group name is exactly
+    // what let old and new branches run in parallel against each other).
+    // See the concurrency block's own comment in e2e.yml.
+    expect(e2eWorkflow).toContain("group: e2e-shared-test-project");
     for (const workflow of [coachWorkflow, migrationWorkflow, e2eWorkflow]) {
       expect(workflow).toContain("queue: max");
     }
