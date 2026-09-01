@@ -19,7 +19,7 @@ const AUTH_FILE = "e2e/.auth/user.json";
  */
 setup("authenticate", async ({ page }) => {
   const admin = adminClient();
-  await ensureTestUser(admin, { repairPassword: true });
+  await ensureTestUser(admin);
 
   await page.goto("/login");
   await expect(

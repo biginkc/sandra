@@ -68,6 +68,13 @@ function withoutSqlComments(sql: string): string {
 }
 
 describe("coach realtime authorization CI security contract", () => {
+  it("requires explicit Coach CI owner-purpose markers and collision preflight", () => {
+    expect(coachWorkflow).toContain("Assert Coach identities are explicitly isolated");
+    expect(coachWorkflow).toContain("browser-QA namespace");
+    expect(withoutSqlComments(ciTestProjectSetup)).toContain("app_metadata->>'owner'");
+    expect(withoutSqlComments(ciTestProjectSetup)).toContain("app_metadata->>'purpose'");
+    expect(withoutSqlComments(ciTestProjectSetup)).toContain("coach-realtime-authorization");
+  });
   it("is a single job — not split across jobs that would each need their own environment approval", () => {
     const jobsBlockStart = coachWorkflow.indexOf("\njobs:\n");
     expect(jobsBlockStart).toBeGreaterThan(0);

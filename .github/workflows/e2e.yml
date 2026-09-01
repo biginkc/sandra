@@ -58,6 +58,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate run-scoped CI identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          slug="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'E2E_RUN_SLUG=%s\n' "$slug" >> "$GITHUB_ENV"
+          printf 'E2E_TEST_USER_EMAIL=e2e-ci+%s@bmhgroupkc.com\n' "$slug" >> "$GITHUB_ENV"
+          printf 'E2E_TEST_USER_PASSWORD=%s\n' "$(openssl rand -base64 36 | tr -d '\n')" >> "$GITHUB_ENV"
+          case "$slug" in gha-[1-9]*-[1-9]*) ;; *) echo 'invalid CI identity namespace' >&2; exit 1 ;; esac
+
+      - name: Assert CI identity is not browser-QA scoped
+        run: |
+          test "${E2E_TEST_USER_EMAIL#e2e-ci+}" = "${E2E_RUN_SLUG}@bmhgroupkc.com"
+          test "${E2E_TEST_USER_EMAIL}" != "PRIMARY_E2E"
+
       - name: Verify Chrome browser
         run: |
           google-chrome --version

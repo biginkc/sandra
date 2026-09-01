@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "../src/lib/supabase/types";
+import { assertBrowserQaProtected, assertIdentity, createIdentity } from "../src/lib/testing/e2e-identity-policy";
 import { assertSafeE2ESupabaseTarget } from "../src/lib/supabase/e2e-target-safety";
 import {
   MOCK_PROVIDER_CAMPAIGN_ID,
@@ -17,8 +18,11 @@ import {
  * without going through the UI.
  */
 
-export const TEST_USER_EMAIL = "e2e-test@bmhgroupkc.com";
-export const TEST_USER_PASSWORD = "test12345";
+const RUN_SLUG = process.env.E2E_RUN_SLUG ?? `gha-${process.env.GITHUB_RUN_ID ?? "1"}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`;
+const RUN_PASSWORD = process.env.E2E_TEST_USER_PASSWORD ?? "local-development-only-password-000";
+const PRIMARY_IDENTITY = createIdentity(RUN_SLUG, RUN_PASSWORD);
+export const TEST_USER_EMAIL = PRIMARY_IDENTITY.email;
+export const TEST_USER_PASSWORD = PRIMARY_IDENTITY.password;
 export const E2E_MOCK_BUSINESS_NUMBER = MOCK_SENDER_PRIMARY;
 
 export function adminClient(): SupabaseClient<Database> {
@@ -131,8 +135,8 @@ export const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
  */
 export async function ensureTestUser(
   client: SupabaseClient<Database>,
-  options: { repairPassword?: boolean } = {},
 ): Promise<string> {
+  assertBrowserQaProtected({ email: TEST_USER_EMAIL, app_metadata: PRIMARY_IDENTITY.appMetadata });
   // Paginate the FULL user list (Codex month-view round 4): the shared
   // test project accumulates users faster than a single 200-row page —
   // when the shared account fell past page one, this helper concluded it
@@ -142,7 +146,7 @@ export async function ensureTestUser(
   // page parsing bug — same locally-bounded pattern as
   // fetchAssigneeEmails).
   const MAX_USER_PAGES = 50;
-  let existing: { id: string } | undefined;
+  let existing: { id: string; email?: string | null; app_metadata?: unknown } | undefined;
   for (let page = 1; page <= MAX_USER_PAGES && !existing; page++) {
     const { data: list, error: listErr } = await client.auth.admin.listUsers({
       page,
@@ -150,29 +154,21 @@ export async function ensureTestUser(
     });
     if (listErr) throw listErr;
     const users = list?.users ?? [];
-    existing = users.find((u) => u.email === TEST_USER_EMAIL);
+    existing = users.find((u) => u.email?.trim().toLowerCase() === TEST_USER_EMAIL);
     if (users.length < 1000) break;
   }
 
   let userId: string;
   if (existing) {
     userId = existing.id;
-    if (options.repairPassword) {
-      const { error: updateErr } = await client.auth.admin.updateUserById(
-        userId,
-        {
-          password: TEST_USER_PASSWORD,
-          email_confirm: true,
-        },
-      );
-      if (updateErr) throw updateErr;
-    }
+    assertIdentity(existing, PRIMARY_IDENTITY);
   } else {
     const { data: created, error: createErr } =
       await client.auth.admin.createUser({
         email: TEST_USER_EMAIL,
         password: TEST_USER_PASSWORD,
         email_confirm: true,
+        app_metadata: PRIMARY_IDENTITY.appMetadata,
       });
     if (createErr || !created?.user)
       throw createErr ?? new Error("createUser returned no user");

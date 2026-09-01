@@ -82,6 +82,20 @@ jobs:
       - name: Install coach canary dependencies
         run: npm ci
 
+      - name: Assert Coach identities are explicitly isolated
+        env:
+          COACH_CI_OWNER_EMAIL: ${{ secrets.COACH_CI_OWNER_EMAIL }}
+          COACH_CI_FOREIGN_EMAIL: ${{ secrets.COACH_CI_FOREIGN_EMAIL }}
+        run: |
+          set -euo pipefail
+          test -n "$COACH_CI_OWNER_EMAIL"
+          test -n "$COACH_CI_FOREIGN_EMAIL"
+          test "$COACH_CI_OWNER_EMAIL" != "$COACH_CI_FOREIGN_EMAIL"
+          case "$COACH_CI_OWNER_EMAIL:$COACH_CI_FOREIGN_EMAIL" in
+            *e2e-ci*|*browser-qa*|*PRIMARY_E2E*|*ASSIGNEE_E2E*|*LEADS_TEAMMATE_E2E*)
+              echo 'Coach CI identity collides with a protected browser-QA namespace' >&2; exit 1 ;;
+          esac
+
       - name: Run the coach realtime authorization canary
         env:
           TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}

@@ -9,7 +9,7 @@ function clientWithMembershipResult(error: { message: string } | null) {
       admin: {
         listUsers: vi.fn().mockResolvedValue({
           data: {
-            users: [{ id: "user-123", email: TEST_USER_EMAIL }],
+            users: [{ id: "user-123", email: TEST_USER_EMAIL, app_metadata: { owner: "github-actions", purpose: "ci-e2e", run_slug: "gha-1-1", principal: "primary" } }],
           },
           error: null,
         }),
@@ -41,17 +41,10 @@ describe("ensureTestUser", () => {
     );
   });
 
-  it("repairs the existing e2e auth user password when explicitly requested", async () => {
+  it("does not expose a password-repair path", async () => {
     const client = clientWithMembershipResult(null);
-
-    await expect(
-      ensureTestUser(client as never, { repairPassword: true }),
-    ).resolves.toBe("user-123");
-
-    expect(client.auth.admin.updateUserById).toHaveBeenCalledWith("user-123", {
-      password: "test12345",
-      email_confirm: true,
-    });
+    await expect(ensureTestUser(client as never)).resolves.toBe("user-123");
+    expect(client.auth.admin.updateUserById).not.toHaveBeenCalled();
   });
 
   it("fails loudly when the memberships table is missing", async () => {

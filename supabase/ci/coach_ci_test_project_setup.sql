@@ -188,7 +188,8 @@ declare
 begin
   select count(*) into v_known_count
   from auth.users
-  where email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com');
+  where (app_metadata->>'owner') = 'github-actions'
+    and (app_metadata->>'purpose') = 'coach-realtime-authorization';
   if v_known_count <> 2 then
     raise exception 'coach_ci_seed_ownership: expected exactly 2 known CI test accounts, found %', v_known_count;
   end if;
@@ -196,7 +197,8 @@ begin
   if auth.uid() is null or not exists (
     select 1 from auth.users
     where id = auth.uid()
-      and email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')
+      and (app_metadata->>'owner') = 'github-actions'
+      and (app_metadata->>'purpose') = 'coach-realtime-authorization'
   ) then
     raise exception 'coach_ci_seed_ownership: not permitted for this user';
   end if;
@@ -220,7 +222,8 @@ declare
 begin
   select count(*) into v_known_count
   from auth.users
-  where email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com');
+  where (app_metadata->>'owner') = 'github-actions'
+    and (app_metadata->>'purpose') = 'coach-realtime-authorization';
   if v_known_count <> 2 then
     raise exception 'coach_ci_delete_own_ownership: expected exactly 2 known CI test accounts, found %', v_known_count;
   end if;
@@ -228,7 +231,8 @@ begin
   if auth.uid() is null or not exists (
     select 1 from auth.users
     where id = auth.uid()
-      and email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')
+      and (app_metadata->>'owner') = 'github-actions'
+      and (app_metadata->>'purpose') = 'coach-realtime-authorization'
   ) then
     raise exception 'coach_ci_delete_own_ownership: not permitted for this user';
   end if;
