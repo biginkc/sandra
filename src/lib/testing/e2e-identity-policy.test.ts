@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertBrowserQaProtected, assertIdentity, assertPairwiseDisjoint, createIdentity, identityFromEnvironment } from "./e2e-identity-policy";
+import { assertBrowserQaProtected, assertDedicatedProjectUrl, assertIdentity, assertPairwiseDisjoint, createIdentity, identityFromEnvironment } from "./e2e-identity-policy";
 
 describe("E2E identity policy", () => {
   it("creates deterministic run-scoped principals", () => {
@@ -28,5 +28,10 @@ describe("E2E identity policy", () => {
     expect(primary.email).not.toBe(assignee.email);
     expect(primary.appMetadata).toMatchObject({ owner: "github-actions", purpose: "ci-e2e", run_slug: "gha-9-1", principal: "primary" });
     expect(assignee.appMetadata).toMatchObject({ owner: "github-actions", purpose: "ci-e2e", run_slug: "gha-9-1", principal: "assignee" });
+  });
+  it("rejects URL component and hostname smuggling", () => {
+    const ref = "ci-project";
+    expect(() => assertDedicatedProjectUrl("https://ci-project.supabase.co/", ref)).not.toThrow();
+    for (const value of ["http://ci-project.supabase.co/", "https://ci-project.supabase.co.evil/", "https://evil/ci-project.supabase.co", "https://ci-project.supabase.co/path", "https://ci-project.supabase.co/?x=1", "https://u:p@ci-project.supabase.co/", "https://ci-project.supabase.co:443/"]) expect(() => assertDedicatedProjectUrl(value, ref)).toThrow();
   });
 });

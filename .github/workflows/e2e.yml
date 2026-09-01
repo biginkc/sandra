@@ -80,8 +80,10 @@ jobs:
           if (values.some((value) => !value) || new Set(values).size !== values.length || !values[0].startsWith("e2e-ci+")) process.exit(1);
           const ciRef = process.env.E2E_CI_SUPABASE_PROJECT_REF?.trim().toLowerCase();
           const browserRef = process.env.BROWSER_QA_SUPABASE_PROJECT_REF?.trim().toLowerCase();
-          const ciUrl = process.env.E2E_CI_SUPABASE_URL?.trim().toLowerCase();
-          if (!ciRef || !browserRef || !ciUrl || ciRef === browserRef || !ciUrl.includes(`${ciRef}.supabase.co`)) process.exit(1);
+          const ciUrl = process.env.E2E_CI_SUPABASE_URL?.trim();
+          let parsed;
+          try { parsed = new URL(ciUrl); } catch { process.exit(1); }
+          if (!ciRef || !browserRef || !ciUrl || ciRef === browserRef || parsed.protocol !== 'https:' || parsed.hostname !== `${ciRef}.supabase.co` || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash || parsed.pathname !== '/') process.exit(1);
           NODE
 
       - name: Verify Chrome browser

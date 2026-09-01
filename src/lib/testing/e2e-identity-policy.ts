@@ -22,6 +22,15 @@ export function assertPairwiseDisjoint(values: readonly string[]): void {
   }
 }
 
+export function assertDedicatedProjectUrl(value: string, projectRef: string): void {
+  const ref = normalizeIdentity(projectRef);
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { throw new Error("E2E CI project URL is invalid."); }
+  if (parsed.protocol !== "https:" || parsed.hostname !== `${ref}.supabase.co` || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash || parsed.pathname !== "/") {
+    throw new Error("E2E CI project URL is not the exact dedicated project origin.");
+  }
+}
+
 const slugPattern = /^gha-[1-9][0-9]*-[1-9][0-9]*$/;
 const email = (slug: string, principal: E2EPrincipal) =>
   `e2e-ci+${slug}${principal === "primary" ? "" : `-${principal}`}@${DOMAIN}`;
