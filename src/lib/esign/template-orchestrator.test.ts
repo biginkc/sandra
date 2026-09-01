@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderError } from "@/lib/errors/classes";
 
 import { ESIGN_TEMPLATE_MERGE_FIELDS } from "./template-contract";
@@ -40,6 +40,7 @@ const draft: TemplateDraftRecord = {
   mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
   stagingSourceId: sourceId,
   supersedesTemplateId: null,
+  providerSyncStartedAt: null,
   lifecycle: "editing",
 };
 const finalized = { ...draft, lifecycle: "finalized" as const, stagingSourceId: null };
@@ -63,6 +64,7 @@ function makePorts(): TemplateOrchestratorPorts {
       createHiddenDuplicate: vi.fn().mockResolvedValue({ ...draft, providerTemplateId: null, lifecycle: "preparing" }),
       createHiddenEditRevision: vi.fn().mockResolvedValue({ ...draft, id: "revision-1", providerTemplateId: null, lifecycle: "preparing", supersedesTemplateId: "template-1" }),
       getTemplate: vi.fn().mockResolvedValue(draft),
+      markFinishSyncStarted: vi.fn().mockResolvedValue("2026-08-29T12:00:00.000Z"),
       attachProviderId: vi.fn().mockResolvedValue(true),
       finalizeDraft: vi.fn().mockResolvedValue(true),
       publishEditRevision: vi.fn().mockResolvedValue("published"),
@@ -84,6 +86,7 @@ function makePorts(): TemplateOrchestratorPorts {
       duplicateTemplate: vi.fn().mockResolvedValue({ providerTemplateId: "provider-copy", readiness: "pending" }),
       deleteTemplate: vi.fn().mockResolvedValue(undefined),
       isNotFound: vi.fn().mockReturnValue(false),
+      classifyTemplateReadError: vi.fn().mockReturnValue("terminal"),
       isAmbiguousMutation: vi.fn().mockReturnValue(false),
       isRestartableEditorSessionError: vi.fn().mockReturnValue(false),
     },
@@ -172,6 +175,7 @@ describe("template action orchestration", () => {
     }
   });
   beforeEach(() => vi.clearAllMocks());
+  afterEach(() => vi.useRealTimers());
 
   it("owner-gates every operation before touching another port", async () => {
     const ports = makePorts();
@@ -726,6 +730,199 @@ describe("template action orchestration", () => {
     expect(result).toMatchObject({ ok: true, data: { providerTemplateId: "provider-1", sellerRoleName: "Seller", signerRoles: roles, mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS } });
     expect(ports.storage.deletePrivate).toHaveBeenCalledWith(stage.storagePath);
     expect(ports.repository.recordSourceCleanup).toHaveBeenCalledWith({ orgId: "org-1", templateId: "template-1", storagePath: stage.storagePath, outcome: "deleted" });
+  });
+
+  it("retries only the asynchronous provider not-found window before finalizing", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    const providerPending = new Error("not ready");
+    vi.mocked(ports.provider.getTemplate)
+      .mockRejectedValueOnce(providerPending)
+      .mockRejectedValueOnce(providerPending)
+      .mockResolvedValue({
+        providerTemplateId: "provider-1",
+        signerRoles: roles,
+        mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
+      });
+    vi.mocked(ports.provider.classifyTemplateReadError).mockImplementation(
+      (error) => error === providerPending ? "not_found" : "terminal",
+    );
+
+    const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
+    await vi.advanceTimersByTimeAsync(999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(resultPromise).resolves.toMatchObject({ ok: true });
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(3);
+    expect(ports.repository.finalizeDraft).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stops retrying when a not-found conversion window becomes a genuine failure", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    const providerPending = new Error("not ready");
+    const providerFailure = new Error("private provider diagnostic");
+    vi.mocked(ports.provider.getTemplate)
+      .mockRejectedValueOnce(providerPending)
+      .mockRejectedValueOnce(providerFailure);
+    vi.mocked(ports.provider.classifyTemplateReadError).mockImplementation(
+      (error) => error === providerPending ? "not_found" : "terminal",
+    );
+
+    const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_SYNC_FAILED" },
+    });
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a missing finalized provider template as conversion delay", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    const missing = new Error("missing");
+    vi.mocked(ports.repository.getTemplate).mockResolvedValue(finalized);
+    vi.mocked(ports.provider.getTemplate).mockRejectedValue(missing);
+    vi.mocked(ports.provider.classifyTemplateReadError).mockImplementation(
+      (error) => error === missing ? "not_found" : "terminal",
+    );
+
+    const result = await createTemplateOrchestrator(ports).finishSync("template-1");
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_SYNC_FAILED" },
+    });
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not retry a genuine provider failure during finish sync", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    vi.mocked(ports.provider.getTemplate).mockRejectedValue(
+      new Error("private provider diagnostic"),
+    );
+
+    const result = await createTemplateOrchestrator(ports).finishSync("template-1");
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "PROVIDER_SYNC_FAILED",
+        message: "Dropbox Sign template state could not be verified.",
+      },
+    });
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("private provider diagnostic");
+  });
+
+  it("keeps an asynchronously converting template recoverable after bounded retries", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    const providerPending = new Error("not ready");
+    vi.mocked(ports.provider.getTemplate).mockRejectedValue(providerPending);
+    vi.mocked(ports.provider.classifyTemplateReadError).mockImplementation(
+      (error) => error === providerPending ? "not_found" : "terminal",
+    );
+
+    const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
+    await vi.advanceTimersByTimeAsync(999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(6_999);
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(resultPromise).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "PROVIDER_SYNC_PENDING",
+        message:
+          "Dropbox Sign is still finishing this template. Retry synchronization here without reopening the editor.",
+      },
+    });
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(5);
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    expect(ports.repository.markAbandoned).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.mocked(ports.provider.getTemplate).mockResolvedValue({
+      providerTemplateId: "provider-1",
+      signerRoles: roles,
+      mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
+    });
+    await expect(
+      createTemplateOrchestrator(ports).finishSync("template-1"),
+    ).resolves.toMatchObject({ ok: true });
+    expect(ports.repository.finalizeDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("wall-clock bounds a provider read that ignores cancellation", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    vi.mocked(ports.provider.getTemplate).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+
+    const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(ports.repository.finalizeDraft).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(resultPromise).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "PROVIDER_SYNC_TIMEOUT",
+        message: "Dropbox Sign template verification timed out. Retry synchronization without reopening the editor.",
+      },
+    });
+    const signal = vi.mocked(ports.provider.getTemplate).mock.calls[0]?.[1];
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("makes a structured not-found terminal after the documented callback deadline", async () => {
+    vi.useFakeTimers();
+    const ports = makePorts();
+    const providerPending = new Error("not ready");
+    vi.mocked(ports.repository.getTemplate).mockResolvedValue({
+      ...draft,
+      providerSyncStartedAt: "2026-08-29T10:59:59.999Z",
+    });
+    vi.mocked(ports.provider.getTemplate).mockRejectedValue(providerPending);
+    vi.mocked(ports.provider.classifyTemplateReadError).mockReturnValue("not_found");
+
+    const resultPromise = createTemplateOrchestrator(ports).finishSync("template-1");
+    await vi.advanceTimersByTimeAsync(14_000);
+    await expect(resultPromise).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_SYNC_FAILED" },
+    });
+    expect(ports.repository.markFinishSyncStarted).not.toHaveBeenCalled();
+    expect(ports.provider.getTemplate).toHaveBeenCalledTimes(1);
   });
 
   it("does not claim abandon success when source cleanup fails and audits the failure", async () => {

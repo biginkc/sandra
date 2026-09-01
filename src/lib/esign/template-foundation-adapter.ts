@@ -18,6 +18,8 @@ import {
 } from "./template-orchestrator";
 
 const STAGING_BUCKET = "esign-staging";
+const TEMPLATE_DRAFT_SELECT = "id,org_id,name,document_type,sign_template_id,provider_account_id,seller_role,signer_roles,merge_field_names,staging_source_id,supersedes_template_id,lifecycle_state";
+const EXPIRED_PROVIDER_SYNC_STARTED_AT = "1970-01-01T00:00:00.000Z";
 
 export type TemplateLibraryRecord = TemplateOption & {
   sourceFilename: string;
@@ -40,6 +42,26 @@ export async function createFoundationTemplateOrchestrator() {
   };
   const membership = await actorPort.getActor();
   const admin = createAdminClient();
+  let providerSyncTimestampCapability: boolean | null = null;
+  const readProviderSyncStartedAt = async (
+    orgId: string,
+    templateId: string,
+  ): Promise<string | null> => {
+    if (providerSyncTimestampCapability === false) return null;
+    const { data, error } = await admin
+      .from("esign_templates")
+      .select("provider_sync_started_at")
+      .eq("org_id", orgId)
+      .eq("id", templateId)
+      .maybeSingle();
+    if (error) {
+      if (!isMissingProviderSyncTimestampColumnError(error)) throw error;
+      providerSyncTimestampCapability = false;
+      return null;
+    }
+    providerSyncTimestampCapability = true;
+    return data?.provider_sync_started_at ?? null;
+  };
   let providerPromise: Promise<{
     clientId: string;
     providerAccountId: string;
@@ -242,12 +264,19 @@ export async function createFoundationTemplateOrchestrator() {
       if (error) {
         const { data: reconciled, error: reconcileError } = await admin
           .from("esign_templates")
-          .select("id,org_id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names,staging_source_id,lifecycle_state")
+          .select(TEMPLATE_DRAFT_SELECT)
           .eq("org_id", input.orgId)
           .eq("staging_source_id", input.stagingSourceId)
           .maybeSingle();
         if (reconcileError || !reconciled) throw error;
-        return draftFromRow(reconciled);
+        const providerSyncStartedAt = await readProviderSyncStartedAt(
+          input.orgId,
+          reconciled.id,
+        );
+        return draftFromRow({
+          ...reconciled,
+          provider_sync_started_at: providerSyncStartedAt,
+        });
       }
       const created = await this.getTemplate(input.orgId, data);
       if (!created) throw new Error("created template not found");
@@ -283,12 +312,60 @@ export async function createFoundationTemplateOrchestrator() {
     async getTemplate(orgId, templateId) {
       const { data, error } = await admin
         .from("esign_templates")
-        .select("id,org_id,name,document_type,sign_template_id,provider_account_id,seller_role,signer_roles,merge_field_names,staging_source_id,supersedes_template_id,lifecycle_state")
+        .select(TEMPLATE_DRAFT_SELECT)
         .eq("org_id", orgId)
         .eq("id", templateId)
         .maybeSingle();
       if (error) throw error;
-      return data ? draftFromRow(data) : null;
+      if (!data) return null;
+      const providerSyncStartedAt = await readProviderSyncStartedAt(
+        orgId,
+        templateId,
+      );
+      return draftFromRow({
+        ...data,
+        provider_sync_started_at: providerSyncStartedAt,
+      });
+    },
+
+    async markFinishSyncStarted(orgId, templateId, startedAt) {
+      if (providerSyncTimestampCapability !== false) {
+        const { data: claimed, error: claimError } = await admin
+          .from("esign_templates")
+          .update({ provider_sync_started_at: startedAt })
+          .eq("org_id", orgId)
+          .eq("id", templateId)
+          .eq("lifecycle_state", "editing")
+          .is("provider_sync_started_at", null)
+          .select("provider_sync_started_at")
+          .maybeSingle();
+        if (claimError) {
+          if (!isMissingProviderSyncTimestampColumnError(claimError)) {
+            throw claimError;
+          }
+          providerSyncTimestampCapability = false;
+        } else {
+          providerSyncTimestampCapability = true;
+          if (claimed?.provider_sync_started_at) {
+            return claimed.provider_sync_started_at;
+          }
+          return readProviderSyncStartedAt(orgId, templateId);
+        }
+      }
+
+      // During code-first rollout or rollback, the old schema cannot persist
+      // the deadline. Verify the draft is still editable, then fail closed on
+      // provider not_found instead of resetting the 60-minute grace period on
+      // every invocation. A ready provider template can still finalize.
+      const { data: legacyDraft, error: legacyReadError } = await admin
+        .from("esign_templates")
+        .select("id")
+        .eq("org_id", orgId)
+        .eq("id", templateId)
+        .eq("lifecycle_state", "editing")
+        .maybeSingle();
+      if (legacyReadError) throw legacyReadError;
+      return legacyDraft ? EXPIRED_PROVIDER_SYNC_STARTED_AT : null;
     },
 
     async attachProviderId(orgId, templateId, providerTemplateId) {
@@ -412,9 +489,9 @@ export async function createFoundationTemplateOrchestrator() {
         const session = await provider.getEmbeddedTemplateEditUrl(providerTemplateId);
         return { editUrl: session.editUrl, expiresAt: session.expiresAt };
       },
-      async getTemplate(providerTemplateId) {
+      async getTemplate(providerTemplateId, signal) {
         const { provider } = await providerConnection();
-        return provider.getTemplate(providerTemplateId);
+        return provider.getTemplate(providerTemplateId, signal);
       },
       async getTemplateFiles(providerTemplateId) {
         const { provider } = await providerConnection();
@@ -434,6 +511,9 @@ export async function createFoundationTemplateOrchestrator() {
       isNotFound(error) {
         return error instanceof ProviderError && error.details?.statusCode === 404;
       },
+      classifyTemplateReadError(error) {
+        return classifyDropboxTemplateReadError(error);
+      },
       isAmbiguousMutation(error) {
         return error instanceof ProviderError
           && (typeof error.details?.statusCode !== "number" || error.details.statusCode >= 500);
@@ -447,6 +527,33 @@ export async function createFoundationTemplateOrchestrator() {
   };
 
   return createTemplateOrchestrator(ports);
+}
+
+export function classifyDropboxTemplateReadError(error: unknown): "not_found" | "terminal" {
+  return error instanceof ProviderError
+    && error.provider === "dropbox_sign"
+    && error.details?.statusCode === 404
+    && error.details?.providerCode === "not_found"
+    ? "not_found"
+    : "terminal";
+}
+
+export function isMissingProviderSyncTimestampColumnError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    code?: unknown;
+    message?: unknown;
+    details?: unknown;
+    hint?: unknown;
+  };
+  const code = typeof candidate.code === "string" ? candidate.code : "";
+  const diagnostic = [candidate.message, candidate.details, candidate.hint]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ");
+  return (
+    (code === "PGRST204" || code === "42703")
+    && /\bprovider_sync_started_at\b/i.test(diagnostic)
+  );
 }
 
 function signerRoles(value: unknown): readonly TemplateSignerRole[] {
@@ -487,6 +594,7 @@ function draftFromRow(row: {
   id: string; org_id: string; name: string; document_type: string; sign_template_id: string | null;
   seller_role: string; signer_roles: unknown; merge_field_names: string[]; staging_source_id: string | null;
   supersedes_template_id?: string | null; lifecycle_state: string; provider_account_id?: string | null;
+  provider_sync_started_at?: string | null;
 }): TemplateDraftRecord {
   if (!["preparing", "editing", "finalized", "abandoned", "deleted", "error"].includes(row.lifecycle_state)) throw new Error("invalid template lifecycle");
   return {
@@ -501,6 +609,7 @@ function draftFromRow(row: {
     mergeFieldNames: row.merge_field_names,
     stagingSourceId: row.staging_source_id,
     supersedesTemplateId: row.supersedes_template_id ?? null,
+    providerSyncStartedAt: row.provider_sync_started_at ?? null,
     lifecycle: row.lifecycle_state as TemplateDraftRecord["lifecycle"],
   };
 }

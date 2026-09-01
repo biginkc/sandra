@@ -239,7 +239,8 @@ function runOwningTests(command) {
         `Owning test command timed out or was killed: npx ${command.join(" ")}`,
       );
     }
-    const report = parseVitestReport(error.stdout);
+    const report =
+      parseVitestReport(error.stdout) ?? parseVitestReport(error.stderr);
     if (!report) {
       throw new Error(
         `Owning test command failed without a Vitest JSON report: npx ${command.join(" ")}`,

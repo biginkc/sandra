@@ -309,7 +309,11 @@ export function EmbeddedTemplateEditor({
               role="alert"
             >
               <div>
-                <h2 className="font-medium">Editor unavailable</h2>
+                <h2 className="font-medium">
+                  {isSynchronizationRetry(state.code)
+                    ? "Synchronization pending"
+                    : "Editor unavailable"}
+                </h2>
                 <p className="text-muted-foreground mt-1 max-w-lg text-sm">
                   {state.message}
                 </p>
@@ -330,6 +334,10 @@ export function EmbeddedTemplateEditor({
                     })
                   }
                 />
+              ) : isSynchronizationRetry(state.code) ? (
+                <Button variant="outline" size="sm" onClick={() => void syncFinished()}>
+                  <RefreshCwIcon data-icon="inline-start" /> Retry synchronization
+                </Button>
               ) : (
                 <Button
                   variant="outline"
@@ -397,6 +405,10 @@ function RestartPlacementButton({
       {pending ? "Restarting…" : "Restart placement"}
     </Button>
   );
+}
+
+function isSynchronizationRetry(code: string | undefined): boolean {
+  return code === "PROVIDER_SYNC_PENDING" || code === "PROVIDER_SYNC_TIMEOUT";
 }
 
 export function InitialSessionEmbeddedTemplateEditor(
