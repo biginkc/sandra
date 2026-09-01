@@ -241,7 +241,11 @@ export function SendForSignatureDialog({
       ) ?? null,
     [preflight, selectedTemplateId],
   );
-  const blocker = primarySendBlocker(preflight?.blockers ?? []);
+  const blocker =
+    primarySendBlocker(preflight?.blockers ?? []) ??
+    (preflight && !preflight.sellerDefaults.emailAddress.trim()
+      ? "owner_email_missing"
+      : null);
   const fieldsComplete =
     mergeValues !== null &&
     MERGE_FIELDS.every(({ name }) => mergeValues[name].trim().length > 0);

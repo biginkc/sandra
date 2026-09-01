@@ -118,6 +118,32 @@ describe("SendForSignature", () => {
     },
   );
 
+  it("explains a missing seller email from the loaded recipient snapshot without sending", async () => {
+    const user = userEvent.setup();
+    const { preflightAction, sendAction } = actions({
+      ...preflight,
+      blockers: [],
+      sellerDefaults: { ...preflight.sellerDefaults, emailAddress: "" },
+    });
+
+    render(
+      <SendForSignature
+        propertyId="property-1"
+        initialBlockers={[]}
+        preflightAction={preflightAction}
+        sendAction={sendAction}
+      />,
+    );
+
+    await user.click(screen.getByTestId("send-for-signature-trigger"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Send disabled: the seller has no email address.",
+    );
+    expect(screen.getByTestId("send-for-signature-submit")).toBeDisabled();
+    expect(sendAction).not.toHaveBeenCalled();
+  });
+
   it("prefills the seller, requires every provider role, and sends the edited five-field snapshot", async () => {
     const user = userEvent.setup();
     const { preflightAction, sendAction } = actions();
