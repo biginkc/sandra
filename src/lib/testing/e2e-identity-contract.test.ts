@@ -7,13 +7,16 @@ function source(relativePath: string): string {
   return readFileSync(path.join(process.cwd(), relativePath), "utf8");
 }
 
-function typescriptFilesUnder(relativeDirectory: string): string[] {
+function executableTypescriptFilesUnder(relativeDirectory: string): string[] {
   const absoluteDirectory = path.join(process.cwd(), relativeDirectory);
   return readdirSync(absoluteDirectory, { withFileTypes: true }).flatMap(
     (entry) => {
       const relativePath = path.join(relativeDirectory, entry.name);
-      if (entry.isDirectory()) return typescriptFilesUnder(relativePath);
-      return entry.isFile() && entry.name.endsWith(".ts") ? [relativePath] : [];
+      if (entry.isDirectory())
+        return executableTypescriptFilesUnder(relativePath);
+      return entry.isFile() && /\.(?:ts|tsx|mts|cts)$/.test(entry.name)
+        ? [relativePath]
+        : [];
     },
   );
 }
@@ -94,11 +97,13 @@ describe("E2E identity source contract", () => {
 
   it("contains no E2E password repair or shared default password path", () => {
     const executableFiles = [
-      ...typescriptFilesUnder("e2e"),
+      ...executableTypescriptFilesUnder("e2e"),
       ...readdirSync(path.join(process.cwd(), "scripts"))
-        .filter((name) => /^e2e-.*\.ts$/.test(name))
+        .filter((name) => /^e2e-.*\.(?:ts|tsx|mts|cts)$/.test(name))
         .map((name) => path.join("scripts", name)),
-      "playwright.config.ts",
+      ...readdirSync(process.cwd()).filter((name) =>
+        /^playwright.*\.config\.(?:ts|mts|cts)$/.test(name),
+      ),
     ].sort();
 
     const forbiddenTokens = [
