@@ -17,6 +17,8 @@ import {
 } from "./template-orchestrator";
 
 const STAGING_BUCKET = "esign-staging";
+const TEMPLATE_DRAFT_SELECT = "id,org_id,name,document_type,sign_template_id,provider_account_id,seller_role,signer_roles,merge_field_names,staging_source_id,supersedes_template_id,lifecycle_state";
+const EXPIRED_PROVIDER_SYNC_STARTED_AT = "1970-01-01T00:00:00.000Z";
 
 export type TemplateLibraryRecord = TemplateOption & {
   sourceFilename: string;
@@ -39,6 +41,26 @@ export async function createFoundationTemplateOrchestrator() {
   };
   const membership = await actorPort.getActor();
   const admin = createAdminClient();
+  let providerSyncTimestampCapability: boolean | null = null;
+  const readProviderSyncStartedAt = async (
+    orgId: string,
+    templateId: string,
+  ): Promise<string | null> => {
+    if (providerSyncTimestampCapability === false) return null;
+    const { data, error } = await admin
+      .from("esign_templates")
+      .select("provider_sync_started_at")
+      .eq("org_id", orgId)
+      .eq("id", templateId)
+      .maybeSingle();
+    if (error) {
+      if (!isMissingProviderSyncTimestampColumnError(error)) throw error;
+      providerSyncTimestampCapability = false;
+      return null;
+    }
+    providerSyncTimestampCapability = true;
+    return data?.provider_sync_started_at ?? null;
+  };
   let providerPromise: Promise<{
     clientId: string;
     providerAccountId: string;
@@ -206,12 +228,19 @@ export async function createFoundationTemplateOrchestrator() {
       if (error) {
         const { data: reconciled, error: reconcileError } = await admin
           .from("esign_templates")
-          .select("id,org_id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names,staging_source_id,lifecycle_state,provider_sync_started_at")
+          .select(TEMPLATE_DRAFT_SELECT)
           .eq("org_id", input.orgId)
           .eq("staging_source_id", input.stagingSourceId)
           .maybeSingle();
         if (reconcileError || !reconciled) throw error;
-        return draftFromRow(reconciled);
+        const providerSyncStartedAt = await readProviderSyncStartedAt(
+          input.orgId,
+          reconciled.id,
+        );
+        return draftFromRow({
+          ...reconciled,
+          provider_sync_started_at: providerSyncStartedAt,
+        });
       }
       const created = await this.getTemplate(input.orgId, data);
       if (!created) throw new Error("created template not found");
@@ -247,35 +276,60 @@ export async function createFoundationTemplateOrchestrator() {
     async getTemplate(orgId, templateId) {
       const { data, error } = await admin
         .from("esign_templates")
-        .select("id,org_id,name,document_type,sign_template_id,provider_account_id,seller_role,signer_roles,merge_field_names,staging_source_id,supersedes_template_id,lifecycle_state,provider_sync_started_at")
+        .select(TEMPLATE_DRAFT_SELECT)
         .eq("org_id", orgId)
         .eq("id", templateId)
         .maybeSingle();
       if (error) throw error;
-      return data ? draftFromRow(data) : null;
+      if (!data) return null;
+      const providerSyncStartedAt = await readProviderSyncStartedAt(
+        orgId,
+        templateId,
+      );
+      return draftFromRow({
+        ...data,
+        provider_sync_started_at: providerSyncStartedAt,
+      });
     },
 
     async markFinishSyncStarted(orgId, templateId, startedAt) {
-      const { data: claimed, error: claimError } = await admin
+      if (providerSyncTimestampCapability !== false) {
+        const { data: claimed, error: claimError } = await admin
+          .from("esign_templates")
+          .update({ provider_sync_started_at: startedAt })
+          .eq("org_id", orgId)
+          .eq("id", templateId)
+          .eq("lifecycle_state", "editing")
+          .is("provider_sync_started_at", null)
+          .select("provider_sync_started_at")
+          .maybeSingle();
+        if (claimError) {
+          if (!isMissingProviderSyncTimestampColumnError(claimError)) {
+            throw claimError;
+          }
+          providerSyncTimestampCapability = false;
+        } else {
+          providerSyncTimestampCapability = true;
+          if (claimed?.provider_sync_started_at) {
+            return claimed.provider_sync_started_at;
+          }
+          return readProviderSyncStartedAt(orgId, templateId);
+        }
+      }
+
+      // During code-first rollout or rollback, the old schema cannot persist
+      // the deadline. Verify the draft is still editable, then fail closed on
+      // provider not_found instead of resetting the 60-minute grace period on
+      // every invocation. A ready provider template can still finalize.
+      const { data: legacyDraft, error: legacyReadError } = await admin
         .from("esign_templates")
-        .update({ provider_sync_started_at: startedAt })
+        .select("id")
         .eq("org_id", orgId)
         .eq("id", templateId)
         .eq("lifecycle_state", "editing")
-        .is("provider_sync_started_at", null)
-        .select("provider_sync_started_at")
         .maybeSingle();
-      if (claimError) throw claimError;
-      if (claimed?.provider_sync_started_at) return claimed.provider_sync_started_at;
-      const { data: existing, error: readError } = await admin
-        .from("esign_templates")
-        .select("provider_sync_started_at")
-        .eq("org_id", orgId)
-        .eq("id", templateId)
-        .eq("lifecycle_state", "editing")
-        .maybeSingle();
-      if (readError) throw readError;
-      return existing?.provider_sync_started_at ?? null;
+      if (legacyReadError) throw legacyReadError;
+      return legacyDraft ? EXPIRED_PROVIDER_SYNC_STARTED_AT : null;
     },
 
     async attachProviderId(orgId, templateId, providerTemplateId) {
@@ -443,6 +497,24 @@ export function classifyDropboxTemplateReadError(error: unknown): "not_found" | 
     && error.details?.providerCode === "not_found"
     ? "not_found"
     : "terminal";
+}
+
+export function isMissingProviderSyncTimestampColumnError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    code?: unknown;
+    message?: unknown;
+    details?: unknown;
+    hint?: unknown;
+  };
+  const code = typeof candidate.code === "string" ? candidate.code : "";
+  const diagnostic = [candidate.message, candidate.details, candidate.hint]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ");
+  return (
+    (code === "PGRST204" || code === "42703")
+    && /\bprovider_sync_started_at\b/i.test(diagnostic)
+  );
 }
 
 function signerRoles(value: unknown): readonly TemplateSignerRole[] {
