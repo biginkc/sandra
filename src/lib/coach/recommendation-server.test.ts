@@ -294,6 +294,117 @@ describe("coach recommendation server boundary", () => {
     expect(redactPhoneNumbers("Call\u00A0816\u00A0555\u00A01212\u00A0now.")).toBe("Call [phone removed] now.");
   });
 
+  it("redacts a phone number split by zero-width characters before it reaches the prompt", async () => {
+    let captured: unknown;
+    const dependencies = deps({
+      anthropic: anthropicReturning(
+        { questions: [
+          { template: "tell_more", groundingPhrase: "roof issue is urgent" },
+          { template: "impact", groundingPhrase: "roof issue" },
+          { template: "priority", groundingPhrase: "urgent" },
+        ] },
+        (args) => { captured = args; },
+      ),
+    });
+    // Every other digit is followed by a zero-width space (U+200B) -- reads
+    // as an ordinary 10-digit number to a person, but a naive digit-run
+    // regex over the raw text sees only single isolated digits.
+    const zeroWidthPhone = "8\u200b1\u200b6\u200b5\u200b5\u200b5\u200b1\u200b2\u200b1\u200b2";
+    const result = await requestCoachRecommendationsWithDeps(
+      request({ transcript: [{ speaker: "seller", text: `Call me at ${zeroWidthPhone} because the roof issue is urgent.`, isFinal: true }] }),
+      dependencies,
+    );
+
+    expect(result.ok).toBe(true);
+    const serialized = JSON.stringify(captured);
+    expect(serialized).not.toContain(zeroWidthPhone);
+    expect(serialized).not.toContain("8165551212");
+    expect(serialized).toContain("[phone removed]");
+  });
+
+  it("redacts a phone number interleaved with a bidi control mark before it reaches the prompt", async () => {
+    let captured: unknown;
+    const dependencies = deps({
+      anthropic: anthropicReturning(
+        { questions: [
+          { template: "tell_more", groundingPhrase: "roof issue is urgent" },
+          { template: "impact", groundingPhrase: "roof issue" },
+          { template: "priority", groundingPhrase: "urgent" },
+        ] },
+        (args) => { captured = args; },
+      ),
+    });
+    // Right-to-Left Mark (U+200F) interleaved between every digit -- a
+    // zero-width bidi control, invisible like the zero-width space above,
+    // but from the bidi-control family rather than the zero-width-joiner
+    // family. Wrapping the whole number in an override (U+202E/U+202C)
+    // alone would NOT evade the old digit-adjacency regex, since the
+    // digits themselves stay contiguous; interleaving is what breaks it.
+    const bidiPhone = "8\u200f1\u200f6\u200f5\u200f5\u200f5\u200f1\u200f2\u200f1\u200f2";
+    const result = await requestCoachRecommendationsWithDeps(
+      request({ transcript: [{ speaker: "seller", text: `Call me at ${bidiPhone} because the roof issue is urgent.`, isFinal: true }] }),
+      dependencies,
+    );
+
+    expect(result.ok).toBe(true);
+    const serialized = JSON.stringify(captured);
+    expect(serialized).not.toContain(bidiPhone);
+    expect(serialized).not.toContain("8165551212");
+    expect(serialized).toContain("[phone removed]");
+  });
+
+  it("redacts a phone number written in Arabic-Indic digits before it reaches the prompt", async () => {
+    let captured: unknown;
+    const dependencies = deps({
+      anthropic: anthropicReturning(
+        { questions: [
+          { template: "tell_more", groundingPhrase: "roof issue is urgent" },
+          { template: "impact", groundingPhrase: "roof issue" },
+          { template: "priority", groundingPhrase: "urgent" },
+        ] },
+        (args) => { captured = args; },
+      ),
+    });
+    // U+0660-U+0669: Arabic-Indic digits 0-9, spelling out "8165551212".
+    const arabicIndicPhone = "٨١٦٥٥٥١٢١٢";
+    const result = await requestCoachRecommendationsWithDeps(
+      request({ transcript: [{ speaker: "seller", text: `Call me at ${arabicIndicPhone} because the roof issue is urgent.`, isFinal: true }] }),
+      dependencies,
+    );
+
+    expect(result.ok).toBe(true);
+    const serialized = JSON.stringify(captured);
+    expect(serialized).not.toContain(arabicIndicPhone);
+    expect(serialized).not.toContain("8165551212");
+    expect(serialized).toContain("[phone removed]");
+  });
+
+  it("redacts a phone number written in Devanagari digits before it reaches the prompt", async () => {
+    let captured: unknown;
+    const dependencies = deps({
+      anthropic: anthropicReturning(
+        { questions: [
+          { template: "tell_more", groundingPhrase: "roof issue is urgent" },
+          { template: "impact", groundingPhrase: "roof issue" },
+          { template: "priority", groundingPhrase: "urgent" },
+        ] },
+        (args) => { captured = args; },
+      ),
+    });
+    // U+0966-U+096F: Devanagari digits 0-9, spelling out "8165551212".
+    const devanagariPhone = "८१६५५५१२१२";
+    const result = await requestCoachRecommendationsWithDeps(
+      request({ transcript: [{ speaker: "seller", text: `Call me at ${devanagariPhone} because the roof issue is urgent.`, isFinal: true }] }),
+      dependencies,
+    );
+
+    expect(result.ok).toBe(true);
+    const serialized = JSON.stringify(captured);
+    expect(serialized).not.toContain(devanagariPhone);
+    expect(serialized).not.toContain("8165551212");
+    expect(serialized).toContain("[phone removed]");
+  });
+
   it("returns exactly three distinct follow-up questions and rejects malformed tool output", async () => {
     const good = deps({
       anthropic: {

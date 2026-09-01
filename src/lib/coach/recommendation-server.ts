@@ -193,26 +193,71 @@ function parseRequest(input: unknown): CoachRecommendationRequest | null {
 // minus sign, middle dots (Latin and katakana), and the hyphenation point.
 // Mapped to a canonical ASCII separator before phone detection runs, since
 // none of these decompose under NFKC the way fullwidth digits do.
-const UNICODE_DASH_LIKE = /[‐-―−·‧・]/g;
+const UNICODE_DASH_LIKE = /[‐‑‒–—―−·‧・]/g;
 const UNICODE_SPACE_LIKE = /[  ]/g;
 
+// General_Category=Format: zero-width space/joiner/non-joiner, every bidi
+// control (LRM/RLM/LRE/RLE/PDF/LRO/RLO/LRI/RLI/FSI/PDI), word joiner, the
+// zero-width no-break space/BOM, soft hyphen. Plus variation selectors
+// (General_Category=Mn, not Cf, so \p{Cf} alone misses them). None of
+// these render as a visible character; their only function here is to
+// split a digit run apart or reorder it so it doesn't read as 10
+// consecutive digits -- e.g. digits interleaved with zero-width spaces,
+// or a number wrapped in a right-to-left override. Stripped first so
+// they can't hide inside what NFKC or the digit fold below then
+// processes.
+const UNICODE_IGNORABLE = /[\p{Cf}\u00ad\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu;
+
+// Matches one Unicode decimal digit -- General_Category=Nd covers every
+// digit system (ASCII, fullwidth, Arabic-Indic, Devanagari, ...), not an
+// enumerated subset of them.
+const UNICODE_DECIMAL_DIGIT = /\p{Nd}/u;
+
+function isDecimalDigitCodePoint(codePoint: number): boolean {
+  return codePoint >= 0 && UNICODE_DECIMAL_DIGIT.test(String.fromCodePoint(codePoint));
+}
+
+// Unicode requires every Nd digit system to be exactly 10 contiguous code
+// points in 0-9 order (UAX #44), so a digit's value is its offset from
+// the start of that run -- found by walking backward while the previous
+// code point is still Nd. This folds any script's digits to their real
+// ASCII value without a per-script lookup table: Arabic-Indic digits fold
+// to "0"-"9", Devanagari digits fold to "0"-"9", not a placeholder.
+function foldUnicodeDigits(text: string): string {
+  return text.replace(/\p{Nd}/gu, (digit) => {
+    const codePoint = digit.codePointAt(0)!;
+    let zero = codePoint;
+    while (isDecimalDigitCodePoint(zero - 1)) zero -= 1;
+    return String(codePoint - zero);
+  });
+}
+
 function normalizeForPhoneDetection(text: string): string {
-  // NFKC folds fullwidth digits (１２３) to ASCII digits; it does not touch
-  // the dash/dot/space family above, so those still need explicit mapping.
-  return text
-    .normalize("NFKC")
+  return foldUnicodeDigits(
+    text
+      // Strip invisible format/ignorable characters first, before
+      // anything that follows can be tricked into treating a broken-up
+      // digit run as something other than consecutive digits.
+      .replace(UNICODE_IGNORABLE, "")
+      // Folds fullwidth digits and other compatibility variants to
+      // ASCII; does not touch other-script decimal digits (handled by
+      // foldUnicodeDigits below) or the dash/dot/space family.
+      .normalize("NFKC"),
+  )
     .replace(UNICODE_DASH_LIKE, "-")
     .replace(UNICODE_SPACE_LIKE, " ");
 }
 
 /** Removes digit sequences that can represent a US/international phone number,
  * including common spaces, punctuation (including slashes, Unicode dash
- * variants, and fullwidth digits) and a leading plus or open parenthesis.
- * The returned text is itself normalized (NFKC-folded, exotic separators
- * mapped to ASCII) — this is the only text that reaches the transcript
- * bound for the provider prompt, so there is no separate unredacted copy
- * of the original for a phone number to leak through. Short numbers such
- * as years, prices and street numbers remain useful to the coach. */
+ * variants, and any script's decimal digits) and a leading plus or open
+ * parenthesis. The returned text is itself normalized (ignorables
+ * stripped, NFKC-folded, every digit system folded to ASCII, exotic
+ * separators mapped to ASCII) — this is the only text that reaches
+ * the transcript bound for the provider prompt, so there is no separate
+ * unredacted copy of the original for a phone number to leak through.
+ * Short numbers such as years, prices and street numbers remain useful to
+ * the coach. */
 export function redactPhoneNumbers(text: string): string {
   return normalizeForPhoneDetection(text).replace(/\(?(?:\+?\d[\s().\-/]*){6,}\d/g, (candidate) => {
     const digitCount = candidate.replace(/\D/g, "").length;
