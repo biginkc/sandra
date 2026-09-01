@@ -70,10 +70,10 @@ const ITEM_INACTIVE =
   "pl-[21px] text-white/75 hover:bg-white/[0.07] hover:text-white";
 
 const MOBILE_ITEM_BASE =
-  "inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-white/10 px-3 text-xs font-bold tracking-[0.02em] whitespace-nowrap transition-colors duration-150 ease-in-out";
-const MOBILE_ITEM_ACTIVE =
-  "border-nav-active-border bg-white/10 text-white";
-const MOBILE_ITEM_INACTIVE = "text-white/75 hover:bg-white/[0.07] hover:text-white";
+  "inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full border border-white/10 px-3 text-xs font-bold tracking-[0.02em] whitespace-nowrap transition-colors duration-150 ease-in-out";
+const MOBILE_ITEM_ACTIVE = "border-nav-active-border bg-white/10 text-white";
+const MOBILE_ITEM_INACTIVE =
+  "text-white/75 hover:bg-white/[0.07] hover:text-white";
 
 export function DashboardSidebar() {
   const pathname = usePathname();
