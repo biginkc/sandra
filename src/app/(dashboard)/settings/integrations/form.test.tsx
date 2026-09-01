@@ -72,6 +72,7 @@ describe("<IntegrationsForm />", () => {
     ).toHaveAttribute("href", "/api/oauth/google/start");
     expect(screen.getAllByText("Disconnected")).toHaveLength(3);
     expect(screen.getByText(/Test mode is always on for v1/i)).toBeVisible();
+    expect(screen.queryByRole("link", { name: "Manage templates" })).toBeNull();
   });
 
   it("renders disconnect controls when Slack is connected", () => {
@@ -256,7 +257,9 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
     await waitFor(() => {
       expect(setEsignSendingEnabledAction).toHaveBeenCalledWith(true);
     });
-    expect(screen.queryByRole("link", { name: "Manage templates" })).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Manage templates" }),
+    ).toHaveAttribute("href", "/settings/esign-templates");
   });
 
   it("prevents members from changing or disconnecting the org connection", () => {
@@ -280,6 +283,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
     expect(
       screen.queryByRole("button", { name: "Disconnect Dropbox Sign" }),
     ).toBeNull();
+    expect(screen.queryByRole("link", { name: "Manage templates" })).toBeNull();
   });
 });
 

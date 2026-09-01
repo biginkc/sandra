@@ -267,15 +267,25 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                 </label>
                 <div className="flex flex-wrap gap-2">
                   {esign.canManage && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={pending}
-                      onClick={disconnectEsign}
-                    >
-                      Disconnect Dropbox Sign
-                    </Button>
+                    <>
+                      <Link
+                        href="/settings/esign-templates"
+                        className={cn(
+                          buttonVariants({ variant: "outline", size: "sm" }),
+                        )}
+                      >
+                        Manage templates
+                      </Link>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={pending}
+                        onClick={disconnectEsign}
+                      >
+                        Disconnect Dropbox Sign
+                      </Button>
+                    </>
                   )}
                 </div>
                 {!esign.canManage && (
