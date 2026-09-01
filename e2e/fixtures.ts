@@ -1,7 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "../src/lib/supabase/types";
-import { assertBrowserQaProtected, assertIdentity, createIdentity } from "../src/lib/testing/e2e-identity-policy";
+import { assertBrowserQaProtected, assertIdentity, createIdentity, identityFromEnvironment } from "../src/lib/testing/e2e-identity-policy";
 import { assertSafeE2ESupabaseTarget } from "../src/lib/supabase/e2e-target-safety";
 import {
   MOCK_PROVIDER_CAMPAIGN_ID,
@@ -18,9 +18,9 @@ import {
  * without going through the UI.
  */
 
-const RUN_SLUG = process.env.E2E_RUN_SLUG ?? `gha-${process.env.GITHUB_RUN_ID ?? "1"}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`;
-const RUN_PASSWORD = process.env.E2E_TEST_USER_PASSWORD ?? "local-development-only-password-000";
-const PRIMARY_IDENTITY = createIdentity(RUN_SLUG, RUN_PASSWORD);
+const PRIMARY_IDENTITY = process.env.CI === "1"
+  ? identityFromEnvironment()
+  : createIdentity("gha-1-1", "local-development-only-password-000000");
 export const TEST_USER_EMAIL = PRIMARY_IDENTITY.email;
 export const TEST_USER_PASSWORD = PRIMARY_IDENTITY.password;
 export const E2E_MOCK_BUSINESS_NUMBER = MOCK_SENDER_PRIMARY;

@@ -11,6 +11,17 @@ export type E2EIdentity = {
   appMetadata: { owner: typeof CI_E2E_OWNER; purpose: typeof CI_E2E_PURPOSE; run_slug: string; principal: E2EPrincipal };
 };
 
+export function normalizeIdentity(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+export function assertPairwiseDisjoint(values: readonly string[]): void {
+  const normalized = values.map(normalizeIdentity).filter(Boolean);
+  if (normalized.length !== values.length || new Set(normalized).size !== normalized.length) {
+    throw new Error("E2E identities must be present and pairwise disjoint.");
+  }
+}
+
 const slugPattern = /^gha-[1-9][0-9]*-[1-9][0-9]*$/;
 const email = (slug: string, principal: E2EPrincipal) =>
   `e2e-ci+${slug}${principal === "primary" ? "" : `-${principal}`}@${DOMAIN}`;
@@ -20,6 +31,18 @@ export function createIdentity(runSlug: string, password: string, principal: E2E
   if (password.length < 32) throw new Error("CI E2E identity requires a job-scoped password.");
   return { runSlug, email: email(runSlug, principal), password, principal,
     appMetadata: { owner: CI_E2E_OWNER, purpose: CI_E2E_PURPOSE, run_slug: runSlug, principal } };
+}
+
+export function identityFromEnvironment(env: NodeJS.ProcessEnv = process.env): E2EIdentity {
+  const runSlug = env.E2E_RUN_SLUG;
+  const password = env.E2E_TEST_USER_PASSWORD;
+  if (!runSlug || !password || !env.GITHUB_RUN_ID || !env.GITHUB_RUN_ATTEMPT) {
+    throw new Error("CI E2E identity inputs are missing; refusing shared identity fallback.");
+  }
+  if (runSlug !== `gha-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`) {
+    throw new Error("CI E2E identity does not match the GitHub run namespace.");
+  }
+  return createIdentity(runSlug, password);
 }
 
 export function assertIdentity(user: { email?: string | null; app_metadata?: unknown }, expected: E2EIdentity): void {

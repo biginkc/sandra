@@ -9,8 +9,12 @@ import {
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "../src/lib/supabase/types";
+import { assertBrowserQaProtected, createIdentity, identityFromEnvironment } from "../src/lib/testing/e2e-identity-policy";
 
-const SECONDARY_USER_EMAIL = "e2e-assignee@bmhgroupkc.com";
+const ASSIGNEE_IDENTITY = process.env.CI === "1"
+  ? createIdentity(identityFromEnvironment().runSlug, process.env.E2E_ASSIGNEE_PASSWORD ?? "", "assignee")
+  : createIdentity("gha-1-1", "local-development-only-password-000000", "assignee");
+const SECONDARY_USER_EMAIL = ASSIGNEE_IDENTITY.email;
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 type AuthUser = { id: string; email?: string | null };
 
@@ -105,13 +109,15 @@ async function ensureSecondaryTestUser(
   const existing = await findAuthUserByEmail(admin, SECONDARY_USER_EMAIL);
   let userId: string;
   if (existing) {
+    assertBrowserQaProtected(existing);
     userId = existing.id;
   } else {
     const { data: created, error: createErr } =
       await admin.auth.admin.createUser({
         email: SECONDARY_USER_EMAIL,
-        password: "test12345",
+        password: ASSIGNEE_IDENTITY.password,
         email_confirm: true,
+        app_metadata: ASSIGNEE_IDENTITY.appMetadata,
       });
     if (createErr || !created?.user) {
       throw createErr ?? new Error("createUser returned no secondary user");

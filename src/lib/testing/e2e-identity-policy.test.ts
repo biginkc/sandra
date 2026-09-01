@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertBrowserQaProtected, assertIdentity, createIdentity } from "./e2e-identity-policy";
+import { assertBrowserQaProtected, assertIdentity, assertPairwiseDisjoint, createIdentity, identityFromEnvironment } from "./e2e-identity-policy";
 
 describe("E2E identity policy", () => {
   it("creates deterministic run-scoped principals", () => {
@@ -16,5 +16,10 @@ describe("E2E identity policy", () => {
     expect(() => assertIdentity({ email: identity.email, app_metadata: identity.appMetadata }, identity)).not.toThrow();
     expect(() => assertIdentity({ email: identity.email, app_metadata: { ...identity.appMetadata, purpose: "browser-qa" } }, identity)).toThrow();
     expect(() => assertBrowserQaProtected({ email: "a@example.com", app_metadata: { owner: "browser-qa" } })).toThrow();
+  });
+  it("normalizes and rejects missing or colliding identities", () => {
+    expect(() => assertPairwiseDisjoint([" A@x.test ", "a@x.test"])).toThrow();
+    expect(() => assertPairwiseDisjoint(["a@x.test", "b@x.test"])).not.toThrow();
+    expect(() => identityFromEnvironment({ ...process.env, CI: "1", NODE_ENV: "test" })).toThrow();
   });
 });
