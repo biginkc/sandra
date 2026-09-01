@@ -87,7 +87,6 @@ describe("coach realtime authorization CI security contract", () => {
     expect(e2eWorkflow).toContain("parsed.hostname !== `${ciRef}.supabase.co`");
     expect(e2eWorkflow).not.toContain("ciUrl.includes");
     expect(e2eWorkflow).toContain('E2E_DEDICATED_CI: "1"');
-    expect(e2eWorkflow).toContain("E2E_TEST_USER_EMAIL: ${{ env.E2E_TEST_USER_EMAIL }}");
   });
   it("is a single job — not split across jobs that would each need their own environment approval", () => {
     const jobsBlockStart = coachWorkflow.indexOf("\njobs:\n");

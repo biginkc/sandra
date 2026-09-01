@@ -109,7 +109,6 @@ jobs:
           TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
           E2E_DEDICATED_CI: "1"
           E2E_CI_SUPABASE_PROJECT_REF: ${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
-          E2E_TEST_USER_EMAIL: ${{ env.E2E_TEST_USER_EMAIL }}
         run: |
           # Bound each serial group to a fresh Next dev server. Beyond roughly
           # six minutes the CI server has emitted ECONNRESET and stopped
