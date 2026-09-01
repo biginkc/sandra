@@ -56,10 +56,19 @@ const softphoneTransport =
   process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT ??
   env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT ??
   "";
+const dedicatedCi = process.env.E2E_DEDICATED_CI === "1";
+const dedicatedCiProjectRef = process.env.E2E_CI_SUPABASE_PROJECT_REF ?? "";
+const generatedPrimaryEmail = process.env.E2E_TEST_USER_EMAIL?.trim().toLowerCase() ?? "";
+
+if (dedicatedCi && !generatedPrimaryEmail) {
+  throw new Error("E2E dedicated CI requires a generated primary identity.");
+}
 
 if (supabaseUrl) {
   assertSafeE2ESupabaseTarget(supabaseUrl, {
     allowLocal: process.env.E2E_ALLOW_LOCAL_SUPABASE === "1",
+    dedicatedCi,
+    expectedProjectRef: dedicatedCiProjectRef,
   });
 }
 
@@ -100,7 +109,9 @@ const webServerEnv: Record<string, string> = {
   SKIP_INTENT_GATE: "1",
   // Pin admin email so /properties knows the shared E2E user is admin for the
   // duration of the suite (enables Delete in the Actions menu tests).
-  ADMIN_EMAILS: "e2e-test@bmhgroupkc.com,jarrad@bmhgroupkc.com",
+  ADMIN_EMAILS: dedicatedCi
+    ? generatedPrimaryEmail
+    : "e2e-test@bmhgroupkc.com,jarrad@bmhgroupkc.com",
   // Pin quiet-hours checks to 11:00 AM America/Chicago so send-flow E2E
   // coverage is deterministic when the suite runs overnight.
   E2E_QUIET_HOURS_NOW: process.env.E2E_QUIET_HOURS_NOW,
