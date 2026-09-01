@@ -223,12 +223,28 @@ function isDecimalDigitCodePoint(codePoint: number): boolean {
 // code point is still Nd. This folds any script's digits to their real
 // ASCII value without a per-script lookup table: Arabic-Indic digits fold
 // to "0"-"9", Devanagari digits fold to "0"-"9", not a placeholder.
+//
+// Some scripts' Nd blocks sit immediately adjacent to another script's,
+// with no gap between them (e.g. Myanmar Pao digits U+116D0-116D9 run
+// straight into Myanmar Eastern Pwo Karen digits at U+116DA-116E3, and
+// five separate Mathematical-alphanumeric digit styles stack back to
+// back at U+1D7CE-1D7FF). The backward walk above doesn't stop at the
+// digit's own block boundary in that case -- it keeps walking through
+// however many adjacent 10-blocks precede it, so codePoint - zero can
+// come out as 10-19, 20-29, and so on instead of 0-9. Each block is
+// still exactly 10 wide and in 0-9 order, so the true digit value is
+// always that raw offset mod 10, regardless of how many adjacent blocks
+// the walk crossed.
 function foldUnicodeDigits(text: string): string {
   return text.replace(/\p{Nd}/gu, (digit) => {
     const codePoint = digit.codePointAt(0)!;
     let zero = codePoint;
     while (isDecimalDigitCodePoint(zero - 1)) zero -= 1;
-    return String(codePoint - zero);
+    const value = (codePoint - zero) % 10;
+    if (value < 0 || value > 9) {
+      throw new Error(`Unicode decimal digit fold produced an out-of-range value: ${value}`);
+    }
+    return String(value);
   });
 }
 

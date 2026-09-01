@@ -405,6 +405,49 @@ describe("coach recommendation server boundary", () => {
     expect(serialized).toContain("[phone removed]");
   });
 
+  it("redacts a phone number written in Myanmar Eastern Pwo Karen digits before it reaches the prompt", async () => {
+    let captured: unknown;
+    const dependencies = deps({
+      anthropic: anthropicReturning(
+        { questions: [
+          { template: "tell_more", groundingPhrase: "roof issue is urgent" },
+          { template: "impact", groundingPhrase: "roof issue" },
+          { template: "priority", groundingPhrase: "urgent" },
+        ] },
+        (args) => { captured = args; },
+      ),
+    });
+    // U+116DA-U+116E3: Myanmar Eastern Pwo Karen digits 0-9, spelling out
+    // "8165551212". This block sits immediately adjacent to Myanmar Pao
+    // digits (U+116D0-U+116D9, no gap) -- exactly the case that broke the
+    // unmodded backward-walk offset: walking from an Eastern Pwo Karen
+    // digit crosses into the Pao block before finding a non-digit code
+    // point, so the raw offset comes out as 10-19 instead of 0-9.
+    const easternPwoKarenPhone = "\u{116e2}\u{116db}\u{116e0}\u{116df}\u{116df}\u{116df}\u{116db}\u{116dc}\u{116db}\u{116dc}";
+    const result = await requestCoachRecommendationsWithDeps(
+      request({ transcript: [{ speaker: "seller", text: `Call me at ${easternPwoKarenPhone} because the roof issue is urgent.`, isFinal: true }] }),
+      dependencies,
+    );
+
+    expect(result.ok).toBe(true);
+    const serialized = JSON.stringify(captured);
+    expect(serialized).not.toContain(easternPwoKarenPhone);
+    expect(serialized).not.toContain("8165551212");
+    expect(serialized).toContain("[phone removed]");
+  });
+
+  it("folds a standalone Eastern Pwo Karen digit to its real value, not a raw block-crossing offset", () => {
+    // Sanity-checks the modulo fix's invariant directly: a single digit
+    // from the second (adjacent) block must fold to its true 0-9 value.
+    // Before the fix, this exact digit (Eastern Pwo Karen "3") folded to
+    // "13" -- the raw, un-modded offset from Pao's block start -- rather
+    // than "3".
+    const easternPwoKarenThree = "\u{116dd}";
+    expect(redactPhoneNumbers(`I have ${easternPwoKarenThree} kids and two dogs.`)).toBe(
+      "I have 3 kids and two dogs.",
+    );
+  });
+
   it("returns exactly three distinct follow-up questions and rejects malformed tool output", async () => {
     const good = deps({
       anthropic: {
