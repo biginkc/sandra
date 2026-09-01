@@ -67,6 +67,9 @@ jobs:
 
       - name: Assert CI identity is not browser-QA scoped
         env:
+          E2E_CI_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          E2E_CI_SUPABASE_PROJECT_REF: ${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
+          BROWSER_QA_SUPABASE_PROJECT_REF: ${{ vars.BROWSER_QA_SUPABASE_PROJECT_REF }}
           BROWSER_QA_A_EMAIL: ${{ secrets.BROWSER_QA_A_EMAIL }}
           BROWSER_QA_B_EMAIL: ${{ secrets.BROWSER_QA_B_EMAIL }}
           BROWSER_QA_C_EMAIL: ${{ secrets.BROWSER_QA_C_EMAIL }}
@@ -75,6 +78,10 @@ jobs:
           node - <<'NODE'
           const values = [process.env.E2E_TEST_USER_EMAIL, process.env.BROWSER_QA_A_EMAIL, process.env.BROWSER_QA_B_EMAIL, process.env.BROWSER_QA_C_EMAIL].map((value) => value?.trim().toLowerCase() ?? "");
           if (values.some((value) => !value) || new Set(values).size !== values.length || !values[0].startsWith("e2e-ci+")) process.exit(1);
+          const ciRef = process.env.E2E_CI_SUPABASE_PROJECT_REF?.trim().toLowerCase();
+          const browserRef = process.env.BROWSER_QA_SUPABASE_PROJECT_REF?.trim().toLowerCase();
+          const ciUrl = process.env.E2E_CI_SUPABASE_URL?.trim().toLowerCase();
+          if (!ciRef || !browserRef || !ciUrl || ciRef === browserRef || !ciUrl.includes(`${ciRef}.supabase.co`)) process.exit(1);
           NODE
 
       - name: Verify Chrome browser
@@ -94,9 +101,9 @@ jobs:
 
       - name: Run Playwright E2E suite
         env:
-          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
-          TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
-          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          TEST_SUPABASE_ANON_KEY: ${{ secrets.E2E_CI_SUPABASE_ANON_KEY }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           # Bound each serial group to a fresh Next dev server. Beyond roughly
           # six minutes the CI server has emitted ECONNRESET and stopped

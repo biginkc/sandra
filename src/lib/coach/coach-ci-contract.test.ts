@@ -76,6 +76,14 @@ describe("coach realtime authorization CI security contract", () => {
     expect(withoutSqlComments(ciTestProjectSetup)).toContain("email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')");
     expect(withoutSqlComments(ciTestProjectSetup)).toContain("coach-realtime-authorization");
   });
+
+  it("keeps Playwright service-role access on the dedicated CI project", () => {
+    expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_URL");
+    expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_SERVICE_ROLE_KEY");
+    expect(e2eWorkflow).not.toContain("secrets.TEST_SUPABASE_SERVICE_ROLE_KEY");
+    expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_PROJECT_REF");
+    expect(e2eWorkflow).toContain("BROWSER_QA_SUPABASE_PROJECT_REF");
+  });
   it("is a single job — not split across jobs that would each need their own environment approval", () => {
     const jobsBlockStart = coachWorkflow.indexOf("\njobs:\n");
     expect(jobsBlockStart).toBeGreaterThan(0);
