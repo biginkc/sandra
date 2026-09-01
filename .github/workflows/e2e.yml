@@ -17,8 +17,12 @@ on:
 # the other had just seeded. Symptoms looked like compile-penalty from a static
 # import; the static import was a red herring (PR #131 lazy-load workaround
 # was withdrawn).
+# E2E now runs against its own dedicated Supabase project, so it only needs to
+# serialize against runs sharing that same project — not against eSign/browser-QA
+# or coach-canary runs on other projects. Keying the group by project ref keeps
+# same-database runs single-file while letting other tracks run concurrently.
 concurrency:
-  group: e2e-shared-test-project
+  group: e2e-dedicated-${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
   cancel-in-progress: false
   queue: max
 
