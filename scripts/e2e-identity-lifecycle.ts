@@ -223,13 +223,22 @@ async function cleanup(): Promise<void> {
   );
 }
 
-const command = process.argv[2];
-if (command === "emit") {
-  emit();
-} else if (command === "preflight") {
-  await preflight();
-} else if (command === "cleanup") {
-  await cleanup();
-} else {
-  throw new Error("Usage: e2e-identity-lifecycle.ts <emit|preflight|cleanup>");
+async function main(): Promise<void> {
+  const command = process.argv[2];
+  if (command === "emit") {
+    emit();
+  } else if (command === "preflight") {
+    await preflight();
+  } else if (command === "cleanup") {
+    await cleanup();
+  } else {
+    throw new Error(
+      "Usage: e2e-identity-lifecycle.ts <emit|preflight|cleanup>",
+    );
+  }
 }
+
+void main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
