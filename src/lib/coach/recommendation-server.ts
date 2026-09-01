@@ -217,6 +217,23 @@ function isDecimalDigitCodePoint(codePoint: number): boolean {
   return codePoint >= 0 && UNICODE_DECIMAL_DIGIT.test(String.fromCodePoint(codePoint));
 }
 
+// Unicode 16.0 is what first classifies Myanmar Eastern Pwo Karen digits
+// (below) as General_Category=Nd -- ICU 76 shipped that data, and Node
+// first bundled ICU 76 in 22.12.0. package.json's engines.node pins that
+// floor, but engines is advisory: npm/pnpm/yarn warn on a mismatch, they
+// don't refuse to install or run, and nothing stops this module loading
+// under an older runtime some other way. On Unicode <16.0, \p{Nd} simply
+// doesn't match these code points at all -- the fold below never even
+// sees them as digits, so a phone number written in them sails straight
+// through unredacted with no error and no visible symptom. Fail at
+// module load instead of leaking silently.
+if (!/\p{Nd}/u.test("\u{116da}")) {
+  throw new Error(
+    "This JS runtime's Unicode data predates Unicode 16.0 and does not classify Myanmar Eastern Pwo Karen digits (U+116DA) as decimal digits. " +
+    "recommendation-server.ts's phone-number redaction depends on that classification. Upgrade to the Node version required by package.json's engines.node (>=22.12.0, ICU >=76).",
+  );
+}
+
 // Unicode requires every Nd digit system to be exactly 10 contiguous code
 // points in 0-9 order (UAX #44), so a digit's value is its offset from
 // the start of that run -- found by walking backward while the previous
@@ -225,11 +242,18 @@ function isDecimalDigitCodePoint(codePoint: number): boolean {
 // to "0"-"9", Devanagari digits fold to "0"-"9", not a placeholder.
 //
 // Some scripts' Nd blocks sit immediately adjacent to another script's,
-// with no gap between them (e.g. Myanmar Pao digits U+116D0-116D9 run
-// straight into Myanmar Eastern Pwo Karen digits at U+116DA-116E3, and
-// five separate Mathematical-alphanumeric digit styles stack back to
-// back at U+1D7CE-1D7FF). The backward walk above doesn't stop at the
-// digit's own block boundary in that case -- it keeps walking through
+// with no gap between them. Scanning every Unicode code point for Nd runs
+// whose length isn't exactly 10 finds precisely two such clusters in the
+// entire standard, both multiples of 10 code points because they are
+// whole 10-digit blocks stacked back to back, not a single run of some
+// other width: Myanmar Pao digits (U+116D0-116D9) running straight into
+// Myanmar Eastern Pwo Karen digits (U+116DA-116E3) -- 2 blocks, 20 code
+// points -- and five separate Mathematical-alphanumeric digit styles at
+// U+1D7CE-1D7FF -- 5 blocks, 50 code points (though NFKC folds that
+// second case to ASCII before this function ever runs, since Mathematical
+// Alphanumeric Symbols are compatibility variants; Eastern Pwo Karen is
+// not). The backward walk above doesn't stop at the digit's own block
+// boundary when blocks are stacked like this -- it keeps walking through
 // however many adjacent 10-blocks precede it, so codePoint - zero can
 // come out as 10-19, 20-29, and so on instead of 0-9. Each block is
 // still exactly 10 wide and in 0-9 order, so the true digit value is
@@ -240,11 +264,18 @@ function foldUnicodeDigits(text: string): string {
     const codePoint = digit.codePointAt(0)!;
     let zero = codePoint;
     while (isDecimalDigitCodePoint(zero - 1)) zero -= 1;
-    const value = (codePoint - zero) % 10;
-    if (value < 0 || value > 9) {
-      throw new Error(`Unicode decimal digit fold produced an out-of-range value: ${value}`);
+    const offset = codePoint - zero;
+    // Not a tautology: this bounds the walk itself, before the modulo
+    // that would otherwise always come out 0-9 no matter what offset
+    // went in. The longest adjacent-block run anywhere in Unicode (see
+    // above) is 50 code points; a walk far past that means
+    // isDecimalDigitCodePoint is matching something it shouldn't and the
+    // resulting "digit" can't be trusted -- fail loudly rather than fold
+    // to a plausible-looking but made-up value.
+    if (offset > 200) {
+      throw new Error(`Unicode decimal digit fold walked an implausible ${offset} code points from U+${codePoint.toString(16)}; refusing to guess a digit value.`);
     }
-    return String(value);
+    return String(offset % 10);
   });
 }
 
