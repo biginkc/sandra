@@ -66,7 +66,7 @@ insert into auth.users (
     'coach-ci-owner@bmhgroupkc.com',
     crypt(encode(gen_random_bytes(24), 'hex'), gen_salt('bf')),
     now(), now(), now(),
-    '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false,
+    '{"provider":"email","providers":["email"],"owner":"github-actions","purpose":"coach-realtime-authorization"}'::jsonb, '{}'::jsonb, false,
     '', '', '', ''
   ),
   (
@@ -75,7 +75,7 @@ insert into auth.users (
     'coach-ci-foreign@bmhgroupkc.com',
     crypt(encode(gen_random_bytes(24), 'hex'), gen_salt('bf')),
     now(), now(), now(),
-    '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false,
+    '{"provider":"email","providers":["email"],"owner":"github-actions","purpose":"coach-realtime-authorization"}'::jsonb, '{}'::jsonb, false,
     '', '', '', ''
   );
 

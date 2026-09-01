@@ -31,9 +31,6 @@ jobs:
     env:
       # Feeds playwright.config.ts + e2e/fixtures.ts. Populate these in
       # GitHub → repo settings → Secrets and variables → Actions.
-      TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
-      TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
-      TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
       NEXT_PUBLIC_SOFTPHONE_TRANSPORT: "simulated"
       # Skip the Haiku intent classifier in e2e — no ANTHROPIC_API_KEY here,
       # and the classifier is already unit-tested in
@@ -100,6 +97,10 @@ jobs:
           NODE
 
       - name: Run Playwright E2E suite
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           # Bound each serial group to a fresh Next dev server. Beyond roughly
           # six minutes the CI server has emitted ECONNRESET and stopped

@@ -172,6 +172,7 @@ export async function ensureTestUser(
       });
     if (createErr || !created?.user)
       throw createErr ?? new Error("createUser returned no user");
+    assertIdentity(created.user, PRIMARY_IDENTITY);
     userId = created.user.id;
   }
 
