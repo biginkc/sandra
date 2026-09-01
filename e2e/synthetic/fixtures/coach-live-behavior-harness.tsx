@@ -192,6 +192,8 @@ function BehaviorHarness() {
       sellerMeaningful: () => emitTranscript("seller", "We need to sell before October because the carrying costs are becoming painful.", true),
       sellerSecondMeaningful: () => emitTranscript("seller", "My job is moving and I cannot afford two homes after next month.", true),
       sellerThirdMeaningful: () => emitTranscript("seller", "The vacant property is draining our savings and we need a clean closing.", true),
+      sellerObjection: () => emitTranscript("seller", "I don't trust wholesalers because I heard bad things.", true),
+      sellerNoObjection: () => emitTranscript("seller", "The house has a new roof and fresh paint.", true),
       repFinal: () => emitTranscript("rep", "Tell me more about the timing.", true),
       providerImmediate: () => chooseProviderMode("immediate"),
       providerFast: () => chooseProviderMode("fast"),

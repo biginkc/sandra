@@ -10,6 +10,24 @@ import type {
   CoachRecommendationResult,
   CoachRecommendationTranscriptLine,
 } from "./recommendation-types";
+import { resolveCoachTokens } from "./token-resolver";
+import type { CoachCallContext } from "./types";
+
+const objectionTokens = resolveCoachTokens({
+  sellerName: "Jane Homeowner",
+  propertyAddress: "123 Main St",
+  propertyCounty: "Jackson",
+  repName: "Alex Rep",
+  authenticatedRepName: "Alex Rep",
+  repPhoneE164: "+18165551234",
+  motivation: "move closer to family",
+  leadId: "lead-1",
+  sellerPhoneE164: "+18165559876",
+  coldCallerName: null,
+  yearBuilt: "1987",
+  leadSource: "cold_call",
+  occupancy: "owner_occupied",
+} satisfies CoachCallContext);
 
 const meaningfulTurn = (id: string, text = "The repairs have become too expensive for me."): CoachRecommendationTranscriptLine => ({
   id,
@@ -310,5 +328,38 @@ describe("CoachRecommendationController", () => {
     expect(reopened.getSnapshot().loadingMode).toBe("follow_up");
     resolvers[1](success(currentInput));
     await expect(current).resolves.toBe(true);
+  });
+
+  it("runs Objection Help only on click, uses finalized seller speech, and never calls the provider", async () => {
+    const request = vi.fn(async (input: CoachRecommendationRequest) => success(input));
+    const controller = makeController(request);
+    const transcript = [
+      { speaker: "rep" as const, text: "I don't trust this estimate.", isFinal: true },
+      { speaker: "seller" as const, text: "I don't trust wholesalers because I heard bad things.", isFinal: true },
+    ];
+
+    expect(controller.getSnapshot().objectionHelp).toBeNull();
+    await expect(controller.requestObjectionHelp(transcript, objectionTokens, "owner_occupied")).resolves.toBe(true);
+    expect(request).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().objectionHelp).toMatchObject({ kind: "match", objectionId: "dont_trust" });
+
+    await expect(controller.requestObjectionHelp([
+      { speaker: "seller", text: "The house is in good shape and I am gathering details.", isFinal: true },
+    ], objectionTokens, "owner_occupied")).resolves.toBe(true);
+    expect(controller.getSnapshot().objectionHelp).toEqual(expect.objectContaining({ kind: "no_match" }));
+  });
+
+  it("rejects a stale Objection Help state once the call or section changes", async () => {
+    const request = vi.fn(async (input: CoachRecommendationRequest) => success(input));
+    const controller = makeController(request);
+    const transcript = [
+      { speaker: "seller" as const, text: "I don't trust wholesalers because I heard bad things.", isFinal: true },
+    ];
+
+    await expect(controller.requestObjectionHelp(transcript, objectionTokens, "owner_occupied")).resolves.toBe(true);
+    expect(controller.getSnapshot().objectionHelp).toMatchObject({ kind: "match", objectionId: "dont_trust" });
+
+    controller.setContext({ callId: "call-2", activeSectionId: "introduction.opener", branchOverrides: {} });
+    expect(controller.getSnapshot().objectionHelp).toBeNull();
   });
 });

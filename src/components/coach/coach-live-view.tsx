@@ -210,6 +210,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     branchOverrides: selectedVariants,
     transcript: state.transcript,
     request: recommendationRequest,
+    objectionTokens: tokens,
+    objectionOccupancy: activeContext.occupancy,
     continuity: session.recommendationContinuity,
   });
 
@@ -677,12 +679,14 @@ function ScriptPanel({
 }
 
 function RecommendationsPanel({
+  objectionHelp,
   followUpQuestions,
   loadingMode,
   error,
   followUpLimitReached,
   hasFinalSellerTranscript,
   requestFollowUp,
+  requestObjectionHelp,
 }: ReturnType<typeof useCoachRecommendations> & { hasFinalSellerTranscript: boolean }) {
   const followUpBusy = loadingMode === "follow_up";
   const retryableError = Boolean(error && error !== "rate_limited" && error !== "busy");
@@ -705,6 +709,51 @@ function RecommendationsPanel({
       <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
         Ask Sandra for three transcript-grounded questions after the homeowner has shared a meaningful response. Nothing runs until you choose this button.
       </p>
+      <Button
+        type="button"
+        variant="outline"
+        className="mt-5 w-full"
+        disabled={followUpBusy || !hasFinalSellerTranscript}
+        data-testid="objection-help"
+        onClick={() => void requestObjectionHelp()}
+      >
+        Objection Help
+      </Button>
+      {objectionHelp?.kind === "no_match" ? (
+        <p role="status" className="mt-4 rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed" data-testid="objection-help-no-match">
+          {objectionHelp.message}
+        </p>
+      ) : null}
+      {objectionHelp?.kind === "match" ? (
+        <div className="mt-4 rounded-lg border border-border bg-card px-3 py-3" data-testid="objection-help-result">
+          <div className="text-[10px] font-bold tracking-wide text-primary uppercase">Most likely objection</div>
+          <h3 className="mt-1 text-sm font-bold" data-testid="objection-help-label">{objectionHelp.label}</h3>
+          <p className="mt-1 text-xs text-muted-foreground" data-testid="objection-help-match">
+            Matched cue: “{objectionHelp.matchedTrigger}”
+            {objectionHelp.tonality ? ` · ${objectionHelp.tonality}` : ""}
+          </p>
+          <dl className="mt-3 space-y-2 text-sm leading-relaxed">
+            <div>
+              <dt className="text-[10px] font-bold tracking-wide text-muted-foreground uppercase">Acknowledge</dt>
+              <dd data-testid="objection-help-acknowledge">{objectionHelp.acknowledge}</dd>
+            </div>
+            <div>
+              <dt className="text-[10px] font-bold tracking-wide text-muted-foreground uppercase">Disarm</dt>
+              <dd data-testid="objection-help-disarm">{objectionHelp.disarm}</dd>
+            </div>
+            <div>
+              <dt className="text-[10px] font-bold tracking-wide text-muted-foreground uppercase">Overcome</dt>
+              <dd data-testid="objection-help-overcome">{objectionHelp.overcome}</dd>
+            </div>
+          </dl>
+          {objectionHelp.templateNote ? (
+            <p className="mt-3 border-t border-border pt-2 text-xs text-muted-foreground" data-testid="objection-help-template-note">
+              {objectionHelp.templateNote}
+            </p>
+          ) : null}
+          <p className="mt-3 text-[11px] text-muted-foreground">Advisory only. Your script and call controls are unchanged.</p>
+        </div>
+      ) : null}
       <Button
         type="button"
         variant="outline"

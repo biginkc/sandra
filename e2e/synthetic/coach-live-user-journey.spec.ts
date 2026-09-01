@@ -351,6 +351,31 @@ test("emulated finalized transcript never requests follow-ups until the rep clic
   await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1");
 });
 
+test("Objection Help is a deliberate catalog lookup with truthful no-match state", async ({ page }) => {
+  await mountCoach(page);
+  await expect(page.getByTestId("objection-help")).toBeDisabled();
+
+  await emitStimulus(page, "sellerObjection");
+  await expect(page.getByTestId("objection-help")).toBeEnabled();
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
+  await page.getByTestId("objection-help").click();
+
+  await expect(page.getByTestId("objection-help-label")).toHaveText("Dont Trust");
+  await expect(page.getByTestId("objection-help-acknowledge")).toContainText("completely right");
+  await expect(page.getByTestId("objection-help-disarm")).toContainText("don't know enough about us");
+  await expect(page.getByTestId("objection-help-overcome")).toContainText("feel more confident");
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
+  await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title);
+
+  await emitStimulus(page, "newCall");
+  await expect(page.getByTestId("synthetic-active-call")).toHaveText("synthetic-call-2");
+  await emitStimulus(page, "sellerNoObjection");
+  await page.getByTestId("objection-help").click();
+  await expect(page.getByTestId("objection-help-no-match")).toContainText("No clear objection");
+  await expect(page.getByTestId("objection-help-result")).toHaveCount(0);
+  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
+});
+
 test("follow-up clicks reject duplicates and keep exactly three grounded questions", async ({ page }) => {
   await mountCoach(page);
   await emitStimulus(page, "providerDeferred");

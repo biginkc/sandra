@@ -469,6 +469,72 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
   });
 
+  it("keeps Objection Help click-only, renders the approved three-beat playbook, and leaves the call untouched", async () => {
+    const user = userEvent.setup();
+    const recommendationRequest = vi.fn(
+      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true,
+        requestId: input.requestId,
+        callId: input.callId,
+        activeSectionId: input.activeSectionId,
+        mode: input.mode,
+        followUpQuestions: [],
+      }),
+    );
+    const onHangup = vi.fn();
+    render(<Harness {...baseProps({ recommendationRequest, onHangup })} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+
+    expect(screen.getByTestId("objection-help")).toBeDisabled();
+    broadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "I need to talk to my spouse before deciding.",
+      isFinal: true,
+      ts: "seller-objection",
+    });
+    expect(screen.getByTestId("objection-help")).toBeEnabled();
+
+    await user.click(screen.getByTestId("objection-help"));
+    expect(recommendationRequest).not.toHaveBeenCalled();
+    expect(screen.getByTestId("objection-help-label")).toHaveTextContent("Talk To Spouse");
+    expect(screen.getByTestId("objection-help-match")).toHaveTextContent("talk to my spouse");
+    expect(screen.getByTestId("objection-help-acknowledge")).toHaveTextContent("Totally");
+    expect(screen.getByTestId("objection-help-disarm")).toHaveTextContent("Jane");
+    expect(screen.getByTestId("objection-help-overcome")).toHaveTextContent("what questions");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
+    expect(onHangup).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("objection-help"));
+    expect(screen.getByTestId("objection-help-result")).toBeVisible();
+    expect(recommendationRequest).not.toHaveBeenCalled();
+  });
+
+  it("reports no clear objection rather than guessing from rep or interim speech", async () => {
+    const user = userEvent.setup();
+    const recommendationRequest = vi.fn(
+      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true,
+        requestId: input.requestId,
+        callId: input.callId,
+        activeSectionId: input.activeSectionId,
+        mode: input.mode,
+        followUpQuestions: [],
+      }),
+    );
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+
+    broadcast({ type: "transcript", speaker: "rep", text: "Are you a realtor?", isFinal: true, ts: "rep-line" });
+    broadcast({ type: "transcript", speaker: "seller", text: "I might want a realtor.", isFinal: false, ts: "seller-interim" });
+    broadcast({ type: "transcript", speaker: "seller", text: "The house has a new roof and fresh paint.", isFinal: true, ts: "seller-final" });
+    await user.click(screen.getByTestId("objection-help"));
+
+    expect(screen.getByTestId("objection-help-no-match")).toHaveTextContent("No clear objection");
+    expect(screen.queryByTestId("objection-help-result")).not.toBeInTheDocument();
+    expect(recommendationRequest).not.toHaveBeenCalled();
+  });
+
   it("parses legacy guidance events without rendering them or covering the script", async () => {
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());

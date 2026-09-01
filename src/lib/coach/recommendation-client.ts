@@ -9,12 +9,16 @@ import type {
   CoachRecommendationResult,
   CoachRecommendationTranscriptLine,
 } from "./recommendation-types";
+import { findObjectionHelp, type CoachObjectionHelp } from "./objection-help";
 import { FOLLOW_UP_RECOMMENDATION_LIMIT_PER_CALL } from "./recommendation-policy";
+import type { CoachOccupancy, ResolvedTokens } from "./types";
 
 export const COACH_RECOMMENDATION_REQUEST_TIMEOUT_MS = 20_000;
 
 export type CoachRecommendationClientState = {
   followUpQuestions: string[];
+  /** Explicit, rep-requested help from the validated objection catalog. */
+  objectionHelp: CoachObjectionHelp | null;
   loadingMode: CoachRecommendationMode | null;
   error: CoachRecommendationFailureCode | "busy" | null;
   followUpLimitReached: boolean;
@@ -53,6 +57,7 @@ export type CoachRecommendationControllerOptions = {
 
 const EMPTY_STATE: CoachRecommendationClientState = {
   followUpQuestions: [],
+  objectionHelp: null,
   loadingMode: null,
   error: null,
   followUpLimitReached: false,
@@ -183,6 +188,24 @@ export class CoachRecommendationController {
     return this.startRequest([...transcript]);
   }
 
+  /** Objection Help is a synchronous, click-only read of the validated local
+   * catalog. It never invokes the provider or changes script/call state. */
+  async requestObjectionHelp(
+    transcript: readonly CoachRecommendationTranscriptLine[],
+    tokens: ResolvedTokens,
+    occupancy: CoachOccupancy | null,
+  ): Promise<boolean> {
+    if (this.activeRequestToken) {
+      this.publish({ error: "busy" });
+      return false;
+    }
+    this.publish({
+      objectionHelp: findObjectionHelp(transcript, tokens, occupancy),
+      error: null,
+    });
+    return true;
+  }
+
   private async startRequest(transcript: CoachRecommendationTranscriptLine[]): Promise<boolean> {
     const callId = this.callId;
     const activeSectionId = this.activeSectionId;
@@ -266,6 +289,8 @@ export type UseCoachRecommendationsInput = {
   branchOverrides: Record<string, string>;
   transcript: readonly CoachRecommendationTranscriptLine[];
   request: CoachRecommendationRequestFn;
+  objectionTokens: ResolvedTokens;
+  objectionOccupancy: CoachOccupancy | null;
   continuity?: CoachRecommendationContinuity;
 };
 
@@ -293,5 +318,6 @@ export function useCoachRecommendations(input: UseCoachRecommendationsInput) {
   return {
     ...state,
     requestFollowUp: () => controller.requestFollowUp(input.transcript),
+    requestObjectionHelp: () => controller.requestObjectionHelp(input.transcript, input.objectionTokens, input.objectionOccupancy),
   };
 }
