@@ -10,6 +10,15 @@ const lockedBranch = source.slice(
 const lockedView = source.slice(
   source.indexOf("function LockedDncPropertyDetail"),
 );
+const heroActionsStart = source.indexOf("const heroActions = (");
+const normalZillowAction = source.slice(
+  source.indexOf("{zillowHref ? (", heroActionsStart),
+  source.indexOf("<SendForSignature", heroActionsStart),
+);
+const lockedZillowAction = lockedView.slice(
+  lockedView.indexOf("{zillowHref ? ("),
+  lockedView.indexOf("{prevId ? ("),
+);
 
 describe("locked property detail", () => {
   it("returns the read-only view before any message acknowledgement or contact setup", () => {
@@ -47,5 +56,19 @@ describe("locked property detail", () => {
     expect(lockedView).toContain("[&_button]:min-h-11");
     expect(lockedView.match(/className="min-w-11"/g)).toHaveLength(2);
     expect(lockedView).toContain('aria-label="View on Zillow"');
+    expect(lockedZillowAction).toContain('className: "min-h-11"');
+  });
+
+  it("renders one semantic Zillow link without a nested button in both detail paths", () => {
+    for (const action of [normalZillowAction, lockedZillowAction]) {
+      expect(action.match(/<a\b/g)).toHaveLength(1);
+      expect(action).toContain("buttonVariants({");
+      expect(action).toContain('variant: "outline"');
+      expect(action).toContain('size: "sm"');
+      expect(action).not.toContain("<Button");
+    }
+    expect(normalZillowAction).toContain(
+      '"min-h-9 border-white/80 bg-white/95 text-slate-950 shadow-sm hover:bg-white"',
+    );
   });
 });

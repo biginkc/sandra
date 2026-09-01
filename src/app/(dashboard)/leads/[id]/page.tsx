@@ -8,7 +8,7 @@ import type { SoftphoneLead } from "@/components/softphone/softphone-provider";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
@@ -691,11 +691,15 @@ export default async function LeadDetailPage({
           rel="noopener noreferrer"
           aria-label="View on Zillow"
           data-testid="zillow-link-header"
+          className={buttonVariants({
+            variant: "outline",
+            size: "sm",
+            className:
+              "min-h-9 border-white/80 bg-white/95 text-slate-950 shadow-sm hover:bg-white",
+          })}
         >
-          <Button variant="outline" size="sm">
-            Zillow
-            <ExternalLink className="ml-1 h-4 w-4" />
-          </Button>
+          Zillow
+          <ExternalLink className="ml-1 h-4 w-4" />
         </a>
       ) : null}
       <SendForSignature
@@ -1319,11 +1323,14 @@ function LockedDncPropertyDetail({
                 target="_blank"
                 rel="noopener noreferrer"
                 aria-label="View on Zillow"
+                className={buttonVariants({
+                  variant: "outline",
+                  size: "sm",
+                  className: "min-h-11",
+                })}
               >
-                <Button variant="outline" size="sm">
-                  <ExternalLink className="mr-1 h-4 w-4" />
-                  Zillow
-                </Button>
+                <ExternalLink className="mr-1 h-4 w-4" />
+                Zillow
               </a>
             ) : null}
             {prevId ? (
