@@ -188,12 +188,33 @@ function parseRequest(input: unknown): CoachRecommendationRequest | null {
   return input as unknown as CoachRecommendationRequest;
 }
 
+// Unicode punctuation that reads as a phone separator to a person but isn't
+// ASCII "-" or a plain space: non-breaking/figure/en/em dash, the Unicode
+// minus sign, middle dots (Latin and katakana), and the hyphenation point.
+// Mapped to a canonical ASCII separator before phone detection runs, since
+// none of these decompose under NFKC the way fullwidth digits do.
+const UNICODE_DASH_LIKE = /[‐-―−·‧・]/g;
+const UNICODE_SPACE_LIKE = /[  ]/g;
+
+function normalizeForPhoneDetection(text: string): string {
+  // NFKC folds fullwidth digits (１２３) to ASCII digits; it does not touch
+  // the dash/dot/space family above, so those still need explicit mapping.
+  return text
+    .normalize("NFKC")
+    .replace(UNICODE_DASH_LIKE, "-")
+    .replace(UNICODE_SPACE_LIKE, " ");
+}
+
 /** Removes digit sequences that can represent a US/international phone number,
- * including common spaces, punctuation (including slashes and en/em dashes)
- * and a leading plus or open parenthesis. Short numbers such as years, prices
- * and street numbers remain useful to the coach. */
+ * including common spaces, punctuation (including slashes, Unicode dash
+ * variants, and fullwidth digits) and a leading plus or open parenthesis.
+ * The returned text is itself normalized (NFKC-folded, exotic separators
+ * mapped to ASCII) — this is the only text that reaches the transcript
+ * bound for the provider prompt, so there is no separate unredacted copy
+ * of the original for a phone number to leak through. Short numbers such
+ * as years, prices and street numbers remain useful to the coach. */
 export function redactPhoneNumbers(text: string): string {
-  return text.replace(/\(?(?:\+?\d[\s().\-–—/]*){6,}\d/g, (candidate) => {
+  return normalizeForPhoneDetection(text).replace(/\(?(?:\+?\d[\s().\-/]*){6,}\d/g, (candidate) => {
     const digitCount = candidate.replace(/\D/g, "").length;
     return digitCount >= 7 && digitCount <= 16 ? "[phone removed]" : candidate;
   });

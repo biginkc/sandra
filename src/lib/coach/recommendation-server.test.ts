@@ -273,6 +273,27 @@ describe("coach recommendation server boundary", () => {
     expect(redactPhoneNumbers("Built in 1987 at 1234 Main St")).toBe("Built in 1987 at 1234 Main St");
   });
 
+  it("redacts phone numbers written with Unicode dash variants and fullwidth digits", () => {
+    // Each string below reads as an ordinary phone number to a person but
+    // uses a separator or digit form the plain ASCII regex alone never
+    // matched — the trailing comment on each pins the exact codepoint.
+    const nonBreakingHyphen = "Call me at 816‑555‑1212 today."; // U+2011
+    const figureDash = "Call me at 816‒555‒1212 today."; // U+2012
+    const unicodeMinus = "Call me at 816−555−1212 today."; // U+2212
+    const middleDot = "Call me at 816·555·1212 today."; // U+00B7
+    const fullwidthDigits = "Call me at ８１６５５５１２１２ today."; // "8165551212"
+
+    for (const input of [nonBreakingHyphen, figureDash, unicodeMinus, middleDot, fullwidthDigits]) {
+      expect(redactPhoneNumbers(input)).toBe("Call me at [phone removed] today.");
+    }
+
+    // Katakana middle dot and hyphenation point as inter-digit separators,
+    // and non-breaking space (\u00A0) in place of a plain space.
+    expect(redactPhoneNumbers("Call 816・555・1212 now.")).toBe("Call [phone removed] now.");
+    expect(redactPhoneNumbers("Call 816‧555‧1212 now.")).toBe("Call [phone removed] now.");
+    expect(redactPhoneNumbers("Call\u00A0816\u00A0555\u00A01212\u00A0now.")).toBe("Call [phone removed] now.");
+  });
+
   it("returns exactly three distinct follow-up questions and rejects malformed tool output", async () => {
     const good = deps({
       anthropic: {
