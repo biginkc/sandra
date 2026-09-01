@@ -98,3 +98,62 @@ revoke all on function public.record_definitive_esign_template_provider_create_f
 grant execute on function public.record_definitive_esign_template_provider_create_failure(
   uuid, uuid, uuid, uuid, text, uuid
 ) to service_role;
+
+-- Released definitive failures must remain visible after a page refresh. The
+-- released-token fence excludes the short-lived unstarted state before the
+-- first claim, while the ordinary-draft predicates keep copies and revisions
+-- on their existing recovery paths.
+create or replace function public.list_pending_esign_template_provider_creates(
+  p_org_id uuid, p_actor_id uuid
+)
+returns table (
+  template_id uuid,
+  source_id uuid,
+  name text,
+  provider_create_state text,
+  provider_create_claimed_at timestamptz,
+  provider_create_invocation_started_at timestamptz,
+  provider_create_error_code text,
+  created_by uuid,
+  created_at timestamptz
+)
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required' using errcode = '42501';
+  end if;
+  perform public.esign_require_active_owner(p_org_id, p_actor_id);
+  return query
+  select template.id, template.staging_source_id, template.name,
+    template.provider_create_state,
+    template.provider_create_claimed_at,
+    template.provider_create_invocation_started_at,
+    template.provider_create_error_code, template.created_by,
+    template.created_at
+  from public.esign_templates template
+  left join public.org_esign_integrations integration
+    on integration.org_id = template.org_id
+   and integration.provider = 'dropbox_sign'
+   and integration.provider_account_id = template.provider_account_id
+  where template.org_id = p_org_id
+    and template.lifecycle_state in ('preparing', 'editing')
+    and template.finalized_at is null
+    and template.deleted_at is null
+    and template.abandoned_at is null
+    and template.duplicate_of_template_id is null
+    and template.supersedes_template_id is null
+    and (
+      (template.provider_create_state = 'unstarted'
+       and template.provider_create_last_released_token_hash is not null)
+      or
+      (template.provider_create_state in (
+        'claimed', 'invoking', 'unknown', 'attached'
+      ) and integration.org_id is not null)
+    )
+  order by template.created_at, template.id;
+end;
+$$;

@@ -47,7 +47,7 @@ export type PendingTemplateCopy = Readonly<{
     | "placement_restart"
     | "source_cleanup"
     | "provider_create";
-  providerCreateState?: "claimed" | "invoking" | "unknown" | "attached";
+  providerCreateState?: "unstarted" | "claimed" | "invoking" | "unknown" | "attached";
 }>;
 
 export type PendingTemplateCopiesLoadResult = TemplateLaneResult<
@@ -140,6 +140,7 @@ export type TemplateLibraryActions = Readonly<{
   abandonDraft(templateId: string): Promise<TemplateLaneResult<null>>;
   retryCleanup(templateId: string): Promise<TemplateLaneResult<null>>;
   retrySourceCleanup?(sourceId: string): Promise<TemplateLaneResult<null>>;
+  retryProviderCreate?(templateId: string): Promise<TemplateLaneResult<{ templateId: string }>>;
   deleteTemplate(
     templateId: string,
     confirmRecentSends?: boolean,

@@ -36,6 +36,7 @@ function makeActions(): TemplateLibraryActions {
     abandonDraft: vi.fn().mockResolvedValue({ ok: true, data: null }),
     retryCleanup: vi.fn().mockResolvedValue({ ok: true, data: null }),
     retrySourceCleanup: vi.fn().mockResolvedValue({ ok: true, data: null }),
+    retryProviderCreate: vi.fn().mockResolvedValue({ ok: true, data: { templateId: "template-1" } }),
     deleteTemplate: vi.fn(),
   };
 }
@@ -169,6 +170,16 @@ describe("PendingTemplateCopies", () => {
     expect(push).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry cleanup" })).not.toBeInTheDocument();
+  });
+
+  it("retries a definitively rejected provider create and routes only after success", async () => {
+    const actions = makeActions();
+    render(<PendingTemplateCopies result={{ ok: true, data: [{ id: "template-1", name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "unstarted" }] }} actions={actions} />);
+    expect(screen.getByText(/rejected the previous request without creating a template/i)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Retry setup" }));
+    await waitFor(() => expect(actions.retryProviderCreate).toHaveBeenCalledWith("template-1"));
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/settings/esign-templates/template-1/edit"));
+    expect(actions.checkEditorReadiness).not.toHaveBeenCalled();
   });
 
   it.each(["invoking", "unknown"] as const)("keeps %s recovery out of the normal provider-ID UI", (providerCreateState) => {

@@ -265,6 +265,19 @@ export async function promoteStaleInitialTemplateProviderCreateAction(
   }
 }
 
+export async function retryInitialTemplateProviderCreateAction(
+  templateId: string,
+): Promise<TemplateLaneResult<{ templateId: string }>> {
+  try {
+    const result = await (await createInitialTemplateRuntime()).retryProviderCreate(templateId);
+    if (result.ok) revalidatePath("/settings/esign-templates");
+    return result;
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_template_provider_retry" } });
+    return { ok: false, error: SAFE_FAILURE };
+  }
+}
+
 export async function duplicateTemplateAction(
   templateId: string,
   name: string,

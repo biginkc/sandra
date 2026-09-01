@@ -217,7 +217,7 @@ export async function runInitialProviderCreate(
         ) {
           return failure(
             "PROVIDER_CREATE_REJECTED",
-            "Dropbox Sign rejected the template create request before creating a template. The draft remains retryable.",
+            "Dropbox Sign rejected the template create request before creating a template. Return to the template library to retry setup.",
           );
         }
       } catch {

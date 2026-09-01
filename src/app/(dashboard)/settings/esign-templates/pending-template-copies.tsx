@@ -42,7 +42,7 @@ function PendingTemplateCopyRow({
   copy,
   actions,
 }: {
-  copy: { id: string; name: string; lifecycle: "preparing" | "editing" | "cleanup_attention" | "provider_attention"; kind?: "copy" | "edit_revision" | "placement_restart" | "source_cleanup" | "provider_create"; providerCreateState?: "claimed" | "invoking" | "unknown" | "attached" };
+  copy: { id: string; name: string; lifecycle: "preparing" | "editing" | "cleanup_attention" | "provider_attention"; kind?: "copy" | "edit_revision" | "placement_restart" | "source_cleanup" | "provider_create"; providerCreateState?: "unstarted" | "claimed" | "invoking" | "unknown" | "attached" };
   actions?: TemplateLibraryActions;
 }) {
   const router = useRouter();
@@ -97,6 +97,15 @@ function PendingTemplateCopyRow({
     router.refresh();
   });
 
+  const retryProviderCreate = () => actions?.retryProviderCreate && !routedRef.current && startTransition(async () => {
+    setError(null);
+    const result = await actions.retryProviderCreate!(copy.id);
+    if (!result.ok) return setError(result.error.message);
+    routedRef.current = true;
+    setRouted(true);
+    router.push(`/settings/esign-templates/${result.data.templateId}/edit`);
+  });
+
   const cleanupAttention = copy.lifecycle === "cleanup_attention";
   const providerAttention = copy.lifecycle === "provider_attention";
   const preparingMessage = copy.kind === "edit_revision" ? "Edit revision is still preparing" : "Copy is still preparing";
@@ -109,6 +118,7 @@ function PendingTemplateCopyRow({
         {providerAttention && copy.providerCreateState && (
           <p className="text-muted-foreground mt-1 text-sm">
             {copy.providerCreateState === "claimed" && "Provider creation is safely claimed. Reload this page later; Sandra will not start a second provider template."}
+            {copy.providerCreateState === "unstarted" && "Dropbox Sign rejected the previous request without creating a template. Correct the provider issue, then retry setup."}
             {copy.providerCreateState === "invoking" && "Dropbox Sign may have created this template. Do not retry creation. Contact an administrator for provider recovery."}
             {copy.providerCreateState === "unknown" && "Dropbox Sign creation is uncertain. Contact an administrator for provider recovery."}
             {copy.providerCreateState === "attached" && "Provider setup is attached. Continue to finish setup."}
@@ -122,7 +132,11 @@ function PendingTemplateCopyRow({
             <RefreshCwIcon data-icon="inline-start" /> {isPending ? "Retrying…" : "Retry cleanup"}
           </Button>
         ) : providerAttention ? (
-          copy.providerCreateState === "claimed" ? (
+          copy.providerCreateState === "unstarted" ? (
+            <Button size="sm" variant="outline" onClick={retryProviderCreate} disabled={!actions?.retryProviderCreate || isPending || routed}>
+              <RefreshCwIcon data-icon="inline-start" /> {isPending ? "Retrying…" : "Retry setup"}
+            </Button>
+          ) : copy.providerCreateState === "claimed" ? (
             <Button size="sm" variant="outline" onClick={() => router.refresh()} disabled={isPending || routed}>
               <RefreshCwIcon data-icon="inline-start" /> Reload
             </Button>

@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   cleanupInitial: vi.fn(),
   reconcileInitial: vi.fn(),
   promoteInitial: vi.fn(),
+  retryProviderInitial: vi.fn(),
   revalidate: vi.fn(),
   verifyStagedSource: vi.fn(),
   add: vi.fn(),
@@ -46,6 +47,7 @@ import {
   prepareTemplateUploadAction,
   reconcileUnknownTemplateProviderAction,
   promoteStaleInitialTemplateProviderCreateAction,
+  retryInitialTemplateProviderCreateAction,
   restartTemplatePlacementAction,
 } from "./actions";
 
@@ -101,6 +103,7 @@ describe("template server action boundary", () => {
       ok: true,
       data: { templateId: "template-1", providerCreateState: "unknown" },
     });
+    mocks.retryProviderInitial.mockResolvedValue({ ok: true, data: { templateId: "template-1" } });
     mocks.initialFactory.mockResolvedValue({
       prepare: mocks.prepareUpload,
       create: mocks.createInitial,
@@ -108,6 +111,7 @@ describe("template server action boundary", () => {
       cleanupSource: mocks.cleanupInitial,
       reconcileUnknown: mocks.reconcileInitial,
       promoteStaleProviderCreate: mocks.promoteInitial,
+      retryProviderCreate: mocks.retryProviderInitial,
     });
     mocks.verifyStagedSource.mockResolvedValue({
       ok: true,
@@ -211,6 +215,15 @@ describe("template server action boundary", () => {
       ok: true,
       data: { templateId: "template-1", initialEditorSession },
     });
+  });
+
+  it("retries a released provider create through the owner-scoped runtime", async () => {
+    await expect(retryInitialTemplateProviderCreateAction("template-1")).resolves.toEqual({
+      ok: true,
+      data: { templateId: "template-1" },
+    });
+    expect(mocks.retryProviderInitial).toHaveBeenCalledWith("template-1");
+    expect(mocks.revalidate).toHaveBeenCalledWith("/settings/esign-templates");
   });
 
   it("retires the stuck provider draft before creating its replacement", async () => {

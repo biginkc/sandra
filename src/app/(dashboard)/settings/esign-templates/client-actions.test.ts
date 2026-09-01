@@ -29,6 +29,7 @@ vi.mock("./actions", () => ({
   duplicateTemplateAction: vi.fn(),
   retryTemplateSourceCleanupAction: vi.fn(),
   retryUnattachedTemplateSourceCleanupAction: vi.fn(),
+  retryInitialTemplateProviderCreateAction: vi.fn(),
   reconcileUnknownTemplateProviderAction: vi.fn(),
   promoteStaleInitialTemplateProviderCreateAction: vi.fn(),
 }));

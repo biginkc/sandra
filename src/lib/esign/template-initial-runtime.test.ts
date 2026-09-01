@@ -104,6 +104,16 @@ function restartableDraft(templateId: string) {
   };
 }
 
+function retryableProviderDraft(templateId: string) {
+  return {
+    ...restartableDraft(templateId),
+    sign_template_id: null,
+    lifecycle_state: "preparing",
+    provider_create_state: "unstarted",
+    provider_create_last_released_token_hash: "released-token-hash",
+  };
+}
+
 function successfulRpc(name: string, args: Record<string, unknown>) {
   if (name === "prepare_esign_template_source_upload")
     return {
@@ -429,6 +439,67 @@ describe("foundation initial-template runtime", () => {
         },
       ],
     });
+  });
+
+  it("rediscovers a definitively rejected provider create as safely retryable", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    mocks.rpc.mockImplementation(async (name: string) => {
+      if (name === "list_pending_esign_template_source_uploads") return { data: [], error: null };
+      if (name === "list_pending_esign_template_provider_creates") return {
+        data: [{ template_id: templateId, source_id: sourceId, name: "Offer", provider_create_state: "unstarted" }],
+        error: null,
+      };
+      return successfulRpc(name, {});
+    });
+    await expect((await createInitialTemplateRuntime()).listRecoveries()).resolves.toEqual({
+      ok: true,
+      data: [{ id: templateId, name: "Offer", lifecycle: "provider_attention", kind: "provider_create", providerCreateState: "unstarted" }],
+    });
+  });
+
+  it("revalidates the released draft and retained PDF before retrying provider creation", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    query.maybeSingle.mockResolvedValue({ data: retryableProviderDraft(templateId), error: null });
+    mocks.from.mockReturnValue(query);
+    mocks.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+      if (name === "list_pending_esign_template_provider_creates") return {
+        data: [{ template_id: templateId, source_id: sourceId, provider_create_state: "unstarted" }],
+        error: null,
+      };
+      const result = successfulRpc(name, args);
+      if (["claim_esign_template_provider_create", "begin_esign_template_provider_create", "complete_esign_template_provider_create"].includes(name)) {
+        return { ...result, data: result.data?.map((row) => ({ ...row, template_id: templateId })) };
+      }
+      return result;
+    });
+    await expect((await createInitialTemplateRuntime()).retryProviderCreate(templateId)).resolves.toEqual({ ok: true, data: { templateId } });
+    expect(mocks.download).toHaveBeenCalledWith(source.storagePath);
+    expect(mocks.providerCreate).toHaveBeenCalledTimes(1);
+    expect(mocks.rpc).toHaveBeenCalledWith("claim_esign_template_provider_create", expect.objectContaining({ p_template_id: templateId, p_source_id: sourceId }));
+  });
+
+  it("refuses an unstarted draft without a durable released-attempt fence", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    query.maybeSingle.mockResolvedValue({ data: { ...retryableProviderDraft(templateId), provider_create_last_released_token_hash: null }, error: null });
+    mocks.from.mockReturnValue(query);
+    mocks.rpc.mockImplementation(async (name: string) => {
+      if (name === "list_pending_esign_template_provider_creates") return {
+        data: [{ template_id: templateId, source_id: sourceId, provider_create_state: "unstarted" }],
+        error: null,
+      };
+      return successfulRpc(name, {});
+    });
+    await expect((await createInitialTemplateRuntime()).retryProviderCreate(templateId)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_RETRY_CONTRACT_MISMATCH" },
+    });
+    expect(mocks.providerCreate).not.toHaveBeenCalled();
   });
 
   it("copies the retained private PDF into the fenced initial-create path", async () => {

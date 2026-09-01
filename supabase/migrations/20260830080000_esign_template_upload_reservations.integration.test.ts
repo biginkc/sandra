@@ -950,6 +950,11 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     await connectIntegration(orgId, creatorId, "account-a");
     const source = await prepareAndVerify();
     const draft = await consumeDraft(source.id, creatorId);
+    const neverAttempted = await pg.query(
+      "select * from public.list_pending_esign_template_provider_creates($1,$2)",
+      [orgId, recoveryOwnerId],
+    );
+    expect(neverAttempted.rows).toEqual([]);
     const claim = await pg.query<{ claim_token: string }>(
       "select * from public.claim_esign_template_provider_create($1,$2,$3,$4)",
       [orgId, draft.template_id, source.id, creatorId],
@@ -1200,6 +1205,22 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       provider_account_id: null,
       provider_create_error_code: null,
     });
+
+    const recoverable = await pg.query<{
+      template_id: string;
+      source_id: string;
+      provider_create_state: string;
+    }>(
+      "select * from public.list_pending_esign_template_provider_creates($1,$2)",
+      [orgId, recoveryOwnerId],
+    );
+    expect(recoverable.rows).toEqual([
+      expect.objectContaining({
+        template_id: draft.template_id,
+        source_id: source.id,
+        provider_create_state: "unstarted",
+      }),
+    ]);
 
     const retried = await pg.query<{
       outcome: string;

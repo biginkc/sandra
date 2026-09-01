@@ -137,7 +137,7 @@ export async function createInitialTemplateRuntime() {
               lifecycle: "provider_attention";
               kind: "provider_create";
               providerCreateState:
-                "claimed" | "invoking" | "unknown" | "attached";
+                "unstarted" | "claimed" | "invoking" | "unknown" | "attached";
             }
         )[]
       >
@@ -170,7 +170,7 @@ export async function createInitialTemplateRuntime() {
           lifecycle: "provider_attention" as const,
           kind: "provider_create" as const,
           providerCreateState: row.provider_create_state as
-            "claimed" | "invoking" | "unknown" | "attached",
+            "unstarted" | "claimed" | "invoking" | "unknown" | "attached",
         })),
       ]);
     },
@@ -579,6 +579,88 @@ export async function createInitialTemplateRuntime() {
           ? created
           : { ...created, cleanupAttention },
       );
+    },
+    async retryProviderCreate(
+      templateId: string,
+    ): Promise<TemplateActionResult<{ templateId: string }>> {
+      if (!isOpaqueId(templateId)) {
+        return failure("PROVIDER_RETRY_INVALID", "The hidden template reference is invalid.");
+      }
+      const { data: pending, error: pendingError } = await admin.rpc(
+        "list_pending_esign_template_provider_creates",
+        { p_org_id: orgId, p_actor_id: actorId },
+      );
+      const recovery = pending?.find((row) =>
+        row.template_id === templateId && row.provider_create_state === "unstarted"
+      );
+      if (pendingError || !recovery) {
+        return failure("PROVIDER_RETRY_UNAVAILABLE", "This template is not awaiting a safe provider retry.");
+      }
+      const { data: draft, error: draftError } = await admin
+        .from("esign_templates")
+        .select("id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,sign_template_id,staging_source_id,source_filename,source_size_bytes,source_content_type,source_sha256,staging_path,lifecycle_state,provider_create_state,provider_create_last_released_token_hash,duplicate_of_template_id,supersedes_template_id,finalized_at,deleted_at,abandoned_at")
+        .eq("org_id", orgId)
+        .eq("id", templateId)
+        .maybeSingle();
+      if (
+        draftError || !draft || draft.org_id !== orgId || draft.id !== templateId ||
+        draft.lifecycle_state !== "preparing" || draft.provider_create_state !== "unstarted" ||
+        !draft.provider_create_last_released_token_hash || draft.sign_template_id !== null ||
+        draft.staging_source_id !== recovery.source_id ||
+        draft.staging_path !== `${orgId}/${recovery.source_id}.pdf` ||
+        draft.duplicate_of_template_id !== null || draft.supersedes_template_id !== null ||
+        draft.finalized_at !== null || draft.deleted_at !== null || draft.abandoned_at !== null ||
+        !draft.source_filename || !draft.source_size_bytes ||
+        draft.source_content_type !== "application/pdf" || !draft.source_sha256
+      ) {
+        return failure("PROVIDER_RETRY_CONTRACT_MISMATCH", "The hidden retryable template contract could not be verified.");
+      }
+      const signerRoles = parseSignerRoles(draft.signer_roles);
+      if (
+        signerRoles.length === 0 ||
+        !signerRoles.some((role) => role.name === draft.seller_role) ||
+        !exactFiveFields(draft.merge_field_names)
+      ) {
+        return failure("PROVIDER_RETRY_CONTRACT_MISMATCH", "The hidden retryable template contract could not be verified.");
+      }
+      let bytes: Uint8Array;
+      try {
+        const { data, error } = await admin.storage.from(BUCKET).download(draft.staging_path);
+        if (error) throw error;
+        bytes = new Uint8Array(await data.arrayBuffer());
+      } catch {
+        return failure("PROVIDER_RETRY_SOURCE_UNAVAILABLE", "The retained private PDF could not be read for retry.");
+      }
+      const actualSha = createHash("sha256").update(bytes).digest("hex");
+      if (
+        bytes.byteLength !== draft.source_size_bytes || bytes.byteLength === 0 ||
+        bytes.byteLength > ESIGN_TEMPLATE_MAX_PDF_BYTES || !hasPdfMagic(bytes) ||
+        actualSha !== draft.source_sha256
+      ) {
+        return failure("PROVIDER_RETRY_SOURCE_MISMATCH", "The retained private PDF no longer matches the retryable draft.");
+      }
+      let cachedCredentials: Awaited<ReturnType<typeof getEsignCredentials>> = null;
+      const result = await runInitialProviderCreate(
+        { orgId, templateId, sourceId: recovery.source_id, actorId },
+        providerPorts({
+          admin, orgId, actorId, localTemplateId: templateId, bytes,
+          input: {
+            source: {
+              stagingSourceId: recovery.source_id, bucket: BUCKET,
+              storagePath: draft.staging_path, filename: draft.source_filename,
+              size: draft.source_size_bytes, mimeType: "application/pdf",
+              sha256: draft.source_sha256,
+            },
+            name: draft.name, documentType: draft.document_type,
+            signerRoles, sellerRoleName: draft.seller_role,
+          },
+          getCredentials: async () => {
+            cachedCredentials ??= await getEsignCredentials(orgId);
+            return cachedCredentials;
+          },
+        }),
+      );
+      return result.ok ? success({ templateId: result.data.templateId }) : result;
     },
     async createReplacementFromRetainedSource(
       templateId: string,

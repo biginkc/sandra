@@ -13,6 +13,7 @@ import {
   duplicateTemplateAction,
   retryTemplateSourceCleanupAction,
   retryUnattachedTemplateSourceCleanupAction,
+  retryInitialTemplateProviderCreateAction,
 } from "./actions";
 import { chooseDropboxPdf, type DropboxChooserSdk } from "./dropbox-chooser";
 import { AmbiguousTusTerminationError, uploadStagedPdf } from "./staged-pdf-upload";
@@ -72,6 +73,11 @@ export const templateLibraryActions: TemplateLibraryActions = {
   retrySourceCleanup(sourceId) {
     return safeTemplateCallAction(retryUnattachedTemplateSourceCleanupAction(sourceId), {
       fallbackMessage: "The private upload cleanup could not be retried.",
+    });
+  },
+  retryProviderCreate(templateId) {
+    return safeTemplateCallAction(retryInitialTemplateProviderCreateAction(templateId), {
+      fallbackMessage: "The provider setup could not be retried.",
     });
   },
   deleteTemplate(templateId, confirmRecentSends = false) {
