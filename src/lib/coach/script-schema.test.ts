@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 
 import { assertValidClosrScript, type ClosrScript } from "./script-schema";
 import scriptJson from "./closr-script-v0.json";
+import sectionsJson from "./closr-sections-v1.json";
 
 function validScript(): Record<string, unknown> {
   // Deep-clone via JSON round-trip so mutation in one test never leaks.
@@ -98,11 +99,11 @@ describe("assertValidClosrScript", () => {
       .map((line) => line.text)
       .join("\u0000");
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "0f11d3a3fd8f3aab0e92c8dec4442cc6a76a65c049bfe5a45adcedaf3f195a90",
+      "103e28750aa267b808afd0b90b789c98e569f514cea032ed665c1d3de8fe9402",
     );
   });
 
-  it("keeps the spoken email request exactly once in the initial contact-details branch", () => {
+  it("keeps the spoken email request exactly once in the underwriting readiness section", () => {
     const script = scriptJson as unknown as ClosrScript;
     const spokenEmailRequests = script.phases
       .flatMap((phase) => phase.display.branches.flatMap((branch) => branch.variants))
@@ -111,14 +112,39 @@ describe("assertValidClosrScript", () => {
 
     expect(spokenEmailRequests).toHaveLength(1);
     expect(spokenEmailRequests[0]).toMatchObject({
-      id: "introduction.pen-paper-contact-details.default.08",
+      id: "secure_positioning.back-from-hold-final-questions.default.08",
       text: "What's the best email address for you?",
     });
 
-    const contactDetails = script.phases
-      .find((phase) => phase.id === "introduction")
-      ?.display.branches.find((branch) => branch.tag === "Pen & paper — contact details");
-    expect(contactDetails?.variants[0]?.lines.some((line) => line.id === spokenEmailRequests[0]?.id)).toBe(true);
+    const underwritingQuestions = script.phases
+      .find((phase) => phase.id === "secure_positioning")
+      ?.display.branches.find((branch) => branch.tag === "Back from hold — final questions");
+    expect(underwritingQuestions?.variants[0]?.lines.some((line) => line.id === spokenEmailRequests[0]?.id)).toBe(true);
+
+    const sectionsWithRequest = sectionsJson.sections.filter((section) =>
+      section.content.some((content) =>
+        content.variants.some((variant) => variant.line_ids.includes(spokenEmailRequests[0]!.id)),
+      ),
+    );
+    expect(sectionsWithRequest).toEqual([
+      expect.objectContaining({
+        id: "secure_positioning.final-commitment",
+        phase_id: "secure_positioning",
+        title: "Confirm readiness and email",
+      }),
+    ]);
+
+    const goodNews = script.phases.find((phase) => phase.id === "offer")?.display.branches.find((branch) => branch.tag === "Good news");
+    const sellerAccepts = script.phases.find((phase) => phase.id === "close")?.display.branches.find((branch) => branch.tag === "They accept");
+    const proofOfFunds = script.objections.find((objection) => objection.id === "proof_of_funds");
+    const excludedCopy = [
+      ...goodNews!.variants.flatMap((variant) => variant.lines.map((line) => line.text)),
+      ...sellerAccepts!.variants.flatMap((variant) => variant.lines.map((line) => line.text)),
+      proofOfFunds!.display.acknowledge,
+      proofOfFunds!.display.disarm,
+      proofOfFunds!.display.overcome,
+    ].join("\n");
+    expect(excludedCopy).not.toMatch(/(?:what(?:'s| is)|where).{0,80}\bemail\b/i);
   });
 
   it("rejects a phase missing match.entry_landmarks/advance_landmarks", () => {
