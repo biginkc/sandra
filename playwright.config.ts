@@ -120,6 +120,11 @@ const webServerEnv: Record<string, string> = {
 
 export default defineConfig({
   testDir: "./e2e",
+  // Hold a cross-run Postgres advisory lock for the whole run so E2E runs
+  // against the dedicated CI project serialize even when GitHub's
+  // concurrency group can't (different branches carrying different
+  // e2e.yml group strings). See e2e/global-setup.ts.
+  globalSetup: "./e2e/global-setup.ts",
   // phase-1-5-uat.spec.ts is a PROD-ONLY screenshot UAT — it requires
   // PROD_EMAIL / PROD_PASSWORD and runs against sandra-sooty.vercel.app.
   // It must not run in the default CI suite (no creds → it throws in

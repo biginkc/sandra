@@ -116,6 +116,10 @@ jobs:
           TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
           E2E_DEDICATED_CI: "1"
           E2E_CI_SUPABASE_PROJECT_REF: ${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
+          # Direct-connection URL (db.<ref>.supabase.co:5432) for the
+          # Playwright globalSetup advisory lock — see e2e/global-setup.ts.
+          # Never printed; consumed only by the pg client inside Node.
+          E2E_CI_SUPABASE_DB_URL: ${{ secrets.E2E_CI_SUPABASE_DB_URL }}
         run: |
           # Bound each serial group to a fresh Next dev server. Beyond roughly
           # six minutes the CI server has emitted ECONNRESET and stopped

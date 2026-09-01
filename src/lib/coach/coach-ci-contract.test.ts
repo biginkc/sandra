@@ -92,6 +92,16 @@ describe("coach realtime authorization CI security contract", () => {
     expect(e2eWorkflow).toContain("E2E_PREFLIGHT_FAILED: url_shape");
     expect(e2eWorkflow).toContain("E2E_PREFLIGHT_FAILED: project_ref_or_url_shape");
   });
+
+  it("holds a DB-level advisory lock for the whole E2E suite run", () => {
+    // GitHub concurrency groups only serialize runs whose *own* checked-out
+    // e2e.yml carries the same group string — a branch that hasn't rebased
+    // onto a group-string change can run in parallel against the same
+    // dedicated CI project. The DB advisory lock is immune to that drift.
+    expect(e2eWorkflow).toContain("secrets.E2E_CI_SUPABASE_DB_URL");
+    expect(withoutComments(e2eWorkflow)).not.toMatch(/echo[^\n]*E2E_CI_SUPABASE_DB_URL/i);
+    expect(withoutComments(e2eWorkflow)).not.toMatch(/console\.log\([^)]*(dbUrl|DB_URL)/i);
+  });
   it("labels Coach preflight failures without exposing identity values", () => {
     expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: owner_missing");
     expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: foreign_missing");
