@@ -130,6 +130,11 @@ describe("template action orchestration", () => {
         providerCode: "not_found",
         retryable: false,
       }),
+      new ProviderError("same status, wrong provider code", "dropbox_sign", {
+        statusCode: 404,
+        providerCode: "bad_request",
+        retryable: false,
+      }),
       new ProviderError("payment", "dropbox_sign", {
         statusCode: 402,
         providerCode: "payment_required",
