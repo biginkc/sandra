@@ -36,10 +36,13 @@ describe("mountEmbeddedTemplateClient", () => {
       open: vi.fn(() => { calls.push("open"); }),
       close: vi.fn(() => { calls.push("close"); }),
     };
+    const container = {
+      querySelector: vi.fn().mockReturnValue(null),
+    } as unknown as HTMLElement;
     const cleanup = mountEmbeddedTemplateClient({
       client,
       session: { providerTemplateId: "provider-1", editUrl: "https://edit", expiresAt: 123, clientId: "client-1" },
-      container: {} as HTMLElement,
+      container,
       skipDomainVerification: false,
       listeners: { onFinish: vi.fn(), onCancel: vi.fn(), onClose: vi.fn(), onError: vi.fn() },
     });
