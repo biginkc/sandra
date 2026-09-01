@@ -4,10 +4,8 @@ import {
   adminClient,
   ensureTestUser,
   resetTenantTables,
+  TEST_ASSIGNEE_EMAIL,
 } from "./fixtures";
-
-const LEADS_TEAMMATE_EMAIL = "e2e-leads-teammate@bmhgroupkc.com";
-const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 
 async function resetInboundQueryFilters(page: Page): Promise<void> {
   await expect(async () => {
@@ -24,53 +22,14 @@ async function resetInboundQueryFilters(page: Page): Promise<void> {
   });
 }
 
-async function findAuthUserByEmail(
-  admin: ReturnType<typeof adminClient>,
-  email: string,
-) {
-  let page = 1;
-  const perPage = 200;
-  while (true) {
-    const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
-    if (error) throw error;
-    const match = data.users.find((user) => user.email === email);
-    if (match) return match;
-    if (!data.nextPage || data.users.length === 0) return null;
-    page = data.nextPage;
-  }
-}
-
 async function ensureLeadsTeammate(
   admin: ReturnType<typeof adminClient>,
 ): Promise<{ id: string; email: string }> {
-  let teammate = await findAuthUserByEmail(admin, LEADS_TEAMMATE_EMAIL);
-  if (!teammate) {
-    const { data, error } = await admin.auth.admin.createUser({
-      email: LEADS_TEAMMATE_EMAIL,
-      email_confirm: true,
-    });
-    if (error || !data.user) throw error ?? new Error("teammate create failed");
-    teammate = data.user;
-  }
-
-  type MembershipWriter = {
-    from(table: "memberships"): {
-      upsert(
-        values: { user_id: string; org_id: string; role: "member" },
-        options: { onConflict: string },
-      ): Promise<{ error: { message: string } | null }>;
-    };
-  };
-  const { error: membershipError } = await (
-    admin as unknown as MembershipWriter
-  )
-    .from("memberships")
-    .upsert(
-      { user_id: teammate.id, org_id: DEFAULT_ORG_ID, role: "member" },
-      { onConflict: "user_id,org_id" },
-    );
-  if (membershipError) throw new Error(membershipError.message);
-  return { id: teammate.id, email: LEADS_TEAMMATE_EMAIL };
+  const id = await ensureTestUser(admin, {
+    principal: "assignee",
+    membershipRole: "member",
+  });
+  return { id, email: TEST_ASSIGNEE_EMAIL };
 }
 
 test("Leads board v2 foundation is usable at desktop and narrow widths", async ({

@@ -3,7 +3,11 @@ import path from "node:path";
 
 import { defineConfig, devices } from "@playwright/test";
 
-import { assertSafeE2ESupabaseTarget } from "./src/lib/supabase/e2e-target-safety";
+import {
+  ensureE2ERunEnvironment,
+  identityForPrincipal,
+} from "./src/lib/supabase/e2e-identity-guard";
+import { assertSafeE2ESupabaseTargetFromEnvironment } from "./src/lib/supabase/e2e-target-safety";
 
 /**
  * Playwright config for the Sandra CRM E2E safety net (Feature 9).
@@ -43,6 +47,16 @@ function loadTestEnv(): Record<string, string> {
 
 const env = loadTestEnv();
 
+for (const key of [
+  "E2E_RUN_SLUG",
+  "E2E_TEST_USER_EMAIL",
+  "E2E_TEST_USER_PASSWORD",
+] as const) {
+  process.env[key] = process.env[key] ?? env[key];
+}
+const e2eRunEnvironment = ensureE2ERunEnvironment();
+const e2ePrimaryIdentity = identityForPrincipal(e2eRunEnvironment);
+
 // Fall back to process.env so CI can inject TEST_SUPABASE_* via secrets.
 const supabaseUrl =
   process.env.TEST_SUPABASE_URL ?? env.TEST_SUPABASE_URL ?? "";
@@ -58,9 +72,7 @@ const softphoneTransport =
   "";
 
 if (supabaseUrl) {
-  assertSafeE2ESupabaseTarget(supabaseUrl, {
-    allowLocal: process.env.E2E_ALLOW_LOCAL_SUPABASE === "1",
-  });
+  assertSafeE2ESupabaseTargetFromEnvironment(supabaseUrl);
 }
 
 // Publish the values to process.env so the test workers + fixtures can
@@ -68,13 +80,15 @@ if (supabaseUrl) {
 process.env.TEST_SUPABASE_URL = supabaseUrl;
 process.env.TEST_SUPABASE_ANON_KEY = supabaseAnonKey;
 process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = supabaseServiceRoleKey;
+process.env.E2E_RUN_SLUG = e2ePrimaryIdentity.runSlug;
+process.env.E2E_TEST_USER_EMAIL = e2ePrimaryIdentity.email;
+process.env.E2E_TEST_USER_PASSWORD = e2ePrimaryIdentity.password;
 process.env.E2E_QUIET_HOURS_NOW =
   process.env.E2E_QUIET_HOURS_NOW ?? "2026-05-09T16:00:00.000Z";
 
 const browserChannel =
   process.env.PLAYWRIGHT_BROWSER_CHANNEL === "chrome" ? "chrome" : undefined;
-const useWebpackDevServer =
-  process.env.PLAYWRIGHT_WEBPACK_DEV_SERVER === "1";
+const useWebpackDevServer = process.env.PLAYWRIGHT_WEBPACK_DEV_SERVER === "1";
 
 const webServerEnv: Record<string, string> = {
   // The Next app reads these for its Supabase clients. Point them at the
@@ -83,6 +97,9 @@ const webServerEnv: Record<string, string> = {
   NEXT_PUBLIC_SUPABASE_ANON_KEY: supabaseAnonKey,
   NEXT_PUBLIC_SOFTPHONE_TRANSPORT: softphoneTransport,
   SUPABASE_SERVICE_ROLE_KEY: supabaseServiceRoleKey,
+  E2E_RUN_SLUG: e2ePrimaryIdentity.runSlug,
+  E2E_TEST_USER_EMAIL: e2ePrimaryIdentity.email,
+  E2E_TEST_USER_PASSWORD: e2ePrimaryIdentity.password,
   NEXT_PUBLIC_HUGO_SSO: "1",
   // The broad golden-path suite seeds a test-project password session only as
   // support evidence. Production code refuses this bypass, and real Hugo
@@ -98,9 +115,8 @@ const webServerEnv: Record<string, string> = {
   // can't see "prospect → new_lead". Mirror of .github/workflows/e2e.yml so
   // local runs match CI.
   SKIP_INTENT_GATE: "1",
-  // Pin admin email so /properties knows the shared E2E user is admin for the
-  // duration of the suite (enables Delete in the Actions menu tests).
-  ADMIN_EMAILS: "e2e-test@bmhgroupkc.com,jarrad@bmhgroupkc.com",
+  // Grant only this run's namespaced principal the admin-only E2E paths.
+  ADMIN_EMAILS: e2ePrimaryIdentity.email,
   // Pin quiet-hours checks to 11:00 AM America/Chicago so send-flow E2E
   // coverage is deterministic when the suite runs overnight.
   E2E_QUIET_HOURS_NOW: process.env.E2E_QUIET_HOURS_NOW,

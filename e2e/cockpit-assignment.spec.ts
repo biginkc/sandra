@@ -5,14 +5,9 @@ import {
   ensureTestUser,
   resetTenantTables,
   seedProspects,
+  TEST_ASSIGNEE_EMAIL,
 } from "./fixtures";
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
-import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database } from "../src/lib/supabase/types";
-
-const SECONDARY_USER_EMAIL = "e2e-assignee@bmhgroupkc.com";
-const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
-type AuthUser = { id: string; email?: string | null };
 
 /**
  * Feature 8 Phase 3 — Per-user assignment + cockpit ergonomics.
@@ -102,65 +97,11 @@ async function seedAssignedThread(
 async function ensureSecondaryTestUser(
   admin: ReturnType<typeof adminClient>,
 ): Promise<{ id: string; email: string }> {
-  const existing = await findAuthUserByEmail(admin, SECONDARY_USER_EMAIL);
-  let userId: string;
-  if (existing) {
-    userId = existing.id;
-  } else {
-    const { data: created, error: createErr } =
-      await admin.auth.admin.createUser({
-        email: SECONDARY_USER_EMAIL,
-        password: "test12345",
-        email_confirm: true,
-      });
-    if (createErr || !created?.user) {
-      throw createErr ?? new Error("createUser returned no secondary user");
-    }
-    userId = created.user.id;
-  }
-
-  type MembershipWriter = {
-    from(table: "memberships"): {
-      upsert(
-        values: { user_id: string; org_id: string; role: "owner" | "member" },
-        options?: { onConflict?: string },
-      ): Promise<{ error: { message: string } | null }>;
-    };
-  };
-  const { error: membershipErr } = await (admin as unknown as MembershipWriter)
-    .from("memberships")
-    .upsert(
-      { user_id: userId, org_id: DEFAULT_ORG_ID, role: "member" },
-      { onConflict: "user_id,org_id" },
-    );
-  if (membershipErr) {
-    throw new Error(
-      `ensureSecondaryTestUser: failed to upsert membership for ${SECONDARY_USER_EMAIL}: ${membershipErr.message}`,
-    );
-  }
-
-  return { id: userId, email: SECONDARY_USER_EMAIL };
-}
-
-async function findAuthUserByEmail(
-  admin: SupabaseClient<Database>,
-  email: string,
-): Promise<AuthUser | null> {
-  let page = 1;
-  const perPage = 200;
-
-  while (true) {
-    const { data, error } = await admin.auth.admin.listUsers({
-      page,
-      perPage,
-    });
-    if (error) throw error;
-
-    const match = data?.users.find((u) => u.email === email);
-    if (match) return match;
-    if (!data?.nextPage || data.users.length === 0) return null;
-    page = data.nextPage;
-  }
+  const id = await ensureTestUser(admin, {
+    principal: "assignee",
+    membershipRole: "member",
+  });
+  return { id, email: TEST_ASSIGNEE_EMAIL };
 }
 
 test("Each assigned thread row tags itself with the viewer's assignment state", async ({
@@ -201,7 +142,9 @@ test('Side panel shows "No owner" picker on an unassigned thread; choosing Me as
     assigneeId: null,
   });
 
-  await page.goto(`/messages?thread=${encodeURIComponent(unassigned.threadId)}`);
+  await page.goto(
+    `/messages?thread=${encodeURIComponent(unassigned.threadId)}`,
+  );
   await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
 
   await expect(page.getByTestId("assign-to-me")).toHaveCount(0);
@@ -245,7 +188,9 @@ test("Assignee dropdown can assign a teammate directly from an unassigned thread
     assigneeId: null,
   });
 
-  await page.goto(`/messages?thread=${encodeURIComponent(unassigned.threadId)}`);
+  await page.goto(
+    `/messages?thread=${encodeURIComponent(unassigned.threadId)}`,
+  );
   await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
 
   const trigger = page.getByTestId("assign-dropdown-trigger");
