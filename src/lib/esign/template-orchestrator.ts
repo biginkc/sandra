@@ -7,6 +7,11 @@ import {
 
 export const ESIGN_TEMPLATE_MAX_PDF_BYTES = 40 * 1024 * 1024;
 export const ESIGN_TEMPLATE_STAGING_BUCKET = "esign-staging" as const;
+const FINISH_SYNC_ATTEMPT_OFFSETS_MS = [0, 1_000, 3_000, 7_000, 14_000] as const;
+const FINISH_SYNC_WALL_CLOCK_TIMEOUT_MS = 15_000;
+// Dropbox Sign documents template_created/template_error as the authoritative
+// asynchronous result and directs integrators to investigate after 60 minutes.
+const FINISH_SYNC_PROVIDER_CALLBACK_DEADLINE_MS = 60 * 60 * 1_000;
 
 export type TemplateActionError = Readonly<{ code: string; message: string }>;
 export type TemplateActionResult<T> =
@@ -76,6 +81,7 @@ export type TemplateDraftRecord = Readonly<{
   mergeFieldNames: readonly string[];
   stagingSourceId: string | null;
   supersedesTemplateId: string | null;
+  providerSyncStartedAt?: string | null;
   lifecycle: "preparing" | "editing" | "finalized" | "abandoned" | "deleted" | "error";
 }>;
 
@@ -99,6 +105,7 @@ export type TemplateRepositoryPort = Readonly<{
   createHiddenDuplicate(input: { orgId: string; sourceTemplateId: string; name: string }): Promise<TemplateDraftRecord>;
   createHiddenEditRevision(input: { orgId: string; sourceTemplateId: string; stagingSourceId: string }): Promise<TemplateDraftRecord>;
   getTemplate(orgId: string, templateId: string): Promise<TemplateDraftRecord | null>;
+  markFinishSyncStarted(orgId: string, templateId: string, startedAt: string): Promise<string | null>;
   attachProviderId(orgId: string, templateId: string, providerTemplateId: string): Promise<boolean>;
   finalizeDraft(input: {
     orgId: string;
@@ -141,7 +148,7 @@ export type TemplateProviderPort = Readonly<{
     mergeFieldNames: typeof ESIGN_TEMPLATE_MERGE_FIELDS;
   }): Promise<{ providerTemplateId: string }>;
   getFreshEditUrl(providerTemplateId: string): Promise<{ editUrl: string; expiresAt: number | null }>;
-  getTemplate(providerTemplateId: string): Promise<ProviderTemplateState>;
+  getTemplate(providerTemplateId: string, signal?: AbortSignal): Promise<ProviderTemplateState>;
   getTemplateFiles(providerTemplateId: string): Promise<Uint8Array>;
   duplicateTemplate(input: {
     providerTemplateId: string;
@@ -150,6 +157,7 @@ export type TemplateProviderPort = Readonly<{
   }): Promise<{ providerTemplateId: string; readiness: "ready" | "pending" }>;
   deleteTemplate(providerTemplateId: string): Promise<void>;
   isNotFound(error: unknown): boolean;
+  classifyTemplateReadError(error: unknown): "not_found" | "terminal";
   isAmbiguousMutation(error: unknown): boolean;
 }>;
 
@@ -470,12 +478,32 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       if (!draft || draft.orgId !== access.data.orgId || !["editing", "finalized"].includes(draft.lifecycle) || !draft.providerTemplateId) {
         return failure("DRAFT_STALE", "The template draft is no longer available to finalize.");
       }
-      let provider: ProviderTemplateState;
-      try {
-        provider = await ports.provider.getTemplate(draft.providerTemplateId);
-      } catch {
-        return failure("PROVIDER_SYNC_FAILED", "Dropbox Sign template state could not be verified.");
+      let providerSyncStartedAt = draft.providerSyncStartedAt ?? null;
+      if (draft.lifecycle === "editing" && !providerSyncStartedAt) {
+        try {
+          providerSyncStartedAt = await ports.repository.markFinishSyncStarted(
+            access.data.orgId,
+            templateId,
+            ports.now().toISOString(),
+          );
+        } catch {
+          return failure("FINISH_SYNC_START_FAILED", "Sandra could not start template synchronization safely.");
+        }
+        if (!providerSyncStartedAt) {
+          return failure("DRAFT_STALE", "The template changed before synchronization could start.");
+        }
       }
+      const conversionDeadlineOpen = draft.lifecycle === "editing"
+        && providerSyncStartedAt !== null
+        && ports.now().getTime() - new Date(providerSyncStartedAt).getTime()
+          < FINISH_SYNC_PROVIDER_CALLBACK_DEADLINE_MS;
+      const providerResult = await getFinishedProviderTemplate(
+        ports,
+        draft.providerTemplateId,
+        conversionDeadlineOpen,
+      );
+      if (!providerResult.ok) return providerResult;
+      const provider = providerResult.data;
       const reconciled = reconcileOption(draft, provider);
       if (!reconciled.ok) return reconciled;
       try {
@@ -753,6 +781,50 @@ async function safelyDeleteStagedUpload(ports: TemplateOrchestratorPorts, path: 
     // The action still fails closed. Storage diagnostics are reported server-side by the adapter.
   }
 }
+
+async function getFinishedProviderTemplate(
+  ports: TemplateOrchestratorPorts,
+  providerTemplateId: string,
+  allowConversionDelay: boolean,
+): Promise<TemplateActionResult<ProviderTemplateState>> {
+  const startedAt = Date.now();
+  const wallClockDeadline = startedAt + FINISH_SYNC_WALL_CLOCK_TIMEOUT_MS;
+  for (const attemptOffset of FINISH_SYNC_ATTEMPT_OFFSETS_MS) {
+    const waitMs = startedAt + attemptOffset - Date.now();
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    const remainingMs = wallClockDeadline - Date.now();
+    if (remainingMs <= 0) break;
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const provider = await Promise.race([
+        ports.provider.getTemplate(providerTemplateId, controller.signal),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            controller.abort();
+            reject(new FinishSyncReadTimeout());
+          }, remainingMs);
+        }),
+      ]);
+      return success(provider);
+    } catch (error) {
+      if (error instanceof FinishSyncReadTimeout) {
+        return failure("PROVIDER_SYNC_TIMEOUT", "Dropbox Sign template verification timed out. Retry synchronization without reopening the editor.");
+      }
+      if (!allowConversionDelay || ports.provider.classifyTemplateReadError(error) !== "not_found") {
+        return failure("PROVIDER_SYNC_FAILED", "Dropbox Sign template state could not be verified.");
+      }
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  }
+  return failure(
+    "PROVIDER_SYNC_PENDING",
+    "Dropbox Sign is still finishing this template. Retry synchronization here without reopening the editor.",
+  );
+}
+
+class FinishSyncReadTimeout extends Error {}
 
 async function cleanupUnattachedStage(ports: TemplateOrchestratorPorts, stage: StagedTemplateSource): Promise<boolean> {
   try {

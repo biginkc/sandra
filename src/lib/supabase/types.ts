@@ -3883,6 +3883,7 @@ export type Database = {
           provider_create_invocation_started_at: string | null
           provider_create_last_released_token_hash: string | null
           provider_create_state: string | null
+          provider_sync_started_at: string | null
           seller_role: string
           sign_template_id: string | null
           signer_roles: Json
@@ -3920,6 +3921,7 @@ export type Database = {
           provider_create_invocation_started_at?: string | null
           provider_create_last_released_token_hash?: string | null
           provider_create_state?: string | null
+          provider_sync_started_at?: string | null
           seller_role: string
           sign_template_id?: string | null
           signer_roles: Json
@@ -3957,6 +3959,7 @@ export type Database = {
           provider_create_invocation_started_at?: string | null
           provider_create_last_released_token_hash?: string | null
           provider_create_state?: string | null
+          provider_sync_started_at?: string | null
           seller_role?: string
           sign_template_id?: string | null
           signer_roles?: Json

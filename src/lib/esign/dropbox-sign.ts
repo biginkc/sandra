@@ -56,6 +56,18 @@ function abortableSignatureApi(apiKey: EsignSecret, signal?: AbortSignal) {
   return signatureRequest;
 }
 
+function abortableTemplateApi(apiKey: EsignSecret, signal?: AbortSignal) {
+  const template = new TemplateApi();
+  template.username = apiKey.reveal();
+  template.password = "";
+  if (signal) {
+    template.addInterceptor((options) => {
+      options.signal = signal;
+    });
+  }
+  return template;
+}
+
 export function createDropboxSignProvider(input: {
   apiKey: EsignSecret;
   clientId: string;
@@ -154,9 +166,9 @@ export function createDropboxSignProvider(input: {
       }
     },
 
-    async getTemplate(providerTemplateId: string): Promise<ProviderTemplateMetadata> {
+    async getTemplate(providerTemplateId: string, signal?: AbortSignal): Promise<ProviderTemplateMetadata> {
       try {
-        const response = await api.template.templateGet(providerTemplateId);
+        const response = await abortableTemplateApi(input.apiKey, signal).templateGet(providerTemplateId);
         const template = response.body.template;
         const metadata = providerTemplateMetadata(template as typeof template & { metadata?: Record<string, unknown> });
         return { ...metadata, providerTemplateId: metadata.providerTemplateId || providerTemplateId };
