@@ -12,7 +12,7 @@ import type { Database } from "../src/lib/supabase/types";
 import { assertBrowserQaProtected, assertIdentity, createIdentity, identityFromEnvironment } from "../src/lib/testing/e2e-identity-policy";
 
 const ASSIGNEE_IDENTITY = process.env.CI === "1"
-  ? createIdentity(identityFromEnvironment().runSlug, process.env.E2E_ASSIGNEE_PASSWORD ?? "", "assignee")
+  ? createIdentity(identityFromEnvironment().runSlug, process.env.E2E_ASSIGNEE_PASSWORD ?? process.env.E2E_TEST_USER_PASSWORD ?? "", "assignee")
   : createIdentity("gha-1-1", "local-development-only-password-000000", "assignee");
 const SECONDARY_USER_EMAIL = ASSIGNEE_IDENTITY.email;
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";

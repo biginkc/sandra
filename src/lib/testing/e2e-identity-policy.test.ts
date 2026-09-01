@@ -22,4 +22,11 @@ describe("E2E identity policy", () => {
     expect(() => assertPairwiseDisjoint(["a@x.test", "b@x.test"])).not.toThrow();
     expect(() => identityFromEnvironment({ ...process.env, CI: "1", NODE_ENV: "test" })).toThrow();
   });
+  it("keeps primary and assignee distinct within one run", () => {
+    const primary = createIdentity("gha-9-1", "p".repeat(32), "primary");
+    const assignee = createIdentity("gha-9-1", "p".repeat(32), "assignee");
+    expect(primary.email).not.toBe(assignee.email);
+    expect(primary.appMetadata).toMatchObject({ owner: "github-actions", purpose: "ci-e2e", run_slug: "gha-9-1", principal: "primary" });
+    expect(assignee.appMetadata).toMatchObject({ owner: "github-actions", purpose: "ci-e2e", run_slug: "gha-9-1", principal: "assignee" });
+  });
 });
