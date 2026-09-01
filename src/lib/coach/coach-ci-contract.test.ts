@@ -70,9 +70,10 @@ function withoutSqlComments(sql: string): string {
 describe("coach realtime authorization CI security contract", () => {
   it("requires explicit Coach CI owner-purpose markers and collision preflight", () => {
     expect(coachWorkflow).toContain("Assert Coach identities are explicitly isolated");
-    expect(coachWorkflow).toContain("browser-QA namespace");
-    expect(withoutSqlComments(ciTestProjectSetup)).toContain("app_metadata->>'owner'");
-    expect(withoutSqlComments(ciTestProjectSetup)).toContain("app_metadata->>'purpose'");
+    expect(coachWorkflow).toContain("Coach CI identity collision");
+    expect(withoutSqlComments(ciTestProjectSetup)).toContain("raw_app_meta_data->>'owner'");
+    expect(withoutSqlComments(ciTestProjectSetup)).toContain("raw_app_meta_data->>'purpose'");
+    expect(withoutSqlComments(ciTestProjectSetup)).toContain("email in ('coach-ci-owner@bmhgroupkc.com', 'coach-ci-foreign@bmhgroupkc.com')");
     expect(withoutSqlComments(ciTestProjectSetup)).toContain("coach-realtime-authorization");
   });
   it("is a single job — not split across jobs that would each need their own environment approval", () => {

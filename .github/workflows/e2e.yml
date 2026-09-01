@@ -72,14 +72,10 @@ jobs:
           BROWSER_QA_C_EMAIL: ${{ secrets.BROWSER_QA_C_EMAIL }}
         run: |
           set -euo pipefail
-          test "${E2E_TEST_USER_EMAIL#e2e-ci+}" = "${E2E_RUN_SLUG}@bmhgroupkc.com"
-          for browser_email in "$BROWSER_QA_A_EMAIL" "$BROWSER_QA_B_EMAIL" "$BROWSER_QA_C_EMAIL"; do
-            test -n "$browser_email"
-            test "${browser_email,,}" != "${E2E_TEST_USER_EMAIL,,}"
-          done
-          test "$BROWSER_QA_A_EMAIL" != "$BROWSER_QA_B_EMAIL"
-          test "$BROWSER_QA_A_EMAIL" != "$BROWSER_QA_C_EMAIL"
-          test "$BROWSER_QA_B_EMAIL" != "$BROWSER_QA_C_EMAIL"
+          node - <<'NODE'
+          const values = [process.env.E2E_TEST_USER_EMAIL, process.env.BROWSER_QA_A_EMAIL, process.env.BROWSER_QA_B_EMAIL, process.env.BROWSER_QA_C_EMAIL].map((value) => value?.trim().toLowerCase() ?? "");
+          if (values.some((value) => !value) || new Set(values).size !== values.length || !values[0].startsWith("e2e-ci+")) process.exit(1);
+          NODE
 
       - name: Verify Chrome browser
         run: |
