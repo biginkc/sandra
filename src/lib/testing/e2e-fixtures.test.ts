@@ -1,10 +1,50 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
-  ensureTestUser,
-  TEST_ASSIGNEE_EMAIL,
-  TEST_USER_EMAIL,
-} from "../../../e2e/fixtures";
+  ciE2EEmail,
+  deriveGitHubRunSlug,
+} from "../supabase/e2e-identity-guard";
+
+type FixturesModule = typeof import("../../../e2e/fixtures");
+
+const IDENTITY_ENVIRONMENT_KEYS = [
+  "GITHUB_RUN_ID",
+  "GITHUB_RUN_ATTEMPT",
+  "E2E_RUN_SLUG",
+  "E2E_TEST_USER_EMAIL",
+  "E2E_TEST_USER_PASSWORD",
+] as const;
+const ORIGINAL_IDENTITY_ENVIRONMENT = new Map(
+  IDENTITY_ENVIRONMENT_KEYS.map((key) => [key, process.env[key]]),
+);
+
+let ensureTestUser!: FixturesModule["ensureTestUser"];
+let TEST_ASSIGNEE_EMAIL!: string;
+let TEST_USER_EMAIL!: string;
+
+beforeAll(async () => {
+  const runId = process.env.GITHUB_RUN_ID ?? "900000001";
+  const runAttempt = process.env.GITHUB_RUN_ATTEMPT ?? "1";
+  const runSlug = deriveGitHubRunSlug(runId, runAttempt);
+  process.env.GITHUB_RUN_ID = runId;
+  process.env.GITHUB_RUN_ATTEMPT = runAttempt;
+  process.env.E2E_RUN_SLUG = runSlug;
+  process.env.E2E_TEST_USER_EMAIL = ciE2EEmail(runSlug);
+  process.env.E2E_TEST_USER_PASSWORD = "e2e-fixtures-test-password-0123456789";
+
+  const fixtures = await import("../../../e2e/fixtures");
+  ensureTestUser = fixtures.ensureTestUser;
+  TEST_ASSIGNEE_EMAIL = fixtures.TEST_ASSIGNEE_EMAIL;
+  TEST_USER_EMAIL = fixtures.TEST_USER_EMAIL;
+});
+
+afterAll(() => {
+  for (const key of IDENTITY_ENVIRONMENT_KEYS) {
+    const original = ORIGINAL_IDENTITY_ENVIRONMENT.get(key);
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
+  }
+});
 
 function runSlugFromEmail(email: string): string {
   const match = /^e2e-ci\+(.+)@bmhgroupkc\.com$/.exec(email);
