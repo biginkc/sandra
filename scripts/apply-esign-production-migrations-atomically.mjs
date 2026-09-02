@@ -15,7 +15,7 @@
 //   3. on an explicitly armed execution, repeats every preflight under one
 //      transaction, an advisory deployment lock, Switchboard's DNC barrier,
 //      and an ACCESS EXCLUSIVE consumer-table lock;
-//   4. executes 194500, 080000, 100000, and 120100 and inserts the exact
+//   4. executes 194500, 080000, 100000, 120100, and 143000 and inserts the exact
 //      Supabase schema_migrations rows in that same transaction.
 //
 // This file is never invoked by application code or ordinary CI. It does not
@@ -241,7 +241,7 @@ export function loadReviewedPlan(planPath = DEFAULT_PLAN_PATH, options = {}) {
   const versions = plan.migrations.map((entry) => entry.version);
   if (
     versions.join(",") !==
-    "20260829194500,20260830080000,20260830100000,20260902120100"
+    "20260829194500,20260830080000,20260830100000,20260902120100,20260902143000"
   ) {
     throw new Error("The reviewed plan does not contain the exact eSign migration order.");
   }

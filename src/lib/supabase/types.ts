@@ -3606,10 +3606,12 @@ export type Database = {
           details_url: string | null
           error_message: string | null
           id: string
+          live_send_reserved_at: string | null
           merge_value_snapshot: Json
           org_id: string
           payload_hash: string
           property_id: string
+          provider_remaining_at_claim: number | null
           provider_event_at: string | null
           retry_of_request_id: string | null
           send_intent_id: string
@@ -3634,10 +3636,12 @@ export type Database = {
           details_url?: string | null
           error_message?: string | null
           id?: string
+          live_send_reserved_at?: string | null
           merge_value_snapshot?: Json
           org_id: string
           payload_hash: string
           property_id: string
+          provider_remaining_at_claim?: number | null
           provider_event_at?: string | null
           retry_of_request_id?: string | null
           send_intent_id: string
@@ -3662,10 +3666,12 @@ export type Database = {
           details_url?: string | null
           error_message?: string | null
           id?: string
+          live_send_reserved_at?: string | null
           merge_value_snapshot?: Json
           org_id?: string
           payload_hash?: string
           property_id?: string
+          provider_remaining_at_claim?: number | null
           provider_event_at?: string | null
           retry_of_request_id?: string | null
           send_intent_id?: string
@@ -3895,6 +3901,10 @@ export type Database = {
           provider_create_invocation_started_at: string | null
           provider_create_last_released_token_hash: string | null
           provider_create_state: string | null
+          provider_metadata: Json | null
+          provider_metadata_attested_at: string | null
+          provider_metadata_unavailable_at: string | null
+          provider_metadata_unavailable_reason: string | null
           provider_sync_started_at: string | null
           seller_role: string
           sign_template_id: string | null
@@ -3907,6 +3917,7 @@ export type Database = {
           staging_path: string | null
           staging_source_id: string | null
           supersedes_template_id: string | null
+          template_origin: string
           updated_at: string
           updated_by: string
         }
@@ -3933,6 +3944,10 @@ export type Database = {
           provider_create_invocation_started_at?: string | null
           provider_create_last_released_token_hash?: string | null
           provider_create_state?: string | null
+          provider_metadata?: Json | null
+          provider_metadata_attested_at?: string | null
+          provider_metadata_unavailable_at?: string | null
+          provider_metadata_unavailable_reason?: string | null
           provider_sync_started_at?: string | null
           seller_role: string
           sign_template_id?: string | null
@@ -3945,6 +3960,7 @@ export type Database = {
           staging_path?: string | null
           staging_source_id?: string | null
           supersedes_template_id?: string | null
+          template_origin?: string
           updated_at?: string
           updated_by: string
         }
@@ -3971,6 +3987,10 @@ export type Database = {
           provider_create_invocation_started_at?: string | null
           provider_create_last_released_token_hash?: string | null
           provider_create_state?: string | null
+          provider_metadata?: Json | null
+          provider_metadata_attested_at?: string | null
+          provider_metadata_unavailable_at?: string | null
+          provider_metadata_unavailable_reason?: string | null
           provider_sync_started_at?: string | null
           seller_role?: string
           sign_template_id?: string | null
@@ -3983,6 +4003,7 @@ export type Database = {
           staging_path?: string | null
           staging_source_id?: string | null
           supersedes_template_id?: string | null
+          template_origin?: string
           updated_at?: string
           updated_by?: string
         }
@@ -4170,6 +4191,9 @@ export type Database = {
           disconnect_pending_at: string | null
           disconnect_requested_by: string | null
           id: string
+          live_send_monthly_limit: number
+          live_send_monthly_period_started_at: string
+          live_send_monthly_used: number
           org_id: string
           provider: string
           provider_account_id: string | null
@@ -4189,6 +4213,9 @@ export type Database = {
           disconnect_pending_at?: string | null
           disconnect_requested_by?: string | null
           id?: string
+          live_send_monthly_limit?: number
+          live_send_monthly_period_started_at?: string
+          live_send_monthly_used?: number
           org_id: string
           provider?: string
           provider_account_id?: string | null
@@ -4208,6 +4235,9 @@ export type Database = {
           disconnect_pending_at?: string | null
           disconnect_requested_by?: string | null
           id?: string
+          live_send_monthly_limit?: number
+          live_send_monthly_period_started_at?: string
+          live_send_monthly_used?: number
           org_id?: string
           provider?: string
           provider_account_id?: string | null
@@ -4499,6 +4529,10 @@ export type Database = {
           name: string | null
           org_id: string | null
           preparation_error_code: string | null
+          provider_metadata: Json | null
+          provider_metadata_attested_at: string | null
+          provider_metadata_unavailable_at: string | null
+          provider_metadata_unavailable_reason: string | null
           seller_role: string | null
           sign_template_id: string | null
           signer_roles: Json | null
@@ -4510,6 +4544,7 @@ export type Database = {
           staging_path: string | null
           staging_source_id: string | null
           supersedes_template_id: string | null
+          template_origin: string | null
           updated_at: string | null
           updated_by: string | null
         }
@@ -4529,6 +4564,10 @@ export type Database = {
           name?: string | null
           org_id?: string | null
           preparation_error_code?: string | null
+          provider_metadata?: Json | null
+          provider_metadata_attested_at?: string | null
+          provider_metadata_unavailable_at?: string | null
+          provider_metadata_unavailable_reason?: string | null
           seller_role?: string | null
           sign_template_id?: string | null
           signer_roles?: Json | null
@@ -4540,6 +4579,7 @@ export type Database = {
           staging_path?: string | null
           staging_source_id?: string | null
           supersedes_template_id?: string | null
+          template_origin?: string | null
           updated_at?: string | null
           updated_by?: string | null
         }
@@ -4559,6 +4599,10 @@ export type Database = {
           name?: string | null
           org_id?: string | null
           preparation_error_code?: string | null
+          provider_metadata?: Json | null
+          provider_metadata_attested_at?: string | null
+          provider_metadata_unavailable_at?: string | null
+          provider_metadata_unavailable_reason?: string | null
           seller_role?: string | null
           sign_template_id?: string | null
           signer_roles?: Json | null
@@ -4570,6 +4614,7 @@ export type Database = {
           staging_path?: string | null
           staging_source_id?: string | null
           supersedes_template_id?: string | null
+          template_origin?: string | null
           updated_at?: string | null
           updated_by?: string | null
         }
@@ -5042,6 +5087,10 @@ export type Database = {
         Args: { p_org_id: string; p_template_id: string }
         Returns: boolean
       }
+      esign_website_template_metadata_is_valid: {
+        Args: { p_metadata: Json; p_provider_template_id: string }
+        Returns: boolean
+      }
       esign_storage_org_id: {
         Args: { p_path: string }
         Returns: string
@@ -5103,6 +5152,7 @@ export type Database = {
           property_id: string
           signed_pdf_path: string | null
           status: Database["public"]["Enums"]["esign_request_status"]
+          test_mode: boolean
           template_title: string
         }[]
       }
@@ -5145,6 +5195,16 @@ export type Database = {
           lead_file_id: string
           outcome: string
         }[]
+      }
+      mark_dropbox_website_esign_template_unavailable: {
+        Args: {
+          p_actor_id: string
+          p_org_id: string
+          p_provider_template_id: string
+          p_reason: string
+          p_template_id: string
+        }
+        Returns: undefined
       }
       reconcile_esign_completed_signed_artifact: {
         Args: {
@@ -5402,6 +5462,29 @@ export type Database = {
           template_id: string
         }[]
       }
+      register_dropbox_website_esign_template: {
+        Args: {
+          p_actor_id: string
+          p_document_type: string
+          p_name: string
+          p_org_id: string
+          p_provider_account_id: string
+          p_provider_metadata: Json
+          p_provider_template_id: string
+        }
+        Returns: {
+          outcome: string
+          template_id: string
+        }[]
+      }
+      reserve_esign_live_send: {
+        Args: {
+          p_org_id: string
+          p_provider_remaining: number
+          p_request_id: string
+        }
+        Returns: string
+      }
       soft_delete_esign_template: {
         Args: {
           p_actor_id: string
@@ -5416,6 +5499,10 @@ export type Database = {
       }
       set_org_esign_sending_enabled: {
         Args: { p_actor_id: string; p_enabled: boolean; p_org_id: string }
+        Returns: undefined
+      }
+      set_org_esign_test_mode: {
+        Args: { p_actor_id: string; p_org_id: string; p_test_mode: boolean }
         Returns: undefined
       }
       upsert_org_esign_integration: {

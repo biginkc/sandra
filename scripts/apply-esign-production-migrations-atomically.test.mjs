@@ -114,6 +114,7 @@ test("reviewed packet pins exact file and statement-array identities", () => {
       "20260830080000",
       "20260830100000",
       "20260902120100",
+      "20260902143000",
     ],
   );
   for (const entry of manifest.migrations) {

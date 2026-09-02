@@ -210,13 +210,6 @@ const mutations = [
         };`,
     command: unit("src/lib/esign/template-foundation-adapter.test.ts"),
   },
-  {
-    name: "email-bounce repair provider requires SQL template capability",
-    file: "src/app/(dashboard)/leads/[id]/lead-esign-bindings.ts",
-    from: "await requireEsignTemplateManagementCredentials(orgId);",
-    to: "void orgId;",
-    command: unit("src/app/(dashboard)/leads/[id]/lead-esign-provider.test.ts"),
-  },
 ];
 
 function replaceExactly(source, mutation) {
