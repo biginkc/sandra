@@ -102,7 +102,7 @@ const deliveryCatalog = {
 };
 
 async function selectSender(user: ReturnType<typeof userEvent.setup>) {
-  await screen.findByRole("option", { name: "+15551234567" });
+  await screen.findByRole("option", { name: /number ending 4567/i });
   await user.selectOptions(
     screen.getByLabelText(/sending number/i),
     "+15551234567",

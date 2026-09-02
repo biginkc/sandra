@@ -260,7 +260,7 @@ describe("<MonthGrid />", () => {
       screen.getByTestId("calendar-month-owner-teammate"),
     ).toHaveTextContent("gretchen@bmhgroupkc.com");
     expect(screen.getByTestId("calendar-month-owner-former")).toHaveTextContent(
-      /Former teammate \(user-gon/,
+      "Former teammate (name unavailable)",
     );
   });
 });

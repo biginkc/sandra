@@ -4,17 +4,19 @@ const {
   createClient,
   fetchLeadBoardData,
   getCallerMemberships,
+  listOrgAssigneeFilterUsers,
   listOrgUsers,
 } = vi.hoisted(() => ({
   createClient: vi.fn(),
   fetchLeadBoardData: vi.fn(),
   getCallerMemberships: vi.fn(),
+  listOrgAssigneeFilterUsers: vi.fn(),
   listOrgUsers: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships }));
-vi.mock("./actions", () => ({ listOrgUsers }));
+vi.mock("./actions", () => ({ listOrgUsers, listOrgAssigneeFilterUsers }));
 vi.mock("./board-query", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./board-query")>();
   return { ...actual, fetchLeadBoardData };
@@ -38,6 +40,7 @@ beforeEach(() => {
   fetchLeadBoardData.mockReset();
   getCallerMemberships.mockReset();
   listOrgUsers.mockReset();
+  listOrgAssigneeFilterUsers.mockReset();
   createClient.mockResolvedValue({
     auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) },
     from: vi.fn().mockReturnValue({
@@ -49,6 +52,7 @@ beforeEach(() => {
     }),
   });
   listOrgUsers.mockResolvedValue({ ok: true, data: [] });
+  listOrgAssigneeFilterUsers.mockResolvedValue({ ok: true, data: [] });
   fetchLeadBoardData.mockResolvedValue({
     leads: [],
     totals: emptyTotals,

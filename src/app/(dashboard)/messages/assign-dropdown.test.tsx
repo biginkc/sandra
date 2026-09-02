@@ -63,8 +63,12 @@ describe("<AssignDropdown />", () => {
     vi.mocked(listOrgUsers).mockResolvedValueOnce({
       ok: true,
       data: [
-        { id: "user-1", email: "me@example.com" },
-        { id: "user-2", email: "teammate@example.com" },
+        { id: "user-1", email: "me@example.com", displayName: "Morgan Me" },
+        {
+          id: "user-2",
+          email: "teammate@example.com",
+          displayName: "Taylor Teammate",
+        },
       ],
     });
     vi.mocked(updateLeadAssignee).mockResolvedValueOnce({
@@ -88,11 +92,11 @@ describe("<AssignDropdown />", () => {
     await user.click(trigger);
 
     expect(await screen.findByTestId("assign-dropdown-me")).toHaveTextContent(
-      "Me",
+      "Morgan Me (you)",
     );
     expect(
       await screen.findByTestId("assign-dropdown-user-user-2"),
-    ).toHaveTextContent("teammate@example.com");
+    ).toHaveTextContent("Taylor Teammate");
     expect(screen.getByTestId("assign-dropdown-unassign")).toHaveTextContent(
       "Unassign",
     );
