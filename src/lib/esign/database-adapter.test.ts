@@ -257,6 +257,7 @@ describe("typed eSign webhook database adapter", () => {
           org_id: ORG_ID,
           property_id: PROPERTY_ID,
           status: "awaiting",
+          test_mode: false,
           signed_pdf_path: null,
           template_title: "Purchase Agreement",
         }];
@@ -274,6 +275,7 @@ describe("typed eSign webhook database adapter", () => {
       orgId: ORG_ID,
       propertyId: PROPERTY_ID,
       status: "awaiting",
+      testMode: false,
       signedPdfPath: null,
       templateTitle: "Purchase Agreement",
     });
@@ -292,6 +294,7 @@ describe("typed eSign webhook database adapter", () => {
         org_id: ORG_ID,
         property_id: PROPERTY_ID,
         status: "awaiting",
+        test_mode: false,
         signed_pdf_path: null,
         template_title: "Purchase Agreement",
       }],

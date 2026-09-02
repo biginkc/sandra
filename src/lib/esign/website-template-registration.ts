@@ -6,19 +6,35 @@ import type { Json } from "@/lib/supabase/types";
 
 import {
   ESIGN_MERGE_FIELD_NAMES,
+  ESIGN_TEMPLATE_SIGNER_ROLES,
   requireTemplateTitle,
   type ProviderTemplateMetadata,
   type TemplateOption,
-  type TemplateSignerRole,
 } from "./contracts";
 import { getEsignCredentials } from "./credentials";
 import { createDropboxSignProvider } from "./dropbox-sign";
 
-const WEBSITE_SIGNER_ROLES: readonly TemplateSignerRole[] = [
-  { name: "Seller", order: 0 },
-];
-
 type WebsiteRegistrationClient = {
+  from(table: "esign_templates"): {
+    select(columns: string): {
+      eq(column: string, value: string): {
+        eq(column: string, value: string): {
+          maybeSingle(): Promise<{
+            data: {
+              id: string;
+              org_id: string;
+              name: string;
+              document_type: string;
+              provider_account_id: string | null;
+              sign_template_id: string | null;
+              template_origin: string;
+            } | null;
+            error: { message: string; code?: string } | null;
+          }>;
+        };
+      };
+    };
+  };
   rpc(
     fn: "register_dropbox_website_esign_template",
     args: {
@@ -40,7 +56,6 @@ type WebsiteRegistrationClient = {
       p_org_id: string;
       p_actor_id: string;
       p_template_id: string;
-      p_provider_template_id: string;
       p_reason: string;
     },
   ): Promise<{ error: { message: string; code?: string } | null }>;
@@ -65,7 +80,7 @@ export async function registerDropboxWebsiteTemplate(
     documentType: input.documentType.trim(),
     providerTemplateId: metadata.providerTemplateId,
     sellerRoleName: "Seller",
-    signerRoles: WEBSITE_SIGNER_ROLES,
+    signerRoles: ESIGN_TEMPLATE_SIGNER_ROLES,
     mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
   };
 }
@@ -74,36 +89,56 @@ export async function revalidateDropboxWebsiteTemplate(input: {
   orgId: string;
   actorId: string;
   templateId: string;
-  providerTemplateId: string;
+  providerTemplateId?: string;
 }): Promise<"valid" | "unavailable"> {
   const credentials = await getEsignCredentials(input.orgId);
   if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+  const local = await loadLocalWebsiteTemplate(input);
+  if (!local.sign_template_id) {
+    await markUnavailable(input, "PROVIDER_METADATA_DRIFT");
+    return "unavailable";
+  }
+  if (local.provider_account_id !== credentials.providerAccountId) {
+    await markUnavailable(input, "PROVIDER_METADATA_DRIFT");
+    return "unavailable";
+  }
   const provider = createDropboxSignProvider({
     apiKey: credentials.apiKey,
     clientId: credentials.clientId,
   });
   let metadata: ProviderTemplateMetadata;
   try {
-    metadata = await provider.getTemplate(input.providerTemplateId);
-    validateWebsiteProviderMetadata(metadata, input.providerTemplateId);
+    metadata = await provider.getTemplate(local.sign_template_id);
+    validateWebsiteProviderMetadata(
+      metadata,
+      local.sign_template_id,
+      credentials.providerAccountId,
+    );
   } catch (error) {
-    await markUnavailable(input, providerMetadataForFailure(input.providerTemplateId), "PROVIDER_METADATA_DRIFT");
-    if (error instanceof ProviderError) return "unavailable";
+    if (isDefinitiveTemplateDrift(error)) {
+      await markUnavailable(input, "PROVIDER_METADATA_DRIFT");
+      return "unavailable";
+    }
     throw error;
   }
   const admin = createAdminClient() as unknown as WebsiteRegistrationClient;
   const { error } = await admin.rpc("register_dropbox_website_esign_template", {
     p_org_id: input.orgId,
     p_actor_id: input.actorId,
-    p_name: metadata.title ?? "Dropbox Sign template",
-    p_document_type: "Purchase agreement",
+    p_name: local.name,
+    p_document_type: local.document_type,
     p_provider_account_id: credentials.providerAccountId,
     p_provider_template_id: metadata.providerTemplateId,
     p_provider_metadata: metadataForStorage(metadata),
   });
   if (error) {
-    await markUnavailable(input, metadataForStorage(metadata), "PROVIDER_METADATA_DRIFT");
-    return "unavailable";
+    if (isIntegrityError(error.code)) {
+      await markUnavailable(input, "PROVIDER_METADATA_DRIFT");
+      return "unavailable";
+    }
+    throw new DatabaseError("Dropbox Sign template revalidation failed.", {
+      code: error.code,
+    });
   }
   return "valid";
 }
@@ -125,13 +160,40 @@ async function readAndValidateWebsiteTemplate(
     apiKey: credentials.apiKey,
     clientId: credentials.clientId,
   }).getTemplate(providerTemplateId);
-  validateWebsiteProviderMetadata(metadata, providerTemplateId);
+  validateWebsiteProviderMetadata(
+    metadata,
+    providerTemplateId,
+    credentials.providerAccountId,
+  );
   return metadata;
+}
+
+async function loadLocalWebsiteTemplate(input: {
+  orgId: string;
+  templateId: string;
+}) {
+  const admin = createAdminClient() as unknown as WebsiteRegistrationClient;
+  const { data, error } = await admin
+    .from("esign_templates")
+    .select("id,org_id,name,document_type,provider_account_id,sign_template_id,template_origin")
+    .eq("org_id", input.orgId)
+    .eq("id", input.templateId)
+    .maybeSingle();
+  if (error) {
+    throw new DatabaseError("Dropbox Sign template revalidation failed.", {
+      code: error.code,
+    });
+  }
+  if (!data || data.template_origin !== "dropbox_website") {
+    throw new DatabaseError("Dropbox Sign website template was not found.");
+  }
+  return data;
 }
 
 function validateWebsiteProviderMetadata(
   metadata: ProviderTemplateMetadata,
   expectedProviderTemplateId: string,
+  expectedProviderAccountId: string,
 ): void {
   if (metadata.providerTemplateId !== expectedProviderTemplateId) {
     throw new ProviderError(
@@ -147,14 +209,34 @@ function validateWebsiteProviderMetadata(
       { providerCode: "embedded_template_not_supported" },
     );
   }
-  if (JSON.stringify(metadata.signerRoles) !== JSON.stringify(WEBSITE_SIGNER_ROLES)) {
+  if (metadata.canEdit !== true || metadata.isLocked === true) {
     throw new ProviderError(
-      "Dropbox Sign signer roles must be exactly Seller at order 1.",
+      "Dropbox Sign template must be unlocked and editable before Sandra can send it.",
+      "dropbox_sign",
+      { providerCode: "template_not_usable" },
+    );
+  }
+  if (
+    !metadata.accounts.some(
+      (account) =>
+        account.accountId === expectedProviderAccountId &&
+        account.isLocked !== true,
+    )
+  ) {
+    throw new ProviderError(
+      "Dropbox Sign template is not available to the connected provider account.",
+      "dropbox_sign",
+      { providerCode: "template_account_mismatch" },
+    );
+  }
+  if (JSON.stringify(metadata.signerRoles) !== JSON.stringify(ESIGN_TEMPLATE_SIGNER_ROLES)) {
+    throw new ProviderError(
+      "Dropbox Sign signer roles must be exactly Seller then Buyer.",
       "dropbox_sign",
       { providerCode: "signer_role_mismatch" },
     );
   }
-  const actualFields = [...new Set(metadata.mergeFieldNames)].sort();
+  const actualFields = [...metadata.mergeFieldNames].sort();
   const expectedFields = [...ESIGN_MERGE_FIELD_NAMES].sort();
   if (
     actualFields.length !== expectedFields.length ||
@@ -198,7 +280,6 @@ async function registerAttestedTemplate(
 
 async function markUnavailable(
   input: { orgId: string; actorId: string; templateId: string },
-  metadata: Json,
   reason: string,
 ): Promise<void> {
   const admin = createAdminClient() as unknown as WebsiteRegistrationClient;
@@ -206,9 +287,6 @@ async function markUnavailable(
     p_org_id: input.orgId,
     p_actor_id: input.actorId,
     p_template_id: input.templateId,
-    p_provider_template_id: String(
-      (metadata as { providerTemplateId?: unknown }).providerTemplateId ?? "",
-    ),
     p_reason: reason,
   });
   if (error) {
@@ -223,14 +301,37 @@ function metadataForStorage(metadata: ProviderTemplateMetadata): Json {
     providerTemplateId: metadata.providerTemplateId,
     title: metadata.title,
     isEmbedded: metadata.isEmbedded,
+    canEdit: metadata.canEdit,
+    isCreator: metadata.isCreator,
+    isLocked: metadata.isLocked,
+    accounts: metadata.accounts.map((account) => ({ ...account })),
     signerRoles: metadata.signerRoles.map((role) => ({ ...role })),
     mergeFieldNames: [...metadata.mergeFieldNames],
   };
 }
 
-function providerMetadataForFailure(providerTemplateId: string): Json {
-  return {
-    providerTemplateId,
-    unavailable: true,
-  };
+function isDefinitiveTemplateDrift(error: unknown): boolean {
+  if (!(error instanceof ProviderError)) return false;
+  const statusCode =
+    typeof error.details?.statusCode === "number" ? error.details.statusCode : null;
+  const providerCode =
+    typeof error.details?.providerCode === "string"
+      ? error.details.providerCode
+      : null;
+  if (statusCode === 404) return true;
+  if (statusCode === 429 || (statusCode !== null && statusCode >= 500)) {
+    return false;
+  }
+  return [
+    "template_id_mismatch",
+    "embedded_template_not_supported",
+    "template_not_usable",
+    "template_account_mismatch",
+    "signer_role_mismatch",
+    "merge_field_mismatch",
+  ].includes(providerCode ?? "");
+}
+
+function isIntegrityError(code: string | undefined): boolean {
+  return typeof code === "string" && code.startsWith("23");
 }

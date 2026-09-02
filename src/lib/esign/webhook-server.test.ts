@@ -189,12 +189,14 @@ describe("concrete eSign webhook server binding", () => {
       callbackConsumerId: CONSUMER_ID,
       signRequestId: "provider-request-1",
       localRequestId: REQUEST_ID,
+      testMode: true,
     })).resolves.toBe("mismatch");
     await expect(dependencies.metadataProvider.confirmProviderLocalRequestId({
       orgId: ORG_ID,
       callbackConsumerId: CONSUMER_ID,
       signRequestId: "provider-request-1",
       localRequestId: REQUEST_ID,
+      testMode: true,
     })).resolves.toBe("matched");
   });
 

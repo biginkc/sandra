@@ -418,7 +418,7 @@ async function loadLeadSendContext({
       admin
         .from("available_esign_templates")
         .select(
-          "id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names",
+          "id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names,template_origin",
         )
         .eq("org_id", actor.orgId)
         .order("updated_at", { ascending: false }),
@@ -432,6 +432,7 @@ async function loadLeadSendContext({
     contact?.contact_type === "entity"
       ? (contact.entity_name ?? "")
       : [contact?.first_name, contact?.last_name].filter(Boolean).join(" ");
+  const testMode = integrationResult.data?.test_mode ?? true;
   return {
     propertyId: property.id,
     sellerName,
@@ -449,7 +450,7 @@ async function loadLeadSendContext({
     sendingEnabled:
       Boolean(integrationResult.data?.api_key_last_four) &&
       (integrationResult.data?.sending_enabled ?? false),
-    testMode: integrationResult.data?.test_mode ?? true,
+    testMode,
     liveSendLimit:
       typeof integrationResult.data?.live_send_monthly_limit === "number" &&
       typeof integrationResult.data?.live_send_monthly_used === "number"
@@ -463,7 +464,9 @@ async function loadLeadSendContext({
             ),
           }
         : null,
-    templates: (templatesResult.data ?? []).flatMap(toTemplateOption),
+    templates: (templatesResult.data ?? []).flatMap((row) =>
+      toTemplateOption(row, { testMode }),
+    ),
   };
 }
 
@@ -475,7 +478,9 @@ function toTemplateOption(row: {
   seller_role: string | null;
   signer_roles: Json | null;
   merge_field_names: string[] | null;
-}): TemplateOption[] {
+  template_origin?: string | null;
+}, options: { testMode: boolean }): TemplateOption[] {
+  if (!options.testMode && row.template_origin !== "dropbox_website") return [];
   const roles = parseRoles(row.signer_roles);
   if (
     !row.id ||
@@ -649,7 +654,9 @@ async function loadRequest(
   if (templateError) throw templateError;
   if (signerError) throw signerError;
   if (fileError) throw fileError;
-  const template = templateRow ? toTemplateOption(templateRow)[0] : null;
+  const template = templateRow
+    ? toTemplateOption(templateRow, { testMode: true })[0]
+    : null;
   if (!template) throw new Error("Request template snapshot is unavailable.");
   const merge = parseMergeValues(row.merge_value_snapshot);
   if (!merge) throw new Error("Request merge snapshot is invalid.");

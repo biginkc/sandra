@@ -142,6 +142,134 @@ describe("lead eSign send context", () => {
       sellerEmailAddress: "seller@example.com",
     });
   });
+
+  it("excludes historical embedded templates from the live send chooser", async () => {
+    const templateRows = [
+      {
+        id: "embedded-template-1",
+        name: "Embedded template",
+        document_type: "purchase_agreement",
+        sign_template_id: "embedded-provider-1",
+        seller_role: "Seller",
+        signer_roles: [
+          { name: "Seller", order: 0 },
+          { name: "Buyer", order: 1 },
+        ],
+        merge_field_names: [
+          "seller_name",
+          "property_address",
+          "offer_price",
+          "closing_date",
+          "earnest_money",
+        ],
+        template_origin: "sandra_embedded",
+      },
+      {
+        id: "website-template-1",
+        name: "Website template",
+        document_type: "purchase_agreement",
+        sign_template_id: "website-provider-1",
+        seller_role: "Seller",
+        signer_roles: [
+          { name: "Seller", order: 0 },
+          { name: "Buyer", order: 1 },
+        ],
+        merge_field_names: [
+          "seller_name",
+          "property_address",
+          "offer_price",
+          "closing_date",
+          "earnest_money",
+        ],
+        template_origin: "dropbox_website",
+      },
+    ];
+    const admin = {
+      from: vi.fn((table: string) => {
+        if (table === "properties") {
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: {
+                      id: "property-1",
+                      org_id: "org-1",
+                      address: "123 Main",
+                      city: "Springfield",
+                      state: "MO",
+                      zip: "65801",
+                      homeowner_contact_id: "contact-1",
+                    },
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === "contacts") {
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: {
+                      first_name: "Sally",
+                      last_name: "Seller",
+                      entity_name: null,
+                      contact_type: "person",
+                      email: "seller@example.com",
+                    },
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === "org_esign_integrations") {
+          return {
+            select: () => ({
+              eq: () => ({
+                maybeSingle: async () => ({
+                  data: {
+                    api_key_last_four: "1234",
+                    sending_enabled: true,
+                    test_mode: false,
+                    live_send_monthly_limit: 40,
+                    live_send_monthly_used: 3,
+                  },
+                  error: null,
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === "available_esign_templates") {
+          return {
+            select: () => ({
+              eq: () => ({
+                order: async () => ({ data: templateRows, error: null }),
+              }),
+            }),
+          };
+        }
+        throw new Error(`Unexpected table ${table}`);
+      }),
+    };
+    supabaseMocks.createAdminClient.mockReturnValueOnce(admin);
+
+    await expect(
+      createLeadEsignRepository().loadLeadSendContext({
+        actor: { orgId: "org-1", userId: "user-1", role: "owner" },
+        propertyId: "property-1",
+      }),
+    ).resolves.toMatchObject({
+      testMode: false,
+      templates: [{ id: "website-template-1" }],
+    });
+  });
 });
 
 describe("atomic eSign send blocker mapping", () => {

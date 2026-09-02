@@ -13,7 +13,7 @@ import {
 
 export type ProviderSendContractInput = Readonly<{
   localRequestId: string;
-  testMode?: boolean;
+  testMode: boolean;
   template: TemplateOption;
   signers: readonly Readonly<{
     role: string;
@@ -35,7 +35,7 @@ export async function sendContractWithTemplate(
 
   const response = await provider.sendWithTemplate({
     localRequestId: input.localRequestId,
-    testMode: input.testMode ?? true,
+    testMode: input.testMode,
     templateId: input.template.providerTemplateId,
     signers: input.signers.map(({ role, name, emailAddress }) => ({
       role,
@@ -89,6 +89,7 @@ function assertExactTemplateContract(template: TemplateOption): void {
     template.mergeFieldNames.length !== ESIGN_MERGE_FIELD_NAMES.length ||
     new Set(template.mergeFieldNames).size !==
       template.mergeFieldNames.length ||
+    !sameSortedValues(template.mergeFieldNames, ESIGN_MERGE_FIELD_NAMES) ||
     ESIGN_MERGE_FIELD_NAMES.some(
       (requiredName) => !template.mergeFieldNames.includes(requiredName),
     )
@@ -97,6 +98,16 @@ function assertExactTemplateContract(template: TemplateOption): void {
       "The template merge fields are no longer valid. Refresh and try again.",
     );
   }
+}
+
+function sameSortedValues(
+  actual: readonly string[],
+  expected: readonly string[],
+): boolean {
+  if (actual.length !== expected.length) return false;
+  const actualSorted = [...actual].sort();
+  const expectedSorted = [...expected].sort();
+  return actualSorted.every((value, index) => value === expectedSorted[index]);
 }
 
 function assertExactSignerAssignments(

@@ -61,6 +61,7 @@ describe("bound lead eSign provider classification", () => {
       await expect(
         provider!.sendWithTemplate({
           localRequestId: "request-1",
+          testMode: true,
           providerTemplateId: "template-1",
           signers: [],
           mergeValues: {
@@ -88,6 +89,7 @@ describe("bound lead eSign provider classification", () => {
     await expect(
       provider!.sendWithTemplate({
         localRequestId: "request-1",
+        testMode: true,
         providerTemplateId: "template-1",
         signers: [],
         mergeValues: {

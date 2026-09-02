@@ -27,6 +27,7 @@ function callbackRequest(input: {
   eventHash?: string;
   signRequestId?: string | null;
   localRequestId?: string | null;
+  testMode?: boolean;
   relatedSignatureId?: string | null;
   providerSignatures?: Array<{
     signature_id: string;
@@ -70,6 +71,7 @@ function callbackRequest(input: {
               metadata: {
                 sandra_request_id: input.localRequestId ?? REQUEST_ID,
               },
+              ...(input.testMode === undefined ? {} : { test_mode: input.testMode }),
               signatures: input.providerSignatures ?? [],
             },
           }),
@@ -93,6 +95,7 @@ function dependencies(
       orgId: ORG_ID,
       propertyId: PROPERTY_ID,
       status: "awaiting" as const,
+      testMode: true,
       signedPdfPath: null,
       templateTitle: "Purchase Agreement",
     })),
@@ -248,12 +251,16 @@ describe("injectable Dropbox Sign webhook handler", () => {
         orgId: ORG_ID,
         propertyId: PROPERTY_ID,
         status: "awaiting" as const,
+        testMode: true,
         signedPdfPath: null,
         templateTitle: "Purchase Agreement",
       });
 
     const response = await handleDropboxSignWebhook({
-      request: callbackRequest({ signRequestId: "provider-after-timeout" }),
+      request: callbackRequest({
+        signRequestId: "provider-after-timeout",
+        testMode: true,
+      }),
       pathSecret: PATH_SECRET,
       dependencies: deps,
     });
@@ -264,6 +271,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
       callbackConsumerId: CONSUMER_ID,
       signRequestId: "provider-after-timeout",
       localRequestId: REQUEST_ID,
+      testMode: true,
     });
     expect(deps.persistence.findRequest).toHaveBeenNthCalledWith(1, {
       orgId: ORG_ID,
@@ -292,6 +300,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
       request: callbackRequest({
         signRequestId: "provider-after-timeout",
         localRequestId: "spoofed-local-request",
+        testMode: true,
       }),
       pathSecret: PATH_SECRET,
       dependencies: deps,
@@ -304,6 +313,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
       callbackConsumerId: CONSUMER_ID,
       signRequestId: "provider-after-timeout",
       localRequestId: "spoofed-local-request",
+      testMode: true,
     });
     expect(deps.persistence.findRequest).toHaveBeenCalledTimes(1);
     expect(deps.persistence.markReceiptIgnored).toHaveBeenCalledWith(
@@ -311,6 +321,27 @@ describe("injectable Dropbox Sign webhook handler", () => {
       "PROVIDER_METADATA_MISMATCH",
     );
     expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+  });
+
+  it("fails closed instead of resolving provider metadata when callback mode is missing", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.persistence.findRequest).mockResolvedValue(null);
+
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        signRequestId: "provider-after-timeout",
+        localRequestId: REQUEST_ID,
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(deps.metadataProvider.confirmProviderLocalRequestId).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptIgnored).toHaveBeenCalledWith(
+      CLAIM,
+      "CALLBACK_MODE_MISSING",
+    );
   });
 
   it("rejects an invalid event hash before claiming a receipt", async () => {
@@ -411,6 +442,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
       orgId: ORG_ID,
       propertyId: PROPERTY_ID,
       status: "error",
+      testMode: true,
       signedPdfPath: null,
       templateTitle: "Purchase Agreement",
     });
@@ -578,6 +610,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
       orgId: ORG_ID,
       propertyId: PROPERTY_ID,
       status: "declined",
+      testMode: true,
       signedPdfPath: null,
       templateTitle: "Purchase Agreement",
     });

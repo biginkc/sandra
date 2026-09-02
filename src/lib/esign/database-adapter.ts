@@ -257,7 +257,7 @@ export function createEsignWebhookDatabaseAdapter(
         !isNonEmptyString(row.org_id) ||
         !isNonEmptyString(row.property_id) ||
         !isEsignStatus(row.status) ||
-        (row.test_mode !== undefined && typeof row.test_mode !== "boolean") ||
+        typeof row.test_mode !== "boolean" ||
         (row.signed_pdf_path !== null &&
           typeof row.signed_pdf_path !== "string") ||
         typeof row.template_title !== "string"
@@ -269,7 +269,7 @@ export function createEsignWebhookDatabaseAdapter(
         orgId: row.org_id,
         propertyId: row.property_id,
         status: row.status,
-        ...(row.test_mode === undefined ? {} : { testMode: row.test_mode }),
+        testMode: row.test_mode,
         signedPdfPath: row.signed_pdf_path,
         templateTitle: row.template_title,
       };

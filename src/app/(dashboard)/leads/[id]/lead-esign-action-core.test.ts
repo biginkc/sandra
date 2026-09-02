@@ -358,6 +358,58 @@ describe("lead eSign action orchestration", () => {
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });
 
+  it("allows live send dispatch when Dropbox remaining quota is above the fail-closed threshold", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ testMode: false }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({ testMode: false }),
+    });
+    h.provider.getRemainingSignatureRequests.mockResolvedValue(11);
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toEqual({ ok: true, data: { requestId: "request-1" } });
+    expect(h.repository.reserveLiveSend).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      providerRemaining: 11,
+    });
+    expect(h.provider.sendWithTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({ testMode: false }),
+    );
+  });
+
+  it("fails a claimed live request when the Sandra reservation RPC is uncertain", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ testMode: false }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({ testMode: false }),
+    });
+    h.repository.reserveLiveSend.mockRejectedValue(
+      new Error("database connection lost"),
+    );
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "LIVE_QUOTA_BLOCKED" },
+    });
+    expect(h.repository.markSendOutcome).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      deliveryState: "failed",
+      safeErrorMessage: "SANDRA_LIVE_RESERVATION_UNCERTAIN",
+    });
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
   it("keeps a lead with no homeowner contact blocked before provider dispatch", async () => {
     const h = harness();
     h.repository.loadLeadSendContext.mockResolvedValue(

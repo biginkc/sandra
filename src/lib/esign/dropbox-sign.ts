@@ -259,7 +259,7 @@ export function createDropboxSignProvider(input: {
         title: request.title,
         subject: request.subject,
         message: request.message,
-        testMode: request.testMode ?? true,
+        testMode: request.testMode,
       };
       try {
         const response =
@@ -290,7 +290,7 @@ export function createDropboxSignProvider(input: {
                 : [],
           ),
           detailsUrl: signatureRequest.detailsUrl ?? null,
-          testMode: request.testMode ?? true,
+          testMode: request.testMode,
         };
       } catch (error) {
         throw normalizeDropboxSignError(error);
@@ -402,7 +402,7 @@ export function createDropboxSignProvider(input: {
             typeof request.metadata?.sandra_request_id === "string"
               ? request.metadata.sandra_request_id
               : null,
-          testMode: typeof request.testMode === "boolean" ? request.testMode : null,
+        testMode: typeof request.testMode === "boolean" ? request.testMode : null,
         };
       } catch (error) {
         throw normalizeDropboxSignError(error);
@@ -450,6 +450,10 @@ function providerTemplateMetadata(template: {
   templateId?: string;
   title?: string;
   isEmbedded?: boolean | null;
+  isCreator?: boolean;
+  canEdit?: boolean;
+  isLocked?: boolean;
+  accounts?: Array<{ accountId?: string; isLocked?: boolean }>;
   metadata?: Record<string, unknown>;
   signerRoles?: Array<{ name?: string; order?: number }>;
   namedFormFields?: Array<{ name?: string }> | null;
@@ -461,6 +465,13 @@ function providerTemplateMetadata(template: {
       : null,
     title: template.title ?? null,
     isEmbedded: typeof template.isEmbedded === "boolean" ? template.isEmbedded : null,
+    canEdit: typeof template.canEdit === "boolean" ? template.canEdit : null,
+    isCreator: typeof template.isCreator === "boolean" ? template.isCreator : null,
+    isLocked: typeof template.isLocked === "boolean" ? template.isLocked : null,
+    accounts: (template.accounts ?? []).map((account) => ({
+      accountId: account.accountId ?? null,
+      isLocked: typeof account.isLocked === "boolean" ? account.isLocked : null,
+    })),
     signerRoles: (template.signerRoles ?? [])
       .map((role, index) => ({ name: role.name ?? "", order: role.order ?? index }))
       .sort((a, b) => a.order - b.order),

@@ -36,6 +36,11 @@ export const ESIGN_MERGE_FIELD_NAMES = [
 export const ESIGN_TEMPLATE_MERGE_FIELDS = ESIGN_MERGE_FIELD_NAMES;
 export const ESIGN_TEMPLATE_TITLE_MAX_LENGTH = 160;
 
+export const ESIGN_TEMPLATE_SIGNER_ROLES = [
+  { name: "Seller", order: 0 },
+  { name: "Buyer", order: 1 },
+] as const;
+
 export type EsignMergeFieldName = (typeof ESIGN_MERGE_FIELD_NAMES)[number];
 export type EsignTemplateMergeField = EsignMergeFieldName;
 
@@ -79,6 +84,10 @@ export type ProviderTemplateMetadata = {
   localTemplateId: string | null;
   title: string | null;
   isEmbedded: boolean | null;
+  canEdit: boolean | null;
+  isCreator: boolean | null;
+  isLocked: boolean | null;
+  accounts: readonly { accountId: string | null; isLocked: boolean | null }[];
   signerRoles: TemplateSignerRole[];
   mergeFieldNames: string[];
 };
@@ -99,7 +108,7 @@ export type CreateEmbeddedTemplateDraftInput = {
 export type SendWithTemplateInput = {
   localRequestId: string;
   templateId: string;
-  testMode?: boolean;
+  testMode: boolean;
   signers: EsignSigner[];
   mergeValues: Record<string, string>;
   title?: string;

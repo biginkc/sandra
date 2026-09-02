@@ -49,7 +49,7 @@ export interface EsignWebhookPersistence {
     orgId: string;
     propertyId: string;
     status: EsignStatus;
-    testMode?: boolean;
+    testMode: boolean;
     signedPdfPath: string | null;
     templateTitle: string;
   } | null>;
@@ -118,7 +118,7 @@ export interface DropboxSignatureRequestMetadataProvider {
     callbackConsumerId: string;
     signRequestId: string;
     localRequestId: string;
-    testMode?: boolean;
+    testMode: boolean;
   }): Promise<"matched" | "mismatch">;
 }
 

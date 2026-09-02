@@ -284,7 +284,7 @@ export type ProviderSignerUpdateOutcome =
 export type EsignActionProvider = Readonly<{
   sendWithTemplate(input: {
     localRequestId: string;
-    testMode?: boolean;
+    testMode: boolean;
     providerTemplateId: string;
     signers: readonly SignerAssignment[];
     mergeValues: ContractMergeValues;
@@ -430,6 +430,7 @@ async function send(
   assertSellerEmail(template, normalized.signers);
   validateContractSendInput({
     localRequestId: "validation-only",
+    testMode: context.testMode,
     template,
     signers: normalized.signers,
     mergeValues: normalized.mergeValues,
@@ -538,11 +539,20 @@ async function dispatchClaimed(
         "Dropbox Sign reports too few signature requests remaining. No live request was sent.",
       );
     }
-    const reservation = await dependencies.repository.reserveLiveSend({
-      orgId: request.orgId,
-      requestId: request.id,
-      providerRemaining,
-    });
+    let reservation: "reserved" | "blocked";
+    try {
+      reservation = await dependencies.repository.reserveLiveSend({
+        orgId: request.orgId,
+        requestId: request.id,
+        providerRemaining,
+      });
+    } catch {
+      await markFailed(dependencies, request, "SANDRA_LIVE_RESERVATION_UNCERTAIN");
+      fail(
+        "LIVE_QUOTA_BLOCKED",
+        "Sandra could not reserve this live send. No live request was sent.",
+      );
+    }
     if (reservation !== "reserved") {
       await markFailed(dependencies, request, "SANDRA_LIVE_LIMIT_REACHED");
       fail(

@@ -101,9 +101,12 @@ export async function createFoundationTemplateOrchestrator() {
   const repository: TemplateOrchestratorPorts["repository"] = {
     async listFinalized(orgId) {
       const { data, error } = await admin
-        .from("available_esign_templates")
+        .from("esign_templates")
         .select("id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names,source_filename,source_size_bytes,updated_at,updated_by,template_origin,provider_metadata_unavailable_at,provider_metadata_unavailable_reason")
         .eq("org_id", orgId)
+        .is("deleted_at", null)
+        .not("finalized_at", "is", null)
+        .eq("lifecycle_state", "finalized")
         .order("updated_at", { ascending: false });
       if (error) throw error;
       const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();

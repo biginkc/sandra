@@ -59,6 +59,7 @@ function input(
 ): ProviderSendContractInput {
   return {
     localRequestId: "request-local-1",
+    testMode: true,
     template,
     signers,
     mergeValues,

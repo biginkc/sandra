@@ -127,6 +127,7 @@ describe("Dropbox Sign provider", () => {
     await provider.sendWithTemplate({
       localRequestId: "local-uuid",
       templateId: "provider-template",
+      testMode: true,
       signers: [{ role: "Seller", name: "Seller", emailAddress: "seller@example.com" }],
       mergeValues: {},
       signal: controller.signal,
@@ -227,6 +228,7 @@ describe("Dropbox Sign provider", () => {
     const result = await provider.sendWithTemplate({
       localRequestId: "local-uuid",
       templateId: "provider-template",
+      testMode: true,
       signers: [
         {
           role: "Seller",
