@@ -140,6 +140,15 @@ Current workflows:
 
 Migration watchpoint: all workflows currently use npm and root-level paths. They will need conversion or replacement by platform path-aware Turbo/Vercel workflows after the app lives under `apps/sandra/`.
 
+## eSign Retimestamp Recovery
+
+- On 2026-09-02, two idempotent eSign migrations were renamed because later eSign migrations had already reached shared backends first:
+  - `20260901181004_record_definitive_esign_template_provider_create_failure.sql` -> `20260902120000_record_definitive_esign_template_provider_create_failure.sql`
+  - `20260902074814_esign_atomic_disconnect_state.sql` -> `20260902120100_esign_atomic_disconnect_state.sql`
+- Supabase migration history is keyed by version, not SQL content. A backend that already has the old version rows will still treat the renamed files as pending fresh versions.
+- That replay is expected for the QA backend that already applied the old filenames; the SQL bodies are idempotent, and the migration-safety gate now sees the fresh versions as newer than the latest applied eSign history instead of refusing them as out-of-order.
+- Production only receives these through the normal `db-migrate-test.yml` -> `db-migrate-prod.yml` workflow chain after the test migration-safety gate passes.
+
 ## Vercel Cron And HTTP Endpoints
 
 `vercel.json` defines these cron schedules:

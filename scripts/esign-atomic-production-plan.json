@@ -32,9 +32,9 @@
       "statementsSha256": "0696768d8a6ecdf584bd22848c44b1f182936cd118d1ee0fb1ae3346ad1efd7c"
     },
     {
-      "version": "20260902074814",
+      "version": "20260902120100",
       "name": "esign_atomic_disconnect_state",
-      "path": "supabase/migrations/20260902074814_esign_atomic_disconnect_state.sql",
+      "path": "supabase/migrations/20260902120100_esign_atomic_disconnect_state.sql",
       "sha256": "3a3fcc87da6a48062861fac5758cef5b1231bfc0babc9549e044486d61daa111",
       "statementsSha256": "5abfc78a20255fdb4df5e24e75fdde1cbb3872b096e8d1a3a6b8441a9a9891eb"
     }

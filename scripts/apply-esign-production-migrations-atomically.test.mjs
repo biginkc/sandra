@@ -113,7 +113,7 @@ test("reviewed packet pins exact file and statement-array identities", () => {
       "20260829194500",
       "20260830080000",
       "20260830100000",
-      "20260902074814",
+      "20260902120100",
     ],
   );
   for (const entry of manifest.migrations) {
@@ -132,13 +132,13 @@ test("reviewed packet pins exact file and statement-array identities", () => {
 test("reviewed packet includes the disconnect state migration", () => {
   const manifest = JSON.parse(readFileSync(planPath, "utf8"));
   const entry = manifest.migrations.find(
-    (migration) => migration.version === "20260902074814",
+    (migration) => migration.version === "20260902120100",
   );
   assert.ok(entry, "disconnect migration missing from atomic packet");
   assert.equal(entry.name, "esign_atomic_disconnect_state");
   assert.equal(
     entry.path,
-    "supabase/migrations/20260902074814_esign_atomic_disconnect_state.sql",
+    "supabase/migrations/20260902120100_esign_atomic_disconnect_state.sql",
   );
   assert.equal(
     entry.sha256,
@@ -168,7 +168,7 @@ test("applyProductionPacket executes the disconnect migration body from the revi
   assert.ok(
     calls.some((call) =>
       /insert into supabase_migrations\.schema_migrations/u.test(call.sql) &&
-      call.params?.[0] === "20260902074814",
+      call.params?.[0] === "20260902120100",
     ),
     "disconnect migration ledger row was not inserted",
   );
