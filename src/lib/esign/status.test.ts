@@ -73,4 +73,19 @@ describe("Dropbox Sign lifecycle normalization", () => {
   ] as const)("maps %s to %s", (eventType, expected) => {
     expect(apply("awaiting", eventType).nextStatus).toBe(expected);
   });
+
+  it("separates bounced-email evidence from generic provider errors", () => {
+    expect(
+      normalizeDropboxSignLifecycleEvent("signature_request_email_bounce"),
+    ).toMatchObject({
+      requestedStatus: "error",
+      reason: "email_bounced",
+    });
+    expect(
+      normalizeDropboxSignLifecycleEvent("signature_request_invalid"),
+    ).toMatchObject({
+      requestedStatus: "error",
+      reason: "provider_error",
+    });
+  });
 });

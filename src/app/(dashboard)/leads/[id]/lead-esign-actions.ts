@@ -8,6 +8,7 @@ import type {
   AuthorizedDownload,
   ConfirmContractNotSentInput,
   DownloadLeadFileInput,
+  FixSignerEmailAndResendContractInput,
   LeadEsignPreflight,
   RemindContractInput,
   RetryContractInput,
@@ -42,6 +43,14 @@ export async function voidContractAction(input: VoidContractInput): Promise<Resu
 
 export async function retryContractAction(input: RetryContractInput): Promise<Result<SendContractOutput>> {
   const result = await createBoundLeadEsignCore().retry(input);
+  if (result.ok) revalidatePath("/leads", "layout");
+  return result;
+}
+
+export async function fixSignerEmailAndResendContractAction(
+  input: FixSignerEmailAndResendContractInput,
+): Promise<Result<null>> {
+  const result = await createBoundLeadEsignCore().fixSignerEmailAndResend(input);
   if (result.ok) revalidatePath("/leads", "layout");
   return result;
 }

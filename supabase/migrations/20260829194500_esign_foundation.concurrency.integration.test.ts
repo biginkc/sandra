@@ -27,6 +27,14 @@ const sellerEmailAuthoritySql = readFileSync(
   "supabase/migrations/20260902010000_esign_dialog_seller_email_authority.sql",
   "utf8",
 );
+const emailBouncedDeliveryStateSql = readFileSync(
+  "supabase/migrations/20260902110000_esign_email_bounced_delivery_state.sql",
+  "utf8",
+);
+const emailBounceRecoverySql = readFileSync(
+  "supabase/migrations/20260902111000_esign_email_bounce_recovery.sql",
+  "utf8",
+);
 const sourceUrl = process.env.TEST_SUPABASE_DB_URL;
 const databaseName = `sandra_esign_race_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 let admin: Client;
@@ -165,6 +173,10 @@ beforeAll(async () => {
   await setup.query(sellerEmailAuthoritySql);
   await setup.query(sendUnknownResolutionSql);
   await setup.query(sendUnknownResolutionSql);
+  await setup.query(emailBouncedDeliveryStateSql);
+  await setup.query(emailBouncedDeliveryStateSql);
+  await setup.query(emailBounceRecoverySql);
+  await setup.query(emailBounceRecoverySql);
 }, 60_000);
 
 afterAll(async () => {
@@ -180,6 +192,228 @@ afterAll(async () => {
 });
 
 describe("eSign foundation production lease contention", () => {
+  it("turns a Dropbox Sign email bounce into same-request signer correction", async () => {
+    const orgId = crypto.randomUUID();
+    const userId = crypto.randomUUID();
+    const contactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const sourceId = crypto.randomUUID();
+    const templateId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    const signerId = crypto.randomUUID();
+    const consumerId = crypto.randomUUID();
+    const providerRequestId = `provider-request-${requestId}`;
+    const oldSignatureId = `signature-old-${signerId}`;
+    const newSignatureId = `signature-new-${signerId}`;
+    const leaseId = crypto.randomUUID();
+    const claimToken = crypto.randomUUID();
+    const bounceAt = "2026-09-02T06:00:00.000Z";
+
+    await setServiceRole(setup);
+    await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into public.organizations values ($1)", [orgId]);
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
+      [userId, orgId],
+    );
+    await setup.query(
+      "insert into public.contacts (id,org_id,email) values ($1,$2,'old-contact@example.com')",
+      [contactId, orgId],
+    );
+    await setup.query(
+      "insert into public.properties (id,org_id,homeowner_contact_id) values ($1,$2,$3)",
+      [propertyId, orgId, contactId],
+    );
+    await setup.query(
+      `insert into public.webhook_consumers (
+         id,org_id,name,secret_hash,consumer_type
+       ) values ($1,$2,$3,repeat('a',64),'esign_provider')`,
+      [consumerId, orgId, `esign-${consumerId}`],
+    );
+    await setup.query(
+      `insert into public.org_esign_integrations (
+         org_id,api_key_encrypted,api_key_last_four,client_id,
+         callback_consumer_id,callback_verified_at,sending_enabled,
+         provider_account_id,
+         connected_by,updated_by
+       ) values ($1,'\\x00','1234','client-1',$2,now(),true,'account-1',$3,$3)`,
+      [orgId, consumerId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_template_staging_sources (
+         id,org_id,storage_path,source_filename,source_size_bytes,
+         content_type,source_sha256,created_by
+       ) values ($1,$2,$3,'contract.pdf',1024,'application/pdf',repeat('b',64),$4)`,
+      [sourceId, orgId, `${orgId}/${sourceId}.pdf`, userId],
+    );
+    await setup.query(
+      `insert into public.esign_templates (
+         id,org_id,name,document_type,seller_role,signer_roles,
+         merge_field_names,sign_template_id,staging_source_id,
+         source_filename,source_size_bytes,source_content_type,source_sha256,
+         staging_path,provider_account_id,finalized_at,lifecycle_state,
+         created_by,updated_by
+       ) values (
+         $1,$2,'Purchase agreement','purchase_agreement','Seller',
+         '[{"name":"Seller","order":0}]'::jsonb,
+         array['seller_name','property_address','offer_price','closing_date','earnest_money'],
+         'provider-template-1',$3,'contract.pdf',1024,'application/pdf',
+         repeat('b',64),$4,'account-1',now(),'finalized',$5,$5
+       )`,
+      [templateId, orgId, sourceId, `${orgId}/${sourceId}.pdf`, userId],
+    );
+    await setup.query(
+      `insert into public.esign_requests (
+         id,org_id,property_id,template_id,signer_snapshot,
+         merge_value_snapshot,status,delivery_state,sign_request_id,
+         details_url,send_intent_id,payload_hash,sent_at,created_by,
+         claimed_homeowner_contact_id
+       ) values (
+         $1,$2,$3,$4,
+         '[{"role":"Seller","order":0,"name":"Seller Owner","emailAddress":"bad@example.invalid"}]'::jsonb,
+         '{"seller_name":"Seller Owner","property_address":"123 Main St","offer_price":"$1","closing_date":"2026-09-30","earnest_money":"$1"}'::jsonb,
+         'awaiting','sent',$5,'https://app.hellosign.com/home/manage?guid=provider-request',
+         $6,repeat('c',64),now(),$7,$8
+       )`,
+      [
+        requestId,
+        orgId,
+        propertyId,
+        templateId,
+        providerRequestId,
+        crypto.randomUUID(),
+        userId,
+        contactId,
+      ],
+    );
+    await setup.query(
+      `insert into public.esign_request_signers (
+         id,org_id,request_id,role_name,signer_order,signer_name,
+         signer_email,provider_signature_id,status
+       ) values ($1,$2,$3,'Seller',0,'Seller Owner',$4,$5,'awaiting')`,
+      [signerId, orgId, requestId, "bad@example.invalid", oldSignatureId],
+    );
+
+    const receipt = await setup.query<{ receipt_id: string }>(
+      `select receipt_id
+       from public.claim_esign_webhook_receipt(
+         $1,$2,repeat('d',64),repeat('e',64),repeat('f',64),
+         'signature_request_email_bounce',$3,$4,$5,
+         jsonb_build_object(
+           'event_time', extract(epoch from $5::timestamptz)::bigint::text,
+           'event_type', 'signature_request_email_bounce',
+           'sign_request_id', $3::text,
+           'related_signature_id', $4::text,
+           'reported_for_app_id', 'client-1'
+         ),
+         now(),$6,300
+       )`,
+      [orgId, consumerId, providerRequestId, oldSignatureId, bounceAt, leaseId],
+    );
+
+    const bounced = await setup.query<{ outcome: string; status: string }>(
+      `select * from public.apply_esign_email_bounce_delivery_decision(
+         $1,$2,$3,$4,'awaiting',$5
+       )`,
+      [orgId, requestId, receipt.rows[0].receipt_id, leaseId, bounceAt],
+    );
+    expect(bounced.rows[0]).toEqual({ outcome: "applied", status: "error" });
+
+    const bouncedRequest = await setup.query<{
+      status: string;
+      delivery_state: string;
+      sign_request_id: string;
+      error_message: string;
+    }>(
+      `select status,delivery_state,sign_request_id,error_message
+       from public.esign_requests where id=$1`,
+      [requestId],
+    );
+    expect(bouncedRequest.rows[0]).toEqual({
+      status: "error",
+      delivery_state: "email_bounced",
+      sign_request_id: providerRequestId,
+      error_message: "PROVIDER_EMAIL_BOUNCE",
+    });
+
+    const claim = await setup.query<{
+      outcome: string;
+      provider_request_id: string;
+      provider_signature_id: string;
+    }>(
+      `select outcome,provider_request_id,provider_signature_id
+       from public.claim_esign_bounced_signer_email_update(
+         $1,$2,$3,$4,'seller-fixed@example.com',$5
+       )`,
+      [orgId, requestId, signerId, userId, claimToken],
+    );
+    expect(claim.rows[0]).toEqual({
+      outcome: "claimed",
+      provider_request_id: providerRequestId,
+      provider_signature_id: oldSignatureId,
+    });
+
+    const finalized = await setup.query<{ result: string }>(
+      `select public.finalize_esign_bounced_signer_email_update(
+         $1,$2,$3,$4,$5
+       ) as result`,
+      [orgId, requestId, signerId, claimToken, newSignatureId],
+    );
+    expect(finalized.rows[0].result).toBe("applied");
+
+    const finalRows = await setup.query<{
+      request_count: string;
+      request_status: string;
+      delivery_state: string;
+      sign_request_id: string;
+      signer_email: string;
+      provider_signature_id: string;
+      signer_status: string;
+      contact_email: string;
+    }>(
+      `select
+         (select count(*)::text from public.esign_requests where org_id=$1) as request_count,
+         request.status::text as request_status,
+         request.delivery_state::text as delivery_state,
+         request.sign_request_id,
+         signer.signer_email,
+         signer.provider_signature_id,
+         signer.status as signer_status,
+         contact.email as contact_email
+       from public.esign_requests request
+       join public.esign_request_signers signer
+         on signer.request_id=request.id and signer.org_id=request.org_id
+       join public.contacts contact on contact.id=$4 and contact.org_id=$1
+       where request.id=$2 and signer.id=$3`,
+      [orgId, requestId, signerId, contactId],
+    );
+    expect(finalRows.rows[0]).toEqual({
+      request_count: "1",
+      request_status: "awaiting",
+      delivery_state: "sent",
+      sign_request_id: providerRequestId,
+      signer_email: "seller-fixed@example.com",
+      provider_signature_id: newSignatureId,
+      signer_status: "awaiting",
+      contact_email: "old-contact@example.com",
+    });
+
+    const events = await setup.query<{ event_type: string; payload: unknown }>(
+      `select event_type,payload
+       from public.lead_events
+       where org_id=$1 and property_id=$2
+       order by event_type`,
+      [orgId, propertyId],
+    );
+    expect(events.rows.map((event) => event.event_type)).toEqual([
+      "esign_email_bounced",
+      "esign_email_bounced_resend",
+    ]);
+    expect(JSON.stringify(events.rows.map((event) => event.payload))).not.toMatch(
+      /bad@example|seller-fixed@example/i,
+    );
+  });
+
   it("does not deadlock a contact-first writer while claiming a request", async () => {
     const orgId = crypto.randomUUID();
     const userId = crypto.randomUUID();

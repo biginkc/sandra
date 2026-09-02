@@ -137,6 +137,11 @@ function harness() {
       providerRequestId: "known-provider-request",
     }),
     resolveSendUnknownNotSent: vi.fn().mockResolvedValue("updated"),
+    claimEmailBounceUpdate: vi.fn().mockResolvedValue({
+      outcome: "ineligible",
+    }),
+    finalizeEmailBounceUpdate: vi.fn().mockResolvedValue("applied"),
+    releaseEmailBounceUpdate: vi.fn().mockResolvedValue("released"),
     findRequest: vi.fn().mockResolvedValue(null),
     claimReminder: vi.fn().mockResolvedValue({ outcome: "ineligible" }),
     finalizeReminder: vi.fn().mockResolvedValue("applied"),
@@ -156,6 +161,16 @@ function harness() {
     }),
     remind: vi.fn().mockResolvedValue("accepted"),
     cancel: vi.fn().mockResolvedValue("accepted"),
+    updateSignerEmail: vi.fn().mockResolvedValue({
+      outcome: "accepted",
+      signature: {
+        signatureId: "signature-updated",
+        role: "Seller",
+        order: 0,
+        name: "Seller Owner",
+        emailAddress: "seller-fixed@example.com",
+      },
+    }),
     findSignatureRequestIdsByLocalRequestId: vi.fn()
       .mockResolvedValueOnce({
         complete: true,
@@ -633,6 +648,7 @@ describe("lead eSign action orchestration", () => {
     ["sent", null],
     ["sending", "SEND_IN_PROGRESS"],
     ["send_unknown", "SEND_UNKNOWN"],
+    ["email_bounced", "EMAIL_BOUNCED"],
     ["failed", "SEND_FAILED"],
   ] as const)(
     "maps a pre-claim same-intent %s row without redispatch",
@@ -657,6 +673,7 @@ describe("lead eSign action orchestration", () => {
     ["sent", null],
     ["sending", "SEND_IN_PROGRESS"],
     ["send_unknown", "SEND_UNKNOWN"],
+    ["email_bounced", "EMAIL_BOUNCED"],
     ["failed", "SEND_FAILED"],
   ] as const)(
     "maps a claim-race same-intent %s row without redispatch",
@@ -849,6 +866,134 @@ describe("lead eSign action orchestration", () => {
       orgId: "org-1",
       requestId: "request-other-org",
     });
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("fixes a bounced signer email by updating the same provider request", async () => {
+    const h = harness();
+    h.repository.claimEmailBounceUpdate.mockResolvedValue({
+      outcome: "eligible",
+      candidate: {
+        claimToken: "claim-token-1",
+        providerRequestId: "provider-request-1",
+        signer: {
+          id: "stored-signer-1",
+          providerSignatureId: "signature-old",
+          role: "Seller",
+          order: 0,
+          name: "Seller Owner",
+          emailAddress: "seller-fixed@example.com",
+        },
+      },
+    });
+
+    const result = await h.core.fixSignerEmailAndResend({
+      requestId: "request-1",
+      signerId: "stored-signer-1",
+      emailAddress: " seller-fixed@example.com ",
+    });
+
+    expect(result).toEqual({ ok: true, data: null });
+    expect(h.repository.claimEmailBounceUpdate).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      signerId: "stored-signer-1",
+      actorId: "user-1",
+      emailAddress: "seller-fixed@example.com",
+    });
+    expect(h.provider.updateSignerEmail).toHaveBeenCalledWith({
+      providerRequestId: "provider-request-1",
+      providerSignatureId: "signature-old",
+      signerName: "Seller Owner",
+      signerEmailAddress: "seller-fixed@example.com",
+      signerRole: "Seller",
+      signerOrder: 0,
+      signal: expect.any(AbortSignal),
+    });
+    expect(h.repository.finalizeEmailBounceUpdate).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      signerId: "stored-signer-1",
+      claimToken: "claim-token-1",
+      providerSignatureId: "signature-updated",
+    });
+    expect(h.repository.claimSend).not.toHaveBeenCalled();
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+    expect(h.repository.releaseEmailBounceUpdate).not.toHaveBeenCalled();
+  });
+
+  it("releases a bounced signer email claim after definitive provider failure", async () => {
+    const h = harness();
+    h.repository.claimEmailBounceUpdate.mockResolvedValue({
+      outcome: "eligible",
+      candidate: {
+        claimToken: "claim-token-1",
+        providerRequestId: "provider-request-1",
+        signer: {
+          id: "stored-signer-1",
+          providerSignatureId: "signature-old",
+          role: "Seller",
+          order: 0,
+          name: "Seller Owner",
+          emailAddress: "seller-fixed@example.com",
+        },
+      },
+    });
+    h.provider.updateSignerEmail.mockResolvedValue({
+      outcome: "definitive_failure",
+    });
+
+    const result = await h.core.fixSignerEmailAndResend({
+      requestId: "request-1",
+      signerId: "stored-signer-1",
+      emailAddress: "seller-fixed@example.com",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "EMAIL_FIX_FAILED" },
+    });
+    expect(h.repository.releaseEmailBounceUpdate).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      signerId: "stored-signer-1",
+      claimToken: "claim-token-1",
+    });
+    expect(h.repository.finalizeEmailBounceUpdate).not.toHaveBeenCalled();
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("keeps a bounced signer email claim fenced after an ambiguous provider update", async () => {
+    const h = harness();
+    h.repository.claimEmailBounceUpdate.mockResolvedValue({
+      outcome: "eligible",
+      candidate: {
+        claimToken: "claim-token-1",
+        providerRequestId: "provider-request-1",
+        signer: {
+          id: "stored-signer-1",
+          providerSignatureId: "signature-old",
+          role: "Seller",
+          order: 0,
+          name: "Seller Owner",
+          emailAddress: "seller-fixed@example.com",
+        },
+      },
+    });
+    h.provider.updateSignerEmail.mockResolvedValue({ outcome: "ambiguous" });
+
+    const result = await h.core.fixSignerEmailAndResend({
+      requestId: "request-1",
+      signerId: "stored-signer-1",
+      emailAddress: "seller-fixed@example.com",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "EMAIL_FIX_UNKNOWN" },
+    });
+    expect(h.repository.releaseEmailBounceUpdate).not.toHaveBeenCalled();
+    expect(h.repository.finalizeEmailBounceUpdate).not.toHaveBeenCalled();
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });
 

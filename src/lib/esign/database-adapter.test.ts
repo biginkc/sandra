@@ -193,6 +193,61 @@ describe("typed eSign webhook database adapter", () => {
     },
   );
 
+  it("uses the dedicated email-bounce delivery RPC without lead-event PII", async () => {
+    const { client, rpc } = clientWith(() => [
+      { outcome: "applied", status: "error" },
+    ]);
+    const adapter = createEsignWebhookDatabaseAdapter(client);
+
+    await expect(
+      adapter.applyEmailBounceDecision({
+        orgId: ORG_ID,
+        requestId: REQUEST_ID,
+        claim: CLAIM,
+        decision: {
+          previousStatus: "awaiting",
+          nextStatus: "error",
+          changed: true,
+          artifactReady: false,
+          reason: "email_bounced",
+        },
+        providerEventAt: new Date("2026-08-29T23:00:00.000Z"),
+      }),
+    ).resolves.toEqual({ outcome: "applied", status: "error" });
+    expect(rpc).toHaveBeenCalledWith(
+      "apply_esign_email_bounce_delivery_decision",
+      {
+        p_org_id: ORG_ID,
+        p_request_id: REQUEST_ID,
+        p_receipt_id: RECEIPT_ID,
+        p_lease_id: LEASE_ID,
+        p_expected_status: "awaiting",
+        p_provider_event_at: "2026-08-29T23:00:00.000Z",
+      },
+    );
+    expect(JSON.stringify(rpc.mock.calls[0][1])).not.toMatch(/email|actor/i);
+  });
+
+  it.each(["42883", "PGRST202"] as const)(
+    "returns null when the email-bounce RPC is missing with %s",
+    async (code) => {
+      const rpc = vi.fn(async () => ({ data: null, error: { code } }));
+      const adapter = createEsignWebhookDatabaseAdapter({
+        rpc: rpc as EsignWebhookRpcClient["rpc"],
+      });
+
+      await expect(
+        adapter.applyEmailBounceDecision({
+          orgId: ORG_ID,
+          requestId: REQUEST_ID,
+          claim: CLAIM,
+          decision: VIEWED_DECISION,
+          providerEventAt: new Date("2026-08-29T23:00:00.000Z"),
+        }),
+      ).resolves.toBeNull();
+    },
+  );
+
   it("finds an already attached request by provider request id without repair", async () => {
     const { client, rpc } = clientWith((name) => {
       if (name === "find_esign_webhook_request") {

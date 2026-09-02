@@ -8,6 +8,7 @@ const providerMocks = vi.hoisted(() => ({
   sendWithTemplate: vi.fn(),
   remind: vi.fn(),
   cancel: vi.fn(),
+  updateSignerEmail: vi.fn(),
 }));
 
 vi.mock("@/lib/esign/credentials", () => ({
@@ -33,6 +34,7 @@ describe("bound lead eSign provider classification", () => {
       sendWithTemplate: providerMocks.sendWithTemplate,
       remind: providerMocks.remind,
       cancel: providerMocks.cancel,
+      updateSignerEmail: providerMocks.updateSignerEmail,
     });
   });
 
@@ -89,5 +91,48 @@ describe("bound lead eSign provider classification", () => {
         signal: new AbortController().signal,
       }),
     ).resolves.toEqual({ outcome: "ambiguous" });
+  });
+
+  it("updates a bounced signer email on the existing provider request", async () => {
+    providerMocks.updateSignerEmail.mockResolvedValue({
+      signatureId: "signature-updated",
+      role: "Seller",
+      order: 0,
+      name: "Seller Owner",
+      emailAddress: "fixed-seller@example.com",
+    });
+    const provider = await providerForOrg("org-1");
+    const signal = new AbortController().signal;
+
+    await expect(
+      provider!.updateSignerEmail({
+        providerRequestId: "provider-request-1",
+        providerSignatureId: "signature-old",
+        signerName: "Seller Owner",
+        signerEmailAddress: "fixed-seller@example.com",
+        signerRole: "Seller",
+        signerOrder: 0,
+        signal,
+      }),
+    ).resolves.toEqual({
+      outcome: "accepted",
+      signature: {
+        signatureId: "signature-updated",
+        role: "Seller",
+        order: 0,
+        name: "Seller Owner",
+        emailAddress: "fixed-seller@example.com",
+      },
+    });
+    expect(providerMocks.updateSignerEmail).toHaveBeenCalledWith({
+      signatureRequestId: "provider-request-1",
+      signatureId: "signature-old",
+      name: "Seller Owner",
+      emailAddress: "fixed-seller@example.com",
+      role: "Seller",
+      order: 0,
+      signal,
+    });
+    expect(providerMocks.sendWithTemplate).not.toHaveBeenCalled();
   });
 });

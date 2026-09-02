@@ -6,6 +6,7 @@ import {
   MoreHorizontalIcon,
   RefreshCwIcon,
   SendIcon,
+  MailWarningIcon,
   ShieldXIcon,
 } from "lucide-react";
 import { useMemo, useState, useTransition } from "react";
@@ -26,11 +27,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { callAction } from "@/lib/errors/call-action";
 import {
   navigateAuthorizedPopup,
   openAuthorizedPopup,
 } from "@/lib/esign/authorized-popup";
+import { isValidEsignEmail } from "@/lib/esign/email";
 import {
   cancelPendingDialogClose,
   type DialogCloseEventDetails,
@@ -42,7 +46,13 @@ import type {
   LeadContractRow,
 } from "./esign-types";
 
-type ActionMode = "remind" | "void" | "retry" | "confirm_not_sent" | null;
+type ActionMode =
+  | "remind"
+  | "void"
+  | "retry"
+  | "confirm_not_sent"
+  | "fix_email"
+  | null;
 
 type Props = {
   contract: LeadContractRow;
@@ -53,9 +63,14 @@ type Props = {
 export function ContractActions({ contract, actions, onChanged }: Props) {
   const [mode, setMode] = useState<ActionMode>(null);
   const [error, setError] = useState<string | null>(null);
+  const [replacementEmail, setReplacementEmail] = useState("");
   const [pending, startTransition] = useTransition();
   const reminderTarget = useMemo(
     () => nextReminderTarget(contract.signers),
+    [contract.signers],
+  );
+  const emailFixTarget = useMemo(
+    () => bouncedEmailTarget(contract.signers),
     [contract.signers],
   );
 
@@ -75,6 +90,11 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
     contract.deliveryState === "failed" &&
     !contract.detailsAvailable &&
     contract.errorMessage === "PROVIDER_SEND_NOT_FOUND";
+  const canFixSignerEmail =
+    contract.deliveryState === "email_bounced" &&
+    contract.status === "error" &&
+    contract.canFixSignerEmail &&
+    Boolean(emailFixTarget);
   const canDownload = Boolean(contract.signedPdfFileId);
   const hasAnyAction =
     contract.detailsAvailable ||
@@ -82,6 +102,7 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
     canVoid ||
     canRetry ||
     canConfirmNotSent ||
+    canFixSignerEmail ||
     canDownload;
 
   const closeAfterSuccess = () => {
@@ -96,6 +117,9 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
 
   const openMode = (nextMode: Exclude<ActionMode, null>) => {
     setError(null);
+    setReplacementEmail(
+      nextMode === "fix_email" ? (emailFixTarget?.emailAddress ?? "") : "",
+    );
     setMode(nextMode);
   };
 
@@ -130,12 +154,24 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
               : mode === "confirm_not_sent"
                 ? await callAction(
                     actions.confirmNotSentAction({ requestId: contract.id }),
-                    {
-                      successMessage: "Not-sent evidence acknowledged",
-                      fallbackMessage:
-                        "Could not acknowledge the not-sent evidence",
-                    },
-                  )
+                  {
+                    successMessage: "Not-sent evidence acknowledged",
+                    fallbackMessage:
+                      "Could not acknowledge the not-sent evidence",
+                  },
+                )
+                : mode === "fix_email" && emailFixTarget
+                  ? await callAction(
+                      actions.fixSignerEmailAndResendAction({
+                        requestId: contract.id,
+                        signerId: emailFixTarget.id,
+                        emailAddress: replacementEmail.trim(),
+                      }),
+                      {
+                        successMessage: "Signer email updated and resent",
+                        fallbackMessage: "Could not update the signer email",
+                      },
+                    )
               : null;
       if (!result) return;
       if (!result.ok) {
@@ -253,6 +289,12 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
               Retry send
             </DropdownMenuItem>
           ) : null}
+          {canFixSignerEmail ? (
+            <DropdownMenuItem onClick={() => openMode("fix_email")}>
+              <MailWarningIcon className="size-4" aria-hidden />
+              Fix signer email and resend
+            </DropdownMenuItem>
+          ) : null}
           {canConfirmNotSent ? (
             <DropdownMenuItem onClick={() => openMode("confirm_not_sent")}>
               <ShieldXIcon className="size-4" aria-hidden />
@@ -280,13 +322,28 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
           <DialogHeader>
             <DialogTitle>{dialogTitle(mode)}</DialogTitle>
             <DialogDescription>
-              {dialogDescription(mode, reminderTarget)}
+              {dialogDescription(mode, reminderTarget, emailFixTarget)}
             </DialogDescription>
           </DialogHeader>
           {mode === "void" ? (
             <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">
               Dropbox Sign cancellation is asynchronous. Sandra will show this
               contract as voided only after the verified cancellation callback.
+            </div>
+          ) : null}
+          {mode === "fix_email" && emailFixTarget ? (
+            <div className="grid gap-2">
+              <Label htmlFor={`esign-fix-email-${contract.id}`}>
+                Correct signer email
+              </Label>
+              <Input
+                id={`esign-fix-email-${contract.id}`}
+                type="email"
+                value={replacementEmail}
+                onChange={(event) => setReplacementEmail(event.target.value)}
+                aria-invalid={!isValidEsignEmail(replacementEmail)}
+                disabled={pending}
+              />
             </div>
           ) : null}
           {error ? (
@@ -307,7 +364,13 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
               type="button"
               variant={mode === "void" ? "destructive" : "default"}
               onClick={run}
-              disabled={pending}
+              disabled={
+                pending ||
+                (mode === "fix_email" &&
+                  (!isValidEsignEmail(replacementEmail) ||
+                    replacementEmail.trim().toLowerCase() ===
+                      emailFixTarget?.emailAddress.trim().toLowerCase()))
+              }
             >
               <span role="status" aria-live="polite" aria-busy={pending}>
                 {pending ? dialogPendingLabel(mode) : dialogConfirmLabel(mode)}
@@ -318,6 +381,14 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
       </Dialog>
     </>
   );
+}
+
+function bouncedEmailTarget(
+  signers: readonly ContractSignerView[],
+): ContractSignerView | null {
+  return [...signers].sort((a, b) => a.order - b.order).find(
+    (signer) => signer.status === "error",
+  ) ?? null;
 }
 
 function nextReminderTarget(
@@ -337,12 +408,14 @@ function dialogTitle(mode: ActionMode): string {
   if (mode === "void") return "Void this contract?";
   if (mode === "retry") return "Retry this contract?";
   if (mode === "confirm_not_sent") return "Confirm this was not sent?";
+  if (mode === "fix_email") return "Fix signer email and resend?";
   return "Contract action";
 }
 
 function dialogDescription(
   mode: ActionMode,
   signer: ContractSignerView | null,
+  emailFixTarget: ContractSignerView | null,
 ): string {
   if (mode === "remind" && signer) {
     return `Dropbox Sign will email the current signer for the ${signer.role} role: ${signer.name}.`;
@@ -356,6 +429,9 @@ function dialogDescription(
   if (mode === "confirm_not_sent") {
     return "Sandra already confirmed this request was not found after repeated Dropbox Sign checks.";
   }
+  if (mode === "fix_email" && emailFixTarget) {
+    return `Dropbox Sign will resend the existing request to the corrected email for the ${emailFixTarget.role} role: ${emailFixTarget.name}.`;
+  }
   return "Review this action before continuing.";
 }
 
@@ -364,6 +440,7 @@ function dialogConfirmLabel(mode: ActionMode): string {
   if (mode === "void") return "Request void";
   if (mode === "retry") return "Retry send";
   if (mode === "confirm_not_sent") return "Confirm not sent";
+  if (mode === "fix_email") return "Update and resend";
   return "Continue";
 }
 
@@ -372,5 +449,6 @@ function dialogPendingLabel(mode: ActionMode): string {
   if (mode === "void") return "Requesting void…";
   if (mode === "retry") return "Retrying contract…";
   if (mode === "confirm_not_sent") return "Acknowledging…";
+  if (mode === "fix_email") return "Updating signer…";
   return "Working…";
 }

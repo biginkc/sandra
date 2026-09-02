@@ -90,6 +90,10 @@ function dependencies(
       outcome: "applied" as const,
       status: decision.nextStatus,
     })),
+    applyEmailBounceDecision: vi.fn(async () => ({
+      outcome: "applied" as const,
+      status: "error" as const,
+    })),
     reconcileReminderCallback: vi.fn(async () => "applied" as const),
     markReceiptProcessed: vi.fn(async () => undefined),
     markReceiptIgnored: vi.fn(async () => undefined),
@@ -154,6 +158,31 @@ describe("injectable Dropbox Sign webhook handler", () => {
     );
     expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
 	  });
+
+  it("applies email-bounce delivery truth without the generic provider-error transition", async () => {
+    const deps = dependencies();
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({ eventType: "signature_request_email_bounce" }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(deps.persistence.applyEmailBounceDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orgId: ORG_ID,
+        requestId: REQUEST_ID,
+        claim: CLAIM,
+        decision: expect.objectContaining({
+          previousStatus: "awaiting",
+          nextStatus: "error",
+          reason: "email_bounced",
+        }),
+      }),
+    );
+    expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
+  });
 
 	  it("continues normal webhook processing after metadata repairs a timeout-stranded send", async () => {
 	    const deps = dependencies();

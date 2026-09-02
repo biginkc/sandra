@@ -61,6 +61,13 @@ export interface EsignWebhookPersistence {
     providerEventAt: Date;
     templateTitle: string;
   }): Promise<ApplyStatusDecisionResult>;
+  applyEmailBounceDecision(input: {
+    orgId: string;
+    requestId: string;
+    claim: ActiveReceiptClaim;
+    decision: EsignStatusDecision;
+    providerEventAt: Date;
+  }): Promise<ApplyStatusDecisionResult | null>;
   reconcileReminderCallback(input: {
     orgId: string;
     requestId: string;

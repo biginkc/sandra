@@ -136,16 +136,34 @@ export async function handleDropboxSignWebhook(input: {
 
     let authoritativeStatus = request.status;
     if (normalized.requestedStatus !== null) {
-      const transition = await input.dependencies.persistence.applyStatusDecision({
-        orgId: identity.orgId,
-        requestId: request.id,
-        propertyId: request.propertyId,
-        claim: activeClaim,
-        decision,
-        requestedStatus: normalized.requestedStatus,
-        providerEventAt: providerEventDate(replay),
-        templateTitle: request.templateTitle,
-      });
+      const transition = normalized.reason === "email_bounced"
+        ? await input.dependencies.persistence.applyEmailBounceDecision({
+            orgId: identity.orgId,
+            requestId: request.id,
+            claim: activeClaim,
+            decision,
+            providerEventAt: providerEventDate(replay),
+          }) ??
+          await input.dependencies.persistence.applyStatusDecision({
+            orgId: identity.orgId,
+            requestId: request.id,
+            propertyId: request.propertyId,
+            claim: activeClaim,
+            decision,
+            requestedStatus: normalized.requestedStatus,
+            providerEventAt: providerEventDate(replay),
+            templateTitle: request.templateTitle,
+          })
+        : await input.dependencies.persistence.applyStatusDecision({
+            orgId: identity.orgId,
+            requestId: request.id,
+            propertyId: request.propertyId,
+            claim: activeClaim,
+            decision,
+            requestedStatus: normalized.requestedStatus,
+            providerEventAt: providerEventDate(replay),
+            templateTitle: request.templateTitle,
+          });
       authoritativeStatus = transition.status;
     }
 

@@ -13,6 +13,7 @@ export const ESIGN_DELIVERY_STATES = [
   "sending",
   "sent",
   "send_unknown",
+  "email_bounced",
   "failed",
 ] as const;
 
@@ -145,6 +146,15 @@ export type DropboxSignProvider = {
   ): Promise<void>;
   deleteTemplate(providerTemplateId: string): Promise<void>;
   sendWithTemplate(input: SendWithTemplateInput): Promise<SendWithTemplateOutput>;
+  updateSignerEmail(input: {
+    signatureRequestId: string;
+    signatureId: string;
+    name: string;
+    emailAddress: string;
+    role: string;
+    order: number;
+    signal?: AbortSignal;
+  }): Promise<ProviderSignature>;
   findSignatureRequestIdsByLocalRequestId(
     localRequestId: string,
     testMode: boolean,
