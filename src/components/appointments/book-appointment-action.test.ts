@@ -1091,9 +1091,18 @@ describe("bookAppointment — RPC + side effects", () => {
 
 describe("listBookingAssignees", () => {
   function makeAdminMock(opts: {
-    orgMemberUserIds?: string[];
+    orgMembers?: Array<{
+      user_id: string;
+      access_status?: string | null;
+      access_expires_at?: string | null;
+      deletion_prepared_at?: string | null;
+    }>;
     orgMembersError?: { message: string } | null;
-    users?: { id: string; email?: string | null }[];
+    users?: {
+      id: string;
+      email?: string | null;
+      user_metadata?: Record<string, unknown>;
+    }[];
   }) {
     const membershipsBuilder = {
       select: vi.fn(function (this: unknown) {
@@ -1102,11 +1111,11 @@ describe("listBookingAssignees", () => {
       eq: vi.fn(function (this: unknown) {
         return this;
       }),
-      is: vi.fn(function (this: unknown) {
+      order: vi.fn(function (this: unknown) {
         return this;
       }),
-      or: vi.fn().mockResolvedValue({
-        data: (opts.orgMemberUserIds ?? []).map((user_id) => ({ user_id })),
+      limit: vi.fn().mockResolvedValue({
+        data: opts.orgMembers ?? [],
         error: opts.orgMembersError ?? null,
       }),
     };
@@ -1127,7 +1136,7 @@ describe("listBookingAssignees", () => {
     };
   }
 
-  it("excludes inactive members — the query is scoped to active, non-deletion-prepared, unexpired memberships", async () => {
+  it("returns only active members with authoritative names", async () => {
     requireOrgMembershipByResource.mockResolvedValue({
       userId: "user-1",
       orgId: "org-1",
@@ -1136,8 +1145,27 @@ describe("listBookingAssignees", () => {
     });
     createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1" }));
     const admin = makeAdminMock({
-      orgMemberUserIds: ["active-1"],
-      users: [{ id: "active-1", email: "active@example.test" }],
+      orgMembers: [
+        { user_id: "active-1", access_status: "active" },
+        { user_id: "suspended-1", access_status: "suspended" },
+        {
+          user_id: "expired-1",
+          access_status: "active",
+          access_expires_at: "2020-01-01T00:00:00.000Z",
+        },
+        {
+          user_id: "prepared-1",
+          access_status: "active",
+          deletion_prepared_at: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      users: [
+        {
+          id: "active-1",
+          email: "active@example.test",
+          user_metadata: { display_name: "Avery Agent" },
+        },
+      ],
     });
     createAdminClient.mockReturnValue(admin as never);
 
@@ -1145,21 +1173,20 @@ describe("listBookingAssignees", () => {
 
     expect(result).toEqual({
       ok: true,
-      data: [{ id: "active-1", email: "active@example.test" }],
+      data: [
+        {
+          id: "active-1",
+          email: "active@example.test",
+          displayName: "Avery Agent",
+          isActive: true,
+        },
+      ],
     });
     expect(admin.__membershipsBuilder.eq).toHaveBeenCalledWith(
-      "access_status",
-      "active",
+      "org_id",
+      "org-1",
     );
-    expect(admin.__membershipsBuilder.is).toHaveBeenCalledWith(
-      "deletion_prepared_at",
-      null,
-    );
-    expect(admin.__membershipsBuilder.or).toHaveBeenCalledWith(
-      expect.stringMatching(
-        /^access_expires_at\.is\.null,access_expires_at\.gt\.\d{4}-\d{2}-\d{2}T/,
-      ),
-    );
+    expect(admin.__membershipsBuilder.limit).toHaveBeenCalledWith(401);
   });
 
   it("cross-org members are never returned — scoped to the ONE org the booking resolves into", async () => {
@@ -1170,7 +1197,7 @@ describe("listBookingAssignees", () => {
       resourceId: "contact-1",
     });
     createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1" }));
-    const admin = makeAdminMock({ orgMemberUserIds: [] });
+    const admin = makeAdminMock({ orgMembers: [] });
     createAdminClient.mockReturnValue(admin as never);
 
     await listBookingAssignees({ contactId: "contact-1" });
@@ -1197,7 +1224,7 @@ describe("listBookingAssignees", () => {
       orgId: "org-9",
       role: "member",
     });
-    const admin = makeAdminMock({ orgMemberUserIds: [] });
+    const admin = makeAdminMock({ orgMembers: [] });
     createAdminClient.mockReturnValue(admin as never);
 
     await listBookingAssignees({});

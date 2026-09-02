@@ -7,9 +7,10 @@ import { LEAD_SOURCES } from "@/lib/leads/sources";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { createClient } from "@/lib/supabase/server";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
+import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
 
 import { AddLeadDialog } from "./add-lead-dialog";
-import { listOrgUsers } from "./actions";
+import { listOrgAssigneeFilterUsers, listOrgUsers } from "./actions";
 import { fetchLeadBoardData, type LeadBoardFilters } from "./board-query";
 import { Kanban } from "./kanban";
 import { LeadsLoadError } from "./load-error";
@@ -34,20 +35,27 @@ export default async function LeadsPage({
 }) {
   const params = await searchParams;
   const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  const [teamResult, { data: counties }, memberships] = await Promise.all([
-    listOrgUsers(),
-    supabase.from("counties").select("market").order("state").order("name"),
-    getCallerMemberships(),
-  ]);
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  const [teamResult, filterTeamResult, { data: counties }, memberships] =
+    await Promise.all([
+      listOrgUsers(),
+      listOrgAssigneeFilterUsers(),
+      supabase.from("counties").select("market").order("state").order("name"),
+      getCallerMemberships(),
+    ]);
   // Resolve every active organization from the server session. Board cards
   // can span those organizations, so eSign decoration is scoped per card
   // rather than selecting an arbitrary first membership.
   const orgIds = memberships.map((membership) => membership.org_id);
   const teamMembers = teamResult.ok ? teamResult.data : [];
+  const filterTeamMembers = filterTeamResult.ok
+    ? filterTeamResult.data
+    : teamMembers;
   const inboundFilters = resolveInboundLeadFilters(params, {
     currentUserId: user?.id ?? null,
-    teammateIds: teamMembers.map((member) => member.id),
+    teammateIds: filterTeamMembers.map((member) => member.id),
   });
   const filters: LeadBoardFilters = {
     search: "",
@@ -58,15 +66,23 @@ export default async function LeadsPage({
     hotOnly: params.status === "hot",
     noActiveSequence: params.no_active_sequence === "true",
     skipTraced:
-      params.skip_traced === "false" ? false : params.skip_traced === "true" ? true : null,
+      params.skip_traced === "false"
+        ? false
+        : params.skip_traced === "true"
+          ? true
+          : null,
   };
   const assigneeId =
     inboundFilters.ownership === "mine"
-      ? user?.id ?? null
-      : inboundFilters.ownership !== "all" && inboundFilters.ownership !== "unassigned"
+      ? (user?.id ?? null)
+      : inboundFilters.ownership !== "all" &&
+          inboundFilters.ownership !== "unassigned"
         ? inboundFilters.ownership
         : null;
-  const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), "America/Chicago");
+  const { dayStart, dayEnd } = getDayBoundsInZone(
+    new Date(),
+    "America/Chicago",
+  );
   let board = null;
   let loadFailed = false;
   try {
@@ -82,14 +98,25 @@ export default async function LeadsPage({
     loadFailed = true;
   }
 
-  const assigneeEmails = Object.fromEntries(teamMembers.map((member) => [member.id, member.email]));
-  const markets = Array.from(new Set((counties ?? []).map((county) => county.market).filter(Boolean)));
+  const assigneeEmails = Object.fromEntries(
+    filterTeamMembers.map((member) => [
+      member.id,
+      teamMemberPrimaryLabel(member, user?.id ?? null),
+    ]),
+  );
+  const markets = Array.from(
+    new Set((counties ?? []).map((county) => county.market).filter(Boolean)),
+  );
   const activeFilter = describeFilter(params);
   const hasInboundFilter =
     inboundFilters.ownership !== "all" ||
     inboundFilters.attention !== null ||
-    filters.hotOnly || filters.noActiveSequence || filters.skipTraced !== null;
-  const totalLeads = board ? Object.values(board.totals).reduce((sum, count) => sum + count, 0) : 0;
+    filters.hotOnly ||
+    filters.noActiveSequence ||
+    filters.skipTraced !== null;
+  const totalLeads = board
+    ? Object.values(board.totals).reduce((sum, count) => sum + count, 0)
+    : 0;
   const renderedAt = new Date();
 
   return (
@@ -110,10 +137,19 @@ export default async function LeadsPage({
 
       {activeFilter ? (
         <div className="border-border bg-muted/40 flex flex-wrap items-center gap-3 rounded-2xl border px-4 py-3 text-sm">
-          <span className="text-muted-foreground text-[11px] font-bold tracking-widest uppercase">Filter</span>
-          <span className="text-foreground font-bold">{activeFilter.label}</span>
-          {activeFilter.note ? <span className="text-muted-foreground">— {activeFilter.note}</span> : null}
-          <Link href="/leads" className="text-foreground ml-auto text-xs font-bold underline-offset-4 hover:underline">
+          <span className="text-muted-foreground text-[11px] font-bold tracking-widest uppercase">
+            Filter
+          </span>
+          <span className="text-foreground font-bold">
+            {activeFilter.label}
+          </span>
+          {activeFilter.note ? (
+            <span className="text-muted-foreground">— {activeFilter.note}</span>
+          ) : null}
+          <Link
+            href="/leads"
+            className="text-foreground ml-auto text-xs font-bold underline-offset-4 hover:underline"
+          >
             Clear filter
           </Link>
         </div>
@@ -127,9 +163,15 @@ export default async function LeadsPage({
           initialLeads={board.leads}
           initialTotals={board.totals}
           initialBaselineTotals={board.baselineTotals ?? board.totals}
-          initialUrgencyCounts={board.urgencyCounts ?? {
-            all: totalLeads, overdue: 0, today: 0, scheduled: 0, none: 0,
-          }}
+          initialUrgencyCounts={
+            board.urgencyCounts ?? {
+              all: totalLeads,
+              overdue: 0,
+              today: 0,
+              scheduled: 0,
+              none: 0,
+            }
+          }
           initialNextCursors={board.nextCursors}
           initialHasMore={board.hasMore}
           initialSnapshotGenerations={board.snapshotGenerations}
@@ -138,7 +180,7 @@ export default async function LeadsPage({
           dayEnd={dayEnd.toISOString()}
           unreadPropertyIds={board.unreadPropertyIds}
           assigneeEmails={assigneeEmails}
-          teamMembers={teamMembers}
+          teamMembers={filterTeamMembers}
           currentUserId={user?.id ?? null}
           listMemberships={board.listMemberships}
           customTags={board.customTags}
@@ -151,9 +193,17 @@ export default async function LeadsPage({
         />
       ) : (
         <div className="border-border bg-card flex min-h-80 flex-col items-center justify-center rounded-2xl border border-dashed p-8 text-center">
-          <Image src="/brand/mascot.svg" alt="Sandra" width={150} height={150} className="mb-4 h-32 w-auto" />
+          <Image
+            src="/brand/mascot.svg"
+            alt="Sandra"
+            width={150}
+            height={150}
+            className="mb-4 h-32 w-auto"
+          />
           <h2 className="text-lg font-bold">No leads in the pipeline yet</h2>
-          <p className="text-muted-foreground mt-2 max-w-md text-sm">Add a lead to start working the pipeline.</p>
+          <p className="text-muted-foreground mt-2 max-w-md text-sm">
+            Add a lead to start working the pipeline.
+          </p>
           <div className="mt-5">
             <AddLeadDialog
               markets={markets}
@@ -168,10 +218,15 @@ export default async function LeadsPage({
   );
 }
 
-function describeFilter(params: LeadsSearchParams): { label: string; note?: string } | null {
-  if (params.status === "hot") return { label: "Hot leads", note: "interested + offer sent" };
-  if (params.no_active_sequence === "true") return { label: "Not in a sequence" };
-  if (params.skip_traced === "false") return { label: "Not skip-traced", note: "no phone numbers gathered yet" };
+function describeFilter(
+  params: LeadsSearchParams,
+): { label: string; note?: string } | null {
+  if (params.status === "hot")
+    return { label: "Hot leads", note: "interested + offer sent" };
+  if (params.no_active_sequence === "true")
+    return { label: "Not in a sequence" };
+  if (params.skip_traced === "false")
+    return { label: "Not skip-traced", note: "no phone numbers gathered yet" };
   if (params.skip_traced === "true") return { label: "Skip-traced" };
   return null;
 }

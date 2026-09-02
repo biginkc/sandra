@@ -262,7 +262,7 @@ export default async function CalendarPage({
   const assigneeLabels: Record<string, string> = { ...assignees };
   for (const id of inactiveAssigneeIds) {
     assigneeLabels[id] =
-      inactiveEmails[id] ?? `Former teammate (${id.slice(0, 8)})`;
+      inactiveEmails[id] ?? "Former teammate (name unavailable)";
   }
 
   return (

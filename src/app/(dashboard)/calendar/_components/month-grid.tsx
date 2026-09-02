@@ -149,7 +149,7 @@ export function MonthGrid({
                   const ownerLabel =
                     appt.assignee_id !== currentUserId
                       ? (assignees[appt.assignee_id] ??
-                        `Former teammate (${appt.assignee_id.slice(0, 8)})`)
+                        "Former teammate (name unavailable)")
                       : null;
                   const line = (
                     <span className="block truncate text-[11px] leading-4">

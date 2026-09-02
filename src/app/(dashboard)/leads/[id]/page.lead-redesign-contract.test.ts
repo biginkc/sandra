@@ -57,7 +57,7 @@ describe("Lead Detail v2 integration contract", () => {
     expect(source.indexOf("return []", authError)).toBeGreaterThan(authError);
     const orgFilter = source.indexOf("orgMemberIds.has(user.id)");
     const clientAuthorMap = source.indexOf(
-      "if (u.email) authorEmails[u.id] = u.email",
+      "authoritativeDisplayName({ user_metadata: u.user_metadata ?? {} })",
     );
     expect(orgFilter).toBeGreaterThan(-1);
     expect(clientAuthorMap).toBeGreaterThan(orgFilter);
@@ -78,16 +78,12 @@ describe("Lead Detail v2 integration contract", () => {
       inlineGateStart,
       source.indexOf("</SmsEntryPointGate>", inlineGateStart),
     );
-    expect(headerGate).toContain(
-      "restricted={smsPresentation.smsRestricted}",
-    );
+    expect(headerGate).toContain("restricted={smsPresentation.smsRestricted}");
     expect(inlineGate).toContain(
       "restricted={inlineSmsPresentation.smsRestricted}",
     );
 
-    const headerPresentationStart = source.indexOf(
-      "const smsPresentation =",
-    );
+    const headerPresentationStart = source.indexOf("const smsPresentation =");
     const inlinePresentationStart = source.indexOf(
       "const inlineSmsPresentation =",
     );
@@ -103,9 +99,7 @@ describe("Lead Detail v2 integration contract", () => {
     expect(inlinePresentation).toContain("consentState,");
     expect(headerPresentation).toContain("phoneSuppressionResult");
     expect(inlinePresentation).toContain("inlinePhoneSuppressionResult");
-    expect(inlinePresentation).toContain(
-      "latestHomeownerSmsRoute",
-    );
+    expect(inlinePresentation).toContain("latestHomeownerSmsRoute");
     expect(inlinePresentation).toContain(": smsPresentation");
   });
 
@@ -177,9 +171,7 @@ describe("Lead Detail v2 integration contract", () => {
   });
 
   it("offers Skip Trace only when the homeowner or primary phone is missing", () => {
-    expect(source).toContain(
-      "!lead.homeowner || !lead.homeowner.phone_1 ? (",
-    );
+    expect(source).toContain("!lead.homeowner || !lead.homeowner.phone_1 ? (");
     expect(source).not.toContain(
       "<SkipTraceButton propertyId={lead.id} />\n      <span",
     );

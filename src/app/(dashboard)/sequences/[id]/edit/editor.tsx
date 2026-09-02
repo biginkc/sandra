@@ -14,6 +14,11 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { callAction } from "@/lib/errors/call-action";
+import {
+  PROPERTY_STATUS_LABELS,
+  SEQUENCE_ACTION_LABELS,
+  systemLabel,
+} from "@/lib/presentation/system-labels";
 
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
 
@@ -48,7 +53,13 @@ const MIN_PER_UNIT: Record<DelayUnit, number> = {
 
 function splitDelay(minutes: number): { amount: number; unit: DelayUnit } {
   if (minutes === 0) return { amount: 0, unit: "minutes" };
-  const descending: DelayUnit[] = ["months", "weeks", "days", "hours", "minutes"];
+  const descending: DelayUnit[] = [
+    "months",
+    "weeks",
+    "days",
+    "hours",
+    "minutes",
+  ];
   for (const unit of descending) {
     const per = MIN_PER_UNIT[unit];
     if (minutes % per === 0) return { amount: minutes / per, unit };
@@ -102,9 +113,7 @@ function DelayInput({
         <option value="weeks">weeks</option>
         <option value="months">months</option>
       </select>
-      <span className="text-muted-foreground text-xs">
-        after previous step
-      </span>
+      <span className="text-muted-foreground text-xs">after previous step</span>
     </div>
   );
 }
@@ -175,7 +184,10 @@ export function SequenceEditor({
             maxLength={120}
           />
         </label>
-        <label htmlFor="seq-description" className="flex flex-col gap-1 text-sm">
+        <label
+          htmlFor="seq-description"
+          className="flex flex-col gap-1 text-sm"
+        >
           <span>Description</span>
           <Input
             id="seq-description"
@@ -297,9 +309,7 @@ function MessageBodyEditor({
             onChange={() => setMode("template")}
             disabled={templates.length === 0}
           />
-          <span>
-            Use template{templates.length === 0 ? " (none yet)" : ""}
-          </span>
+          <span>Use template{templates.length === 0 ? " (none yet)" : ""}</span>
         </label>
       </div>
       {referencedTemplateMissing ? (
@@ -308,9 +318,9 @@ function MessageBodyEditor({
             Referenced template no longer exists
           </span>
           <span>
-            Pick a different template from the list, or switch to
-            &ldquo;Custom message&rdquo;. Saving as-is will pause any
-            enrollments hitting this step.
+            Pick a different template from the list, or switch to &ldquo;Custom
+            message&rdquo;. Saving as-is will pause any enrollments hitting this
+            step.
           </span>
         </div>
       ) : null}
@@ -325,10 +335,10 @@ function MessageBodyEditor({
             placeholder="Hi {{first_name}}, cash offer on {{property_address}}?"
           />
           <span className="text-muted-foreground text-xs">
-            Variables: first_name, last_name, property_address, city,
-            state, property_zip, market, my_first_name, company_name,
-            opt_out. Wrap with <code>{"{{#if var}}…{{/if}}"}</code> to
-            skip a phrase when a value is missing.
+            Variables: first_name, last_name, property_address, city, state,
+            property_zip, market, my_first_name, company_name, opt_out. Wrap
+            with <code>{"{{#if var}}…{{/if}}"}</code> to skip a phrase when a
+            value is missing.
           </span>
         </label>
       ) : (
@@ -442,8 +452,8 @@ function AddStepButton({
           <DialogTitle>Add step {nextIndex + 1}</DialogTitle>
           <DialogDescription>
             Step fires after the delay elapses from the previous step&rsquo;s
-            run time (or enrollment time, for step 1). Templates are
-            live-read on every fire.
+            run time (or enrollment time, for step 1). Templates are live-read
+            on every fire.
           </DialogDescription>
         </DialogHeader>
 
@@ -459,14 +469,16 @@ function AddStepButton({
               <select
                 value={actionType}
                 onChange={(e) =>
-                  setActionType(
-                    e.target.value as "send_sms" | "change_status",
-                  )
+                  setActionType(e.target.value as "send_sms" | "change_status")
                 }
                 className="border-input rounded-md border px-2 py-1.5 text-sm"
               >
-                <option value="send_sms">send_sms</option>
-                <option value="change_status">change_status</option>
+                <option value="send_sms">
+                  {systemLabel(SEQUENCE_ACTION_LABELS, "send_sms")}
+                </option>
+                <option value="change_status">
+                  {systemLabel(SEQUENCE_ACTION_LABELS, "change_status")}
+                </option>
               </select>
             </label>
           </div>
@@ -488,14 +500,20 @@ function AddStepButton({
                 className="border-input rounded-md border px-2 py-1.5 text-sm"
               >
                 <option value="">— select —</option>
-                <option value="new_lead">new_lead</option>
-                <option value="contacted">contacted</option>
-                <option value="interested">interested</option>
-                <option value="offer_sent">offer_sent</option>
-                <option value="offer_declined">offer_declined</option>
-                <option value="under_contract">under_contract</option>
-                <option value="closed">closed</option>
-                <option value="dead">dead</option>
+                {[
+                  "new_lead",
+                  "contacted",
+                  "interested",
+                  "offer_sent",
+                  "offer_declined",
+                  "under_contract",
+                  "closed",
+                  "dead",
+                ].map((status) => (
+                  <option key={status} value={status}>
+                    {systemLabel(PROPERTY_STATUS_LABELS, status)}
+                  </option>
+                ))}
               </select>
             </label>
           )}
@@ -566,13 +584,10 @@ function StepEditor({
   const onDelete = () => {
     if (!window.confirm(`Delete step ${step.step_index + 1}?`)) return;
     startTransition(async () => {
-      const r = await callAction(
-        deleteSequenceStep(step.id, sequenceId),
-        {
-          successMessage: "Step deleted",
-          fallbackMessage: "Could not delete step",
-        },
-      );
+      const r = await callAction(deleteSequenceStep(step.id, sequenceId), {
+        successMessage: "Step deleted",
+        fallbackMessage: "Could not delete step",
+      });
       if (r.ok) router.refresh();
     });
   };
@@ -580,9 +595,7 @@ function StepEditor({
   return (
     <div className="flex flex-col gap-3 rounded-md border p-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">
-          Step {step.step_index + 1}
-        </h3>
+        <h3 className="text-sm font-semibold">Step {step.step_index + 1}</h3>
         <Button variant="ghost" size="sm" onClick={onDelete} disabled={pending}>
           Delete
         </Button>
@@ -603,8 +616,12 @@ function StepEditor({
             }
             className="border-input rounded-md border px-2 py-1.5 text-sm"
           >
-            <option value="send_sms">send_sms</option>
-            <option value="change_status">change_status</option>
+            <option value="send_sms">
+              {systemLabel(SEQUENCE_ACTION_LABELS, "send_sms")}
+            </option>
+            <option value="change_status">
+              {systemLabel(SEQUENCE_ACTION_LABELS, "change_status")}
+            </option>
           </select>
         </label>
       </div>
@@ -626,14 +643,20 @@ function StepEditor({
             className="border-input rounded-md border px-2 py-1.5 text-sm"
           >
             <option value="">— select —</option>
-            <option value="new_lead">new_lead</option>
-            <option value="contacted">contacted</option>
-            <option value="interested">interested</option>
-            <option value="offer_sent">offer_sent</option>
-            <option value="offer_declined">offer_declined</option>
-            <option value="under_contract">under_contract</option>
-            <option value="closed">closed</option>
-            <option value="dead">dead</option>
+            {[
+              "new_lead",
+              "contacted",
+              "interested",
+              "offer_sent",
+              "offer_declined",
+              "under_contract",
+              "closed",
+              "dead",
+            ].map((status) => (
+              <option key={status} value={status}>
+                {systemLabel(PROPERTY_STATUS_LABELS, status)}
+              </option>
+            ))}
           </select>
         </label>
       )}
@@ -662,4 +685,3 @@ function confirmImpact(impact: {
   ];
   return window.confirm(lines.join("\n"));
 }
-

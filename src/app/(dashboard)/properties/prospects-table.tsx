@@ -17,6 +17,11 @@ import {
   type UseTableUrlStateReturn,
 } from "@/components/table/use-table-url-state";
 import { Badge } from "@/components/ui/badge";
+import {
+  teamMemberPrimaryLabel,
+  teamMemberSecondaryLabel,
+  type TeamMember,
+} from "@/lib/auth/team-member";
 import { cn } from "@/lib/utils";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { CircularPagination } from "@/components/ui/circular-pagination";
@@ -100,7 +105,7 @@ export type ProspectRow = {
 
 export type ListOption = { id: string; name: string; color: string | null };
 export type TagOption = { id: string; name: string; color: string | null };
-export type TeamMemberOption = { id: string; email: string };
+export type TeamMemberOption = TeamMember;
 
 type Props = {
   orgId?: string;
@@ -151,8 +156,14 @@ function summarize(outcome: BulkOutcome, noun = "prospect"): string {
   return parts.join(" · ") || "Done";
 }
 
-export function formatRelativeImportTime(iso: string, now = new Date()): string {
-  const elapsedMinutes = Math.max(0, Math.floor((now.getTime() - new Date(iso).getTime()) / 60_000));
+export function formatRelativeImportTime(
+  iso: string,
+  now = new Date(),
+): string {
+  const elapsedMinutes = Math.max(
+    0,
+    Math.floor((now.getTime() - new Date(iso).getTime()) / 60_000),
+  );
   if (elapsedMinutes < 1) return "just now";
   if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
   const hours = Math.floor(elapsedMinutes / 60);
@@ -204,9 +215,9 @@ export function ProspectsTable({
   // search/sort/filter scope that produced the selected id set. When the
   // page scope changes, the selected ids may survive as manual picks, but
   // they no longer claim to represent "all matching" for the new scope.
-  const [selectAllMatchingKey, setSelectAllMatchingKey] = useState<string | null>(
-    null,
-  );
+  const [selectAllMatchingKey, setSelectAllMatchingKey] = useState<
+    string | null
+  >(null);
   const [selectAllDncLockedCount, setSelectAllDncLockedCount] = useState(0);
   const selectAllMatching = selectAllMatchingKey === selectionScopeKey;
   const selectionScopeStale =
@@ -339,7 +350,8 @@ export function ProspectsTable({
   );
   const allSelected = useMemo(
     () =>
-      selectableProspects.length > 0 && selectableProspects.every((p) => selectedInScope.has(p.id)),
+      selectableProspects.length > 0 &&
+      selectableProspects.every((p) => selectedInScope.has(p.id)),
     [selectableProspects, selectedInScope],
   );
   const someSelected = selectedInScope.size > 0 && !allSelected;
@@ -450,7 +462,7 @@ export function ProspectsTable({
           (cassRequestKeyRef.current ??= crypto.randomUUID()),
         ),
         {
-        fallbackMessage: "Could not start verify job",
+          fallbackMessage: "Could not start verify job",
         },
       );
       if (result.ok) {
@@ -505,34 +517,34 @@ export function ProspectsTable({
         description={headerCount}
         actions={
           <>
-          {hasSelection ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onClearAllSelection}
-              disabled={pending}
-            >
-              Clear
-            </Button>
-          ) : null}
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant={hasSelection ? "default" : "outline"}
-                  disabled={!hasSelection || pending}
-                  aria-label={
-                    hasSelection
-                      ? `Actions for ${selectedInScope.size} selected`
-                      : "Actions (select prospects first)"
-                  }
-                >
-                  Actions
-                  {hasSelection ? ` (${selectedInScope.size})` : ""}
-                  <ChevronDownIcon className="ml-1 size-3.5" />
-                </Button>
-              }
-            />
+            {hasSelection ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onClearAllSelection}
+                disabled={pending}
+              >
+                Clear
+              </Button>
+            ) : null}
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    variant={hasSelection ? "default" : "outline"}
+                    disabled={!hasSelection || pending}
+                    aria-label={
+                      hasSelection
+                        ? `Actions for ${selectedInScope.size} selected`
+                        : "Actions (select prospects first)"
+                    }
+                  >
+                    Actions
+                    {hasSelection ? ` (${selectedInScope.size})` : ""}
+                    <ChevronDownIcon className="ml-1 size-3.5" />
+                  </Button>
+                }
+              />
               <DropdownMenuContent align="end" className="w-56">
                 {/* ------------- Advance ------------- */}
                 <DropdownMenuGroup>
@@ -549,9 +561,7 @@ export function ProspectsTable({
                     <DropdownMenuSubContent className="w-56">
                       {hasTeam ? (
                         <>
-                          <DropdownMenuItem
-                            onClick={() => handleAssign(null)}
-                          >
+                          <DropdownMenuItem onClick={() => handleAssign(null)}>
                             Unassign
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
@@ -560,9 +570,16 @@ export function ProspectsTable({
                               key={m.id}
                               onClick={() => handleAssign(m.id)}
                             >
-                              {m.id === currentUserId
-                                ? `${m.email} (me)`
-                                : m.email}
+                              <span className="flex min-w-0 flex-col">
+                                <span>
+                                  {teamMemberPrimaryLabel(m, currentUserId)}
+                                </span>
+                                {teamMemberSecondaryLabel(m) ? (
+                                  <span className="text-muted-foreground text-xs">
+                                    {teamMemberSecondaryLabel(m)}
+                                  </span>
+                                ) : null}
+                              </span>
                             </DropdownMenuItem>
                           ))}
                         </>
@@ -575,12 +592,12 @@ export function ProspectsTable({
                   </DropdownMenuSub>
                 </DropdownMenuGroup>
 
-                  <DropdownMenuItem onClick={() => setShowBulkSms(true)}>
-                    Bulk SMS
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setShowBatchCreate(true)}>
-                    Create dialer batch
-                  </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setShowBulkSms(true)}>
+                  Bulk SMS
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setShowBatchCreate(true)}>
+                  Create dialer batch
+                </DropdownMenuItem>
 
                 <DropdownMenuSeparator />
 
@@ -695,10 +712,10 @@ export function ProspectsTable({
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
-          </DropdownMenu>
-          <Link href="/import" className={buttonVariants()}>
-            Import prospects
-          </Link>
+            </DropdownMenu>
+            <Link href="/import" className={buttonVariants()}>
+              Import prospects
+            </Link>
           </>
         }
       />
@@ -709,9 +726,7 @@ export function ProspectsTable({
        *  container + flex behavior come from <TableToolbar>; the search
        *  markup + 250ms debounce come from <TableToolbarSearch>. */}
       <TableToolbar
-        state={
-          ts as unknown as UseTableUrlStateReturn<Record<string, unknown>>
-        }
+        state={ts as unknown as UseTableUrlStateReturn<Record<string, unknown>>}
       >
         <TableToolbarSearch
           ariaLabel="Search prospects by address"
@@ -722,7 +737,10 @@ export function ProspectsTable({
       <div className="mb-3 flex gap-2">
         <Link
           href={importedParam ? "/properties" : "/properties?imported=today"}
-          className={buttonVariants({ variant: importedParam ? "default" : "outline", size: "sm" })}
+          className={buttonVariants({
+            variant: importedParam ? "default" : "outline",
+            size: "sm",
+          })}
         >
           Imported today
         </Link>
@@ -735,7 +753,11 @@ export function ProspectsTable({
         pageEligibleCount={selectableProspects.length}
         total={total}
         selectedCount={selectedInScope.size}
-        dncLockedCount={selectAllMatching ? selectAllDncLockedCount : prospects.length - selectableProspects.length}
+        dncLockedCount={
+          selectAllMatching
+            ? selectAllDncLockedCount
+            : prospects.length - selectableProspects.length
+        }
         onSelectAllAcrossPages={onSelectAllAcrossPages}
         onClear={onClearAllSelection}
       />
@@ -804,7 +826,9 @@ export function ProspectsTable({
         }}
         propertyIds={skipTracePreflightIds}
         onPreflight={preflightProspectSkipTrace}
-        onLaunchSkipTrace={() => requestProspectSkipTrace(skipTracePreflightIds)}
+        onLaunchSkipTrace={() =>
+          requestProspectSkipTrace(skipTracePreflightIds)
+        }
         onStartCassVerification={verifyPropertiesBulk}
         onFinished={() => {
           onClearAllSelection();
@@ -913,7 +937,10 @@ export function ProspectsTable({
                       className="cursor-default"
                     >
                       {p.dnc_reason ? (
-                        <LockKeyhole className="text-muted-foreground size-4" aria-label={`${p.address} is locked Do Not Contact`} />
+                        <LockKeyhole
+                          className="text-muted-foreground size-4"
+                          aria-label={`${p.address} is locked Do Not Contact`}
+                        />
                       ) : (
                         <input
                           type="checkbox"
@@ -942,7 +969,10 @@ export function ProspectsTable({
                     <TableCell>
                       <div className="flex flex-col items-start gap-1">
                         {p.dnc_reason ? (
-                          <span className="bg-foreground text-background rounded px-2 py-1 font-mono text-[10px] font-bold tracking-wide" title={p.dnc_reason}>
+                          <span
+                            className="bg-foreground text-background rounded px-2 py-1 font-mono text-[10px] font-bold tracking-wide"
+                            title={p.dnc_reason}
+                          >
                             ⊘ DO NOT CONTACT
                           </span>
                         ) : (
@@ -1211,7 +1241,10 @@ function SelectAllBanner({
           All <strong>{fmt(selectedCount)}</strong> eligible prospects selected
           across all pages.
           {dncLockedCount > 0 && (
-            <> <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.</>
+            <>
+              {" "}
+              <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.
+            </>
           )}
         </span>
         <button
@@ -1236,7 +1269,10 @@ function SelectAllBanner({
         All <strong>{fmt(pageEligibleCount)}</strong> eligible prospects on this
         page selected.
         {dncLockedCount > 0 && (
-          <> <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.</>
+          <>
+            {" "}
+            <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.
+          </>
         )}
       </span>
       <button
@@ -1251,7 +1287,11 @@ function SelectAllBanner({
   );
 }
 
-function EngagementPill({ state }: { state: Exclude<EngagementState, "none"> }) {
+function EngagementPill({
+  state,
+}: {
+  state: Exclude<EngagementState, "none">;
+}) {
   if (state === "replying") {
     return (
       <Badge

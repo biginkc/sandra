@@ -6,6 +6,9 @@ import { after } from "next/server";
 import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
+import { hasActiveSandraAccess } from "@/lib/auth/access-state";
+import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
+export type { TeamMember } from "@/lib/auth/team-member";
 import { cassBulkWorkflow } from "@/workflows/cass-bulk";
 import {
   parseThreadId,
@@ -2189,19 +2192,14 @@ async function captureConsent(params: {
 // Lead assignment · unread indicator · activity notes
 // ============================================================================
 
-export type TeamMember = {
-  id: string;
-  email: string;
-};
-
 /**
- * List authed team members for assignee pickers. Uses the admin client
- * because `auth.admin.listUsers()` requires service role, but we limit
- * the returned shape to {id, email} — no sign-in timestamps or metadata
- * leak through. Middleware already gates `/leads/**` behind auth, so any
- * caller reaching this action is already a trusted org member.
+ * List assignable team members for the caller's one current organization.
+ * The shared roster loader applies the Hugo lifecycle predicate and returns
+ * only the presentation-safe identity fields used by people controls.
  */
-export async function listOrgUsers(): Promise<Result<TeamMember[]>> {
+export async function listOrgUsers(): Promise<
+  Result<import("@/lib/auth/team-member").TeamMember[]>
+> {
   try {
     const supabase = await createClient();
     const {
@@ -2214,85 +2212,89 @@ export async function listOrgUsers(): Promise<Result<TeamMember[]>> {
       };
     }
 
-    const { data: myMemberships, error: myMembershipsError } = await supabase
+    const { data: memberships, error: membershipsError } = await supabase
       .from("memberships")
-      .select("org_id")
+      .select("org_id, access_status, access_expires_at, deletion_prepared_at")
       .eq("user_id", user.id);
-    if (myMembershipsError) {
+    if (membershipsError) {
+      return {
+        ok: false,
+        error: { code: "TEAM_FETCH_FAILED", message: membershipsError.message },
+      };
+    }
+    const activeMemberships = (memberships ?? []).filter((membership) =>
+      hasActiveSandraAccess(membership),
+    );
+    if (activeMemberships.length !== 1) {
       return {
         ok: false,
         error: {
-          code: "TEAM_FETCH_FAILED",
-          message: myMembershipsError.message,
+          code: "TEAM_SCOPE_INVALID",
+          message:
+            activeMemberships.length > 1
+              ? "Could not resolve one active organization."
+              : "No active organization membership was found.",
         },
       };
     }
-
-    const orgIds = Array.from(
-      new Set((myMemberships ?? []).map((membership) => membership.org_id)),
-    );
-    if (orgIds.length === 0) return ok([]);
-
-    const admin = createAdminClient();
-    const { data: orgMemberships, error: orgMembershipsError } = await admin
-      .from("memberships")
-      .select("user_id")
-      .in("org_id", orgIds);
-    if (orgMembershipsError) {
-      return {
-        ok: false,
-        error: {
-          code: "TEAM_FETCH_FAILED",
-          message: orgMembershipsError.message,
-        },
-      };
-    }
-
-    const memberIds = new Set(
-      (orgMemberships ?? []).map((membership) => membership.user_id),
-    );
-    if (memberIds.size === 0) return ok([]);
-
-    const users = await listAllAuthUsers(admin);
-    if (!users.ok) return users;
-    const members: TeamMember[] = users.data
-      .filter((u) => memberIds.has(u.id) && !!u.email)
-      .map((u) => ({ id: u.id, email: u.email as string }))
-      .sort((a, b) => a.email.localeCompare(b.email));
-    return ok(members);
+    return ok(await loadOrgTeamMembers(activeMemberships[0].org_id));
   } catch (e) {
     reportError(e, { tags: { surface: "list_org_users" } });
     return errFromUnknown(e, "TEAM_FETCH_FAILED");
   }
 }
 
-type AuthUserPageUser = { id: string; email?: string | null };
-
-async function listAllAuthUsers(
-  admin: ReturnType<typeof createAdminClient>,
-): Promise<Result<AuthUserPageUser[]>> {
-  const users: AuthUserPageUser[] = [];
-  let page = 1;
-  const perPage = 200;
-
-  while (true) {
-    const { data, error } = await admin.auth.admin.listUsers({
-      page,
-      perPage,
-    });
-    if (error) {
+/**
+ * Filter-only roster. Former members remain representable so historical
+ * assignments do not disappear when someone loses access.
+ */
+export async function listOrgAssigneeFilterUsers(): Promise<
+  Result<import("@/lib/auth/team-member").TeamMember[]>
+> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
       return {
         ok: false,
-        error: { code: "TEAM_FETCH_FAILED", message: error.message },
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
       };
     }
 
-    users.push(...((data?.users ?? []) as AuthUserPageUser[]));
-    if (!data?.nextPage || data.users.length === 0) break;
-    page = data.nextPage;
-  }
+    const { data: memberships, error: membershipsError } = await supabase
+      .from("memberships")
+      .select("org_id, access_status, access_expires_at, deletion_prepared_at")
+      .eq("user_id", user.id);
+    if (membershipsError) {
+      return {
+        ok: false,
+        error: { code: "TEAM_FETCH_FAILED", message: membershipsError.message },
+      };
+    }
+    const activeMemberships = (memberships ?? []).filter((membership) =>
+      hasActiveSandraAccess(membership),
+    );
+    if (activeMemberships.length !== 1) {
+      return {
+        ok: false,
+        error: {
+          code: "TEAM_SCOPE_INVALID",
+          message: "Could not resolve one active organization.",
+        },
+      };
+    }
 
-  return ok(users);
+    return ok(
+      await loadOrgTeamMembers(activeMemberships[0].org_id, {
+        includeInactiveMembers: true,
+      }),
+    );
+  } catch (e) {
+    reportError(e, { tags: { surface: "list_org_assignee_filter_users" } });
+    return errFromUnknown(e, "TEAM_FETCH_FAILED");
+  }
 }
 
 /**

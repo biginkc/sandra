@@ -7,6 +7,10 @@ import { useTransition } from "react";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { callAction } from "@/lib/errors/call-action";
+import {
+  MEMBERSHIP_ROLE_LABELS,
+  systemLabel,
+} from "@/lib/presentation/system-labels";
 
 import { updateMembershipRole, type MembershipRole } from "./actions";
 import {
@@ -17,6 +21,7 @@ import {
 export type UserRow = {
   id: string;
   email: string;
+  displayName: string | null;
   createdAt: string;
   lastSignInAt: string | null;
   hugoLinked: boolean;
@@ -85,8 +90,12 @@ export function RoleEditor({
       onChange={(event) => changeRole(event.target.value as MembershipRole)}
       className="border-input bg-background h-8 rounded-md border px-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
     >
-      <option value="owner">owner</option>
-      <option value="member">member</option>
+      <option value="owner">
+        {systemLabel(MEMBERSHIP_ROLE_LABELS, "owner")}
+      </option>
+      <option value="member">
+        {systemLabel(MEMBERSHIP_ROLE_LABELS, "member")}
+      </option>
     </select>
   );
 }
@@ -105,7 +114,9 @@ export function MembershipRoleControl({
   }
   if (!membership.hasActiveAccess) {
     return (
-      <span className="text-muted-foreground text-sm">{membership.role}</span>
+      <span className="text-muted-foreground text-sm">
+        {systemLabel(MEMBERSHIP_ROLE_LABELS, membership.role)}
+      </span>
     );
   }
   return <RoleEditor userId={userId} email={email} role={membership.role} />;

@@ -12,7 +12,13 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { CalendarClockIcon, ChevronDownIcon, ChevronRightIcon, SearchIcon, XIcon } from "lucide-react";
+import {
+  CalendarClockIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  SearchIcon,
+  XIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -25,6 +31,10 @@ import { SoftphoneLeadButton } from "@/components/softphone/softphone-lead-butto
 import type { SoftphoneLead } from "@/components/softphone/softphone-provider";
 import { callAction } from "@/lib/errors/call-action";
 import { canShowCallButton } from "@/lib/dialer/eligibility";
+import {
+  teamMemberOptionLabel,
+  teamMemberPrimaryLabel,
+} from "@/lib/auth/team-member";
 import type { Database } from "@/lib/supabase/types";
 import type { ContractStatusRecord } from "@/lib/esign/contract-status";
 
@@ -44,10 +54,7 @@ import type {
   InboundAttentionFilter,
   InboundOwnershipFilter,
 } from "./inbound-filters";
-import {
-  loadLeadBoardAction,
-  setLeadNextActionAction,
-} from "./board-actions";
+import { loadLeadBoardAction, setLeadNextActionAction } from "./board-actions";
 import type {
   CustomTag,
   LeadBoardCursor,
@@ -66,10 +73,18 @@ import {
 type ContactSummary = Pick<
   Database["public"]["Tables"]["contacts"]["Row"],
   "first_name" | "last_name" | "entity_name"
-> & Partial<Pick<
-  Database["public"]["Tables"]["contacts"]["Row"],
-  "id" | "phone_1" | "phone_2" | "phone_3" | "do_not_contact" | "sms_opted_out"
->>;
+> &
+  Partial<
+    Pick<
+      Database["public"]["Tables"]["contacts"]["Row"],
+      | "id"
+      | "phone_1"
+      | "phone_2"
+      | "phone_3"
+      | "do_not_contact"
+      | "sms_opted_out"
+    >
+  >;
 
 export type Lead = LeadBoardLead;
 
@@ -163,7 +178,9 @@ export function Kanban({
   const [urgencyCounts, setUrgencyCounts] = useState(initialUrgencyCounts);
   const [nextCursors, setNextCursors] = useState(initialNextCursors);
   const [hasMore, setHasMore] = useState(initialHasMore);
-  const [snapshotGenerations, setSnapshotGenerations] = useState(initialSnapshotGenerations);
+  const [snapshotGenerations, setSnapshotGenerations] = useState(
+    initialSnapshotGenerations,
+  );
   const [unreadIds, setUnreadIds] = useState(unreadPropertyIds);
   const [listsByLead, setListsByLead] = useState(listMemberships);
   const [tagsByLead, setTagsByLead] = useState(customTags);
@@ -177,7 +194,9 @@ export function Kanban({
   );
   const [search, setSearch] = useState(initialFilters.search);
   const [ownership, setOwnership] = useState<OwnershipFilter>(initialOwnership);
-  const [motivation, setMotivation] = useState<MotivationFilter>(initialFilters.motivation);
+  const [motivation, setMotivation] = useState<MotivationFilter>(
+    initialFilters.motivation,
+  );
   const [urgency, setUrgency] = useState<UrgencyFilter>(initialFilters.urgency);
   const [attention, setAttention] = useState<AttentionFilter>(
     initialAttentionFilter,
@@ -188,7 +207,9 @@ export function Kanban({
   const [retryingIds, setRetryingIds] = useState<Set<string>>(new Set());
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [loadingMore, setLoadingMore] = useState<Set<PropertyStatus>>(new Set());
+  const [loadingMore, setLoadingMore] = useState<Set<PropertyStatus>>(
+    new Set(),
+  );
   const inFlightMoveIds = useRef(new Set<string>());
   const renderedAtMs = new Date(renderedAt).getTime();
   const initialRender = useRef(true);
@@ -217,13 +238,12 @@ export function Kanban({
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 150, tolerance: 5 },
+    }),
   );
 
-  const unreadSet = useMemo(
-    () => new Set(unreadIds),
-    [unreadIds],
-  );
+  const unreadSet = useMemo(() => new Set(unreadIds), [unreadIds]);
 
   const ownershipFiltered = useMemo(() => {
     if (ownership === "all") return leads;
@@ -248,9 +268,10 @@ export function Kanban({
   }, [motivation, ownershipFiltered]);
 
   const filteredLeads = useMemo(
-    () => filterLeads(motivationFiltered, search).filter((lead) =>
-      matchesUrgencyFilter(lead, urgency, dayStart, dayEnd),
-    ),
+    () =>
+      filterLeads(motivationFiltered, search).filter((lead) =>
+        matchesUrgencyFilter(lead, urgency, dayStart, dayEnd),
+      ),
     [dayEnd, dayStart, motivationFiltered, search, urgency],
   );
 
@@ -281,23 +302,28 @@ export function Kanban({
       grouped[key].push(lead);
     }
     for (const status of STATUS_ORDER) {
-      grouped[status].sort((a, b) => compareLeadUrgency(a, b, dayStart, dayEnd));
+      grouped[status].sort((a, b) =>
+        compareLeadUrgency(a, b, dayStart, dayEnd),
+      );
     }
     return grouped;
   }, [dayEnd, dayStart, filteredLeads]);
 
   const activeLead = activeId
-    ? leads.find((lead) => lead.id === activeId) ?? null
+    ? (leads.find((lead) => lead.id === activeId) ?? null)
     : null;
 
-  const boardFilters = useMemo<LeadBoardFilters>(() => ({
-    ...initialFilters,
-    search,
-    ownership,
-    motivation,
-    urgency,
-    attention,
-  }), [attention, initialFilters, motivation, ownership, search, urgency]);
+  const boardFilters = useMemo<LeadBoardFilters>(
+    () => ({
+      ...initialFilters,
+      search,
+      ownership,
+      motivation,
+      urgency,
+      attention,
+    }),
+    [attention, initialFilters, motivation, ownership, search, urgency],
+  );
   const boardFilterKey = JSON.stringify(boardFilters);
   const boardFilterKeyRef = useRef(boardFilterKey);
   const boardFiltersRef = useRef(boardFilters);
@@ -342,12 +368,20 @@ export function Kanban({
     try {
       result = await loadLeadBoardAction({ filters });
     } catch {
-      if (request !== requestSequence.current || filterKey !== boardFilterKeyRef.current) return;
+      if (
+        request !== requestSequence.current ||
+        filterKey !== boardFilterKeyRef.current
+      )
+        return;
       setIsRefreshing(false);
       setLoadError("We couldn't refresh your leads.");
       return;
     }
-    if (request !== requestSequence.current || filterKey !== boardFilterKeyRef.current) return;
+    if (
+      request !== requestSequence.current ||
+      filterKey !== boardFilterKeyRef.current
+    )
+      return;
     setIsRefreshing(false);
     if (!result.ok) {
       setLoadError(result.error.message || "We couldn't refresh your leads.");
@@ -361,7 +395,10 @@ export function Kanban({
       initialRender.current = false;
       return;
     }
-    const timeout = window.setTimeout(() => void refreshBoard(), search ? 250 : 0);
+    const timeout = window.setTimeout(
+      () => void refreshBoard(),
+      search ? 250 : 0,
+    );
     return () => window.clearTimeout(timeout);
     // Each control intentionally re-queries the full server-backed queue. The
     // memoized object itself would retrigger on every render.
@@ -377,14 +414,21 @@ export function Kanban({
     setLoadingMore((previous) => new Set(previous).add(status));
     let result: Awaited<ReturnType<typeof loadLeadBoardAction>>;
     try {
-      result = await loadLeadBoardAction({ filters: boardFiltersRef.current, status, cursor });
+      result = await loadLeadBoardAction({
+        filters: boardFiltersRef.current,
+        status,
+        cursor,
+      });
     } catch {
       setLoadingMore((previous) => {
         const next = new Set(previous);
         next.delete(status);
         return next;
       });
-      if (filterKey === boardFilterKeyRef.current && generation === requestSequence.current) {
+      if (
+        filterKey === boardFilterKeyRef.current &&
+        generation === requestSequence.current
+      ) {
         setLoadError(`We couldn't load more ${STATUS_LABEL[status]} leads.`);
       }
       return;
@@ -401,37 +445,63 @@ export function Kanban({
       return;
     }
     if (!result.ok) {
-      setLoadError(result.error.message || `We couldn't load more ${STATUS_LABEL[status]} leads.`);
+      setLoadError(
+        result.error.message ||
+          `We couldn't load more ${STATUS_LABEL[status]} leads.`,
+      );
       return;
     }
     const data = result.data;
     const expectedGeneration = snapshotGenerations[status];
     const receivedGeneration = data.snapshotGenerations?.[status];
-    if (!expectedGeneration || !receivedGeneration || expectedGeneration !== receivedGeneration) {
+    if (
+      !expectedGeneration ||
+      !receivedGeneration ||
+      expectedGeneration !== receivedGeneration
+    ) {
       void refreshBoard();
       return;
     }
     setLeads((previous) => {
       const known = new Set(previous.map((lead) => lead.id));
-      return [...previous, ...(data.leads as Lead[]).filter((lead) => !known.has(lead.id))];
+      return [
+        ...previous,
+        ...(data.leads as Lead[]).filter((lead) => !known.has(lead.id)),
+      ];
     });
-    setNextCursors((previous) => ({ ...previous, [status]: data.nextCursors[status] }));
+    setNextCursors((previous) => ({
+      ...previous,
+      [status]: data.nextCursors[status],
+    }));
     setHasMore((previous) => ({ ...previous, [status]: data.hasMore[status] }));
-    setSnapshotGenerations((previous) => ({ ...previous, [status]: receivedGeneration }));
-    setUnreadIds((previous) => Array.from(new Set([...previous, ...data.unreadPropertyIds])));
+    setSnapshotGenerations((previous) => ({
+      ...previous,
+      [status]: receivedGeneration,
+    }));
+    setUnreadIds((previous) =>
+      Array.from(new Set([...previous, ...data.unreadPropertyIds])),
+    );
     setListsByLead((previous) => ({ ...previous, ...data.listMemberships }));
     setTagsByLead((previous) => ({ ...previous, ...data.customTags }));
-    setMessagesByLead((previous) => ({ ...previous, ...data.lastMessageByPropertyId }));
+    setMessagesByLead((previous) => ({
+      ...previous,
+      ...data.lastMessageByPropertyId,
+    }));
     setContractsByLead((previous) => ({
       ...previous,
       ...(data.latestContractByPropertyId ?? contractsFromLeads(data.leads)),
     }));
     const existingIds = new Set(leads.map((lead) => lead.id));
-    const newlyLoaded = (data.leads as Lead[]).filter((lead) => !existingIds.has(lead.id));
-    const loadedInStatus = leads.filter((lead) => lead.status === status).length + newlyLoaded.length;
+    const newlyLoaded = (data.leads as Lead[]).filter(
+      (lead) => !existingIds.has(lead.id),
+    );
+    const loadedInStatus =
+      leads.filter((lead) => lead.status === status).length +
+      newlyLoaded.length;
     if (
       !data.hasMore[status] &&
-      (data.totals[status] !== totals[status] || loadedInStatus !== totals[status])
+      (data.totals[status] !== totals[status] ||
+        loadedInStatus !== totals[status])
     ) {
       void refreshBoard();
     }
@@ -583,12 +653,7 @@ export function Kanban({
 
     const lead = leads.find((item) => item.id === propertyId);
     if (!lead || lead.status === nextStatus) return;
-    await saveMove(
-      lead,
-      nextStatus,
-      lead.status as PropertyStatus,
-      true,
-    );
+    await saveMove(lead, nextStatus, lead.status as PropertyStatus, true);
   };
 
   const retryMove = async (lead: Lead) => {
@@ -609,10 +674,12 @@ export function Kanban({
         ? "All leads"
         : ownership === "unassigned"
           ? "Unassigned"
-          : shortEmail(
-              teamMembers.find((member) => member.id === ownership)?.email ??
-                "Selected teammate",
-            );
+          : teamMembers.find((member) => member.id === ownership)
+            ? teamMemberPrimaryLabel(
+                teamMembers.find((member) => member.id === ownership)!,
+                currentUserId,
+              )
+            : "Selected teammate";
 
   return (
     <div className="flex flex-col gap-3">
@@ -656,19 +723,19 @@ export function Kanban({
             >
               All leads
             </button>
-          <button
-            type="button"
-            onClick={() => changeOwnership("mine")}
-            disabled={!currentUserId}
-            aria-pressed={ownership === "mine"}
-            className={`px-4 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-              ownership === "mine"
-                ? "bg-primary text-primary-foreground"
-                : "bg-background text-foreground hover:bg-muted"
-            }`}
-          >
-            My leads
-          </button>
+            <button
+              type="button"
+              onClick={() => changeOwnership("mine")}
+              disabled={!currentUserId}
+              aria-pressed={ownership === "mine"}
+              className={`px-4 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                ownership === "mine"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background text-foreground hover:bg-muted"
+              }`}
+            >
+              My leads
+            </button>
           </div>
           <select
             value={
@@ -696,7 +763,7 @@ export function Kanban({
               .filter((member) => member.id !== currentUserId)
               .map((member) => (
                 <option key={member.id} value={member.id}>
-                  {shortEmail(member.email)}
+                  {teamMemberOptionLabel(member, currentUserId)}
                 </option>
               ))}
           </select>
@@ -731,7 +798,11 @@ export function Kanban({
         </select>
 
         {attention ? (
-          <Button variant="outline" size="sm" onClick={() => setAttention(null)}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setAttention(null)}
+          >
             {attention === "stale"
               ? "Stale conversations"
               : "Sequence ended without follow-up"}{" "}
@@ -747,21 +818,33 @@ export function Kanban({
 
         {activeFilterCount > 0 ? (
           <span className="text-muted-foreground text-xs" aria-live="polite">
-            {filteredLeads.length} loaded · {Object.values(totals).reduce((sum, count) => sum + count, 0)} total
+            {filteredLeads.length} loaded ·{" "}
+            {Object.values(totals).reduce((sum, count) => sum + count, 0)} total
           </span>
         ) : null}
-        {isRefreshing ? <span className="text-muted-foreground text-xs" role="status">Refreshing…</span> : null}
+        {isRefreshing ? (
+          <span className="text-muted-foreground text-xs" role="status">
+            Refreshing…
+          </span>
+        ) : null}
       </div>
 
-      <div className="border-border bg-card flex flex-wrap items-center gap-2 rounded-2xl border px-3 py-2" aria-label="Lead urgency">
-        <span className="text-muted-foreground mr-1 text-[10px] font-bold tracking-widest uppercase">Today&apos;s order</span>
-        {([
-          ["all", "All"],
-          ["overdue", "Overdue"],
-          ["today", "Due today"],
-          ["scheduled", "Scheduled later"],
-          ["none", "No next action"],
-        ] as const).map(([value, label]) => (
+      <div
+        className="border-border bg-card flex flex-wrap items-center gap-2 rounded-2xl border px-3 py-2"
+        aria-label="Lead urgency"
+      >
+        <span className="text-muted-foreground mr-1 text-[10px] font-bold tracking-widest uppercase">
+          Today&apos;s order
+        </span>
+        {(
+          [
+            ["all", "All"],
+            ["overdue", "Overdue"],
+            ["today", "Due today"],
+            ["scheduled", "Scheduled later"],
+            ["none", "No next action"],
+          ] as const
+        ).map(([value, label]) => (
           <button
             key={value}
             type="button"
@@ -779,9 +862,18 @@ export function Kanban({
       </div>
 
       {loadError ? (
-        <div className="border-destructive/30 bg-destructive/5 text-destructive flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm" role="alert">
+        <div
+          className="border-destructive/30 bg-destructive/5 text-destructive flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm"
+          role="alert"
+        >
           <span>{loadError} Your previous cards are still shown.</span>
-          <Button variant="outline" size="sm" onClick={() => void refreshBoard()}>Try again</Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void refreshBoard()}
+          >
+            Try again
+          </Button>
         </div>
       ) : null}
 
@@ -836,20 +928,30 @@ export function Kanban({
                 moveFailures={moveFailures}
                 retryingIds={retryingIds}
                 onRetryMove={(lead) => void retryMove(lead)}
-                hasMore={cursorFilterKey === boardFilterKey && Boolean(hasMore[status])}
+                hasMore={
+                  cursorFilterKey === boardFilterKey && Boolean(hasMore[status])
+                }
                 loadingMore={loadingMore.has(status)}
                 onLoadMore={() => void loadMoreInStatus(status)}
                 onNextActionSaved={(leadId, task) => {
-                  setLeads((previous) => previous.map((lead) => lead.id === leadId ? {
-                    ...lead,
-                    next_task_id: task.id,
-                    next_task_title: task.title,
-                    next_task_due_at: task.dueAt,
-                  } : lead));
+                  setLeads((previous) =>
+                    previous.map((lead) =>
+                      lead.id === leadId
+                        ? {
+                            ...lead,
+                            next_task_id: task.id,
+                            next_task_title: task.title,
+                            next_task_due_at: task.dueAt,
+                          }
+                        : lead,
+                    ),
+                  );
                   void refreshBoard();
                 }}
                 onLeadPermanentlyLocked={(leadId) => {
-                  setLeads((previous) => previous.filter((lead) => lead.id !== leadId));
+                  setLeads((previous) =>
+                    previous.filter((lead) => lead.id !== leadId),
+                  );
                   void refreshBoard();
                   router.refresh();
                 }}
@@ -932,7 +1034,8 @@ function FilteredEmptyState({
         ) : null}
         {motivation !== "all" ? (
           <Button variant="outline" size="sm" onClick={onClearMotivation}>
-            Motivation: {motivation === "unset" ? "Not set" : MOTIVATION_LABEL[motivation]}
+            Motivation:{" "}
+            {motivation === "unset" ? "Not set" : MOTIVATION_LABEL[motivation]}
             <XIcon data-icon="inline-end" />
           </Button>
         ) : null}
@@ -1021,19 +1124,24 @@ function Column({
   hasMore: boolean;
   loadingMore: boolean;
   onLoadMore: () => void;
-  onNextActionSaved: (leadId: string, task: { id: string; title: string; dueAt: string }) => void;
+  onNextActionSaved: (
+    leadId: string,
+    task: { id: string; title: string; dueAt: string },
+  ) => void;
   onLeadPermanentlyLocked: (leadId: string) => void;
 }) {
   const { isOver, setNodeRef } = useDroppable({ id: status });
   const hover = isOver && isActiveDropTarget;
-  const countLabel = leads.length < totalInStatus
-    ? `${leads.length}/${totalInStatus}`
-    : totalInStatus !== baselineTotalInStatus
-      ? `${totalInStatus}/${baselineTotalInStatus}`
-      : `${totalInStatus}`;
-  const countDescription = leads.length < totalInStatus
-    ? `${leads.length} loaded, ${totalInStatus} matching, ${baselineTotalInStatus} total`
-    : `${totalInStatus} matching, ${baselineTotalInStatus} total`;
+  const countLabel =
+    leads.length < totalInStatus
+      ? `${leads.length}/${totalInStatus}`
+      : totalInStatus !== baselineTotalInStatus
+        ? `${totalInStatus}/${baselineTotalInStatus}`
+        : `${totalInStatus}`;
+  const countDescription =
+    leads.length < totalInStatus
+      ? `${leads.length} loaded, ${totalInStatus} matching, ${baselineTotalInStatus} total`
+      : `${totalInStatus} matching, ${baselineTotalInStatus} total`;
 
   if (isCollapsed) {
     return (
@@ -1062,7 +1170,12 @@ function Column({
         >
           {STATUS_LABEL[status]}
         </div>
-        <Badge variant="secondary" className="mt-3 font-mono" aria-label={countDescription} title={countDescription}>
+        <Badge
+          variant="secondary"
+          className="mt-3 font-mono"
+          aria-label={countDescription}
+          title={countDescription}
+        >
           {countLabel}
         </Badge>
       </div>
@@ -1078,7 +1191,12 @@ function Column({
       <div className="flex items-center justify-between gap-2 px-3 py-2">
         <div className="text-sm font-semibold">{STATUS_LABEL[status]}</div>
         <div className="flex items-center gap-1.5">
-          <Badge variant="secondary" className="font-mono" aria-label={countDescription} title={countDescription}>
+          <Badge
+            variant="secondary"
+            className="font-mono"
+            aria-label={countDescription}
+            title={countDescription}
+          >
             {countLabel}
           </Badge>
           <Button
@@ -1113,7 +1231,9 @@ function Column({
               lists={listMemberships[lead.id] ?? []}
               customTags={customTags[lead.id] ?? []}
               lastMessage={lastMessageByPropertyId[lead.id] ?? null}
-              contractStatus={latestContractByPropertyId[lead.id]?.status ?? null}
+              contractStatus={
+                latestContractByPropertyId[lead.id]?.status ?? null
+              }
               renderedAtMs={renderedAtMs}
               dayStart={dayStart}
               dayEnd={dayEnd}
@@ -1126,7 +1246,12 @@ function Column({
           ))
         )}
         {hasMore ? (
-          <Button variant="outline" size="sm" disabled={loadingMore} onClick={onLoadMore}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={loadingMore}
+            onClick={onLoadMore}
+          >
             {loadingMore ? "Loading…" : `Load more ${STATUS_LABEL[status]}`}
           </Button>
         ) : null}
@@ -1171,7 +1296,11 @@ function LeadCard({
   moveFailure?: MoveFailure | null;
   isRetrying?: boolean;
   onRetry?: () => void;
-  onNextActionSaved?: (task: { id: string; title: string; dueAt: string }) => void;
+  onNextActionSaved?: (task: {
+    id: string;
+    title: string;
+    dueAt: string;
+  }) => void;
   onPermanentlyLocked?: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
@@ -1180,7 +1309,7 @@ function LeadCard({
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
     : {};
   const assigneeEmail = lead.assigned_user_id
-    ? assigneeEmails[lead.assigned_user_id] ?? null
+    ? (assigneeEmails[lead.assigned_user_id] ?? null)
     : null;
   const assignedToMe =
     lead.assigned_user_id && lead.assigned_user_id === currentUserId;
@@ -1226,14 +1355,20 @@ function LeadCard({
         onPermanentlyLocked?.();
         return;
       }
-      setNextActionError(result.error.message || "Couldn't save the next action.");
+      setNextActionError(
+        result.error.message || "Couldn't save the next action.",
+      );
       return;
     }
     setSettingAction(false);
     setNextActionError(null);
     setDueInput("");
     idempotencyKey.current = null;
-    onNextActionSaved?.({ id: result.data.id, title: result.data.title, dueAt: result.data.dueAt });
+    onNextActionSaved?.({
+      id: result.data.id,
+      title: result.data.title,
+      dueAt: result.data.dueAt,
+    });
   };
 
   return (
@@ -1259,7 +1394,9 @@ function LeadCard({
       ) : null}
 
       {overlay || !onClick ? (
-        <div className={`truncate font-semibold ${hasUnread ? "pr-4" : ""}`}>{lead.address}</div>
+        <div className={`truncate font-semibold ${hasUnread ? "pr-4" : ""}`}>
+          {lead.address}
+        </div>
       ) : (
         <Link
           href={`/leads/${lead.id}`}
@@ -1272,7 +1409,11 @@ function LeadCard({
           {lead.address}
         </Link>
       )}
-      {!overlay ? <div className="absolute top-2 right-2"><SoftphoneLeadButton lead={dialerLead} compact /></div> : null}
+      {!overlay ? (
+        <div className="absolute top-2 right-2">
+          <SoftphoneLeadButton lead={dialerLead} compact />
+        </div>
+      ) : null}
       <div className="text-muted-foreground mt-0.5 truncate">
         {owner}
         {location ? ` · ${location}` : ""}
@@ -1315,9 +1456,9 @@ function LeadCard({
             className="text-[10px]"
           >
             {assignedToMe
-              ? "me"
+              ? (assigneeEmail ?? "Assigned to you")
               : assigneeEmail
-                ? shortEmail(assigneeEmail)
+                ? assigneeEmail
                 : "assigned"}
           </Badge>
         ) : null}
@@ -1430,15 +1571,25 @@ function LeadCard({
             <span className="truncate">{nextAction.label}</span>
           </span>
           {nextAction.tone === "none" && !overlay && !settingAction ? (
-            <button type="button" className="font-bold underline underline-offset-2" onClick={() => setSettingAction(true)}>
+            <button
+              type="button"
+              className="font-bold underline underline-offset-2"
+              onClick={() => setSettingAction(true)}
+            >
               Set
             </button>
           ) : null}
         </div>
-        {lead.next_task_title ? <div className="mt-0.5 truncate text-[10px] opacity-75">{lead.next_task_title}</div> : null}
+        {lead.next_task_title ? (
+          <div className="mt-0.5 truncate text-[10px] opacity-75">
+            {lead.next_task_title}
+          </div>
+        ) : null}
         {settingAction ? (
           <div className="mt-2 flex flex-col gap-1.5">
-            <label className="font-semibold" htmlFor={`next-action-${lead.id}`}>Due date and time</label>
+            <label className="font-semibold" htmlFor={`next-action-${lead.id}`}>
+              Due date and time
+            </label>
             <input
               id={`next-action-${lead.id}`}
               type="datetime-local"
@@ -1448,14 +1599,32 @@ function LeadCard({
               className="border-border bg-background h-8 rounded-md border px-2 text-[11px]"
             />
             <div className="flex gap-2">
-              <button type="button" disabled={savingAction} className="font-bold underline underline-offset-2 disabled:opacity-50" onClick={() => void saveNextAction()}>
+              <button
+                type="button"
+                disabled={savingAction}
+                className="font-bold underline underline-offset-2 disabled:opacity-50"
+                onClick={() => void saveNextAction()}
+              >
                 {savingAction ? "Saving…" : nextActionError ? "Retry" : "Save"}
               </button>
-              <button type="button" disabled={savingAction} className="text-muted-foreground underline underline-offset-2 disabled:opacity-50" onClick={() => { setSettingAction(false); setNextActionError(null); idempotencyKey.current = null; }}>
+              <button
+                type="button"
+                disabled={savingAction}
+                className="text-muted-foreground underline underline-offset-2 disabled:opacity-50"
+                onClick={() => {
+                  setSettingAction(false);
+                  setNextActionError(null);
+                  idempotencyKey.current = null;
+                }}
+              >
                 Cancel
               </button>
             </div>
-            {nextActionError ? <div className="text-destructive" role="alert">{nextActionError} Not saved.</div> : null}
+            {nextActionError ? (
+              <div className="text-destructive" role="alert">
+                {nextActionError} Not saved.
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -1466,8 +1635,8 @@ function LeadCard({
           role="alert"
         >
           <span>
-            Couldn&apos;t move to {STATUS_LABEL[moveFailure.attemptedStatus]}. Not
-            saved.
+            Couldn&apos;t move to {STATUS_LABEL[moveFailure.attemptedStatus]}.
+            Not saved.
           </span>
           <button
             type="button"
@@ -1495,7 +1664,8 @@ function LeadCard({
             <span className="font-semibold text-foreground/80">
               {lastMessage.direction === "inbound" ? "Them" : "Us"}:
             </span>{" "}
-            {lastMessage.body} · {formatRelativeAge(lastMessage.createdAt, renderedAtMs)}
+            {lastMessage.body} ·{" "}
+            {formatRelativeAge(lastMessage.createdAt, renderedAtMs)}
           </>
         ) : (
           "No messages"
@@ -1517,13 +1687,39 @@ function contractsFromLeads(
 
 function toSoftphoneLead(lead: Lead): SoftphoneLead {
   const contact = lead.homeowner;
-  const phones = [contact?.phone_1, contact?.phone_2, contact?.phone_3].filter((phone): phone is string => Boolean(phone));
+  const phones = [contact?.phone_1, contact?.phone_2, contact?.phone_3].filter(
+    (phone): phone is string => Boolean(phone),
+  );
   const name = homeownerName(contact);
   const callable = canShowCallButton({
-    property: { id: lead.id, state: lead.state, is_dnc_locked: lead.is_dnc_locked },
-    contact: contact?.id ? { id: contact.id, phone_1: contact.phone_1 ?? null, phone_2: contact.phone_2 ?? null, phone_3: contact.phone_3 ?? null, do_not_contact: contact.do_not_contact ?? false, sms_opted_out: contact.sms_opted_out ?? false } : null,
+    property: {
+      id: lead.id,
+      state: lead.state,
+      is_dnc_locked: lead.is_dnc_locked,
+    },
+    contact: contact?.id
+      ? {
+          id: contact.id,
+          phone_1: contact.phone_1 ?? null,
+          phone_2: contact.phone_2 ?? null,
+          phone_3: contact.phone_3 ?? null,
+          do_not_contact: contact.do_not_contact ?? false,
+          sms_opted_out: contact.sms_opted_out ?? false,
+        }
+      : null,
   });
-  return { id: lead.id, contactId: contact?.id ?? null, firstName: contact?.first_name ?? name.split(" ")[0] ?? "homeowner", name, address: lead.address, state: lead.state, phones, dncLocked: lead.is_dnc_locked ?? false, contactDnc: contact?.do_not_contact ?? false, callable };
+  return {
+    id: lead.id,
+    contactId: contact?.id ?? null,
+    firstName: contact?.first_name ?? name.split(" ")[0] ?? "homeowner",
+    name,
+    address: lead.address,
+    state: lead.state,
+    phones,
+    dncLocked: lead.is_dnc_locked ?? false,
+    contactDnc: contact?.do_not_contact ?? false,
+    callable,
+  };
 }
 
 export function homeownerName(homeowner: ContactSummary | null): string {
@@ -1536,10 +1732,7 @@ export function homeownerName(homeowner: ContactSummary | null): string {
   return personName || "Unknown homeowner";
 }
 
-export function formatRelativeAge(
-  isoDate: string,
-  nowMs: number,
-): string {
+export function formatRelativeAge(isoDate: string, nowMs: number): string {
   const timestamp = new Date(isoDate).getTime();
   if (!Number.isFinite(timestamp)) return "—";
   const seconds = Math.max(0, Math.floor((nowMs - timestamp) / 1000));
@@ -1559,9 +1752,4 @@ export function formatRelativeAge(
 
 function formatDisposition(disposition: string): string {
   return disposition.replaceAll("_", " ");
-}
-
-function shortEmail(email: string): string {
-  const at = email.indexOf("@");
-  return at > 0 ? email.slice(0, at) : email;
 }

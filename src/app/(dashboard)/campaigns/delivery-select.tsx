@@ -33,6 +33,29 @@ function formatLastSynced(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US");
 }
 
+function titleCaseProvider(provider: string): string {
+  return provider
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function senderLabel(provider: string, phoneE164: string): string {
+  const lastFour = phoneE164.replace(/\D/g, "").slice(-4);
+  return `${titleCaseProvider(provider)} number${lastFour ? ` ending ${lastFour}` : ""}`;
+}
+
+function providerCampaignLabel(
+  provider: string,
+  name: string | null,
+  externalId: string,
+): string {
+  if (name?.trim()) return name.trim();
+  const suffix = externalId.slice(-6);
+  return `${titleCaseProvider(provider)} campaign${suffix ? ` — ID ending ${suffix}` : ""}`;
+}
+
 /**
  * Shared Delivery setup selector: required sending number + optional
  * provider campaign, both read from the synced provider catalog.
@@ -64,15 +87,13 @@ export function DeliverySelect({
           onChange={(event) => onSenderNumberChange(event.target.value)}
           disabled={disabled || loading || senders.length === 0}
           aria-invalid={error ? "true" : "false"}
-          aria-describedby={
-            error ? "delivery-sender-number-error" : undefined
-          }
+          aria-describedby={error ? "delivery-sender-number-error" : undefined}
           className={SELECT_CLASS}
         >
           <option value="">Choose a sending number…</option>
           {senders.map((sender) => (
             <option key={sender.phoneE164} value={sender.phoneE164}>
-              {sender.phoneE164}
+              {senderLabel(sender.provider, sender.phoneE164)}
             </option>
           ))}
         </select>
@@ -107,7 +128,11 @@ export function DeliverySelect({
                 key={providerCampaign.externalId}
                 value={providerCampaign.externalId}
               >
-                {providerCampaign.name ?? providerCampaign.externalId}
+                {providerCampaignLabel(
+                  providerCampaign.provider,
+                  providerCampaign.name,
+                  providerCampaign.externalId,
+                )}
               </option>
             ))}
           </select>

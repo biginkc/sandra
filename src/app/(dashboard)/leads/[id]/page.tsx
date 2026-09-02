@@ -9,6 +9,7 @@ import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { authoritativeDisplayName } from "@/lib/auth/team-member";
 import { leadNoticeMessage } from "@/lib/leads/notices";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -344,15 +345,16 @@ export default async function LeadDetailPage({
   // An existing thread's customer and business numbers are one route. Pick
   // both from the same newest homeowner SMS row so a lead with multiple saved
   // phones cannot accidentally reply from sender B to customer phone A.
-  const latestHomeownerSmsRoute = findLatestAuthoritativeSmsRoute(
-    initialMessages.filter(
-      (message) =>
-        message.channel === "sms" &&
-        Boolean(homeownerContactId) &&
-        message.contact_id === homeownerContactId &&
-        message.property_id === lead.id,
-    ),
-  )?.parties ?? null;
+  const latestHomeownerSmsRoute =
+    findLatestAuthoritativeSmsRoute(
+      initialMessages.filter(
+        (message) =>
+          message.channel === "sms" &&
+          Boolean(homeownerContactId) &&
+          message.contact_id === homeownerContactId &&
+          message.property_id === lead.id,
+      ),
+    )?.parties ?? null;
   const inlineRoutePhoneChoice = latestHomeownerSmsRoute
     ? selectSmsPhoneByNumber(
         lead.homeowner,
@@ -442,7 +444,11 @@ export default async function LeadDetailPage({
 
       const authUsersById = new Map<
         string,
-        { id: string; email?: string | null }
+        {
+          id: string;
+          email?: string | null;
+          user_metadata?: Record<string, unknown>;
+        }
       >();
       const authUsersPerPage = 200;
       // Advance page numbers locally: auth-js can mis-parse multi-digit
@@ -539,8 +545,7 @@ export default async function LeadDetailPage({
     ? await smsConsentEventsPromise
     : { data: [], error: null };
   const phoneSuppressionResult = await smsPhoneSuppressionPromise;
-  const inlinePhoneSuppressionResult =
-    await inlineSmsPhoneSuppressionPromise;
+  const inlinePhoneSuppressionResult = await inlineSmsPhoneSuppressionPromise;
   const consentState: ConsentState | null = smsConsentEventsResult.error
     ? null
     : computeConsentState(smsConsentEventsResult.data ?? []);
@@ -608,14 +613,18 @@ export default async function LeadDetailPage({
     }));
   }
 
-  // Resolve author + assignee emails via the admin client (auth.users isn't
-  // RLS-accessible to end-users). The identities are already filtered through
-  // this lead's active-org membership allowlist above.
+  // Resolve author + assignee labels via the admin client (auth.users isn't
+  // RLS-accessible to end-users). Prefer an authoritative name from Hugo/auth
+  // metadata, then fall back to email. The identities are already filtered
+  // through this lead's active-org membership allowlist above.
   const authorEmails: Record<string, string> = {};
   let assigneeEmail: string | null = null;
   const assigneeUsers = await usersPromise;
   for (const u of assigneeUsers) {
-    if (u.email) authorEmails[u.id] = u.email;
+    const label =
+      authoritativeDisplayName({ user_metadata: u.user_metadata ?? {} }) ??
+      u.email;
+    if (label) authorEmails[u.id] = label;
   }
   if (lead.assigned_user_id) {
     assigneeEmail = authorEmails[lead.assigned_user_id] ?? null;
@@ -913,9 +922,7 @@ export default async function LeadDetailPage({
                   homeownerPhone={inlineReplyPhone}
                   replyToPhone={inlineReplyPhone}
                   preferredFromNumber={inlineReplyFromNumber}
-                  phoneUnavailableMessage={
-                    inlineReplyPhoneUnavailableMessage
-                  }
+                  phoneUnavailableMessage={inlineReplyPhoneUnavailableMessage}
                   footerAction={
                     !inlineSmsPresentation.smsRestricted &&
                     !inlineReplyUnavailable ? (
@@ -924,8 +931,7 @@ export default async function LeadDetailPage({
                   }
                 />
               </SmsEntryPointGate>
-              {inlineSmsPresentation.smsRestricted ||
-              inlineReplyUnavailable ? (
+              {inlineSmsPresentation.smsRestricted || inlineReplyUnavailable ? (
                 <div className="mt-2 flex justify-end">
                   <AddNoteComposer propertyId={lead.id} compact />
                 </div>

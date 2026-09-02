@@ -14,6 +14,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { isAdminEmail } from "@/lib/auth/allowlist";
+import { authoritativeDisplayName } from "@/lib/auth/team-member";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -68,6 +69,7 @@ export default async function AdminUsersPage() {
     return {
       id: u.id,
       email: u.email ?? "(no email)",
+      displayName: authoritativeDisplayName(u),
       createdAt: u.created_at,
       lastSignInAt: u.last_sign_in_at ?? null,
       hugoLinked: Boolean(
@@ -98,7 +100,7 @@ export default async function AdminUsersPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Email</TableHead>
+              <TableHead>Team member</TableHead>
               <TableHead>Role</TableHead>
               <TableHead>Access</TableHead>
               <TableHead>Hugo linked</TableHead>
@@ -130,10 +132,21 @@ function UserRowView({ row }: { row: UserRow }) {
   return (
     <TableRow>
       <TableCell className="font-medium">
-        {row.email}
-        {row.isSelf ? (
-          <span className="text-muted-foreground ml-2 text-xs">(you)</span>
-        ) : null}
+        <div>
+          <span>{row.displayName ?? row.email}</span>
+          {row.isSelf ? (
+            <span className="text-muted-foreground ml-2 text-xs">(you)</span>
+          ) : null}
+        </div>
+        {row.displayName ? (
+          <div className="text-muted-foreground text-xs font-normal">
+            {row.email}
+          </div>
+        ) : (
+          <div className="text-amber-700 text-xs font-normal">
+            Name not set in Hugo
+          </div>
+        )}
       </TableCell>
       <TableCell>
         <MembershipRoleControl

@@ -1,6 +1,10 @@
 "use client";
 
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
+import {
+  teamMemberPrimaryLabel,
+  teamMemberSecondaryLabel,
+} from "@/lib/auth/team-member";
 import { BlockShell, CombinatorSelect, useBlockOptions } from "./_block-shell";
 
 type Block = Extract<FilterBlock, { kind: "assignee" }>;
@@ -43,13 +47,23 @@ export default function AssigneeBlock({
           Unassigned
         </label>
         {assignees.map((a) => (
-          <label key={a.id} className="flex items-center gap-2 text-sm cursor-pointer">
+          <label
+            key={a.id}
+            className="flex items-center gap-2 text-sm cursor-pointer"
+          >
             <input
               type="checkbox"
               checked={block.values.includes(a.id)}
               onChange={() => toggle(a.id)}
             />
-            {a.email}
+            <span className="flex min-w-0 flex-col">
+              <span>{teamMemberPrimaryLabel(a)}</span>
+              {teamMemberSecondaryLabel(a) ? (
+                <span className="text-muted-foreground text-xs">
+                  {teamMemberSecondaryLabel(a)}
+                </span>
+              ) : null}
+            </span>
           </label>
         ))}
       </div>

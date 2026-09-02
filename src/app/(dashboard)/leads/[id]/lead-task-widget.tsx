@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { callAction } from "@/lib/errors/call-action";
+import { teamMemberOptionLabel } from "@/lib/auth/team-member";
 import { cn } from "@/lib/utils";
 
 import {
@@ -51,7 +52,9 @@ export function LeadTaskWidget({
           setMembers(result.data);
           setAssigneeId((current) => {
             if (current) return current;
-            return initialAssigneeId ?? currentUserId ?? result.data[0]?.id ?? "";
+            return (
+              initialAssigneeId ?? currentUserId ?? result.data[0]?.id ?? ""
+            );
           });
         }
       })
@@ -137,7 +140,7 @@ export function LeadTaskWidget({
             </option>
             {members.map((member) => (
               <option key={member.id} value={member.id}>
-                {member.id === currentUserId ? "Me" : member.email}
+                {teamMemberOptionLabel(member, currentUserId)}
               </option>
             ))}
           </select>

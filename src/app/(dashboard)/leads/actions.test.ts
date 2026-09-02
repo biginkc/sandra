@@ -1123,7 +1123,11 @@ describe("listOrgUsers", () => {
         {
           data: {
             users: [
-              { id: "member-2", email: "z@example.test" },
+              {
+                id: "member-2",
+                email: "z@example.test",
+                user_metadata: { display_name: "Zara Seller" },
+              },
               { id: "outside", email: "outside@example.test" },
             ],
             nextPage: 2,
@@ -1132,7 +1136,13 @@ describe("listOrgUsers", () => {
         },
         {
           data: {
-            users: [{ id: "member-1", email: "a@example.test" }],
+            users: [
+              {
+                id: "member-1",
+                email: "a@example.test",
+                user_metadata: { display_name: "Alex Agent" },
+              },
+            ],
             nextPage: null,
           },
           error: null,
@@ -1145,8 +1155,18 @@ describe("listOrgUsers", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.data).toEqual([
-        { id: "member-1", email: "a@example.test" },
-        { id: "member-2", email: "z@example.test" },
+        {
+          id: "member-1",
+          email: "a@example.test",
+          displayName: "Alex Agent",
+          isActive: true,
+        },
+        {
+          id: "member-2",
+          email: "z@example.test",
+          displayName: "Zara Seller",
+          isActive: true,
+        },
       ]);
     }
   });
@@ -1221,7 +1241,14 @@ function makeListUsersSupabase() {
       return {
         select: vi.fn(() => ({
           eq: vi.fn(async () => ({
-            data: [{ org_id: "org-1" }],
+            data: [
+              {
+                org_id: "org-1",
+                access_status: "active",
+                access_expires_at: null,
+                deletion_prepared_at: null,
+              },
+            ],
             error: null,
           })),
         })),
@@ -1233,7 +1260,11 @@ function makeListUsersSupabase() {
 function makeListUsersAdmin(
   userPages: Array<{
     data: {
-      users: Array<{ id: string; email: string }>;
+      users: Array<{
+        id: string;
+        email: string;
+        user_metadata?: Record<string, unknown>;
+      }>;
       nextPage: number | null;
     };
     error: null;
@@ -1243,14 +1274,19 @@ function makeListUsersAdmin(
   return {
     from: vi.fn((table: string) => {
       if (table !== "memberships") throw new Error(`unexpected table ${table}`);
-      return {
-        select: vi.fn(() => ({
-          in: vi.fn(async () => ({
-            data: [{ user_id: "member-1" }, { user_id: "member-2" }],
-            error: null,
-          })),
+      const builder = {
+        select: vi.fn(() => builder),
+        eq: vi.fn(() => builder),
+        order: vi.fn(() => builder),
+        limit: vi.fn(async () => ({
+          data: [
+            { user_id: "member-1", access_status: "active" },
+            { user_id: "member-2", access_status: "active" },
+          ],
+          error: null,
         })),
       };
+      return builder;
     }),
     auth: {
       admin: { listUsers },

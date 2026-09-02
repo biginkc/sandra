@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
+import { teamMemberOptionLabel } from "@/lib/auth/team-member";
 
 import {
   listBookingAssignees,
@@ -67,9 +68,6 @@ export function AssigneeSelect({
     };
   }, [propertyId, contactId]);
 
-  const others = members.filter((m) => m.id !== currentUserId);
-  const showMe = currentUserId !== null;
-
   return (
     <select
       data-testid="assignee-select"
@@ -84,10 +82,9 @@ export function AssigneeSelect({
         className,
       )}
     >
-      {showMe ? <option value={currentUserId!}>Me</option> : null}
-      {others.map((m) => (
+      {members.map((m) => (
         <option key={m.id} value={m.id}>
-          {m.email}
+          {teamMemberOptionLabel(m, currentUserId)}
         </option>
       ))}
     </select>
