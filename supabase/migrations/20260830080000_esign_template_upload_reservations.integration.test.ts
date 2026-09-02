@@ -17,6 +17,10 @@ const definitiveFailureSql = readFileSync(
   "supabase/migrations/20260901181004_record_definitive_esign_template_provider_create_failure.sql",
   "utf8",
 );
+const sellerEmailAuthoritySql = readFileSync(
+  "supabase/migrations/20260902010000_esign_dialog_seller_email_authority.sql",
+  "utf8",
+);
 
 let pg: Client;
 let orgId = "";
@@ -252,6 +256,8 @@ beforeAll(async () => {
   await pg.query("begin");
   await pg.query(definitiveFailureSql);
   await pg.query(definitiveFailureSql);
+  await pg.query(sellerEmailAuthoritySql);
+  await pg.query(sellerEmailAuthoritySql);
 });
 
 beforeEach(async () => {
@@ -287,6 +293,83 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     expect(definitiveFailureSql).not.toContain(
       "mark_esign_template_provider_create_unknown(",
     );
+    expect(sellerEmailAuthoritySql).toContain(
+      "set email = v_submitted_seller_email",
+    );
+  });
+
+  it("accepts the validated dialog Seller email and atomically persists it for the next prefill", async () => {
+    const finalized = await finalizeOrdinaryTemplate();
+    await pg.query(
+      `update public.org_esign_integrations
+       set callback_verified_at=now(),sending_enabled=true
+       where org_id=$1`,
+      [orgId],
+    );
+    const mergeValues = {
+      seller_name: "Seller Owner",
+      property_address: "100 eSign QA A St",
+      offer_price: "$125,000",
+      closing_date: "2026-09-30",
+      earnest_money: "$1,000",
+    };
+
+    for (const storedEmail of [null, "old-seller@example.com"] as const) {
+      const contactId = crypto.randomUUID();
+      const propertyId = crypto.randomUUID();
+      const submittedEmail = `dialog-${propertyId}@example.com`;
+      await pg.query(
+        `insert into public.contacts (id,org_id,first_name,last_name,email)
+         values ($1,$2,'Seller','Owner',$3)`,
+        [contactId, orgId, storedEmail],
+      );
+      await pg.query(
+        `insert into public.properties (
+           id,org_id,address,state,status,homeowner_contact_id
+         ) values ($1,$2,'100 eSign QA A St','MO','new_lead',$3)`,
+        [propertyId, orgId, contactId],
+      );
+      const signers = [
+        {
+          role: "Seller",
+          order: 0,
+          name: "Seller Owner",
+          emailAddress: submittedEmail,
+        },
+        {
+          role: "seller",
+          order: 1,
+          name: "Buyer One",
+          emailAddress: "buyer@example.com",
+        },
+      ];
+      const claim = await pg.query<{ outcome: string; blocker_code: string | null }>(
+        `select outcome,blocker_code from public.create_esign_request(
+           $1,$2,$3,$4::jsonb,$5::jsonb,$6,repeat('a',64),null,$7
+         )`,
+        [
+          orgId,
+          propertyId,
+          finalized.templateId,
+          JSON.stringify(signers),
+          JSON.stringify(mergeValues),
+          crypto.randomUUID(),
+          memberId,
+        ],
+      );
+      expect(claim.rows[0]).toEqual({
+        outcome: "created",
+        blocker_code: null,
+      });
+      expect(
+        (
+          await pg.query<{ email: string }>(
+            "select email from public.contacts where id=$1 and org_id=$2",
+            [contactId, orgId],
+          )
+        ).rows[0].email,
+      ).toBe(submittedEmail);
+    }
   });
 
   it("keeps authenticated template options free of server-only recovery fields", async () => {

@@ -75,7 +75,9 @@ export function SendForSignature({
   onFinished,
 }: Props) {
   const [open, setOpen] = useState(false);
-  const initialBlocker = primarySendBlocker(initialBlockers);
+  const initialBlocker = primarySendBlocker(
+    initialBlockers.filter((blocker) => blocker !== "owner_email_missing"),
+  );
 
   return (
     <div className="flex min-w-0 flex-col items-start gap-1">
@@ -241,9 +243,16 @@ export function SendForSignatureDialog({
       ) ?? null,
     [preflight, selectedTemplateId],
   );
+  const sellerSigner = selectedTemplate
+    ? signers.find((signer) => signer.role === selectedTemplate.sellerRoleName)
+    : null;
   const blocker =
-    primarySendBlocker(preflight?.blockers ?? []) ??
-    (preflight && !preflight.sellerDefaults.emailAddress.trim()
+    primarySendBlocker(
+      (preflight?.blockers ?? []).filter(
+        (candidate) => candidate !== "owner_email_missing",
+      ),
+    ) ??
+    (preflight && selectedTemplate && !sellerSigner?.emailAddress.trim()
       ? "owner_email_missing"
       : null);
   const fieldsComplete =

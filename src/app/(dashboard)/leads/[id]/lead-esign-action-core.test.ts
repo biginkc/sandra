@@ -235,11 +235,6 @@ describe("lead eSign action orchestration", () => {
     ["disconnect", { connected: false }, "PROVIDER_DISCONNECTED"],
     ["toggle", { sendingEnabled: false }, "SENDING_DISABLED"],
     ["template deletion", { templates: [] }, "NO_TEMPLATES"],
-    [
-      "owner email removal",
-      { sellerEmailAddress: null },
-      "OWNER_EMAIL_MISSING",
-    ],
   ] as const)(
     "blocks a TOCTOU %s change before claiming or dispatching",
     async (_name, change, code) => {
@@ -254,7 +249,24 @@ describe("lead eSign action orchestration", () => {
     },
   );
 
-  it("returns actionable guidance when the seller email disappears before send", async () => {
+  it("maps a stale database signer-authority rejection to signer guidance", async () => {
+    const h = harness();
+    h.repository.claimSend.mockResolvedValue({ outcome: "invalid_send_input" });
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "INVALID_SEND_INPUT",
+        message:
+          "The signer details changed. Review each signer and try again.",
+      },
+    });
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("uses the validated dialog seller email when the stored email is blank", async () => {
     const h = harness();
     h.repository.loadLeadSendContext.mockResolvedValue(
       leadContext({ sellerEmailAddress: null }),
@@ -262,16 +274,43 @@ describe("lead eSign action orchestration", () => {
 
     const result = await h.core.send(sendInput);
 
-    expect(result).toMatchObject({
-      ok: false,
-      error: {
-        code: "OWNER_EMAIL_MISSING",
-        message: "Save a seller email on the lead before sending.",
-      },
-    });
-    expect(h.repository.claimSend).not.toHaveBeenCalled();
-    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: true, data: { requestId: "request-1" } });
+    expect(h.repository.claimSend).toHaveBeenCalledWith(
+      expect.objectContaining({ signers: sendInput.signers }),
+    );
+    expect(h.provider.sendWithTemplate).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    {
+      label: "whitespace-only",
+      emailAddress: "   ",
+      code: "OWNER_EMAIL_MISSING",
+      message: "Enter the seller email before sending.",
+    },
+    {
+      label: "malformed non-empty",
+      emailAddress: "seller@@example.com",
+      code: "INVALID_SEND_INPUT",
+      message: "Enter one email address without spaces for the seller.",
+    },
+  ])(
+    "returns the seller email-field reason for $label input",
+    async ({ emailAddress, code, message }) => {
+      const h = harness();
+      const result = await h.core.send({
+        ...sendInput,
+        signers: [
+          { ...sendInput.signers[0], emailAddress },
+          sendInput.signers[1],
+        ],
+      });
+
+      expect(result).toMatchObject({ ok: false, error: { code, message } });
+      expect(h.repository.claimSend).not.toHaveBeenCalled();
+      expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+    },
+  );
 
   it("honors the atomic claim's final blocker recheck", async () => {
     const h = harness();

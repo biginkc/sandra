@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { ValidationError } from "@/lib/errors/classes";
 import { reportError } from "@/lib/errors/report";
 import { err, ok, type Result } from "@/lib/errors/result";
+import { isValidEsignEmail } from "@/lib/esign/email";
 import {
   ESIGN_MERGE_FIELD_NAMES,
   type EsignDeliveryState,
@@ -115,6 +116,7 @@ export type SendClaim =
   | Readonly<{ outcome: "intent_conflict" }>
   | Readonly<{ outcome: "authorization_changed" }>
   | Readonly<{ outcome: "not_found" }>
+  | Readonly<{ outcome: "invalid_send_input" }>
   | Readonly<{ outcome: "retry_ineligible" }>;
 
 export type EsignActionRepository = Readonly<{
@@ -342,12 +344,13 @@ async function send(
     propertyId: normalized.propertyId,
   });
   if (!context) fail("NOT_FOUND", "Lead not found.");
-  assertNoBlockers(context);
+  assertNoSendBlockers(context);
   const template = context.templates.find(
     (candidate) => candidate.id === normalized.templateId,
   );
   if (!template)
     fail("TEMPLATE_CHANGED", "Refresh the contract templates and try again.");
+  assertSellerEmail(template, normalized.signers);
   validateContractSendInput({
     localRequestId: "validation-only",
     template,
@@ -381,6 +384,11 @@ async function send(
     );
   if (claim.outcome === "not_found")
     fail("NOT_FOUND", "Lead not found. Refresh and try again.");
+  if (claim.outcome === "invalid_send_input")
+    fail(
+      "INVALID_SEND_INPUT",
+      "The signer details changed. Review each signer and try again.",
+    );
   if (claim.outcome === "existing")
     return resolveExistingIntent(claim.request, payloadHash, actor.orgId);
   try {
@@ -812,9 +820,31 @@ function blockersFor(context: LeadSendContext): SendBlockerCode[] {
   return blockers;
 }
 
-function assertNoBlockers(context: LeadSendContext): void {
-  const blocker = primarySendBlocker(blockersFor(context));
+function assertNoSendBlockers(context: LeadSendContext): void {
+  const blocker = primarySendBlocker(
+    blockersFor(context).filter(
+      (candidate) => candidate !== "owner_email_missing",
+    ),
+  );
   if (blocker) fail(blockerCode(blocker), blockerMessage(blocker));
+}
+
+function assertSellerEmail(
+  template: TemplateOption,
+  signers: readonly SignerAssignment[],
+): void {
+  const seller = signers.find(
+    (signer) => signer.role === template.sellerRoleName,
+  );
+  if (seller && seller.emailAddress.length === 0) {
+    fail("OWNER_EMAIL_MISSING", "Enter the seller email before sending.");
+  }
+  if (seller && !isValidEsignEmail(seller.emailAddress)) {
+    fail(
+      "INVALID_SEND_INPUT",
+      "Enter one email address without spaces for the seller.",
+    );
+  }
 }
 
 function blockerCode(blocker: SendBlockerCode): string {
@@ -826,7 +856,7 @@ function blockerMessage(blocker: SendBlockerCode): string {
     provider_disconnected: "Dropbox Sign is not connected.",
     sending_disabled: "Sending from leads is turned off.",
     no_templates: "No eSign templates are available.",
-    owner_email_missing: "Save a seller email on the lead before sending.",
+    owner_email_missing: "Enter the seller email before sending.",
   };
   return messages[blocker];
 }

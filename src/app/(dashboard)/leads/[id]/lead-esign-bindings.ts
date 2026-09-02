@@ -469,6 +469,8 @@ export function mapAtomicSendBlocker(
   if (blockerCode === "ACTIVE_MEMBERSHIP_REQUIRED")
     return { outcome: "authorization_changed" };
   if (blockerCode === "PROPERTY_NOT_FOUND") return { outcome: "not_found" };
+  if (blockerCode === "SIGNER_PAYLOAD_INVALID")
+    return { outcome: "invalid_send_input" };
   return null;
 }
 
