@@ -51,6 +51,24 @@ describe("TemplateLibrary", () => {
     expect(screen.getByText("PDF up to 40 MB · or pick a file from Dropbox")).toBeVisible();
   });
 
+  it("explains that Dropbox Sign must be connected before templates can be added", () => {
+    render(
+      <InitialEditorSessionProvider>
+        <TemplateLibrary
+          result={{ ok: true, data: [] }}
+          dropboxSignConnected={false}
+          templateCreationDisabledReason="Connect Dropbox Sign before adding templates."
+        />
+      </InitialEditorSessionProvider>,
+    );
+
+    expect(screen.getByText("Dropbox Sign is not connected")).toBeVisible();
+    expect(
+      screen.getByText(/Connect Dropbox Sign in Integrations before adding or managing/i),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Add template" })).toBeDisabled();
+  });
+
   it("sorts provider roles by order and warns before deleting recent usage", () => {
     render(
       <InitialEditorSessionProvider>

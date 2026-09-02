@@ -29,10 +29,14 @@ import type {
 export function TemplateLibrary({
   result,
   actions,
+  dropboxSignConnected = true,
+  templateCreationDisabledReason,
   onRetry,
 }: {
   result: TemplateLibraryLoadResult;
   actions?: TemplateLibraryActions | null;
+  dropboxSignConnected?: boolean;
+  templateCreationDisabledReason?: string;
   onRetry?: () => void;
 }) {
   const resolvedActions = actions === undefined ? templateLibraryActions : (actions ?? undefined);
@@ -71,18 +75,26 @@ export function TemplateLibrary({
       <DataTableShell>
         <div className="flex min-h-72 flex-col items-center justify-center gap-3 px-8 py-14 text-center">
           <div className="space-y-1">
-            <h2 className="font-semibold">No templates yet</h2>
+            <h2 className="font-semibold">
+              {dropboxSignConnected ? "No templates yet" : "Dropbox Sign is not connected"}
+            </h2>
             <p className="text-muted-foreground max-w-md text-sm leading-relaxed">
-              Upload a contract PDF and place the signature, initials, date, and
-              merge fields once. Every send after that is two clicks from a lead.
+              {dropboxSignConnected
+                ? "Upload a contract PDF and place the signature, initials, date, and merge fields once. Every send after that is two clicks from a lead."
+                : "Connect Dropbox Sign in Integrations before adding or managing eSign templates."}
             </p>
           </div>
           <AddTemplateDialog
             actions={resolvedActions}
-            disabledReason={resolvedActions ? undefined : "Template actions are not connected yet."}
+            disabledReason={
+              templateCreationDisabledReason ??
+              (resolvedActions ? undefined : "Template actions are not connected yet.")
+            }
           />
           <p className="text-muted-foreground font-mono text-[11px]">
-            PDF up to 40 MB · or pick a file from Dropbox
+            {dropboxSignConnected
+              ? "PDF up to 40 MB · or pick a file from Dropbox"
+              : "Reconnect Dropbox Sign to upload contract PDFs."}
           </p>
         </div>
       </DataTableShell>
