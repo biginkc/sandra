@@ -21,12 +21,17 @@ export type StuckSendReconciliationPorts = Readonly<{
     complete: boolean;
     providerRequestIds: readonly string[];
   }>;
-  markOutcome(input: Omit<StuckEsignSend, "deliveryState"> & {
+  markOutcome(input: Omit<StuckEsignSend, "deliveryState"> & ({
     deliveryState: "send_unknown" | "failed";
     safeErrorMessage: string | null;
     resolutionSource?: "automatic";
     evidence?: Record<string, unknown>;
-  }): Promise<"updated" | "raced">;
+  } | {
+    deliveryState: "sent";
+    providerRequestId: string;
+    resolutionSource: "automatic";
+    evidence: Record<string, unknown>;
+  })): Promise<"updated" | "raced">;
   recordZeroResult(input: StuckEsignSend & {
     observedAt: Date;
   }): Promise<{
@@ -75,6 +80,7 @@ export async function reconcileStuckEsignSends(
   });
   const summary = {
     checked: 0,
+    sent: 0,
     failed: 0,
     unknown: 0,
     deferred: 0,
@@ -119,28 +125,34 @@ export async function reconcileStuckEsignSends(
           now,
           zeroEvidence,
         });
-        const result = await ports.markOutcome({
-          ...candidate,
-          deliveryState: shouldFail ? "failed" : "send_unknown",
-          safeErrorMessage: shouldFail
-            ? "PROVIDER_SEND_NOT_FOUND"
-            : null,
-          resolutionSource: shouldFail ? "automatic" : undefined,
-          evidence: shouldFail
-            ? {
-                zeroObservationThreshold:
-                  ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD,
-                consecutiveCompleteZeroCount:
-                  zeroEvidence.consecutiveCompleteZeroCount,
-                firstObservedAt: zeroEvidence.firstObservedAt?.toISOString(),
-                observedAt: now.toISOString(),
-                minimumUnknownAgeMs: ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS,
-              }
-            : undefined,
-        });
-        summary[
-          result === "raced" ? "raced" : shouldFail ? "failed" : "unknown"
-        ] += 1;
+        if (shouldFail) {
+          const result = await ports.markOutcome({
+            ...candidate,
+            deliveryState: "failed",
+            safeErrorMessage: "PROVIDER_SEND_NOT_FOUND",
+            resolutionSource: "automatic",
+            evidence: {
+              zeroObservationThreshold:
+                ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD,
+              consecutiveCompleteZeroCount:
+                zeroEvidence.consecutiveCompleteZeroCount,
+              firstObservedAt: zeroEvidence.firstObservedAt?.toISOString(),
+              observedAt: now.toISOString(),
+              minimumUnknownAgeMs: ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS,
+              positiveControl: "passed",
+            },
+          });
+          summary[result === "raced" ? "raced" : "failed"] += 1;
+        } else if (candidate.deliveryState === "sending") {
+          const result = await ports.markOutcome({
+            ...candidate,
+            deliveryState: "send_unknown",
+            safeErrorMessage: null,
+          });
+          summary[result === "raced" ? "raced" : "unknown"] += 1;
+        } else {
+          summary.deferred += 1;
+        }
       } catch (error) {
         summary.errors += 1;
         ports.reportOutcomeError?.(error, candidate);
@@ -148,6 +160,23 @@ export async function reconcileStuckEsignSends(
       continue;
     }
     try {
+      const providerRequestId = lookup.providerRequestIds[0];
+      if (providerRequestId) {
+        const result = await ports.markOutcome({
+          ...candidate,
+          deliveryState: "sent",
+          providerRequestId,
+          resolutionSource: "automatic",
+          evidence: {
+            providerRequestId,
+            positiveControl: "passed",
+            source: "dropbox_metadata_search_sandra_request_id",
+            observedAt: now.toISOString(),
+          },
+        });
+        summary[result === "raced" ? "raced" : "sent"] += 1;
+        continue;
+      }
       const result = await ports.markOutcome({
         ...candidate,
         deliveryState: "send_unknown",

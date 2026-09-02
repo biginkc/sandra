@@ -193,7 +193,7 @@ describe("ContractActions", () => {
     expect(screen.queryByText("Void contract")).not.toBeInTheDocument();
   });
 
-  it("offers confirm-not-sent for an unresolved unknown send without enabling retry", async () => {
+  it("does not offer confirm-not-sent for an unresolved unknown send", async () => {
     const user = userEvent.setup();
     render(
       <ContractActions
@@ -209,8 +209,30 @@ describe("ContractActions", () => {
       screen.getByRole("button", { name: "Actions for Purchase agreement" }),
     );
 
-    expect(screen.getByText("Confirm not sent")).toBeInTheDocument();
+    expect(screen.queryByText("Acknowledge not sent")).not.toBeInTheDocument();
     expect(screen.queryByText("Retry send")).not.toBeInTheDocument();
+  });
+
+  it("offers acknowledgement only after automatic not-sent evidence failed the send", async () => {
+    const user = userEvent.setup();
+    render(
+      <ContractActions
+        contract={contract({
+          status: "error",
+          deliveryState: "failed",
+          detailsAvailable: false,
+          errorMessage: "PROVIDER_SEND_NOT_FOUND",
+        })}
+        actions={actionHandlers()}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Purchase agreement" }),
+    );
+
+    expect(screen.getByText("Acknowledge not sent")).toBeInTheDocument();
+    expect(screen.getByText("Retry send")).toBeInTheDocument();
   });
 
   it("hides retry after a failed source has been consumed by a child", async () => {
@@ -438,10 +460,15 @@ describe("ContractActions", () => {
     ["void", "Void contract", "Request void", "Requesting void…", {}],
     [
       "confirm_not_sent",
+      "Acknowledge not sent",
       "Confirm not sent",
-      "Confirm not sent",
-      "Checking Dropbox Sign…",
-      { deliveryState: "send_unknown", detailsAvailable: false },
+      "Acknowledging…",
+      {
+        status: "error",
+        deliveryState: "failed",
+        detailsAvailable: false,
+        errorMessage: "PROVIDER_SEND_NOT_FOUND",
+      },
     ],
     [
       "retry",

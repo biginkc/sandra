@@ -112,9 +112,10 @@ describe("concrete eSign webhook server binding", () => {
           payloadHash: "a".repeat(64),
           eventHash: "0".repeat(64),
           eventTime: "1788054000",
-          eventType: "signature_request_viewed",
-          signRequestId: "provider-request-1",
-          relatedSignatureId: null,
+	          eventType: "signature_request_viewed",
+	          signRequestId: "provider-request-1",
+	          localRequestId: null,
+	          relatedSignatureId: null,
           reportedForAppId: null,
         },
       })).resolves.toBe(false);

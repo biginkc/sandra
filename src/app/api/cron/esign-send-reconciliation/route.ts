@@ -113,6 +113,18 @@ async function handle(request: Request) {
         });
       },
       markOutcome: async (outcome) => {
+        if (outcome.deliveryState === "sent") {
+          const { error } = await admin.rpc("attach_esign_request_provider_delivery", {
+            p_org_id: outcome.orgId,
+            p_request_id: outcome.id,
+            p_provider_request_id: outcome.providerRequestId,
+            p_resolution_source: outcome.resolutionSource,
+            p_evidence: outcome.evidence as Json,
+          });
+          if (error?.code === "55000") return "raced" as const;
+          if (error) throw error;
+          return "updated" as const;
+        }
         if (outcome.deliveryState === "failed") {
           const { error } = await admin.rpc("resolve_esign_send_unknown_not_sent", {
             p_org_id: outcome.orgId,
@@ -166,7 +178,10 @@ async function handle(request: Request) {
           .eq("org_id", input.orgId)
           .eq("property_id", input.propertyId)
           .eq("event_type", ZERO_RESULT_EVENT_TYPE)
-          .contains("payload", { request_id: input.id })
+          .contains("payload", {
+            request_id: input.id,
+            positive_control: "passed",
+          })
           .gte("created_at", input.updatedAt.toISOString())
           .order("created_at", { ascending: true })
           .limit(ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD);

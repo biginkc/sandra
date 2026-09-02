@@ -131,6 +131,142 @@ describe("eSign send reconciliation cron", () => {
     });
     expect(findSignatureRequestIdsByLocalRequestId).toHaveBeenCalledTimes(1);
   });
+
+  it("automatically fails a lost unknown send with positive-control evidence after the documented window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-02T02:00:00.000Z"));
+    vi.mocked(getEsignCredentials).mockResolvedValue({
+      apiKey: { reveal: () => "secret" },
+      clientId: "client-1",
+      sendingEnabled: true,
+    } as never);
+    vi.mocked(createDropboxSignProvider).mockReturnValue({
+      findSignatureRequestIdsByLocalRequestId: vi.fn()
+        .mockResolvedValueOnce({
+          complete: true,
+          providerRequestIds: ["known-provider-request"],
+        })
+        .mockResolvedValueOnce({ complete: true, providerRequestIds: [] }),
+    } as never);
+    const rpc = vi.fn().mockResolvedValue({ error: null });
+    vi.mocked(createAdminClient).mockReturnValue({
+      from: vi.fn((table: string) => {
+        if (table === "esign_requests") {
+          return esignRequestsQuery({
+            candidates: [{
+              id: "lost-request",
+              org_id: "org-1",
+              property_id: "property-1",
+              test_mode: true,
+              delivery_state: "send_unknown",
+              updated_at: "2026-09-02T00:00:00.000Z",
+            }],
+            reference: {
+              id: "known-local-request",
+              sign_request_id: "known-provider-request",
+            },
+          });
+        }
+        return leadEventsQuery([
+          { created_at: "2026-09-02T00:30:00.000Z" },
+          { created_at: "2026-09-02T01:00:00.000Z" },
+          { created_at: "2026-09-02T02:00:00.000Z" },
+        ]);
+      }),
+      rpc,
+    } as never);
+
+    const response = await GET(
+      new Request("https://sandra.test/api/cron/esign-send-reconciliation", {
+        headers: { authorization: "Bearer cron-test-secret" },
+      }),
+    );
+
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      checked: 1,
+      failed: 1,
+      unknown: 0,
+    });
+    expect(rpc).toHaveBeenCalledWith("resolve_esign_send_unknown_not_sent", {
+      p_org_id: "org-1",
+      p_request_id: "lost-request",
+      p_actor_id: null,
+      p_resolution_source: "automatic",
+      p_error_message: "PROVIDER_SEND_NOT_FOUND",
+      p_evidence: expect.objectContaining({
+        positiveControl: "passed",
+        consecutiveCompleteZeroCount: 3,
+        minimumUnknownAgeMs: 3_600_000,
+      }),
+    });
+  });
+
+  it("repairs a provider-accepted timeout by attaching the found provider request id", async () => {
+    vi.mocked(getEsignCredentials).mockResolvedValue({
+      apiKey: { reveal: () => "secret" },
+      clientId: "client-1",
+      sendingEnabled: true,
+    } as never);
+    vi.mocked(createDropboxSignProvider).mockReturnValue({
+      findSignatureRequestIdsByLocalRequestId: vi.fn()
+        .mockResolvedValueOnce({
+          complete: true,
+          providerRequestIds: ["known-provider-request"],
+        })
+        .mockResolvedValueOnce({
+          complete: true,
+          providerRequestIds: ["provider-after-timeout"],
+        }),
+    } as never);
+    const rpc = vi.fn().mockResolvedValue({ error: null });
+    vi.mocked(createAdminClient).mockReturnValue({
+      from: vi.fn((table: string) => {
+        if (table === "esign_requests") {
+          return esignRequestsQuery({
+            candidates: [{
+              id: "timeout-request",
+              org_id: "org-1",
+              property_id: "property-1",
+              test_mode: true,
+              delivery_state: "send_unknown",
+              updated_at: "2026-09-02T00:00:00.000Z",
+            }],
+            reference: {
+              id: "known-local-request",
+              sign_request_id: "known-provider-request",
+            },
+          });
+        }
+        return leadEventsQuery([]);
+      }),
+      rpc,
+    } as never);
+
+    const response = await GET(
+      new Request("https://sandra.test/api/cron/esign-send-reconciliation", {
+        headers: { authorization: "Bearer cron-test-secret" },
+      }),
+    );
+
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      checked: 1,
+      failed: 0,
+      sent: 1,
+      unknown: 0,
+    });
+    expect(rpc).toHaveBeenCalledWith("attach_esign_request_provider_delivery", {
+      p_org_id: "org-1",
+      p_request_id: "timeout-request",
+      p_provider_request_id: "provider-after-timeout",
+      p_resolution_source: "automatic",
+      p_evidence: expect.objectContaining({
+        providerRequestId: "provider-after-timeout",
+        positiveControl: "passed",
+      }),
+    });
+  });
 });
 
 function candidateQuery(data: readonly unknown[]) {

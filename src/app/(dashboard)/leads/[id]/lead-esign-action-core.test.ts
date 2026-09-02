@@ -105,6 +105,7 @@ function request(
     testMode: true,
     providerRequestId: null,
     detailsUrl: null,
+    errorMessage: null,
     voidRequestedAt: null,
     signedPdfFileId: null,
     ...overrides,
@@ -169,7 +170,7 @@ function harness() {
   const dependencies: LeadEsignActionDependencies = {
     authenticate: vi
       .fn()
-      .mockResolvedValue({ orgId: "org-1", userId: "user-1" }),
+      .mockResolvedValue({ orgId: "org-1", userId: "user-1", role: "owner" }),
     repository,
     providerForOrg: vi.fn().mockResolvedValue(provider),
     files,
@@ -736,66 +737,62 @@ describe("lead eSign action orchestration", () => {
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });
 
-  it("confirms a send_unknown request as not sent only after a fresh provider lookup with a positive control", async () => {
+  it("acknowledges only an already evidenced failed not-sent request", async () => {
     const h = harness();
     h.repository.findRequest.mockResolvedValue(
-      request({ deliveryState: "send_unknown" }),
+      request({
+        deliveryState: "failed",
+        status: "error",
+        errorMessage: "PROVIDER_SEND_NOT_FOUND",
+      }),
     );
 
     const result = await h.core.confirmNotSent({ requestId: "request-1" });
 
     expect(result).toEqual({ ok: true, data: null });
-    expect(h.repository.findProviderLookupReference).toHaveBeenCalledWith({
-      orgId: "org-1",
-      requestId: "request-1",
-      testMode: true,
-    });
-    expect(h.provider.findSignatureRequestIdsByLocalRequestId)
-      .toHaveBeenNthCalledWith(1, {
-        localRequestId: "known-local-request",
-        testMode: true,
-        signal: expect.any(AbortSignal),
-      });
-    expect(h.provider.findSignatureRequestIdsByLocalRequestId)
-      .toHaveBeenNthCalledWith(2, {
-        localRequestId: "request-1",
-        testMode: true,
-        signal: expect.any(AbortSignal),
-      });
+    expect(h.repository.findProviderLookupReference).not.toHaveBeenCalled();
+    expect(h.provider.findSignatureRequestIdsByLocalRequestId).not.toHaveBeenCalled();
     expect(h.repository.resolveSendUnknownNotSent).toHaveBeenCalledWith({
       orgId: "org-1",
       requestId: "request-1",
       actorId: "user-1",
       evidence: expect.objectContaining({
         resolutionSource: "operator",
-        positiveControl: "passed",
+        acknowledgedFailure: "PROVIDER_SEND_NOT_FOUND",
       }),
     });
     expect(h.repository.markSendOutcome).not.toHaveBeenCalled();
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });
 
-  it("refuses operator confirm when Dropbox Sign finds the request", async () => {
+  it("refuses operator acknowledgement for unresolved unknown sends and non-owners", async () => {
     const h = harness();
     h.repository.findRequest.mockResolvedValue(
       request({ deliveryState: "send_unknown" }),
     );
-    h.provider.findSignatureRequestIdsByLocalRequestId.mockReset();
-    h.provider.findSignatureRequestIdsByLocalRequestId
-      .mockResolvedValueOnce({
-        complete: true,
-        providerRequestIds: ["known-provider-request"],
-      })
-      .mockResolvedValueOnce({
-        complete: true,
-        providerRequestIds: ["provider-after-index"],
-      });
 
-    const result = await h.core.confirmNotSent({ requestId: "request-1" });
-
-    expect(result).toMatchObject({
+    expect(await h.core.confirmNotSent({ requestId: "request-1" })).toMatchObject({
       ok: false,
-      error: { code: "CONFIRM_NOT_SENT_PROVIDER_FOUND" },
+      error: { code: "CONFIRM_NOT_SENT_INELIGIBLE" },
+    });
+    expect(h.repository.resolveSendUnknownNotSent).not.toHaveBeenCalled();
+
+    vi.mocked(h.dependencies.authenticate).mockResolvedValue({
+      orgId: "org-1",
+      userId: "user-member",
+      role: "member",
+    });
+    h.repository.findRequest.mockResolvedValue(
+      request({
+        deliveryState: "failed",
+        status: "error",
+        errorMessage: "PROVIDER_SEND_NOT_FOUND",
+      }),
+    );
+
+    expect(await h.core.confirmNotSent({ requestId: "request-1" })).toMatchObject({
+      ok: false,
+      error: { code: "OWNER_REQUIRED" },
     });
     expect(h.repository.resolveSendUnknownNotSent).not.toHaveBeenCalled();
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();

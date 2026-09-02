@@ -41,7 +41,11 @@ const SIGNED_URL_SECONDS = 300;
 export async function authenticateLeadEsignActor(): Promise<EsignActor | null> {
   const memberships = await getCallerMemberships();
   if (memberships.length !== 1) return null;
-  return { orgId: memberships[0].org_id, userId: memberships[0].user_id };
+  return {
+    orgId: memberships[0].org_id,
+    userId: memberships[0].user_id,
+    role: memberships[0].role,
+  };
 }
 
 export function createLeadEsignRepository(): EsignActionRepository {
@@ -551,13 +555,14 @@ async function loadRequest(
     payloadHash: row.payload_hash,
     retryOfRequestId: row.retry_of_request_id,
     status: row.status,
-    deliveryState: row.delivery_state,
-    testMode: row.test_mode,
-    providerRequestId: row.sign_request_id,
-    detailsUrl: row.details_url,
-    voidRequestedAt: row.void_requested_at,
-    signedPdfFileId: fileRow?.id ?? null,
-  };
+            deliveryState: row.delivery_state,
+            testMode: row.test_mode,
+            providerRequestId: row.sign_request_id,
+            detailsUrl: row.details_url,
+            errorMessage: row.error_message,
+            voidRequestedAt: row.void_requested_at,
+            signedPdfFileId: fileRow?.id ?? null,
+          };
 }
 
 function parseMergeValues(value: Json): ContractMergeValues | null {

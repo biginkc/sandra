@@ -42,6 +42,7 @@ export interface EsignWebhookPersistence {
   findRequest(input: {
     orgId: string;
     signRequestId: string;
+    localRequestId: string | null;
   }): Promise<{
     id: string;
     orgId: string;

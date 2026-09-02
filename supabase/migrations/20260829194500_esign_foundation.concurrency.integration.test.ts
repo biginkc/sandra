@@ -157,6 +157,7 @@ describe("eSign foundation production lease contention", () => {
   it("serializes same-kind and reminder-vs-void claims at the fixed ten-minute boundary", async () => {
     const orgId = crypto.randomUUID();
     const userId = crypto.randomUUID();
+    const memberId = crypto.randomUUID();
     const contactId = crypto.randomUUID();
     const propertyId = crypto.randomUUID();
     const sourceId = crypto.randomUUID();
@@ -165,10 +166,15 @@ describe("eSign foundation production lease contention", () => {
     const signerId = crypto.randomUUID();
     await setServiceRole(setup);
     await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into auth.users values ($1)", [memberId]);
     await setup.query("insert into public.organizations values ($1)", [orgId]);
     await setup.query(
       "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
       [userId, orgId],
+    );
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'member')",
+      [memberId, orgId],
     );
     await setup.query(
       "insert into public.contacts (id,org_id,email) values ($1,$2,'seller@example.com')",
@@ -470,6 +476,7 @@ describe("eSign foundation production lease contention", () => {
   it("claims one local request for simultaneous identical send intents", async () => {
     const orgId = crypto.randomUUID();
     const userId = crypto.randomUUID();
+    const memberId = crypto.randomUUID();
     const contactId = crypto.randomUUID();
     const propertyId = crypto.randomUUID();
     const sourceId = crypto.randomUUID();
@@ -477,10 +484,15 @@ describe("eSign foundation production lease contention", () => {
     const sendIntentId = crypto.randomUUID();
     await setServiceRole(setup);
     await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into auth.users values ($1)", [memberId]);
     await setup.query("insert into public.organizations values ($1)", [orgId]);
     await setup.query(
       "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
       [userId, orgId],
+    );
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'member')",
+      [memberId, orgId],
     );
     await setup.query(
       "insert into public.contacts (id,org_id,email) values ($1,$2,'seller@example.com')",
@@ -1042,12 +1054,15 @@ describe("eSign foundation production lease contention", () => {
   it("resolves send_unknown to failed only with positive evidence and records actor audit", async () => {
     const orgId = crypto.randomUUID();
     const userId = crypto.randomUUID();
+    const memberId = crypto.randomUUID();
     const contactId = crypto.randomUUID();
     const propertyId = crypto.randomUUID();
     const sourceId = crypto.randomUUID();
     const templateId = crypto.randomUUID();
     const operatorRequestId = crypto.randomUUID();
     const automaticRequestId = crypto.randomUUID();
+    const metadataRequestId = crypto.randomUUID();
+    const metadataMissingLocalRequestId = crypto.randomUUID();
     const sentRequestId = crypto.randomUUID();
     const signerSnapshot = JSON.stringify([
       {
@@ -1066,10 +1081,15 @@ describe("eSign foundation production lease contention", () => {
 
     await setServiceRole(setup);
     await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into auth.users values ($1)", [memberId]);
     await setup.query("insert into public.organizations values ($1)", [orgId]);
     await setup.query(
       "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
       [userId, orgId],
+    );
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'member')",
+      [memberId, orgId],
     );
     await setup.query(
       "insert into public.contacts (id,org_id,email) values ($1,$2,'seller@example.com')",
@@ -1105,14 +1125,17 @@ describe("eSign foundation production lease contention", () => {
     await setup.query(
       `insert into public.esign_requests (
          id,org_id,property_id,template_id,signer_snapshot,merge_value_snapshot,
-         delivery_state,sign_request_id,sent_at,send_intent_id,payload_hash,created_by
+         delivery_state,status,error_message,completed_at,sign_request_id,sent_at,send_intent_id,payload_hash,created_by
        ) values
-         ($1,$4,$5,$6,$7::jsonb,$8::jsonb,'send_unknown',null,null,gen_random_uuid(),repeat('b',64),$9),
-         ($2,$4,$5,$6,$7::jsonb,$8::jsonb,'send_unknown',null,null,gen_random_uuid(),repeat('c',64),$9),
-         ($3,$4,$5,$6,$7::jsonb,$8::jsonb,'sent','provider-request',now(),gen_random_uuid(),repeat('d',64),$9)`,
+         ($1,$5,$6,$7,$8::jsonb,$9::jsonb,'failed','error','PROVIDER_SEND_NOT_FOUND',now(),null,null,gen_random_uuid(),repeat('b',64),$10),
+         ($2,$5,$6,$7,$8::jsonb,$9::jsonb,'send_unknown','awaiting',null,null,null,null,gen_random_uuid(),repeat('c',64),$10),
+         ($3,$5,$6,$7,$8::jsonb,$9::jsonb,'send_unknown','awaiting',null,null,null,null,gen_random_uuid(),repeat('d',64),$10),
+         ($4,$5,$6,$7,$8::jsonb,$9::jsonb,'sent','awaiting',null,null,'provider-request',now(),gen_random_uuid(),repeat('e',64),$10),
+         ($11,$5,$6,$7,$8::jsonb,$9::jsonb,'send_unknown','awaiting',null,null,null,null,gen_random_uuid(),repeat('f',64),$10)`,
       [
         operatorRequestId,
         automaticRequestId,
+        metadataRequestId,
         sentRequestId,
         orgId,
         propertyId,
@@ -1120,13 +1143,14 @@ describe("eSign foundation production lease contention", () => {
         signerSnapshot,
         mergeSnapshot,
         userId,
+        metadataMissingLocalRequestId,
       ],
     );
 
     await setup.query(
       `select public.resolve_esign_send_unknown_not_sent(
         $1,$2,$3,'operator','PROVIDER_SEND_NOT_FOUND',
-        '{"positiveControl":"passed","resolutionSource":"operator"}'::jsonb
+        '{"acknowledgedFailure":"PROVIDER_SEND_NOT_FOUND","resolutionSource":"operator"}'::jsonb
       )`,
       [orgId, operatorRequestId, userId],
     );
@@ -1137,6 +1161,35 @@ describe("eSign foundation production lease contention", () => {
       )`,
       [orgId, automaticRequestId],
     );
+    await setup.query(
+      `select public.attach_esign_request_provider_delivery(
+        $1,$2::uuid,'provider-after-timeout','webhook',
+        jsonb_build_object(
+          'source','dropbox_metadata_sandra_request_id',
+          'localRequestId',$2::text,
+          'providerRequestId','provider-after-timeout'
+        )
+      )`,
+      [orgId, metadataRequestId],
+    );
+    await expect(
+      setup.query(
+        `select public.attach_esign_request_provider_delivery(
+          $1,$2,'provider-missing-local','webhook',
+          '{"source":"dropbox_metadata_sandra_request_id","providerRequestId":"provider-missing-local"}'::jsonb
+        )`,
+        [orgId, metadataMissingLocalRequestId],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      setup.query(
+        `select public.resolve_esign_send_unknown_not_sent(
+          $1,$2,$3,'operator','PROVIDER_SEND_NOT_FOUND',
+          '{"acknowledgedFailure":"PROVIDER_SEND_NOT_FOUND"}'::jsonb
+        )`,
+        [orgId, operatorRequestId, memberId],
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
 
     expect(
       (
@@ -1151,7 +1204,7 @@ describe("eSign foundation production lease contention", () => {
            from public.esign_requests
            where id = any($1::uuid[])
            order by id`,
-          [[operatorRequestId, automaticRequestId]],
+          [[operatorRequestId, automaticRequestId, metadataRequestId]],
         )
       ).rows,
     ).toEqual(
@@ -1168,6 +1221,13 @@ describe("eSign foundation production lease contention", () => {
           delivery_state: "failed",
           status: "error",
           error_message: "PROVIDER_SEND_NOT_FOUND",
+          updated_by: null,
+        }),
+        expect.objectContaining({
+          id: metadataRequestId,
+          delivery_state: "sent",
+          status: "awaiting",
+          error_message: null,
           updated_by: null,
         }),
       ]),
@@ -1194,12 +1254,23 @@ describe("eSign foundation production lease contention", () => {
         )
       ).rows[0],
     ).toEqual({ actor_type: "system", actor_id: null });
+    expect(
+      (
+        await setup.query<{ actor_type: string; actor_id: string | null }>(
+          `select actor_type,actor_id
+           from public.lead_events
+           where event_type='esign_send_provider_attached_webhook'
+             and payload->>'request_id'=$1`,
+          [metadataRequestId],
+        )
+      ).rows[0],
+    ).toEqual({ actor_type: "system", actor_id: null });
 
     await expect(
       setup.query(
         `select public.resolve_esign_send_unknown_not_sent(
           $1,$2,$3,'operator','PROVIDER_SEND_NOT_FOUND',
-          '{"positiveControl":"passed"}'::jsonb
+          '{"acknowledgedFailure":"PROVIDER_SEND_NOT_FOUND"}'::jsonb
         )`,
         [orgId, sentRequestId, userId],
       ),

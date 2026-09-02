@@ -24,10 +24,11 @@ const CLAIM = {
 
 function callbackRequest(input: {
   eventType?: string;
-  eventHash?: string;
-  signRequestId?: string | null;
-  relatedSignatureId?: string | null;
-} = {}): Request {
+	  eventHash?: string;
+	  signRequestId?: string | null;
+	  localRequestId?: string | null;
+	  relatedSignatureId?: string | null;
+	} = {}): Request {
   const eventTime = "1788054000";
   const eventType = input.eventType ?? "signature_request_viewed";
   const eventHash =
@@ -54,10 +55,13 @@ function callbackRequest(input: {
       ...(input.signRequestId === null
         ? {}
         : {
-            signature_request: {
-              signature_request_id:
-                input.signRequestId ?? "provider-request-1",
-            },
+	            signature_request: {
+	              signature_request_id:
+	                input.signRequestId ?? "provider-request-1",
+	              metadata: {
+	                sandra_request_id: input.localRequestId ?? REQUEST_ID,
+	              },
+	            },
           }),
     }),
   );
@@ -130,10 +134,11 @@ describe("injectable Dropbox Sign webhook handler", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
     expect(await response.text()).toBe(DROPBOX_SIGN_ACKNOWLEDGEMENT);
-    expect(deps.persistence.findRequest).toHaveBeenCalledWith({
-      orgId: ORG_ID,
-      signRequestId: "provider-request-1",
-    });
+	    expect(deps.persistence.findRequest).toHaveBeenCalledWith({
+	      orgId: ORG_ID,
+	      signRequestId: "provider-request-1",
+	      localRequestId: REQUEST_ID,
+	    });
     expect(deps.persistence.applyStatusDecision).toHaveBeenCalledWith(
       expect.objectContaining({
         orgId: ORG_ID,
@@ -148,7 +153,41 @@ describe("injectable Dropbox Sign webhook handler", () => {
       }),
     );
     expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
-  });
+	  });
+
+	  it("continues normal webhook processing after metadata repairs a timeout-stranded send", async () => {
+	    const deps = dependencies();
+	    vi.mocked(deps.persistence.findRequest).mockImplementation(async (input) => {
+	      expect(input).toEqual({
+	        orgId: ORG_ID,
+	        signRequestId: "provider-after-timeout",
+	        localRequestId: REQUEST_ID,
+	      });
+	      return {
+	        id: REQUEST_ID,
+	        orgId: ORG_ID,
+	        propertyId: PROPERTY_ID,
+	        status: "awaiting" as const,
+	        signedPdfPath: null,
+	        templateTitle: "Purchase Agreement",
+	      };
+	    });
+
+	    const response = await handleDropboxSignWebhook({
+	      request: callbackRequest({ signRequestId: "provider-after-timeout" }),
+	      pathSecret: PATH_SECRET,
+	      dependencies: deps,
+	    });
+
+	    expect(response.status).toBe(200);
+	    expect(deps.persistence.applyStatusDecision).toHaveBeenCalledWith(
+	      expect.objectContaining({
+	        requestId: REQUEST_ID,
+	        decision: expect.objectContaining({ nextStatus: "viewed" }),
+	      }),
+	    );
+	    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
+	  });
 
   it("rejects an invalid event hash before claiming a receipt", async () => {
     const deps = dependencies();

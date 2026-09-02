@@ -9,6 +9,7 @@ export type DropboxSignReplayData = {
   eventType: string;
   eventHash: string;
   signRequestId: string | null;
+  localRequestId: string | null;
   relatedSignatureId: string | null;
   reportedForAppId: string | null;
 };
@@ -83,6 +84,7 @@ export function validateDropboxSignCallbackEvent(
   const eventHash = parseEventHash(payload.event.event_hash);
   const signatureRequest = optionalRecord(payload.signature_request);
   const metadata = optionalRecord(payload.event.event_metadata);
+  const requestMetadata = optionalRecord(signatureRequest?.metadata);
 
   return {
     payloadHash,
@@ -90,6 +92,7 @@ export function validateDropboxSignCallbackEvent(
     eventType,
     eventHash,
     signRequestId: optionalIdentifier(signatureRequest?.signature_request_id),
+    localRequestId: optionalIdentifier(requestMetadata?.sandra_request_id),
     relatedSignatureId: optionalIdentifier(metadata?.related_signature_id),
     reportedForAppId: optionalIdentifier(metadata?.reported_for_app_id),
   };
@@ -123,6 +126,7 @@ export function buildDropboxSignReceiptFingerprint(
     event.eventTime,
     event.eventType,
     event.signRequestId,
+    event.localRequestId,
     event.relatedSignatureId,
     event.reportedForAppId,
   ];

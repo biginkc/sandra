@@ -22,7 +22,7 @@ function candidate(
 }
 
 describe("stuck eSign send reconciliation", () => {
-  it("marks every complete provider lookup send_unknown, including zero-result Dropbox search lag", async () => {
+  it("fences zero-result sends as unknown and repairs provider-found sends", async () => {
     const markOutcome = vi.fn().mockResolvedValue("updated");
     const listCandidates = vi.fn().mockResolvedValue([
       candidate({ id: "request-zero" }),
@@ -54,8 +54,9 @@ describe("stuck eSign send reconciliation", () => {
       ),
     ).resolves.toEqual({
       checked: 3,
+      sent: 1,
       failed: 0,
-      unknown: 2,
+      unknown: 1,
       deferred: 1,
       lookupErrors: 0,
       raced: 0,
@@ -80,13 +81,18 @@ describe("stuck eSign send reconciliation", () => {
       propertyId: "property-1",
       testMode: true,
       updatedAt: new Date("2026-09-02T00:00:00.000Z"),
-      deliveryState: "send_unknown",
-      safeErrorMessage: null,
+      deliveryState: "sent",
+      providerRequestId: "provider-1",
+      resolutionSource: "automatic",
+      evidence: expect.objectContaining({
+        providerRequestId: "provider-1",
+        positiveControl: "passed",
+      }),
     });
   });
 
-  it("keeps a Dropbox index-lag zero lookup non-retryable before a later present lookup", async () => {
-    const lagged = candidate({ id: "lagged-request" });
+  it("keeps a Dropbox index-lag zero lookup non-retryable before a later present lookup repairs it", async () => {
+    const lagged = candidate({ id: "lagged-request", deliveryState: "send_unknown" });
     const markOutcome = vi.fn().mockResolvedValue("updated");
     const ports = {
       listCandidates: vi.fn().mockResolvedValue([lagged]),
@@ -106,20 +112,19 @@ describe("stuck eSign send reconciliation", () => {
 
     await expect(
       reconcileStuckEsignSends(ports, new Date("2026-09-02T00:30:00.000Z")),
-    ).resolves.toMatchObject({ failed: 0, unknown: 1 });
+    ).resolves.toMatchObject({ failed: 0, unknown: 0, deferred: 1 });
     await expect(
       reconcileStuckEsignSends(ports, new Date("2026-09-02T00:45:00.000Z")),
-    ).resolves.toMatchObject({ failed: 0, unknown: 1 });
-    expect(markOutcome).toHaveBeenCalledTimes(2);
+    ).resolves.toMatchObject({ failed: 0, sent: 1, unknown: 0 });
+    expect(markOutcome).toHaveBeenCalledTimes(1);
     expect(markOutcome).toHaveBeenNthCalledWith(1, {
       ...lagged,
-      deliveryState: "send_unknown",
-      safeErrorMessage: null,
-    });
-    expect(markOutcome).toHaveBeenNthCalledWith(2, {
-      ...lagged,
-      deliveryState: "send_unknown",
-      safeErrorMessage: null,
+      deliveryState: "sent",
+      providerRequestId: "provider-after-index",
+      resolutionSource: "automatic",
+      evidence: expect.objectContaining({
+        providerRequestId: "provider-after-index",
+      }),
     });
   });
 
@@ -147,6 +152,7 @@ describe("stuck eSign send reconciliation", () => {
       markOutcome,
     }, observedAt)).resolves.toMatchObject({
       checked: 1,
+      sent: 0,
       failed: 1,
       unknown: 0,
     });
@@ -160,6 +166,7 @@ describe("stuck eSign send reconciliation", () => {
         zeroObservationThreshold: 3,
         consecutiveCompleteZeroCount: 3,
         minimumUnknownAgeMs: ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS,
+        positiveControl: "passed",
       }),
     });
   });
@@ -182,6 +189,7 @@ describe("stuck eSign send reconciliation", () => {
       reportLookupError,
     })).resolves.toEqual({
       checked: 2,
+      sent: 0,
       failed: 0,
       unknown: 0,
       deferred: 1,
@@ -211,6 +219,7 @@ describe("stuck eSign send reconciliation", () => {
       shouldContinue,
     })).resolves.toEqual({
       checked: 1,
+      sent: 0,
       failed: 0,
       unknown: 0,
       deferred: 0,
@@ -245,6 +254,7 @@ describe("stuck eSign send reconciliation", () => {
       reportOutcomeError,
     })).resolves.toEqual({
       checked: 2,
+      sent: 0,
       failed: 0,
       unknown: 1,
       deferred: 0,

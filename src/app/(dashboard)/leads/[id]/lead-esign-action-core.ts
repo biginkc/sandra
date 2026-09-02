@@ -18,7 +18,6 @@ import {
 } from "@/lib/esign/send-contract";
 import {
   ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD,
-  lookupAfterVerifiedProviderProbe,
 } from "@/lib/esign/stuck-send-reconciliation";
 
 import {
@@ -44,7 +43,11 @@ const DOWNLOAD_MAX_LIFETIME_MS = 5 * 60 * 1_000;
 // before an ambiguous provider call is fenced as send_unknown.
 export const ESIGN_PROVIDER_TIMEOUT_MS = 4 * 60 * 1_000;
 
-export type EsignActor = Readonly<{ orgId: string; userId: string }>;
+export type EsignActor = Readonly<{
+  orgId: string;
+  userId: string;
+  role?: string | null;
+}>;
 
 export type LeadSendContext = Readonly<{
   propertyId: string;
@@ -77,6 +80,7 @@ export type EsignRequestRecord = Readonly<{
   testMode: boolean;
   providerRequestId: string | null;
   detailsUrl: string | null;
+  errorMessage: string | null;
   voidRequestedAt: string | null;
   signedPdfFileId: string | null;
 }>;
@@ -500,6 +504,9 @@ async function confirmNotSent(
   input: ConfirmContractNotSentInput,
 ): Promise<null> {
   const actor = await requireActor(dependencies);
+  if (actor.role !== "owner") {
+    fail("OWNER_REQUIRED", "Only an organization owner can acknowledge this send.");
+  }
   const request = await dependencies.repository.findRequest({
     orgId: actor.orgId,
     requestId: input.requestId,
@@ -507,63 +514,13 @@ async function confirmNotSent(
   if (!request) fail("NOT_FOUND", "Contract not found.");
   if (
     request.orgId !== actor.orgId ||
-    request.deliveryState !== "send_unknown" ||
-    request.providerRequestId
+    request.deliveryState !== "failed" ||
+    request.providerRequestId ||
+    request.errorMessage !== "PROVIDER_SEND_NOT_FOUND"
   ) {
     fail(
       "CONFIRM_NOT_SENT_INELIGIBLE",
-      "Only unresolved unknown sends can be confirmed as not sent.",
-    );
-  }
-  let provider: EsignActionProvider | null;
-  try {
-    provider = await dependencies.providerForOrg(actor.orgId);
-  } catch {
-    fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
-  }
-  if (!provider) fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
-  const reference = await dependencies.repository.findProviderLookupReference({
-    orgId: actor.orgId,
-    requestId: request.id,
-    testMode: request.testMode,
-  });
-  let lookup: { complete: boolean; providerRequestIds: readonly string[] };
-  try {
-    lookup = await withProviderTimeout((signal) =>
-      lookupAfterVerifiedProviderProbe({
-        candidate: {
-          id: request.id,
-          orgId: request.orgId,
-          propertyId: request.propertyId,
-          testMode: request.testMode,
-          deliveryState: "send_unknown",
-          updatedAt: dependencies.now(),
-        },
-        reference,
-        find: (localRequestId, testMode) =>
-          provider.findSignatureRequestIdsByLocalRequestId({
-            localRequestId,
-            testMode,
-            signal,
-          }),
-      }),
-    );
-  } catch {
-    fail(
-      "CONFIRM_NOT_SENT_UNVERIFIED",
-      "Dropbox Sign could not be checked. Do not retry this contract yet.",
-    );
-  }
-  if (!lookup.complete) {
-    fail(
-      "CONFIRM_NOT_SENT_UNVERIFIED",
-      "Dropbox Sign could not prove the request is absent. Do not retry this contract yet.",
-    );
-  }
-  if (lookup.providerRequestIds.length > 0) {
-    fail(
-      "CONFIRM_NOT_SENT_PROVIDER_FOUND",
-      "Dropbox Sign has a matching request. Wait for reconciliation instead of retrying.",
+      "Only automatically evidenced not-sent contracts can be acknowledged.",
     );
   }
   const result = await dependencies.repository.resolveSendUnknownNotSent({
@@ -574,7 +531,7 @@ async function confirmNotSent(
       resolutionSource: "operator",
       observedAt: dependencies.now().toISOString(),
       zeroObservationThreshold: ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD,
-      positiveControl: "passed",
+      acknowledgedFailure: "PROVIDER_SEND_NOT_FOUND",
     },
   });
   if (result === "raced") {

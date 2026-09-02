@@ -23,6 +23,7 @@ function replay(overrides: Partial<DropboxSignReplayData> = {}): DropboxSignRepl
       overrides.eventHash ??
       createHmac("sha256", API_KEY).update(eventTime + eventType).digest("hex"),
     signRequestId: overrides.signRequestId ?? "request-1",
+    localRequestId: overrides.localRequestId ?? "local-request-1",
     relatedSignatureId: overrides.relatedSignatureId ?? "signature-1",
     reportedForAppId: overrides.reportedForAppId ?? "app-1",
   };
@@ -42,7 +43,10 @@ function callbackForm(event: DropboxSignReplayData): FormData {
           reported_for_app_id: event.reportedForAppId,
         },
       },
-      signature_request: { signature_request_id: event.signRequestId },
+      signature_request: {
+        signature_request_id: event.signRequestId,
+        metadata: { sandra_request_id: event.localRequestId },
+      },
     }),
   );
   return form;
@@ -70,11 +74,15 @@ describe("Dropbox Sign callback parsing and authenticity", () => {
   it("keeps same-second events distinct across request and signer identity", () => {
     const first = replay();
     const otherRequest = replay({ signRequestId: "request-2" });
+    const otherLocalRequest = replay({ localRequestId: "local-request-2" });
     const otherSigner = replay({ relatedSignatureId: "signature-2" });
 
     expect(first.eventHash).toBe(otherRequest.eventHash);
     expect(buildDropboxSignReceiptFingerprint(first)).not.toBe(
       buildDropboxSignReceiptFingerprint(otherRequest),
+    );
+    expect(buildDropboxSignReceiptFingerprint(first)).not.toBe(
+      buildDropboxSignReceiptFingerprint(otherLocalRequest),
     );
     expect(buildDropboxSignReceiptFingerprint(first)).not.toBe(
       buildDropboxSignReceiptFingerprint(otherSigner),

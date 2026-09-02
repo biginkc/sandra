@@ -26,6 +26,7 @@ function receiptInput(): VerifiedReceiptInput {
       eventType: "signature_request_viewed",
       eventHash: "c".repeat(64),
       signRequestId: "provider-request-1",
+      localRequestId: REQUEST_ID,
       relatedSignatureId: "provider-signature-1",
       reportedForAppId: "provider-app-1",
     },
@@ -191,6 +192,98 @@ describe("typed eSign webhook database adapter", () => {
       expect(JSON.stringify(rpc.mock.calls[0][1])).not.toMatch(/actor|email|path/i);
     },
   );
+
+  it("finds an already attached request by provider request id without repair", async () => {
+    const { client, rpc } = clientWith((name) => {
+      if (name === "find_esign_webhook_request") {
+        return [{
+          id: REQUEST_ID,
+          org_id: ORG_ID,
+          property_id: PROPERTY_ID,
+          status: "awaiting",
+          signed_pdf_path: null,
+          template_title: "Purchase Agreement",
+        }];
+      }
+      return null;
+    });
+    const adapter = createEsignWebhookDatabaseAdapter(client);
+
+    await expect(adapter.findRequest({
+      orgId: ORG_ID,
+      signRequestId: "provider-request-1",
+      localRequestId: REQUEST_ID,
+    })).resolves.toEqual({
+      id: REQUEST_ID,
+      orgId: ORG_ID,
+      propertyId: PROPERTY_ID,
+      status: "awaiting",
+      signedPdfPath: null,
+      templateTitle: "Purchase Agreement",
+    });
+
+    expect(rpc).not.toHaveBeenCalledWith(
+      "attach_esign_request_provider_delivery",
+      expect.anything(),
+    );
+  });
+
+  it("repairs a timeout-stranded request by Sandra request id metadata", async () => {
+    const findRows = [
+      [],
+      [{
+        id: REQUEST_ID,
+        org_id: ORG_ID,
+        property_id: PROPERTY_ID,
+        status: "awaiting",
+        signed_pdf_path: null,
+        template_title: "Purchase Agreement",
+      }],
+    ];
+    const { client, rpc } = clientWith((name) => {
+      if (name === "find_esign_webhook_request") return findRows.shift();
+      if (name === "attach_esign_request_provider_delivery") return null;
+      return null;
+    });
+    const adapter = createEsignWebhookDatabaseAdapter(client);
+
+    await expect(adapter.findRequest({
+      orgId: ORG_ID,
+      signRequestId: "provider-after-timeout",
+      localRequestId: REQUEST_ID,
+    })).resolves.toMatchObject({ id: REQUEST_ID, status: "awaiting" });
+
+    expect(rpc).toHaveBeenCalledWith("attach_esign_request_provider_delivery", {
+      p_org_id: ORG_ID,
+      p_request_id: REQUEST_ID,
+      p_provider_request_id: "provider-after-timeout",
+      p_resolution_source: "webhook",
+      p_evidence: {
+        localRequestId: REQUEST_ID,
+        providerRequestId: "provider-after-timeout",
+        source: "dropbox_metadata_sandra_request_id",
+      },
+    });
+  });
+
+  it("keeps existing webhook processing deploy-safe before the metadata repair migration", async () => {
+    const rpc = vi.fn(async (name: string) => {
+      if (name === "find_esign_webhook_request") return { data: [], error: null };
+      if (name === "attach_esign_request_provider_delivery") {
+        return { data: null, error: { code: "42883" } };
+      }
+      return { data: null, error: null };
+    });
+    const adapter = createEsignWebhookDatabaseAdapter({
+      rpc: rpc as EsignWebhookRpcClient["rpc"],
+    });
+
+    await expect(adapter.findRequest({
+      orgId: ORG_ID,
+      signRequestId: "provider-after-timeout",
+      localRequestId: REQUEST_ID,
+    })).resolves.toBeNull();
+  });
 
   it("links a signed artifact idempotently with system/null provenance implicit", async () => {
     const { client, rpc } = clientWith(() => [

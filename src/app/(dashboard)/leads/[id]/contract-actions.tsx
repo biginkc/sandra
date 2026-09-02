@@ -72,7 +72,9 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
   const canRetry =
     contract.deliveryState === "failed" && !contract.retryConsumed;
   const canConfirmNotSent =
-    contract.deliveryState === "send_unknown" && !contract.detailsAvailable;
+    contract.deliveryState === "failed" &&
+    !contract.detailsAvailable &&
+    contract.errorMessage === "PROVIDER_SEND_NOT_FOUND";
   const canDownload = Boolean(contract.signedPdfFileId);
   const hasAnyAction =
     contract.detailsAvailable ||
@@ -129,9 +131,9 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
                 ? await callAction(
                     actions.confirmNotSentAction({ requestId: contract.id }),
                     {
-                      successMessage: "Contract marked not sent",
+                      successMessage: "Not-sent evidence acknowledged",
                       fallbackMessage:
-                        "Could not confirm the contract was not sent",
+                        "Could not acknowledge the not-sent evidence",
                     },
                   )
               : null;
@@ -254,7 +256,7 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
           {canConfirmNotSent ? (
             <DropdownMenuItem onClick={() => openMode("confirm_not_sent")}>
               <ShieldXIcon className="size-4" aria-hidden />
-              Confirm not sent
+              Acknowledge not sent
             </DropdownMenuItem>
           ) : null}
         </DropdownMenuContent>
@@ -352,7 +354,7 @@ function dialogDescription(
     return "Retry creates a new contract history row and keeps this failed attempt.";
   }
   if (mode === "confirm_not_sent") {
-    return "Sandra will check Dropbox Sign again before marking this unknown send as failed.";
+    return "Sandra already confirmed this request was not found after repeated Dropbox Sign checks.";
   }
   return "Review this action before continuing.";
 }
@@ -369,6 +371,6 @@ function dialogPendingLabel(mode: ActionMode): string {
   if (mode === "remind") return "Sending reminder…";
   if (mode === "void") return "Requesting void…";
   if (mode === "retry") return "Retrying contract…";
-  if (mode === "confirm_not_sent") return "Checking Dropbox Sign…";
+  if (mode === "confirm_not_sent") return "Acknowledging…";
   return "Working…";
 }
