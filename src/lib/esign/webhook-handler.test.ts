@@ -210,6 +210,35 @@ describe("injectable Dropbox Sign webhook handler", () => {
     expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
   });
 
+  it("keeps a bounce callback retryable when code reaches a pre-bounce-RPC database", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.persistence.applyEmailBounceDecision).mockResolvedValue(null);
+
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        eventType: "signature_request_email_bounce",
+        providerSignatures: [{
+          signature_id: "provider-signature-1",
+          signer_role: "Seller",
+          signer_name: "Seller Owner",
+          signer_email_address: "bad@example.invalid",
+          order: 0,
+        }],
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(503);
+    expect(deps.persistence.applyEmailBounceDecision).toHaveBeenCalled();
+    expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptProcessed).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptFailed).toHaveBeenCalledWith(
+      CLAIM,
+      "EMAIL_BOUNCE_RPC_UNAVAILABLE",
+    );
+  });
+
   it("continues normal webhook processing after provider-read metadata repairs a timeout-stranded send", async () => {
     const deps = dependencies();
     vi.mocked(deps.persistence.findRequest)

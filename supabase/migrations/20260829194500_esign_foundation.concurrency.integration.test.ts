@@ -366,6 +366,96 @@ describe("eSign foundation production lease contention", () => {
       provider_signature_id: oldSignatureId,
     });
 
+    const providerSignatures = JSON.stringify([{
+      signatureId: newSignatureId,
+      role: "Seller",
+      name: "Seller Owner",
+      emailAddress: "seller-fixed@example.com",
+      order: 0,
+      statusCode: "signed",
+      signedAt: 1788331417,
+    }]);
+    const webhookBeforeFinalizerAt = "2026-09-02T06:00:30.000Z";
+    const webhookBeforeFinalizerLeaseId = crypto.randomUUID();
+    const webhookBeforeFinalizerReceipt = await setup.query<{
+      receipt_id: string;
+      lease_id: string;
+    }>(
+      `select receipt_id,lease_id
+       from public.claim_esign_webhook_receipt(
+         $1,$2,repeat('1',64),repeat('2',64),repeat('3',64),
+         'signature_request_viewed',$3,$4,$5,
+         jsonb_build_object(
+           'event_time', extract(epoch from $5::timestamptz)::bigint::text,
+           'event_type', 'signature_request_viewed',
+           'sign_request_id', $3::text,
+           'related_signature_id', $4::text,
+           'reported_for_app_id', 'client-1'
+         ),
+         now(),$6,300
+       )`,
+      [
+        orgId,
+        consumerId,
+        providerRequestId,
+        newSignatureId,
+        webhookBeforeFinalizerAt,
+        webhookBeforeFinalizerLeaseId,
+      ],
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string }>(
+          `select outcome from public.reconcile_esign_webhook_provider_signers(
+             $1,$2,$3,$4,$5,$6::jsonb,$7
+           )`,
+          [
+            orgId,
+            requestId,
+            webhookBeforeFinalizerReceipt.rows[0].receipt_id,
+            webhookBeforeFinalizerReceipt.rows[0].lease_id,
+            webhookBeforeFinalizerAt,
+            providerSignatures,
+            null,
+          ],
+        )
+      ).rows[0].outcome,
+    ).toBe("applied");
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [
+        webhookBeforeFinalizerReceipt.rows[0].receipt_id,
+        webhookBeforeFinalizerReceipt.rows[0].lease_id,
+      ],
+    );
+    expect(
+      (
+        await setup.query<{
+          signer_email: string;
+          provider_signature_id: string;
+          email_update_claim_token: string | null;
+          email_update_claim_email: string | null;
+          contact_email: string | null;
+        }>(
+          `select signer.signer_email,
+             signer.provider_signature_id,
+             signer.email_update_claim_token::text,
+             signer.email_update_claim_email,
+             contact.email as contact_email
+           from public.esign_request_signers signer
+           join public.contacts contact on contact.id=$4 and contact.org_id=$1
+           where signer.org_id=$1 and signer.request_id=$2 and signer.id=$3`,
+          [orgId, requestId, signerId, contactId],
+        )
+      ).rows[0],
+    ).toEqual({
+      signer_email: "seller-fixed@example.com",
+      provider_signature_id: newSignatureId,
+      email_update_claim_token: claimToken,
+      email_update_claim_email: "seller-fixed@example.com",
+      contact_email: "old-contact@example.com",
+    });
+
     const finalized = await setup.query<{ result: string }>(
       `select public.finalize_esign_bounced_signer_email_update(
          $1,$2,$3,$4,$5
@@ -373,6 +463,13 @@ describe("eSign foundation production lease contention", () => {
       [orgId, requestId, signerId, claimToken, newSignatureId],
     );
     expect(finalized.rows[0].result).toBe("applied");
+    const duplicateFinalize = await setup.query<{ result: string }>(
+      `select public.finalize_esign_bounced_signer_email_update(
+         $1,$2,$3,$4,$5
+       ) as result`,
+      [orgId, requestId, signerId, claimToken, newSignatureId],
+    );
+    expect(duplicateFinalize.rows[0].result).toBe("lease_lost");
 
     const finalRows = await setup.query<{
       request_count: string;
@@ -426,15 +523,6 @@ describe("eSign foundation production lease contention", () => {
       /bad@example|seller-fixed@example/i,
     );
 
-    const providerSignatures = JSON.stringify([{
-      signatureId: newSignatureId,
-      role: "Seller",
-      name: "Seller Owner",
-      emailAddress: "seller-fixed@example.com",
-      order: 0,
-      statusCode: "signed",
-      signedAt: 1788331417,
-    }]);
     const claimLifecycle = async (
       eventType: string,
       eventAt: string,

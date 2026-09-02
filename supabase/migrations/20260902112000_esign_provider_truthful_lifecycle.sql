@@ -127,10 +127,6 @@ begin
     set provider_signature_id = v_signature.signature_id,
         signer_email = v_signature.signer_email,
         signer_name = v_signature.signer_name,
-        email_update_claim_token = null,
-        email_update_claimed_at = null,
-        email_update_claim_email = null,
-        email_update_claim_actor_id = null,
         updated_at = now()
     where signer.org_id = p_org_id
       and signer.request_id = p_request_id
@@ -140,7 +136,6 @@ begin
         signer.provider_signature_id is distinct from v_signature.signature_id
         or signer.signer_email is distinct from v_signature.signer_email
         or signer.signer_name is distinct from v_signature.signer_name
-        or signer.email_update_claim_token is not null
       );
     if found then
       v_changed := true;

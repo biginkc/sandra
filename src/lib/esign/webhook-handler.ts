@@ -205,27 +205,23 @@ export async function handleDropboxSignWebhook(input: {
             claim: activeClaim,
             decision,
             providerEventAt,
-          }) ??
-          await input.dependencies.persistence.applyStatusDecision({
-            orgId: identity.orgId,
-            requestId: request.id,
-            propertyId: request.propertyId,
-            claim: activeClaim,
-            decision,
-            requestedStatus: normalized.requestedStatus,
-            providerEventAt,
-            templateTitle: request.templateTitle,
           })
         : await input.dependencies.persistence.applyStatusDecision({
-            orgId: identity.orgId,
-            requestId: request.id,
-            propertyId: request.propertyId,
-            claim: activeClaim,
-            decision,
-            requestedStatus: normalized.requestedStatus,
-            providerEventAt,
-            templateTitle: request.templateTitle,
-          });
+          orgId: identity.orgId,
+          requestId: request.id,
+          propertyId: request.propertyId,
+          claim: activeClaim,
+          decision,
+          requestedStatus: normalized.requestedStatus,
+          providerEventAt,
+          templateTitle: request.templateTitle,
+        });
+      if (transition === null) {
+        throw new SafeWebhookProcessingError(
+          "EMAIL_BOUNCE_RPC_UNAVAILABLE",
+          503,
+        );
+      }
       authoritativeStatus = transition.status;
       if (
         request.status === "error" &&

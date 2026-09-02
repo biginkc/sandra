@@ -92,4 +92,26 @@ describe("email-bounce recovery migration contract", () => {
     expect(recoverySql).toContain("'reason', 'seller_email_conflict'");
     expect(recoverySql).toContain("'esign_contact_email_persist_skipped'");
   });
+
+  it("does not let provider signer reconciliation own the bounced-email finalizer fence", () => {
+    const providerTruthfulSql = readFileSync(
+      "supabase/migrations/20260902112000_esign_provider_truthful_lifecycle.sql",
+      "utf8",
+    );
+    const reconcileStart = providerTruthfulSql.indexOf(
+      "create or replace function public.reconcile_esign_webhook_provider_signers",
+    );
+    const artifactStart = providerTruthfulSql.indexOf(
+      "create or replace function public.reconcile_esign_completed_signed_artifact",
+      reconcileStart,
+    );
+    const reconcileBody = providerTruthfulSql.slice(reconcileStart, artifactStart);
+
+    expect(reconcileStart).toBeGreaterThan(-1);
+    expect(reconcileBody).not.toMatch(/email_update_claim_token\s*=\s*null/i);
+    expect(reconcileBody).not.toMatch(/email_update_claimed_at\s*=\s*null/i);
+    expect(reconcileBody).not.toMatch(/email_update_claim_email\s*=\s*null/i);
+    expect(reconcileBody).not.toMatch(/email_update_claim_actor_id\s*=\s*null/i);
+    expect(reconcileBody).not.toMatch(/email_update_claim_token is not null/i);
+  });
 });
