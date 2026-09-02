@@ -8,15 +8,20 @@ import {
   normalizeStateCode,
   normalizeZip,
 } from "@/lib/csv/normalize";
+import { ConfigurationError } from "@/lib/errors/classes";
 import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
-import { telnyxLookupFromEnv } from "@/lib/line-type-lookup/telnyx";
+import {
+  telnyxLookupFromEnv,
+  type TelnyxLookupOutcome,
+} from "@/lib/line-type-lookup/telnyx";
 import { LEAD_SOURCES, type LeadSource } from "@/lib/leads/sources";
-import type { PhoneLineType } from "@/lib/messaging/line-type";
+import { asLineType, type PhoneLineType } from "@/lib/messaging/line-type";
 import type { Database } from "@/lib/supabase/types";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LEAD_PHONE_LOOKUP_TIMEOUT_MS = 5_000;
 
 /**
  * Canonical list of `properties.source` values. Mirrors the DB CHECK
@@ -78,13 +83,8 @@ export type CreateLeadResult = {
   /** Resolved homeowner contact id for a newly created lead. Duplicate
    *  results return null because submitted contact data was not processed. */
   contactId: string | null;
-  /** Set when the submitted phone could not be classified (Telnyx
-   *  unconfigured / unreachable / unknown line type) and was therefore
-   *  not saved as a phone slot (hard rule, migration 080). The number
-   *  is preserved verbatim on the contact's notes for manual recovery —
-   *  callers must surface this degraded outcome, not report plain
-   *  success. */
-  phoneDropped: string | null;
+  /** True when the phone was saved but its line type could not be verified. */
+  phoneUnverified: boolean;
 };
 
 export type CreateLeadError = {
@@ -121,7 +121,9 @@ export type CreateLeadError = {
 export async function createLead(
   supabase: SupabaseClient<Database>,
   input: CreateLeadInput,
-): Promise<{ ok: true; data: CreateLeadResult } | { ok: false; error: CreateLeadError }> {
+): Promise<
+  { ok: true; data: CreateLeadResult } | { ok: false; error: CreateLeadError }
+> {
   // ---- 1. Validate + normalize ---------------------------------------
   const orgId = input.orgId?.trim() ?? "";
   if (!orgId) {
@@ -151,7 +153,8 @@ export async function createLead(
       ok: false,
       error: {
         code: "VALIDATION",
-        message: "Property state is required and must be a valid US state code.",
+        message:
+          "Property state is required and must be a valid US state code.",
         field: "property.state",
       },
     };
@@ -184,7 +187,18 @@ export async function createLead(
   const cityNorm = normalizeDisplayAddress(input.property.city) || null;
   const zipNorm = normalizeZip(input.property.zip ?? null);
   const addressNormalized = normalizeAddress(addressRaw);
-  const phoneNorm = normalizePhone(input.contact?.phone_1 ?? null);
+  const phoneRaw = input.contact?.phone_1?.trim() ?? "";
+  const phoneNorm = normalizePhone(phoneRaw || null);
+  if (phoneRaw && !phoneNorm) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: "Enter a valid 10-digit US phone number.",
+        field: "contact.phone_1",
+      },
+    };
+  }
   const emailNorm = input.contact?.email?.trim().toLowerCase() || null;
   const firstNorm = normalizeName(input.contact?.first_name) || null;
   const lastNorm = normalizeName(input.contact?.last_name) || null;
@@ -212,7 +226,7 @@ export async function createLead(
           propertyId: existing.id,
           wasDuplicate: true,
           contactId: null,
-          phoneDropped: null,
+          phoneUnverified: false,
         },
       };
     }
@@ -224,7 +238,7 @@ export async function createLead(
   // eligible for cleanup; an exposed property is never compensated away.
   let resolvedContact: Awaited<ReturnType<typeof resolveOrCreateContact>> = {
     id: null,
-    phoneDropped: null,
+    phoneUnverified: false,
     created: false,
   };
   const hasAnyContactField =
@@ -306,7 +320,7 @@ export async function createLead(
           propertyId: duplicatePropertyId,
           wasDuplicate: true,
           contactId: null,
-          phoneDropped: null,
+          phoneUnverified: false,
         },
       };
     }
@@ -338,7 +352,7 @@ export async function createLead(
       propertyId: inserted.id,
       wasDuplicate: false,
       contactId: resolvedContact.id,
-      phoneDropped: resolvedContact.phoneDropped,
+      phoneUnverified: resolvedContact.phoneUnverified,
     },
   };
 }
@@ -444,39 +458,54 @@ async function resolveOrCreateContact(
   supabase: SupabaseClient<Database>,
   orgId: string,
   contact: ContactIdentity,
-): Promise<{ id: string | null; phoneDropped: string | null; created: boolean }> {
-  const existingContactId = await findExistingContact(supabase, orgId, contact);
-  if (existingContactId) {
-    return { id: existingContactId, phoneDropped: null, created: false };
+): Promise<{ id: string | null; phoneUnverified: boolean; created: boolean }> {
+  const existingContact = await findExistingContact(supabase, orgId, contact);
+  if (existingContact) {
+    if (existingContact.matchedBy === "phone") {
+      return {
+        id: existingContact.id,
+        phoneUnverified: existingContact.matchedPhoneType === "unknown",
+        created: false,
+      };
+    }
+    if (!contact.phone_1) {
+      return { id: existingContact.id, phoneUnverified: false, created: false };
+    }
+
+    const classification = await classifyLeadPhone(contact.phone_1);
+    if (classification.lineType === "unknown") {
+      await saveUnverifiedLeadPhone(
+        supabase,
+        orgId,
+        contact,
+        existingContact.id,
+      );
+      return { id: existingContact.id, phoneUnverified: true, created: false };
+    }
+    await appendVerifiedPhone(
+      supabase,
+      orgId,
+      existingContact.id,
+      contact.phone_1,
+      classification.lineType,
+    );
+    return { id: existingContact.id, phoneUnverified: false, created: false };
   }
 
-  // Hard rule (migration 080): a phone can't be saved with type
-  // 'unknown'. Lead phones arrive untyped, so classify at intake via
-  // Telnyx when configured. When the lookup is unavailable or fails,
-  // the number can't go into a phone slot — preserve it verbatim on
-  // the contact's notes (durable, visible on the lead page) and flag
-  // the degraded outcome to the caller; never silently succeed.
-  let phoneType: PhoneLineType = "unknown";
-  if (contact.phone_1) {
-    try {
-      const lookup = telnyxLookupFromEnv();
-      const types = await lookup.classify([contact.phone_1]);
-      phoneType = types.get(contact.phone_1) ?? "unknown";
-    } catch {
-      // ConfigurationError (no TELNYX_API_KEY) or transport failure.
-    }
-    if (phoneType === "unknown") {
-      reportError(
-        new Error("lead phone unclassified at intake — parked on notes"),
-        {
-          tags: { surface: "lead_create_phone_unclassified" },
-          extra: { phone: contact.phone_1 },
-        },
-      );
-    }
+  const classification = contact.phone_1
+    ? await classifyLeadPhone(contact.phone_1)
+    : null;
+  if (contact.phone_1 && classification?.lineType === "unknown") {
+    const contactId = await saveUnverifiedLeadPhone(
+      supabase,
+      orgId,
+      contact,
+      null,
+    );
+    return { id: contactId, phoneUnverified: true, created: true };
   }
-  const phoneClassified = phoneType !== "unknown";
-  const phoneDropped = !phoneClassified ? contact.phone_1 : null;
+
+  const phoneType = classification?.lineType ?? "unknown";
   const { data, error } = await supabase
     .from("contacts")
     .insert({
@@ -484,12 +513,10 @@ async function resolveOrCreateContact(
       contact_type: "person",
       first_name: contact.first_name,
       last_name: contact.last_name,
-      phone_1: phoneClassified ? contact.phone_1 : null,
-      phone_1_type: phoneClassified ? phoneType : "unknown",
+      phone_1: contact.phone_1,
+      phone_1_type: phoneType,
       email: contact.email,
-      notes: phoneDropped
-        ? `Unclassified phone from lead intake (line-type lookup unavailable): ${phoneDropped}`
-        : null,
+      notes: null,
     })
     .select("id")
     .single();
@@ -498,14 +525,20 @@ async function resolveOrCreateContact(
     // Re-read after a unique conflict and mark it reused; only rows created
     // by this request may ever enter compensating cleanup.
     if (error.code === "23505") {
-      const racedContactId = await findExistingContact(supabase, orgId, contact);
-      if (racedContactId) {
-        return { id: racedContactId, phoneDropped: null, created: false };
+      const racedContact = await findExistingContact(supabase, orgId, contact);
+      if (racedContact) {
+        return {
+          id: racedContact.id,
+          phoneUnverified:
+            racedContact.matchedBy === "phone" &&
+            racedContact.matchedPhoneType === "unknown",
+          created: false,
+        };
       }
     }
     throw new Error(`contact insert: ${error.message}`);
   }
-  return { id: data.id, phoneDropped, created: true };
+  return { id: data.id, phoneUnverified: false, created: true };
 }
 
 type ContactIdentity = {
@@ -515,15 +548,186 @@ type ContactIdentity = {
   email: string | null;
 };
 
+type ExistingContactMatch = {
+  id: string;
+  matchedBy: "phone" | "email" | "name";
+  matchedPhoneType: PhoneLineType | null;
+};
+
+type LeadPhoneClassification = {
+  lineType: PhoneLineType;
+  status: TelnyxLookupOutcome["status"] | "unavailable";
+  reason: TelnyxLookupOutcome["reason"] | "configuration_missing";
+  httpStatus: number | null;
+};
+
+async function classifyLeadPhone(
+  phone: string,
+): Promise<LeadPhoneClassification> {
+  let result: LeadPhoneClassification;
+  try {
+    result = await telnyxLookupFromEnv().classifyOne(
+      phone,
+      AbortSignal.timeout(LEAD_PHONE_LOOKUP_TIMEOUT_MS),
+    );
+  } catch (error) {
+    result = {
+      lineType: "unknown",
+      status: "unavailable",
+      reason:
+        error instanceof ConfigurationError
+          ? "configuration_missing"
+          : "transport_unknown",
+      httpStatus: null,
+    };
+  }
+
+  if (result.lineType === "unknown") {
+    reportError(new Error("lead phone line type unverified at intake"), {
+      tags: {
+        surface: "lead_create_phone_unverified",
+        lookup_status: result.status,
+        lookup_reason: result.reason,
+      },
+      extra: { httpStatus: result.httpStatus },
+    });
+  }
+  return result;
+}
+
+async function saveUnverifiedLeadPhone(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  contact: ContactIdentity,
+  contactId: string | null,
+): Promise<string> {
+  const { data, error } = await supabase
+    .rpc("save_unverified_lead_phone", {
+      p_org_id: orgId,
+      p_phone: contact.phone_1!,
+      p_contact_id: contactId,
+      p_first_name: contact.first_name,
+      p_last_name: contact.last_name,
+      p_email: contact.email,
+    })
+    .single();
+  if (error || !data) {
+    if (error?.code === "23505") {
+      const racedContact = await findExistingContact(supabase, orgId, contact);
+      if (racedContact?.matchedBy === "phone") return racedContact.id;
+    }
+    throw new Error(
+      `unverified phone save: ${error?.message ?? "no result returned"}`,
+    );
+  }
+  if (data.outcome === "no_open_phone_slot") {
+    throw new Error(
+      "This contact already has three phone numbers. Remove one before adding another.",
+    );
+  }
+  return data.contact_id;
+}
+
+async function appendVerifiedPhone(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  contactId: string,
+  phone: string,
+  phoneType: Exclude<PhoneLineType, "unknown">,
+): Promise<void> {
+  const [
+    { data: contact, error: contactError },
+    { data: lockedProperty, error: lockError },
+  ] = await Promise.all([
+    supabase
+      .from("contacts")
+      .select("id, phone_1, phone_2, phone_3, do_not_contact")
+      .eq("org_id", orgId)
+      .eq("id", contactId)
+      .maybeSingle(),
+    supabase
+      .from("properties")
+      .select("id")
+      .eq("org_id", orgId)
+      .eq("homeowner_contact_id", contactId)
+      .eq("is_dnc_locked", true)
+      .limit(1)
+      .maybeSingle(),
+  ]);
+  if (contactError || !contact) {
+    throw new Error(
+      `contact phone append: ${contactError?.message ?? "contact not found"}`,
+    );
+  }
+  if (lockError) throw new Error(`contact DNC check: ${lockError.message}`);
+  if (contact.do_not_contact || lockedProperty) {
+    throw new Error(
+      "This contact is locked by do-not-call rules. The new phone was not added.",
+    );
+  }
+  if (
+    phone === contact.phone_1 ||
+    phone === contact.phone_2 ||
+    phone === contact.phone_3
+  ) {
+    return;
+  }
+
+  const slot =
+    contact.phone_1 === null
+      ? 1
+      : contact.phone_2 === null
+        ? 2
+        : contact.phone_3 === null
+          ? 3
+          : null;
+  if (slot === null) {
+    throw new Error(
+      "This contact already has three phone numbers. Remove one before adding another.",
+    );
+  }
+  const phoneColumn = `phone_${slot}` as "phone_1" | "phone_2" | "phone_3";
+  const typeColumn = `${phoneColumn}_type` as
+    "phone_1_type" | "phone_2_type" | "phone_3_type";
+  const updateRow: Database["public"]["Tables"]["contacts"]["Update"] = {
+    [phoneColumn]: phone,
+    [typeColumn]: phoneType,
+  };
+  const { data: updated, error: updateError } = await supabase
+    .from("contacts")
+    .update(updateRow)
+    .eq("org_id", orgId)
+    .eq("id", contactId)
+    .is(phoneColumn, null)
+    .select("id")
+    .maybeSingle();
+  if (updateError)
+    throw new Error(`contact phone append: ${updateError.message}`);
+  if (!updated) {
+    const racedContact = await findExistingContact(supabase, orgId, {
+      first_name: null,
+      last_name: null,
+      phone_1: phone,
+      email: null,
+    });
+    if (racedContact?.id === contactId) return;
+    throw new Error(
+      "This contact changed while the phone was being saved. Try again.",
+    );
+  }
+}
+
 async function findExistingContact(
   supabase: SupabaseClient<Database>,
   orgId: string,
   contact: ContactIdentity,
-): Promise<string | null> {
+): Promise<ExistingContactMatch | null> {
   if (contact.phone_1) {
     const { data, error } = await supabase
       .from("contacts")
-      .select("id")
+      .select(
+        "id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type",
+      )
       .eq("org_id", orgId)
       .or(
         `phone_1.eq.${contact.phone_1},phone_2.eq.${contact.phone_1},phone_3.eq.${contact.phone_1}`,
@@ -531,7 +735,15 @@ async function findExistingContact(
       .limit(1)
       .maybeSingle();
     if (error) throw new Error(`contact phone lookup: ${error.message}`);
-    if (data) return data.id;
+    if (data) {
+      const matchedPhoneType =
+        data.phone_1 === contact.phone_1
+          ? asLineType(data.phone_1_type)
+          : data.phone_2 === contact.phone_1
+            ? asLineType(data.phone_2_type)
+            : asLineType(data.phone_3_type);
+      return { id: data.id, matchedBy: "phone", matchedPhoneType };
+    }
   }
   if (contact.email) {
     const { data, error } = await supabase
@@ -542,7 +754,8 @@ async function findExistingContact(
       .limit(1)
       .maybeSingle();
     if (error) throw new Error(`contact email lookup: ${error.message}`);
-    if (data) return data.id;
+    if (data)
+      return { id: data.id, matchedBy: "email", matchedPhoneType: null };
   }
   if (
     !contact.phone_1 &&
@@ -562,7 +775,7 @@ async function findExistingContact(
       .limit(1)
       .maybeSingle();
     if (error) throw new Error(`contact name lookup: ${error.message}`);
-    if (data) return data.id;
+    if (data) return { id: data.id, matchedBy: "name", matchedPhoneType: null };
   }
   return null;
 }

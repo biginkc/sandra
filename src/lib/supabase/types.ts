@@ -5797,6 +5797,21 @@ export type Database = {
           was_created: boolean
         }[]
       }
+      save_unverified_lead_phone: {
+        Args: {
+          p_contact_id?: string | null
+          p_email?: string | null
+          p_first_name?: string | null
+          p_last_name?: string | null
+          p_org_id: string
+          p_phone: string
+        }
+        Returns: {
+          contact_id: string
+          outcome: string
+          phone_slot: number | null
+        }[]
+      }
       outbound_sms_metrics: {
         Args: {
           p_campaign_id?: string | null

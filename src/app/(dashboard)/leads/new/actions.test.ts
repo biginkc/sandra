@@ -1,16 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createLead, createClient, createAdminClient } = vi.hoisted(() => ({
-  createLead: vi.fn(),
-  createClient: vi.fn(),
-  createAdminClient: vi.fn(),
-}));
+const { createLead, createClient, createAdminClient, redirect } = vi.hoisted(
+  () => ({
+    createLead: vi.fn(),
+    createClient: vi.fn(),
+    createAdminClient: vi.fn(),
+    redirect: vi.fn(),
+  }),
+);
 
 vi.mock("@/lib/leads/create", () => ({ createLead }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
+vi.mock("next/navigation", () => ({ redirect }));
 
-import { createLeadFromForm } from "./actions";
+import { createLeadFromForm, submitNewLead } from "./actions";
 
 const baseInput = {
   source: "cold_call",
@@ -37,7 +41,9 @@ function cookieClient() {
 }
 
 function adminMembershipResult({
-  actorMemberships = [{ org_id: "org-1", created_at: "2026-01-01T00:00:00.000Z" }],
+  actorMemberships = [
+    { org_id: "org-1", created_at: "2026-01-01T00:00:00.000Z" },
+  ],
   assigneeMember = true,
 }: {
   actorMemberships?: Array<{ org_id: string; created_at: string }>;
@@ -46,9 +52,13 @@ function adminMembershipResult({
   let queryNumber = 0;
   return {
     from: vi.fn(() => {
-      const response = queryNumber++ === 0
-        ? { data: actorMemberships, error: null }
-        : { data: assigneeMember ? { user_id: "user-other" } : null, error: null };
+      const response =
+        queryNumber++ === 0
+          ? { data: actorMemberships, error: null }
+          : {
+              data: assigneeMember ? { user_id: "user-other" } : null,
+              error: null,
+            };
       const builder: Record<string, unknown> = {};
       for (const method of ["select", "eq", "or", "order", "limit"]) {
         builder[method] = vi.fn(() => builder);
@@ -65,14 +75,45 @@ beforeEach(() => {
   vi.clearAllMocks();
   createClient.mockResolvedValue(cookieClient());
   createAdminClient.mockReturnValue(adminMembershipResult());
+  redirect.mockImplementation((url: string) => {
+    throw new Error(`NEXT_REDIRECT:${url}`);
+  });
   createLead.mockResolvedValue({
     ok: true,
     data: {
       propertyId: "property-1",
       wasDuplicate: false,
       contactId: "contact-1",
-      phoneDropped: null,
+      phoneUnverified: false,
     },
+  });
+});
+
+describe("submitNewLead", () => {
+  it("shows the fixed notice after saving an unverified phone", async () => {
+    createLead.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        wasDuplicate: false,
+        contactId: "contact-1",
+        phoneUnverified: true,
+      },
+    });
+    const formData = new FormData();
+    for (const [field, value] of Object.entries({
+      ...baseInput,
+      phone_1: "8165550100",
+    })) {
+      formData.set(field, value);
+    }
+
+    await expect(submitNewLead(formData)).rejects.toThrow(
+      "NEXT_REDIRECT:/leads/property-1?notice=phone_unverified",
+    );
+    expect(redirect).toHaveBeenCalledWith(
+      "/leads/property-1?notice=phone_unverified",
+    );
   });
 });
 
@@ -114,8 +155,36 @@ describe("createLeadFromForm quick-entry fields", () => {
     );
   });
 
+  it("returns the saved-but-unverified phone flag to the form", async () => {
+    createLead.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        wasDuplicate: false,
+        contactId: "contact-1",
+        phoneUnverified: true,
+      },
+    });
+
+    const result = await createLeadFromForm({
+      ...baseInput,
+      phone_1: "8165550100",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        wasDuplicate: false,
+        phoneUnverified: true,
+      },
+    });
+  });
+
   it("rejects an assignee outside the current user's workspaces", async () => {
-    createAdminClient.mockReturnValue(adminMembershipResult({ assigneeMember: false }));
+    createAdminClient.mockReturnValue(
+      adminMembershipResult({ assigneeMember: false }),
+    );
 
     const result = await createLeadFromForm({
       ...baseInput,
@@ -129,32 +198,42 @@ describe("createLeadFromForm quick-entry fields", () => {
   });
 
   it("rejects creation when the creator has no active workspace", async () => {
-    createAdminClient.mockReturnValue(adminMembershipResult({ actorMemberships: [] }));
+    createAdminClient.mockReturnValue(
+      adminMembershipResult({ actorMemberships: [] }),
+    );
 
     const result = await createLeadFromForm({
       ...baseInput,
       assigned_user_id: "user-me",
     });
 
-    expect(result).toMatchObject({ ok: false, error: { code: "NO_ACTIVE_WORKSPACE" } });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "NO_ACTIVE_WORKSPACE" },
+    });
     expect(createLead).not.toHaveBeenCalled();
   });
 
   it("uses the deterministic earliest active workspace and rejects an assignee outside it", async () => {
-    createAdminClient.mockReturnValue(adminMembershipResult({
-      actorMemberships: [
-        { org_id: "org-earliest", created_at: "2025-01-01T00:00:00.000Z" },
-        { org_id: "org-later", created_at: "2026-01-01T00:00:00.000Z" },
-      ],
-      assigneeMember: false,
-    }));
+    createAdminClient.mockReturnValue(
+      adminMembershipResult({
+        actorMemberships: [
+          { org_id: "org-earliest", created_at: "2025-01-01T00:00:00.000Z" },
+          { org_id: "org-later", created_at: "2026-01-01T00:00:00.000Z" },
+        ],
+        assigneeMember: false,
+      }),
+    );
 
     const result = await createLeadFromForm({
       ...baseInput,
       assigned_user_id: "user-other",
     });
 
-    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_ASSIGNEE" } });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "INVALID_ASSIGNEE" },
+    });
     expect(createLead).not.toHaveBeenCalled();
   });
 });

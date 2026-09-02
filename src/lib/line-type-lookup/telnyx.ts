@@ -78,9 +78,7 @@ export class TelnyxLineTypeLookup {
    * MAX_IN_FLIGHT; a single number's failure never throws — that number
    * just comes back 'unknown'. The returned map covers every input.
    */
-  async classify(
-    phoneNumbers: string[],
-  ): Promise<Map<string, PhoneLineType>> {
+  async classify(phoneNumbers: string[]): Promise<Map<string, PhoneLineType>> {
     const result = new Map<string, PhoneLineType>();
     let cursor = 0;
 
@@ -92,9 +90,8 @@ export class TelnyxLineTypeLookup {
     };
 
     await Promise.all(
-      Array.from(
-        { length: Math.min(MAX_IN_FLIGHT, phoneNumbers.length) },
-        () => worker(),
+      Array.from({ length: Math.min(MAX_IN_FLIGHT, phoneNumbers.length) }, () =>
+        worker(),
       ),
     );
 
@@ -107,7 +104,10 @@ export class TelnyxLineTypeLookup {
    * the request may have reached the paid boundary, so return `ambiguous`
    * immediately and let the durable caller quarantine it.
    */
-  async classifyOne(number: string): Promise<TelnyxLookupOutcome> {
+  async classifyOne(
+    number: string,
+    signal?: AbortSignal,
+  ): Promise<TelnyxLookupOutcome> {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const response = await fetch(
@@ -117,6 +117,7 @@ export class TelnyxLineTypeLookup {
               Authorization: `Bearer ${this.apiKey}`,
               Accept: "application/json",
             },
+            signal,
           },
         );
 
@@ -162,8 +163,7 @@ export class TelnyxLineTypeLookup {
         return {
           status: "completed",
           lineType,
-          reason:
-            lineType === "unknown" ? "definitive_unknown" : "classified",
+          reason: lineType === "unknown" ? "definitive_unknown" : "classified",
           httpStatus: response.status,
         };
       } catch {

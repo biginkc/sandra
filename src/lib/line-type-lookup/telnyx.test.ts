@@ -157,6 +157,22 @@ describe("TelnyxLineTypeLookup.classify", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("passes a caller deadline to the provider request", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(carrierBody("mobile")));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    const lookup = new TelnyxLineTypeLookup("key-123");
+    await lookup.classifyOne("+18165550001", controller.signal);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
   it.each([402, 408, 409])(
     "keeps HTTP %i nonterminal so a job retry can recover without deleting the phone",
     async (httpStatus) => {

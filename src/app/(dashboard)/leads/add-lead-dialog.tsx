@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { LEAD_PHONE_UNVERIFIED_NOTICE } from "@/lib/leads/notices";
 
 import { createLeadFromForm } from "./new/actions";
 import { SOURCE_LABELS, STATES } from "./new/form-options";
@@ -114,10 +115,8 @@ export function AddLeadDialog({
 
         setDirty(false);
         setOpen(false);
-        const warning = result.data.phoneDropped
-          ? `?warning=${encodeURIComponent(
-              `Phone ${result.data.phoneDropped} couldn't be classified (line-type lookup unavailable) — it's saved on the contact's notes, not as a callable number.`,
-            )}`
+        const warning = result.data.phoneUnverified
+          ? `?notice=${LEAD_PHONE_UNVERIFIED_NOTICE}`
           : "";
         router.push(`/leads/${result.data.propertyId}${warning}`);
       })().finally(() => {

@@ -15,9 +15,7 @@ const OTHER_ORG_ID = "00000000-0000-0000-0000-000000000ccc";
 // else passes through to the real test DB.
 const realFetch = globalThis.fetch;
 
-function withOneInjectedFailure(
-  target: "contact_insert" | "property_insert",
-) {
+function withOneInjectedFailure(target: "contact_insert" | "property_insert") {
   let armed = true;
   return {
     from(table: string) {
@@ -38,7 +36,10 @@ function withOneInjectedFailure(
                 select: () => failed,
                 single: async () => ({
                   data: null,
-                  error: { code: "INJECTED", message: "injected contact failure" },
+                  error: {
+                    code: "INJECTED",
+                    message: "injected contact failure",
+                  },
                 }),
               };
               return failed;
@@ -56,7 +57,10 @@ function withOneInjectedFailure(
                 select: () => failed,
                 single: async () => ({
                   data: null,
-                  error: { code: "INJECTED", message: "injected property failure" },
+                  error: {
+                    code: "INJECTED",
+                    message: "injected property failure",
+                  },
                 }),
               };
               return failed;
@@ -194,7 +198,9 @@ describe("createLead (integration)", () => {
   });
 
   it("keeps identical address, phone, email, and another org's DNC contact tenant-isolated", async () => {
-    await supabase.from("organizations").upsert({ id: OTHER_ORG_ID, name: "Other org" });
+    await supabase
+      .from("organizations")
+      .upsert({ id: OTHER_ORG_ID, name: "Other org" });
     const { data: otherContact, error: otherContactError } = await supabase
       .from("contacts")
       .insert({
@@ -209,14 +215,16 @@ describe("createLead (integration)", () => {
       .select("id")
       .single();
     expect(otherContactError).toBeNull();
-    const { error: otherPropertyError } = await supabase.from("properties").insert({
-      org_id: OTHER_ORG_ID,
-      address: "23 Shared Tenant Way",
-      address_normalized: "23 shared tenant way",
-      state: "MO",
-      status: "new_lead",
-      homeowner_contact_id: otherContact!.id,
-    });
+    const { error: otherPropertyError } = await supabase
+      .from("properties")
+      .insert({
+        org_id: OTHER_ORG_ID,
+        address: "23 Shared Tenant Way",
+        address_normalized: "23 shared tenant way",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: otherContact!.id,
+      });
     expect(otherPropertyError).toBeNull();
 
     const result = await createLead(supabase, {
@@ -274,7 +282,11 @@ describe("createLead (integration)", () => {
       orgId: ORG_ID,
       source: "cold_call",
       property: { address: "5 Attach Ln", state: "MO" },
-      contact: { phone_1: "+18165551005", first_name: "Hi", last_name: "There" },
+      contact: {
+        phone_1: "+18165551005",
+        first_name: "Hi",
+        last_name: "There",
+      },
     });
     expect(second.ok).toBe(true);
     if (!second.ok) return;
@@ -392,16 +404,18 @@ describe("createLead (integration)", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.contactId).toBe(existing!.id);
-    expect(result.data.phoneDropped).toBeNull();
+    expect(result.data.phoneUnverified).toBe(false);
 
     const { count } = await supabase
       .from("contacts")
       .select("*", { count: "exact", head: true })
-      .or("phone_1.eq.+18165553101,phone_2.eq.+18165553101,phone_3.eq.+18165553101");
+      .or(
+        "phone_1.eq.+18165553101,phone_2.eq.+18165553101,phone_3.eq.+18165553101",
+      );
     expect(count).toBe(1);
   });
 
-  it("classification unavailable → lead succeeds degraded: phone parked on notes, phoneDropped flagged, no phone slot written", async () => {
+  it("classification unavailable → lead saves the phone as unverified instead of deleting it", async () => {
     // Simulate a Telnyx outage: the stub returns a 500 for lookup calls.
     globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -419,16 +433,175 @@ describe("createLead (integration)", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.data.phoneDropped).toBe("+18165553200");
+    expect(result.data.phoneUnverified).toBe(true);
     expect(result.data.contactId).not.toBeNull();
 
     const { data: contact } = await supabase
       .from("contacts")
-      .select("phone_1, notes")
+      .select("phone_1, phone_1_type, notes")
       .eq("id", result.data.contactId!)
       .single();
-    expect(contact!.phone_1).toBeNull();
-    expect(contact!.notes).toContain("+18165553200");
+    expect(contact).toMatchObject({
+      phone_1: "+18165553200",
+      phone_1_type: "unknown",
+      notes: null,
+    });
+  });
+
+  it("missing lookup setup saves the phone as unverified", async () => {
+    vi.stubEnv("TELNYX_API_KEY", "");
+
+    const result = await createLead(supabase, {
+      orgId: ORG_ID,
+      source: "referral",
+      property: { address: "9 Missing Lookup Ln", state: "MO" },
+      contact: { first_name: "Safe", phone_1: "+18165553201" },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.phoneUnverified).toBe(true);
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, phone_1_type")
+      .eq("id", result.data.contactId!)
+      .single();
+    expect(contact).toMatchObject({
+      phone_1: "+18165553201",
+      phone_1_type: "unknown",
+    });
+  });
+
+  it("an email match appends an unverified phone instead of losing it", async () => {
+    const { data: existing, error } = await supabase
+      .from("contacts")
+      .insert({
+        org_id: ORG_ID,
+        first_name: "Existing",
+        email: "existing@example.test",
+      })
+      .select("id")
+      .single();
+    expect(error).toBeNull();
+    vi.stubEnv("TELNYX_API_KEY", "");
+
+    const result = await createLead(supabase, {
+      orgId: ORG_ID,
+      source: "referral",
+      property: { address: "9 Existing Email Ln", state: "MO" },
+      contact: {
+        first_name: "Existing",
+        email: "existing@example.test",
+        phone_1: "+18165553202",
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.contactId).toBe(existing!.id);
+    expect(result.data.phoneUnverified).toBe(true);
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, phone_1_type")
+      .eq("id", existing!.id)
+      .single();
+    expect(contact).toMatchObject({
+      phone_1: "+18165553202",
+      phone_1_type: "unknown",
+    });
+  });
+
+  it("an email match appends a classified phone with its real type", async () => {
+    const { data: existing, error } = await supabase
+      .from("contacts")
+      .insert({
+        org_id: ORG_ID,
+        first_name: "Known",
+        email: "known@example.test",
+        phone_1: "+18165553203",
+        phone_1_type: "landline",
+      })
+      .select("id")
+      .single();
+    expect(error).toBeNull();
+
+    const result = await createLead(supabase, {
+      orgId: ORG_ID,
+      source: "referral",
+      property: { address: "9 Known Email Ln", state: "MO" },
+      contact: {
+        email: "known@example.test",
+        phone_1: "+18165553204",
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.phoneUnverified).toBe(false);
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, phone_1_type, phone_2, phone_2_type")
+      .eq("id", existing!.id)
+      .single();
+    expect(contact).toMatchObject({
+      phone_1: "+18165553203",
+      phone_1_type: "landline",
+      phone_2: "+18165553204",
+      phone_2_type: "mobile",
+    });
+  });
+
+  it("reports an already-saved unknown phone as unverified without another lookup", async () => {
+    const { data: existing, error } = await supabase
+      .rpc("save_unverified_lead_phone", {
+        p_org_id: ORG_ID,
+        p_phone: "+18165553205",
+        p_first_name: "Already",
+      })
+      .single();
+    expect(error).toBeNull();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const result = await createLead(supabase, {
+      orgId: ORG_ID,
+      source: "referral",
+      property: { address: "9 Already Unknown Ln", state: "MO" },
+      contact: { phone_1: "+18165553205" },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.contactId).toBe(existing!.contact_id);
+    expect(result.data.phoneUnverified).toBe(true);
+    expect(
+      fetchSpy.mock.calls.some(([input]) =>
+        String(input).startsWith("https://api.telnyx.com/v2/number_lookup"),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects a non-empty invalid phone before creating a contact or property", async () => {
+    const result = await createLead(supabase, {
+      orgId: ORG_ID,
+      source: "referral",
+      property: { address: "9 Invalid Phone Ln", state: "MO" },
+      contact: { first_name: "Invalid", phone_1: "123" },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "VALIDATION", field: "contact.phone_1" },
+    });
+    const [{ count: propertyCount }, { count: contactCount }] =
+      await Promise.all([
+        supabase
+          .from("properties")
+          .select("id", { count: "exact", head: true })
+          .eq("address", "9 Invalid Phone Ln"),
+        supabase.from("contacts").select("id", { count: "exact", head: true }),
+      ]);
+    expect(propertyCount).toBe(0);
+    expect(contactCount).toBe(0);
   });
 
   it("creates no property when contact creation fails and permits a clean retry", async () => {
@@ -439,16 +612,20 @@ describe("createLead (integration)", () => {
       contact: { first_name: "Cleanup", last_name: "Contact" },
     };
 
-    const first = await createLead(withOneInjectedFailure("contact_insert"), input);
+    const first = await createLead(
+      withOneInjectedFailure("contact_insert"),
+      input,
+    );
     expect(first.ok).toBe(false);
 
-    const [{ count: propertyCount }, { count: contactCount }] = await Promise.all([
-      supabase
-        .from("properties")
-        .select("*", { count: "exact", head: true })
-        .eq("address", input.property.address),
-      supabase.from("contacts").select("*", { count: "exact", head: true }),
-    ]);
+    const [{ count: propertyCount }, { count: contactCount }] =
+      await Promise.all([
+        supabase
+          .from("properties")
+          .select("*", { count: "exact", head: true })
+          .eq("address", input.property.address),
+        supabase.from("contacts").select("*", { count: "exact", head: true }),
+      ]);
     expect(propertyCount).toBe(0);
     expect(contactCount).toBe(0);
 
@@ -465,16 +642,20 @@ describe("createLead (integration)", () => {
       contact: { first_name: "Cleanup", last_name: "Attach" },
     };
 
-    const first = await createLead(withOneInjectedFailure("property_insert"), input);
+    const first = await createLead(
+      withOneInjectedFailure("property_insert"),
+      input,
+    );
     expect(first.ok).toBe(false);
 
-    const [{ count: propertyCount }, { count: contactCount }] = await Promise.all([
-      supabase
-        .from("properties")
-        .select("*", { count: "exact", head: true })
-        .eq("address", input.property.address),
-      supabase.from("contacts").select("*", { count: "exact", head: true }),
-    ]);
+    const [{ count: propertyCount }, { count: contactCount }] =
+      await Promise.all([
+        supabase
+          .from("properties")
+          .select("*", { count: "exact", head: true })
+          .eq("address", input.property.address),
+        supabase.from("contacts").select("*", { count: "exact", head: true }),
+      ]);
     expect(propertyCount).toBe(0);
     expect(contactCount).toBe(0);
 
@@ -497,16 +678,21 @@ describe("createLead (integration)", () => {
     ]);
     expect(results.every((result) => result.ok)).toBe(true);
     const successful = results.filter((result) => result.ok);
-    expect(successful.filter((result) => result.data.wasDuplicate)).toHaveLength(1);
-    expect(new Set(successful.map((result) => result.data.propertyId)).size).toBe(1);
+    expect(
+      successful.filter((result) => result.data.wasDuplicate),
+    ).toHaveLength(1);
+    expect(
+      new Set(successful.map((result) => result.data.propertyId)).size,
+    ).toBe(1);
 
-    const [{ count: propertyCount }, { count: contactCount }] = await Promise.all([
-      supabase
-        .from("properties")
-        .select("*", { count: "exact", head: true })
-        .eq("address", input.property.address),
-      supabase.from("contacts").select("*", { count: "exact", head: true }),
-    ]);
+    const [{ count: propertyCount }, { count: contactCount }] =
+      await Promise.all([
+        supabase
+          .from("properties")
+          .select("*", { count: "exact", head: true })
+          .eq("address", input.property.address),
+        supabase.from("contacts").select("*", { count: "exact", head: true }),
+      ]);
     expect(propertyCount).toBe(1);
     expect(contactCount).toBe(1);
   });
