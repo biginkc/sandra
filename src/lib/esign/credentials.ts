@@ -12,7 +12,7 @@ export type DecryptedEsignCredentials = {
   clientId: string;
   providerAccountId: string;
   sendingEnabled: boolean;
-  testMode: true;
+  testMode: boolean;
   callbackSecretHash: string;
 };
 
@@ -97,6 +97,10 @@ export function configuredDropboxSignEmbeddedDomain(): string {
   return domain;
 }
 
+export function embeddedTemplateManagementEnabled(): boolean {
+  return process.env.ESIGN_EMBEDDED_TEMPLATE_MANAGEMENT_ENABLED === "true";
+}
+
 /**
  * Server-only deterministic path secret for Session 04's callback URL.
  * Only its SHA-256 digest is persisted. Never return this from an action.
@@ -155,17 +159,12 @@ export async function getEsignCredentials(
   const row = data?.[0];
   if (!row) return null;
   if (!row.api_key || !row.client_id || !row.provider_account_id) return null;
-  if (!row.test_mode) {
-    throw new ConfigurationError(
-      "Dropbox Sign must remain in test mode for Sandra v1.",
-    );
-  }
   return {
     apiKey: new EsignSecret(row.api_key),
     clientId: row.client_id,
     providerAccountId: row.provider_account_id,
     sendingEnabled: row.sending_enabled,
-    testMode: true,
+    testMode: row.test_mode,
     callbackSecretHash: row.callback_secret_hash,
   };
 }
@@ -175,6 +174,9 @@ export async function requireEsignTemplateManagementCredentials(
 ): Promise<DecryptedEsignCredentials> {
   const credentials = await getEsignCredentials(orgId);
   if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+  if (!embeddedTemplateManagementEnabled()) {
+    throw new Error("DROPBOX_SIGN_EMBEDDED_TEMPLATE_MANAGEMENT_DISABLED");
+  }
   const { data, error } = await adminRpc().rpc(
     "esign_require_template_management_capability",
     { p_org_id: orgId },

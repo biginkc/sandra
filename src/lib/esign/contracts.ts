@@ -78,6 +78,7 @@ export type ProviderTemplateMetadata = {
   providerTemplateId: string;
   localTemplateId: string | null;
   title: string | null;
+  isEmbedded: boolean | null;
   signerRoles: TemplateSignerRole[];
   mergeFieldNames: string[];
 };
@@ -98,6 +99,7 @@ export type CreateEmbeddedTemplateDraftInput = {
 export type SendWithTemplateInput = {
   localRequestId: string;
   templateId: string;
+  testMode?: boolean;
   signers: EsignSigner[];
   mergeValues: Record<string, string>;
   title?: string;
@@ -120,7 +122,7 @@ export type SendWithTemplateOutput = {
   signatureRequestId: string;
   signatures: ProviderSignature[];
   detailsUrl: string | null;
-  testMode: true;
+  testMode: boolean;
 };
 
 export type ProviderSignatureRequestMetadata = {
@@ -158,6 +160,7 @@ export type DropboxSignProvider = {
   sendWithTemplate(
     input: SendWithTemplateInput,
   ): Promise<SendWithTemplateOutput>;
+  getRemainingSignatureRequests?(signal?: AbortSignal): Promise<number | null>;
   updateSignerEmail(input: {
     signatureRequestId: string;
     signatureId: string;
@@ -190,6 +193,12 @@ export type EsignConnectionStatus = {
   canManage: boolean;
   sendingEnabled: boolean;
   disconnectPending: boolean;
-  testMode: true;
+  testMode: boolean;
   apiKeyLastFour: string | null;
+  embeddedTemplateManagementEnabled?: boolean;
+  liveSendLimit?: {
+    monthlyLimit: number;
+    usedThisMonth: number;
+    remainingThisMonth: number;
+  } | null;
 };

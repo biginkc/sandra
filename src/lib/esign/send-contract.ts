@@ -13,6 +13,7 @@ import {
 
 export type ProviderSendContractInput = Readonly<{
   localRequestId: string;
+  testMode?: boolean;
   template: TemplateOption;
   signers: readonly Readonly<{
     role: string;
@@ -34,6 +35,7 @@ export async function sendContractWithTemplate(
 
   const response = await provider.sendWithTemplate({
     localRequestId: input.localRequestId,
+    testMode: input.testMode ?? true,
     templateId: input.template.providerTemplateId,
     signers: input.signers.map(({ role, name, emailAddress }) => ({
       role,

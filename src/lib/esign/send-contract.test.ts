@@ -104,6 +104,7 @@ describe("sendContractWithTemplate", () => {
 
     expect(adapter.sendWithTemplate).toHaveBeenCalledWith({
       localRequestId: "request-local-1",
+      testMode: true,
       templateId: "provider-template-1",
       signers: [
         {

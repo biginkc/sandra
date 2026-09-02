@@ -69,10 +69,22 @@ function abortableTemplateApi(apiKey: EsignSecret, signal?: AbortSignal) {
   return template;
 }
 
+function abortableAccountApi(apiKey: EsignSecret, signal?: AbortSignal) {
+  const account = new AccountApi();
+  account.username = apiKey.reveal();
+  account.password = "";
+  if (signal) {
+    account.addInterceptor((options) => {
+      options.signal = signal;
+    });
+  }
+  return account;
+}
+
 export function createDropboxSignProvider(input: {
   apiKey: EsignSecret;
   clientId: string;
-  expectedDomain: string;
+  expectedDomain?: string;
 }): DropboxSignProvider {
   const api = authenticatedApiSet(input.apiKey);
 
@@ -92,8 +104,13 @@ export function createDropboxSignProvider(input: {
           );
         }
         const domains = apiApp.domains ?? [];
-        const expectedHost = normalizedDomain(input.expectedDomain);
-        if (!domains.some((domain) => normalizedDomain(domain) === expectedHost)) {
+        const expectedHost = input.expectedDomain
+          ? normalizedDomain(input.expectedDomain)
+          : null;
+        if (
+          expectedHost &&
+          !domains.some((domain) => normalizedDomain(domain) === expectedHost)
+        ) {
           throw new ProviderError(
             "The Dropbox Sign API app does not allow Sandra's embedded domain.",
             "dropbox_sign",
@@ -242,7 +259,7 @@ export function createDropboxSignProvider(input: {
         title: request.title,
         subject: request.subject,
         message: request.message,
-        testMode: true,
+        testMode: request.testMode ?? true,
       };
       try {
         const response =
@@ -273,8 +290,28 @@ export function createDropboxSignProvider(input: {
                 : [],
           ),
           detailsUrl: signatureRequest.detailsUrl ?? null,
-          testMode: true,
+          testMode: request.testMode ?? true,
         };
+      } catch (error) {
+        throw normalizeDropboxSignError(error);
+      }
+    },
+
+    async getRemainingSignatureRequests(signal?: AbortSignal) {
+      try {
+        const response = await abortableAccountApi(input.apiKey, signal).accountGet();
+        const account = response.body.account as unknown as {
+          quotas?: {
+            api_signature_requests_left?: unknown;
+            apiSignatureRequestsLeft?: unknown;
+          };
+        };
+        const remaining =
+          account.quotas?.api_signature_requests_left ??
+          account.quotas?.apiSignatureRequestsLeft;
+        return typeof remaining === "number" && Number.isFinite(remaining)
+          ? remaining
+          : null;
       } catch (error) {
         throw normalizeDropboxSignError(error);
       }
@@ -412,6 +449,7 @@ export function createDropboxSignProvider(input: {
 function providerTemplateMetadata(template: {
   templateId?: string;
   title?: string;
+  isEmbedded?: boolean | null;
   metadata?: Record<string, unknown>;
   signerRoles?: Array<{ name?: string; order?: number }>;
   namedFormFields?: Array<{ name?: string }> | null;
@@ -422,6 +460,7 @@ function providerTemplateMetadata(template: {
       ? template.metadata.sandra_template_id
       : null,
     title: template.title ?? null,
+    isEmbedded: typeof template.isEmbedded === "boolean" ? template.isEmbedded : null,
     signerRoles: (template.signerRoles ?? [])
       .map((role, index) => ({ name: role.name ?? "", order: role.order ?? index }))
       .sort((a, b) => a.order - b.order),

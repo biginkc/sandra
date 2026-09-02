@@ -21,7 +21,7 @@ import { createClient } from "@/lib/supabase/server";
 import type { EsignConnectionStatus } from "./contracts";
 import {
   configuredDropboxSignClientId,
-  configuredDropboxSignEmbeddedDomain,
+  embeddedTemplateManagementEnabled,
   saveEsignCredentials,
 } from "./credentials";
 import { createDropboxSignProvider } from "./dropbox-sign";
@@ -39,6 +39,8 @@ type StatusClient = {
             api_key_last_four: string | null;
             sending_enabled: boolean;
             test_mode: boolean;
+            live_send_monthly_limit?: number | null;
+            live_send_monthly_used?: number | null;
             disconnect_pending_at?: string | null;
           } | null;
           error: { message: string; code?: string } | null;
@@ -53,17 +55,19 @@ async function loadEsignStatusRow(
   orgId: string,
 ): Promise<{
   data: {
-    api_key_last_four: string | null;
-    sending_enabled: boolean;
-    test_mode: boolean;
-    disconnect_pending_at?: string | null;
+            api_key_last_four: string | null;
+            sending_enabled: boolean;
+            test_mode: boolean;
+            live_send_monthly_limit?: number | null;
+            live_send_monthly_used?: number | null;
+            disconnect_pending_at?: string | null;
   } | null;
   error: { message: string; code?: string } | null;
 }> {
   const withPendingState = await supabase
     .from("org_esign_integrations")
     .select(
-      "api_key_last_four, sending_enabled, test_mode, disconnect_pending_at",
+      "api_key_last_four, sending_enabled, test_mode, disconnect_pending_at, live_send_monthly_limit, live_send_monthly_used",
     )
     .eq("org_id", orgId)
     .maybeSingle();
@@ -86,6 +90,10 @@ async function loadEsignStatusRow(
 }
 
 type AdminIntegrationClient = {
+  rpc(
+    fn: "set_org_esign_test_mode",
+    args: { p_org_id: string; p_actor_id: string; p_test_mode: boolean },
+  ): Promise<{ error: { message: string; code?: string } | null }>;
   rpc(
     fn: "set_org_esign_sending_enabled",
     args: { p_org_id: string; p_actor_id: string; p_enabled: boolean },
@@ -179,10 +187,9 @@ export async function getEsignConnectionStatus(): Promise<
         code: error.code,
       });
     }
-    if (data && !data.test_mode) {
-      throw new DatabaseError("Dropbox Sign is not safely configured for v1.");
-    }
     const credentialsPresent = Boolean(data?.api_key_last_four);
+    const monthlyLimit = data?.live_send_monthly_limit ?? null;
+    const usedThisMonth = data?.live_send_monthly_used ?? null;
     return ok({
       connected: credentialsPresent,
       canManage: membership.role === "owner",
@@ -192,8 +199,17 @@ export async function getEsignConnectionStatus(): Promise<
         (data?.sending_enabled ?? false),
       disconnectPending:
         credentialsPresent && Boolean(data?.disconnect_pending_at),
-      testMode: true,
+      testMode: data?.test_mode ?? true,
       apiKeyLastFour: data?.api_key_last_four ?? null,
+      embeddedTemplateManagementEnabled: embeddedTemplateManagementEnabled(),
+      liveSendLimit:
+        monthlyLimit === null || usedThisMonth === null
+          ? null
+          : {
+              monthlyLimit,
+              usedThisMonth,
+              remainingThisMonth: Math.max(0, monthlyLimit - usedThisMonth),
+            },
     });
   } catch (error) {
     reportError(error, { tags: { surface: "esign_connection_status" } });
@@ -219,7 +235,6 @@ export async function connectDropboxSignAction(
     const provider = createDropboxSignProvider({
       apiKey: new EsignSecret(apiKey),
       clientId,
-      expectedDomain: configuredDropboxSignEmbeddedDomain(),
     });
     const validation = await provider.validateCredentials();
     const providerAccountId = validation.accountId?.trim();
@@ -243,6 +258,8 @@ export async function connectDropboxSignAction(
       disconnectPending: false,
       testMode: true,
       apiKeyLastFour: apiKey.slice(-4),
+      embeddedTemplateManagementEnabled: embeddedTemplateManagementEnabled(),
+      liveSendLimit: null,
     });
   } catch (error) {
     reportError(error, { tags: { surface: "esign_connect" } });
@@ -295,6 +312,45 @@ export async function setEsignSendingEnabledAction(
       error,
       "ESIGN_UPDATE_FAILED",
       "Dropbox Sign sending could not be updated.",
+    );
+  }
+}
+
+export async function setEsignRequestModeAction(
+  testMode: boolean,
+  operatorConfirmed: boolean,
+): Promise<Result<EsignConnectionStatus>> {
+  try {
+    const membership = await currentMembership();
+    requireOwner(membership);
+    if (operatorConfirmed !== true) {
+      throw new ValidationError(
+        "Confirm the Dropbox Sign mode change before it is applied.",
+      );
+    }
+    const { error } = await (
+      createAdminClient() as unknown as AdminIntegrationClient
+    ).rpc("set_org_esign_test_mode", {
+      p_org_id: membership.org_id,
+      p_actor_id: membership.user_id,
+      p_test_mode: testMode,
+    });
+    if (error) {
+      throw new DatabaseError(
+        error.code === "P0002"
+          ? "Connect Dropbox Sign before changing request mode."
+          : "Dropbox Sign request mode could not be changed.",
+        { code: error.code },
+      );
+    }
+    revalidatePath("/settings/integrations");
+    return getEsignConnectionStatus();
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_mode_change" } });
+    return safeEsignError(
+      error,
+      "ESIGN_MODE_UPDATE_FAILED",
+      "Dropbox Sign request mode could not be changed.",
     );
   }
 }

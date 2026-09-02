@@ -97,7 +97,9 @@ describe("<IntegrationsForm />", () => {
       screen.getByRole("link", { name: "Connect Google Calendar" }),
     ).toHaveAttribute("href", "/api/oauth/google/start");
     expect(screen.getAllByText("Disconnected")).toHaveLength(3);
-    expect(screen.getByText(/Test mode is always on for v1/i)).toBeVisible();
+    expect(
+      screen.getByText(/Use the Primary Key from your Dropbox Sign API settings/i),
+    ).toBeVisible();
     expect(screen.queryByRole("link", { name: "Manage templates" })).toBeNull();
   });
 
@@ -299,13 +301,14 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
     await screen.findByText("Dropbox Sign disconnected.");
 
-    await user.type(
-      screen.getByLabelText("Primary API key"),
-      "secret-api-key-1234",
-    );
-    await user.click(
-      screen.getByRole("button", { name: "Connect Dropbox Sign" }),
-    );
+    const apiKeyInput = await screen.findByLabelText("Primary API key");
+    await waitFor(() => expect(apiKeyInput).toBeEnabled());
+    await user.type(apiKeyInput, "secret-api-key-1234");
+    const connectButton = screen.getByRole("button", {
+      name: "Connect Dropbox Sign",
+    });
+    await waitFor(() => expect(connectButton).toBeEnabled());
+    await user.click(connectButton);
 
     await waitFor(() => {
       expect(connectDropboxSignAction).toHaveBeenCalledWith(

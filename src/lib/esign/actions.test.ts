@@ -46,6 +46,7 @@ vi.mock("@/lib/auth/memberships", () => ({
 vi.mock("@/lib/esign/credentials", () => ({
   configuredDropboxSignClientId: () => "client-id",
   configuredDropboxSignEmbeddedDomain: () => "sandra.example.com",
+  embeddedTemplateManagementEnabled: () => false,
   saveEsignCredentials: mocks.saveEsignCredentials,
   deleteEsignCredentials: mocks.deleteEsignCredentials,
 }));
@@ -133,6 +134,8 @@ describe("eSign server actions", () => {
         disconnectPending: false,
         testMode: true,
         apiKeyLastFour: "1234",
+        embeddedTemplateManagementEnabled: false,
+        liveSendLimit: null,
       },
     });
     expect(JSON.stringify(result)).not.toContain("dropbox-api-key-1234");
@@ -187,6 +190,8 @@ describe("eSign server actions", () => {
         disconnectPending: false,
         testMode: true,
         apiKeyLastFour: "9876",
+        embeddedTemplateManagementEnabled: false,
+        liveSendLimit: null,
       },
     });
   });
@@ -208,6 +213,8 @@ describe("eSign server actions", () => {
         disconnectPending: false,
         testMode: true,
         apiKeyLastFour: null,
+        embeddedTemplateManagementEnabled: false,
+        liveSendLimit: null,
       },
     });
   });
@@ -229,6 +236,8 @@ describe("eSign server actions", () => {
         disconnectPending: true,
         testMode: true,
         apiKeyLastFour: "9876",
+        embeddedTemplateManagementEnabled: false,
+        liveSendLimit: null,
       },
     });
   });
@@ -258,6 +267,8 @@ describe("eSign server actions", () => {
         disconnectPending: false,
         testMode: true,
         apiKeyLastFour: "9876",
+        embeddedTemplateManagementEnabled: false,
+        liveSendLimit: null,
       },
     });
   });
