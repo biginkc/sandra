@@ -86,6 +86,7 @@ function provider(
         "https://app.hellosign.com/home/manage?guid=provider-request-1",
       testMode: true,
     }),
+    findSignatureRequestIdsByLocalRequestId: vi.fn(),
     remind: vi.fn(),
     cancel: vi.fn(),
     downloadSignedPdf: vi.fn(),

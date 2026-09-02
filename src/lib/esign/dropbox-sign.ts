@@ -279,6 +279,36 @@ export function createDropboxSignProvider(input: {
       }
     },
 
+    async findSignatureRequestIdsByLocalRequestId(localRequestId, signal) {
+      try {
+        const response = await abortableSignatureApi(
+          input.apiKey,
+          signal,
+        ).signatureRequestList(
+          undefined,
+          1,
+          100,
+          `metadata:${localRequestId} AND test_mode:true AND client_id:${input.clientId}`,
+        );
+        const requests = response.body.signatureRequests ?? [];
+        const providerRequestIds = requests.flatMap((request) =>
+          request.metadata?.sandra_request_id === localRequestId &&
+          request.signatureRequestId
+            ? [request.signatureRequestId]
+            : [],
+        );
+        const listInfo = response.body.listInfo;
+        return {
+          complete:
+            (listInfo.numPages ?? 1) === 1 &&
+            (listInfo.numResults ?? requests.length) === requests.length,
+          providerRequestIds,
+        };
+      } catch (error) {
+        throw normalizeDropboxSignError(error);
+      }
+    },
+
     async remind(
       signatureRequestId: string,
       signer: { emailAddress: string; name?: string },

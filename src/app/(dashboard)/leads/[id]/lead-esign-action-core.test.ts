@@ -288,7 +288,58 @@ describe("lead eSign action orchestration", () => {
       ok: false,
       error: { code: "REQUEST_CLAIM_MISMATCH" },
     });
+    expect(h.repository.markSendOutcome).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      deliveryState: "failed",
+      safeErrorMessage: "REQUEST_CLAIM_MISMATCH",
+    });
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("dispatches the forensic one-signer row shape after ignoring database-only signer fields", async () => {
+    const h = harness();
+    const forensicTemplate = {
+      ...template,
+      signerRoles: [{ name: "Seller", order: 0 }],
+    };
+    const forensicInput = {
+      ...sendInput,
+      signers: [sendInput.signers[0]],
+    };
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ templates: [forensicTemplate] }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({
+        id: "c36c5e1e-a98d-4b1e-a768-f0ea6d7e854c",
+        template: forensicTemplate,
+        payloadHash: hashSendPayload(forensicInput),
+        signers: [
+          {
+            ...forensicInput.signers[0],
+            id: "persisted-signer-1",
+            status: "awaiting",
+            lastRemindedAt: null,
+          },
+        ],
+      }),
+    });
+    h.provider.sendWithTemplate.mockResolvedValue({
+      outcome: "sent",
+      providerRequestId: "provider-request-1",
+      detailsUrl:
+        "https://app.hellosign.com/home/manage?guid=provider-request-1",
+      signatures: [
+        { ...forensicInput.signers[0], signatureId: "signature-1" },
+      ],
+    });
+
+    const result = await h.core.send(forensicInput);
+
+    expect(result).toEqual({ ok: true, data: { requestId: "c36c5e1e-a98d-4b1e-a768-f0ea6d7e854c" } });
+    expect(h.provider.sendWithTemplate).toHaveBeenCalledTimes(1);
   });
 
   it("rejects stale role case/order and incomplete five-field snapshots", async () => {

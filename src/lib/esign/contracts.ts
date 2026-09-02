@@ -145,6 +145,10 @@ export type DropboxSignProvider = {
   ): Promise<void>;
   deleteTemplate(providerTemplateId: string): Promise<void>;
   sendWithTemplate(input: SendWithTemplateInput): Promise<SendWithTemplateOutput>;
+  findSignatureRequestIdsByLocalRequestId(
+    localRequestId: string,
+    signal?: AbortSignal,
+  ): Promise<{ complete: boolean; providerRequestIds: string[] }>;
   remind(
     signatureRequestId: string,
     signer: { emailAddress: string; name?: string },

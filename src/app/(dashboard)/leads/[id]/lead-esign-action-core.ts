@@ -34,7 +34,10 @@ import {
 
 const REMINDER_COOLDOWN_MS = 60 * 60 * 1_000;
 const DOWNLOAD_MAX_LIFETIME_MS = 5 * 60 * 1_000;
-export const ESIGN_PROVIDER_TIMEOUT_MS = 8 * 60 * 1_000;
+// The lead page explicitly gives its Server Actions 300 seconds. Leave a full
+// minute for claim/outcome bookkeeping so Vercel cannot terminate the action
+// before an ambiguous provider call is fenced as send_unknown.
+export const ESIGN_PROVIDER_TIMEOUT_MS = 4 * 60 * 1_000;
 
 export type EsignActor = Readonly<{ orgId: string; userId: string }>;
 
@@ -349,13 +352,22 @@ async function send(
     fail("NOT_FOUND", "Lead not found. Refresh and try again.");
   if (claim.outcome === "existing")
     return resolveExistingIntent(claim.request, payloadHash, actor.orgId);
-  assertClaimedRequest(
-    claim.request,
-    actor,
-    normalized,
-    payloadHash,
-    retryOfRequestId,
-  );
+  try {
+    assertClaimedRequest(
+      claim.request,
+      actor,
+      normalized,
+      payloadHash,
+      retryOfRequestId,
+    );
+  } catch (error) {
+    await markFailed(
+      dependencies,
+      { id: claim.request.id, orgId: actor.orgId },
+      "REQUEST_CLAIM_MISMATCH",
+    );
+    throw error;
+  }
   return dispatchClaimed(dependencies, claim.request);
 }
 
@@ -798,7 +810,14 @@ export function hashSendPayload(input: SendContractInput): string {
       JSON.stringify({
         propertyId: input.propertyId,
         templateId: input.templateId,
-        signers: input.signers,
+        signers: [...input.signers]
+          .sort((left, right) => left.order - right.order)
+          .map(({ role, order, name, emailAddress }) => ({
+            role,
+            order,
+            name,
+            emailAddress,
+          })),
         mergeValues: ESIGN_MERGE_FIELD_NAMES.map((name) => [
           name,
           input.mergeValues[name],
@@ -982,7 +1001,7 @@ async function markUnknown(
 
 async function markFailed(
   dependencies: LeadEsignActionDependencies,
-  request: EsignRequestRecord,
+  request: Pick<EsignRequestRecord, "id" | "orgId">,
   safeErrorMessage: string,
 ): Promise<void> {
   try {

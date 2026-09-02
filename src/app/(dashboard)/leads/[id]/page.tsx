@@ -79,6 +79,10 @@ import {
   voidContractAction,
 } from "./lead-esign-actions";
 
+// Server Actions in this segment must outlive the four-minute provider abort
+// plus the outcome write that makes an interrupted send safely retryable.
+export const maxDuration = 300;
+
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 type LeadNoteRow = Database["public"]["Tables"]["lead_notes"]["Row"];
 
