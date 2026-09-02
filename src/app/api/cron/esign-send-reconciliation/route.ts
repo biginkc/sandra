@@ -119,7 +119,10 @@ async function handle(request: Request) {
             p_request_id: outcome.id,
             p_provider_request_id: outcome.providerRequestId,
             p_resolution_source: outcome.resolutionSource,
-            p_evidence: outcome.evidence as Json,
+            p_evidence: {
+              ...outcome.evidence,
+              localRequestId: outcome.id,
+            } as Json,
           });
           if (error?.code === "55000") return "raced" as const;
           if (error) throw error;

@@ -39,6 +39,10 @@ begin
   if p_resolution_source = 'operator' then
     perform public.esign_require_active_owner(p_org_id, p_actor_id);
   end if;
+  v_event_type := case p_resolution_source
+    when 'operator' then 'esign_send_not_found_operator'
+    else 'esign_send_not_found_automatic'
+  end;
 
   select request.* into v_request
   from public.esign_requests request
@@ -60,6 +64,19 @@ begin
        or v_request.error_message is distinct from p_error_message) then
     raise exception 'eSign request is not an evidenced failed send'
       using errcode = '55000';
+  end if;
+  if p_resolution_source = 'operator'
+     and exists (
+       select 1
+       from public.lead_events event
+       where event.source_type = v_event_type
+         and event.source_id = p_request_id
+         and event.org_id = p_org_id
+         and event.property_id = v_request.property_id
+         and event.actor_type = 'user'
+         and event.event_type = v_event_type
+     ) then
+    return;
   end if;
 
   if p_resolution_source = 'automatic' then
@@ -93,11 +110,6 @@ begin
     end if;
   end if;
 
-  v_event_type := case p_resolution_source
-    when 'operator' then 'esign_send_not_found_operator'
-    else 'esign_send_not_found_automatic'
-  end;
-
   insert into public.lead_events (
     org_id, property_id, actor_type, actor_id, event_type, payload,
     source_type, source_id
@@ -112,9 +124,9 @@ begin
       'error_message', p_error_message,
       'evidence', coalesce(p_evidence, '{}'::jsonb)
     ),
-    null,
-    null
-  );
+    v_event_type,
+    p_request_id
+  ) on conflict (source_type, source_id) where source_id is not null do nothing;
 end;
 $$;
 
@@ -153,16 +165,17 @@ begin
      or p_resolution_source not in ('automatic', 'webhook')
      or jsonb_typeof(coalesce(p_evidence, '{}'::jsonb)) <> 'object'
      or coalesce(p_evidence ->> 'providerRequestId', '') <> p_provider_request_id
+     or coalesce(p_evidence ->> 'localRequestId', '') <> p_request_id::text
      or (
        p_resolution_source = 'automatic'
-       and coalesce(p_evidence ->> 'positiveControl', '') <> 'passed'
+       and (
+         coalesce(p_evidence ->> 'positiveControl', '') <> 'passed'
+         or coalesce(p_evidence ->> 'source', '') <> 'dropbox_metadata_search_sandra_request_id'
+       )
      )
      or (
        p_resolution_source = 'webhook'
-       and (
-         coalesce(p_evidence ->> 'source', '') <> 'dropbox_metadata_sandra_request_id'
-         or coalesce(p_evidence ->> 'localRequestId', '') <> p_request_id::text
-       )
+       and coalesce(p_evidence ->> 'source', '') <> 'dropbox_metadata_sandra_request_id'
      ) then
     raise exception 'invalid eSign provider delivery attachment'
       using errcode = '23514';

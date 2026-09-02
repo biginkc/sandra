@@ -262,6 +262,7 @@ describe("eSign send reconciliation cron", () => {
       p_provider_request_id: "provider-after-timeout",
       p_resolution_source: "automatic",
       p_evidence: expect.objectContaining({
+        localRequestId: "timeout-request",
         providerRequestId: "provider-after-timeout",
         positiveControl: "passed",
       }),

@@ -737,7 +737,7 @@ describe("lead eSign action orchestration", () => {
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });
 
-  it("acknowledges only an already evidenced failed not-sent request", async () => {
+  it("acknowledges only an already evidenced failed not-sent request and replays cleanly", async () => {
     const h = harness();
     h.repository.findRequest.mockResolvedValue(
       request({
@@ -748,8 +748,10 @@ describe("lead eSign action orchestration", () => {
     );
 
     const result = await h.core.confirmNotSent({ requestId: "request-1" });
+    const replay = await h.core.confirmNotSent({ requestId: "request-1" });
 
     expect(result).toEqual({ ok: true, data: null });
+    expect(replay).toEqual({ ok: true, data: null });
     expect(h.repository.findProviderLookupReference).not.toHaveBeenCalled();
     expect(h.provider.findSignatureRequestIdsByLocalRequestId).not.toHaveBeenCalled();
     expect(h.repository.resolveSendUnknownNotSent).toHaveBeenCalledWith({
@@ -761,6 +763,7 @@ describe("lead eSign action orchestration", () => {
         acknowledgedFailure: "PROVIDER_SEND_NOT_FOUND",
       }),
     });
+    expect(h.repository.resolveSendUnknownNotSent).toHaveBeenCalledTimes(2);
     expect(h.repository.markSendOutcome).not.toHaveBeenCalled();
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });

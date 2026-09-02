@@ -1154,6 +1154,22 @@ describe("eSign foundation production lease contention", () => {
       )`,
       [orgId, operatorRequestId, userId],
     );
+    const operatorAcknowledgedAt = (
+      await setup.query<{ updated_at: string }>(
+        `select updated_at::text
+         from public.esign_requests
+         where id=$1`,
+        [operatorRequestId],
+      )
+    ).rows[0].updated_at;
+    await setup.query("select pg_sleep(0.01)");
+    await setup.query(
+      `select public.resolve_esign_send_unknown_not_sent(
+        $1,$2,$3,'operator','PROVIDER_SEND_NOT_FOUND',
+        '{"acknowledgedFailure":"PROVIDER_SEND_NOT_FOUND","resolutionSource":"operator"}'::jsonb
+      )`,
+      [orgId, operatorRequestId, userId],
+    );
     await setup.query(
       `select public.resolve_esign_send_unknown_not_sent(
         $1,$2,null,'automatic','PROVIDER_SEND_NOT_FOUND',
@@ -1171,6 +1187,41 @@ describe("eSign foundation production lease contention", () => {
         )
       )`,
       [orgId, metadataRequestId],
+    );
+    await expect(
+      setup.query(
+        `select public.attach_esign_request_provider_delivery(
+          $1,$2,'provider-automatic-missing-local','automatic',
+          '{"source":"dropbox_metadata_search_sandra_request_id","providerRequestId":"provider-automatic-missing-local","positiveControl":"passed"}'::jsonb
+        )`,
+        [orgId, metadataMissingLocalRequestId],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      setup.query(
+        `select public.attach_esign_request_provider_delivery(
+          $1,$2::uuid,'provider-automatic-wrong-local','automatic',
+          jsonb_build_object(
+            'source','dropbox_metadata_search_sandra_request_id',
+            'localRequestId',$3::text,
+            'providerRequestId','provider-automatic-wrong-local',
+            'positiveControl','passed'
+          )
+        )`,
+        [orgId, metadataMissingLocalRequestId, automaticRequestId],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+    await setup.query(
+      `select public.attach_esign_request_provider_delivery(
+        $1,$2::uuid,'provider-automatic-local-match','automatic',
+        jsonb_build_object(
+          'source','dropbox_metadata_search_sandra_request_id',
+          'localRequestId',$2::text,
+          'providerRequestId','provider-automatic-local-match',
+          'positiveControl','passed'
+        )
+      )`,
+      [orgId, metadataMissingLocalRequestId],
     );
     await expect(
       setup.query(
@@ -1204,7 +1255,12 @@ describe("eSign foundation production lease contention", () => {
            from public.esign_requests
            where id = any($1::uuid[])
            order by id`,
-          [[operatorRequestId, automaticRequestId, metadataRequestId]],
+          [[
+            operatorRequestId,
+            automaticRequestId,
+            metadataRequestId,
+            metadataMissingLocalRequestId,
+          ]],
         )
       ).rows,
     ).toEqual(
@@ -1230,6 +1286,13 @@ describe("eSign foundation production lease contention", () => {
           error_message: null,
           updated_by: null,
         }),
+        expect.objectContaining({
+          id: metadataMissingLocalRequestId,
+          delivery_state: "sent",
+          status: "awaiting",
+          error_message: null,
+          updated_by: null,
+        }),
       ]),
     );
     expect(
@@ -1243,6 +1306,27 @@ describe("eSign foundation production lease contention", () => {
         )
       ).rows[0],
     ).toEqual({ actor_type: "user", actor_id: userId });
+    expect(
+      (
+        await setup.query<{ count: string }>(
+          `select count(*)::text
+           from public.lead_events
+           where event_type='esign_send_not_found_operator'
+             and payload->>'request_id'=$1`,
+          [operatorRequestId],
+        )
+      ).rows[0],
+    ).toEqual({ count: "1" });
+    expect(
+      (
+        await setup.query<{ updated_at: string }>(
+          `select updated_at::text
+           from public.esign_requests
+           where id=$1`,
+          [operatorRequestId],
+        )
+      ).rows[0].updated_at,
+    ).toBe(operatorAcknowledgedAt);
     expect(
       (
         await setup.query<{ actor_type: string; actor_id: string | null }>(
