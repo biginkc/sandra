@@ -30,6 +30,13 @@
       "path": "supabase/migrations/20260830100000_esign_switchboard_webhook_constraint_union.sql",
       "sha256": "fb67de5b4b0eaccdd3e37238caeab91e6d42131e674851349aba9103246b85ef",
       "statementsSha256": "0696768d8a6ecdf584bd22848c44b1f182936cd118d1ee0fb1ae3346ad1efd7c"
+    },
+    {
+      "version": "20260902074814",
+      "name": "esign_atomic_disconnect_state",
+      "path": "supabase/migrations/20260902074814_esign_atomic_disconnect_state.sql",
+      "sha256": "075e183886c9ec16cde0eb13ec850f7a154eb048b93b6bc5f0e440a3d4a9a1dd",
+      "statementsSha256": "b1bd4a606d8ec8a7d303381e7c541fa864f30bdf5d6fa1f1edf373e0bda73a14"
     }
   ]
 }

@@ -275,6 +275,7 @@ describe("foundation initial-template runtime", () => {
       apiKey: "secret",
       clientId: "client",
       providerAccountId: "account-1",
+      sendingEnabled: true,
     });
     mocks.providerCreate.mockResolvedValue(initialEditorSession);
   });
@@ -607,6 +608,7 @@ describe("foundation initial-template runtime", () => {
       apiKey: "secret",
       clientId: "client",
       providerAccountId: "different-account",
+      sendingEnabled: true,
     });
     mocks.rpc.mockImplementation(async (name: string) => {
       if (name === "list_retryable_esign_template_provider_creates") return {
@@ -650,6 +652,70 @@ describe("foundation initial-template runtime", () => {
       ok: false,
       error: { code: "PROVIDER_RETRY_CONTRACT_MISMATCH" },
     });
+    expect(mocks.providerCreate).not.toHaveBeenCalled();
+  });
+
+  it("does not invoke Dropbox while disconnect is pending for provider create", async () => {
+    mocks.credentials.mockResolvedValueOnce({
+      apiKey: "secret",
+      clientId: "client",
+      providerAccountId: "account-1",
+      sendingEnabled: false,
+    });
+
+    await expect(
+      (await createInitialTemplateRuntime()).create({
+        source,
+        name: "Offer",
+        documentType: "Purchase agreement",
+        signerRoles: [{ name: "Seller", order: 0 }],
+        sellerRoleName: "Seller",
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_CONFIGURATION_FAILED" },
+    });
+    expect(mocks.providerFactory).not.toHaveBeenCalled();
+    expect(mocks.providerCreate).not.toHaveBeenCalled();
+  });
+
+  it("does not invoke Dropbox while disconnect is pending for provider retry", async () => {
+    const templateId = "123e4567-e89b-42d3-a456-426614174111";
+    const query = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    query.maybeSingle.mockResolvedValue({
+      data: retryableProviderDraft(templateId),
+      error: null,
+    });
+    mocks.from.mockReturnValue(query);
+    mocks.credentials.mockResolvedValueOnce({
+      apiKey: "secret",
+      clientId: "client",
+      providerAccountId: "account-1",
+      sendingEnabled: false,
+    });
+    mocks.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+      if (name === "list_retryable_esign_template_provider_creates") {
+        return {
+          data: [{ template_id: templateId, source_id: sourceId, name: "Offer" }],
+          error: null,
+        };
+      }
+      return successfulRpc(name, args);
+    });
+
+    await expect(
+      (await createInitialTemplateRuntime()).retryProviderCreate(templateId),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_CONFIGURATION_FAILED" },
+    });
+    expect(mocks.rpc).not.toHaveBeenCalledWith(
+      "begin_definitive_esign_template_provider_create_retry",
+      expect.anything(),
+    );
+    expect(mocks.providerFactory).not.toHaveBeenCalled();
     expect(mocks.providerCreate).not.toHaveBeenCalled();
   });
 
@@ -1010,6 +1076,7 @@ describe("foundation initial-template runtime", () => {
       apiKey: "secret",
       clientId: "client",
       providerAccountId: "account-2",
+      sendingEnabled: true,
     });
     const result = await (
       await createInitialTemplateRuntime()

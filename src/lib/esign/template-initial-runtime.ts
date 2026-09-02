@@ -37,6 +37,14 @@ export type PreparedSourceMetadata = Readonly<{
   sha256: string;
 }>;
 
+function assertTemplateManagementEnabled(
+  credentials: Awaited<ReturnType<typeof getEsignCredentials>>,
+) {
+  if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+  if (!credentials.sendingEnabled) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+  return credentials;
+}
+
 export async function createInitialTemplateRuntime() {
   const resolvedMembership = await getSingleActiveMembership();
   if (!resolvedMembership.ok) throw new Error("AUTH_REQUIRED");
@@ -674,7 +682,9 @@ export async function createInitialTemplateRuntime() {
       }
       let retryCredentials: Awaited<ReturnType<typeof getEsignCredentials>>;
       try {
-        retryCredentials = await getEsignCredentials(orgId);
+        retryCredentials = assertTemplateManagementEnabled(
+          await getEsignCredentials(orgId),
+        );
       } catch {
         return failure(
           "PROVIDER_CONFIGURATION_FAILED",
@@ -1035,13 +1045,15 @@ function providerPorts(context: {
     },
     provider: {
       async loadAccountIdentity() {
-        const credentials = await context.getCredentials();
-        if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+        const credentials = assertTemplateManagementEnabled(
+          await context.getCredentials(),
+        );
         return { providerAccountId: credentials.providerAccountId };
       },
       async invoke() {
-        const credentials = await context.getCredentials();
-        if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+        const credentials = assertTemplateManagementEnabled(
+          await context.getCredentials(),
+        );
         const provider = createDropboxSignProvider({
           apiKey: credentials.apiKey,
           clientId: credentials.clientId,

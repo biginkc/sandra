@@ -36,7 +36,12 @@ test("reviewed packet pins exact file and statement-array identities", () => {
   const manifest = JSON.parse(readFileSync(planPath, "utf8"));
   assert.deepEqual(
     manifest.migrations.map((entry) => entry.version),
-    ["20260829194500", "20260830080000", "20260830100000"],
+    [
+      "20260829194500",
+      "20260830080000",
+      "20260830100000",
+      "20260902074814",
+    ],
   );
   for (const entry of manifest.migrations) {
     const sql = readFileSync(join(repoRoot, entry.path), "utf8");
@@ -49,6 +54,27 @@ test("reviewed packet pins exact file and statement-array identities", () => {
     const plan = loadReviewedPlan(planPath);
     assert.equal(plan.switchboard.statements.length, 32);
   }
+});
+
+test("reviewed packet includes the disconnect state migration", () => {
+  const manifest = JSON.parse(readFileSync(planPath, "utf8"));
+  const entry = manifest.migrations.find(
+    (migration) => migration.version === "20260902074814",
+  );
+  assert.ok(entry, "disconnect migration missing from atomic packet");
+  assert.equal(entry.name, "esign_atomic_disconnect_state");
+  assert.equal(
+    entry.path,
+    "supabase/migrations/20260902074814_esign_atomic_disconnect_state.sql",
+  );
+  assert.equal(
+    entry.sha256,
+    "075e183886c9ec16cde0eb13ec850f7a154eb048b93b6bc5f0e440a3d4a9a1dd",
+  );
+  assert.equal(
+    entry.statementsSha256,
+    "b1bd4a606d8ec8a7d303381e7c541fa864f30bdf5d6fa1f1edf373e0bda73a14",
+  );
 });
 
 test("the manual packet refuses before reading credentials when arguments are incomplete", () => {

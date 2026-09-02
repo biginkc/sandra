@@ -291,6 +291,7 @@ function configureSuccessfulProvider() {
     apiKey: { reveal: () => "redacted-test-value" },
     clientId: "client-1",
     providerAccountId: "account-1",
+    sendingEnabled: true,
   });
   mocks.providerFactory.mockReturnValue({
     getTemplate: vi.fn().mockResolvedValue({
@@ -382,6 +383,40 @@ describe("finish synchronization schema compatibility", () => {
       },
     });
     expect(getTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses provider-backed template reads while disconnect is pending", async () => {
+    const draftQuery = query({ data: draftRow, error: null });
+    const capabilityQuery = query({
+      data: { provider_sync_started_at: null },
+      error: null,
+    });
+    const updateQuery = query({
+      data: { provider_sync_started_at: "2026-09-02T00:00:00.000Z" },
+      error: null,
+    });
+    mocks.from
+      .mockReturnValueOnce(draftQuery)
+      .mockReturnValueOnce(capabilityQuery)
+      .mockReturnValueOnce(updateQuery);
+    mocks.credentials.mockResolvedValueOnce({
+      apiKey: { reveal: () => "redacted-test-value" },
+      clientId: "client-1",
+      providerAccountId: "account-1",
+      sendingEnabled: false,
+    });
+
+    const orchestrator = await createFoundationTemplateOrchestrator();
+
+    await expect(orchestrator.finishSync(draftRow.id)).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "TEMPLATE_MANAGEMENT_DISABLED",
+        message:
+          "Dropbox Sign is disconnecting or not connected. Reconnect it before managing eSign templates.",
+      },
+    });
+    expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
 
   it("survives rollback between capability read and timestamp update", async () => {

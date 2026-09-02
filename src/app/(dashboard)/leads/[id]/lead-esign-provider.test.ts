@@ -164,6 +164,20 @@ describe("bound lead eSign provider classification", () => {
     expect(providerMocks.createProvider).not.toHaveBeenCalled();
   });
 
+  it("keeps normal send operations unreachable after the disabled read", async () => {
+    providerMocks.getCredentials.mockResolvedValueOnce({
+      sendingEnabled: false,
+      apiKey: "secret-wrapper",
+      clientId: "client-id",
+    });
+
+    const provider = await providerForOrg("org-1");
+
+    expect(provider).toBeNull();
+    expect(providerMocks.createProvider).not.toHaveBeenCalled();
+    expect(providerMocks.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
   it("does not create a provider client after credentials are removed", async () => {
     providerMocks.getCredentials.mockResolvedValueOnce(null);
 

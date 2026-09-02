@@ -31,6 +31,14 @@ export type TemplateLibraryRecord = TemplateOption & {
   recentSendCount30d: number;
 };
 
+function assertTemplateManagementEnabled(
+  credentials: Awaited<ReturnType<typeof getEsignCredentials>>,
+) {
+  if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+  if (!credentials.sendingEnabled) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+  return credentials;
+}
+
 export async function createFoundationTemplateOrchestrator() {
   const selectedMembership = await getSingleActiveMembership();
   const actorPort = {
@@ -75,8 +83,9 @@ export async function createFoundationTemplateOrchestrator() {
     if (!providerPromise) {
       providerPromise = (async () => {
         if (!membership) throw new Error("AUTH_REQUIRED");
-        const credentials = await getEsignCredentials(membership.orgId);
-        if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+        const credentials = assertTemplateManagementEnabled(
+          await getEsignCredentials(membership.orgId),
+        );
         return {
           clientId: credentials.clientId,
           providerAccountId: credentials.providerAccountId,
