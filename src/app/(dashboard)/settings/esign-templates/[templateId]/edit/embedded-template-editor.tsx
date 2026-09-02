@@ -55,11 +55,13 @@ export function EmbeddedTemplateEditor({
   actions,
   loadClient,
   initialSession,
+  preserveSessionForHistoryReturn,
 }: {
   template: TemplateEditorData;
   actions?: TemplateEditorActions;
   loadClient?: (clientId: string) => Promise<EmbeddedTemplateClient>;
   initialSession?: EmbeddedTemplateSession | null;
+  preserveSessionForHistoryReturn?: (session: EmbeddedTemplateSession) => void;
 }) {
   const router = useRouter();
   const editorActions = useMemo<TemplateEditorActions>(
@@ -213,6 +215,8 @@ export function EmbeddedTemplateEditor({
                 code: error.code,
               }),
           },
+          onBeforeHistoryReturn: () =>
+            preserveSessionForHistoryReturn?.(session.data),
         });
         setState({ status: "open" });
       })
@@ -237,6 +241,7 @@ export function EmbeddedTemplateEditor({
     editorActions,
     generation,
     loadClient,
+    preserveSessionForHistoryReturn,
     router,
     syncFinished,
   ]);
@@ -426,8 +431,20 @@ export function InitialSessionEmbeddedTemplateEditor(
     setInitialSession(sessions.take(props.template.id));
   }, [props.template.id, sessions]);
 
+  const preserveSessionForHistoryReturn = useCallback(
+    (session: EmbeddedTemplateSession) =>
+      sessions.put(props.template.id, session),
+    [props.template.id, sessions],
+  );
+
   if (initialSession === undefined) return null;
-  return <EmbeddedTemplateEditor {...props} initialSession={initialSession} />;
+  return (
+    <EmbeddedTemplateEditor
+      {...props}
+      initialSession={initialSession}
+      preserveSessionForHistoryReturn={preserveSessionForHistoryReturn}
+    />
+  );
 }
 
 function EditorNotice({ title, message }: { title: string; message: string }) {

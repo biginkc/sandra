@@ -1,4 +1,5 @@
 import type { EmbeddedTemplateSession } from "../../types";
+import { installEmbeddedEditorNavigationBoundary } from "./embedded-editor-navigation-history";
 
 export type EmbeddedTemplateEventMap = Readonly<{
   createTemplate: unknown;
@@ -74,6 +75,7 @@ export function mountEmbeddedTemplateClient(input: {
   container: HTMLElement;
   skipDomainVerification: boolean;
   listeners: EmbeddedTemplateListeners;
+  onBeforeHistoryReturn?: () => void;
 }): () => void {
   let closed = false;
   const subscriptions = [
@@ -92,10 +94,18 @@ export function mountEmbeddedTemplateClient(input: {
     container: input.container,
     skipDomainVerification: input.skipDomainVerification,
   });
+  const iframe = input.container.querySelector("iframe");
+  const removeNavigationBoundary = iframe
+    ? installEmbeddedEditorNavigationBoundary(
+        iframe,
+        input.onBeforeHistoryReturn,
+      )
+    : () => undefined;
 
   return () => {
     if (closed) return;
     closed = true;
+    removeNavigationBoundary();
     for (const [event, listener] of subscriptions) {
       input.client.off?.(event, listener as never);
     }
