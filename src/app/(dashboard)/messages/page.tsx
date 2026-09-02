@@ -85,7 +85,9 @@ export default async function MessagesPage({
   // Everything downstream — thread pin, detail fetch, mark-read — deals
   // in canonical ids only.
   const canonicalThreadId =
-    isThreadFilter(effectiveFilter) && selectedThreadId
+    activeTab === "inbox" &&
+    isThreadFilter(effectiveFilter) &&
+    selectedThreadId
       ? await canonicalizeThreadId(supabase, selectedThreadId)
       : null;
 
@@ -108,7 +110,12 @@ export default async function MessagesPage({
         hideNoise: hideDnc,
         page: effectiveInboxPage,
       }),
-      listQueuedPage(null),
+      activeTab === "outbox"
+        ? listQueuedPage(null)
+        : Promise.resolve({
+            ok: true as const,
+            data: { rows: [], hasMore: false },
+          }),
       canonicalThreadId
         ? fetchInboxDetail(supabase, canonicalThreadId)
         : Promise.resolve(null),
@@ -139,23 +146,17 @@ export default async function MessagesPage({
     ? queueStatsResult.data
     : EMPTY_QUEUE_STATS;
 
-  // Hydrate assignee emails for whichever assignee ids appear on the
-  // visible threads. One auth.admin.listUsers call covers the whole page.
+  // The assignee label is rendered only in the selected detail panel.
+  // Avoid scanning the Auth directory on list-only loads and resolve just
+  // the one selected assignee when the detail needs it.
   const assigneeEmails: Record<string, string> = {};
-  const assigneeIds = new Set<string>();
-  for (const t of visibleThreads) {
-    if (t.assigneeId) assigneeIds.add(t.assigneeId);
-  }
-  if (assigneeIds.size > 0) {
+  const selectedAssigneeId = threadDetail?.assigneeId ?? null;
+  if (selectedAssigneeId) {
     try {
       const admin = createAdminClient();
-      const { data: usersPage } = await admin.auth.admin.listUsers({
-        perPage: 200,
-      });
-      for (const u of usersPage?.users ?? []) {
-        if (u.email && assigneeIds.has(u.id)) {
-          assigneeEmails[u.id] = u.email;
-        }
+      const { data } = await admin.auth.admin.getUserById(selectedAssigneeId);
+      if (data.user?.email) {
+        assigneeEmails[selectedAssigneeId] = data.user.email;
       }
     } catch {
       // ids still render — pretty labels are best-effort.

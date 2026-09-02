@@ -280,10 +280,6 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     return request;
   }, []);
 
-  useEffect(() => {
-    if (callingEnabled) void loadCallerIds();
-  }, [callingEnabled, loadCallerIds]);
-
   const showToast = useCallback((message: string) => {
     setToast(message);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -776,11 +772,18 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   const openIdle = useCallback(() => {
     if (phone === "closed") {
       transition({ type: "open" });
+      const cachedCallerId = selectedCallerIdRef.current;
+      const hasCachedCallerId =
+        cachedCallerId !== null &&
+        callerIdsRef.current.some(
+          (item) => item.phone_e164 === cachedCallerId,
+        );
+      if (callingEnabled && !hasCachedCallerId) void loadCallerIds();
     } else if (phone === "idle") {
       resetIdle();
       setPhone("closed");
     }
-  }, [phone, resetIdle, transition]);
+  }, [callingEnabled, loadCallerIds, phone, resetIdle, transition]);
 
   const hangup = useCallback(async () => {
     const transport = transportRef.current;

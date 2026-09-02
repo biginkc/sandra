@@ -169,6 +169,7 @@ describe("SoftphoneProvider transport gate", () => {
       { phone_e164: "+18165550100", label: "Main" },
     ] } });
     render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
     await waitFor(() => expect(window.localStorage.getItem("sandra.softphone.caller-id.v1")).toBe("+18165550100"));
   });
 
