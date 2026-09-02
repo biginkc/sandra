@@ -19,7 +19,8 @@ export type StuckSendReconciliationPorts = Readonly<{
   markOutcome(input: StuckEsignSend & {
     deliveryState: "failed" | "send_unknown";
     safeErrorMessage: string | null;
-  }): Promise<void>;
+  }): Promise<"updated" | "raced">;
+  reportOutcomeError?(error: unknown, candidate: StuckEsignSend): void;
   shouldContinue?(): boolean;
 }>;
 
@@ -58,7 +59,14 @@ export async function reconcileStuckEsignSends(
     staleBefore: new Date(now.getTime() - ESIGN_STUCK_SEND_MIN_AGE_MS),
     limit: ESIGN_STUCK_SEND_BATCH_SIZE,
   });
-  const summary = { checked: 0, failed: 0, unknown: 0, deferred: 0, raced: 0 };
+  const summary = {
+    checked: 0,
+    failed: 0,
+    unknown: 0,
+    deferred: 0,
+    raced: 0,
+    errors: 0,
+  };
   for (const candidate of candidates) {
     if (ports.shouldContinue && !ports.shouldContinue()) break;
     summary.checked += 1;
@@ -77,26 +85,28 @@ export async function reconcileStuckEsignSends(
     }
     if (lookup.providerRequestIds.length === 0) {
       try {
-        await ports.markOutcome({
+        const result = await ports.markOutcome({
           ...candidate,
           deliveryState: "failed",
           safeErrorMessage: "STALE_NO_PROVIDER_REQUEST",
         });
-        summary.failed += 1;
-      } catch {
-        summary.raced += 1;
+        summary[result === "raced" ? "raced" : "failed"] += 1;
+      } catch (error) {
+        summary.errors += 1;
+        ports.reportOutcomeError?.(error, candidate);
       }
       continue;
     }
     try {
-      await ports.markOutcome({
+      const result = await ports.markOutcome({
         ...candidate,
         deliveryState: "send_unknown",
         safeErrorMessage: null,
       });
-      summary.unknown += 1;
-    } catch {
-      summary.raced += 1;
+      summary[result === "raced" ? "raced" : "unknown"] += 1;
+    } catch (error) {
+      summary.errors += 1;
+      ports.reportOutcomeError?.(error, candidate);
     }
   }
   return summary;

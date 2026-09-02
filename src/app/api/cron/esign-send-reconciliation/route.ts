@@ -93,8 +93,14 @@ async function handle(request: Request) {
           p_delivery_state: outcome.deliveryState,
           p_error_message: outcome.safeErrorMessage,
         });
+        if (error?.code === "55000") return "raced" as const;
         if (error) throw error;
+        return "updated" as const;
       },
+      reportOutcomeError: (error, candidate) => reportError(error, {
+        tags: { surface: "cron_esign_send_reconciliation_outcome" },
+        extra: { requestId: candidate.id, orgId: candidate.orgId },
+      }),
       shouldContinue: () => Date.now() < deadline,
     });
     return NextResponse.json({ ok: true, ...summary });

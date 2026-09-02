@@ -7,7 +7,7 @@ import {
 
 describe("stuck eSign send reconciliation", () => {
   it("marks a stale send failed only after a complete zero-result provider lookup", async () => {
-    const markOutcome = vi.fn().mockResolvedValue(undefined);
+    const markOutcome = vi.fn().mockResolvedValue("updated");
     const listCandidates = vi.fn().mockResolvedValue([
       { id: "request-zero", orgId: "org-1", testMode: true },
       { id: "request-found", orgId: "org-1", testMode: true },
@@ -27,7 +27,14 @@ describe("stuck eSign send reconciliation", () => {
         { listCandidates, lookupProviderRequest, markOutcome },
         new Date("2026-09-02T00:30:00.000Z"),
       ),
-    ).resolves.toEqual({ checked: 3, failed: 1, unknown: 1, deferred: 1, raced: 0 });
+    ).resolves.toEqual({
+      checked: 3,
+      failed: 1,
+      unknown: 1,
+      deferred: 1,
+      raced: 0,
+      errors: 0,
+    });
     expect(listCandidates).toHaveBeenCalledWith({
       staleBefore: new Date("2026-09-02T00:15:00.000Z"),
       limit: 10,
@@ -54,7 +61,7 @@ describe("stuck eSign send reconciliation", () => {
       { id: "not-started", orgId: "org-1", testMode: true },
     ];
     const shouldContinue = vi.fn().mockReturnValueOnce(true).mockReturnValue(false);
-    const markOutcome = vi.fn().mockRejectedValue(new Error("state changed"));
+    const markOutcome = vi.fn().mockResolvedValue("raced");
 
     await expect(reconcileStuckEsignSends({
       listCandidates: vi.fn().mockResolvedValue(candidates),
@@ -70,7 +77,39 @@ describe("stuck eSign send reconciliation", () => {
       unknown: 0,
       deferred: 0,
       raced: 1,
+      errors: 0,
     });
+  });
+
+  it("reports a genuine outcome write error and continues the batch", async () => {
+    const reportOutcomeError = vi.fn();
+    const writeError = new Error("database unavailable");
+    const markOutcome = vi.fn()
+      .mockRejectedValueOnce(writeError)
+      .mockResolvedValueOnce("updated");
+    const candidates = [
+      { id: "write-error", orgId: "org-1", testMode: true },
+      { id: "continues", orgId: "org-1", testMode: true },
+    ];
+
+    await expect(reconcileStuckEsignSends({
+      listCandidates: vi.fn().mockResolvedValue(candidates),
+      lookupProviderRequest: vi.fn().mockResolvedValue({
+        complete: true,
+        providerRequestIds: [],
+      }),
+      markOutcome,
+      reportOutcomeError,
+    })).resolves.toEqual({
+      checked: 2,
+      failed: 1,
+      unknown: 0,
+      deferred: 0,
+      raced: 0,
+      errors: 1,
+    });
+    expect(reportOutcomeError).toHaveBeenCalledWith(writeError, candidates[0]);
+    expect(markOutcome).toHaveBeenCalledTimes(2);
   });
 
   it("requires a known provider request to prove the zero-result query works", async () => {
