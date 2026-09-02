@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ESIGN_MERGE_FIELD_NAMES,
@@ -8,6 +8,7 @@ import {
 
 import type { SendContractInput } from "./esign-types";
 import {
+  ESIGN_PROVIDER_TIMEOUT_MS,
   createLeadEsignActionCore,
   hashSendPayload,
   type EsignActionFiles,
@@ -101,8 +102,10 @@ function request(
     retryOfRequestId: null,
     status: "awaiting",
     deliveryState: "sending",
+    testMode: true,
     providerRequestId: null,
     detailsUrl: null,
+    errorMessage: null,
     voidRequestedAt: null,
     signedPdfFileId: null,
     ...overrides,
@@ -127,6 +130,11 @@ function harness() {
     })),
     reconcileSent: vi.fn().mockResolvedValue(undefined),
     markSendOutcome: vi.fn().mockResolvedValue(undefined),
+    findProviderLookupReference: vi.fn().mockResolvedValue({
+      localRequestId: "known-local-request",
+      providerRequestId: "known-provider-request",
+    }),
+    resolveSendUnknownNotSent: vi.fn().mockResolvedValue("updated"),
     findRequest: vi.fn().mockResolvedValue(null),
     claimReminder: vi.fn().mockResolvedValue({ outcome: "ineligible" }),
     finalizeReminder: vi.fn().mockResolvedValue("applied"),
@@ -146,6 +154,12 @@ function harness() {
     }),
     remind: vi.fn().mockResolvedValue("accepted"),
     cancel: vi.fn().mockResolvedValue("accepted"),
+    findSignatureRequestIdsByLocalRequestId: vi.fn()
+      .mockResolvedValueOnce({
+        complete: true,
+        providerRequestIds: ["known-provider-request"],
+      })
+      .mockResolvedValueOnce({ complete: true, providerRequestIds: [] }),
   } as unknown as EsignActionProvider;
   const files = {
     authorizeSignedFile: vi.fn().mockResolvedValue({
@@ -156,7 +170,7 @@ function harness() {
   const dependencies: LeadEsignActionDependencies = {
     authenticate: vi
       .fn()
-      .mockResolvedValue({ orgId: "org-1", userId: "user-1" }),
+      .mockResolvedValue({ orgId: "org-1", userId: "user-1", role: "owner" }),
     repository,
     providerForOrg: vi.fn().mockResolvedValue(provider),
     files,
@@ -184,6 +198,9 @@ function harness() {
 describe("lead eSign action orchestration", () => {
   beforeEach(() => {
     reportMocks.reportError.mockClear();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("returns live preflight blockers and safe seller defaults", async () => {
@@ -288,7 +305,58 @@ describe("lead eSign action orchestration", () => {
       ok: false,
       error: { code: "REQUEST_CLAIM_MISMATCH" },
     });
+    expect(h.repository.markSendOutcome).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      deliveryState: "failed",
+      safeErrorMessage: "REQUEST_CLAIM_MISMATCH",
+    });
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("dispatches the forensic one-signer row shape after ignoring database-only signer fields", async () => {
+    const h = harness();
+    const forensicTemplate = {
+      ...template,
+      signerRoles: [{ name: "Seller", order: 0 }],
+    };
+    const forensicInput = {
+      ...sendInput,
+      signers: [sendInput.signers[0]],
+    };
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ templates: [forensicTemplate] }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({
+        id: "c36c5e1e-a98d-4b1e-a768-f0ea6d7e854c",
+        template: forensicTemplate,
+        payloadHash: hashSendPayload(forensicInput),
+        signers: [
+          {
+            ...forensicInput.signers[0],
+            id: "persisted-signer-1",
+            status: "awaiting",
+            lastRemindedAt: null,
+          },
+        ],
+      }),
+    });
+    h.provider.sendWithTemplate.mockResolvedValue({
+      outcome: "sent",
+      providerRequestId: "provider-request-1",
+      detailsUrl:
+        "https://app.hellosign.com/home/manage?guid=provider-request-1",
+      signatures: [
+        { ...forensicInput.signers[0], signatureId: "signature-1" },
+      ],
+    });
+
+    const result = await h.core.send(forensicInput);
+
+    expect(result).toEqual({ ok: true, data: { requestId: "c36c5e1e-a98d-4b1e-a768-f0ea6d7e854c" } });
+    expect(h.provider.sendWithTemplate).toHaveBeenCalledTimes(1);
   });
 
   it("rejects stale role case/order and incomplete five-field snapshots", async () => {
@@ -419,6 +487,32 @@ describe("lead eSign action orchestration", () => {
       expect(h.provider.sendWithTemplate).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("fences an abort-ignoring provider timeout as send_unknown before the provider settles", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    let capturedSignal: AbortSignal | undefined;
+    h.provider.sendWithTemplate.mockImplementation((input) => {
+      capturedSignal = input.signal;
+      return new Promise<never>(() => undefined);
+    });
+
+    const resultPromise = h.core.send(sendInput);
+    await vi.advanceTimersByTimeAsync(ESIGN_PROVIDER_TIMEOUT_MS);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      ok: false,
+      error: { code: "SEND_UNKNOWN" },
+    });
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(h.repository.markSendOutcome).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      deliveryState: "send_unknown",
+      safeErrorMessage: null,
+    });
+    expect(h.repository.reconcileSent).not.toHaveBeenCalled();
+  });
 
   it.each([
     ["sent", null],
@@ -640,6 +734,70 @@ describe("lead eSign action orchestration", () => {
       orgId: "org-1",
       requestId: "request-other-org",
     });
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges only an already evidenced failed not-sent request and replays cleanly", async () => {
+    const h = harness();
+    h.repository.findRequest.mockResolvedValue(
+      request({
+        deliveryState: "failed",
+        status: "error",
+        errorMessage: "PROVIDER_SEND_NOT_FOUND",
+      }),
+    );
+
+    const result = await h.core.confirmNotSent({ requestId: "request-1" });
+    const replay = await h.core.confirmNotSent({ requestId: "request-1" });
+
+    expect(result).toEqual({ ok: true, data: null });
+    expect(replay).toEqual({ ok: true, data: null });
+    expect(h.repository.findProviderLookupReference).not.toHaveBeenCalled();
+    expect(h.provider.findSignatureRequestIdsByLocalRequestId).not.toHaveBeenCalled();
+    expect(h.repository.resolveSendUnknownNotSent).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      actorId: "user-1",
+      evidence: expect.objectContaining({
+        resolutionSource: "operator",
+        acknowledgedFailure: "PROVIDER_SEND_NOT_FOUND",
+      }),
+    });
+    expect(h.repository.resolveSendUnknownNotSent).toHaveBeenCalledTimes(2);
+    expect(h.repository.markSendOutcome).not.toHaveBeenCalled();
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("refuses operator acknowledgement for unresolved unknown sends and non-owners", async () => {
+    const h = harness();
+    h.repository.findRequest.mockResolvedValue(
+      request({ deliveryState: "send_unknown" }),
+    );
+
+    expect(await h.core.confirmNotSent({ requestId: "request-1" })).toMatchObject({
+      ok: false,
+      error: { code: "CONFIRM_NOT_SENT_INELIGIBLE" },
+    });
+    expect(h.repository.resolveSendUnknownNotSent).not.toHaveBeenCalled();
+
+    vi.mocked(h.dependencies.authenticate).mockResolvedValue({
+      orgId: "org-1",
+      userId: "user-member",
+      role: "member",
+    });
+    h.repository.findRequest.mockResolvedValue(
+      request({
+        deliveryState: "failed",
+        status: "error",
+        errorMessage: "PROVIDER_SEND_NOT_FOUND",
+      }),
+    );
+
+    expect(await h.core.confirmNotSent({ requestId: "request-1" })).toMatchObject({
+      ok: false,
+      error: { code: "OWNER_REQUIRED" },
+    });
+    expect(h.repository.resolveSendUnknownNotSent).not.toHaveBeenCalled();
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });
 

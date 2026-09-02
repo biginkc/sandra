@@ -42,7 +42,7 @@ import type {
   LeadContractRow,
 } from "./esign-types";
 
-type ActionMode = "remind" | "void" | "retry" | null;
+type ActionMode = "remind" | "void" | "retry" | "confirm_not_sent" | null;
 
 type Props = {
   contract: LeadContractRow;
@@ -71,12 +71,17 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
   const canVoid = delivered && !terminal && !contract.voidRequestedAt;
   const canRetry =
     contract.deliveryState === "failed" && !contract.retryConsumed;
+  const canConfirmNotSent =
+    contract.deliveryState === "failed" &&
+    !contract.detailsAvailable &&
+    contract.errorMessage === "PROVIDER_SEND_NOT_FOUND";
   const canDownload = Boolean(contract.signedPdfFileId);
   const hasAnyAction =
     contract.detailsAvailable ||
     canRemind ||
     canVoid ||
     canRetry ||
+    canConfirmNotSent ||
     canDownload;
 
   const closeAfterSuccess = () => {
@@ -122,6 +127,15 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
                     fallbackMessage: "Could not retry the contract",
                   },
                 )
+              : mode === "confirm_not_sent"
+                ? await callAction(
+                    actions.confirmNotSentAction({ requestId: contract.id }),
+                    {
+                      successMessage: "Not-sent evidence acknowledged",
+                      fallbackMessage:
+                        "Could not acknowledge the not-sent evidence",
+                    },
+                  )
               : null;
       if (!result) return;
       if (!result.ok) {
@@ -239,6 +253,12 @@ export function ContractActions({ contract, actions, onChanged }: Props) {
               Retry send
             </DropdownMenuItem>
           ) : null}
+          {canConfirmNotSent ? (
+            <DropdownMenuItem onClick={() => openMode("confirm_not_sent")}>
+              <ShieldXIcon className="size-4" aria-hidden />
+              Acknowledge not sent
+            </DropdownMenuItem>
+          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
 
@@ -316,6 +336,7 @@ function dialogTitle(mode: ActionMode): string {
   if (mode === "remind") return "Send signature reminder?";
   if (mode === "void") return "Void this contract?";
   if (mode === "retry") return "Retry this contract?";
+  if (mode === "confirm_not_sent") return "Confirm this was not sent?";
   return "Contract action";
 }
 
@@ -332,6 +353,9 @@ function dialogDescription(
   if (mode === "retry") {
     return "Retry creates a new contract history row and keeps this failed attempt.";
   }
+  if (mode === "confirm_not_sent") {
+    return "Sandra already confirmed this request was not found after repeated Dropbox Sign checks.";
+  }
   return "Review this action before continuing.";
 }
 
@@ -339,6 +363,7 @@ function dialogConfirmLabel(mode: ActionMode): string {
   if (mode === "remind") return "Send reminder";
   if (mode === "void") return "Request void";
   if (mode === "retry") return "Retry send";
+  if (mode === "confirm_not_sent") return "Confirm not sent";
   return "Continue";
 }
 
@@ -346,5 +371,6 @@ function dialogPendingLabel(mode: ActionMode): string {
   if (mode === "remind") return "Sending reminder…";
   if (mode === "void") return "Requesting void…";
   if (mode === "retry") return "Retrying contract…";
+  if (mode === "confirm_not_sent") return "Acknowledging…";
   return "Working…";
 }

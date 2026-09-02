@@ -20,6 +20,7 @@ import type { EsignStatus } from "./status";
 export const ESIGN_WEBHOOK_RPC_NAMES = {
   CLAIM_RECEIPT: "claim_esign_webhook_receipt",
   FIND_REQUEST: "find_esign_webhook_request",
+  ATTACH_PROVIDER_DELIVERY: "attach_esign_request_provider_delivery",
   APPLY_STATUS: "apply_esign_webhook_status_decision",
   RECONCILE_REMINDER: "reconcile_esign_reminder_callback",
   LINK_ARTIFACT: "link_esign_signed_artifact",
@@ -67,6 +68,16 @@ export type EsignWebhookRpcContract = {
       signed_pdf_path: string | null;
       template_title: string;
     }>;
+  };
+  attach_esign_request_provider_delivery: {
+    args: {
+      p_org_id: string;
+      p_request_id: string;
+      p_provider_request_id: string;
+      p_resolution_source: "webhook";
+      p_evidence: Record<string, unknown>;
+    };
+    result: null;
   };
   apply_esign_webhook_status_decision: {
     args: {
@@ -207,8 +218,10 @@ export function createEsignWebhookDatabaseAdapter(
         p_org_id: input.orgId,
         p_sign_request_id: input.signRequestId,
       });
-      if (rows.length === 0) return null;
-      const row = exactlyOne(rows);
+      const row = rows.length === 0
+        ? await findAndAttachRequestByMetadata(client, input)
+        : exactlyOne(rows);
+      if (!row) return null;
       if (
         !isNonEmptyString(row.id) ||
         !isNonEmptyString(row.org_id) ||
@@ -316,6 +329,51 @@ export function createEsignWebhookDatabaseAdapter(
   };
 }
 
+async function findAndAttachRequestByMetadata(
+  client: EsignWebhookRpcClient,
+  input: { orgId: string; signRequestId: string; localRequestId: string | null },
+): Promise<EsignWebhookRpcContract["find_esign_webhook_request"]["result"][number] | null> {
+  if (!input.localRequestId) return null;
+  try {
+    await callVoidRpc(client, ESIGN_WEBHOOK_RPC_NAMES.ATTACH_PROVIDER_DELIVERY, {
+      p_org_id: input.orgId,
+      p_request_id: input.localRequestId,
+      p_provider_request_id: input.signRequestId,
+      p_resolution_source: "webhook",
+      p_evidence: {
+        localRequestId: input.localRequestId,
+        providerRequestId: input.signRequestId,
+        source: "dropbox_metadata_sandra_request_id",
+      },
+    });
+  } catch (error) {
+    if (isMissingMetadataRepairRpc(error)) return null;
+    throw error;
+  }
+  const rows = await callRpc(client, ESIGN_WEBHOOK_RPC_NAMES.FIND_REQUEST, {
+    p_org_id: input.orgId,
+    p_sign_request_id: input.signRequestId,
+  });
+  return rows.length === 0 ? null : exactlyOne(rows);
+}
+
+async function callVoidRpc<Name extends EsignWebhookRpcName>(
+  client: EsignWebhookRpcClient,
+  name: Name,
+  args: EsignWebhookRpcContract[Name]["args"],
+): Promise<void> {
+  const result = await client.rpc(name, args);
+  if (result.error) {
+    throw new EsignDatabaseAdapterError("RPC_FAILED", result.error.code);
+  }
+}
+
+function isMissingMetadataRepairRpc(error: unknown): boolean {
+  if (!(error instanceof EsignDatabaseAdapterError)) return false;
+  return error.code === "RPC_FAILED" &&
+    (error.rpcCode === "42883" || error.rpcCode === "PGRST202");
+}
+
 async function completeReceipt(
   client: EsignWebhookRpcClient,
   claim: ActiveReceiptClaim,
@@ -350,7 +408,7 @@ async function callRpc<Name extends EsignWebhookRpcName>(
 ): Promise<NonNullable<EsignWebhookRpcContract[Name]["result"]>> {
   const result = await client.rpc(name, args);
   if (result.error || result.data === null) {
-    throw new EsignDatabaseAdapterError("RPC_FAILED");
+    throw new EsignDatabaseAdapterError("RPC_FAILED", result.error?.code);
   }
   return result.data as NonNullable<EsignWebhookRpcContract[Name]["result"]>;
 }
@@ -435,7 +493,10 @@ export type EsignDatabaseAdapterErrorCode =
   | "RPC_FAILED";
 
 export class EsignDatabaseAdapterError extends Error {
-  constructor(public readonly code: EsignDatabaseAdapterErrorCode) {
+  constructor(
+    public readonly code: EsignDatabaseAdapterErrorCode,
+    public readonly rpcCode: string | undefined = undefined,
+  ) {
     super("The eSign webhook database operation failed.");
     this.name = "EsignDatabaseAdapterError";
   }

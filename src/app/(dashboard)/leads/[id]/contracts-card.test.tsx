@@ -52,6 +52,7 @@ function actionHandlers(): ContractActionHandlers {
     retryAction: vi
       .fn()
       .mockResolvedValue({ ok: true, data: { requestId: "request-retry" } }),
+    confirmNotSentAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
     downloadAction: vi.fn().mockResolvedValue({
       ok: true,
       data: { url: "https://authorized.example/signed.pdf" },
@@ -190,6 +191,48 @@ describe("ContractActions", () => {
     expect(screen.getByText("Retry send")).toBeInTheDocument();
     expect(screen.queryByText("Send reminder")).not.toBeInTheDocument();
     expect(screen.queryByText("Void contract")).not.toBeInTheDocument();
+  });
+
+  it("does not offer confirm-not-sent for an unresolved unknown send", async () => {
+    const user = userEvent.setup();
+    render(
+      <ContractActions
+        contract={contract({
+          deliveryState: "send_unknown",
+          detailsAvailable: false,
+        })}
+        actions={actionHandlers()}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Purchase agreement" }),
+    );
+
+    expect(screen.queryByText("Acknowledge not sent")).not.toBeInTheDocument();
+    expect(screen.queryByText("Retry send")).not.toBeInTheDocument();
+  });
+
+  it("offers acknowledgement only after automatic not-sent evidence failed the send", async () => {
+    const user = userEvent.setup();
+    render(
+      <ContractActions
+        contract={contract({
+          status: "error",
+          deliveryState: "failed",
+          detailsAvailable: false,
+          errorMessage: "PROVIDER_SEND_NOT_FOUND",
+        })}
+        actions={actionHandlers()}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Purchase agreement" }),
+    );
+
+    expect(screen.getByText("Acknowledge not sent")).toBeInTheDocument();
+    expect(screen.getByText("Retry send")).toBeInTheDocument();
   });
 
   it("hides retry after a failed source has been consumed by a child", async () => {
@@ -416,6 +459,18 @@ describe("ContractActions", () => {
     ["remind", "Send reminder", "Send reminder", "Sending reminder…", {}],
     ["void", "Void contract", "Request void", "Requesting void…", {}],
     [
+      "confirm_not_sent",
+      "Acknowledge not sent",
+      "Confirm not sent",
+      "Acknowledging…",
+      {
+        status: "error",
+        deliveryState: "failed",
+        detailsAvailable: false,
+        errorMessage: "PROVIDER_SEND_NOT_FOUND",
+      },
+    ],
+    [
       "retry",
       "Retry send",
       "Retry send",
@@ -434,6 +489,10 @@ describe("ContractActions", () => {
         );
       } else if (mode === "void") {
         vi.mocked(actions.voidAction).mockReturnValue(pending.promise as never);
+      } else if (mode === "confirm_not_sent") {
+        vi.mocked(actions.confirmNotSentAction).mockReturnValue(
+          pending.promise as never,
+        );
       } else {
         vi.mocked(actions.retryAction).mockReturnValue(
           pending.promise as never,

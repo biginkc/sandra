@@ -6,6 +6,7 @@ import type { Result } from "@/lib/errors/result";
 
 import type {
   AuthorizedDownload,
+  ConfirmContractNotSentInput,
   DownloadLeadFileInput,
   LeadEsignPreflight,
   RemindContractInput,
@@ -41,6 +42,12 @@ export async function voidContractAction(input: VoidContractInput): Promise<Resu
 
 export async function retryContractAction(input: RetryContractInput): Promise<Result<SendContractOutput>> {
   const result = await createBoundLeadEsignCore().retry(input);
+  if (result.ok) revalidatePath("/leads", "layout");
+  return result;
+}
+
+export async function confirmContractNotSentAction(input: ConfirmContractNotSentInput): Promise<Result<null>> {
+  const result = await createBoundLeadEsignCore().confirmNotSent(input);
   if (result.ok) revalidatePath("/leads", "layout");
   return result;
 }

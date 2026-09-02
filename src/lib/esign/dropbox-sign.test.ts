@@ -4,6 +4,7 @@ const sdk = vi.hoisted(() => ({
   accountGet: vi.fn(),
   apiAppGet: vi.fn(),
   send: vi.fn(),
+  list: vi.fn(),
   signUrl: vi.fn(),
   remind: vi.fn(),
   cancel: vi.fn(),
@@ -40,6 +41,7 @@ vi.mock("@dropbox/sign", () => {
   }
   class SignatureRequestApi extends BaseApi {
     signatureRequestSendWithTemplate = sdk.send;
+    signatureRequestList = sdk.list;
     signatureRequestRemind = sdk.remind;
     signatureRequestCancel = sdk.cancel;
     signatureRequestFiles = sdk.files;
@@ -199,5 +201,49 @@ describe("Dropbox Sign provider", () => {
       testMode: true,
     });
     expect(result).not.toHaveProperty("signingUrl");
+  });
+
+  it("performs a bounded exact-metadata lookup before stale-send recovery", async () => {
+    sdk.list.mockResolvedValue({
+      body: {
+        signatureRequests: [
+          {
+            signatureRequestId: "provider-request-1",
+            metadata: { sandra_request_id: "local-uuid" },
+          },
+          {
+            signatureRequestId: "false-positive",
+            metadata: { sandra_request_id: "other" },
+          },
+        ],
+        listInfo: { numPages: 1, numResults: 2, page: 1, pageSize: 100 },
+      },
+    });
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+      expectedDomain: "sandra.example.com",
+    });
+    const controller = new AbortController();
+
+    await expect(
+      provider.findSignatureRequestIdsByLocalRequestId(
+        "local-uuid",
+        false,
+        controller.signal,
+      ),
+    ).resolves.toEqual({
+      complete: true,
+      providerRequestIds: ["provider-request-1"],
+    });
+    expect(sdk.list).toHaveBeenCalledWith(
+      undefined,
+      1,
+      100,
+      "metadata:local-uuid AND test_mode:false AND client_id:client-id",
+    );
+    expect(sdk.interceptorOptions.at(-1)).toEqual({
+      signal: controller.signal,
+    });
   });
 });

@@ -41,7 +41,11 @@ const SIGNED_URL_SECONDS = 300;
 export async function authenticateLeadEsignActor(): Promise<EsignActor | null> {
   const memberships = await getCallerMemberships();
   if (memberships.length !== 1) return null;
-  return { orgId: memberships[0].org_id, userId: memberships[0].user_id };
+  return {
+    orgId: memberships[0].org_id,
+    userId: memberships[0].user_id,
+    role: memberships[0].role,
+  };
 }
 
 export function createLeadEsignRepository(): EsignActionRepository {
@@ -82,6 +86,41 @@ export function createLeadEsignRepository(): EsignActionRepository {
         },
       );
       if (error) throw error;
+    },
+    findProviderLookupReference: async ({ orgId, requestId, testMode }) => {
+      const { data, error } = await createAdminClient()
+        .from("esign_requests")
+        .select("id,sign_request_id")
+        .eq("org_id", orgId)
+        .eq("test_mode", testMode)
+        .not("sign_request_id", "is", null)
+        .neq("id", requestId)
+        .order("sent_at", { ascending: false, nullsFirst: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return data?.sign_request_id
+        ? {
+            localRequestId: data.id,
+            providerRequestId: data.sign_request_id,
+          }
+        : null;
+    },
+    resolveSendUnknownNotSent: async (input) => {
+      const { error } = await createAdminClient().rpc(
+        "resolve_esign_send_unknown_not_sent",
+        {
+          p_org_id: input.orgId,
+          p_request_id: input.requestId,
+          p_actor_id: input.actorId,
+          p_resolution_source: "operator",
+          p_error_message: "PROVIDER_SEND_NOT_FOUND",
+          p_evidence: input.evidence as Json,
+        },
+      );
+      if (error?.code === "55000") return "raced";
+      if (error) throw error;
+      return "updated";
     },
     findRequest: ({ orgId, requestId }) => loadRequest(orgId, requestId),
     claimReminder: async ({ orgId, requestId, signerId }) => {
@@ -516,12 +555,14 @@ async function loadRequest(
     payloadHash: row.payload_hash,
     retryOfRequestId: row.retry_of_request_id,
     status: row.status,
-    deliveryState: row.delivery_state,
-    providerRequestId: row.sign_request_id,
-    detailsUrl: row.details_url,
-    voidRequestedAt: row.void_requested_at,
-    signedPdfFileId: fileRow?.id ?? null,
-  };
+            deliveryState: row.delivery_state,
+            testMode: row.test_mode,
+            providerRequestId: row.sign_request_id,
+            detailsUrl: row.details_url,
+            errorMessage: row.error_message,
+            voidRequestedAt: row.void_requested_at,
+            signedPdfFileId: fileRow?.id ?? null,
+          };
 }
 
 function parseMergeValues(value: Json): ContractMergeValues | null {
@@ -600,6 +641,16 @@ export async function providerForOrg(
         return classifyProviderFailure(error);
       }
     },
+    findSignatureRequestIdsByLocalRequestId: ({
+      localRequestId,
+      testMode,
+      signal,
+    }) =>
+      provider.findSignatureRequestIdsByLocalRequestId(
+        localRequestId,
+        testMode,
+        signal,
+      ),
   };
 }
 

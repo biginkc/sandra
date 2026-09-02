@@ -99,6 +99,7 @@ export async function handleDropboxSignWebhook(input: {
     const request = await input.dependencies.persistence.findRequest({
       orgId: identity.orgId,
       signRequestId: replay.signRequestId,
+      localRequestId: replay.localRequestId,
     });
     if (!request || request.orgId !== identity.orgId) {
       throw new SafeWebhookProcessingError("REQUEST_NOT_FOUND", 503);

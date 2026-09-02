@@ -16,10 +16,14 @@ import {
   validateContractSendInput,
   validateProviderSignatures,
 } from "@/lib/esign/send-contract";
+import {
+  ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD,
+} from "@/lib/esign/stuck-send-reconciliation";
 
 import {
   primarySendBlocker,
   type AuthorizedDownload,
+  type ConfirmContractNotSentInput,
   type ContractMergeValues,
   type DownloadLeadFileInput,
   type LeadEsignPreflight,
@@ -34,9 +38,16 @@ import {
 
 const REMINDER_COOLDOWN_MS = 60 * 60 * 1_000;
 const DOWNLOAD_MAX_LIFETIME_MS = 5 * 60 * 1_000;
-export const ESIGN_PROVIDER_TIMEOUT_MS = 8 * 60 * 1_000;
+// The lead page explicitly gives its Server Actions 300 seconds. Leave a full
+// minute for claim/outcome bookkeeping so Vercel cannot terminate the action
+// before an ambiguous provider call is fenced as send_unknown.
+export const ESIGN_PROVIDER_TIMEOUT_MS = 4 * 60 * 1_000;
 
-export type EsignActor = Readonly<{ orgId: string; userId: string }>;
+export type EsignActor = Readonly<{
+  orgId: string;
+  userId: string;
+  role?: string | null;
+}>;
 
 export type LeadSendContext = Readonly<{
   propertyId: string;
@@ -66,8 +77,10 @@ export type EsignRequestRecord = Readonly<{
   retryOfRequestId: string | null;
   status: EsignStatus;
   deliveryState: EsignDeliveryState;
+  testMode: boolean;
   providerRequestId: string | null;
   detailsUrl: string | null;
+  errorMessage: string | null;
   voidRequestedAt: string | null;
   signedPdfFileId: string | null;
 }>;
@@ -127,6 +140,20 @@ export type EsignActionRepository = Readonly<{
     deliveryState: "send_unknown" | "failed";
     safeErrorMessage: string | null;
   }): Promise<void>;
+  findProviderLookupReference(input: {
+    orgId: string;
+    requestId: string;
+    testMode: boolean;
+  }): Promise<Readonly<{
+    localRequestId: string;
+    providerRequestId: string;
+  }> | null>;
+  resolveSendUnknownNotSent(input: {
+    orgId: string;
+    requestId: string;
+    actorId: string;
+    evidence: Record<string, unknown>;
+  }): Promise<"updated" | "raced">;
   findRequest(input: {
     orgId: string;
     requestId: string;
@@ -212,6 +239,11 @@ export type EsignActionProvider = Readonly<{
     providerRequestId: string;
     signal: AbortSignal;
   }): Promise<ProviderMutationOutcome>;
+  findSignatureRequestIdsByLocalRequestId(input: {
+    localRequestId: string;
+    testMode: boolean;
+    signal: AbortSignal;
+  }): Promise<{ complete: boolean; providerRequestIds: readonly string[] }>;
 }>;
 
 export type EsignActionFiles = Readonly<{
@@ -250,6 +282,8 @@ export function createLeadEsignActionCore(
       safely(() => requestVoid(dependencies, input)),
     retry: (input: RetryContractInput) =>
       safely(() => retry(dependencies, input)),
+    confirmNotSent: (input: ConfirmContractNotSentInput) =>
+      safely(() => confirmNotSent(dependencies, input)),
     view: (input: ViewContractInput) =>
       safely(() => viewDetails(dependencies, input)),
     download: (input: DownloadLeadFileInput) =>
@@ -349,13 +383,22 @@ async function send(
     fail("NOT_FOUND", "Lead not found. Refresh and try again.");
   if (claim.outcome === "existing")
     return resolveExistingIntent(claim.request, payloadHash, actor.orgId);
-  assertClaimedRequest(
-    claim.request,
-    actor,
-    normalized,
-    payloadHash,
-    retryOfRequestId,
-  );
+  try {
+    assertClaimedRequest(
+      claim.request,
+      actor,
+      normalized,
+      payloadHash,
+      retryOfRequestId,
+    );
+  } catch (error) {
+    await markFailed(
+      dependencies,
+      { id: claim.request.id, orgId: actor.orgId },
+      "REQUEST_CLAIM_MISMATCH",
+    );
+    throw error;
+  }
   return dispatchClaimed(dependencies, claim.request);
 }
 
@@ -454,6 +497,50 @@ async function retry(
     },
     source.id,
   );
+}
+
+async function confirmNotSent(
+  dependencies: LeadEsignActionDependencies,
+  input: ConfirmContractNotSentInput,
+): Promise<null> {
+  const actor = await requireActor(dependencies);
+  if (actor.role !== "owner") {
+    fail("OWNER_REQUIRED", "Only an organization owner can acknowledge this send.");
+  }
+  const request = await dependencies.repository.findRequest({
+    orgId: actor.orgId,
+    requestId: input.requestId,
+  });
+  if (!request) fail("NOT_FOUND", "Contract not found.");
+  if (
+    request.orgId !== actor.orgId ||
+    request.deliveryState !== "failed" ||
+    request.providerRequestId ||
+    request.errorMessage !== "PROVIDER_SEND_NOT_FOUND"
+  ) {
+    fail(
+      "CONFIRM_NOT_SENT_INELIGIBLE",
+      "Only automatically evidenced not-sent contracts can be acknowledged.",
+    );
+  }
+  const result = await dependencies.repository.resolveSendUnknownNotSent({
+    orgId: actor.orgId,
+    requestId: request.id,
+    actorId: actor.userId,
+    evidence: {
+      resolutionSource: "operator",
+      observedAt: dependencies.now().toISOString(),
+      zeroObservationThreshold: ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD,
+      acknowledgedFailure: "PROVIDER_SEND_NOT_FOUND",
+    },
+  });
+  if (result === "raced") {
+    fail(
+      "CONFIRM_NOT_SENT_INELIGIBLE",
+      "This contract changed while Dropbox Sign was being checked. Refresh and review it.",
+    );
+  }
+  return null;
 }
 
 async function remind(
@@ -798,7 +885,14 @@ export function hashSendPayload(input: SendContractInput): string {
       JSON.stringify({
         propertyId: input.propertyId,
         templateId: input.templateId,
-        signers: input.signers,
+        signers: [...input.signers]
+          .sort((left, right) => left.order - right.order)
+          .map(({ role, order, name, emailAddress }) => ({
+            role,
+            order,
+            name,
+            emailAddress,
+          })),
         mergeValues: ESIGN_MERGE_FIELD_NAMES.map((name) => [
           name,
           input.mergeValues[name],
@@ -910,12 +1004,18 @@ async function withProviderTimeout<T>(
   operation: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ESIGN_PROVIDER_TIMEOUT_MS);
-  try {
-    return await operation(controller.signal);
-  } finally {
-    clearTimeout(timer);
-  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const providerPromise = operation(controller.signal);
+  void providerPromise.catch(() => undefined);
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new DOMException("Provider send deadline exceeded.", "AbortError"));
+    }, ESIGN_PROVIDER_TIMEOUT_MS);
+  });
+  return Promise.race([providerPromise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 async function releaseReminder(
@@ -982,7 +1082,7 @@ async function markUnknown(
 
 async function markFailed(
   dependencies: LeadEsignActionDependencies,
-  request: EsignRequestRecord,
+  request: Pick<EsignRequestRecord, "id" | "orgId">,
   safeErrorMessage: string,
 ): Promise<void> {
   try {

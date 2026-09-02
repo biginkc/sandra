@@ -71,6 +71,7 @@ import { LeadFilesCard } from "./lead-files-card";
 import { loadLeadEsignPageModel } from "./lead-esign-bindings";
 import {
   downloadLeadFileAction,
+  confirmContractNotSentAction,
   loadLeadEsignPreflightAction,
   remindContractAction,
   retryContractAction,
@@ -78,6 +79,10 @@ import {
   viewContractAction,
   voidContractAction,
 } from "./lead-esign-actions";
+
+// Server Actions in this segment must outlive the four-minute provider abort
+// plus the outcome write that makes an interrupted send safely retryable.
+export const maxDuration = 300;
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 type LeadNoteRow = Database["public"]["Tables"]["lead_notes"]["Row"];
@@ -889,6 +894,7 @@ export default async function LeadDetailPage({
                 remindAction: remindContractAction,
                 voidAction: voidContractAction,
                 retryAction: retryContractAction,
+                confirmNotSentAction: confirmContractNotSentAction,
                 downloadAction: downloadLeadFileAction,
               }}
             />

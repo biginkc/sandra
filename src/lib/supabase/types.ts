@@ -4952,6 +4952,16 @@ export type Database = {
         Args: { p_actor_id: string; p_org_id: string }
         Returns: undefined
       }
+      attach_esign_request_provider_delivery: {
+        Args: {
+          p_evidence: Json
+          p_org_id: string
+          p_provider_request_id: string
+          p_request_id: string
+          p_resolution_source: string
+        }
+        Returns: undefined
+      }
       esign_safe_event_data_is_valid: {
         Args: { p_data: Json }
         Returns: boolean
@@ -5189,6 +5199,17 @@ export type Database = {
           p_provider_request_id: string
           p_provider_signatures: Json
           p_request_id: string
+        }
+        Returns: undefined
+      }
+      resolve_esign_send_unknown_not_sent: {
+        Args: {
+          p_actor_id: string | null
+          p_error_message: string
+          p_evidence: Json
+          p_org_id: string
+          p_request_id: string
+          p_resolution_source: string
         }
         Returns: undefined
       }
