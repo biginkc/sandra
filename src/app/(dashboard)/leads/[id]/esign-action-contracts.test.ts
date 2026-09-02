@@ -86,6 +86,10 @@ describe("lead eSign server-action contracts", () => {
         ok: true,
         data: { requestId: "request-retry-1" },
       }),
+      confirmNotSentAction: vi.fn().mockResolvedValue({
+        ok: true,
+        data: null,
+      }),
       downloadAction: vi.fn().mockResolvedValue({
         ok: true,
         data: { url: "https://authorized.example/signed.pdf" },
@@ -107,6 +111,9 @@ describe("lead eSign server-action contracts", () => {
       ok: true,
       data: { requestId: "request-retry-1" },
     });
+    await expect(
+      actions.confirmNotSentAction({ requestId: "request-local-1" }),
+    ).resolves.toEqual({ ok: true, data: null });
     await expect(
       actions.downloadAction({ fileId: "file-local-1" }),
     ).resolves.toEqual({

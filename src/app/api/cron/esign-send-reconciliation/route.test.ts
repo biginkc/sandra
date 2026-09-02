@@ -25,7 +25,10 @@ describe("eSign send reconciliation cron", () => {
     vi.mocked(reportError).mockReset();
     vi.mocked(createAdminClient).mockReset();
   });
-  afterEach(() => vi.unstubAllEnvs());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
 
   it("fails closed when the cron secret is missing", async () => {
     vi.stubEnv("CRON_SECRET", "");
@@ -48,7 +51,10 @@ describe("eSign send reconciliation cron", () => {
       from: vi.fn().mockReturnValue(candidateQuery([{
         id: "request-lookup-error",
         org_id: "org-1",
+        property_id: "property-1",
         test_mode: true,
+        delivery_state: "sending",
+        updated_at: "2026-09-02T00:00:00.000Z",
       }])),
     } as never);
 
@@ -70,14 +76,105 @@ describe("eSign send reconciliation cron", () => {
       extra: { requestId: "request-lookup-error", orgId: "org-1" },
     });
   });
+
+  it("bounds provider lookup with a local race when the SDK ignores abort", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getEsignCredentials).mockResolvedValue({
+      apiKey: { reveal: () => "secret" },
+      clientId: "client-1",
+      sendingEnabled: true,
+    } as never);
+    const findSignatureRequestIdsByLocalRequestId = vi.fn(
+      (_localRequestId: string, _testMode: boolean, signal: AbortSignal) => {
+        expect(signal).toBeInstanceOf(AbortSignal);
+        return new Promise<never>(() => undefined);
+      },
+    );
+    vi.mocked(createDropboxSignProvider).mockReturnValue({
+      findSignatureRequestIdsByLocalRequestId,
+    } as never);
+    vi.mocked(createAdminClient).mockReturnValue({
+      from: vi.fn((table: string) => {
+        if (table === "esign_requests") {
+          return esignRequestsQuery({
+            candidates: [{
+              id: "request-hangs",
+              org_id: "org-1",
+              property_id: "property-1",
+              test_mode: true,
+              delivery_state: "sending",
+              updated_at: "2026-09-02T00:00:00.000Z",
+            }],
+            reference: {
+              id: "known-local-request",
+              sign_request_id: "known-provider-request",
+            },
+          });
+        }
+        return leadEventsQuery([]);
+      }),
+      rpc: vi.fn().mockResolvedValue({ error: null }),
+    } as never);
+
+    const responsePromise = GET(
+      new Request("https://sandra.test/api/cron/esign-send-reconciliation", {
+        headers: { authorization: "Bearer cron-test-secret" },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    const response = await responsePromise;
+
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      checked: 1,
+      lookupErrors: 1,
+    });
+    expect(findSignatureRequestIdsByLocalRequestId).toHaveBeenCalledTimes(1);
+  });
 });
 
 function candidateQuery(data: readonly unknown[]) {
-  return {
-    select: vi.fn().mockReturnThis(),
+  return esignRequestsQuery({ candidates: data, reference: null });
+}
+
+function esignRequestsQuery(input: {
+  candidates: readonly unknown[];
+  reference: unknown;
+}) {
+  let selectedReference = false;
+  const query = {
+    select: vi.fn((columns: string) => {
+      selectedReference = columns === "id,sign_request_id";
+      return query;
+    }),
+    in: vi.fn().mockReturnThis(),
     eq: vi.fn().mockReturnThis(),
     is: vi.fn().mockReturnThis(),
+    or: vi.fn().mockReturnThis(),
+    not: vi.fn().mockReturnThis(),
+    neq: vi.fn().mockReturnThis(),
     lt: vi.fn().mockReturnThis(),
+    order: vi.fn().mockReturnThis(),
+    maybeSingle: vi.fn(async () => ({
+      data: selectedReference ? input.reference : null,
+      error: null,
+    })),
+    limit: vi.fn(() => {
+      return selectedReference
+        ? query
+        : Promise.resolve({ data: input.candidates, error: null });
+    }),
+  };
+  return query;
+}
+
+function leadEventsQuery(data: readonly unknown[]) {
+  return {
+    insert: vi.fn().mockResolvedValue({ error: null }),
+    select: vi.fn().mockReturnThis(),
+    eq: vi.fn().mockReturnThis(),
+    contains: vi.fn().mockReturnThis(),
+    gte: vi.fn().mockReturnThis(),
     order: vi.fn().mockReturnThis(),
     limit: vi.fn().mockResolvedValue({ data, error: null }),
   };

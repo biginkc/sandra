@@ -1,18 +1,38 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS,
   lookupAfterVerifiedProviderProbe,
   reconcileStuckEsignSends,
+  type StuckEsignSend,
 } from "./stuck-send-reconciliation";
+
+function candidate(
+  overrides: Partial<StuckEsignSend> = {},
+): StuckEsignSend {
+  return {
+    id: "request-1",
+    orgId: "org-1",
+    propertyId: "property-1",
+    testMode: true,
+    deliveryState: "sending",
+    updatedAt: new Date("2026-09-02T00:00:00.000Z"),
+    ...overrides,
+  };
+}
 
 describe("stuck eSign send reconciliation", () => {
   it("marks every complete provider lookup send_unknown, including zero-result Dropbox search lag", async () => {
     const markOutcome = vi.fn().mockResolvedValue("updated");
     const listCandidates = vi.fn().mockResolvedValue([
-      { id: "request-zero", orgId: "org-1", testMode: true },
-      { id: "request-found", orgId: "org-1", testMode: true },
-      { id: "request-incomplete", orgId: "org-1", testMode: true },
+      candidate({ id: "request-zero" }),
+      candidate({ id: "request-found" }),
+      candidate({ id: "request-incomplete" }),
     ]);
+    const recordZeroResult = vi.fn().mockResolvedValue({
+      consecutiveCompleteZeroCount: 1,
+      firstObservedAt: new Date("2026-09-02T00:30:00.000Z"),
+    });
     const lookupProviderRequest = vi
       .fn()
       .mockResolvedValueOnce({ complete: true, providerRequestIds: [] })
@@ -24,7 +44,12 @@ describe("stuck eSign send reconciliation", () => {
 
     await expect(
       reconcileStuckEsignSends(
-        { listCandidates, lookupProviderRequest, markOutcome },
+        {
+          listCandidates,
+          lookupProviderRequest,
+          markOutcome,
+          recordZeroResult,
+        },
         new Date("2026-09-02T00:30:00.000Z"),
       ),
     ).resolves.toEqual({
@@ -43,24 +68,28 @@ describe("stuck eSign send reconciliation", () => {
     expect(markOutcome).toHaveBeenNthCalledWith(1, {
       id: "request-zero",
       orgId: "org-1",
+      propertyId: "property-1",
       testMode: true,
+      updatedAt: new Date("2026-09-02T00:00:00.000Z"),
       deliveryState: "send_unknown",
       safeErrorMessage: null,
     });
     expect(markOutcome).toHaveBeenNthCalledWith(2, {
       id: "request-found",
       orgId: "org-1",
+      propertyId: "property-1",
       testMode: true,
+      updatedAt: new Date("2026-09-02T00:00:00.000Z"),
       deliveryState: "send_unknown",
       safeErrorMessage: null,
     });
   });
 
   it("keeps a Dropbox index-lag zero lookup non-retryable before a later present lookup", async () => {
-    const candidate = { id: "lagged-request", orgId: "org-1", testMode: true };
+    const lagged = candidate({ id: "lagged-request" });
     const markOutcome = vi.fn().mockResolvedValue("updated");
     const ports = {
-      listCandidates: vi.fn().mockResolvedValue([candidate]),
+      listCandidates: vi.fn().mockResolvedValue([lagged]),
       lookupProviderRequest: vi
         .fn()
         .mockResolvedValueOnce({ complete: true, providerRequestIds: [] })
@@ -69,6 +98,10 @@ describe("stuck eSign send reconciliation", () => {
           providerRequestIds: ["provider-after-index"],
         }),
       markOutcome,
+      recordZeroResult: vi.fn().mockResolvedValue({
+        consecutiveCompleteZeroCount: 1,
+        firstObservedAt: new Date("2026-09-02T00:30:00.000Z"),
+      }),
     };
 
     await expect(
@@ -79,14 +112,55 @@ describe("stuck eSign send reconciliation", () => {
     ).resolves.toMatchObject({ failed: 0, unknown: 1 });
     expect(markOutcome).toHaveBeenCalledTimes(2);
     expect(markOutcome).toHaveBeenNthCalledWith(1, {
-      ...candidate,
+      ...lagged,
       deliveryState: "send_unknown",
       safeErrorMessage: null,
     });
     expect(markOutcome).toHaveBeenNthCalledWith(2, {
-      ...candidate,
+      ...lagged,
       deliveryState: "send_unknown",
       safeErrorMessage: null,
+    });
+  });
+
+  it("marks a genuinely lost send failed after repeated complete zeros with controls over the resolution window", async () => {
+    const unknown = candidate({
+      id: "lost-request",
+      deliveryState: "send_unknown",
+      updatedAt: new Date("2026-09-02T00:00:00.000Z"),
+    });
+    const observedAt = new Date(
+      unknown.updatedAt.getTime() + ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS,
+    );
+    const markOutcome = vi.fn().mockResolvedValue("updated");
+
+    await expect(reconcileStuckEsignSends({
+      listCandidates: vi.fn().mockResolvedValue([unknown]),
+      lookupProviderRequest: vi.fn().mockResolvedValue({
+        complete: true,
+        providerRequestIds: [],
+      }),
+      recordZeroResult: vi.fn().mockResolvedValue({
+        consecutiveCompleteZeroCount: 3,
+        firstObservedAt: unknown.updatedAt,
+      }),
+      markOutcome,
+    }, observedAt)).resolves.toMatchObject({
+      checked: 1,
+      failed: 1,
+      unknown: 0,
+    });
+
+    expect(markOutcome).toHaveBeenCalledWith({
+      ...unknown,
+      deliveryState: "failed",
+      safeErrorMessage: "PROVIDER_SEND_NOT_FOUND",
+      resolutionSource: "automatic",
+      evidence: expect.objectContaining({
+        zeroObservationThreshold: 3,
+        consecutiveCompleteZeroCount: 3,
+        minimumUnknownAgeMs: ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS,
+      }),
     });
   });
 
@@ -94,8 +168,8 @@ describe("stuck eSign send reconciliation", () => {
     const lookupError = new Error("provider search unavailable");
     const reportLookupError = vi.fn();
     const candidates = [
-      { id: "throws", orgId: "org-1", testMode: true },
-      { id: "incomplete", orgId: "org-1", testMode: true },
+      candidate({ id: "throws" }),
+      candidate({ id: "incomplete" }),
     ];
 
     await expect(reconcileStuckEsignSends({
@@ -104,6 +178,7 @@ describe("stuck eSign send reconciliation", () => {
         .mockRejectedValueOnce(lookupError)
         .mockResolvedValueOnce({ complete: false, providerRequestIds: [] }),
       markOutcome: vi.fn(),
+      recordZeroResult: vi.fn(),
       reportLookupError,
     })).resolves.toEqual({
       checked: 2,
@@ -119,8 +194,8 @@ describe("stuck eSign send reconciliation", () => {
 
   it("isolates outcome races and stops at the cron deadline", async () => {
     const candidates = [
-      { id: "raced", orgId: "org-1", testMode: true },
-      { id: "not-started", orgId: "org-1", testMode: true },
+      candidate({ id: "raced" }),
+      candidate({ id: "not-started" }),
     ];
     const shouldContinue = vi.fn().mockReturnValueOnce(true).mockReturnValue(false);
     const markOutcome = vi.fn().mockResolvedValue("raced");
@@ -132,6 +207,7 @@ describe("stuck eSign send reconciliation", () => {
         providerRequestIds: ["provider-1"],
       }),
       markOutcome,
+      recordZeroResult: vi.fn(),
       shouldContinue,
     })).resolves.toEqual({
       checked: 1,
@@ -151,8 +227,8 @@ describe("stuck eSign send reconciliation", () => {
       .mockRejectedValueOnce(writeError)
       .mockResolvedValueOnce("updated");
     const candidates = [
-      { id: "write-error", orgId: "org-1", testMode: true },
-      { id: "continues", orgId: "org-1", testMode: true },
+      candidate({ id: "write-error" }),
+      candidate({ id: "continues" }),
     ];
 
     await expect(reconcileStuckEsignSends({
@@ -162,6 +238,10 @@ describe("stuck eSign send reconciliation", () => {
         providerRequestIds: [],
       }),
       markOutcome,
+      recordZeroResult: vi.fn().mockResolvedValue({
+        consecutiveCompleteZeroCount: 1,
+        firstObservedAt: new Date("2026-09-02T00:30:00.000Z"),
+      }),
       reportOutcomeError,
     })).resolves.toEqual({
       checked: 2,
@@ -177,12 +257,12 @@ describe("stuck eSign send reconciliation", () => {
   });
 
   it("requires a known provider request to prove the zero-result query works", async () => {
-    const candidate = { id: "stuck-request", orgId: "org-1", testMode: false };
+    const stuck = candidate({ id: "stuck-request", testMode: false });
     const find = vi.fn()
       .mockResolvedValueOnce({ complete: true, providerRequestIds: [] });
 
     await expect(lookupAfterVerifiedProviderProbe({
-      candidate,
+      candidate: stuck,
       reference: {
         localRequestId: "known-local-request",
         providerRequestId: "known-provider-request",
@@ -194,7 +274,7 @@ describe("stuck eSign send reconciliation", () => {
   });
 
   it("queries the stranded request only after the control probe matches", async () => {
-    const candidate = { id: "stuck-request", orgId: "org-1", testMode: true };
+    const stuck = candidate({ id: "stuck-request", testMode: true });
     const find = vi.fn()
       .mockResolvedValueOnce({
         complete: true,
@@ -203,7 +283,7 @@ describe("stuck eSign send reconciliation", () => {
       .mockResolvedValueOnce({ complete: true, providerRequestIds: [] });
 
     await expect(lookupAfterVerifiedProviderProbe({
-      candidate,
+      candidate: stuck,
       reference: {
         localRequestId: "known-local-request",
         providerRequestId: "known-provider-request",

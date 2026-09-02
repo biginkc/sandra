@@ -102,6 +102,7 @@ function request(
     retryOfRequestId: null,
     status: "awaiting",
     deliveryState: "sending",
+    testMode: true,
     providerRequestId: null,
     detailsUrl: null,
     voidRequestedAt: null,
@@ -128,6 +129,11 @@ function harness() {
     })),
     reconcileSent: vi.fn().mockResolvedValue(undefined),
     markSendOutcome: vi.fn().mockResolvedValue(undefined),
+    findProviderLookupReference: vi.fn().mockResolvedValue({
+      localRequestId: "known-local-request",
+      providerRequestId: "known-provider-request",
+    }),
+    resolveSendUnknownNotSent: vi.fn().mockResolvedValue("updated"),
     findRequest: vi.fn().mockResolvedValue(null),
     claimReminder: vi.fn().mockResolvedValue({ outcome: "ineligible" }),
     finalizeReminder: vi.fn().mockResolvedValue("applied"),
@@ -147,6 +153,12 @@ function harness() {
     }),
     remind: vi.fn().mockResolvedValue("accepted"),
     cancel: vi.fn().mockResolvedValue("accepted"),
+    findSignatureRequestIdsByLocalRequestId: vi.fn()
+      .mockResolvedValueOnce({
+        complete: true,
+        providerRequestIds: ["known-provider-request"],
+      })
+      .mockResolvedValueOnce({ complete: true, providerRequestIds: [] }),
   } as unknown as EsignActionProvider;
   const files = {
     authorizeSignedFile: vi.fn().mockResolvedValue({
@@ -721,6 +733,71 @@ describe("lead eSign action orchestration", () => {
       orgId: "org-1",
       requestId: "request-other-org",
     });
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("confirms a send_unknown request as not sent only after a fresh provider lookup with a positive control", async () => {
+    const h = harness();
+    h.repository.findRequest.mockResolvedValue(
+      request({ deliveryState: "send_unknown" }),
+    );
+
+    const result = await h.core.confirmNotSent({ requestId: "request-1" });
+
+    expect(result).toEqual({ ok: true, data: null });
+    expect(h.repository.findProviderLookupReference).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      testMode: true,
+    });
+    expect(h.provider.findSignatureRequestIdsByLocalRequestId)
+      .toHaveBeenNthCalledWith(1, {
+        localRequestId: "known-local-request",
+        testMode: true,
+        signal: expect.any(AbortSignal),
+      });
+    expect(h.provider.findSignatureRequestIdsByLocalRequestId)
+      .toHaveBeenNthCalledWith(2, {
+        localRequestId: "request-1",
+        testMode: true,
+        signal: expect.any(AbortSignal),
+      });
+    expect(h.repository.resolveSendUnknownNotSent).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      actorId: "user-1",
+      evidence: expect.objectContaining({
+        resolutionSource: "operator",
+        positiveControl: "passed",
+      }),
+    });
+    expect(h.repository.markSendOutcome).not.toHaveBeenCalled();
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("refuses operator confirm when Dropbox Sign finds the request", async () => {
+    const h = harness();
+    h.repository.findRequest.mockResolvedValue(
+      request({ deliveryState: "send_unknown" }),
+    );
+    h.provider.findSignatureRequestIdsByLocalRequestId.mockReset();
+    h.provider.findSignatureRequestIdsByLocalRequestId
+      .mockResolvedValueOnce({
+        complete: true,
+        providerRequestIds: ["known-provider-request"],
+      })
+      .mockResolvedValueOnce({
+        complete: true,
+        providerRequestIds: ["provider-after-index"],
+      });
+
+    const result = await h.core.confirmNotSent({ requestId: "request-1" });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "CONFIRM_NOT_SENT_PROVIDER_FOUND" },
+    });
+    expect(h.repository.resolveSendUnknownNotSent).not.toHaveBeenCalled();
     expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });
 

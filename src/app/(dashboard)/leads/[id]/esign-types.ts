@@ -114,6 +114,10 @@ export type RetryContractInput = Readonly<{
   requestId: string;
 }>;
 
+export type ConfirmContractNotSentInput = Readonly<{
+  requestId: string;
+}>;
+
 export type DownloadLeadFileInput = Readonly<{
   fileId: string;
 }>;
@@ -129,6 +133,9 @@ export type ContractActionHandlers = Readonly<{
   retryAction: (
     input: RetryContractInput,
   ) => Promise<Result<SendContractOutput>>;
+  confirmNotSentAction: (
+    input: ConfirmContractNotSentInput,
+  ) => Promise<Result<null>>;
   downloadAction: (
     input: DownloadLeadFileInput,
   ) => Promise<Result<AuthorizedDownload>>;

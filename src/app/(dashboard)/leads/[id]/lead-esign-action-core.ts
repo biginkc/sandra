@@ -16,10 +16,15 @@ import {
   validateContractSendInput,
   validateProviderSignatures,
 } from "@/lib/esign/send-contract";
+import {
+  ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD,
+  lookupAfterVerifiedProviderProbe,
+} from "@/lib/esign/stuck-send-reconciliation";
 
 import {
   primarySendBlocker,
   type AuthorizedDownload,
+  type ConfirmContractNotSentInput,
   type ContractMergeValues,
   type DownloadLeadFileInput,
   type LeadEsignPreflight,
@@ -69,6 +74,7 @@ export type EsignRequestRecord = Readonly<{
   retryOfRequestId: string | null;
   status: EsignStatus;
   deliveryState: EsignDeliveryState;
+  testMode: boolean;
   providerRequestId: string | null;
   detailsUrl: string | null;
   voidRequestedAt: string | null;
@@ -130,6 +136,20 @@ export type EsignActionRepository = Readonly<{
     deliveryState: "send_unknown" | "failed";
     safeErrorMessage: string | null;
   }): Promise<void>;
+  findProviderLookupReference(input: {
+    orgId: string;
+    requestId: string;
+    testMode: boolean;
+  }): Promise<Readonly<{
+    localRequestId: string;
+    providerRequestId: string;
+  }> | null>;
+  resolveSendUnknownNotSent(input: {
+    orgId: string;
+    requestId: string;
+    actorId: string;
+    evidence: Record<string, unknown>;
+  }): Promise<"updated" | "raced">;
   findRequest(input: {
     orgId: string;
     requestId: string;
@@ -215,6 +235,11 @@ export type EsignActionProvider = Readonly<{
     providerRequestId: string;
     signal: AbortSignal;
   }): Promise<ProviderMutationOutcome>;
+  findSignatureRequestIdsByLocalRequestId(input: {
+    localRequestId: string;
+    testMode: boolean;
+    signal: AbortSignal;
+  }): Promise<{ complete: boolean; providerRequestIds: readonly string[] }>;
 }>;
 
 export type EsignActionFiles = Readonly<{
@@ -253,6 +278,8 @@ export function createLeadEsignActionCore(
       safely(() => requestVoid(dependencies, input)),
     retry: (input: RetryContractInput) =>
       safely(() => retry(dependencies, input)),
+    confirmNotSent: (input: ConfirmContractNotSentInput) =>
+      safely(() => confirmNotSent(dependencies, input)),
     view: (input: ViewContractInput) =>
       safely(() => viewDetails(dependencies, input)),
     download: (input: DownloadLeadFileInput) =>
@@ -466,6 +493,97 @@ async function retry(
     },
     source.id,
   );
+}
+
+async function confirmNotSent(
+  dependencies: LeadEsignActionDependencies,
+  input: ConfirmContractNotSentInput,
+): Promise<null> {
+  const actor = await requireActor(dependencies);
+  const request = await dependencies.repository.findRequest({
+    orgId: actor.orgId,
+    requestId: input.requestId,
+  });
+  if (!request) fail("NOT_FOUND", "Contract not found.");
+  if (
+    request.orgId !== actor.orgId ||
+    request.deliveryState !== "send_unknown" ||
+    request.providerRequestId
+  ) {
+    fail(
+      "CONFIRM_NOT_SENT_INELIGIBLE",
+      "Only unresolved unknown sends can be confirmed as not sent.",
+    );
+  }
+  let provider: EsignActionProvider | null;
+  try {
+    provider = await dependencies.providerForOrg(actor.orgId);
+  } catch {
+    fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
+  }
+  if (!provider) fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
+  const reference = await dependencies.repository.findProviderLookupReference({
+    orgId: actor.orgId,
+    requestId: request.id,
+    testMode: request.testMode,
+  });
+  let lookup: { complete: boolean; providerRequestIds: readonly string[] };
+  try {
+    lookup = await withProviderTimeout((signal) =>
+      lookupAfterVerifiedProviderProbe({
+        candidate: {
+          id: request.id,
+          orgId: request.orgId,
+          propertyId: request.propertyId,
+          testMode: request.testMode,
+          deliveryState: "send_unknown",
+          updatedAt: dependencies.now(),
+        },
+        reference,
+        find: (localRequestId, testMode) =>
+          provider.findSignatureRequestIdsByLocalRequestId({
+            localRequestId,
+            testMode,
+            signal,
+          }),
+      }),
+    );
+  } catch {
+    fail(
+      "CONFIRM_NOT_SENT_UNVERIFIED",
+      "Dropbox Sign could not be checked. Do not retry this contract yet.",
+    );
+  }
+  if (!lookup.complete) {
+    fail(
+      "CONFIRM_NOT_SENT_UNVERIFIED",
+      "Dropbox Sign could not prove the request is absent. Do not retry this contract yet.",
+    );
+  }
+  if (lookup.providerRequestIds.length > 0) {
+    fail(
+      "CONFIRM_NOT_SENT_PROVIDER_FOUND",
+      "Dropbox Sign has a matching request. Wait for reconciliation instead of retrying.",
+    );
+  }
+  const result = await dependencies.repository.resolveSendUnknownNotSent({
+    orgId: actor.orgId,
+    requestId: request.id,
+    actorId: actor.userId,
+    evidence: {
+      resolutionSource: "operator",
+      observedAt: dependencies.now().toISOString(),
+      zeroObservationThreshold: ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD,
+      positiveControl: "passed",
+    },
+  });
+  if (result === "raced") {
+    fail(
+      "CONFIRM_NOT_SENT_INELIGIBLE",
+      "This contract changed while Dropbox Sign was being checked. Refresh and review it.",
+    );
+  }
+  return null;
 }
 
 async function remind(

@@ -52,6 +52,7 @@ function actionHandlers(): ContractActionHandlers {
     retryAction: vi
       .fn()
       .mockResolvedValue({ ok: true, data: { requestId: "request-retry" } }),
+    confirmNotSentAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
     downloadAction: vi.fn().mockResolvedValue({
       ok: true,
       data: { url: "https://authorized.example/signed.pdf" },
@@ -190,6 +191,26 @@ describe("ContractActions", () => {
     expect(screen.getByText("Retry send")).toBeInTheDocument();
     expect(screen.queryByText("Send reminder")).not.toBeInTheDocument();
     expect(screen.queryByText("Void contract")).not.toBeInTheDocument();
+  });
+
+  it("offers confirm-not-sent for an unresolved unknown send without enabling retry", async () => {
+    const user = userEvent.setup();
+    render(
+      <ContractActions
+        contract={contract({
+          deliveryState: "send_unknown",
+          detailsAvailable: false,
+        })}
+        actions={actionHandlers()}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Purchase agreement" }),
+    );
+
+    expect(screen.getByText("Confirm not sent")).toBeInTheDocument();
+    expect(screen.queryByText("Retry send")).not.toBeInTheDocument();
   });
 
   it("hides retry after a failed source has been consumed by a child", async () => {
@@ -416,6 +437,13 @@ describe("ContractActions", () => {
     ["remind", "Send reminder", "Send reminder", "Sending reminder…", {}],
     ["void", "Void contract", "Request void", "Requesting void…", {}],
     [
+      "confirm_not_sent",
+      "Confirm not sent",
+      "Confirm not sent",
+      "Checking Dropbox Sign…",
+      { deliveryState: "send_unknown", detailsAvailable: false },
+    ],
+    [
       "retry",
       "Retry send",
       "Retry send",
@@ -434,6 +462,10 @@ describe("ContractActions", () => {
         );
       } else if (mode === "void") {
         vi.mocked(actions.voidAction).mockReturnValue(pending.promise as never);
+      } else if (mode === "confirm_not_sent") {
+        vi.mocked(actions.confirmNotSentAction).mockReturnValue(
+          pending.promise as never,
+        );
       } else {
         vi.mocked(actions.retryAction).mockReturnValue(
           pending.promise as never,

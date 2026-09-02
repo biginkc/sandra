@@ -1,10 +1,15 @@
-const ESIGN_STUCK_SEND_MIN_AGE_MS = 15 * 60 * 1_000;
+export const ESIGN_STUCK_SEND_MIN_AGE_MS = 15 * 60 * 1_000;
+export const ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS = 60 * 60 * 1_000;
+export const ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD = 3;
 const ESIGN_STUCK_SEND_BATCH_SIZE = 10;
 
 export type StuckEsignSend = Readonly<{
   id: string;
   orgId: string;
+  propertyId: string;
   testMode: boolean;
+  deliveryState: "sending" | "send_unknown";
+  updatedAt: Date;
 }>;
 
 export type StuckSendReconciliationPorts = Readonly<{
@@ -16,10 +21,18 @@ export type StuckSendReconciliationPorts = Readonly<{
     complete: boolean;
     providerRequestIds: readonly string[];
   }>;
-  markOutcome(input: StuckEsignSend & {
-    deliveryState: "send_unknown";
+  markOutcome(input: Omit<StuckEsignSend, "deliveryState"> & {
+    deliveryState: "send_unknown" | "failed";
     safeErrorMessage: string | null;
+    resolutionSource?: "automatic";
+    evidence?: Record<string, unknown>;
   }): Promise<"updated" | "raced">;
+  recordZeroResult(input: StuckEsignSend & {
+    observedAt: Date;
+  }): Promise<{
+    consecutiveCompleteZeroCount: number;
+    firstObservedAt: Date | null;
+  }>;
   reportOutcomeError?(error: unknown, candidate: StuckEsignSend): void;
   reportLookupError?(error: unknown, candidate: StuckEsignSend): void;
   shouldContinue?(): boolean;
@@ -87,13 +100,47 @@ export async function reconcileStuckEsignSends(
       continue;
     }
     if (lookup.providerRequestIds.length === 0) {
+      let zeroEvidence: Awaited<
+        ReturnType<StuckSendReconciliationPorts["recordZeroResult"]>
+      >;
       try {
+        zeroEvidence = await ports.recordZeroResult({
+          ...candidate,
+          observedAt: now,
+        });
+      } catch (error) {
+        summary.errors += 1;
+        ports.reportOutcomeError?.(error, candidate);
+        continue;
+      }
+      try {
+        const shouldFail = shouldResolveUnknownSendAsFailed({
+          candidate,
+          now,
+          zeroEvidence,
+        });
         const result = await ports.markOutcome({
           ...candidate,
-          deliveryState: "send_unknown",
-          safeErrorMessage: null,
+          deliveryState: shouldFail ? "failed" : "send_unknown",
+          safeErrorMessage: shouldFail
+            ? "PROVIDER_SEND_NOT_FOUND"
+            : null,
+          resolutionSource: shouldFail ? "automatic" : undefined,
+          evidence: shouldFail
+            ? {
+                zeroObservationThreshold:
+                  ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD,
+                consecutiveCompleteZeroCount:
+                  zeroEvidence.consecutiveCompleteZeroCount,
+                firstObservedAt: zeroEvidence.firstObservedAt?.toISOString(),
+                observedAt: now.toISOString(),
+                minimumUnknownAgeMs: ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS,
+              }
+            : undefined,
         });
-        summary[result === "raced" ? "raced" : "unknown"] += 1;
+        summary[
+          result === "raced" ? "raced" : shouldFail ? "failed" : "unknown"
+        ] += 1;
       } catch (error) {
         summary.errors += 1;
         ports.reportOutcomeError?.(error, candidate);
@@ -113,4 +160,29 @@ export async function reconcileStuckEsignSends(
     }
   }
   return summary;
+}
+
+function shouldResolveUnknownSendAsFailed(input: {
+  candidate: StuckEsignSend;
+  now: Date;
+  zeroEvidence: {
+    consecutiveCompleteZeroCount: number;
+    firstObservedAt: Date | null;
+  };
+}): boolean {
+  if (input.candidate.deliveryState !== "send_unknown") return false;
+  const unknownAgeMs = input.now.getTime() - input.candidate.updatedAt.getTime();
+  if (unknownAgeMs < ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS) return false;
+  if (
+    input.zeroEvidence.consecutiveCompleteZeroCount <
+    ESIGN_UNKNOWN_SEND_ZERO_OBSERVATION_THRESHOLD
+  ) {
+    return false;
+  }
+  const firstObservedAt = input.zeroEvidence.firstObservedAt?.getTime();
+  return (
+    typeof firstObservedAt === "number" &&
+    input.now.getTime() - firstObservedAt >=
+      ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS
+  );
 }

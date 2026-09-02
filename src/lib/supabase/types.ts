@@ -5192,6 +5192,17 @@ export type Database = {
         }
         Returns: undefined
       }
+      resolve_esign_send_unknown_not_sent: {
+        Args: {
+          p_actor_id: string | null
+          p_error_message: string
+          p_evidence: Json
+          p_org_id: string
+          p_request_id: string
+          p_resolution_source: string
+        }
+        Returns: undefined
+      }
       reconcile_esign_reminder_callback: {
         Args: {
           p_lease_id: string

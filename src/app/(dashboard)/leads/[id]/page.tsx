@@ -71,6 +71,7 @@ import { LeadFilesCard } from "./lead-files-card";
 import { loadLeadEsignPageModel } from "./lead-esign-bindings";
 import {
   downloadLeadFileAction,
+  confirmContractNotSentAction,
   loadLeadEsignPreflightAction,
   remindContractAction,
   retryContractAction,
@@ -893,6 +894,7 @@ export default async function LeadDetailPage({
                 remindAction: remindContractAction,
                 voidAction: voidContractAction,
                 retryAction: retryContractAction,
+                confirmNotSentAction: confirmContractNotSentAction,
                 downloadAction: downloadLeadFileAction,
               }}
             />

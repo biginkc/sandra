@@ -15,6 +15,10 @@ const retryReminderFenceSql = readFileSync(
   "supabase/migrations/20260901020000_esign_retry_and_reminder_callback_fences.sql",
   "utf8",
 );
+const sendUnknownResolutionSql = readFileSync(
+  "supabase/migrations/20260902030000_esign_send_unknown_positive_resolution.sql",
+  "utf8",
+);
 const sourceUrl = process.env.TEST_SUPABASE_DB_URL;
 const databaseName = `sandra_esign_race_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 let admin: Client;
@@ -133,6 +137,8 @@ beforeAll(async () => {
   await setup.query(migrationSql);
   await setup.query(reconciliationFenceSql);
   await setup.query(retryReminderFenceSql);
+  await setup.query(sendUnknownResolutionSql);
+  await setup.query(sendUnknownResolutionSql);
 }, 60_000);
 
 afterAll(async () => {
@@ -1031,5 +1037,181 @@ describe("eSign foundation production lease contention", () => {
     } finally {
       await Promise.all([first.end(), second.end()]);
     }
+  });
+
+  it("resolves send_unknown to failed only with positive evidence and records actor audit", async () => {
+    const orgId = crypto.randomUUID();
+    const userId = crypto.randomUUID();
+    const contactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const sourceId = crypto.randomUUID();
+    const templateId = crypto.randomUUID();
+    const operatorRequestId = crypto.randomUUID();
+    const automaticRequestId = crypto.randomUUID();
+    const sentRequestId = crypto.randomUUID();
+    const signerSnapshot = JSON.stringify([
+      {
+        role: "Seller",
+        name: "Test Seller",
+        emailAddress: "seller@example.com",
+      },
+    ]);
+    const mergeSnapshot = JSON.stringify({
+      seller_name: "Test Seller",
+      property_address: "123 Test",
+      offer_price: "1",
+      closing_date: "2026-09-30",
+      earnest_money: "1",
+    });
+
+    await setServiceRole(setup);
+    await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into public.organizations values ($1)", [orgId]);
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
+      [userId, orgId],
+    );
+    await setup.query(
+      "insert into public.contacts (id,org_id,email) values ($1,$2,'seller@example.com')",
+      [contactId, orgId],
+    );
+    await setup.query(
+      "insert into public.properties (id,org_id,homeowner_contact_id) values ($1,$2,$3)",
+      [propertyId, orgId, contactId],
+    );
+    await setup.query(
+      `insert into public.esign_template_staging_sources (
+         id,org_id,storage_path,source_filename,source_size_bytes,
+         content_type,source_sha256,created_by
+       ) values ($1,$2,($2::uuid)::text || '/' || ($1::uuid)::text || '.pdf','source.pdf',1024,
+         'application/pdf',repeat('a',64),$3)`,
+      [sourceId, orgId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_templates (
+         id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,
+         sign_template_id,staging_source_id,source_filename,source_size_bytes,
+         source_content_type,source_sha256,staging_path,finalized_at,lifecycle_state,
+         created_by,updated_by
+       ) values (
+         $1,$2,'Purchase agreement','purchase_agreement','Seller',
+         '[{"name":"Seller","order":0}]'::jsonb,
+         array['seller_name','property_address','offer_price','closing_date','earnest_money'],
+         'provider-template',$3,'source.pdf',1024,'application/pdf',repeat('a',64),
+         ($2::uuid)::text || '/' || ($3::uuid)::text || '.pdf',now(),'finalized',$4,$4
+       )`,
+      [templateId, orgId, sourceId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_requests (
+         id,org_id,property_id,template_id,signer_snapshot,merge_value_snapshot,
+         delivery_state,sign_request_id,sent_at,send_intent_id,payload_hash,created_by
+       ) values
+         ($1,$4,$5,$6,$7::jsonb,$8::jsonb,'send_unknown',null,null,gen_random_uuid(),repeat('b',64),$9),
+         ($2,$4,$5,$6,$7::jsonb,$8::jsonb,'send_unknown',null,null,gen_random_uuid(),repeat('c',64),$9),
+         ($3,$4,$5,$6,$7::jsonb,$8::jsonb,'sent','provider-request',now(),gen_random_uuid(),repeat('d',64),$9)`,
+      [
+        operatorRequestId,
+        automaticRequestId,
+        sentRequestId,
+        orgId,
+        propertyId,
+        templateId,
+        signerSnapshot,
+        mergeSnapshot,
+        userId,
+      ],
+    );
+
+    await setup.query(
+      `select public.resolve_esign_send_unknown_not_sent(
+        $1,$2,$3,'operator','PROVIDER_SEND_NOT_FOUND',
+        '{"positiveControl":"passed","resolutionSource":"operator"}'::jsonb
+      )`,
+      [orgId, operatorRequestId, userId],
+    );
+    await setup.query(
+      `select public.resolve_esign_send_unknown_not_sent(
+        $1,$2,null,'automatic','PROVIDER_SEND_NOT_FOUND',
+        '{"positiveControl":"passed","resolutionSource":"automatic"}'::jsonb
+      )`,
+      [orgId, automaticRequestId],
+    );
+
+    expect(
+      (
+        await setup.query<{
+          id: string;
+          delivery_state: string;
+          status: string;
+          error_message: string | null;
+          updated_by: string | null;
+        }>(
+          `select id,delivery_state,status,error_message,updated_by
+           from public.esign_requests
+           where id = any($1::uuid[])
+           order by id`,
+          [[operatorRequestId, automaticRequestId]],
+        )
+      ).rows,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: operatorRequestId,
+          delivery_state: "failed",
+          status: "error",
+          error_message: "PROVIDER_SEND_NOT_FOUND",
+          updated_by: userId,
+        }),
+        expect.objectContaining({
+          id: automaticRequestId,
+          delivery_state: "failed",
+          status: "error",
+          error_message: "PROVIDER_SEND_NOT_FOUND",
+          updated_by: null,
+        }),
+      ]),
+    );
+    expect(
+      (
+        await setup.query<{ actor_type: string; actor_id: string | null }>(
+          `select actor_type,actor_id
+           from public.lead_events
+           where event_type='esign_send_not_found_operator'
+             and payload->>'request_id'=$1`,
+          [operatorRequestId],
+        )
+      ).rows[0],
+    ).toEqual({ actor_type: "user", actor_id: userId });
+    expect(
+      (
+        await setup.query<{ actor_type: string; actor_id: string | null }>(
+          `select actor_type,actor_id
+           from public.lead_events
+           where event_type='esign_send_not_found_automatic'
+             and payload->>'request_id'=$1`,
+          [automaticRequestId],
+        )
+      ).rows[0],
+    ).toEqual({ actor_type: "system", actor_id: null });
+
+    await expect(
+      setup.query(
+        `select public.resolve_esign_send_unknown_not_sent(
+          $1,$2,$3,'operator','PROVIDER_SEND_NOT_FOUND',
+          '{"positiveControl":"passed"}'::jsonb
+        )`,
+        [orgId, sentRequestId, userId],
+      ),
+    ).rejects.toMatchObject({ code: "55000" });
+    await expect(
+      setup.query(
+        `select public.resolve_esign_send_unknown_not_sent(
+          $1,$2,$3,'operator','PROVIDER_SEND_NOT_FOUND',
+          '{"positiveControl":"missing"}'::jsonb
+        )`,
+        [orgId, sentRequestId, userId],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
   });
 });
