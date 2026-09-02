@@ -26,6 +26,7 @@ function replay(overrides: Partial<DropboxSignReplayData> = {}): DropboxSignRepl
     localRequestId: overrides.localRequestId ?? "local-request-1",
     relatedSignatureId: overrides.relatedSignatureId ?? "signature-1",
     reportedForAppId: overrides.reportedForAppId ?? "app-1",
+    providerSignatures: overrides.providerSignatures ?? [],
   };
 }
 
@@ -46,6 +47,15 @@ function callbackForm(event: DropboxSignReplayData): FormData {
       signature_request: {
         signature_request_id: event.signRequestId,
         metadata: { sandra_request_id: event.localRequestId },
+        signatures: event.providerSignatures.map((signature) => ({
+          signature_id: signature.signatureId,
+          signer_role: signature.role,
+          signer_name: signature.name,
+          signer_email_address: signature.emailAddress,
+          order: signature.order,
+          status_code: signature.statusCode,
+          signed_at: signature.signedAt,
+        })),
       },
     }),
   );
@@ -54,10 +64,23 @@ function callbackForm(event: DropboxSignReplayData): FormData {
 
 describe("Dropbox Sign callback parsing and authenticity", () => {
   it("parses the multipart json field into PII-minimal replay data", () => {
-    const event = replay();
+    const event = replay({
+      providerSignatures: [{
+        signatureId: "signature-1",
+        role: "Seller",
+        name: "Private Seller",
+        emailAddress: "seller@example.com",
+        order: 0,
+        statusCode: "signed",
+        signedAt: 1788054010,
+      }],
+    });
     const parsed = parseDropboxSignCallbackFormData(callbackForm(event));
     expect(parsed).toEqual({ ...event, payloadHash: parsed.payloadHash });
     expect(parsed.payloadHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(buildDropboxSignReceiptFingerprint(parsed)).not.toContain(
+      "seller@example.com",
+    );
   });
 
   it("verifies the documented HMAC input and rejects an invalid hash", () => {

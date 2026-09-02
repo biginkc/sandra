@@ -28,6 +28,15 @@ function callbackRequest(input: {
 	  signRequestId?: string | null;
 	  localRequestId?: string | null;
 	  relatedSignatureId?: string | null;
+      providerSignatures?: Array<{
+        signature_id: string;
+        signer_role: string;
+        signer_name: string;
+        signer_email_address: string;
+        order: number;
+        status_code?: string;
+        signed_at?: number;
+      }>;
 	} = {}): Request {
   const eventTime = "1788054000";
   const eventType = input.eventType ?? "signature_request_viewed";
@@ -61,6 +70,7 @@ function callbackRequest(input: {
 	              metadata: {
 	                sandra_request_id: input.localRequestId ?? REQUEST_ID,
 	              },
+                  signatures: input.providerSignatures ?? [],
 	            },
           }),
     }),
@@ -95,6 +105,7 @@ function dependencies(
       status: "error" as const,
     })),
     reconcileReminderCallback: vi.fn(async () => "applied" as const),
+    reconcileProviderSigners: vi.fn(async () => "applied" as const),
     markReceiptProcessed: vi.fn(async () => undefined),
     markReceiptIgnored: vi.fn(async () => undefined),
     markReceiptFailed: vi.fn(async () => undefined),
@@ -162,7 +173,16 @@ describe("injectable Dropbox Sign webhook handler", () => {
   it("applies email-bounce delivery truth without the generic provider-error transition", async () => {
     const deps = dependencies();
     const response = await handleDropboxSignWebhook({
-      request: callbackRequest({ eventType: "signature_request_email_bounce" }),
+      request: callbackRequest({
+        eventType: "signature_request_email_bounce",
+        providerSignatures: [{
+          signature_id: "provider-signature-1",
+          signer_role: "Seller",
+          signer_name: "Seller Owner",
+          signer_email_address: "bad@example.invalid",
+          order: 0,
+        }],
+      }),
       pathSecret: PATH_SECRET,
       dependencies: deps,
     });
@@ -181,6 +201,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
       }),
     );
     expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+    expect(deps.persistence.reconcileProviderSigners).not.toHaveBeenCalled();
     expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
   });
 
@@ -257,10 +278,108 @@ describe("injectable Dropbox Sign webhook handler", () => {
 
     expect(response.status).toBe(200);
     expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
-    expect(deps.persistence.markReceiptIgnored).toHaveBeenCalledWith(
-      CLAIM,
-      "AUDIT_ONLY_EVENT",
+    expect(deps.persistence.reconcileProviderSigners).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      requestId: REQUEST_ID,
+      claim: CLAIM,
+      providerEventAt: new Date("2026-08-30T01:40:00.000Z"),
+      providerSignatures: [],
+      signedProviderSignatureId: "provider-signature-1",
+    });
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
+    expect(deps.persistence.markReceiptIgnored).not.toHaveBeenCalled();
+  });
+
+  it("reconciles the provider-updated signer identity before signer-level signed processing", async () => {
+    const deps = dependencies();
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        eventType: "signature_request_signed",
+        relatedSignatureId: "bb67df41911f964aa66f488bd2878cbd",
+        providerSignatures: [{
+          signature_id: "bb67df41911f964aa66f488bd2878cbd",
+          signer_role: "Seller",
+          signer_name: "eSign QA A PRIMARY_E2E",
+          signer_email_address: "jarrad.henry@gmail.com",
+          order: 0,
+          status_code: "signed",
+          signed_at: 1788331417,
+        }],
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(deps.persistence.reconcileProviderSigners).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      requestId: REQUEST_ID,
+      claim: CLAIM,
+      providerEventAt: new Date("2026-08-30T01:40:00.000Z"),
+      providerSignatures: [{
+        signatureId: "bb67df41911f964aa66f488bd2878cbd",
+        role: "Seller",
+        name: "eSign QA A PRIMARY_E2E",
+        emailAddress: "jarrad.henry@gmail.com",
+        order: 0,
+        statusCode: "signed",
+        signedAt: 1788331417,
+      }],
+      signedProviderSignatureId: "bb67df41911f964aa66f488bd2878cbd",
+    });
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
+  });
+
+  it("repairs local error state before signed completion and PDF download", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.persistence.findRequest).mockResolvedValue({
+      id: REQUEST_ID,
+      orgId: ORG_ID,
+      propertyId: PROPERTY_ID,
+      status: "error",
+      signedPdfPath: null,
+      templateTitle: "Purchase Agreement",
+    });
+    vi.mocked(deps.persistence.applyStatusDecision).mockResolvedValue({
+      outcome: "applied",
+      status: "signed",
+    });
+
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        eventType: "signature_request_downloadable",
+        relatedSignatureId: null,
+        providerSignatures: [{
+          signature_id: "bb67df41911f964aa66f488bd2878cbd",
+          signer_role: "Seller",
+          signer_name: "eSign QA A PRIMARY_E2E",
+          signer_email_address: "jarrad.henry@gmail.com",
+          order: 0,
+          status_code: "signed",
+          signed_at: 1788331417,
+        }],
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(deps.persistence.reconcileProviderSigners).toHaveBeenCalled();
+    expect(deps.persistence.applyStatusDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        decision: expect.objectContaining({
+          previousStatus: "error",
+          nextStatus: "signed",
+          reason: "downloadable",
+        }),
+      }),
     );
+    expect(deps.pdfProvider.downloadSignedPdf).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      callbackConsumerId: CONSUMER_ID,
+      signRequestId: "provider-request-1",
+    });
+    expect(deps.artifactPersistence.storeLinkAndRecordReady).toHaveBeenCalled();
   });
 
   it("reconciles a verified reminder callback before completing its receipt", async () => {

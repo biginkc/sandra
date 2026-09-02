@@ -105,6 +105,36 @@ export async function handleDropboxSignWebhook(input: {
       throw new SafeWebhookProcessingError("REQUEST_NOT_FOUND", 503);
     }
 
+    const providerEventAt = providerEventDate(replay);
+
+    const supportsSignerReconciliation =
+      replay.eventType === "signature_request_viewed" ||
+      replay.eventType === "signature_request_signed" ||
+      replay.eventType === "signature_request_all_signed" ||
+      replay.eventType === "signature_request_downloadable" ||
+      replay.eventType === "signature_request_declined" ||
+      replay.eventType === "signature_request_remind";
+    const signerReconciliation =
+      supportsSignerReconciliation &&
+      (replay.providerSignatures.length > 0 ||
+        replay.eventType === "signature_request_signed")
+        ? await input.dependencies.persistence.reconcileProviderSigners({
+            orgId: identity.orgId,
+            requestId: request.id,
+            claim: activeClaim,
+            providerEventAt,
+            providerSignatures: replay.providerSignatures,
+            signedProviderSignatureId: replay.relatedSignatureId,
+          })
+        : null;
+    if (
+      signerReconciliation === "unavailable" &&
+      (request.status === "error" ||
+        replay.providerSignatures.length > 0)
+    ) {
+      throw new SafeWebhookProcessingError("SIGNER_RECONCILE_UNAVAILABLE", 503);
+    }
+
     if (replay.eventType === "signature_request_remind") {
       if (replay.relatedSignatureId === null) {
         await input.dependencies.persistence.markReceiptIgnored(
@@ -118,13 +148,24 @@ export async function handleDropboxSignWebhook(input: {
         requestId: request.id,
         claim: activeClaim,
         providerSignatureId: replay.relatedSignatureId,
-        providerEventAt: providerEventDate(replay),
+        providerEventAt,
       });
       await input.dependencies.persistence.markReceiptProcessed(activeClaim);
       return acknowledgement();
     }
 
     const normalized = normalizeDropboxSignLifecycleEvent(replay.eventType);
+    if (replay.eventType === "signature_request_signed") {
+      if (signerReconciliation === "unavailable") {
+        await input.dependencies.persistence.markReceiptIgnored(
+          activeClaim,
+          "AUDIT_ONLY_EVENT",
+        );
+        return acknowledgement();
+      }
+      await input.dependencies.persistence.markReceiptProcessed(activeClaim);
+      return acknowledgement();
+    }
     const decision = reduceEsignStatus(request.status, normalized);
     if (normalized.requestedStatus === null && !normalized.artifactReady) {
       await input.dependencies.persistence.markReceiptIgnored(
@@ -142,7 +183,7 @@ export async function handleDropboxSignWebhook(input: {
             requestId: request.id,
             claim: activeClaim,
             decision,
-            providerEventAt: providerEventDate(replay),
+            providerEventAt,
           }) ??
           await input.dependencies.persistence.applyStatusDecision({
             orgId: identity.orgId,
@@ -151,7 +192,7 @@ export async function handleDropboxSignWebhook(input: {
             claim: activeClaim,
             decision,
             requestedStatus: normalized.requestedStatus,
-            providerEventAt: providerEventDate(replay),
+            providerEventAt,
             templateTitle: request.templateTitle,
           })
         : await input.dependencies.persistence.applyStatusDecision({
@@ -161,10 +202,17 @@ export async function handleDropboxSignWebhook(input: {
             claim: activeClaim,
             decision,
             requestedStatus: normalized.requestedStatus,
-            providerEventAt: providerEventDate(replay),
+            providerEventAt,
             templateTitle: request.templateTitle,
           });
       authoritativeStatus = transition.status;
+      if (
+        request.status === "error" &&
+        normalized.requestedStatus === "signed" &&
+        transition.status !== "signed"
+      ) {
+        throw new SafeWebhookProcessingError("SIGNED_RECOVERY_UNAVAILABLE", 503);
+      }
     }
 
     if (

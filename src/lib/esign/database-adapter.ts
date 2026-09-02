@@ -24,6 +24,7 @@ export const ESIGN_WEBHOOK_RPC_NAMES = {
   APPLY_STATUS: "apply_esign_webhook_status_decision",
   APPLY_EMAIL_BOUNCE: "apply_esign_email_bounce_delivery_decision",
   RECONCILE_REMINDER: "reconcile_esign_reminder_callback",
+  RECONCILE_PROVIDER_SIGNERS: "reconcile_esign_webhook_provider_signers",
   LINK_ARTIFACT: "link_esign_signed_artifact",
   COMPLETE_RECEIPT: "complete_esign_webhook_receipt",
 } as const;
@@ -116,6 +117,21 @@ export type EsignWebhookRpcContract = {
       p_lease_id: string;
       p_provider_signature_id: string;
       p_provider_event_at: string;
+    };
+    result: Array<{
+      outcome:
+        "applied" | "already_reconciled" | "stale_ignored" | "superseded";
+    }>;
+  };
+  reconcile_esign_webhook_provider_signers: {
+    args: {
+      p_org_id: string;
+      p_request_id: string;
+      p_receipt_id: string;
+      p_lease_id: string;
+      p_provider_event_at: string;
+      p_provider_signatures: unknown;
+      p_signed_provider_signature_id: string | null;
     };
     result: Array<{
       outcome:
@@ -321,6 +337,30 @@ export function createEsignWebhookDatabaseAdapter(
       return row.outcome;
     },
 
+    async reconcileProviderSigners(input) {
+      try {
+        const rows = await callRpc(
+          client,
+          ESIGN_WEBHOOK_RPC_NAMES.RECONCILE_PROVIDER_SIGNERS,
+          {
+            p_org_id: input.orgId,
+            p_request_id: input.requestId,
+            p_receipt_id: input.claim.receiptId,
+            p_lease_id: input.claim.leaseId,
+            p_provider_event_at: input.providerEventAt.toISOString(),
+            p_provider_signatures: input.providerSignatures,
+            p_signed_provider_signature_id: input.signedProviderSignatureId,
+          },
+        );
+        const row = exactlyOne(rows);
+        if (!isSignerReconciliationOutcome(row.outcome)) invalidResponse();
+        return row.outcome;
+      } catch (error) {
+        if (isMissingRpc(error)) return "unavailable";
+        throw error;
+      }
+    },
+
     async markReceiptProcessed(claim) {
       await completeReceipt(client, claim, "processed", null);
     },
@@ -501,6 +541,12 @@ function isReminderReconciliationOutcome(
     value === "stale_ignored" ||
     value === "superseded"
   );
+}
+
+function isSignerReconciliationOutcome(
+  value: unknown,
+): value is "applied" | "already_reconciled" | "stale_ignored" | "superseded" {
+  return isReminderReconciliationOutcome(value);
 }
 
 function isLinkOutcome(value: unknown): value is "applied" | "already_linked" {

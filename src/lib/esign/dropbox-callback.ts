@@ -1,7 +1,10 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
+import type { ProviderSignature } from "./contracts";
+
 const MAX_CALLBACK_JSON_BYTES = 1_000_000;
 const MAX_PROVIDER_IDENTIFIER_LENGTH = 256;
+const MAX_PROVIDER_SIGNATURES = 25;
 
 export type DropboxSignReplayData = {
   payloadHash: string;
@@ -12,6 +15,7 @@ export type DropboxSignReplayData = {
   localRequestId: string | null;
   relatedSignatureId: string | null;
   reportedForAppId: string | null;
+  providerSignatures: ProviderSignature[];
 };
 
 export type DropboxCallbackValidationCode =
@@ -95,6 +99,7 @@ export function validateDropboxSignCallbackEvent(
     localRequestId: optionalIdentifier(requestMetadata?.sandra_request_id),
     relatedSignatureId: optionalIdentifier(metadata?.related_signature_id),
     reportedForAppId: optionalIdentifier(metadata?.reported_for_app_id),
+    providerSignatures: parseProviderSignatures(signatureRequest?.signatures),
   };
 }
 
@@ -177,6 +182,47 @@ function optionalIdentifier(value: unknown): string | null {
     value.length === 0 ||
     value.length > MAX_PROVIDER_IDENTIFIER_LENGTH
   ) {
+    invalidEvent();
+  }
+  return value;
+}
+
+function parseProviderSignatures(value: unknown): ProviderSignature[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > MAX_PROVIDER_SIGNATURES) {
+    invalidEvent();
+  }
+  return value.map((item, index) => {
+    if (!isRecord(item)) invalidEvent();
+    const signatureId = optionalIdentifier(item.signature_id);
+    const role = optionalIdentifier(item.signer_role);
+    const name = optionalIdentifier(item.signer_name);
+    const emailAddress = optionalIdentifier(item.signer_email_address);
+    if (!signatureId || !role || !name || !emailAddress) invalidEvent();
+    const order = optionalOrder(item.order, index);
+    return {
+      signatureId,
+      role,
+      name,
+      emailAddress,
+      order,
+      statusCode: optionalIdentifier(item.status_code),
+      signedAt: optionalTimestamp(item.signed_at),
+    };
+  });
+}
+
+function optionalOrder(value: unknown, fallback: number): number {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    invalidEvent();
+  }
+  return value;
+}
+
+function optionalTimestamp(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     invalidEvent();
   }
   return value;

@@ -60,6 +60,20 @@ export function reduceEsignStatus(
   currentStatus: EsignStatus,
   event: NormalizedEsignLifecycleEvent,
 ): EsignStatusDecision {
+  if (
+    currentStatus === "error" &&
+    event.requestedStatus === "signed" &&
+    (event.reason === "all_signed" || event.reason === "downloadable")
+  ) {
+    return {
+      previousStatus: currentStatus,
+      nextStatus: "signed",
+      changed: true,
+      artifactReady: event.artifactReady,
+      reason: event.reason,
+    };
+  }
+
   if (TERMINAL_STATUSES.has(currentStatus)) {
     return {
       previousStatus: currentStatus,

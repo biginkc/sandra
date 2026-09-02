@@ -1,4 +1,5 @@
 import type { DropboxSignReplayData } from "./dropbox-callback";
+import type { ProviderSignature } from "./contracts";
 import type { SignedPdfArtifact } from "./signed-pdf";
 import type { EsignStatus, EsignStatusDecision } from "./status";
 
@@ -76,6 +77,20 @@ export interface EsignWebhookPersistence {
     providerEventAt: Date;
   }): Promise<
     "applied" | "already_reconciled" | "stale_ignored" | "superseded"
+  >;
+  reconcileProviderSigners(input: {
+    orgId: string;
+    requestId: string;
+    claim: ActiveReceiptClaim;
+    providerEventAt: Date;
+    providerSignatures: readonly ProviderSignature[];
+    signedProviderSignatureId: string | null;
+  }): Promise<
+    | "applied"
+    | "already_reconciled"
+    | "stale_ignored"
+    | "superseded"
+    | "unavailable"
   >;
   markReceiptProcessed(claim: ActiveReceiptClaim): Promise<void>;
   markReceiptIgnored(

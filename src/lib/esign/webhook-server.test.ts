@@ -117,6 +117,7 @@ describe("concrete eSign webhook server binding", () => {
 	          localRequestId: null,
 	          relatedSignatureId: null,
           reportedForAppId: null,
+          providerSignatures: [],
         },
       })).resolves.toBe(false);
       expect(serverMocks.getEsignCredentials).not.toHaveBeenCalled();

@@ -5130,6 +5130,23 @@ export type Database = {
           outcome: string
         }[]
       }
+      reconcile_esign_completed_signed_artifact: {
+        Args: {
+          p_content_type: string
+          p_lead_event_payload: Json
+          p_lead_event_type: string
+          p_lead_file_id: string
+          p_org_id: string
+          p_request_id: string
+          p_size_bytes: number
+          p_storage_bucket: string
+          p_storage_path: string
+        }
+        Returns: {
+          lead_file_id: string
+          outcome: string
+        }[]
+      }
       list_pending_esign_template_provider_creates: {
         Args: { p_actor_id: string; p_org_id: string }
         Returns: {
@@ -5275,6 +5292,20 @@ export type Database = {
           p_provider_signature_id: string
           p_receipt_id: string
           p_request_id: string
+        }
+        Returns: {
+          outcome: string
+        }[]
+      }
+      reconcile_esign_webhook_provider_signers: {
+        Args: {
+          p_lease_id: string
+          p_org_id: string
+          p_provider_event_at: string
+          p_provider_signatures?: Json
+          p_receipt_id: string
+          p_request_id: string
+          p_signed_provider_signature_id?: string | null
         }
         Returns: {
           outcome: string

@@ -113,6 +113,8 @@ export type ProviderSignature = {
   name: string;
   emailAddress: string;
   order: number;
+  statusCode?: string | null;
+  signedAt?: number | null;
 };
 
 export type SendWithTemplateOutput = {
