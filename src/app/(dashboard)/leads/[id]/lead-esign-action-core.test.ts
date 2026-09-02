@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ESIGN_MERGE_FIELD_NAMES,
@@ -8,6 +8,7 @@ import {
 
 import type { SendContractInput } from "./esign-types";
 import {
+  ESIGN_PROVIDER_TIMEOUT_MS,
   createLeadEsignActionCore,
   hashSendPayload,
   type EsignActionFiles,
@@ -184,6 +185,9 @@ function harness() {
 describe("lead eSign action orchestration", () => {
   beforeEach(() => {
     reportMocks.reportError.mockClear();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("returns live preflight blockers and safe seller defaults", async () => {
@@ -470,6 +474,32 @@ describe("lead eSign action orchestration", () => {
       expect(h.provider.sendWithTemplate).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("fences an abort-ignoring provider timeout as send_unknown before the provider settles", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    let capturedSignal: AbortSignal | undefined;
+    h.provider.sendWithTemplate.mockImplementation((input) => {
+      capturedSignal = input.signal;
+      return new Promise<never>(() => undefined);
+    });
+
+    const resultPromise = h.core.send(sendInput);
+    await vi.advanceTimersByTimeAsync(ESIGN_PROVIDER_TIMEOUT_MS);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      ok: false,
+      error: { code: "SEND_UNKNOWN" },
+    });
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(h.repository.markSendOutcome).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      deliveryState: "send_unknown",
+      safeErrorMessage: null,
+    });
+    expect(h.repository.reconcileSent).not.toHaveBeenCalled();
+  });
 
   it.each([
     ["sent", null],

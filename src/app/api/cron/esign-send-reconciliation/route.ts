@@ -101,9 +101,16 @@ async function handle(request: Request) {
         tags: { surface: "cron_esign_send_reconciliation_outcome" },
         extra: { requestId: candidate.id, orgId: candidate.orgId },
       }),
+      reportLookupError: (error, candidate) => reportError(error, {
+        tags: { surface: "cron_esign_send_reconciliation_lookup" },
+        extra: { requestId: candidate.id, orgId: candidate.orgId },
+      }),
       shouldContinue: () => Date.now() < deadline,
     });
-    return NextResponse.json({ ok: true, ...summary });
+    return NextResponse.json({
+      ok: summary.lookupErrors === 0 && summary.errors === 0,
+      ...summary,
+    });
   } catch (error) {
     reportError(error, { tags: { surface: "cron_esign_send_reconciliation" } });
     return NextResponse.json(

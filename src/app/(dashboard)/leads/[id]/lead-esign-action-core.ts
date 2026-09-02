@@ -929,12 +929,18 @@ async function withProviderTimeout<T>(
   operation: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ESIGN_PROVIDER_TIMEOUT_MS);
-  try {
-    return await operation(controller.signal);
-  } finally {
-    clearTimeout(timer);
-  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const providerPromise = operation(controller.signal);
+  void providerPromise.catch(() => undefined);
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new DOMException("Provider send deadline exceeded.", "AbortError"));
+    }, ESIGN_PROVIDER_TIMEOUT_MS);
+  });
+  return Promise.race([providerPromise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 async function releaseReminder(
