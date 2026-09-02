@@ -7,7 +7,10 @@ import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import { ESIGN_MERGE_FIELD_NAMES, type TemplateOption, type TemplateSignerRole } from "./contracts";
-import { getEsignCredentials, configuredDropboxSignEmbeddedDomain } from "./credentials";
+import {
+  requireEsignTemplateManagementCredentials,
+  configuredDropboxSignEmbeddedDomain,
+} from "./credentials";
 import { createDropboxSignProvider } from "./dropbox-sign";
 import { isRestartableDraftEditorFailure } from "./provider-failure";
 import {
@@ -30,14 +33,6 @@ export type TemplateLibraryRecord = TemplateOption & {
   updatedByName: string;
   recentSendCount30d: number;
 };
-
-function assertTemplateManagementEnabled(
-  credentials: Awaited<ReturnType<typeof getEsignCredentials>>,
-) {
-  if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
-  if (!credentials.sendingEnabled) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
-  return credentials;
-}
 
 export async function createFoundationTemplateOrchestrator() {
   const selectedMembership = await getSingleActiveMembership();
@@ -83,8 +78,8 @@ export async function createFoundationTemplateOrchestrator() {
     if (!providerPromise) {
       providerPromise = (async () => {
         if (!membership) throw new Error("AUTH_REQUIRED");
-        const credentials = assertTemplateManagementEnabled(
-          await getEsignCredentials(membership.orgId),
+        const credentials = await requireEsignTemplateManagementCredentials(
+          membership.orgId,
         );
         return {
           clientId: credentials.clientId,

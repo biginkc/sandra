@@ -11,6 +11,7 @@ import {
   callbackPathSecretForOrg,
   deleteEsignCredentials,
   getEsignCredentials,
+  requireEsignTemplateManagementCredentials,
   saveEsignCredentials,
 } from "./credentials";
 
@@ -96,6 +97,59 @@ describe("eSign credential store", () => {
     });
 
     await expect(getEsignCredentials("org-1")).resolves.toBeNull();
+  });
+
+  it("requires the SQL template-management capability before provider use", async () => {
+    admin.rpc
+      .mockResolvedValueOnce({
+        data: [
+          {
+            api_key: "dropbox-key",
+            client_id: "client-id",
+            provider_account_id: "account-1",
+            sending_enabled: false,
+            test_mode: true,
+            callback_secret_hash: "a".repeat(64),
+          },
+        ],
+        error: null,
+      })
+      .mockResolvedValueOnce({ data: "account-1", error: null });
+
+    await expect(
+      requireEsignTemplateManagementCredentials("org-1"),
+    ).resolves.toMatchObject({
+      clientId: "client-id",
+      providerAccountId: "account-1",
+      sendingEnabled: false,
+    });
+    expect(admin.rpc).toHaveBeenNthCalledWith(
+      2,
+      "esign_require_template_management_capability",
+      { p_org_id: "org-1" },
+    );
+  });
+
+  it("rejects provider use when the SQL capability is absent or mismatched", async () => {
+    admin.rpc
+      .mockResolvedValueOnce({
+        data: [
+          {
+            api_key: "dropbox-key",
+            client_id: "client-id",
+            provider_account_id: "account-1",
+            sending_enabled: false,
+            test_mode: true,
+            callback_secret_hash: "a".repeat(64),
+          },
+        ],
+        error: null,
+      })
+      .mockResolvedValueOnce({ data: "other-account", error: null });
+
+    await expect(
+      requireEsignTemplateManagementCredentials("org-1"),
+    ).rejects.toThrow("DROPBOX_SIGN_NOT_CONNECTED");
   });
 
   it("surfaces the safe disconnect blocker without leaking database details", async () => {

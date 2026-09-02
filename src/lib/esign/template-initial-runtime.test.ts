@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   upload: vi.fn(),
   remove: vi.fn(),
   credentials: vi.fn(),
+  templateCapability: vi.fn(),
   providerFactory: vi.fn(),
   providerCreate: vi.fn(),
 }));
@@ -37,6 +38,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 vi.mock("./credentials", () => ({
   configuredDropboxSignEmbeddedDomain: () => "example.com",
   getEsignCredentials: mocks.credentials,
+  requireEsignTemplateManagementCredentials: mocks.templateCapability,
 }));
 vi.mock("./dropbox-sign", () => ({
   createDropboxSignProvider: (...args: unknown[]) => {
@@ -277,6 +279,12 @@ describe("foundation initial-template runtime", () => {
       providerAccountId: "account-1",
       sendingEnabled: true,
     });
+    mocks.templateCapability.mockResolvedValue({
+      apiKey: "secret",
+      clientId: "client",
+      providerAccountId: "account-1",
+      sendingEnabled: false,
+    });
     mocks.providerCreate.mockResolvedValue(initialEditorSession);
   });
 
@@ -307,6 +315,7 @@ describe("foundation initial-template runtime", () => {
       }),
     );
     expect(mocks.credentials).not.toHaveBeenCalled();
+    expect(mocks.templateCapability).not.toHaveBeenCalled();
     expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
 
@@ -318,6 +327,7 @@ describe("foundation initial-template runtime", () => {
 
     await expect(createInitialTemplateRuntime()).rejects.toThrow("AUTH_REQUIRED");
     expect(mocks.credentials).not.toHaveBeenCalled();
+    expect(mocks.templateCapability).not.toHaveBeenCalled();
     expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
 
@@ -574,7 +584,7 @@ describe("foundation initial-template runtime", () => {
     query.eq.mockReturnValue(query);
     query.maybeSingle.mockResolvedValue({ data: retryableProviderDraft(templateId), error: null });
     mocks.from.mockReturnValue(query);
-    mocks.credentials.mockResolvedValue(null);
+    mocks.templateCapability.mockRejectedValue(new Error("DROPBOX_SIGN_NOT_CONNECTED"));
     mocks.rpc.mockImplementation(async (name: string) => {
       if (name === "list_retryable_esign_template_provider_creates") return {
         data: [{ template_id: templateId, source_id: sourceId, name: "Offer" }],
@@ -604,7 +614,7 @@ describe("foundation initial-template runtime", () => {
     query.eq.mockReturnValue(query);
     query.maybeSingle.mockResolvedValue({ data: retryableProviderDraft(templateId), error: null });
     mocks.from.mockReturnValue(query);
-    mocks.credentials.mockResolvedValue({
+    mocks.templateCapability.mockResolvedValue({
       apiKey: "secret",
       clientId: "client",
       providerAccountId: "different-account",
@@ -656,12 +666,9 @@ describe("foundation initial-template runtime", () => {
   });
 
   it("does not invoke Dropbox while disconnect is pending for provider create", async () => {
-    mocks.credentials.mockResolvedValueOnce({
-      apiKey: "secret",
-      clientId: "client",
-      providerAccountId: "account-1",
-      sendingEnabled: false,
-    });
+    mocks.templateCapability.mockRejectedValueOnce(
+      new Error("template management unavailable"),
+    );
 
     await expect(
       (await createInitialTemplateRuntime()).create({
@@ -679,6 +686,31 @@ describe("foundation initial-template runtime", () => {
     expect(mocks.providerCreate).not.toHaveBeenCalled();
   });
 
+  it("invokes Dropbox for template create when sending is paused but SQL capability passes", async () => {
+    mocks.templateCapability.mockResolvedValueOnce({
+      apiKey: "secret",
+      clientId: "client",
+      providerAccountId: "account-1",
+      sendingEnabled: false,
+    });
+
+    await expect(
+      (await createInitialTemplateRuntime()).create({
+        source,
+        name: "Offer",
+        documentType: "Purchase agreement",
+        signerRoles: [{ name: "Seller", order: 0 }],
+        sellerRoleName: "Seller",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: { templateId: "template-1" },
+    });
+    expect(mocks.templateCapability).toHaveBeenCalledWith("org-1");
+    expect(mocks.providerFactory).toHaveBeenCalled();
+    expect(mocks.providerCreate).toHaveBeenCalledTimes(1);
+  });
+
   it("does not invoke Dropbox while disconnect is pending for provider retry", async () => {
     const templateId = "123e4567-e89b-42d3-a456-426614174111";
     const query = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() };
@@ -689,12 +721,9 @@ describe("foundation initial-template runtime", () => {
       error: null,
     });
     mocks.from.mockReturnValue(query);
-    mocks.credentials.mockResolvedValueOnce({
-      apiKey: "secret",
-      clientId: "client",
-      providerAccountId: "account-1",
-      sendingEnabled: false,
-    });
+    mocks.templateCapability.mockRejectedValueOnce(
+      new Error("template management unavailable"),
+    );
     mocks.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
       if (name === "list_retryable_esign_template_provider_creates") {
         return {
@@ -1072,7 +1101,7 @@ describe("foundation initial-template runtime", () => {
   });
 
   it("releases an old-account claim before begin and never constructs Dropbox", async () => {
-    mocks.credentials.mockResolvedValue({
+    mocks.templateCapability.mockResolvedValue({
       apiKey: "secret",
       clientId: "client",
       providerAccountId: "account-2",
@@ -1136,6 +1165,7 @@ describe("foundation initial-template runtime", () => {
       error: { code: "PROVIDER_CREATE_IN_PROGRESS" },
     });
     expect(mocks.credentials).not.toHaveBeenCalled();
+    expect(mocks.templateCapability).not.toHaveBeenCalled();
     expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
 

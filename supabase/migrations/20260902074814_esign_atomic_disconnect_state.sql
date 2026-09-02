@@ -1,3 +1,5 @@
+begin;
+
 -- Atomic disconnect state for Dropbox Sign.
 -- A disconnect that is blocked by active eSign lifecycle work disables new
 -- provider mutations while preserving callback ingestion until work is terminal.
@@ -11,6 +13,9 @@ alter table public.org_esign_integrations
 alter table public.org_esign_integrations
   add column if not exists disconnect_pending_at timestamptz,
   add column if not exists disconnect_requested_by uuid references auth.users(id);
+
+grant select (disconnect_pending_at)
+  on public.org_esign_integrations to authenticated;
 
 alter table public.org_esign_integrations
   drop constraint if exists org_esign_integrations_credentials_all_or_none;
@@ -544,3 +549,5 @@ revoke all on function public.esign_template_is_available(uuid, uuid)
   from public, anon;
 grant execute on function public.esign_template_is_available(uuid, uuid)
   to authenticated, service_role;
+
+commit;

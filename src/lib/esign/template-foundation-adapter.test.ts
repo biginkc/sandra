@@ -5,6 +5,7 @@ import { ProviderError } from "@/lib/errors/classes";
 const mocks = vi.hoisted(() => ({
   memberships: vi.fn(),
   credentials: vi.fn(),
+  templateCapability: vi.fn(),
   providerFactory: vi.fn(),
   rpc: vi.fn(),
   from: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock("@/lib/auth/memberships", () => ({
 }));
 vi.mock("./credentials", () => ({
   getEsignCredentials: mocks.credentials,
+  requireEsignTemplateManagementCredentials: mocks.templateCapability,
   configuredDropboxSignEmbeddedDomain: () => "app.example.com",
 }));
 vi.mock("./dropbox-sign", () => ({ createDropboxSignProvider: mocks.providerFactory }));
@@ -55,6 +57,9 @@ describe("foundation template staging adapter without Dropbox credentials", () =
     vi.clearAllMocks();
     mocks.memberships.mockResolvedValue([{ user_id: "owner-1", org_id: orgId, role: "owner" }]);
     mocks.credentials.mockResolvedValue(null);
+    mocks.templateCapability.mockRejectedValue(
+      new Error("DROPBOX_SIGN_NOT_CONNECTED"),
+    );
     mocks.download.mockResolvedValue({
       data: new Blob([bytes], { type: "application/pdf" }),
       error: null,
@@ -84,6 +89,7 @@ describe("foundation template staging adapter without Dropbox credentials", () =
       p_source_sha256: sha256,
     }));
     expect(mocks.credentials).not.toHaveBeenCalled();
+    expect(mocks.templateCapability).not.toHaveBeenCalled();
     expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
 
@@ -101,6 +107,7 @@ describe("foundation template staging adapter without Dropbox credentials", () =
       },
     });
     expect(mocks.credentials).not.toHaveBeenCalled();
+    expect(mocks.templateCapability).not.toHaveBeenCalled();
     expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
 
@@ -287,11 +294,11 @@ const draftRow = {
 };
 
 function configureSuccessfulProvider() {
-  mocks.credentials.mockResolvedValue({
+  mocks.templateCapability.mockResolvedValue({
     apiKey: { reveal: () => "redacted-test-value" },
     clientId: "client-1",
     providerAccountId: "account-1",
-    sendingEnabled: true,
+    sendingEnabled: false,
   });
   mocks.providerFactory.mockReturnValue({
     getTemplate: vi.fn().mockResolvedValue({
@@ -399,12 +406,9 @@ describe("finish synchronization schema compatibility", () => {
       .mockReturnValueOnce(draftQuery)
       .mockReturnValueOnce(capabilityQuery)
       .mockReturnValueOnce(updateQuery);
-    mocks.credentials.mockResolvedValueOnce({
-      apiKey: { reveal: () => "redacted-test-value" },
-      clientId: "client-1",
-      providerAccountId: "account-1",
-      sendingEnabled: false,
-    });
+    mocks.templateCapability.mockRejectedValueOnce(
+      new Error("DROPBOX_SIGN_NOT_CONNECTED"),
+    );
 
     const orchestrator = await createFoundationTemplateOrchestrator();
 

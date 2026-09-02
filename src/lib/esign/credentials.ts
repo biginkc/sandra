@@ -45,6 +45,13 @@ type EsignRpcClient = {
     error: { message: string; code?: string } | null;
   }>;
   rpc(
+    fn: "esign_require_template_management_capability",
+    args: { p_org_id: string },
+  ): Promise<{
+    data: string | null;
+    error: { message: string; code?: string } | null;
+  }>;
+  rpc(
     fn: "delete_org_esign_integration",
     args: { p_org_id: string; p_actor_id: string },
   ): Promise<{ error: { message: string; code?: string } | null }>;
@@ -161,6 +168,27 @@ export async function getEsignCredentials(
     testMode: true,
     callbackSecretHash: row.callback_secret_hash,
   };
+}
+
+export async function requireEsignTemplateManagementCredentials(
+  orgId: string,
+): Promise<DecryptedEsignCredentials> {
+  const credentials = await getEsignCredentials(orgId);
+  if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+  const { data, error } = await adminRpc().rpc(
+    "esign_require_template_management_capability",
+    { p_org_id: orgId },
+  );
+  if (error) {
+    if (error.code === "P0002") throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+    throw new DatabaseError("Dropbox Sign template management is unavailable.", {
+      code: error.code,
+    });
+  }
+  if (!data || data !== credentials.providerAccountId) {
+    throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+  }
+  return credentials;
 }
 
 export async function deleteEsignCredentials(

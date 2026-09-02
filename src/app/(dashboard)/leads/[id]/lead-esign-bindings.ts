@@ -12,6 +12,7 @@ import {
 import {
   configuredDropboxSignEmbeddedDomain,
   getEsignCredentials,
+  requireEsignTemplateManagementCredentials,
 } from "@/lib/esign/credentials";
 import { createDropboxSignProvider } from "@/lib/esign/dropbox-sign";
 import { classifyProviderFailure } from "@/lib/esign/provider-failure";
@@ -680,6 +681,7 @@ export async function providerForOrg(
   if (options.requireSendingEnabled !== false && !credentials.sendingEnabled) {
     return null;
   }
+  await requireEsignTemplateManagementCredentials(orgId);
   const provider = createDropboxSignProvider({
     apiKey: credentials.apiKey,
     clientId: credentials.clientId,

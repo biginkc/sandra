@@ -180,6 +180,43 @@ const mutations = [
     to: "if (false && !result.data.initialEditorSession) {",
     command: unit("src/lib/esign/template-initial-runtime.test.ts"),
   },
+  {
+    name: "initial provider create requires SQL template capability",
+    file: "src/lib/esign/template-initial-runtime.ts",
+    from: "cachedCredentials ??=\n              await requireEsignTemplateManagementCredentials(orgId);",
+    to: `cachedCredentials ??= {
+              apiKey: "secret" as never,
+              clientId: "client",
+              providerAccountId: "account-1",
+              sendingEnabled: true,
+              testMode: true,
+              callbackSecretHash: "hash",
+            };`,
+    command: unit("src/lib/esign/template-initial-runtime.test.ts"),
+  },
+  {
+    name: "foundation provider reads require SQL template capability",
+    file: "src/lib/esign/template-foundation-adapter.ts",
+    from: `const credentials = await requireEsignTemplateManagementCredentials(
+          membership.orgId,
+        );`,
+    to: `const credentials = {
+          apiKey: { reveal: () => "redacted-test-value" } as never,
+          clientId: "client-1",
+          providerAccountId: "account-1",
+          sendingEnabled: true,
+          testMode: true,
+          callbackSecretHash: "hash",
+        };`,
+    command: unit("src/lib/esign/template-foundation-adapter.test.ts"),
+  },
+  {
+    name: "email-bounce repair provider requires SQL template capability",
+    file: "src/app/(dashboard)/leads/[id]/lead-esign-bindings.ts",
+    from: "await requireEsignTemplateManagementCredentials(orgId);",
+    to: "void orgId;",
+    command: unit("src/app/(dashboard)/leads/[id]/lead-esign-provider.test.ts"),
+  },
 ];
 
 function replaceExactly(source, mutation) {

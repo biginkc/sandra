@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  applyProductionPacket,
   loadReviewedPlan,
   splitSupabaseStatements,
 } from "./apply-esign-production-migrations-atomically.mjs";
@@ -16,9 +17,81 @@ const switchboardPath = join(
   repoRoot,
   "supabase/migrations/20260830092331_switchboard_contact_preferences.sql",
 );
+const requiredSwitchboardTypes = Object.freeze([
+  "lead",
+  "provider",
+  "jitter_writeback",
+  "closer_practice",
+  "bmh_institute_course",
+  "esign_provider",
+  "switchboard_contact_preference",
+]);
 
 function hash(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function packetHarness(plan) {
+  const protectedSwitchboard = [];
+  const counts = {
+    switchboard_consumers: 0,
+    switchboard_events: 0,
+    global_dnc_rows: 0,
+  };
+  const constraints = [
+    {
+      conname: "webhook_consumers_type_check",
+      convalidated: true,
+      definition: requiredSwitchboardTypes.join(" "),
+    },
+    {
+      conname: "webhook_consumers_type_source_match_check",
+      convalidated: true,
+      definition: requiredSwitchboardTypes.join(" "),
+    },
+  ];
+  const calls = [];
+  const client = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      if (/current_database\(\)/u.test(sql)) {
+        return { rows: [{ database: "postgres", system_identifier: "system-1" }] };
+      }
+      if (/from supabase_migrations\.schema_migrations/u.test(sql)) {
+        return {
+          rows: [
+            {
+              version: plan.switchboard.version,
+              name: plan.switchboard.name,
+              statements: plan.switchboard.statements,
+            },
+          ],
+        };
+      }
+      if (/jsonb_build_object/u.test(sql)) {
+        return { rows: [{ value: protectedSwitchboard }] };
+      }
+      if (/switchboard_consumers/u.test(sql)) return { rows: [counts] };
+      if (/conrelid='public\.webhook_consumers'::regclass/u.test(sql)) {
+        return { rows: constraints };
+      }
+      return { rows: [] };
+    },
+  };
+  return {
+    calls,
+    client,
+    snapshot: {
+      format: 1,
+      recordedAt: new Date().toISOString(),
+      productionProjectRef: plan.productionProjectRef,
+      database: "postgres",
+      systemIdentifier: "system-1",
+      counts,
+      protectedSwitchboard,
+      protectedSwitchboardSha256: hash(JSON.stringify(protectedSwitchboard)),
+    },
+  };
 }
 
 test("Supabase 2.109.1-compatible parser preserves transaction and quoted bodies", () => {
@@ -69,12 +142,51 @@ test("reviewed packet includes the disconnect state migration", () => {
   );
   assert.equal(
     entry.sha256,
-    "075e183886c9ec16cde0eb13ec850f7a154eb048b93b6bc5f0e440a3d4a9a1dd",
+    "3a3fcc87da6a48062861fac5758cef5b1231bfc0babc9549e044486d61daa111",
   );
   assert.equal(
     entry.statementsSha256,
-    "b1bd4a606d8ec8a7d303381e7c541fa864f30bdf5d6fa1f1edf373e0bda73a14",
+    "5abfc78a20255fdb4df5e24e75fdde1cbb3872b096e8d1a3a6b8441a9a9891eb",
   );
+});
+
+test("applyProductionPacket executes the disconnect migration body from the reviewed packet", async () => {
+  const plan = loadReviewedPlan(planPath);
+  const { calls, client, snapshot } = packetHarness(plan);
+
+  await assert.doesNotReject(
+    applyProductionPacket(client, plan, snapshot, {
+      beforeCommit: async () => {},
+    }),
+  );
+  assert.ok(
+    calls.some((call) =>
+      /grant select \(disconnect_pending_at\)/u.test(call.sql),
+    ),
+    "disconnect migration body was not executed",
+  );
+  assert.ok(
+    calls.some((call) =>
+      /insert into supabase_migrations\.schema_migrations/u.test(call.sql) &&
+      call.params?.[0] === "20260902074814",
+    ),
+    "disconnect migration ledger row was not inserted",
+  );
+});
+
+test("applyProductionPacket rolls back when packet execution fails before commit", async () => {
+  const plan = loadReviewedPlan(planPath);
+  const { calls, client, snapshot } = packetHarness(plan);
+  await assert.rejects(
+    applyProductionPacket(client, plan, snapshot, {
+      beforeCommit: async () => {
+        throw new Error("synthetic packet failure");
+      },
+    }),
+    /synthetic packet failure/u,
+  );
+  assert.ok(calls.some((call) => call.sql === "rollback"));
+  assert.equal(calls.some((call) => call.sql === "commit"), false);
 });
 
 test("the manual packet refuses before reading credentials when arguments are incomplete", () => {

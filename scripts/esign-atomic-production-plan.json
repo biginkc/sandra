@@ -35,8 +35,8 @@
       "version": "20260902074814",
       "name": "esign_atomic_disconnect_state",
       "path": "supabase/migrations/20260902074814_esign_atomic_disconnect_state.sql",
-      "sha256": "075e183886c9ec16cde0eb13ec850f7a154eb048b93b6bc5f0e440a3d4a9a1dd",
-      "statementsSha256": "b1bd4a606d8ec8a7d303381e7c541fa864f30bdf5d6fa1f1edf373e0bda73a14"
+      "sha256": "3a3fcc87da6a48062861fac5758cef5b1231bfc0babc9549e044486d61daa111",
+      "statementsSha256": "5abfc78a20255fdb4df5e24e75fdde1cbb3872b096e8d1a3a6b8441a9a9891eb"
     }
   ]
 }

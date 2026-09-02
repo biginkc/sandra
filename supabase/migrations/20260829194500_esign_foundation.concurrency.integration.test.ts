@@ -62,6 +62,129 @@ async function setServiceRole(client: Client): Promise<void> {
   );
 }
 
+const bootstrapSql = `
+  do $roles$
+  begin
+    if not exists (select 1 from pg_roles where rolname = 'anon') then
+      create role anon;
+    end if;
+    if not exists (select 1 from pg_roles where rolname = 'authenticated') then
+      create role authenticated;
+    end if;
+    if not exists (select 1 from pg_roles where rolname = 'service_role') then
+      create role service_role;
+    end if;
+  end;
+  $roles$;
+
+  create schema auth;
+  create schema storage;
+  create schema extensions;
+  create extension pgcrypto with schema extensions;
+
+  create table auth.users (id uuid primary key);
+  create function auth.uid() returns uuid language sql stable as $$
+    select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+  $$;
+  create function auth.role() returns text language sql stable as $$
+    select nullif(current_setting('request.jwt.claim.role', true), '')
+  $$;
+
+  create table public.organizations (id uuid primary key);
+  create table public.memberships (
+    user_id uuid not null references auth.users(id),
+    org_id uuid not null references public.organizations(id),
+    role text not null,
+    access_status text not null default 'active',
+    deletion_prepared_at timestamptz,
+    access_expires_at timestamptz,
+    primary key (user_id, org_id)
+  );
+  create table public.webhook_consumers (
+    id uuid primary key default gen_random_uuid(),
+    org_id uuid references public.organizations(id),
+    name text not null unique,
+    secret_hash text not null,
+    consumer_type text not null,
+    default_source text,
+    enabled boolean not null default true,
+    revoked_at timestamptz,
+    created_by uuid,
+    constraint webhook_consumers_type_check check (true),
+    constraint webhook_consumers_type_source_match_check check (true)
+  );
+  create table public.contacts (
+    id uuid primary key,
+    org_id uuid not null references public.organizations(id),
+    email text,
+    phone_1 text,
+    constraint contacts_id_org_key unique (id, org_id)
+  );
+  create table public.properties (
+    id uuid primary key,
+    org_id uuid not null references public.organizations(id),
+    homeowner_contact_id uuid,
+    constraint properties_id_org_key unique (id, org_id),
+    constraint properties_homeowner_contact_org_fkey
+      foreign key (homeowner_contact_id, org_id)
+      references public.contacts(id, org_id)
+  );
+  create table public.lead_events (
+    id uuid primary key default gen_random_uuid(),
+    org_id uuid not null references public.organizations(id),
+    property_id uuid not null,
+    actor_type text not null,
+    actor_id uuid,
+    event_type text not null,
+    payload jsonb not null default '{}'::jsonb,
+    source_type text,
+    source_id uuid
+  );
+  create unique index lead_events_source_key
+    on public.lead_events(source_type, source_id)
+    where source_id is not null;
+  create function public.hugo_has_active_org_access(uuid)
+    returns boolean language sql stable as $$ select true $$;
+
+  create table storage.buckets (
+    id text primary key,
+    name text not null,
+    public boolean not null default false,
+    file_size_limit bigint,
+    allowed_mime_types text[]
+  );
+  create table storage.objects (
+    id uuid primary key default gen_random_uuid(),
+    bucket_id text not null references storage.buckets(id),
+    name text not null,
+    metadata jsonb,
+    unique (bucket_id, name)
+  );
+  create function storage.foldername(text) returns text[]
+    language sql immutable as $$ select string_to_array($1, '/') $$;
+`;
+
+async function applyPreDisconnectMigrations(client: Client): Promise<void> {
+  await client.query(migrationSql);
+  await client.query(uploadReservationsSql);
+  await client.query(uploadReservationsSql);
+  await client.query(reconciliationFenceSql);
+  await client.query(retryReminderFenceSql);
+  await client.query(sellerEmailAuthoritySql);
+  await client.query(sellerEmailAuthoritySql);
+  await client.query(sendUnknownResolutionSql);
+  await client.query(sendUnknownResolutionSql);
+}
+
+async function applyPost475Migrations(client: Client): Promise<void> {
+  await client.query(emailBouncedDeliveryStateSql);
+  await client.query(emailBouncedDeliveryStateSql);
+  await client.query(emailBounceRecoverySql);
+  await client.query(emailBounceRecoverySql);
+  await client.query(providerTruthfulLifecycleSql);
+  await client.query(providerTruthfulLifecycleSql);
+}
+
 beforeAll(async () => {
   if (!sourceUrl) throw new Error("TEST_SUPABASE_DB_URL is required");
   const adminUrl = new URL(sourceUrl);
@@ -72,124 +195,11 @@ beforeAll(async () => {
   isolatedUrl = databaseUrl(databaseName);
   setup = new Client({ connectionString: isolatedUrl });
   await setup.connect();
-  await setup.query(`
-    do $roles$
-    begin
-      if not exists (select 1 from pg_roles where rolname = 'anon') then
-        create role anon;
-      end if;
-      if not exists (select 1 from pg_roles where rolname = 'authenticated') then
-        create role authenticated;
-      end if;
-      if not exists (select 1 from pg_roles where rolname = 'service_role') then
-        create role service_role;
-      end if;
-    end;
-    $roles$;
-
-    create schema auth;
-    create schema storage;
-    create schema extensions;
-    create extension pgcrypto with schema extensions;
-
-    create table auth.users (id uuid primary key);
-    create function auth.uid() returns uuid language sql stable as $$
-      select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
-    $$;
-    create function auth.role() returns text language sql stable as $$
-      select nullif(current_setting('request.jwt.claim.role', true), '')
-    $$;
-
-    create table public.organizations (id uuid primary key);
-    create table public.memberships (
-      user_id uuid not null references auth.users(id),
-      org_id uuid not null references public.organizations(id),
-      role text not null,
-      access_status text not null default 'active',
-      deletion_prepared_at timestamptz,
-      access_expires_at timestamptz,
-      primary key (user_id, org_id)
-    );
-    create table public.webhook_consumers (
-      id uuid primary key default gen_random_uuid(),
-      org_id uuid references public.organizations(id),
-      name text not null unique,
-      secret_hash text not null,
-      consumer_type text not null,
-      default_source text,
-      enabled boolean not null default true,
-      revoked_at timestamptz,
-      created_by uuid,
-      constraint webhook_consumers_type_check check (true),
-      constraint webhook_consumers_type_source_match_check check (true)
-    );
-    create table public.contacts (
-      id uuid primary key,
-      org_id uuid not null references public.organizations(id),
-      email text,
-      phone_1 text,
-      constraint contacts_id_org_key unique (id, org_id)
-    );
-    create table public.properties (
-      id uuid primary key,
-      org_id uuid not null references public.organizations(id),
-      homeowner_contact_id uuid,
-      constraint properties_id_org_key unique (id, org_id),
-      constraint properties_homeowner_contact_org_fkey
-        foreign key (homeowner_contact_id, org_id)
-        references public.contacts(id, org_id)
-    );
-    create table public.lead_events (
-      id uuid primary key default gen_random_uuid(),
-      org_id uuid not null references public.organizations(id),
-      property_id uuid not null,
-      actor_type text not null,
-      actor_id uuid,
-      event_type text not null,
-      payload jsonb not null default '{}'::jsonb,
-      source_type text,
-      source_id uuid
-    );
-    create unique index lead_events_source_key
-      on public.lead_events(source_type, source_id)
-      where source_id is not null;
-    create function public.hugo_has_active_org_access(uuid)
-      returns boolean language sql stable as $$ select true $$;
-
-    create table storage.buckets (
-      id text primary key,
-      name text not null,
-      public boolean not null default false,
-      file_size_limit bigint,
-      allowed_mime_types text[]
-    );
-    create table storage.objects (
-      id uuid primary key default gen_random_uuid(),
-      bucket_id text not null references storage.buckets(id),
-      name text not null,
-      metadata jsonb,
-      unique (bucket_id, name)
-    );
-    create function storage.foldername(text) returns text[]
-      language sql immutable as $$ select string_to_array($1, '/') $$;
-  `);
-  await setup.query(migrationSql);
-  await setup.query(uploadReservationsSql);
-  await setup.query(uploadReservationsSql);
-  await setup.query(reconciliationFenceSql);
-  await setup.query(retryReminderFenceSql);
-  await setup.query(sellerEmailAuthoritySql);
-  await setup.query(sellerEmailAuthoritySql);
-  await setup.query(sendUnknownResolutionSql);
-  await setup.query(sendUnknownResolutionSql);
+  await setup.query(bootstrapSql);
+  await applyPreDisconnectMigrations(setup);
+  await applyPost475Migrations(setup);
   await setup.query(atomicDisconnectSql);
   await setup.query(atomicDisconnectSql);
-  await setup.query(emailBouncedDeliveryStateSql);
-  await setup.query(emailBouncedDeliveryStateSql);
-  await setup.query(emailBounceRecoverySql);
-  await setup.query(emailBounceRecoverySql);
-  await setup.query(providerTruthfulLifecycleSql);
-  await setup.query(providerTruthfulLifecycleSql);
 }, 60_000);
 
 afterAll(async () => {
@@ -202,6 +212,57 @@ afterAll(async () => {
     await admin.query(`drop database if exists ${databaseName} with (force)`);
     await admin.end();
   }
+});
+
+async function withOrderRehearsal(
+  label: string,
+  applyOrder: (client: Client) => Promise<void>,
+): Promise<void> {
+  const orderDatabaseName = `sandra_esign_order_${label}_${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
+  await admin.query(`create database ${orderDatabaseName}`);
+  const client = new Client({ connectionString: databaseUrl(orderDatabaseName) });
+  try {
+    await client.connect();
+    await client.query(bootstrapSql);
+    await applyPreDisconnectMigrations(client);
+    await applyOrder(client);
+    expect(
+      (
+        await client.query<{ allowed: boolean }>(
+          "select has_column_privilege('authenticated','public.org_esign_integrations','disconnect_pending_at','select') as allowed",
+        )
+      ).rows[0],
+    ).toEqual({ allowed: true });
+    expect(
+      (
+        await client.query<{ proname: string }>(
+          "select proname from pg_proc where proname='esign_require_template_management_capability'",
+        )
+      ).rowCount,
+    ).toBe(1);
+  } finally {
+    await client.end().catch(() => undefined);
+    await admin.query(
+      "select pg_terminate_backend(pid) from pg_stat_activity where datname=$1 and pid <> pg_backend_pid()",
+      [orderDatabaseName],
+    );
+    await admin.query(`drop database if exists ${orderDatabaseName} with (force)`);
+  }
+}
+
+describe("eSign disconnect migration deploy order compatibility", () => {
+  it("applies twice when #475 migrations land before or after disconnect", async () => {
+    await withOrderRehearsal("after475", async (client) => {
+      await applyPost475Migrations(client);
+      await client.query(atomicDisconnectSql);
+      await client.query(atomicDisconnectSql);
+    });
+    await withOrderRehearsal("before475", async (client) => {
+      await client.query(atomicDisconnectSql);
+      await client.query(atomicDisconnectSql);
+      await applyPost475Migrations(client);
+    });
+  }, 120_000);
 });
 
 describe("eSign foundation production lease contention", () => {
@@ -1885,6 +1946,13 @@ describe("eSign foundation production lease contention", () => {
         )
       ).rows[0],
     ).toEqual({ sending_enabled: false, api_key: "synthetic-api-key" });
+    expect(
+      (
+        await setup.query<{ allowed: boolean }>(
+          "select has_column_privilege('authenticated','public.org_esign_integrations','disconnect_pending_at','select') as allowed",
+        )
+      ).rows[0],
+    ).toEqual({ allowed: true });
 
     expect(
       (
