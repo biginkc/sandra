@@ -112,7 +112,9 @@ async function addNoOpVacancyFilter(user: ReturnType<typeof userEvent.setup>) {
 }
 
 async function selectSender(user: ReturnType<typeof userEvent.setup>) {
-  await screen.findByRole("option", { name: /number ending 4567/i });
+  await screen.findByRole("option", {
+    name: /Test Provider — \+15551234567/i,
+  });
   await user.selectOptions(
     screen.getByLabelText(/sending number/i),
     "+15551234567",
@@ -270,7 +272,9 @@ describe("<CreateCampaignForm />", () => {
     await user.type(screen.getByLabelText(/message body/i), "Hello there");
     await addVacancyAudience(user);
     // Catalog loaded but no sender chosen.
-    await screen.findByRole("option", { name: /number ending 4567/i });
+    await screen.findByRole("option", {
+      name: /Test Provider — \+15551234567/i,
+    });
 
     await user.click(
       screen.getByRole("button", { name: /create campaign/i }),

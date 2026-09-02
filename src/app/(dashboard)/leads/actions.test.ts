@@ -933,6 +933,36 @@ describe("createLeadTaskAction", () => {
     expect(createTask).not.toHaveBeenCalled();
   });
 
+  it("rejects a suspended assignee before creating or dispatching a task", async () => {
+    createClient.mockResolvedValue(
+      makeLeadTaskSupabase({
+        property: { id: "prop-1", org_id: "org-1", address: "123 Main" },
+        actorMembership: { user_id: "actor-1" },
+      }),
+    );
+    createAdminClient.mockReturnValue(
+      makeLeadTaskAdmin({
+        assigneeMembership: {
+          user_id: "former-1",
+          access_status: "suspended",
+          access_expires_at: null,
+          deletion_prepared_at: null,
+        },
+      }),
+    );
+
+    const result = await createLeadTaskAction("prop-1", {
+      type: "follow_up",
+      dueAt: "2026-06-20T15:00:00.000Z",
+      assigneeId: "former-1",
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("ASSIGNEE_NOT_ACTIVE");
+    expect(createTask).not.toHaveBeenCalled();
+    expect(afterMock).not.toHaveBeenCalled();
+  });
+
   it("creates a lead task only after assignee membership is verified", async () => {
     createClient.mockResolvedValue(
       makeLeadTaskSupabase({
@@ -1211,7 +1241,12 @@ function makeLeadTaskSupabase(opts: {
 }
 
 function makeLeadTaskAdmin(opts: {
-  assigneeMembership: { user_id: string } | null;
+  assigneeMembership: {
+    user_id: string;
+    access_status?: string | null;
+    access_expires_at?: string | null;
+    deletion_prepared_at?: string | null;
+  } | null;
 }) {
   return {
     from: vi.fn((table: string) => {

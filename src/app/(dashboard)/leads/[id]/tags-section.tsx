@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { callAction } from "@/lib/errors/call-action";
+import { humanizeMachineValue } from "@/lib/presentation/system-labels";
 
 import {
   applyPropertyTag,
@@ -87,7 +88,10 @@ export function TagsSection({ propertyId, initial }: Props) {
   }, [attached]);
 
   const trimmed = query.trim();
-  const attachedIds = useMemo(() => new Set(attached.map((a) => a.id)), [attached]);
+  const attachedIds = useMemo(
+    () => new Set(attached.map((a) => a.id)),
+    [attached],
+  );
   const suggestions = useMemo(() => {
     if (!catalogLoaded) return [];
     return catalog
@@ -111,10 +115,9 @@ export function TagsSection({ propertyId, initial }: Props) {
     setQuery("");
     setAdding(false);
     startTransition(async () => {
-      const result = await callAction(
-        applyPropertyTag(propertyId, tag.id),
-        { fallbackMessage: "Could not apply tag" },
-      );
+      const result = await callAction(applyPropertyTag(propertyId, tag.id), {
+        fallbackMessage: "Could not apply tag",
+      });
       if (!result.ok) {
         setAttached((prev) => prev.filter((t) => t.id !== tag.id));
       } else {
@@ -126,10 +129,9 @@ export function TagsSection({ propertyId, initial }: Props) {
   const createAndAttach = () => {
     if (!trimmed || pending) return;
     startTransition(async () => {
-      const result = await callAction(
-        createCustomTag(trimmed, null),
-        { fallbackMessage: "Could not create tag" },
-      );
+      const result = await callAction(createCustomTag(trimmed, null), {
+        fallbackMessage: "Could not create tag",
+      });
       if (!result.ok) return;
       const tag = result.data;
       setCatalog((prev) =>
@@ -143,10 +145,9 @@ export function TagsSection({ propertyId, initial }: Props) {
     if (tag.system_managed) return; // UI already hides the X, but belt-and-suspenders
     setAttached((prev) => prev.filter((t) => t.id !== tag.id)); // optimistic
     startTransition(async () => {
-      const result = await callAction(
-        removePropertyTag(propertyId, tag.id),
-        { fallbackMessage: "Could not remove tag" },
-      );
+      const result = await callAction(removePropertyTag(propertyId, tag.id), {
+        fallbackMessage: "Could not remove tag",
+      });
       if (!result.ok) {
         // Put it back
         setAttached((prev) => [...prev, tag]);
@@ -212,13 +213,7 @@ export function TagsSection({ propertyId, initial }: Props) {
   );
 }
 
-function TagChip({
-  tag,
-  onRemove,
-}: {
-  tag: TagRow;
-  onRemove?: () => void;
-}) {
+function TagChip({ tag, onRemove }: { tag: TagRow; onRemove?: () => void }) {
   return (
     <Badge
       variant="secondary"
@@ -233,7 +228,9 @@ function TagChip({
           : undefined
       }
     >
-      <span>{tag.name}</span>
+      <span>
+        {tag.system_managed ? humanizeMachineValue(tag.name) : tag.name}
+      </span>
       {onRemove ? (
         <button
           type="button"

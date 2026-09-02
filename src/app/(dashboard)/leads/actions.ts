@@ -1920,7 +1920,7 @@ export async function createLeadTaskAction(
 
     const { data: actorMembership, error: actorMembershipErr } = await supabase
       .from("memberships")
-      .select("user_id")
+      .select("user_id, access_status, access_expires_at, deletion_prepared_at")
       .eq("org_id", property.org_id)
       .eq("user_id", user.id)
       .maybeSingle();
@@ -1933,7 +1933,7 @@ export async function createLeadTaskAction(
         },
       };
     }
-    if (!actorMembership) {
+    if (!actorMembership || !hasActiveSandraAccess(actorMembership)) {
       return {
         ok: false,
         error: {
@@ -1946,7 +1946,7 @@ export async function createLeadTaskAction(
     const admin = createAdminClient();
     const { data: assignee, error: assigneeErr } = await admin
       .from("memberships")
-      .select("user_id")
+      .select("user_id, access_status, access_expires_at, deletion_prepared_at")
       .eq("org_id", property.org_id)
       .eq("user_id", input.assigneeId)
       .maybeSingle();
@@ -1959,12 +1959,14 @@ export async function createLeadTaskAction(
         },
       };
     }
-    if (!assignee) {
+    if (!assignee || !hasActiveSandraAccess(assignee)) {
       return {
         ok: false,
         error: {
-          code: "ASSIGNEE_NOT_IN_ORG",
-          message: "Choose a team member in this lead's org.",
+          code: assignee ? "ASSIGNEE_NOT_ACTIVE" : "ASSIGNEE_NOT_IN_ORG",
+          message: assignee
+            ? "Choose an active team member in this lead's organization."
+            : "Choose a team member in this lead's organization.",
         },
       };
     }
@@ -2240,6 +2242,61 @@ export async function listOrgUsers(): Promise<
     return ok(await loadOrgTeamMembers(activeMemberships[0].org_id));
   } catch (e) {
     reportError(e, { tags: { surface: "list_org_users" } });
+    return errFromUnknown(e, "TEAM_FETCH_FAILED");
+  }
+}
+
+/** Assignment roster pinned to the lead's organization, never membership order. */
+export async function listPropertyOrgUsers(
+  propertyId: string,
+): Promise<Result<import("@/lib/auth/team-member").TeamMember[]>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+    const { data: property, error: propertyError } = await supabase
+      .from("properties")
+      .select("org_id")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (propertyError || !property) {
+      return {
+        ok: false,
+        error: {
+          code: "TEAM_SCOPE_INVALID",
+          message: propertyError?.message ?? "Lead not found.",
+        },
+      };
+    }
+    const { data: membership, error: membershipError } = await supabase
+      .from("memberships")
+      .select("access_status, access_expires_at, deletion_prepared_at")
+      .eq("org_id", property.org_id)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (membershipError || !hasActiveSandraAccess(membership)) {
+      return {
+        ok: false,
+        error: {
+          code: "TEAM_SCOPE_INVALID",
+          message:
+            membershipError?.message ?? "No active membership for this lead.",
+        },
+      };
+    }
+    return ok(await loadOrgTeamMembers(property.org_id));
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "list_property_org_users" },
+      extra: { propertyId },
+    });
     return errFromUnknown(e, "TEAM_FETCH_FAILED");
   }
 }

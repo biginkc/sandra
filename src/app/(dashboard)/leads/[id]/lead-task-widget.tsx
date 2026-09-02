@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 
 import {
   createLeadTaskAction,
-  listOrgUsers,
+  listPropertyOrgUsers,
   type LeadTaskKind,
   type TeamMember,
 } from "../actions";
@@ -36,6 +36,7 @@ export function LeadTaskWidget({
   const router = useRouter();
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingMembers, setLoadingMembers] = useState(true);
+  const [memberLoadError, setMemberLoadError] = useState(false);
   const [taskType, setTaskType] = useState<LeadTaskKind>("follow_up");
   const [dueAt, setDueAt] = useState("");
   const [assigneeId, setAssigneeId] = useState<string>(
@@ -45,17 +46,27 @@ export function LeadTaskWidget({
 
   useEffect(() => {
     let cancelled = false;
-    listOrgUsers()
+    listPropertyOrgUsers(propertyId)
       .then((result) => {
         if (cancelled) return;
         if (result.ok) {
-          setMembers(result.data);
-          setAssigneeId((current) => {
-            if (current) return current;
-            return (
-              initialAssigneeId ?? currentUserId ?? result.data[0]?.id ?? ""
-            );
-          });
+          const assignable = result.data.filter(
+            (member) =>
+              member.isActive !== false && (member.displayName || member.email),
+          );
+          setMembers(assignable);
+          setMemberLoadError(false);
+          setAssigneeId((current) =>
+            assignable.some((member) => member.id === current)
+              ? current
+              : assignable.some((member) => member.id === currentUserId)
+                ? (currentUserId ?? "")
+                : (assignable[0]?.id ?? ""),
+          );
+        } else {
+          setMembers([]);
+          setAssigneeId("");
+          setMemberLoadError(true);
         }
       })
       .finally(() => {
@@ -64,7 +75,7 @@ export function LeadTaskWidget({
     return () => {
       cancelled = true;
     };
-  }, [currentUserId, initialAssigneeId]);
+  }, [currentUserId, initialAssigneeId, propertyId]);
 
   const submit = () => {
     if (!dueAt || !assigneeId || pending) return;
@@ -157,6 +168,11 @@ export function LeadTaskWidget({
           </Button>
         </div>
       </div>
+      {memberLoadError ? (
+        <p className="text-destructive text-xs" role="alert">
+          Team members could not be loaded. Refresh before assigning this task.
+        </p>
+      ) : null}
     </div>
   );
 }

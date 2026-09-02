@@ -4,7 +4,7 @@ import type React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AssignDropdown } from "./assign-dropdown";
-import { listOrgUsers, updateLeadAssignee } from "../leads/actions";
+import { listPropertyOrgUsers, updateLeadAssignee } from "../leads/actions";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -13,7 +13,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 vi.mock("../leads/actions", () => ({
-  listOrgUsers: vi.fn(),
+  listPropertyOrgUsers: vi.fn(),
   updateLeadAssignee: vi.fn(),
 }));
 
@@ -54,13 +54,13 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
 
 describe("<AssignDropdown />", () => {
   beforeEach(() => {
-    vi.mocked(listOrgUsers).mockReset();
+    vi.mocked(listPropertyOrgUsers).mockReset();
     vi.mocked(updateLeadAssignee).mockReset();
   });
 
   it("opens the picker from an unassigned lead and assigns a teammate directly", async () => {
     const user = userEvent.setup();
-    vi.mocked(listOrgUsers).mockResolvedValueOnce({
+    vi.mocked(listPropertyOrgUsers).mockResolvedValueOnce({
       ok: true,
       data: [
         { id: "user-1", email: "me@example.com", displayName: "Morgan Me" },
@@ -108,7 +108,7 @@ describe("<AssignDropdown />", () => {
 
   it("does not show Me when the current user is absent from the org member list", async () => {
     const user = userEvent.setup();
-    vi.mocked(listOrgUsers).mockResolvedValueOnce({
+    vi.mocked(listPropertyOrgUsers).mockResolvedValueOnce({
       ok: true,
       data: [{ id: "user-2", email: "teammate@example.com" }],
     });
@@ -132,7 +132,7 @@ describe("<AssignDropdown />", () => {
 
   it("shows a team-load error instead of an empty menu", async () => {
     const user = userEvent.setup();
-    vi.mocked(listOrgUsers).mockResolvedValueOnce({
+    vi.mocked(listPropertyOrgUsers).mockResolvedValueOnce({
       ok: false,
       error: { code: "TEAM_FETCH_FAILED", message: "network failed" },
     });
@@ -176,6 +176,8 @@ describe("<AssignDropdown />", () => {
       />,
     );
 
-    expect(screen.getByTestId("assign-dropdown-trigger")).toHaveTextContent("No owner");
+    expect(screen.getByTestId("assign-dropdown-trigger")).toHaveTextContent(
+      "No owner",
+    );
   });
 });

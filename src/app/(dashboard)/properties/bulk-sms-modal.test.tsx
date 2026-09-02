@@ -102,7 +102,9 @@ const deliveryCatalog = {
 };
 
 async function selectSender(user: ReturnType<typeof userEvent.setup>) {
-  await screen.findByRole("option", { name: /number ending 4567/i });
+  await screen.findByRole("option", {
+    name: /Test Provider — \+15551234567/i,
+  });
   await user.selectOptions(
     screen.getByLabelText(/sending number/i),
     "+15551234567",
@@ -159,9 +161,7 @@ beforeEach(() => {
 describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
   it("renders campaign name blank by default", async () => {
     renderModal(["p1"]);
-    await waitFor(() =>
-      expect(listSmsTemplateCategories).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
     expect(screen.getByRole("textbox", { name: /Campaign name/i })).toHaveValue(
       "",
@@ -171,18 +171,19 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
   it("requires a non-whitespace campaign name before queueing", async () => {
     const user = userEvent.setup();
     renderModal(["p1"]);
-    await waitFor(() =>
-      expect(listSmsTemplateCategories).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+    expect(screen.getByText("Campaign name is required.")).toBeInTheDocument();
     expect(
-      screen.getByText("Campaign name is required."),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: /Campaign name/i })).toHaveFocus();
+      screen.getByRole("textbox", { name: /Campaign name/i }),
+    ).toHaveFocus();
     expect(bulkQueueSms).not.toHaveBeenCalled();
 
-    await user.type(screen.getByRole("textbox", { name: /Campaign name/i }), "   ");
+    await user.type(
+      screen.getByRole("textbox", { name: /Campaign name/i }),
+      "   ",
+    );
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
     expect(bulkQueueSms).not.toHaveBeenCalled();
   });
@@ -196,18 +197,14 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     renderModal(["p1"]);
 
     // Wait for the open-time effects to settle (categories + count fetch).
-    await waitFor(() =>
-      expect(listSmsTemplateCategories).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
 
     const paceInput = screen.getByLabelText(/^Pacing$/i) as HTMLInputElement;
     expect(paceInput.value).toBe("18");
 
-    const paceUnit = screen.getByLabelText(
-      /Pacing unit/i,
-    ) as HTMLSelectElement;
+    const paceUnit = screen.getByLabelText(/Pacing unit/i) as HTMLSelectElement;
     expect(paceUnit.value).toBe("seconds");
   });
 
@@ -219,9 +216,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     });
 
     renderModal(["p1"]);
-    await waitFor(() =>
-      expect(listSmsTemplateCategories).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
 
@@ -234,9 +229,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     await fillCampaignName(user);
     await selectSender(user);
 
-    await user.click(
-      screen.getByRole("button", { name: /Queue 1 message/i }),
-    );
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
 
     await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
     const [ids, opts] = bulkQueueSms.mock.calls[0];
@@ -248,9 +241,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
   it("Pacing of 5 seconds shows inline validation error and submit does not call bulkQueueSms", async () => {
     const user = userEvent.setup();
     renderModal(["p1"]);
-    await waitFor(() =>
-      expect(listSmsTemplateCategories).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
     await fillCampaignName(user);
@@ -264,9 +255,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
       await screen.findByText(/between 10 seconds and 10 minutes/i),
     ).toBeInTheDocument();
 
-    await user.click(
-      screen.getByRole("button", { name: /Queue 1 message/i }),
-    );
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
 
     expect(bulkQueueSms).not.toHaveBeenCalled();
   });
@@ -274,9 +263,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
   it("Pacing of 11 minutes shows inline validation error and submit does not call bulkQueueSms", async () => {
     const user = userEvent.setup();
     renderModal(["p1"]);
-    await waitFor(() =>
-      expect(listSmsTemplateCategories).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
     await fillCampaignName(user);
@@ -292,9 +279,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
       await screen.findByText(/between 10 seconds and 10 minutes/i),
     ).toBeInTheDocument();
 
-    await user.click(
-      screen.getByRole("button", { name: /Queue 1 message/i }),
-    );
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
 
     expect(bulkQueueSms).not.toHaveBeenCalled();
   });
@@ -302,9 +287,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
   it("Skip-contacted checkbox is checked by default when propertyIds.length is 51", async () => {
     const ids = Array.from({ length: 51 }, (_, i) => `p${i + 1}`);
     renderModal(ids);
-    await waitFor(() =>
-      expect(listSmsTemplateCategories).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
     const skipCheckbox = screen.getByRole("checkbox", {
       name: /Skip prospects already contacted/i,
@@ -315,9 +298,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
   it("Skip-contacted checkbox is unchecked by default when propertyIds.length is 50", async () => {
     const ids = Array.from({ length: 50 }, (_, i) => `p${i + 1}`);
     renderModal(ids);
-    await waitFor(() =>
-      expect(listSmsTemplateCategories).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
     const skipCheckbox = screen.getByRole("checkbox", {
       name: /Skip prospects already contacted/i,
@@ -351,9 +332,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     // 51 ids → skip-contacted defaults to true.
     const ids = Array.from({ length: 51 }, (_, i) => `p${i + 1}`);
     renderModal(ids);
-    await waitFor(() =>
-      expect(listSmsTemplateCategories).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
     await waitFor(() => expect(countAlreadyContacted).toHaveBeenCalled());
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
@@ -406,9 +385,7 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
   it("Push preset shows the 'fast continuous drain' tagline", async () => {
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
-    expect(
-      screen.getByText(/fast continuous drain/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/fast continuous drain/i)).toBeInTheDocument();
   });
 
   it("switching from Steady → Conservative updates the drain estimate", async () => {
@@ -558,7 +535,9 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
         'A campaign named "June Vacant Homes" already exists.',
       ),
     ).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: /Campaign name/i })).toHaveFocus();
+    expect(
+      screen.getByRole("textbox", { name: /Campaign name/i }),
+    ).toHaveFocus();
     expect(routerPush).not.toHaveBeenCalled();
   });
 
@@ -578,9 +557,13 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     await fillCampaignName(user);
     await selectSender(user);
 
-    await user.click(screen.getByRole("button", { name: /Queue 501 messages/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Queue 501 messages/i }),
+    );
 
-    await waitFor(() => expect(routerPush).toHaveBeenCalledWith("/jobs/job-123"));
+    await waitFor(() =>
+      expect(routerPush).toHaveBeenCalledWith("/jobs/job-123"),
+    );
   });
 
   it("mode switching does not clear campaign name", async () => {
@@ -694,9 +677,7 @@ describe("<BulkSmsModal /> delivery setup", () => {
 
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
 
-    expect(
-      screen.getByText("Choose a sending number."),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Choose a sending number.")).toBeInTheDocument();
     expect(bulkQueueSms).not.toHaveBeenCalled();
   });
 
@@ -793,8 +774,8 @@ describe("computeDrain — uncapped continuous ramp", () => {
   });
 
   it("empty selection → empty preview", () => {
-    expect(
-      computeDrain({ total: 0, paceSeconds: 8, now: NINE_AM_PT }),
-    ).toEqual({ perDay: [], lastSendLocal: null, pastCutoffCount: 0 });
+    expect(computeDrain({ total: 0, paceSeconds: 8, now: NINE_AM_PT })).toEqual(
+      { perDay: [], lastSendLocal: null, pastCutoffCount: 0 },
+    );
   });
 });

@@ -1,7 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
-import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
+import { teamMemberOptionLabel } from "@/lib/auth/team-member";
 
 import type { CalendarAppointmentRow } from "./types";
 
@@ -120,7 +120,7 @@ export async function fetchOrgRoster(
   const labelsDegraded = members.some((member) => !member.displayName);
   const roster: OrgRosterEntry[] = members.map((member) => ({
     id: member.id,
-    label: teamMemberPrimaryLabel(member),
+    label: teamMemberOptionLabel(member),
   }));
 
   return { ok: true, roster, labelsDegraded };

@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 import { getCallerMemberships } from "@/lib/auth/memberships";
-import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
+import { loadTeamMembersForOrgs } from "@/lib/auth/team-roster";
 import { createClient } from "@/lib/supabase/server";
 import {
   buildTableHref,
@@ -141,13 +141,11 @@ async function loadBlockOptions(
   supabase: Awaited<ReturnType<typeof createClient>>,
 ): Promise<BlockOptions> {
   const memberships = await getCallerMemberships();
-  const orgId = memberships[0]?.org_id ?? "";
-
-  const assigneesPromise = orgId
-    ? loadOrgTeamMembers(orgId, { includeInactiveMembers: true }).catch(
-        () => [],
-      )
-    : Promise.resolve([]);
+  const orgIds = memberships.map((membership) => membership.org_id);
+  const assigneesPromise =
+    orgIds.length > 0
+      ? loadTeamMembersForOrgs(orgIds, { includeInactiveMembers: true })
+      : Promise.resolve([]);
 
   const [countyResult, stateResult, listResult, tagResult, assignees] =
     await Promise.all([

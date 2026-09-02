@@ -23,6 +23,11 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import type { Database } from "@/lib/supabase/types";
+import {
+  JOB_STATUS_LABELS,
+  JOB_TYPE_LABELS,
+  systemLabel,
+} from "@/lib/presentation/system-labels";
 
 import { RetrySkipTraceButton } from "../retry-skip-trace-button";
 import { RetryPromoteLeadsButton } from "../retry-promote-leads-button";
@@ -199,7 +204,9 @@ export function JobDetail({
       {/* Sub-header strip with status + duration + provider, with retry on the right */}
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <div className="text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-          <Badge variant={statusVariant(job.status)}>{job.status}</Badge>
+          <Badge variant={statusVariant(job.status)}>
+            {systemLabel(JOB_STATUS_LABELS, job.status)}
+          </Badge>
           <span>{durationLabel(job)}</span>
           {job.provider && <span>via {job.provider}</span>}
         </div>
@@ -696,7 +703,9 @@ function DefaultPanel({ job }: { job: Job }) {
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="text-sm">{job.type}</CardTitle>
+        <CardTitle className="text-sm">
+          {systemLabel(JOB_TYPE_LABELS, job.type)}
+        </CardTitle>
         <CardDescription>
           No type-specific view registered yet — see Audit tab below for the raw
           input/result.
@@ -813,7 +822,7 @@ function ItemsTable({
                 <TableRow key={item.id}>
                   <TableCell>
                     <Badge variant={itemStatusVariant(item.status)}>
-                      {item.status}
+                      {systemLabel(JOB_STATUS_LABELS, item.status)}
                     </Badge>
                   </TableCell>
                   <TableCell className="font-medium">
@@ -1101,10 +1110,10 @@ function LinkedJobLine({
       className="hover:bg-muted/40 -mx-1 flex items-center gap-2 rounded px-1 py-0.5 transition-colors"
     >
       <Badge variant="outline" className="text-xs">
-        {job.type}
+        {systemLabel(JOB_TYPE_LABELS, job.type)}
       </Badge>
       <Badge variant={statusVariant(job.status)} className="text-xs">
-        {job.status}
+        {systemLabel(JOB_STATUS_LABELS, job.status)}
       </Badge>
       <span className="text-foreground truncate">
         {job.title ?? job.id.slice(0, 8)}

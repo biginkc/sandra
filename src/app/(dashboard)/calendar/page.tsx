@@ -291,7 +291,8 @@ export default async function CalendarPage({
       />
       {labelsDegraded && (
         <div className="text-muted-foreground text-xs">
-          Some teammate names are unavailable — showing IDs instead.
+          Some teammate names are unavailable — showing verified emails or a
+          generic label instead.
         </div>
       )}
       <CalendarView

@@ -20,6 +20,12 @@ describe("team member presentation", () => {
     ).toBe("Alex Rivera");
     expect(
       authoritativeDisplayName({
+        app_metadata: { display_name: "Admin Verified" },
+        user_metadata: { display_name: "User Editable" },
+      }),
+    ).toBe("Admin Verified");
+    expect(
+      authoritativeDisplayName({
         user_metadata: { given_name: "Alex", family_name: "Rivera" },
       }),
     ).toBe("Alex Rivera");
@@ -41,6 +47,12 @@ describe("team member presentation", () => {
     );
     expect(teamMemberOptionLabel(member)).not.toContain("12345678");
     expect(teamMemberSecondaryLabel(member)).toBe("Name not set");
+    expect(
+      authoritativeDisplayName({
+        email: "browser@example.test",
+        user_metadata: { display_name: "browser@example.test" },
+      }),
+    ).toBeNull();
   });
 
   it("labels the current and former users without changing their ids", () => {

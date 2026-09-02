@@ -42,8 +42,7 @@ function titleCaseProvider(provider: string): string {
 }
 
 function senderLabel(provider: string, phoneE164: string): string {
-  const lastFour = phoneE164.replace(/\D/g, "").slice(-4);
-  return `${titleCaseProvider(provider)} number${lastFour ? ` ending ${lastFour}` : ""}`;
+  return `${titleCaseProvider(provider)} — ${phoneE164}`;
 }
 
 function providerCampaignLabel(
@@ -51,9 +50,9 @@ function providerCampaignLabel(
   name: string | null,
   externalId: string,
 ): string {
-  if (name?.trim()) return name.trim();
   const suffix = externalId.slice(-6);
-  return `${titleCaseProvider(provider)} campaign${suffix ? ` — ID ending ${suffix}` : ""}`;
+  const identity = `${titleCaseProvider(provider)}${suffix ? ` — ID ending ${suffix}` : ""}`;
+  return name?.trim() ? `${name.trim()} — ${identity}` : `${identity} campaign`;
 }
 
 /**

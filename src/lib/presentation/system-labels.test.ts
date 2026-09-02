@@ -18,9 +18,9 @@ describe("system value labels", () => {
     expect(systemLabel(MEMBERSHIP_ROLE_LABELS, "owner")).toBe("Owner");
   });
 
-  it("returns an unknown stored value unchanged", () => {
+  it("humanizes an unknown stored machine value", () => {
     expect(systemLabel(LEAD_SOURCE_LABELS, "future_source")).toBe(
-      "future_source",
+      "Future source",
     );
   });
 });

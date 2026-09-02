@@ -19,7 +19,7 @@ import {
 } from "@/lib/auth/team-member";
 
 import {
-  listOrgUsers,
+  listPropertyOrgUsers,
   updateLeadAssignee,
   type TeamMember,
 } from "../leads/actions";
@@ -85,7 +85,7 @@ function AssignDropdownContent({
     if (loaded || loading) return;
     setLoading(true);
     setLoadError(null);
-    listOrgUsers()
+    listPropertyOrgUsers(propertyId)
       .then((result) => {
         if (result.ok) {
           setMembers(result.data);
@@ -145,7 +145,7 @@ function AssignDropdownContent({
             size="sm"
             className="min-h-11"
             disabled={pending}
-            aria-label="Change assignee"
+            aria-label={`Change assignee. Current owner: ${label}`}
             data-testid="assign-dropdown-trigger"
           >
             <UserIcon className="mr-1 size-3.5" />

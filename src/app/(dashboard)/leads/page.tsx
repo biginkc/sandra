@@ -8,9 +8,9 @@ import { getCallerMemberships } from "@/lib/auth/memberships";
 import { createClient } from "@/lib/supabase/server";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
 import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
+import { loadTeamMembersForOrgs } from "@/lib/auth/team-roster";
 
 import { AddLeadDialog } from "./add-lead-dialog";
-import { listOrgAssigneeFilterUsers, listOrgUsers } from "./actions";
 import { fetchLeadBoardData, type LeadBoardFilters } from "./board-query";
 import { Kanban } from "./kanban";
 import { LeadsLoadError } from "./load-error";
@@ -38,21 +38,26 @@ export default async function LeadsPage({
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  const [teamResult, filterTeamResult, { data: counties }, memberships] =
-    await Promise.all([
-      listOrgUsers(),
-      listOrgAssigneeFilterUsers(),
-      supabase.from("counties").select("market").order("state").order("name"),
-      getCallerMemberships(),
-    ]);
+  const [{ data: counties }, memberships] = await Promise.all([
+    supabase.from("counties").select("market").order("state").order("name"),
+    getCallerMemberships(),
+  ]);
   // Resolve every active organization from the server session. Board cards
   // can span those organizations, so eSign decoration is scoped per card
   // rather than selecting an arbitrary first membership.
   const orgIds = memberships.map((membership) => membership.org_id);
-  const teamMembers = teamResult.ok ? teamResult.data : [];
-  const filterTeamMembers = filterTeamResult.ok
-    ? filterTeamResult.data
-    : teamMembers;
+  let rosterLoadError = false;
+  let teamMembers: Awaited<ReturnType<typeof loadTeamMembersForOrgs>> = [];
+  let filterTeamMembers: Awaited<ReturnType<typeof loadTeamMembersForOrgs>> =
+    [];
+  try {
+    [teamMembers, filterTeamMembers] = await Promise.all([
+      loadTeamMembersForOrgs(orgIds),
+      loadTeamMembersForOrgs(orgIds, { includeInactiveMembers: true }),
+    ]);
+  } catch {
+    rosterLoadError = true;
+  }
   const inboundFilters = resolveInboundLeadFilters(params, {
     currentUserId: user?.id ?? null,
     teammateIds: filterTeamMembers.map((member) => member.id),
@@ -84,7 +89,7 @@ export default async function LeadsPage({
     "America/Chicago",
   );
   let board = null;
-  let loadFailed = false;
+  let loadFailed = rosterLoadError;
   try {
     board = await fetchLeadBoardData(supabase, filters, {
       currentUserId: user?.id ?? "",

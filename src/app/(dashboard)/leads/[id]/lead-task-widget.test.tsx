@@ -2,11 +2,13 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createLeadTaskAction, listOrgUsers, refreshMock } = vi.hoisted(() => ({
-  createLeadTaskAction: vi.fn(),
-  listOrgUsers: vi.fn(),
-  refreshMock: vi.fn(),
-}));
+const { createLeadTaskAction, listPropertyOrgUsers, refreshMock } = vi.hoisted(
+  () => ({
+    createLeadTaskAction: vi.fn(),
+    listPropertyOrgUsers: vi.fn(),
+    refreshMock: vi.fn(),
+  }),
+);
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -20,7 +22,7 @@ vi.mock("@/lib/errors/call-action", () => ({
 
 vi.mock("../actions", () => ({
   createLeadTaskAction,
-  listOrgUsers,
+  listPropertyOrgUsers,
 }));
 
 import { LeadTaskWidget } from "./lead-task-widget";
@@ -28,7 +30,7 @@ import { LeadTaskWidget } from "./lead-task-widget";
 describe("<LeadTaskWidget />", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    listOrgUsers.mockResolvedValue({
+    listPropertyOrgUsers.mockResolvedValue({
       ok: true,
       data: [
         { id: "user-1", email: "me@example.com" },
@@ -65,7 +67,10 @@ describe("<LeadTaskWidget />", () => {
     );
 
     await user.type(screen.getByTestId("lead-task-due-at"), "2026-06-20T09:30");
-    await user.selectOptions(screen.getByTestId("lead-task-assignee"), "user-2");
+    await user.selectOptions(
+      screen.getByTestId("lead-task-assignee"),
+      "user-2",
+    );
     await user.click(screen.getByTestId("lead-task-submit"));
 
     expect(createLeadTaskAction).toHaveBeenCalledWith("prop-1", {
@@ -96,5 +101,23 @@ describe("<LeadTaskWidget />", () => {
       dueAt: new Date("2026-06-20T10:00").toISOString(),
       assigneeId: "user-1",
     });
+  });
+
+  it("does not preserve a former owner as the assignee for a new task", async () => {
+    render(
+      <LeadTaskWidget
+        propertyId="prop-1"
+        address="123 Main"
+        currentUserId="user-1"
+        initialAssigneeId="former-user"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("lead-task-assignee")).toHaveValue("user-1");
+    });
+    expect(
+      screen.queryByRole("option", { name: /former/i }),
+    ).not.toBeInTheDocument();
   });
 });

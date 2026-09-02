@@ -1,16 +1,13 @@
 import Link from "next/link";
 
 import type { ThreadRow } from "../queries";
+import { humanizeMachineValue } from "@/lib/presentation/system-labels";
 
 import { isOlderThan, RelativeTime } from "./relative-time";
 
 type Props = { threads: ThreadRow[]; totalCount: number; nowMs: number };
 
-export function ThreadsNeedingAttention({
-  threads,
-  totalCount,
-  nowMs,
-}: Props) {
+export function ThreadsNeedingAttention({ threads, totalCount, nowMs }: Props) {
   if (threads.length === 0) {
     return (
       <div className="border-border bg-card rounded-2xl border px-5 py-5">
@@ -51,7 +48,7 @@ export function ThreadsNeedingAttention({
                   </div>
                   {t.last_ai_escalation_reason && (
                     <div className="text-muted-foreground mt-1 truncate text-xs italic">
-                      {t.last_ai_escalation_reason}
+                      {humanizeMachineValue(t.last_ai_escalation_reason)}
                     </div>
                   )}
                 </div>

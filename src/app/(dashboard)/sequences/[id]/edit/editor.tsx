@@ -94,6 +94,7 @@ function DelayInput({
   return (
     <div className="flex items-center gap-2">
       <Input
+        aria-label="Delay amount"
         type="number"
         min={0}
         step={1}
@@ -103,6 +104,7 @@ function DelayInput({
         className="w-24"
       />
       <select
+        aria-label="Delay unit"
         value={unit}
         onChange={(e) => apply(amount, e.target.value as DelayUnit)}
         className="border-input rounded-md border px-2 py-1.5 text-sm"

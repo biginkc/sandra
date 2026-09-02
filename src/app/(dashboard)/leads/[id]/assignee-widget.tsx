@@ -18,7 +18,11 @@ import {
   teamMemberSecondaryLabel,
 } from "@/lib/auth/team-member";
 
-import { listOrgUsers, updateLeadAssignee, type TeamMember } from "../actions";
+import {
+  listPropertyOrgUsers,
+  updateLeadAssignee,
+  type TeamMember,
+} from "../actions";
 
 type Props = {
   propertyId: string;
@@ -50,16 +54,26 @@ export function LeadAssigneeWidget({
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [pending, startTransition] = useTransition();
 
   const loadMembers = () => {
     if (loaded || loading) return;
     setLoading(true);
-    listOrgUsers()
+    listPropertyOrgUsers(propertyId)
       .then((result) => {
         if (result.ok) {
-          setMembers(result.data);
+          setMembers(
+            result.data.filter(
+              (member) =>
+                member.isActive !== false &&
+                (member.displayName || member.email),
+            ),
+          );
           setLoaded(true);
+          setLoadError(false);
+        } else {
+          setLoadError(true);
         }
       })
       .finally(() => setLoading(false));
@@ -110,7 +124,7 @@ export function LeadAssigneeWidget({
             variant="outline"
             size="sm"
             disabled={pending}
-            aria-label="Change assignee"
+            aria-label={`Change assignee. Current owner: ${label}`}
           >
             <UserIcon className="mr-1 size-3.5" />
             <span>{label}</span>
@@ -120,6 +134,11 @@ export function LeadAssigneeWidget({
       />
       <DropdownMenuContent align="start" className="max-h-80 overflow-auto">
         {loading && <DropdownMenuItem disabled>Loading team…</DropdownMenuItem>}
+        {loadError && (
+          <DropdownMenuItem disabled>
+            Team members could not be loaded.
+          </DropdownMenuItem>
+        )}
         {loaded && members.length === 0 && (
           <DropdownMenuItem disabled>No team members found.</DropdownMenuItem>
         )}

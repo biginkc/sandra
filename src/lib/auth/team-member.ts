@@ -9,7 +9,9 @@ export type TeamMember = {
   isActive?: boolean;
 };
 
-type AuthIdentity = Pick<User, "id" | "email" | "user_metadata">;
+type AuthIdentity = Pick<User, "id" | "email" | "user_metadata"> & {
+  app_metadata?: User["app_metadata"];
+};
 
 function cleanMetadataValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -21,12 +23,31 @@ function cleanMetadataValue(value: unknown): string | null {
  * person's name and is especially misleading for shared or role accounts.
  */
 export function authoritativeDisplayName(
-  user: Pick<AuthIdentity, "user_metadata"> | null | undefined,
+  user:
+    | {
+        user_metadata?: User["user_metadata"];
+        app_metadata?: User["app_metadata"];
+        email?: string | null;
+      }
+    | null
+    | undefined,
 ): string | null {
+  const administratorMetadata = user?.app_metadata ?? {};
+  for (const key of ["display_name", "full_name", "name"] as const) {
+    const value = cleanMetadataValue(administratorMetadata[key]);
+    if (value) return value;
+  }
+
+  // Legacy Sandra identities were created by an administrator with names in
+  // user_metadata. Keep those readable during the Hugo app_metadata migration,
+  // but never treat an email address copied into a name field as a real name.
   const metadata = user?.user_metadata ?? {};
   for (const key of ["display_name", "full_name", "name"] as const) {
     const value = cleanMetadataValue(metadata[key]);
-    if (value) return value;
+    const email = cleanMetadataValue(
+      (user as { email?: unknown } | null)?.email,
+    )?.toLowerCase();
+    if (value && value.toLowerCase() !== email) return value;
   }
 
   const givenName = cleanMetadataValue(metadata.given_name);

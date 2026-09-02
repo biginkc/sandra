@@ -3,7 +3,7 @@ import { Suspense } from "react";
 import { Page } from "@/components/page";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { getCallerMemberships } from "@/lib/auth/memberships";
-import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
+import { loadTeamMembersForOrgs } from "@/lib/auth/team-roster";
 import { createClient } from "@/lib/supabase/server";
 import {
   applyFilters,
@@ -147,7 +147,8 @@ export default async function PropertiesPage({
   // PresetDropdown components, which all need an orgId prop to scope the
   // saved_filters reads + writes.
   const memberships = await getCallerMemberships();
-  const orgId = memberships[0]?.org_id ?? "";
+  const orgIds = memberships.map((membership) => membership.org_id);
+  const orgId = orgIds[0] ?? "";
 
   // Plan 09 — base properties query. Per the gotchas in 05-09-PLAN.md, when
   // the block stack contains a pipeline_status block we DROP the hardcoded
@@ -230,8 +231,8 @@ export default async function PropertiesPage({
       .eq("category", "custom")
       .eq("system_managed", false)
       .order("name", { ascending: true }),
-    loadOrgTeamMembers(orgId).catch(() => []),
-    loadOrgTeamMembers(orgId, { includeInactiveMembers: true }).catch(() => []),
+    loadTeamMembersForOrgs(orgIds),
+    loadTeamMembersForOrgs(orgIds, { includeInactiveMembers: true }),
     supabase
       .from("saved_filters")
       .select("id, name, filters_json, starred, is_base")

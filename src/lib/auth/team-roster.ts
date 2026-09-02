@@ -2,7 +2,10 @@ import "server-only";
 
 import type { User } from "@supabase/supabase-js";
 
-import { hasActiveSandraAccess } from "@/lib/auth/access-state";
+import {
+  hasActiveSandraAccess,
+  isMissingHugoAccessColumnError,
+} from "@/lib/auth/access-state";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import {
@@ -84,13 +87,38 @@ export async function loadOrgTeamMembers(
   if (!orgId) return [];
 
   const admin = createAdminClient();
-  const { data, error } = await admin
+  const membershipResult = await admin
     .from("memberships")
     .select("user_id, access_status, access_expires_at, deletion_prepared_at")
     .eq("org_id", orgId)
     .order("user_id", { ascending: true })
     .limit(TEAM_ROSTER_CAP + 1);
-  if (error) throw error;
+  let data = membershipResult.data;
+  const { error } = membershipResult;
+  if (error) {
+    const allowLocalE2ePasswordSession =
+      process.env.NODE_ENV !== "production" &&
+      process.env.E2E_AUTH_BYPASS === "1";
+    if (
+      !allowLocalE2ePasswordSession ||
+      !isMissingHugoAccessColumnError(error)
+    ) {
+      throw error;
+    }
+    const legacy = await admin
+      .from("memberships")
+      .select("user_id")
+      .eq("org_id", orgId)
+      .order("user_id", { ascending: true })
+      .limit(TEAM_ROSTER_CAP + 1);
+    if (legacy.error) throw legacy.error;
+    data = (legacy.data ?? []).map((membership) => ({
+      ...membership,
+      access_status: "active",
+      access_expires_at: null,
+      deletion_prepared_at: null,
+    }));
+  }
 
   const memberships = (data ?? []) as MembershipRow[];
   if (memberships.length > TEAM_ROSTER_CAP) {
@@ -102,13 +130,16 @@ export async function loadOrgTeamMembers(
       .map((membership) => membership.user_id),
   );
   const historicalIds = options.historicalAssigneeIds ?? [];
+  const membershipIds = new Set(
+    memberships.map((membership) => membership.user_id),
+  );
   const inactiveMembershipIds = options.includeInactiveMembers
     ? memberships.map((membership) => membership.user_id)
     : [];
   const neededIds = new Set([
     ...activeIds,
     ...inactiveMembershipIds,
-    ...historicalIds.filter(Boolean),
+    ...historicalIds.filter((id) => Boolean(id) && membershipIds.has(id)),
   ]);
   const usersById = await listNeededAuthUsers(
     neededIds,
@@ -126,5 +157,38 @@ export async function loadOrgTeamMembers(
     } satisfies TeamMember;
   });
 
+  if (
+    !options.allowMissingIdentityLabels &&
+    members.some(
+      (member) => member.isActive && !member.displayName && !member.email,
+    )
+  ) {
+    throw new Error(
+      "An active organization member has no verified identity label.",
+    );
+  }
+
   return sortTeamMembers(members);
+}
+
+/**
+ * Merge explicitly scoped organization rosters for cross-org pages. A user
+ * keeps one stable option; active membership wins over former membership.
+ */
+export async function loadTeamMembersForOrgs(
+  orgIds: readonly string[],
+  options: Parameters<typeof loadOrgTeamMembers>[1] = {},
+): Promise<TeamMember[]> {
+  const uniqueOrgIds = [...new Set(orgIds.filter(Boolean))];
+  const rosters = await Promise.all(
+    uniqueOrgIds.map((orgId) => loadOrgTeamMembers(orgId, options)),
+  );
+  const byId = new Map<string, TeamMember>();
+  for (const member of rosters.flat()) {
+    const current = byId.get(member.id);
+    if (!current || (current.isActive === false && member.isActive !== false)) {
+      byId.set(member.id, member);
+    }
+  }
+  return sortTeamMembers([...byId.values()]);
 }

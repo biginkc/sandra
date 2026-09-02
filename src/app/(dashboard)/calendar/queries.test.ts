@@ -582,8 +582,8 @@ describe("fetchOrgRoster", () => {
       ok: true,
       labelsDegraded: false,
       roster: [
-        { id: "user-1", label: "Olivia Owner" },
-        { id: "rep-2", label: "Riley Rep" },
+        { id: "user-1", label: "Olivia Owner — owner@bmh.com" },
+        { id: "rep-2", label: "Riley Rep — rep2@bmh.com" },
       ],
     });
   });
@@ -619,8 +619,11 @@ describe("fetchOrgRoster", () => {
       ok: true,
       labelsDegraded: false,
       roster: [
-        { id: "active-1", label: "Active Agent" },
-        { id: "former-1", label: "Former Agent (former)" },
+        { id: "active-1", label: "Active Agent — active@example.test" },
+        {
+          id: "former-1",
+          label: "Former Agent (former) — former@example.test",
+        },
       ],
     });
   });
@@ -652,7 +655,7 @@ describe("fetchOrgRoster", () => {
     expect(result).toEqual({
       ok: true,
       labelsDegraded: false,
-      roster: [{ id: "rep-2", label: "Riley Rep" }],
+      roster: [{ id: "rep-2", label: "Riley Rep — rep2@bmh.com" }],
     });
   });
 
@@ -701,7 +704,7 @@ describe("fetchOrgRoster", () => {
       labelsDegraded: true,
       roster: [
         { id: "rep-2", label: "Name not set" },
-        { id: "user-1", label: "owner@bmh.com" },
+        { id: "user-1", label: "owner@bmh.com — name not set" },
       ],
     });
   });
@@ -725,7 +728,7 @@ describe("fetchOrgRoster", () => {
       labelsDegraded: true,
       roster: [
         { id: "rep-2", label: "Name not set" },
-        { id: "user-1", label: "owner@bmh.com" },
+        { id: "user-1", label: "owner@bmh.com — name not set" },
       ],
     });
   });
