@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -53,7 +53,10 @@ async function seedConsumer(opts: {
 }
 
 async function clearConsumers(): Promise<void> {
-  await testClient.from("webhook_consumers").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+  await testClient
+    .from("webhook_consumers")
+    .delete()
+    .neq("id", "00000000-0000-0000-0000-000000000000");
 }
 
 function makeRequest(body: unknown, secret: string): Request {
@@ -70,8 +73,13 @@ function makeContext(secret: string) {
 
 describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
   beforeEach(async () => {
+    vi.stubEnv("TELNYX_API_KEY", "");
     await resetTenantTables(testClient);
     await clearConsumers();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("happy path: matched consumer creates property with row's default_source applied", async () => {
@@ -100,7 +108,20 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
     );
     const response = await POST(request, makeContext(ENZO_SECRET));
     expect(response.status).toBe(200);
-    const json = (await response.json()) as { property_id: string };
+    const json = (await response.json()) as {
+      property_id: string;
+      was_duplicate: boolean;
+      contact_id: string;
+      phone_dropped: null;
+      phone_unverified: boolean;
+    };
+    expect(json).toEqual({
+      property_id: expect.any(String),
+      was_duplicate: false,
+      contact_id: expect.any(String),
+      phone_dropped: null,
+      phone_unverified: true,
+    });
 
     const { data: prop } = await testClient
       .from("properties")
@@ -108,6 +129,15 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
       .eq("id", json.property_id)
       .single();
     expect(prop!.source).toBe("cold_call");
+    const { data: contact } = await testClient
+      .from("contacts")
+      .select("phone_1, phone_1_type")
+      .eq("id", json.contact_id)
+      .single();
+    expect(contact).toMatchObject({
+      phone_1: "+18165552001",
+      phone_1_type: "unknown",
+    });
   });
 
   it("payload source overrides consumer default when present and valid", async () => {
@@ -159,7 +189,10 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
     });
 
     const response = await POST(
-      makeRequest({ property: { address: "4 Disabled Ln", state: "MO" } }, PPC_SECRET),
+      makeRequest(
+        { property: { address: "4 Disabled Ln", state: "MO" } },
+        PPC_SECRET,
+      ),
       makeContext(PPC_SECRET),
     );
     expect(response.status).toBe(403);
@@ -177,7 +210,10 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
     });
 
     const response = await POST(
-      makeRequest({ property: { address: "5b Wrong Type Ln", state: "MO" } }, PPC_SECRET),
+      makeRequest(
+        { property: { address: "5b Wrong Type Ln", state: "MO" } },
+        PPC_SECRET,
+      ),
       makeContext(PPC_SECRET),
     );
     expect(response.status).toBe(403);
@@ -192,7 +228,10 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
     });
 
     const response = await POST(
-      makeRequest({ property: { address: "5 Revoked Ln", state: "MO" } }, PPC_SECRET),
+      makeRequest(
+        { property: { address: "5 Revoked Ln", state: "MO" } },
+        PPC_SECRET,
+      ),
       makeContext(PPC_SECRET),
     );
     expect(response.status).toBe(403);
@@ -200,7 +239,10 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
 
   it("rejects with 403 when secret is too short (defensive)", async () => {
     const response = await POST(
-      makeRequest({ property: { address: "6 Short Ln", state: "MO" } }, "short"),
+      makeRequest(
+        { property: { address: "6 Short Ln", state: "MO" } },
+        "short",
+      ),
       makeContext("short"),
     );
     expect(response.status).toBe(403);
@@ -219,13 +261,19 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
     });
 
     const enzoResp = await POST(
-      makeRequest({ property: { address: "10 Enzo Ln", state: "MO" } }, ENZO_SECRET),
+      makeRequest(
+        { property: { address: "10 Enzo Ln", state: "MO" } },
+        ENZO_SECRET,
+      ),
       makeContext(ENZO_SECRET),
     );
     const enzoJson = (await enzoResp.json()) as { property_id: string };
 
     const ppcResp = await POST(
-      makeRequest({ property: { address: "20 PPC Ln", state: "MO" } }, PPC_SECRET),
+      makeRequest(
+        { property: { address: "20 PPC Ln", state: "MO" } },
+        PPC_SECRET,
+      ),
       makeContext(PPC_SECRET),
     );
     const ppcJson = (await ppcResp.json()) as { property_id: string };
@@ -246,7 +294,9 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
   });
 
   it("uses the matched consumer organization when two tenants submit the same address", async () => {
-    await testClient.from("organizations").upsert({ id: OTHER_ORG_ID, name: "Other org" });
+    await testClient
+      .from("organizations")
+      .upsert({ id: OTHER_ORG_ID, name: "Other org" });
     await seedConsumer({
       name: "Tenant A",
       secret: ENZO_SECRET,
@@ -260,7 +310,9 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
       orgId: OTHER_ORG_ID,
     });
 
-    const payload = { property: { address: "25 Shared Webhook Way", state: "MO" } };
+    const payload = {
+      property: { address: "25 Shared Webhook Way", state: "MO" },
+    };
     const [responseA, responseB] = await Promise.all([
       POST(makeRequest(payload, ENZO_SECRET), makeContext(ENZO_SECRET)),
       POST(makeRequest(payload, PPC_SECRET), makeContext(PPC_SECRET)),
@@ -268,8 +320,14 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
     expect(responseA.status).toBe(200);
     expect(responseB.status).toBe(200);
     const [bodyA, bodyB] = await Promise.all([
-      responseA.json() as Promise<{ property_id: string; was_duplicate: boolean }>,
-      responseB.json() as Promise<{ property_id: string; was_duplicate: boolean }>,
+      responseA.json() as Promise<{
+        property_id: string;
+        was_duplicate: boolean;
+      }>,
+      responseB.json() as Promise<{
+        property_id: string;
+        was_duplicate: boolean;
+      }>,
     ]);
     expect(bodyA.property_id).not.toBe(bodyB.property_id);
     expect(bodyA.was_duplicate).toBe(false);
@@ -279,10 +337,12 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
       .from("properties")
       .select("id, org_id")
       .in("id", [bodyA.property_id, bodyB.property_id]);
-    expect(rows).toEqual(expect.arrayContaining([
-      { id: bodyA.property_id, org_id: ORG_ID },
-      { id: bodyB.property_id, org_id: OTHER_ORG_ID },
-    ]));
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { id: bodyA.property_id, org_id: ORG_ID },
+        { id: bodyB.property_id, org_id: OTHER_ORG_ID },
+      ]),
+    );
   });
 
   it("stamps last_used_at on the consumer row after a successful call", async () => {
@@ -293,7 +353,10 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
     });
 
     await POST(
-      makeRequest({ property: { address: "30 Stamp Ln", state: "MO" } }, ENZO_SECRET),
+      makeRequest(
+        { property: { address: "30 Stamp Ln", state: "MO" } },
+        ENZO_SECRET,
+      ),
       makeContext(ENZO_SECRET),
     );
 
@@ -332,7 +395,10 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
       defaultSource: "cold_call",
     });
 
-    const response = await POST(makeRequest("not json {{{", ENZO_SECRET), makeContext(ENZO_SECRET));
+    const response = await POST(
+      makeRequest("not json {{{", ENZO_SECRET),
+      makeContext(ENZO_SECRET),
+    );
     expect(response.status).toBe(400);
   });
 
@@ -343,8 +409,36 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
       defaultSource: "cold_call",
     });
 
-    const response = await POST(makeRequest({}, ENZO_SECRET), makeContext(ENZO_SECRET));
+    const response = await POST(
+      makeRequest({}, ENZO_SECRET),
+      makeContext(ENZO_SECRET),
+    );
     expect(response.status).toBe(400);
+  });
+
+  it("rejects a non-empty invalid phone with a field error", async () => {
+    await seedConsumer({
+      name: "Enzo",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
+    });
+
+    const response = await POST(
+      makeRequest(
+        {
+          property: { address: "41 Bad Phone Ln", state: "MO" },
+          contact: { phone_1: "123" },
+        },
+        ENZO_SECRET,
+      ),
+      makeContext(ENZO_SECRET),
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "Enter a valid 10-digit US phone number.",
+      field: "contact.phone_1",
+    });
   });
 
   it("idempotent on address: second call returns same property_id with was_duplicate=true", async () => {
@@ -355,13 +449,19 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
     });
 
     const first = await POST(
-      makeRequest({ property: { address: "100 Dedup St", state: "MO" } }, ENZO_SECRET),
+      makeRequest(
+        { property: { address: "100 Dedup St", state: "MO" } },
+        ENZO_SECRET,
+      ),
       makeContext(ENZO_SECRET),
     );
     const firstJson = (await first.json()) as { property_id: string };
 
     const second = await POST(
-      makeRequest({ property: { address: "100 Dedup St", state: "MO" } }, ENZO_SECRET),
+      makeRequest(
+        { property: { address: "100 Dedup St", state: "MO" } },
+        ENZO_SECRET,
+      ),
       makeContext(ENZO_SECRET),
     );
     expect(second.status).toBe(200);
@@ -421,13 +521,14 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
       }),
     );
 
-    const [{ count: propertyCount }, { count: contactCount }] = await Promise.all([
-      testClient
-        .from("properties")
-        .select("*", { count: "exact", head: true })
-        .eq("address", address),
-      testClient.from("contacts").select("*", { count: "exact", head: true }),
-    ]);
+    const [{ count: propertyCount }, { count: contactCount }] =
+      await Promise.all([
+        testClient
+          .from("properties")
+          .select("*", { count: "exact", head: true })
+          .eq("address", address),
+        testClient.from("contacts").select("*", { count: "exact", head: true }),
+      ]);
     expect(propertyCount).toBe(1);
     expect(contactCount).toBe(1);
   });

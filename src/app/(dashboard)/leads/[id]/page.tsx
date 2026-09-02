@@ -9,6 +9,7 @@ import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { leadNoticeMessage } from "@/lib/leads/notices";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
@@ -113,12 +114,10 @@ export default async function LeadDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams?: Promise<{ warning?: string }>;
+  searchParams?: Promise<{ notice?: string }>;
 }) {
   const { id } = await params;
-  // Degraded-save warning from the new-lead form (e.g. phone parked on
-  // notes because line-type classification was unavailable).
-  const warning = (await searchParams)?.warning ?? null;
+  const warning = leadNoticeMessage((await searchParams)?.notice);
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("properties")

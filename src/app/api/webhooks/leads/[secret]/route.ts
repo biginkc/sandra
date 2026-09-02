@@ -149,7 +149,10 @@ export async function POST(
   }
 
   if (!body || typeof body !== "object") {
-    return NextResponse.json({ error: "Body must be an object" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Body must be an object" },
+      { status: 400 },
+    );
   }
 
   // Resolve effective source: payload overrides consumer default if
@@ -200,10 +203,7 @@ export async function POST(
       tags: { surface: "lead_webhook" },
       extra: { consumer: consumer.name, source: effectiveSource },
     });
-    return NextResponse.json(
-      { error: result.error.message },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: result.error.message }, { status: 500 });
   }
 
   // Stamp last_used_at for the audit trail. Non-fatal on failure —
@@ -224,9 +224,9 @@ export async function POST(
     property_id: result.data.propertyId,
     was_duplicate: result.data.wasDuplicate,
     contact_id: result.data.contactId,
-    // Non-null when the submitted phone couldn't be classified and was
-    // parked on the contact's notes instead of saved as a phone slot
-    // (hard rule). Senders polling this response can alert on it.
-    phone_dropped: result.data.phoneDropped,
+    // Kept for webhook compatibility. Phones are no longer dropped when
+    // line-type lookup is unavailable.
+    phone_dropped: null,
+    phone_unverified: result.data.phoneUnverified,
   });
 }

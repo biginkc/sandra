@@ -63,7 +63,7 @@ describe("AddLeadDialog", () => {
       data: {
         propertyId: "property-1",
         wasDuplicate: false,
-        phoneDropped: null,
+        phoneUnverified: false,
       },
     });
     renderDialog();
@@ -128,7 +128,7 @@ describe("AddLeadDialog", () => {
     const user = userEvent.setup();
     let resolveSave!: (value: {
       ok: true;
-      data: { propertyId: string; wasDuplicate: false; phoneDropped: null };
+      data: { propertyId: string; wasDuplicate: false; phoneUnverified: false };
     }) => void;
     createLeadFromForm.mockImplementation(
       () =>
@@ -153,10 +153,12 @@ describe("AddLeadDialog", () => {
       data: {
         propertyId: "property-1",
         wasDuplicate: false,
-        phoneDropped: null,
+        phoneUnverified: false,
       },
     });
-    expect(await screen.findByRole("button", { name: "Add lead" })).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: "Add lead" }),
+    ).toBeVisible();
     expect(routerPush).toHaveBeenCalledTimes(1);
   });
 
@@ -167,7 +169,7 @@ describe("AddLeadDialog", () => {
       data: {
         propertyId: "property-existing",
         wasDuplicate: true,
-        phoneDropped: null,
+        phoneUnverified: false,
       },
     });
     renderDialog();
@@ -183,7 +185,31 @@ describe("AddLeadDialog", () => {
     expect(screen.getByRole("dialog")).toBeVisible();
     expect(routerPush).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Open existing lead" }));
+    await user.click(
+      screen.getByRole("button", { name: "Open existing lead" }),
+    );
     expect(routerPush).toHaveBeenCalledWith("/leads/property-existing");
+  });
+
+  it("uses a fixed notice code when the saved phone is unverified", async () => {
+    const user = userEvent.setup();
+    createLeadFromForm.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-unverified",
+        wasDuplicate: false,
+        phoneUnverified: true,
+      },
+    });
+    renderDialog();
+
+    await user.click(screen.getByRole("button", { name: "Add lead" }));
+    await user.type(screen.getByLabelText("Street address"), "123 Main St");
+    await user.type(screen.getByLabelText("Phone"), "8165550100");
+    await user.click(screen.getByRole("button", { name: "Create lead" }));
+
+    expect(routerPush).toHaveBeenCalledWith(
+      "/leads/property-unverified?notice=phone_unverified",
+    );
   });
 });

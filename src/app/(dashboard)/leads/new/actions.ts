@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { createLead } from "@/lib/leads/create";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_PHONE_UNVERIFIED_NOTICE } from "@/lib/leads/notices";
 import type { LeadSource } from "@/lib/leads/sources";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -12,9 +13,8 @@ import { createClient } from "@/lib/supabase/server";
 export type NewLeadFormResult = Result<{
   propertyId: string;
   wasDuplicate: boolean;
-  /** Phone that couldn't be classified and was parked on the contact's
-   *  notes instead of saved as a callable number (hard rule). */
-  phoneDropped: string | null;
+  /** True when the phone was saved but its line type could not be verified. */
+  phoneUnverified: boolean;
 }>;
 
 /**
@@ -150,7 +150,7 @@ export async function createLeadFromForm(
     return ok({
       propertyId: result.data.propertyId,
       wasDuplicate: result.data.wasDuplicate,
-      phoneDropped: result.data.phoneDropped,
+      phoneUnverified: result.data.phoneUnverified,
     });
   } catch (e) {
     reportError(e, { tags: { surface: "create_lead_from_form" } });
@@ -190,14 +190,9 @@ export async function submitNewLead(formData: FormData): Promise<void> {
       `/leads/new?error=${encodeURIComponent("A lead already exists at this address. Open the existing record instead.")}`,
     );
   }
-  // Degraded save: the phone couldn't be classified and sits on the
-  // contact's notes instead of a phone slot. Land on the lead page
-  // with a warning param so the operator sees it immediately.
-  if (result.data.phoneDropped) {
+  if (result.data.phoneUnverified) {
     redirect(
-      `/leads/${result.data.propertyId}?warning=${encodeURIComponent(
-        `Phone ${result.data.phoneDropped} couldn't be classified (line-type lookup unavailable) — it's saved on the contact's notes, not as a callable number.`,
-      )}`,
+      `/leads/${result.data.propertyId}?notice=${LEAD_PHONE_UNVERIFIED_NOTICE}`,
     );
   }
   redirect(`/leads/${result.data.propertyId}`);
