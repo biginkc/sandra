@@ -39,11 +39,11 @@
       "statementsSha256": "5abfc78a20255fdb4df5e24e75fdde1cbb3872b096e8d1a3a6b8441a9a9891eb"
     },
     {
-      "version": "20260902143000",
+      "version": "20260902180000",
       "name": "esign_essentials_production_path",
-      "path": "supabase/migrations/20260902143000_esign_essentials_production_path.sql",
-      "sha256": "8497cd0af9b44c55ee5e4a99c38b32d9bb2cfba8fe173b9900713a4883de7268",
-      "statementsSha256": "188e0f7b6862666f5dd13e13cc87b57d0b7eec16428249b36a8370e0559ef94f"
+      "path": "supabase/migrations/20260902180000_esign_essentials_production_path.sql",
+      "sha256": "4dbe2475de33f4f896bdeed55795b81f3656f61bb43a199a58eadb00df19870b",
+      "statementsSha256": "27d1b220f80f1da5656665ff5a3fd3e0b515075c116c066418709f61ba1d198b"
     }
   ]
 }

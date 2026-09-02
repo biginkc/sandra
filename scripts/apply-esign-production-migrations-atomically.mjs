@@ -241,7 +241,7 @@ export function loadReviewedPlan(planPath = DEFAULT_PLAN_PATH, options = {}) {
   const versions = plan.migrations.map((entry) => entry.version);
   if (
     versions.join(",") !==
-    "20260829194500,20260830080000,20260830100000,20260902120100,20260902143000"
+    "20260829194500,20260830080000,20260830100000,20260902120100,20260902180000"
   ) {
     throw new Error("The reviewed plan does not contain the exact eSign migration order.");
   }
@@ -371,11 +371,21 @@ function classifyMigrationHistory(observation, plan) {
   const applied = plan.migrations.filter((entry) =>
     observation.history.some((row) => row.version === entry.version),
   );
-  if (applied.length !== 0 && applied.length !== plan.migrations.length) {
+  const oldAppliedVersions = plan.migrations.slice(0, -1).map((entry) => entry.version);
+  const appliedVersions = applied.map((entry) => entry.version);
+  const isSafeOldFourLedger =
+    plan.migrations.length === 5 &&
+    appliedVersions.length === oldAppliedVersions.length &&
+    appliedVersions.every((version, index) => version === oldAppliedVersions[index]);
+  if (
+    applied.length !== 0 &&
+    applied.length !== plan.migrations.length &&
+    !isSafeOldFourLedger
+  ) {
     throw new Error("The eSign atomic migration ledger is partial; refusing to guess recovery state.");
   }
-  if (applied.length === plan.migrations.length) {
-    for (const entry of plan.migrations) {
+  if (applied.length === plan.migrations.length || isSafeOldFourLedger) {
+    for (const entry of applied) {
       const row = observation.history.find((candidate) => candidate.version === entry.version);
       if (
         row.name !== entry.name ||
@@ -388,7 +398,7 @@ function classifyMigrationHistory(observation, plan) {
   for (const [name, count] of Object.entries(observation.counts)) {
     if (Number(count) !== 0) throw new Error(`Preflight ${name} must be zero; observed ${count}.`);
   }
-  return applied.length === 0 ? "pending" : "already_applied";
+  return applied.length === plan.migrations.length ? "already_applied" : "pending";
 }
 
 function safeSnapshot(observation, plan) {
@@ -475,7 +485,11 @@ export async function applyProductionPacket(client, plan, snapshot, options = {}
     assertSnapshotMatches(snapshot, lockedObservation, plan);
 
     if (historyOutcome === "pending") {
+      const appliedVersions = new Set(
+        lockedObservation.history.map((row) => row.version),
+      );
       for (const entry of plan.migrations) {
+        if (appliedVersions.has(entry.version)) continue;
         for (const statement of migrationBodyStatements(entry)) {
           await client.query(statement);
         }

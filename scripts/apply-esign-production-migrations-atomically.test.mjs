@@ -31,7 +31,7 @@ function hash(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function packetHarness(plan) {
+function packetHarness(plan, options = {}) {
   const protectedSwitchboard = [];
   const counts = {
     switchboard_consumers: 0,
@@ -51,6 +51,13 @@ function packetHarness(plan) {
     },
   ];
   const calls = [];
+  const historyRows = options.historyRows ?? [
+    {
+      version: plan.switchboard.version,
+      name: plan.switchboard.name,
+      statements: plan.switchboard.statements,
+    },
+  ];
   const client = {
     async query(sql, params) {
       calls.push({ sql, params });
@@ -59,13 +66,7 @@ function packetHarness(plan) {
       }
       if (/from supabase_migrations\.schema_migrations/u.test(sql)) {
         return {
-          rows: [
-            {
-              version: plan.switchboard.version,
-              name: plan.switchboard.name,
-              statements: plan.switchboard.statements,
-            },
-          ],
+          rows: historyRows,
         };
       }
       if (/jsonb_build_object/u.test(sql)) {
@@ -114,7 +115,7 @@ test("reviewed packet pins exact file and statement-array identities", () => {
       "20260830080000",
       "20260830100000",
       "20260902120100",
-      "20260902143000",
+      "20260902180000",
     ],
   );
   for (const entry of manifest.migrations) {
@@ -128,6 +129,43 @@ test("reviewed packet pins exact file and statement-array identities", () => {
     const plan = loadReviewedPlan(planPath);
     assert.equal(plan.switchboard.statements.length, 32);
   }
+});
+
+test("applyProductionPacket upgrades the already-applied four-row ledger by applying only the new migration", async () => {
+  const plan = loadReviewedPlan(planPath);
+  const oldFour = plan.migrations.slice(0, 4).map((entry) => ({
+    version: entry.version,
+    name: entry.name,
+    statements: entry.statements,
+  }));
+  const { calls, client, snapshot } = packetHarness(plan, {
+    historyRows: [
+      {
+        version: plan.switchboard.version,
+        name: plan.switchboard.name,
+        statements: plan.switchboard.statements,
+      },
+      ...oldFour,
+    ],
+  });
+
+  await assert.doesNotReject(
+    applyProductionPacket(client, plan, snapshot, {
+      beforeCommit: async () => {},
+    }),
+  );
+
+  const ledgerInserts = calls.filter((call) =>
+    /insert into supabase_migrations\.schema_migrations/u.test(call.sql),
+  );
+  assert.deepEqual(
+    ledgerInserts.map((call) => call.params?.[0]),
+    ["20260902180000"],
+  );
+  assert.equal(
+    calls.some((call) => call.params?.[0] === "20260829194500"),
+    false,
+  );
 });
 
 test("reviewed packet includes the disconnect state migration", () => {

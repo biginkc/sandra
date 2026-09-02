@@ -7,12 +7,18 @@ alter table public.org_esign_integrations
   drop constraint if exists org_esign_integrations_test_mode_check,
   add column if not exists live_send_monthly_limit integer not null default 40,
   add column if not exists live_send_monthly_used integer not null default 0,
+  add column if not exists live_send_monthly_period_key text not null
+    default to_char(now() at time zone 'America/Chicago', 'YYYY-MM'),
   add column if not exists live_send_monthly_period_started_at timestamptz
-    not null default date_trunc('month', now()),
+    not null default (
+      date_trunc('month', now() at time zone 'America/Chicago')
+        at time zone 'America/Chicago'
+    ),
   drop constraint if exists org_esign_integrations_live_send_monthly_limit_check,
   add constraint org_esign_integrations_live_send_monthly_limit_check check (
     live_send_monthly_limit between 1 and 40
     and live_send_monthly_used between 0 and live_send_monthly_limit
+    and live_send_monthly_period_key ~ '^[0-9]{4}-[0-9]{2}$'
   );
 
 comment on column public.org_esign_integrations.test_mode is
@@ -21,6 +27,8 @@ comment on column public.org_esign_integrations.live_send_monthly_limit is
   'Sandra-owned live send ceiling. It cannot account for manual Dropbox Sign sends or other clients.';
 comment on column public.org_esign_integrations.live_send_monthly_used is
   'Atomic Sandra live-send reservations in the current monthly period.';
+comment on column public.org_esign_integrations.live_send_monthly_period_key is
+  'America/Chicago YYYY-MM period for Sandra-owned live-send reservations.';
 
 alter table public.esign_requests
   drop constraint if exists esign_requests_test_mode_check,
@@ -110,10 +118,13 @@ comment on column public.esign_templates.provider_metadata is
 drop index if exists public.idx_esign_templates_provider_id;
 create unique index idx_esign_templates_provider_id
   on public.esign_templates (provider_account_id, sign_template_id)
-  where sign_template_id is not null and deleted_at is null;
+  where sign_template_id is not null;
+
+drop function if exists public.esign_website_template_metadata_is_valid(text, jsonb);
 
 create or replace function public.esign_website_template_metadata_is_valid(
   p_provider_template_id text,
+  p_provider_account_id text,
   p_metadata jsonb
 )
 returns boolean
@@ -122,27 +133,57 @@ immutable
 set search_path = public, pg_temp
 as $$
   select btrim(coalesce(p_provider_template_id, '')) <> ''
+    and btrim(coalesce(p_provider_account_id, '')) <> ''
     and jsonb_typeof(p_metadata) = 'object'
     and p_metadata ->> 'providerTemplateId' = p_provider_template_id
     and (p_metadata ->> 'isEmbedded')::boolean is false
-    and coalesce(p_metadata -> 'signerRoles', '[]'::jsonb) =
-      jsonb_build_array(jsonb_build_object('name', 'Seller', 'order', 0))
-    and array(
-      select jsonb_array_elements_text(coalesce(p_metadata -> 'mergeFieldNames', '[]'::jsonb))
-      order by 1
-    ) = array[
-      'closing_date',
-      'earnest_money',
-      'offer_price',
-      'property_address',
-      'seller_name'
-    ]::text[];
+    and coalesce((p_metadata ->> 'canEdit')::boolean, false) is true
+    and coalesce((p_metadata ->> 'isLocked')::boolean, false) is false
+    and case
+      when jsonb_typeof(p_metadata -> 'accounts') = 'array' then exists (
+        select 1
+        from jsonb_array_elements(p_metadata -> 'accounts') account(value)
+        where account.value ->> 'accountId' = p_provider_account_id
+      )
+      else false
+    end
+    and case
+      when jsonb_typeof(p_metadata -> 'signerRoles') = 'array' then
+        p_metadata -> 'signerRoles' =
+          jsonb_build_array(
+            jsonb_build_object('name', 'Seller', 'order', 0),
+            jsonb_build_object('name', 'Buyer', 'order', 1)
+          )
+      else false
+    end
+    and case
+      when jsonb_typeof(p_metadata -> 'mergeFieldNames') = 'array' then
+        jsonb_array_length(p_metadata -> 'mergeFieldNames') = 5
+        and array(
+          select jsonb_array_elements_text(p_metadata -> 'mergeFieldNames')
+          order by 1
+        ) = array[
+          'closing_date',
+          'earnest_money',
+          'offer_price',
+          'property_address',
+          'seller_name'
+        ]::text[]
+      else false
+    end;
 $$;
 
-revoke all on function public.esign_website_template_metadata_is_valid(text, jsonb)
+revoke all on function public.esign_website_template_metadata_is_valid(text, text, jsonb)
   from public, anon, authenticated;
-grant execute on function public.esign_website_template_metadata_is_valid(text, jsonb)
+grant execute on function public.esign_website_template_metadata_is_valid(text, text, jsonb)
   to service_role;
+
+grant select (
+  live_send_monthly_limit,
+  live_send_monthly_used,
+  live_send_monthly_period_key,
+  live_send_monthly_period_started_at
+) on public.org_esign_integrations to authenticated;
 
 create or replace function public.esign_template_is_available(
   p_template_id uuid,
@@ -171,6 +212,17 @@ as $$
       and template.finalized_at is not null
       and template.sign_template_id is not null
       and template.provider_metadata_unavailable_at is null
+      and (
+        template.template_origin = 'sandra_embedded'
+        or (
+          template.provider_metadata_attested_at >= now() - interval '30 days'
+          and public.esign_website_template_metadata_is_valid(
+            template.sign_template_id,
+            template.provider_account_id,
+            template.provider_metadata
+          )
+        )
+      )
       and integration.api_key_encrypted is not null
       and integration.api_key_last_four is not null
       and integration.client_id is not null
@@ -263,7 +315,7 @@ begin
   end if;
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
   if not public.esign_website_template_metadata_is_valid(
-    p_provider_template_id, p_provider_metadata
+    p_provider_template_id, p_provider_account_id, p_provider_metadata
   ) then
     raise exception 'Dropbox Sign template metadata does not match Sandra eSign requirements'
       using errcode = '23514';
@@ -287,7 +339,6 @@ begin
   from public.esign_templates template
   where template.provider_account_id = p_provider_account_id
     and template.sign_template_id = p_provider_template_id
-    and template.deleted_at is null
   for update;
   if found then
     if v_existing.org_id <> p_org_id then
@@ -301,6 +352,8 @@ begin
     update public.esign_templates
     set name = btrim(p_name),
         document_type = btrim(p_document_type),
+        deleted_at = null,
+        deleted_by = null,
         provider_metadata = p_provider_metadata,
         provider_metadata_attested_at = now(),
         provider_metadata_unavailable_at = null,
@@ -309,7 +362,9 @@ begin
         updated_at = now()
     where id = v_existing.id
       and org_id = p_org_id;
-    return query select 'existing'::text, v_existing.id;
+    return query select
+      case when v_existing.deleted_at is null then 'existing' else 'restored' end,
+      v_existing.id;
     return;
   end if;
   insert into public.esign_templates (
@@ -319,7 +374,10 @@ begin
     created_by, updated_by
   ) values (
     p_org_id, btrim(p_name), btrim(p_document_type), 'Seller',
-    jsonb_build_array(jsonb_build_object('name', 'Seller', 'order', 0)),
+    jsonb_build_array(
+      jsonb_build_object('name', 'Seller', 'order', 0),
+      jsonb_build_object('name', 'Buyer', 'order', 1)
+    ),
     array[
       'seller_name',
       'property_address',
@@ -346,7 +404,6 @@ create or replace function public.mark_dropbox_website_esign_template_unavailabl
   p_org_id uuid,
   p_actor_id uuid,
   p_template_id uuid,
-  p_provider_template_id text,
   p_reason text
 )
 returns void
@@ -379,7 +436,6 @@ begin
     and template.org_id = p_org_id
     and template.template_origin = 'dropbox_website'
     and template.provider_account_id = v_integration.provider_account_id
-    and template.sign_template_id = p_provider_template_id
     and template.deleted_at is null
   for update;
   if not found then
@@ -396,11 +452,15 @@ end;
 $$;
 
 revoke all on function public.mark_dropbox_website_esign_template_unavailable(
-  uuid, uuid, uuid, text, text
+  uuid, uuid, uuid, text
 ) from public, anon, authenticated, service_role;
 grant execute on function public.mark_dropbox_website_esign_template_unavailable(
-  uuid, uuid, uuid, text, text
+  uuid, uuid, uuid, text
 ) to service_role;
+
+drop function if exists public.mark_dropbox_website_esign_template_unavailable(
+  uuid, uuid, uuid, text, text
+);
 
 create or replace function public.set_org_esign_test_mode(
   p_org_id uuid,
@@ -455,6 +515,12 @@ as $$
 declare
   v_integration public.org_esign_integrations%rowtype;
   v_available_templates integer;
+  v_current_period_key text := to_char(now() at time zone 'America/Chicago', 'YYYY-MM');
+  v_current_period_started_at timestamptz :=
+    (
+      date_trunc('month', now() at time zone 'America/Chicago')
+        at time zone 'America/Chicago'
+    );
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'service role required' using errcode = '42501';
@@ -467,6 +533,20 @@ begin
   for update;
   if not found then
     raise exception 'Dropbox Sign is not connected' using errcode = 'P0002';
+  end if;
+  if not v_integration.test_mode
+     and v_integration.live_send_monthly_period_key <> v_current_period_key then
+    update public.org_esign_integrations
+    set live_send_monthly_used = 0,
+        live_send_monthly_period_key = v_current_period_key,
+        live_send_monthly_period_started_at = v_current_period_started_at,
+        updated_by = p_actor_id,
+        updated_at = now()
+    where org_id = p_org_id
+      and provider = 'dropbox_sign';
+    v_integration.live_send_monthly_used := 0;
+    v_integration.live_send_monthly_period_key := v_current_period_key;
+    v_integration.live_send_monthly_period_started_at := v_current_period_started_at;
   end if;
   if v_integration.disconnect_pending_at is not null then
     raise exception 'Finish active eSign work before re-enabling Dropbox Sign sending'
@@ -493,7 +573,13 @@ begin
       and template.template_origin = 'dropbox_website'
       and template.deleted_at is null
       and template.finalized_at is not null
+      and template.provider_metadata_attested_at >= now() - interval '30 days'
       and template.provider_metadata_unavailable_at is null
+      and public.esign_website_template_metadata_is_valid(
+        template.sign_template_id,
+        template.provider_account_id,
+        template.provider_metadata
+      )
       and public.esign_template_is_available(template.id, p_org_id);
     if v_available_templates = 0 then
       raise exception 'Register a Dropbox Sign website template before enabling live sending'
@@ -559,7 +645,7 @@ declare
   v_homeowner_contact public.contacts%rowtype;
   v_homeowner_contact_id uuid;
   v_submitted_seller_email text;
-  v_request_test_mode boolean := true;
+  v_request_test_mode boolean;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'service role required' using errcode = '42501';
@@ -581,7 +667,7 @@ begin
       null::uuid, p_org_id, p_property_id, p_template_id, p_send_intent_id,
       p_payload_hash, p_retry_of_request_id, p_signer_snapshot,
       p_merge_value_snapshot, null::public.esign_request_status,
-      null::public.esign_delivery_state, true, null::timestamptz;
+      null::public.esign_delivery_state, null::boolean, null::timestamptz;
     return;
   end if;
   select * into v_existing from public.esign_requests request
@@ -615,7 +701,7 @@ begin
       p_payload_hash, p_retry_of_request_id, p_signer_snapshot,
       p_merge_value_snapshot, null::public.esign_request_status,
       null::public.esign_delivery_state,
-      coalesce(v_integration.test_mode, true), null::timestamptz;
+      null::boolean, null::timestamptz;
     return;
   end if;
   v_request_test_mode := v_integration.test_mode;
@@ -628,6 +714,19 @@ begin
     and template.sign_template_id is not null
     and template.provider_account_id = v_integration.provider_account_id
     and public.esign_template_is_available(template.id, p_org_id)
+    and (
+      v_request_test_mode
+      or (
+        template.template_origin = 'dropbox_website'
+        and template.provider_metadata_attested_at >= now() - interval '30 days'
+        and template.provider_metadata_unavailable_at is null
+        and public.esign_website_template_metadata_is_valid(
+          template.sign_template_id,
+          template.provider_account_id,
+          template.provider_metadata
+        )
+      )
+    )
   for update;
   if not found then
     return query select
@@ -834,6 +933,12 @@ as $$
 declare
   v_request public.esign_requests%rowtype;
   v_integration public.org_esign_integrations%rowtype;
+  v_current_period_key text := to_char(now() at time zone 'America/Chicago', 'YYYY-MM');
+  v_current_period_started_at timestamptz :=
+    (
+      date_trunc('month', now() at time zone 'America/Chicago')
+        at time zone 'America/Chicago'
+    );
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'service role required' using errcode = '42501';
@@ -863,6 +968,18 @@ begin
   where integration.org_id = p_org_id
     and integration.provider = 'dropbox_sign'
   for update;
+  if found and v_integration.live_send_monthly_period_key <> v_current_period_key then
+    update public.org_esign_integrations
+    set live_send_monthly_used = 0,
+        live_send_monthly_period_key = v_current_period_key,
+        live_send_monthly_period_started_at = v_current_period_started_at,
+        updated_at = now()
+    where org_id = p_org_id
+      and provider = 'dropbox_sign';
+    v_integration.live_send_monthly_used := 0;
+    v_integration.live_send_monthly_period_key := v_current_period_key;
+    v_integration.live_send_monthly_period_started_at := v_current_period_started_at;
+  end if;
   if not found
      or v_integration.test_mode
      or not v_integration.sending_enabled

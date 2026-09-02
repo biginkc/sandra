@@ -4192,6 +4192,7 @@ export type Database = {
           disconnect_requested_by: string | null
           id: string
           live_send_monthly_limit: number
+          live_send_monthly_period_key: string
           live_send_monthly_period_started_at: string
           live_send_monthly_used: number
           org_id: string
@@ -4214,6 +4215,7 @@ export type Database = {
           disconnect_requested_by?: string | null
           id?: string
           live_send_monthly_limit?: number
+          live_send_monthly_period_key?: string
           live_send_monthly_period_started_at?: string
           live_send_monthly_used?: number
           org_id: string
@@ -4236,6 +4238,7 @@ export type Database = {
           disconnect_requested_by?: string | null
           id?: string
           live_send_monthly_limit?: number
+          live_send_monthly_period_key?: string
           live_send_monthly_period_started_at?: string
           live_send_monthly_used?: number
           org_id?: string
@@ -5088,7 +5091,11 @@ export type Database = {
         Returns: boolean
       }
       esign_website_template_metadata_is_valid: {
-        Args: { p_metadata: Json; p_provider_template_id: string }
+        Args: {
+          p_metadata: Json
+          p_provider_account_id: string
+          p_provider_template_id: string
+        }
         Returns: boolean
       }
       esign_storage_org_id: {
@@ -5200,7 +5207,6 @@ export type Database = {
         Args: {
           p_actor_id: string
           p_org_id: string
-          p_provider_template_id: string
           p_reason: string
           p_template_id: string
         }
