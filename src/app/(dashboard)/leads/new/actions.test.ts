@@ -1,16 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createLead, createClient, createAdminClient } = vi.hoisted(() => ({
-  createLead: vi.fn(),
-  createClient: vi.fn(),
-  createAdminClient: vi.fn(),
-}));
+const { createLead, createClient, createAdminClient, redirect } = vi.hoisted(
+  () => ({
+    createLead: vi.fn(),
+    createClient: vi.fn(),
+    createAdminClient: vi.fn(),
+    redirect: vi.fn(),
+  }),
+);
 
 vi.mock("@/lib/leads/create", () => ({ createLead }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
+vi.mock("next/navigation", () => ({ redirect }));
 
-import { createLeadFromForm } from "./actions";
+import { createLeadFromForm, submitNewLead } from "./actions";
 
 const baseInput = {
   source: "cold_call",
@@ -71,6 +75,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   createClient.mockResolvedValue(cookieClient());
   createAdminClient.mockReturnValue(adminMembershipResult());
+  redirect.mockImplementation((url: string) => {
+    throw new Error(`NEXT_REDIRECT:${url}`);
+  });
   createLead.mockResolvedValue({
     ok: true,
     data: {
@@ -79,6 +86,34 @@ beforeEach(() => {
       contactId: "contact-1",
       phoneUnverified: false,
     },
+  });
+});
+
+describe("submitNewLead", () => {
+  it("shows the fixed notice after saving an unverified phone", async () => {
+    createLead.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        wasDuplicate: false,
+        contactId: "contact-1",
+        phoneUnverified: true,
+      },
+    });
+    const formData = new FormData();
+    for (const [field, value] of Object.entries({
+      ...baseInput,
+      phone_1: "8165550100",
+    })) {
+      formData.set(field, value);
+    }
+
+    await expect(submitNewLead(formData)).rejects.toThrow(
+      "NEXT_REDIRECT:/leads/property-1?notice=phone_unverified",
+    );
+    expect(redirect).toHaveBeenCalledWith(
+      "/leads/property-1?notice=phone_unverified",
+    );
   });
 });
 
