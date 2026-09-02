@@ -150,7 +150,7 @@ test("walks every PDF-aligned section forward and backward with correct boundari
 
 test("renders the seller email-address request once in underwriting and nowhere in the named excluded paths", async ({ page }) => {
   await mountCoach(page);
-  const requestPattern = /\b(?:what(?:'s| is)|which|can i get|could we have).{0,80}\bemail(?: address)?\b/i;
+  const requestPattern = /\b(?:what(?:'s| is)|which|can i get|could we have)[\s\S]{0,80}\bemail(?: address)?\b/i;
   const visibleRequests: { id: string; title: string; text: string }[] = [];
 
   for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
