@@ -19,6 +19,10 @@ const sendUnknownResolutionSql = readFileSync(
   "supabase/migrations/20260902030000_esign_send_unknown_positive_resolution.sql",
   "utf8",
 );
+const sellerEmailAuthoritySql = readFileSync(
+  "supabase/migrations/20260902010000_esign_dialog_seller_email_authority.sql",
+  "utf8",
+);
 const sourceUrl = process.env.TEST_SUPABASE_DB_URL;
 const databaseName = `sandra_esign_race_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 let admin: Client;
@@ -49,6 +53,20 @@ beforeAll(async () => {
   setup = new Client({ connectionString: isolatedUrl });
   await setup.connect();
   await setup.query(`
+    do $roles$
+    begin
+      if not exists (select 1 from pg_roles where rolname = 'anon') then
+        create role anon;
+      end if;
+      if not exists (select 1 from pg_roles where rolname = 'authenticated') then
+        create role authenticated;
+      end if;
+      if not exists (select 1 from pg_roles where rolname = 'service_role') then
+        create role service_role;
+      end if;
+    end;
+    $roles$;
+
     create schema auth;
     create schema storage;
     create schema extensions;
@@ -137,6 +155,14 @@ beforeAll(async () => {
   await setup.query(migrationSql);
   await setup.query(reconciliationFenceSql);
   await setup.query(retryReminderFenceSql);
+  await setup.query(
+    "alter table public.org_esign_integrations add column provider_account_id text not null default 'account-a'",
+  );
+  await setup.query(
+    "alter table public.esign_templates add column provider_account_id text not null default 'account-a'",
+  );
+  await setup.query(sellerEmailAuthoritySql);
+  await setup.query(sellerEmailAuthoritySql);
   await setup.query(sendUnknownResolutionSql);
   await setup.query(sendUnknownResolutionSql);
 }, 60_000);
@@ -154,6 +180,138 @@ afterAll(async () => {
 });
 
 describe("eSign foundation production lease contention", () => {
+  it("does not deadlock a contact-first writer while claiming a request", async () => {
+    const orgId = crypto.randomUUID();
+    const userId = crypto.randomUUID();
+    const contactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const sourceId = crypto.randomUUID();
+    const templateId = crypto.randomUUID();
+    await setServiceRole(setup);
+    await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into public.organizations values ($1)", [orgId]);
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
+      [userId, orgId],
+    );
+    await setup.query(
+      "insert into public.contacts (id,org_id,email) values ($1,$2,'canonical@example.com')",
+      [contactId, orgId],
+    );
+    await setup.query(
+      "insert into public.properties (id,org_id,homeowner_contact_id) values ($1,$2,$3)",
+      [propertyId, orgId, contactId],
+    );
+    await setup.query(
+      `select public.upsert_org_esign_integration(
+         $1,'synthetic-api-key','-key','synthetic-client',repeat('a',64),$2,
+         'synthetic-encryption-key'
+       )`,
+      [orgId, userId],
+    );
+    await setup.query(
+      `update public.org_esign_integrations
+       set callback_verified_at=now(),sending_enabled=true where org_id=$1`,
+      [orgId],
+    );
+    await setup.query(
+      `insert into public.esign_template_staging_sources (
+         id,org_id,storage_path,source_filename,source_size_bytes,
+         content_type,source_sha256,created_by
+       ) values ($1,$2,($2::uuid)::text || '/' || ($1::uuid)::text || '.pdf',
+         'source.pdf',1024,'application/pdf',repeat('b',64),$3)`,
+      [sourceId, orgId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_templates (
+         id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,
+         sign_template_id,provider_account_id,staging_source_id,source_filename,
+         source_size_bytes,source_content_type,source_sha256,staging_path,
+         finalized_at,lifecycle_state,created_by,updated_by
+       ) values (
+         $1,$2,'Purchase agreement','purchase_agreement','Seller',
+         '[{"name":"Seller","order":0}]'::jsonb,
+         array['seller_name','property_address','offer_price','closing_date','earnest_money'],
+         'provider-template','account-a',$3,'source.pdf',1024,'application/pdf',
+         repeat('b',64),($2::uuid)::text || '/' || ($3::uuid)::text || '.pdf',
+         now(),'finalized',$4,$4
+       )`,
+      [templateId, orgId, sourceId, userId],
+    );
+
+    const contactFirst = new Client({
+      connectionString: isolatedUrl,
+      application_name: "contact_first_writer",
+    });
+    const requestClaim = new Client({
+      connectionString: isolatedUrl,
+      application_name: "esign_request_claim",
+    });
+    await Promise.all([contactFirst.connect(), requestClaim.connect()]);
+    await Promise.all([
+      setServiceRole(contactFirst),
+      setServiceRole(requestClaim),
+    ]);
+    try {
+      await contactFirst.query("begin");
+      await contactFirst.query(
+        "select 1 from public.contacts where id=$1 for update",
+        [contactId],
+      );
+      const claimPromise = requestClaim.query<{ outcome: string }>(
+        `select outcome from public.create_esign_request(
+           $1,$2,$3,$4::jsonb,$5::jsonb,$6,repeat('c',64),null,$7
+         )`,
+        [
+          orgId,
+          propertyId,
+          templateId,
+          JSON.stringify([
+            {
+              role: "Seller",
+              order: 0,
+              name: "Seller Owner",
+              emailAddress: "dialog@example.com",
+            },
+          ]),
+          JSON.stringify({
+            seller_name: "Seller Owner",
+            property_address: "123 Test",
+            offer_price: "1",
+            closing_date: "2026-09-30",
+            earnest_money: "1",
+          }),
+          crypto.randomUUID(),
+          userId,
+        ],
+      );
+
+      await expect(
+        Promise.race([
+          claimPromise.then(
+            (value) => ({ state: "resolved" as const, value }),
+            (error: unknown) => ({ state: "rejected" as const, error }),
+          ),
+          new Promise<{ state: "pending" }>((resolve) =>
+            setTimeout(() => resolve({ state: "pending" }), 250),
+          ),
+        ]),
+      ).resolves.toMatchObject({ state: "pending" });
+
+      await contactFirst.query(
+        "update public.properties set homeowner_contact_id=$2 where id=$1",
+        [propertyId, contactId],
+      );
+      await contactFirst.query("commit");
+      await expect(claimPromise).resolves.toMatchObject({
+        rows: [{ outcome: "created" }],
+      });
+    } finally {
+      await contactFirst.query("rollback").catch(() => undefined);
+      await Promise.all([contactFirst.end(), requestClaim.end()]);
+    }
+  });
+
   it("serializes same-kind and reminder-vs-void claims at the fixed ten-minute boundary", async () => {
     const orgId = crypto.randomUUID();
     const userId = crypto.randomUUID();
@@ -1110,14 +1268,14 @@ describe("eSign foundation production lease contention", () => {
     await setup.query(
       `insert into public.esign_templates (
          id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,
-         sign_template_id,staging_source_id,source_filename,source_size_bytes,
+         sign_template_id,provider_account_id,staging_source_id,source_filename,source_size_bytes,
          source_content_type,source_sha256,staging_path,finalized_at,lifecycle_state,
          created_by,updated_by
        ) values (
          $1,$2,'Purchase agreement','purchase_agreement','Seller',
          '[{"name":"Seller","order":0}]'::jsonb,
          array['seller_name','property_address','offer_price','closing_date','earnest_money'],
-         'provider-template',$3,'source.pdf',1024,'application/pdf',repeat('a',64),
+         'provider-template','account-a',$3,'source.pdf',1024,'application/pdf',repeat('a',64),
          ($2::uuid)::text || '/' || ($3::uuid)::text || '.pdf',now(),'finalized',$4,$4
        )`,
       [templateId, orgId, sourceId, userId],

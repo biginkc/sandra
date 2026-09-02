@@ -118,7 +118,7 @@ describe("SendForSignature", () => {
     const user = userEvent.setup();
     const { preflightAction, sendAction } = actions({
       ...preflight,
-      blockers: [],
+      blockers: ["owner_email_missing"],
       templates: [{ ...template, signerRoles: [{ name: "Seller", order: 0 }] }],
       sellerDefaults: { ...preflight.sellerDefaults, emailAddress: "" },
     });
@@ -126,7 +126,7 @@ describe("SendForSignature", () => {
     render(
       <SendForSignature
         propertyId="property-1"
-        initialBlockers={[]}
+        initialBlockers={["owner_email_missing"]}
         preflightAction={preflightAction}
         sendAction={sendAction}
       />,
@@ -147,32 +147,6 @@ describe("SendForSignature", () => {
     expect(submit).toBeEnabled();
     await user.click(submit);
     await waitFor(() => expect(sendAction).toHaveBeenCalledTimes(1));
-  });
-
-  it("opens from a missing stored email so the dialog can collect it", async () => {
-    const user = userEvent.setup();
-    const { preflightAction, sendAction } = actions({
-      ...preflight,
-      blockers: ["owner_email_missing"],
-      templates: [{ ...template, signerRoles: [{ name: "Seller", order: 0 }] }],
-      sellerDefaults: { ...preflight.sellerDefaults, emailAddress: "" },
-    });
-
-    render(
-      <SendForSignature
-        propertyId="property-1"
-        initialBlockers={["owner_email_missing"]}
-        preflightAction={preflightAction}
-        sendAction={sendAction}
-      />,
-    );
-
-    const trigger = screen.getByTestId("send-for-signature-trigger");
-    expect(trigger).toBeEnabled();
-    await user.click(trigger);
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Enter the seller email before sending.",
-    );
   });
 
   it("treats a whitespace-only seller email as missing", async () => {
