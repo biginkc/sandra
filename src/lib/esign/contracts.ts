@@ -124,6 +124,12 @@ export type SendWithTemplateOutput = {
   testMode: true;
 };
 
+export type ProviderSignatureRequestMetadata = {
+  signatureRequestId: string;
+  localRequestId: string | null;
+  testMode: boolean | null;
+};
+
 export type DropboxSignProvider = {
   validateCredentials(): Promise<{
     accountId: string | null;
@@ -162,6 +168,10 @@ export type DropboxSignProvider = {
     testMode: boolean,
     signal?: AbortSignal,
   ): Promise<{ complete: boolean; providerRequestIds: string[] }>;
+  getSignatureRequestMetadata(
+    signatureRequestId: string,
+    signal?: AbortSignal,
+  ): Promise<ProviderSignatureRequestMetadata>;
   remind(
     signatureRequestId: string,
     signer: { emailAddress: string; name?: string },

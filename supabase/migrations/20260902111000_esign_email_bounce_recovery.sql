@@ -346,6 +346,9 @@ as $$
 declare
   v_request public.esign_requests%rowtype;
   v_signer public.esign_request_signers%rowtype;
+  v_current_homeowner_contact_id uuid;
+  v_target_contact_available boolean := false;
+  v_target_contact_current boolean := false;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'service role required' using errcode = '42501';
@@ -354,6 +357,31 @@ begin
     raise exception 'invalid bounced signer email update finalization'
       using errcode = '23514';
   end if;
+
+  select request.* into v_request
+  from public.esign_requests request
+  where request.id = p_request_id
+    and request.org_id = p_org_id
+    and request.status = 'error'
+    and request.delivery_state = 'email_bounced';
+  if not found then
+    return 'lease_lost';
+  end if;
+
+  if v_request.claimed_homeowner_contact_id is not null then
+    perform 1 from public.contacts contact
+    where contact.id = v_request.claimed_homeowner_contact_id
+      and contact.org_id = p_org_id
+    for update;
+    v_target_contact_available := found;
+  end if;
+  select property.homeowner_contact_id into v_current_homeowner_contact_id
+  from public.properties property
+  where property.id = v_request.property_id and property.org_id = p_org_id
+  for update;
+  v_target_contact_current := found
+    and v_request.claimed_homeowner_contact_id is not null
+    and v_current_homeowner_contact_id is not distinct from v_request.claimed_homeowner_contact_id;
 
   select request.* into v_request
   from public.esign_requests request
@@ -413,6 +441,53 @@ begin
   if not found then
     return 'lease_lost';
   end if;
+
+  begin
+    update public.contacts
+    set email = v_signer.email_update_claim_email
+    where id = v_request.claimed_homeowner_contact_id
+      and org_id = p_org_id
+      and v_target_contact_available
+      and v_target_contact_current;
+    if not found then
+      insert into public.lead_events (
+        org_id, property_id, actor_type, actor_id, event_type, payload,
+        source_type, source_id
+      ) values (
+        p_org_id, v_request.property_id, 'system', null,
+        'esign_contact_email_persist_skipped',
+        jsonb_build_object(
+          'reason',
+          case
+            when v_request.claimed_homeowner_contact_id is null
+              then 'missing_claimed_contact_snapshot'
+            when not v_target_contact_available then 'claimed_contact_missing'
+            when not v_target_contact_current then 'property_homeowner_changed'
+            else 'contact_update_not_applied'
+          end,
+          'claimed_homeowner_contact_id', v_request.claimed_homeowner_contact_id,
+          'current_homeowner_contact_id', v_current_homeowner_contact_id
+        ),
+        'esign_contact_email_persist',
+        p_request_id
+      ) on conflict (source_type, source_id) where source_id is not null do nothing;
+    end if;
+  exception
+    when unique_violation then
+      insert into public.lead_events (
+        org_id, property_id, actor_type, actor_id, event_type, payload,
+        source_type, source_id
+      ) values (
+        p_org_id, v_request.property_id, 'system', null,
+        'esign_contact_email_persist_skipped',
+        jsonb_build_object(
+          'reason', 'seller_email_conflict',
+          'claimed_homeowner_contact_id', v_request.claimed_homeowner_contact_id
+        ),
+        'esign_contact_email_persist',
+        p_request_id
+      ) on conflict (source_type, source_id) where source_id is not null do nothing;
+  end;
 
   insert into public.lead_events (
     org_id, property_id, actor_type, actor_id, event_type, payload,
@@ -500,6 +575,6 @@ comment on function public.claim_esign_bounced_signer_email_update(
 comment on function public.finalize_esign_bounced_signer_email_update(
   uuid, uuid, uuid, uuid, text
 ) is
-  'Service-role finalization for accepted Dropbox Sign signer email update. Restores delivery_state=sent on the same local/provider request.';
+  'Service-role finalization for accepted Dropbox Sign signer email update. Restores delivery_state=sent on the same local/provider request and persists the confirmed seller email with the send-time contact snapshot guard.';
 
 commit;

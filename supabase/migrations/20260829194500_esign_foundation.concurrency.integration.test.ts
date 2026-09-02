@@ -408,7 +408,7 @@ describe("eSign foundation production lease contention", () => {
       signer_email: "seller-fixed@example.com",
       provider_signature_id: newSignatureId,
       signer_status: "awaiting",
-      contact_email: "old-contact@example.com",
+      contact_email: "seller-fixed@example.com",
     });
 
     const events = await setup.query<{ event_type: string; payload: unknown }>(
@@ -425,6 +425,258 @@ describe("eSign foundation production lease contention", () => {
     expect(JSON.stringify(events.rows.map((event) => event.payload))).not.toMatch(
       /bad@example|seller-fixed@example/i,
     );
+
+    const providerSignatures = JSON.stringify([{
+      signatureId: newSignatureId,
+      role: "Seller",
+      name: "Seller Owner",
+      emailAddress: "seller-fixed@example.com",
+      order: 0,
+      statusCode: "signed",
+      signedAt: 1788331417,
+    }]);
+    const claimLifecycle = async (
+      eventType: string,
+      eventAt: string,
+      relatedSignatureId: string | null,
+    ) => {
+      const lease = crypto.randomUUID();
+      const receipt = await setup.query<{ receipt_id: string; lease_id: string }>(
+        `select receipt_id,lease_id
+         from public.claim_esign_webhook_receipt(
+           $1,$2,repeat('d',64),encode(sha256(($3 || coalesce($4,''))::bytea),'hex'),
+           repeat('f',64),$3,$5,$4,$6,
+           jsonb_build_object(
+             'event_time', extract(epoch from $6::timestamptz)::bigint::text,
+             'event_type', $3::text,
+             'sign_request_id', $5::text,
+             'related_signature_id', $4::text,
+             'reported_for_app_id', 'client-1'
+           ),
+           now(),$7,300
+         )`,
+        [
+          orgId,
+          consumerId,
+          eventType,
+          relatedSignatureId,
+          providerRequestId,
+          eventAt,
+          lease,
+        ],
+      );
+      return receipt.rows[0];
+    };
+
+    const viewedAt = "2026-09-02T06:01:00.000Z";
+    const viewedReceipt = await claimLifecycle(
+      "signature_request_viewed",
+      viewedAt,
+      newSignatureId,
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string }>(
+          `select outcome from public.reconcile_esign_webhook_provider_signers(
+             $1,$2,$3,$4,$5,$6::jsonb,$7
+           )`,
+          [
+            orgId,
+            requestId,
+            viewedReceipt.receipt_id,
+            viewedReceipt.lease_id,
+            viewedAt,
+            providerSignatures,
+            null,
+          ],
+        )
+      ).rows[0].outcome,
+    ).toMatch(/applied|already_reconciled/);
+    expect(
+      (
+        await setup.query<{ outcome: string; status: string }>(
+          `select * from public.apply_esign_webhook_status_decision(
+             $1,$2,$3,$4,'awaiting','viewed',$5,'esign_viewed',$6::jsonb
+           )`,
+          [
+            orgId,
+            requestId,
+            viewedReceipt.receipt_id,
+            viewedReceipt.lease_id,
+            viewedAt,
+            JSON.stringify({ template_title: "Purchase agreement" }),
+          ],
+        )
+      ).rows[0],
+    ).toEqual({ outcome: "applied", status: "viewed" });
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [viewedReceipt.receipt_id, viewedReceipt.lease_id],
+    );
+
+    const signedAt = "2026-09-02T06:02:00.000Z";
+    const signedReceipt = await claimLifecycle(
+      "signature_request_signed",
+      signedAt,
+      newSignatureId,
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string }>(
+          `select outcome from public.reconcile_esign_webhook_provider_signers(
+             $1,$2,$3,$4,$5,$6::jsonb,$7
+           )`,
+          [
+            orgId,
+            requestId,
+            signedReceipt.receipt_id,
+            signedReceipt.lease_id,
+            signedAt,
+            providerSignatures,
+            newSignatureId,
+          ],
+        )
+      ).rows[0].outcome,
+    ).toMatch(/applied|already_reconciled/);
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [signedReceipt.receipt_id, signedReceipt.lease_id],
+    );
+
+    const allSignedAt = "2026-09-02T06:03:00.000Z";
+    const allSignedReceipt = await claimLifecycle(
+      "signature_request_all_signed",
+      allSignedAt,
+      null,
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string }>(
+          `select outcome from public.reconcile_esign_webhook_provider_signers(
+             $1,$2,$3,$4,$5,$6::jsonb,$7
+           )`,
+          [
+            orgId,
+            requestId,
+            allSignedReceipt.receipt_id,
+            allSignedReceipt.lease_id,
+            allSignedAt,
+            providerSignatures,
+            null,
+          ],
+        )
+      ).rows[0].outcome,
+    ).toMatch(/applied|already_reconciled/);
+    expect(
+      (
+        await setup.query<{ outcome: string; status: string }>(
+          `select * from public.apply_esign_webhook_status_decision(
+             $1,$2,$3,$4,'viewed','signed',$5,'esign_signed',$6::jsonb
+           )`,
+          [
+            orgId,
+            requestId,
+            allSignedReceipt.receipt_id,
+            allSignedReceipt.lease_id,
+            allSignedAt,
+            JSON.stringify({ template_title: "Purchase agreement" }),
+          ],
+        )
+      ).rows[0],
+    ).toEqual({ outcome: "applied", status: "signed" });
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [allSignedReceipt.receipt_id, allSignedReceipt.lease_id],
+    );
+
+    const downloadableAt = "2026-09-02T06:04:00.000Z";
+    const downloadableReceipt = await claimLifecycle(
+      "signature_request_downloadable",
+      downloadableAt,
+      null,
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string; status: string }>(
+          `select * from public.apply_esign_webhook_status_decision(
+             $1,$2,$3,$4,'signed','signed',$5,'esign_signed',$6::jsonb
+           )`,
+          [
+            orgId,
+            requestId,
+            downloadableReceipt.receipt_id,
+            downloadableReceipt.lease_id,
+            downloadableAt,
+            JSON.stringify({ template_title: "Purchase agreement" }),
+          ],
+        )
+      ).rows[0],
+    ).toEqual({ outcome: "terminal_ignored", status: "signed" });
+    const storagePath = `${orgId}/${propertyId}/esign/${requestId}/signed.pdf`;
+    await setup.query(
+      `insert into storage.objects (bucket_id, name, metadata)
+       values ('lead-files',$1,'{"mimetype":"application/pdf","size":1024}')`,
+      [storagePath],
+    );
+    const leadFileId = crypto.randomUUID();
+    expect(
+      (
+        await setup.query<{ outcome: string; lead_file_id: string }>(
+          `select * from public.reconcile_esign_completed_signed_artifact(
+             $1,$2,$3,'lead-files',$4,'application/pdf',1024,
+             'esign_signed_pdf_ready',$5::jsonb
+           )`,
+          [
+            orgId,
+            requestId,
+            leadFileId,
+            storagePath,
+            JSON.stringify({ template_title: "Purchase agreement" }),
+          ],
+        )
+      ).rows[0],
+    ).toEqual({
+      outcome: "applied",
+      lead_file_id: leadFileId,
+    });
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [downloadableReceipt.receipt_id, downloadableReceipt.lease_id],
+    );
+
+    expect(
+      (
+        await setup.query<{
+          request_status: string;
+          delivery_state: string;
+          signed_pdf_path: string | null;
+          signer_status: string;
+          contact_email: string;
+          lead_files_count: string;
+        }>(
+          `select request.status::text as request_status,
+             request.delivery_state::text as delivery_state,
+             request.signed_pdf_path,
+             signer.status as signer_status,
+             contact.email as contact_email,
+             (select count(*)::text from public.lead_files
+              where org_id=$1 and source_request_id=$2) as lead_files_count
+           from public.esign_requests request
+           join public.esign_request_signers signer
+             on signer.org_id=request.org_id and signer.request_id=request.id
+           join public.contacts contact on contact.id=$3 and contact.org_id=$1
+           where request.id=$2`,
+          [orgId, requestId, contactId],
+        )
+      ).rows[0],
+    ).toEqual({
+      request_status: "signed",
+      delivery_state: "sent",
+      signed_pdf_path: storagePath,
+      signer_status: "signed",
+      contact_email: "seller-fixed@example.com",
+      lead_files_count: "1",
+    });
   });
 
   it("repairs the observed provider-updated signed request without stale signature-id failures", async () => {
@@ -2026,11 +2278,24 @@ describe("eSign foundation production lease contention", () => {
       )`,
       [orgId, automaticRequestId],
     );
+    await expect(
+      setup.query(
+        `select public.attach_esign_request_provider_delivery(
+          $1,$2::uuid,'provider-body-only','webhook',
+          jsonb_build_object(
+            'source','dropbox_metadata_sandra_request_id',
+            'localRequestId',$2::text,
+            'providerRequestId','provider-body-only'
+          )
+        )`,
+        [orgId, metadataRequestId],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
     await setup.query(
       `select public.attach_esign_request_provider_delivery(
         $1,$2::uuid,'provider-after-timeout','webhook',
         jsonb_build_object(
-          'source','dropbox_metadata_sandra_request_id',
+          'source','dropbox_provider_read_sandra_request_id',
           'localRequestId',$2::text,
           'providerRequestId','provider-after-timeout'
         )

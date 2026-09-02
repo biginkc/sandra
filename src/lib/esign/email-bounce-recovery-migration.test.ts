@@ -53,6 +53,43 @@ describe("email-bounce recovery migration contract", () => {
     expect(propertyLock).toBeGreaterThan(contactLock);
     expect(requestLock).toBeGreaterThan(propertyLock);
     expect(signerLock).toBeGreaterThan(requestLock);
-    expect(recoverySql).not.toMatch(/update public\.contacts/i);
+    expect(recoverySql).toMatch(/update public\.contacts/i);
+    expect(recoverySql).toContain("esign_contact_email_persist_skipped");
+  });
+
+  it("finalizes provider-confirmed corrected email with contact-first persistence", () => {
+    const finalizerStart = recoverySql.indexOf(
+      "create or replace function public.finalize_esign_bounced_signer_email_update",
+    );
+    const contactLock = recoverySql.indexOf(
+      "from public.contacts contact",
+      finalizerStart,
+    );
+    const propertyLock = recoverySql.indexOf(
+      "from public.properties property",
+      contactLock,
+    );
+    const requestLock = recoverySql.indexOf(
+      "for update",
+      recoverySql.indexOf("from public.esign_requests request", propertyLock),
+    );
+    const signerLock = recoverySql.indexOf(
+      "from public.esign_request_signers signer",
+      requestLock,
+    );
+    const contactUpdate = recoverySql.indexOf(
+      "update public.contacts",
+      signerLock,
+    );
+
+    expect(finalizerStart).toBeGreaterThan(-1);
+    expect(contactLock).toBeGreaterThan(finalizerStart);
+    expect(propertyLock).toBeGreaterThan(contactLock);
+    expect(requestLock).toBeGreaterThan(propertyLock);
+    expect(signerLock).toBeGreaterThan(requestLock);
+    expect(contactUpdate).toBeGreaterThan(signerLock);
+    expect(recoverySql).toContain("when unique_violation then");
+    expect(recoverySql).toContain("'reason', 'seller_email_conflict'");
+    expect(recoverySql).toContain("'esign_contact_email_persist_skipped'");
   });
 });

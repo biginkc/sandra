@@ -43,7 +43,7 @@ export interface EsignWebhookPersistence {
   findRequest(input: {
     orgId: string;
     signRequestId: string;
-    localRequestId: string | null;
+    verifiedLocalRequestId: string | null;
   }): Promise<{
     id: string;
     orgId: string;
@@ -111,6 +111,15 @@ export interface DropboxSignedPdfProvider {
   }): Promise<Buffer>;
 }
 
+export interface DropboxSignatureRequestMetadataProvider {
+  confirmProviderLocalRequestId(input: {
+    orgId: string;
+    callbackConsumerId: string;
+    signRequestId: string;
+    localRequestId: string;
+  }): Promise<"matched" | "mismatch">;
+}
+
 export interface SignedPdfArtifactPersistence {
   /** Store privately, link lead_files/request, and record PDF-ready idempotently. */
   storeLinkAndRecordReady(input: {
@@ -139,6 +148,7 @@ export type EsignWebhookDependencies = {
   secretResolver: EsignCallbackSecretResolver;
   authenticator: DropboxSignEventAuthenticator;
   persistence: EsignWebhookPersistence;
+  metadataProvider: DropboxSignatureRequestMetadataProvider;
   pdfProvider: DropboxSignedPdfProvider;
   artifactPersistence: SignedPdfArtifactPersistence;
   signedPdfMaxBytes?: number;

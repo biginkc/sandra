@@ -88,6 +88,7 @@ function provider(
     }),
     updateSignerEmail: vi.fn(),
     findSignatureRequestIdsByLocalRequestId: vi.fn(),
+    getSignatureRequestMetadata: vi.fn(),
     remind: vi.fn(),
     cancel: vi.fn(),
     downloadSignedPdf: vi.fn(),

@@ -175,7 +175,7 @@ begin
      )
      or (
        p_resolution_source = 'webhook'
-       and coalesce(p_evidence ->> 'source', '') <> 'dropbox_metadata_sandra_request_id'
+       and coalesce(p_evidence ->> 'source', '') <> 'dropbox_provider_read_sandra_request_id'
      ) then
     raise exception 'invalid eSign provider delivery attachment'
       using errcode = '23514';

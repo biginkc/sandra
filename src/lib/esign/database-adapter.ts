@@ -408,19 +408,19 @@ export function createEsignWebhookDatabaseAdapter(
 
 async function findAndAttachRequestByMetadata(
   client: EsignWebhookRpcClient,
-  input: { orgId: string; signRequestId: string; localRequestId: string | null },
+  input: { orgId: string; signRequestId: string; verifiedLocalRequestId: string | null },
 ): Promise<EsignWebhookRpcContract["find_esign_webhook_request"]["result"][number] | null> {
-  if (!input.localRequestId) return null;
+  if (!input.verifiedLocalRequestId) return null;
   try {
     await callVoidRpc(client, ESIGN_WEBHOOK_RPC_NAMES.ATTACH_PROVIDER_DELIVERY, {
       p_org_id: input.orgId,
-      p_request_id: input.localRequestId,
+      p_request_id: input.verifiedLocalRequestId,
       p_provider_request_id: input.signRequestId,
       p_resolution_source: "webhook",
       p_evidence: {
-        localRequestId: input.localRequestId,
+        localRequestId: input.verifiedLocalRequestId,
         providerRequestId: input.signRequestId,
-        source: "dropbox_metadata_sandra_request_id",
+        source: "dropbox_provider_read_sandra_request_id",
       },
     });
   } catch (error) {

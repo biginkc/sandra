@@ -96,11 +96,32 @@ export async function handleDropboxSignWebhook(input: {
       return acknowledgement();
     }
 
-    const request = await input.dependencies.persistence.findRequest({
+    let request = await input.dependencies.persistence.findRequest({
       orgId: identity.orgId,
       signRequestId: replay.signRequestId,
-      localRequestId: replay.localRequestId,
+      verifiedLocalRequestId: null,
     });
+    if (!request && replay.localRequestId !== null) {
+      const metadataMatch =
+        await input.dependencies.metadataProvider.confirmProviderLocalRequestId({
+          ...identity,
+          signRequestId: replay.signRequestId,
+          localRequestId: replay.localRequestId,
+        });
+      if (metadataMatch === "matched") {
+        request = await input.dependencies.persistence.findRequest({
+          orgId: identity.orgId,
+          signRequestId: replay.signRequestId,
+          verifiedLocalRequestId: replay.localRequestId,
+        });
+      } else {
+        await input.dependencies.persistence.markReceiptIgnored(
+          activeClaim,
+          "PROVIDER_METADATA_MISMATCH",
+        );
+        return acknowledgement();
+      }
+    }
     if (!request || request.orgId !== identity.orgId) {
       throw new SafeWebhookProcessingError("REQUEST_NOT_FOUND", 503);
     }

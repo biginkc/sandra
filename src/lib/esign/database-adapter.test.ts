@@ -268,7 +268,7 @@ describe("typed eSign webhook database adapter", () => {
     await expect(adapter.findRequest({
       orgId: ORG_ID,
       signRequestId: "provider-request-1",
-      localRequestId: REQUEST_ID,
+      verifiedLocalRequestId: REQUEST_ID,
     })).resolves.toEqual({
       id: REQUEST_ID,
       orgId: ORG_ID,
@@ -284,7 +284,7 @@ describe("typed eSign webhook database adapter", () => {
     );
   });
 
-  it("repairs a timeout-stranded request by Sandra request id metadata", async () => {
+  it("repairs a timeout-stranded request only after verified provider-read metadata", async () => {
     const findRows = [
       [],
       [{
@@ -306,7 +306,7 @@ describe("typed eSign webhook database adapter", () => {
     await expect(adapter.findRequest({
       orgId: ORG_ID,
       signRequestId: "provider-after-timeout",
-      localRequestId: REQUEST_ID,
+      verifiedLocalRequestId: REQUEST_ID,
     })).resolves.toMatchObject({ id: REQUEST_ID, status: "awaiting" });
 
     expect(rpc).toHaveBeenCalledWith("attach_esign_request_provider_delivery", {
@@ -317,7 +317,7 @@ describe("typed eSign webhook database adapter", () => {
       p_evidence: {
         localRequestId: REQUEST_ID,
         providerRequestId: "provider-after-timeout",
-        source: "dropbox_metadata_sandra_request_id",
+        source: "dropbox_provider_read_sandra_request_id",
       },
     });
   });
@@ -337,7 +337,7 @@ describe("typed eSign webhook database adapter", () => {
     await expect(adapter.findRequest({
       orgId: ORG_ID,
       signRequestId: "provider-after-timeout",
-      localRequestId: REQUEST_ID,
+      verifiedLocalRequestId: REQUEST_ID,
     })).resolves.toBeNull();
   });
 

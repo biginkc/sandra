@@ -60,6 +60,23 @@ export function createConcreteDropboxSignWebhookDependencies(
       loadCredentials: loadActiveCredentials,
     }),
     persistence: database,
+    metadataProvider: {
+      async confirmProviderLocalRequestId(input) {
+        const credentials = await loadActiveCredentials(input);
+        if (!credentials) {
+          throw new SafeEsignServerError("ACTIVE_CREDENTIALS_NOT_FOUND");
+        }
+        const metadata = await createDropboxSignProvider({
+          apiKey: credentials.apiKey,
+          clientId: credentials.clientId,
+          expectedDomain: configuredDropboxSignEmbeddedDomain(),
+        }).getSignatureRequestMetadata(input.signRequestId);
+        return metadata.signatureRequestId === input.signRequestId &&
+          metadata.localRequestId === input.localRequestId
+          ? "matched"
+          : "mismatch";
+      },
+    },
     pdfProvider: {
       async downloadSignedPdf(input) {
         const credentials = await loadActiveCredentials(input);
