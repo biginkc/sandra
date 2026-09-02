@@ -1,7 +1,15 @@
 import { readFileSync } from "node:fs";
 
 import { Client } from "pg";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from "vitest";
 
 import { loadTestEnv } from "@tests/integration/env";
 
@@ -19,6 +27,10 @@ const definitiveFailureSql = readFileSync(
 );
 const sellerEmailAuthoritySql = readFileSync(
   "supabase/migrations/20260902010000_esign_dialog_seller_email_authority.sql",
+  "utf8",
+);
+const atomicDisconnectSql = readFileSync(
+  "supabase/migrations/20260902074814_esign_atomic_disconnect_state.sql",
   "utf8",
 );
 
@@ -43,7 +55,9 @@ async function setRole(
 ): Promise<void> {
   await pg.query(`set local role ${role}`);
   await pg.query("select set_config('request.jwt.claim.role',$1,true)", [role]);
-  await pg.query("select set_config('request.jwt.claim.sub',$1,true)", [userId]);
+  await pg.query("select set_config('request.jwt.claim.sub',$1,true)", [
+    userId,
+  ]);
 }
 
 async function resetRole(): Promise<void> {
@@ -109,11 +123,13 @@ async function connectIntegration(
   );
 }
 
-async function prepareAndVerify(input: {
-  targetOrgId?: string;
-  prepareActorId?: string;
-  verifyActorId?: string;
-} = {}): Promise<{ id: string; path: string }> {
+async function prepareAndVerify(
+  input: {
+    targetOrgId?: string;
+    prepareActorId?: string;
+    verifyActorId?: string;
+  } = {},
+): Promise<{ id: string; path: string }> {
   const targetOrgId = input.targetOrgId ?? orgId;
   const prepareActorId = input.prepareActorId ?? creatorId;
   const verifyActorId = input.verifyActorId ?? recoveryOwnerId;
@@ -163,13 +179,15 @@ async function consumeDraft(
   return result.rows[0];
 }
 
-async function finalizeOrdinaryTemplate(input: {
-  targetOrgId?: string;
-  actorId?: string;
-  accountId?: string;
-  providerTemplateId?: string;
-  connect?: boolean;
-} = {}): Promise<{ templateId: string; sourceId: string; sourcePath: string }> {
+async function finalizeOrdinaryTemplate(
+  input: {
+    targetOrgId?: string;
+    actorId?: string;
+    accountId?: string;
+    providerTemplateId?: string;
+    connect?: boolean;
+  } = {},
+): Promise<{ templateId: string; sourceId: string; sourcePath: string }> {
   const targetOrgId = input.targetOrgId ?? orgId;
   const actorId = input.actorId ?? creatorId;
   const accountId = input.accountId ?? "account-a";
@@ -190,7 +208,13 @@ async function finalizeOrdinaryTemplate(input: {
   );
   await pg.query(
     "select * from public.begin_esign_template_provider_create($1,$2,$3,$4,$5)",
-    [targetOrgId, draft.template_id, source.id, claim.rows[0].claim_token, actorId],
+    [
+      targetOrgId,
+      draft.template_id,
+      source.id,
+      claim.rows[0].claim_token,
+      actorId,
+    ],
   );
   await pg.query(
     "select * from public.complete_esign_template_provider_create($1,$2,$3,$4,$5,$6)",
@@ -228,7 +252,9 @@ async function deleteStagingObject(path: string): Promise<void> {
       [path],
     );
   } finally {
-    await pg.query("select set_config('storage.allow_delete_query','false',true)");
+    await pg.query(
+      "select set_config('storage.allow_delete_query','false',true)",
+    );
   }
   await setRole("service_role");
 }
@@ -258,6 +284,8 @@ beforeAll(async () => {
   await pg.query(definitiveFailureSql);
   await pg.query(sellerEmailAuthoritySql);
   await pg.query(sellerEmailAuthoritySql);
+  await pg.query(atomicDisconnectSql);
+  await pg.query(atomicDisconnectSql);
 });
 
 beforeEach(async () => {
@@ -283,10 +311,16 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
   it("keeps the ledgered foundation immutable and declares a forward-only chain", () => {
     expect(baselineSql).not.toContain("provider_account_id");
     expect(forwardSql).toContain("alter table public.org_esign_integrations");
-    expect(forwardSql).toContain("claim_unattached_esign_template_source_cleanup");
+    expect(forwardSql).toContain(
+      "claim_unattached_esign_template_source_cleanup",
+    );
     expect(forwardSql).toContain("claim_esign_template_provider_create");
-    expect(forwardSql).toContain("mark_stale_esign_template_provider_create_unknown");
-    expect(forwardSql).not.toContain("create table public.org_esign_integrations");
+    expect(forwardSql).toContain(
+      "mark_stale_esign_template_provider_create_unknown",
+    );
+    expect(forwardSql).not.toContain(
+      "create table public.org_esign_integrations",
+    );
     expect(definitiveFailureSql).toContain(
       "record_definitive_esign_template_provider_create_failure",
     );
@@ -1022,7 +1056,9 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     await resetRole();
     await setRole("authenticated", outsiderId);
     await expect(
-      pg.query("select * from public.available_esign_templates where id=$1", [templateId]),
+      pg.query("select * from public.available_esign_templates where id=$1", [
+        templateId,
+      ]),
     ).resolves.toMatchObject({ rows: [] });
   });
 
@@ -1042,7 +1078,12 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     );
     const conflictingClaim = await pg.query<{ claim_token: string }>(
       "select * from public.claim_esign_template_provider_create($1,$2,$3,$4)",
-      [otherOrgId, conflictingDraft.template_id, conflictingSource.id, outsiderId],
+      [
+        otherOrgId,
+        conflictingDraft.template_id,
+        conflictingSource.id,
+        outsiderId,
+      ],
     );
     await pg.query(
       "select * from public.begin_esign_template_provider_create($1,$2,$3,$4,$5)",
@@ -1093,9 +1134,9 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       "account-a",
       "account-b",
     ]);
-    expect(rows.rows.every((row) => row.sign_template_id === providerTemplateId)).toBe(
-      true,
-    );
+    expect(
+      rows.rows.every((row) => row.sign_template_id === providerTemplateId),
+    ).toBe(true);
   });
 
   it("hides old-account templates until the same account reconnects", async () => {
@@ -1171,7 +1212,12 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
   });
 
   it("refuses disconnect for every unfinished template operation", async () => {
-    for (const state of ["unstarted", "claimed", "invoking", "unknown"] as const) {
+    for (const state of [
+      "unstarted",
+      "claimed",
+      "invoking",
+      "unknown",
+    ] as const) {
       await pg.query(`savepoint disconnect_${state}`);
       await connectIntegration(orgId, creatorId, "account-a");
       const source = await prepareAndVerify();
@@ -1219,7 +1265,11 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
         );
       }
       await expectDbError(
-        () => pg.query("select public.delete_org_esign_integration($1,$2)", [orgId, creatorId]),
+        () =>
+          pg.query("select public.delete_org_esign_integration($1,$2)", [
+            orgId,
+            creatorId,
+          ]),
         /provider template operation|finish or abandon template setup/i,
       );
       await pg.query(`rollback to savepoint disconnect_${state}`);
@@ -1234,7 +1284,11 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       [orgId, finalizedDuplicate.templateId, recoveryOwnerId],
     );
     await expectDbError(
-      () => pg.query("select public.delete_org_esign_integration($1,$2)", [orgId, creatorId]),
+      () =>
+        pg.query("select public.delete_org_esign_integration($1,$2)", [
+          orgId,
+          creatorId,
+        ]),
       /finish or abandon template setup/i,
     );
     await pg.query("select public.abandon_esign_template_draft($1,$2,$3)", [
@@ -1243,7 +1297,10 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       recoveryOwnerId,
     ]);
     await expect(
-      pg.query("select public.delete_org_esign_integration($1,$2)", [orgId, creatorId]),
+      pg.query("select public.delete_org_esign_integration($1,$2)", [
+        orgId,
+        creatorId,
+      ]),
     ).resolves.toBeDefined();
     await pg.query("rollback to savepoint disconnect_duplicate");
     await pg.query("release savepoint disconnect_duplicate");
@@ -1257,7 +1314,11 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       [orgId, finalizedEdit.templateId, editSource.id, recoveryOwnerId],
     );
     await expectDbError(
-      () => pg.query("select public.delete_org_esign_integration($1,$2)", [orgId, creatorId]),
+      () =>
+        pg.query("select public.delete_org_esign_integration($1,$2)", [
+          orgId,
+          creatorId,
+        ]),
       /finish or abandon template setup/i,
     );
     await pg.query("select public.abandon_esign_template_draft($1,$2,$3)", [
@@ -1271,7 +1332,10 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       actorId: recoveryOwnerId,
     });
     await expect(
-      pg.query("select public.delete_org_esign_integration($1,$2)", [orgId, creatorId]),
+      pg.query("select public.delete_org_esign_integration($1,$2)", [
+        orgId,
+        creatorId,
+      ]),
     ).resolves.toBeDefined();
     await pg.query("rollback to savepoint disconnect_edit");
     await pg.query("release savepoint disconnect_edit");
@@ -1282,15 +1346,27 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       `select public.record_esign_template_source_cleanup(
          $1,$2,$3,'failed','DELETE_FAILED',$4
        )`,
-      [orgId, finalizedCleanup.templateId, finalizedCleanup.sourcePath, creatorId],
+      [
+        orgId,
+        finalizedCleanup.templateId,
+        finalizedCleanup.sourcePath,
+        creatorId,
+      ],
     );
     await expectDbError(
-      () => pg.query("select public.delete_org_esign_integration($1,$2)", [orgId, creatorId]),
+      () =>
+        pg.query("select public.delete_org_esign_integration($1,$2)", [
+          orgId,
+          creatorId,
+        ]),
       /attached template source cleanup/i,
     );
     await recordAttachedSourceDeleted(finalizedCleanup);
     await expect(
-      pg.query("select public.delete_org_esign_integration($1,$2)", [orgId, creatorId]),
+      pg.query("select public.delete_org_esign_integration($1,$2)", [
+        orgId,
+        creatorId,
+      ]),
     ).resolves.toBeDefined();
     await pg.query("rollback to savepoint disconnect_cleanup");
     await pg.query("release savepoint disconnect_cleanup");
@@ -1319,6 +1395,7 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
   });
 
   it("allows browser upload only for an exact durable reservation", async () => {
+    await connectIntegration(orgId, creatorId, "account-a");
     await setRole("service_role");
     const sourceId = crypto.randomUUID();
     const path = `${orgId}/${sourceId}.pdf`;
@@ -1331,7 +1408,9 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     await resetRole();
     await setRole("authenticated", creatorId);
     await expect(
-      pg.query("select public.esign_staging_upload_is_reserved($1) reserved", [path]),
+      pg.query("select public.esign_staging_upload_is_reserved($1) reserved", [
+        path,
+      ]),
     ).resolves.toMatchObject({ rows: [{ reserved: true }] });
     await expect(
       pg.query(
@@ -1358,13 +1437,18 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       await resetRole();
       await setRole("authenticated", userId);
       await expect(
-        pg.query("select public.esign_staging_upload_is_reserved($1) reserved", [path]),
+        pg.query(
+          "select public.esign_staging_upload_is_reserved($1) reserved",
+          [path],
+        ),
       ).resolves.toMatchObject({ rows: [{ reserved: false }] });
     }
     await resetRole();
     await setRole("service_role");
     await expect(
-      pg.query("select public.esign_staging_upload_is_reserved($1) reserved", [path]),
+      pg.query("select public.esign_staging_upload_is_reserved($1) reserved", [
+        path,
+      ]),
     ).resolves.toMatchObject({ rows: [{ reserved: true }] });
   });
 
@@ -1534,7 +1618,10 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       outcome: "claimed",
       provider_account_id: "account-a",
     });
-    const blocked = await pg.query<{ outcome: string; claim_token: string | null }>(
+    const blocked = await pg.query<{
+      outcome: string;
+      claim_token: string | null;
+    }>(
       "select * from public.claim_esign_template_provider_create($1,$2,$3,$4)",
       [orgId, first.template_id, source.id, creatorId],
     );
@@ -1558,7 +1645,13 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       () =>
         pg.query(
           "select * from public.begin_esign_template_provider_create($1,$2,$3,$4,$5)",
-          [orgId, first.template_id, source.id, claim.rows[0].claim_token, creatorId],
+          [
+            orgId,
+            first.template_id,
+            source.id,
+            claim.rows[0].claim_token,
+            creatorId,
+          ],
         ),
       /token does not match/i,
     );
@@ -1583,7 +1676,10 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
         recoveryOwnerId,
       ],
     );
-    const neverReclaimed = await pg.query<{ outcome: string; provider_create_state: string }>(
+    const neverReclaimed = await pg.query<{
+      outcome: string;
+      provider_create_state: string;
+    }>(
       "select * from public.claim_esign_template_provider_create($1,$2,$3,$4)",
       [orgId, first.template_id, source.id, creatorId],
     );
@@ -1705,7 +1801,14 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     const providerTemplateId = `provider-stale-${crypto.randomUUID()}`;
     const lateCompletion = await pg.query<{ outcome: string }>(
       "select * from public.complete_esign_template_provider_create($1,$2,$3,$4,$5,$6)",
-      [orgId, draft.template_id, source.id, token, providerTemplateId, creatorId],
+      [
+        orgId,
+        draft.template_id,
+        source.id,
+        token,
+        providerTemplateId,
+        creatorId,
+      ],
     );
     expect(lateCompletion.rows[0].outcome).toBe("attached");
     const attachedReplay = await pg.query<{
@@ -1722,7 +1825,14 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     await expect(
       pg.query(
         "select * from public.complete_esign_template_provider_create($1,$2,$3,$4,$5,$6)",
-        [orgId, draft.template_id, source.id, token, providerTemplateId, recoveryOwnerId],
+        [
+          orgId,
+          draft.template_id,
+          source.id,
+          token,
+          providerTemplateId,
+          recoveryOwnerId,
+        ],
       ),
     ).resolves.toMatchObject({
       rows: [expect.objectContaining({ outcome: "already_attached" })],
@@ -1731,7 +1841,14 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       () =>
         pg.query(
           "select * from public.complete_esign_template_provider_create($1,$2,$3,$4,$5,$6)",
-          [orgId, draft.template_id, source.id, token, "provider-conflict", recoveryOwnerId],
+          [
+            orgId,
+            draft.template_id,
+            source.id,
+            token,
+            "provider-conflict",
+            recoveryOwnerId,
+          ],
         ),
       /conflicts/i,
     );
@@ -1885,7 +2002,13 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     await pg.query("savepoint rollback_contract");
     const oldActionCompatible = await pg.query<{ outcome: string }>(
       "select * from public.reconcile_unknown_esign_template_provider_create($1,$2,$3,$4,$5)",
-      [orgId, draft.template_id, source.id, "provider-manual-recovery", recoveryOwnerId],
+      [
+        orgId,
+        draft.template_id,
+        source.id,
+        "provider-manual-recovery",
+        recoveryOwnerId,
+      ],
     );
     expect(oldActionCompatible.rows[0].outcome).toBe("attached");
     await pg.query("rollback to savepoint rollback_contract");
@@ -1900,10 +2023,12 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       "select * from public.begin_definitive_esign_template_provider_create_retry($1,$2,$3,$4)",
       [orgId, draft.template_id, source.id, recoveryOwnerId],
     );
-    expect(interrupted.rows[0]).toEqual(expect.objectContaining({
-      outcome: "started",
-      provider_create_state: "invoking",
-    }));
+    expect(interrupted.rows[0]).toEqual(
+      expect.objectContaining({
+        outcome: "started",
+        provider_create_state: "invoking",
+      }),
+    );
     expect(interrupted.rows[0].claim_token).not.toBe(token);
     await pg.query(
       `update public.esign_templates
@@ -1911,15 +2036,22 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
        where id = $1`,
       [draft.template_id],
     );
-    const promoted = await pg.query<{ outcome: string; provider_create_state: string }>(
+    const promoted = await pg.query<{
+      outcome: string;
+      provider_create_state: string;
+    }>(
       "select * from public.mark_stale_esign_template_provider_create_unknown($1,$2,$3,$4)",
       [orgId, draft.template_id, source.id, recoveryOwnerId],
     );
-    expect(promoted.rows[0]).toEqual(expect.objectContaining({
-      outcome: "recorded_unknown",
-      provider_create_state: "unknown",
-    }));
-    const interruptedRollbackList = await pg.query<{ provider_create_state: string }>(
+    expect(promoted.rows[0]).toEqual(
+      expect.objectContaining({
+        outcome: "recorded_unknown",
+        provider_create_state: "unknown",
+      }),
+    );
+    const interruptedRollbackList = await pg.query<{
+      provider_create_state: string;
+    }>(
       "select * from public.list_pending_esign_template_provider_creates($1,$2)",
       [orgId, recoveryOwnerId],
     );
@@ -1928,7 +2060,13 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     ]);
     const interruptedManualRecovery = await pg.query<{ outcome: string }>(
       "select * from public.reconcile_unknown_esign_template_provider_create($1,$2,$3,$4,$5)",
-      [orgId, draft.template_id, source.id, "provider-after-interruption", recoveryOwnerId],
+      [
+        orgId,
+        draft.template_id,
+        source.id,
+        "provider-after-interruption",
+        recoveryOwnerId,
+      ],
     );
     expect(interruptedManualRecovery.rows[0].outcome).toBe("attached");
     await pg.query("rollback to savepoint interrupted_retry");
@@ -1942,10 +2080,12 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       "select * from public.begin_definitive_esign_template_provider_create_retry($1,$2,$3,$4)",
       [orgId, draft.template_id, source.id, recoveryOwnerId],
     );
-    expect(retried.rows[0]).toEqual(expect.objectContaining({
-      outcome: "started",
-      provider_create_state: "invoking",
-    }));
+    expect(retried.rows[0]).toEqual(
+      expect.objectContaining({
+        outcome: "started",
+        provider_create_state: "invoking",
+      }),
+    );
     expect(retried.rows[0].claim_token).not.toBe(token);
   });
 
@@ -1959,7 +2099,13 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     );
     await pg.query(
       "select * from public.begin_esign_template_provider_create($1,$2,$3,$4,$5)",
-      [orgId, draft.template_id, source.id, claim.rows[0].claim_token, creatorId],
+      [
+        orgId,
+        draft.template_id,
+        source.id,
+        claim.rows[0].claim_token,
+        creatorId,
+      ],
     );
     await pg.query(
       "select * from public.complete_esign_template_provider_create($1,$2,$3,$4,$5,$6)",
@@ -2137,7 +2283,10 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       "select * from public.claim_unattached_esign_template_source_cleanup($1,$2,$3,$4)",
       [orgId, sourceId, path, recoveryOwnerId],
     );
-    const inProgress = await pg.query<{ outcome: string; cleanup_token: string | null }>(
+    const inProgress = await pg.query<{
+      outcome: string;
+      cleanup_token: string | null;
+    }>(
       "select * from public.claim_unattached_esign_template_source_cleanup($1,$2,$3,$4)",
       [orgId, sourceId, path, creatorId],
     );
@@ -2155,7 +2304,9 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       "select * from public.claim_unattached_esign_template_source_cleanup($1,$2,$3,$4)",
       [orgId, sourceId, path, recoveryOwnerId],
     );
-    expect(reclaimed.rows[0].cleanup_token).not.toBe(first.rows[0].cleanup_token);
+    expect(reclaimed.rows[0].cleanup_token).not.toBe(
+      first.rows[0].cleanup_token,
+    );
     await expectDbError(
       () =>
         pg.query(
@@ -2169,7 +2320,10 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
       [orgId, sourceId, path, reclaimed.rows[0].cleanup_token, recoveryOwnerId],
     );
     expect(completed.rows[0].outcome).toBe("deleted");
-    const replay = await pg.query<{ outcome: string; cleanup_token: string | null }>(
+    const replay = await pg.query<{
+      outcome: string;
+      cleanup_token: string | null;
+    }>(
       "select * from public.claim_unattached_esign_template_source_cleanup($1,$2,$3,$4)",
       [orgId, sourceId, path, creatorId],
     );
@@ -2188,7 +2342,13 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     );
     await pg.query(
       "select * from public.complete_unattached_esign_template_source_cleanup($1,$2,$3,$4,'failed','DELETE_AMBIGUOUS',$5)",
-      [orgId, source.id, source.path, firstClaim.rows[0].cleanup_token, creatorId],
+      [
+        orgId,
+        source.id,
+        source.path,
+        firstClaim.rows[0].cleanup_token,
+        creatorId,
+      ],
     );
 
     await expectDbError(
@@ -2244,24 +2404,40 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     );
 
     await resetRole();
-    await pg.query("delete from public.esign_templates where id=$1", [forcedTemplateId]);
+    await pg.query("delete from public.esign_templates where id=$1", [
+      forcedTemplateId,
+    ]);
     await setRole("service_role");
     const retry = await pg.query<{ outcome: string; cleanup_token: string }>(
       "select * from public.claim_unattached_esign_template_source_cleanup($1,$2,$3,$4)",
       [orgId, source.id, source.path, recoveryOwnerId],
     );
     expect(retry.rows[0].outcome).toBe("claimed");
-    expect(retry.rows[0].cleanup_token).not.toBe(firstClaim.rows[0].cleanup_token);
+    expect(retry.rows[0].cleanup_token).not.toBe(
+      firstClaim.rows[0].cleanup_token,
+    );
     await deleteStagingObject(source.path);
-    const completed = await pg.query<{ outcome: string; cleanup_state: string }>(
+    const completed = await pg.query<{
+      outcome: string;
+      cleanup_state: string;
+    }>(
       "select * from public.complete_unattached_esign_template_source_cleanup($1,$2,$3,$4,'deleted',null,$5)",
-      [orgId, source.id, source.path, retry.rows[0].cleanup_token, recoveryOwnerId],
+      [
+        orgId,
+        source.id,
+        source.path,
+        retry.rows[0].cleanup_token,
+        recoveryOwnerId,
+      ],
     );
     expect(completed.rows[0]).toMatchObject({
       outcome: "deleted",
       cleanup_state: "deleted",
     });
-    const replay = await pg.query<{ outcome: string; cleanup_token: string | null }>(
+    const replay = await pg.query<{
+      outcome: string;
+      cleanup_token: string | null;
+    }>(
       "select * from public.claim_unattached_esign_template_source_cleanup($1,$2,$3,$4)",
       [orgId, source.id, source.path, creatorId],
     );

@@ -4,6 +4,7 @@ import { ProviderError } from "@/lib/errors/classes";
 
 const providerMocks = vi.hoisted(() => ({
   getCredentials: vi.fn(),
+  templateCapability: vi.fn(),
   createProvider: vi.fn(),
   sendWithTemplate: vi.fn(),
   remind: vi.fn(),
@@ -14,6 +15,7 @@ const providerMocks = vi.hoisted(() => ({
 vi.mock("@/lib/esign/credentials", () => ({
   configuredDropboxSignEmbeddedDomain: () => "sandra.example.com",
   getEsignCredentials: providerMocks.getCredentials,
+  requireEsignTemplateManagementCredentials: providerMocks.templateCapability,
 }));
 
 vi.mock("@/lib/esign/dropbox-sign", () => ({
@@ -29,6 +31,13 @@ describe("bound lead eSign provider classification", () => {
       sendingEnabled: true,
       apiKey: "secret-wrapper",
       clientId: "client-id",
+      providerAccountId: "account-1",
+    });
+    providerMocks.templateCapability.mockResolvedValue({
+      sendingEnabled: false,
+      apiKey: "secret-wrapper",
+      clientId: "client-id",
+      providerAccountId: "account-1",
     });
     providerMocks.createProvider.mockReturnValue({
       sendWithTemplate: providerMocks.sendWithTemplate,
@@ -134,5 +143,78 @@ describe("bound lead eSign provider classification", () => {
       signal,
     });
     expect(providerMocks.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("can build a repair-only provider while sending is disabled", async () => {
+    providerMocks.getCredentials.mockResolvedValueOnce({
+      sendingEnabled: false,
+      apiKey: "secret-wrapper",
+      clientId: "client-id",
+      providerAccountId: "account-1",
+    });
+
+    await expect(
+      providerForOrg("org-1", { requireSendingEnabled: false }),
+    ).resolves.toBeTruthy();
+    expect(providerMocks.createProvider).toHaveBeenCalledWith({
+      apiKey: "secret-wrapper",
+      clientId: "client-id",
+      expectedDomain: "sandra.example.com",
+    });
+    expect(providerMocks.templateCapability).toHaveBeenCalledWith("org-1");
+  });
+
+  it("does not create a repair-only provider while disconnect is pending", async () => {
+    providerMocks.getCredentials.mockResolvedValueOnce({
+      sendingEnabled: false,
+      apiKey: "secret-wrapper",
+      clientId: "client-id",
+      providerAccountId: "account-1",
+    });
+    providerMocks.templateCapability.mockRejectedValueOnce(
+      new Error("template management unavailable"),
+    );
+
+    await expect(
+      providerForOrg("org-1", { requireSendingEnabled: false }),
+    ).rejects.toThrow("template management unavailable");
+    expect(providerMocks.templateCapability).toHaveBeenCalledWith("org-1");
+    expect(providerMocks.createProvider).not.toHaveBeenCalled();
+  });
+
+  it("does not create a provider client for normal mutations when sending is disabled", async () => {
+    providerMocks.getCredentials.mockResolvedValueOnce({
+      sendingEnabled: false,
+      apiKey: "secret-wrapper",
+      clientId: "client-id",
+      providerAccountId: "account-1",
+    });
+
+    await expect(providerForOrg("org-1")).resolves.toBeNull();
+    expect(providerMocks.templateCapability).not.toHaveBeenCalled();
+    expect(providerMocks.createProvider).not.toHaveBeenCalled();
+  });
+
+  it("keeps normal send operations unreachable after the disabled read", async () => {
+    providerMocks.getCredentials.mockResolvedValueOnce({
+      sendingEnabled: false,
+      apiKey: "secret-wrapper",
+      clientId: "client-id",
+      providerAccountId: "account-1",
+    });
+
+    const provider = await providerForOrg("org-1");
+
+    expect(provider).toBeNull();
+    expect(providerMocks.templateCapability).not.toHaveBeenCalled();
+    expect(providerMocks.createProvider).not.toHaveBeenCalled();
+    expect(providerMocks.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("does not create a provider client after credentials are removed", async () => {
+    providerMocks.getCredentials.mockResolvedValueOnce(null);
+
+    await expect(providerForOrg("org-1")).resolves.toBeNull();
+    expect(providerMocks.createProvider).not.toHaveBeenCalled();
   });
 });

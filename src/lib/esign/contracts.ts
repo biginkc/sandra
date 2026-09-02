@@ -36,8 +36,7 @@ export const ESIGN_MERGE_FIELD_NAMES = [
 export const ESIGN_TEMPLATE_MERGE_FIELDS = ESIGN_MERGE_FIELD_NAMES;
 export const ESIGN_TEMPLATE_TITLE_MAX_LENGTH = 160;
 
-export type EsignMergeFieldName =
-  (typeof ESIGN_MERGE_FIELD_NAMES)[number];
+export type EsignMergeFieldName = (typeof ESIGN_MERGE_FIELD_NAMES)[number];
 export type EsignTemplateMergeField = EsignMergeFieldName;
 
 export type TemplateSignerRole = {
@@ -142,7 +141,10 @@ export type DropboxSignProvider = {
   getEmbeddedTemplateEditUrl(
     providerTemplateId: string,
   ): Promise<EmbeddedTemplateSession>;
-  getTemplate(providerTemplateId: string, signal?: AbortSignal): Promise<ProviderTemplateMetadata>;
+  getTemplate(
+    providerTemplateId: string,
+    signal?: AbortSignal,
+  ): Promise<ProviderTemplateMetadata>;
   getTemplateFiles(providerTemplateId: string): Promise<Buffer>;
   duplicateTemplate(
     providerTemplateId: string,
@@ -153,7 +155,9 @@ export type DropboxSignProvider = {
     file: TemplatePdf,
   ): Promise<void>;
   deleteTemplate(providerTemplateId: string): Promise<void>;
-  sendWithTemplate(input: SendWithTemplateInput): Promise<SendWithTemplateOutput>;
+  sendWithTemplate(
+    input: SendWithTemplateInput,
+  ): Promise<SendWithTemplateOutput>;
   updateSignerEmail(input: {
     signatureRequestId: string;
     signatureId: string;
@@ -185,6 +189,7 @@ export type EsignConnectionStatus = {
   connected: boolean;
   canManage: boolean;
   sendingEnabled: boolean;
+  disconnectPending: boolean;
   testMode: true;
   apiKeyLastFour: string | null;
 };

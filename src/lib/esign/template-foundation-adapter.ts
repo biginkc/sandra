@@ -3,11 +3,14 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 
 import { ProviderError } from "@/lib/errors/classes";
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import { ESIGN_MERGE_FIELD_NAMES, type TemplateOption, type TemplateSignerRole } from "./contracts";
-import { getEsignCredentials, configuredDropboxSignEmbeddedDomain } from "./credentials";
+import {
+  requireEsignTemplateManagementCredentials,
+  configuredDropboxSignEmbeddedDomain,
+} from "./credentials";
 import { createDropboxSignProvider } from "./dropbox-sign";
 import { isRestartableDraftEditorFailure } from "./provider-failure";
 import {
@@ -32,11 +35,15 @@ export type TemplateLibraryRecord = TemplateOption & {
 };
 
 export async function createFoundationTemplateOrchestrator() {
-  const selectedMembership = (await getCallerMemberships())[0];
+  const selectedMembership = await getSingleActiveMembership();
   const actorPort = {
     async getActor() {
-      return selectedMembership
-        ? { userId: selectedMembership.user_id, orgId: selectedMembership.org_id, isOwner: selectedMembership.role === "owner" }
+      return selectedMembership.ok
+        ? {
+            userId: selectedMembership.membership.user_id,
+            orgId: selectedMembership.membership.org_id,
+            isOwner: selectedMembership.membership.role === "owner",
+          }
         : null;
     },
   };
@@ -71,8 +78,9 @@ export async function createFoundationTemplateOrchestrator() {
     if (!providerPromise) {
       providerPromise = (async () => {
         if (!membership) throw new Error("AUTH_REQUIRED");
-        const credentials = await getEsignCredentials(membership.orgId);
-        if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+        const credentials = await requireEsignTemplateManagementCredentials(
+          membership.orgId,
+        );
         return {
           clientId: credentials.clientId,
           providerAccountId: credentials.providerAccountId,

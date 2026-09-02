@@ -5,6 +5,7 @@ import { ProviderError } from "@/lib/errors/classes";
 const mocks = vi.hoisted(() => ({
   memberships: vi.fn(),
   credentials: vi.fn(),
+  templateCapability: vi.fn(),
   providerFactory: vi.fn(),
   rpc: vi.fn(),
   from: vi.fn(),
@@ -13,9 +14,16 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("server-only", () => ({}));
-vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships: mocks.memberships }));
+vi.mock("@/lib/auth/memberships", () => ({
+  getSingleActiveMembership: async () => {
+    const memberships = await mocks.memberships();
+    if (memberships.length !== 1) return { ok: false, reason: "ambiguous" };
+    return { ok: true, membership: memberships[0] };
+  },
+}));
 vi.mock("./credentials", () => ({
   getEsignCredentials: mocks.credentials,
+  requireEsignTemplateManagementCredentials: mocks.templateCapability,
   configuredDropboxSignEmbeddedDomain: () => "app.example.com",
 }));
 vi.mock("./dropbox-sign", () => ({ createDropboxSignProvider: mocks.providerFactory }));
@@ -49,6 +57,9 @@ describe("foundation template staging adapter without Dropbox credentials", () =
     vi.clearAllMocks();
     mocks.memberships.mockResolvedValue([{ user_id: "owner-1", org_id: orgId, role: "owner" }]);
     mocks.credentials.mockResolvedValue(null);
+    mocks.templateCapability.mockRejectedValue(
+      new Error("DROPBOX_SIGN_NOT_CONNECTED"),
+    );
     mocks.download.mockResolvedValue({
       data: new Blob([bytes], { type: "application/pdf" }),
       error: null,
@@ -78,6 +89,25 @@ describe("foundation template staging adapter without Dropbox credentials", () =
       p_source_sha256: sha256,
     }));
     expect(mocks.credentials).not.toHaveBeenCalled();
+    expect(mocks.templateCapability).not.toHaveBeenCalled();
+    expect(mocks.providerFactory).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when active membership resolution is ambiguous", async () => {
+    mocks.memberships.mockResolvedValue([
+      { user_id: "owner-1", org_id: orgId, role: "owner" },
+      { user_id: "owner-1", org_id: "other-org", role: "owner" },
+    ]);
+
+    await expect((await createFoundationTemplateOrchestrator()).list()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "AUTH_REQUIRED",
+        message: "Sign in to manage eSign templates.",
+      },
+    });
+    expect(mocks.credentials).not.toHaveBeenCalled();
+    expect(mocks.templateCapability).not.toHaveBeenCalled();
     expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
 
@@ -264,10 +294,11 @@ const draftRow = {
 };
 
 function configureSuccessfulProvider() {
-  mocks.credentials.mockResolvedValue({
+  mocks.templateCapability.mockResolvedValue({
     apiKey: { reveal: () => "redacted-test-value" },
     clientId: "client-1",
     providerAccountId: "account-1",
+    sendingEnabled: false,
   });
   mocks.providerFactory.mockReturnValue({
     getTemplate: vi.fn().mockResolvedValue({
@@ -359,6 +390,37 @@ describe("finish synchronization schema compatibility", () => {
       },
     });
     expect(getTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses provider-backed template reads while disconnect is pending", async () => {
+    const draftQuery = query({ data: draftRow, error: null });
+    const capabilityQuery = query({
+      data: { provider_sync_started_at: null },
+      error: null,
+    });
+    const updateQuery = query({
+      data: { provider_sync_started_at: "2026-09-02T00:00:00.000Z" },
+      error: null,
+    });
+    mocks.from
+      .mockReturnValueOnce(draftQuery)
+      .mockReturnValueOnce(capabilityQuery)
+      .mockReturnValueOnce(updateQuery);
+    mocks.templateCapability.mockRejectedValueOnce(
+      new Error("DROPBOX_SIGN_NOT_CONNECTED"),
+    );
+
+    const orchestrator = await createFoundationTemplateOrchestrator();
+
+    await expect(orchestrator.finishSync(draftRow.id)).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "TEMPLATE_MANAGEMENT_DISABLED",
+        message:
+          "Dropbox Sign is disconnecting or not connected. Reconnect it before managing eSign templates.",
+      },
+    });
+    expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
 
   it("survives rollback between capability read and timestamp update", async () => {

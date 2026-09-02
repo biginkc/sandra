@@ -66,9 +66,21 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const [esignConfirmation, setEsignConfirmation] = useState<boolean | null>(
     null,
   );
+  const [esignDisconnectConfirmation, setEsignDisconnectConfirmation] =
+    useState(false);
+  const [esignDisconnectResult, setEsignDisconnectResult] = useState<{
+    variant: "success" | "error";
+    message: string;
+  } | null>(null);
   const esignToggleRef = useRef<HTMLInputElement>(null);
+  const esignDisconnectButtonRef = useRef<HTMLButtonElement>(null);
   const esignConfirmingRef = useRef(false);
+  const esignDisconnectingRef = useRef(false);
   const [pending, startTransition] = useTransition();
+  const esignOwnerReasonId = "esign-owner-required-description";
+  const esignToggleDescriptionId = esign.canManage
+    ? undefined
+    : esignOwnerReasonId;
 
   const toggleSlack = (next: boolean) => {
     const previous = slackEnabled;
@@ -149,6 +161,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   };
 
   const connectEsign = () => {
+    setEsignDisconnectResult(null);
     startTransition(async () => {
       const result = await callAction(connectDropboxSignAction(esignApiKey), {
         successMessage: "Dropbox Sign connected",
@@ -169,6 +182,16 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
     if (esignConfirmingRef.current) return;
     setEsignConfirmation(null);
     returnFocusToEsignToggle();
+  };
+
+  const returnFocusToEsignDisconnect = () => {
+    window.setTimeout(() => esignDisconnectButtonRef.current?.focus(), 0);
+  };
+
+  const closeEsignDisconnectConfirmation = () => {
+    if (esignDisconnectingRef.current) return;
+    setEsignDisconnectConfirmation(false);
+    returnFocusToEsignDisconnect();
   };
 
   const confirmEsignToggle = () => {
@@ -198,19 +221,51 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   };
 
   const disconnectEsign = () => {
+    setEsignDisconnectResult(null);
+    setEsignDisconnectConfirmation(true);
+  };
+
+  const confirmEsignDisconnect = () => {
+    if (esignDisconnectingRef.current) return;
+    esignDisconnectingRef.current = true;
     startTransition(async () => {
-      const result = await callAction(disconnectDropboxSignAction(), {
-        successMessage: "Dropbox Sign disconnected",
-        fallbackMessage: "Could not disconnect Dropbox Sign",
-      });
-      if (result.ok) {
-        setEsign({
-          connected: false,
-          canManage: true,
-          sendingEnabled: false,
-          testMode: true,
-          apiKeyLastFour: null,
+      try {
+        const result = await callAction(disconnectDropboxSignAction(true), {
+          fallbackMessage: "Could not disconnect Dropbox Sign",
         });
+        if (result.ok) {
+          if (result.data.disconnected || !result.data.credentialsPresent) {
+            setEsign({
+              connected: false,
+              canManage: true,
+              sendingEnabled: false,
+              disconnectPending: false,
+              testMode: true,
+              apiKeyLastFour: null,
+            });
+          } else {
+            setEsign((current) => ({
+              ...current,
+              connected: true,
+              sendingEnabled: result.data.sendingEnabled,
+              disconnectPending: result.data.disconnectPending,
+            }));
+          }
+          setEsignDisconnectResult({
+            variant: "success",
+            message: result.data.message,
+          });
+          setEsignDisconnectConfirmation(false);
+          return;
+        }
+        setEsignDisconnectResult({
+          variant: "error",
+          message: result.error.message,
+        });
+        setEsignDisconnectConfirmation(false);
+        returnFocusToEsignDisconnect();
+      } finally {
+        esignDisconnectingRef.current = false;
       }
     });
   };
@@ -277,14 +332,34 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               Test mode is always on for v1. Test signatures are not legally
               binding.
             </div>
+            {esignDisconnectResult && (
+              <p
+                role={
+                  esignDisconnectResult.variant === "error" ? "alert" : "status"
+                }
+                aria-label={
+                  esignDisconnectResult.variant === "error"
+                    ? "Dropbox Sign disconnect failed"
+                    : "Dropbox Sign disconnect result"
+                }
+                className={
+                  esignDisconnectResult.variant === "error"
+                    ? "border-destructive/30 bg-destructive/5 text-destructive rounded-md border px-3 py-2 text-sm"
+                    : "rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900"
+                }
+              >
+                {esignDisconnectResult.message}
+              </p>
+            )}
             {esign.connected ? (
               <>
                 <label className="flex items-center justify-between gap-4 rounded-md border p-3 text-sm">
                   <span className="flex flex-col gap-1">
                     <span className="font-medium">Enable contract sending</span>
                     <span className="text-muted-foreground text-xs">
-                      Requires a verified callback and applies to new test-mode
-                      requests.
+                      {esign.disconnectPending
+                        ? "Active signature work is still finishing."
+                        : "Requires a verified callback and applies to new test-mode requests."}
                     </span>
                   </span>
                   <input
@@ -292,7 +367,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                     type="checkbox"
                     role="switch"
                     checked={esign.sendingEnabled}
-                    disabled={pending || !esign.canManage}
+                    disabled={
+                      pending || !esign.canManage || esign.disconnectPending
+                    }
                     onChange={(event) =>
                       setEsignConfirmation(event.target.checked)
                     }
@@ -301,20 +378,24 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                     aria-label="Enable contract sending"
                     aria-expanded={esignConfirmation !== null}
                     aria-controls="esign-sending-confirmation"
+                    aria-describedby={esignToggleDescriptionId}
                   />
                 </label>
                 <div className="flex flex-wrap gap-2">
                   {esign.canManage && (
                     <>
-                      <Link
-                        href="/settings/esign-templates"
-                        className={cn(
-                          buttonVariants({ variant: "outline", size: "sm" }),
-                        )}
-                      >
-                        Manage templates
-                      </Link>
+                      {!esign.disconnectPending && (
+                        <Link
+                          href="/settings/esign-templates"
+                          className={cn(
+                            buttonVariants({ variant: "outline", size: "sm" }),
+                          )}
+                        >
+                          Manage templates
+                        </Link>
+                      )}
                       <Button
+                        ref={esignDisconnectButtonRef}
                         type="button"
                         variant="outline"
                         size="sm"
@@ -327,8 +408,18 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                   )}
                 </div>
                 {!esign.canManage && (
+                  <p
+                    id={esignOwnerReasonId}
+                    className="text-muted-foreground text-xs"
+                  >
+                    Only organization owners can disconnect Dropbox Sign or
+                    manage templates. The sending switch is disabled for
+                    non-owner accounts.
+                  </p>
+                )}
+                {esign.canManage && esign.disconnectPending && (
                   <p className="text-muted-foreground text-xs">
-                    Only organization owners can manage this connection.
+                    Callback handling stays on until active signatures finish.
                   </p>
                 )}
               </>
@@ -489,6 +580,43 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               onClick={confirmEsignToggle}
             >
               {esignConfirmation ? "Turn on sending" : "Turn off sending"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={esignDisconnectConfirmation}
+        onOpenChange={(open) => {
+          if (!open) closeEsignDisconnectConfirmation();
+        }}
+      >
+        <DialogContent id="esign-disconnect-confirmation">
+          <DialogHeader>
+            <DialogTitle>Disconnect Dropbox Sign?</DialogTitle>
+            <DialogDescription>
+              Sandra will remove the active Dropbox Sign connection after the
+              database confirms it is safe. When it succeeds, new contract
+              sending is off.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending}
+              onClick={closeEsignDisconnectConfirmation}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              autoFocus
+              disabled={pending}
+              onClick={confirmEsignDisconnect}
+            >
+              Disconnect
             </Button>
           </DialogFooter>
         </DialogContent>

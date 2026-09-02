@@ -12,6 +12,8 @@ const FINISH_SYNC_WALL_CLOCK_TIMEOUT_MS = 15_000;
 // Dropbox Sign documents template_created/template_error as the authoritative
 // asynchronous result and directs integrators to investigate after 60 minutes.
 const FINISH_SYNC_PROVIDER_CALLBACK_DEADLINE_MS = 60 * 60 * 1_000;
+const TEMPLATE_MANAGEMENT_DISABLED_MESSAGE =
+  "Dropbox Sign is disconnecting or not connected. Reconnect it before managing eSign templates.";
 
 export type TemplateActionError = Readonly<{ code: string; message: string }>;
 export type TemplateActionResult<T> =
@@ -271,7 +273,10 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       let bytes: Uint8Array;
       try {
         bytes = await ports.provider.getTemplateFiles(source.providerTemplateId);
-      } catch {
+      } catch (error) {
+        if (isTemplateManagementUnavailable(error)) {
+          return templateManagementDisabled();
+        }
         return failure("EDIT_SOURCE_DOWNLOAD_FAILED", "Dropbox Sign could not prepare the template source for editing.");
       }
       const staged = await stageVerifiedSource(ports, access.data, {
@@ -292,8 +297,13 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       let duplicate: { providerTemplateId: string; readiness: "ready" | "pending" };
       try {
         duplicate = await ports.provider.duplicateTemplate({ providerTemplateId: source.providerTemplateId, expectedProviderAccountId: source.providerAccountId, title: source.name });
-      } catch {
+      } catch (error) {
         const compensated = await compensateHiddenDraft(ports, revision);
+        if (isTemplateManagementUnavailable(error)) {
+          return compensated
+            ? templateManagementDisabled()
+            : failure("EDIT_COMPENSATION_FAILED", "The failed edit revision requires cleanup attention.");
+        }
         return compensated
           ? failure("EDIT_PROVIDER_COPY_FAILED", "Dropbox Sign could not create the edit revision.")
           : failure("EDIT_COMPENSATION_FAILED", "The failed edit revision requires cleanup attention.");
@@ -381,6 +391,12 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
         }
         const compensated = await compensateHiddenDraft(ports, draft);
         if (!compensated) return failure("CREATE_COMPENSATION_FAILED", "The failed provider draft could not be safely reconciled.");
+        if (isTemplateManagementUnavailable(error)) {
+          return failure(
+            "PROVIDER_CONFIGURATION_FAILED",
+            TEMPLATE_MANAGEMENT_DISABLED_MESSAGE,
+          );
+        }
         return failure("PROVIDER_CREATE_FAILED", "Dropbox Sign could not create the template draft.");
       }
       if (!providerTemplateId) {
@@ -439,6 +455,9 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
             "This unfinished draft's first editor session is no longer available. Restart field placement to continue.",
           );
         }
+        if (isTemplateManagementUnavailable(error)) {
+          return templateManagementDisabled();
+        }
         return failure("EDITOR_SESSION_FAILED", "Dropbox Sign could not open a fresh editor session.");
       }
       if (provider.providerTemplateId !== template.providerTemplateId) {
@@ -458,6 +477,9 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
             "This unfinished draft's first editor session is no longer available. Restart field placement to continue.",
           );
         }
+        if (isTemplateManagementUnavailable(error)) {
+          return templateManagementDisabled();
+        }
         return failure("EDITOR_SESSION_FAILED", "Dropbox Sign could not open a fresh editor session.");
       }
       try {
@@ -468,7 +490,10 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
           expiresAt: session.expiresAt,
           clientId,
         });
-      } catch {
+      } catch (error) {
+        if (isTemplateManagementUnavailable(error)) {
+          return templateManagementDisabled();
+        }
         return failure("EDITOR_SESSION_FAILED", "Dropbox Sign could not open a fresh editor session.");
       }
     },
@@ -492,6 +517,9 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
         }
         return success({ readiness: "ready" });
       } catch (error) {
+        if (isTemplateManagementUnavailable(error)) {
+          return templateManagementDisabled();
+        }
         if (ports.provider.isNotFound(error)) return success({ readiness: "pending" });
         return failure("DUPLICATE_READINESS_FAILED", "Dropbox Sign could not check whether the copy is ready.");
       }
@@ -576,6 +604,9 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
         try {
           await ports.provider.deleteTemplate(draft.providerTemplateId);
         } catch (error) {
+          if (isTemplateManagementUnavailable(error)) {
+            return templateManagementDisabled();
+          }
           if (!ports.provider.isNotFound(error)) return failure("ABANDON_PROVIDER_FAILED", "Dropbox Sign could not remove the draft.");
         }
       }
@@ -650,13 +681,16 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       let duplicate: { providerTemplateId: string; readiness: "ready" | "pending" };
       try {
         duplicate = await ports.provider.duplicateTemplate({ providerTemplateId: source.providerTemplateId, expectedProviderAccountId: source.providerAccountId, title: title.data });
-      } catch {
+      } catch (error) {
         try {
           if (!(await ports.repository.markAbandoned(access.data.orgId, draft.id))) {
             return failure("DUPLICATE_COMPENSATION_FAILED", "The failed provider copy could not be safely reconciled.");
           }
         } catch {
           return failure("DUPLICATE_COMPENSATION_FAILED", "The failed provider copy could not be safely reconciled.");
+        }
+        if (isTemplateManagementUnavailable(error)) {
+          return templateManagementDisabled();
         }
         return failure("DUPLICATE_PROVIDER_FAILED", "Dropbox Sign could not duplicate the template.");
       }
@@ -702,6 +736,9 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       try {
         await ports.provider.deleteTemplate(template.providerTemplateId);
       } catch (error) {
+        if (isTemplateManagementUnavailable(error)) {
+          return templateManagementDisabled();
+        }
         if (!ports.provider.isNotFound(error)) return failure("DELETE_PROVIDER_RECONCILIATION_FAILED", "Sandra retained the deletion record, but Dropbox Sign still needs deletion reconciliation.");
       }
       return success(null);
@@ -715,6 +752,17 @@ function success<T>(data: T): TemplateActionResult<T> {
 
 function failure(code: string, message: string): TemplateActionResult<never> {
   return { ok: false, error: { code, message } };
+}
+
+function templateManagementDisabled(): TemplateActionResult<never> {
+  return failure(
+    "TEMPLATE_MANAGEMENT_DISABLED",
+    TEMPLATE_MANAGEMENT_DISABLED_MESSAGE,
+  );
+}
+
+function isTemplateManagementUnavailable(error: unknown) {
+  return error instanceof Error && error.message === "DROPBOX_SIGN_NOT_CONNECTED";
 }
 
 function safeTitle(value: string): TemplateActionResult<string> {
@@ -854,6 +902,9 @@ async function getFinishedProviderTemplate(
     } catch (error) {
       if (error instanceof FinishSyncReadTimeout) {
         return failure("PROVIDER_SYNC_TIMEOUT", "Dropbox Sign template verification timed out. Retry synchronization without reopening the editor.");
+      }
+      if (isTemplateManagementUnavailable(error)) {
+        return templateManagementDisabled();
       }
       if (!allowConversionDelay || ports.provider.classifyTemplateReadError(error) !== "not_found") {
         return failure("PROVIDER_SYNC_FAILED", "Dropbox Sign template state could not be verified.");

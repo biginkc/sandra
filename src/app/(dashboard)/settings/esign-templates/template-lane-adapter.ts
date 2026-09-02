@@ -1,7 +1,7 @@
 import "server-only";
 
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import { createFoundationTemplateOrchestrator } from "@/lib/esign/template-foundation-adapter";
 import { createInitialTemplateRuntime } from "@/lib/esign/template-initial-runtime";
 
@@ -14,7 +14,8 @@ import type {
 
 export async function loadTemplateLibrary(): Promise<TemplateLibraryLoadResult> {
   try {
-    const membership = (await getCallerMemberships())[0];
+    const resolvedMembership = await getSingleActiveMembership();
+    const membership = resolvedMembership.ok ? resolvedMembership.membership : null;
     if (!membership || membership.role !== "owner") {
       return { ok: false, error: { code: "OWNER_REQUIRED", message: "Only an organization owner can manage eSign templates." } };
     }
@@ -26,7 +27,8 @@ export async function loadTemplateLibrary(): Promise<TemplateLibraryLoadResult> 
 
 export async function loadPendingTemplateCopies(): Promise<PendingTemplateCopiesLoadResult> {
   try {
-    const membership = (await getCallerMemberships())[0];
+    const resolvedMembership = await getSingleActiveMembership();
+    const membership = resolvedMembership.ok ? resolvedMembership.membership : null;
     if (!membership || membership.role !== "owner") {
       return { ok: false, error: { code: "OWNER_REQUIRED", message: "Only an organization owner can manage eSign templates." } };
     }
@@ -49,7 +51,8 @@ export async function loadTemplateEditor(
   templateId: string,
 ): Promise<TemplateLaneResult<TemplateEditorData>> {
   try {
-    const membership = (await getCallerMemberships())[0];
+    const resolvedMembership = await getSingleActiveMembership();
+    const membership = resolvedMembership.ok ? resolvedMembership.membership : null;
     if (!membership || membership.role !== "owner") {
       return { ok: false, error: { code: "OWNER_REQUIRED", message: "Only an organization owner can manage eSign templates." } };
     }

@@ -35,13 +35,20 @@ type EsignRpcClient = {
     args: { p_org_id: string; p_key: string },
   ): Promise<{
     data: Array<{
-      api_key: string;
-      client_id: string;
-      provider_account_id: string;
+      api_key: string | null;
+      client_id: string | null;
+      provider_account_id: string | null;
       sending_enabled: boolean;
       test_mode: boolean;
       callback_secret_hash: string;
     }> | null;
+    error: { message: string; code?: string } | null;
+  }>;
+  rpc(
+    fn: "esign_require_template_management_capability",
+    args: { p_org_id: string },
+  ): Promise<{
+    data: string | null;
     error: { message: string; code?: string } | null;
   }>;
   rpc(
@@ -147,6 +154,7 @@ export async function getEsignCredentials(
   }
   const row = data?.[0];
   if (!row) return null;
+  if (!row.api_key || !row.client_id || !row.provider_account_id) return null;
   if (!row.test_mode) {
     throw new ConfigurationError(
       "Dropbox Sign must remain in test mode for Sandra v1.",
@@ -160,6 +168,27 @@ export async function getEsignCredentials(
     testMode: true,
     callbackSecretHash: row.callback_secret_hash,
   };
+}
+
+export async function requireEsignTemplateManagementCredentials(
+  orgId: string,
+): Promise<DecryptedEsignCredentials> {
+  const credentials = await getEsignCredentials(orgId);
+  if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+  const { data, error } = await adminRpc().rpc(
+    "esign_require_template_management_capability",
+    { p_org_id: orgId },
+  );
+  if (error) {
+    if (error.code === "P0002") throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+    throw new DatabaseError("Dropbox Sign template management is unavailable.", {
+      code: error.code,
+    });
+  }
+  if (!data || data !== credentials.providerAccountId) {
+    throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
+  }
+  return credentials;
 }
 
 export async function deleteEsignCredentials(

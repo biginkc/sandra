@@ -2,7 +2,11 @@
 
 import { revalidatePath } from "next/cache";
 
-import { getCallerMemberships, type Membership } from "@/lib/auth/memberships";
+import {
+  getSingleActiveMembership,
+  type Membership,
+  type SingleActiveMembershipResolution,
+} from "@/lib/auth/memberships";
 import {
   AuthorizationError,
   DatabaseError,
@@ -18,7 +22,6 @@ import type { EsignConnectionStatus } from "./contracts";
 import {
   configuredDropboxSignClientId,
   configuredDropboxSignEmbeddedDomain,
-  deleteEsignCredentials,
   saveEsignCredentials,
 } from "./credentials";
 import { createDropboxSignProvider } from "./dropbox-sign";
@@ -33,9 +36,10 @@ type StatusClient = {
       ): {
         maybeSingle(): Promise<{
           data: {
-            api_key_last_four: string;
+            api_key_last_four: string | null;
             sending_enabled: boolean;
             test_mode: boolean;
+            disconnect_pending_at?: string | null;
           } | null;
           error: { message: string; code?: string } | null;
         }>;
@@ -44,24 +48,88 @@ type StatusClient = {
   };
 };
 
+async function loadEsignStatusRow(
+  supabase: StatusClient,
+  orgId: string,
+): Promise<{
+  data: {
+    api_key_last_four: string | null;
+    sending_enabled: boolean;
+    test_mode: boolean;
+    disconnect_pending_at?: string | null;
+  } | null;
+  error: { message: string; code?: string } | null;
+}> {
+  const withPendingState = await supabase
+    .from("org_esign_integrations")
+    .select(
+      "api_key_last_four, sending_enabled, test_mode, disconnect_pending_at",
+    )
+    .eq("org_id", orgId)
+    .maybeSingle();
+  if (withPendingState.error?.code !== "42703") {
+    return withPendingState;
+  }
+  const legacyStatus = await supabase
+    .from("org_esign_integrations")
+    .select("api_key_last_four, sending_enabled, test_mode")
+    .eq("org_id", orgId)
+    .maybeSingle();
+  return legacyStatus.error
+    ? legacyStatus
+    : {
+        data: legacyStatus.data
+          ? { ...legacyStatus.data, disconnect_pending_at: null }
+          : null,
+        error: null,
+      };
+}
+
 type AdminIntegrationClient = {
   rpc(
     fn: "set_org_esign_sending_enabled",
     args: { p_org_id: string; p_actor_id: string; p_enabled: boolean },
   ): Promise<{ error: { message: string; code?: string } | null }>;
+  rpc(
+    fn: "disconnect_org_esign_integration",
+    args: { p_org_id: string; p_actor_id: string },
+  ): Promise<{
+    data: Array<{
+      disconnected: boolean;
+      sending_enabled: boolean;
+      credentials_present: boolean;
+      disconnect_pending: boolean;
+      message: string;
+    }> | null;
+    error: { message: string; code?: string } | null;
+  }>;
+};
+
+export type EsignDisconnectResult = {
+  disconnected: boolean;
+  sendingEnabled: boolean;
+  credentialsPresent: boolean;
+  disconnectPending: boolean;
+  message: string;
 };
 
 async function currentMembership(): Promise<Membership> {
-  const memberships = await getCallerMemberships();
-  if (memberships.length === 0) {
-    throw new AuthorizationError("Sign in with active organization access.");
+  const resolution = await getSingleActiveMembership();
+  if (!resolution.ok) {
+    throw authorizationErrorForMembershipResolution(resolution);
   }
-  if (memberships.length !== 1) {
-    throw new AuthorizationError(
-      "Choose a single active organization before managing Dropbox Sign.",
-    );
+  return resolution.membership;
+}
+
+function authorizationErrorForMembershipResolution(
+  resolution: Extract<SingleActiveMembershipResolution, { ok: false }>,
+): AuthorizationError {
+  if (resolution.reason === "missing") {
+    return new AuthorizationError("Sign in with active organization access.");
   }
-  return memberships[0];
+  return new AuthorizationError(
+    "Choose a single active organization before managing Dropbox Sign.",
+  );
 }
 
 function safeEsignError(
@@ -102,11 +170,10 @@ export async function getEsignConnectionStatus(): Promise<
   try {
     const membership = await currentMembership();
     const supabase = (await createClient()) as unknown as StatusClient;
-    const { data, error } = await supabase
-      .from("org_esign_integrations")
-      .select("api_key_last_four, sending_enabled, test_mode")
-      .eq("org_id", membership.org_id)
-      .maybeSingle();
+    const { data, error } = await loadEsignStatusRow(
+      supabase,
+      membership.org_id,
+    );
     if (error) {
       throw new DatabaseError("Failed to load Dropbox Sign status.", {
         code: error.code,
@@ -115,10 +182,16 @@ export async function getEsignConnectionStatus(): Promise<
     if (data && !data.test_mode) {
       throw new DatabaseError("Dropbox Sign is not safely configured for v1.");
     }
+    const credentialsPresent = Boolean(data?.api_key_last_four);
     return ok({
-      connected: Boolean(data),
+      connected: credentialsPresent,
       canManage: membership.role === "owner",
-      sendingEnabled: data?.sending_enabled ?? false,
+      sendingEnabled:
+        credentialsPresent &&
+        !data?.disconnect_pending_at &&
+        (data?.sending_enabled ?? false),
+      disconnectPending:
+        credentialsPresent && Boolean(data?.disconnect_pending_at),
       testMode: true,
       apiKeyLastFour: data?.api_key_last_four ?? null,
     });
@@ -167,6 +240,7 @@ export async function connectDropboxSignAction(
       connected: true,
       canManage: true,
       sendingEnabled: false,
+      disconnectPending: false,
       testMode: true,
       apiKeyLastFour: apiKey.slice(-4),
     });
@@ -200,12 +274,16 @@ export async function setEsignSendingEnabledAction(
       p_enabled: enabled,
     });
     if (error) {
+      const activeWorkError =
+        error.code === "23514" && /active eSign work/i.test(error.message);
       throw new DatabaseError(
-        enabled && error.code === "23514"
-          ? "Verify the Dropbox Sign callback before enabling sending."
-          : error.code === "P0002"
-            ? "Connect Dropbox Sign before enabling sending."
-            : "Dropbox Sign sending could not be updated.",
+        enabled && activeWorkError
+          ? "Finish active eSign work before re-enabling Dropbox Sign sending."
+          : enabled && error.code === "23514"
+            ? "Verify the Dropbox Sign callback before enabling sending."
+            : error.code === "P0002"
+              ? "Connect Dropbox Sign before enabling sending."
+              : "Dropbox Sign sending could not be updated.",
         { code: error.code },
       );
     }
@@ -221,13 +299,40 @@ export async function setEsignSendingEnabledAction(
   }
 }
 
-export async function disconnectDropboxSignAction(): Promise<Result<null>> {
+export async function disconnectDropboxSignAction(
+  operatorConfirmed: boolean,
+): Promise<Result<EsignDisconnectResult>> {
   try {
     const membership = await currentMembership();
     requireOwner(membership);
-    await deleteEsignCredentials(membership.org_id, membership.user_id);
+    if (operatorConfirmed !== true) {
+      throw new ValidationError(
+        "Confirm the Dropbox Sign disconnect before it is applied.",
+      );
+    }
+    const { data, error } = await (
+      createAdminClient() as unknown as AdminIntegrationClient
+    ).rpc("disconnect_org_esign_integration", {
+      p_org_id: membership.org_id,
+      p_actor_id: membership.user_id,
+    });
+    const row = data?.[0];
+    if (error || !row) {
+      throw new DatabaseError(
+        error?.code === "42883"
+          ? "Dropbox Sign disconnect requires the latest database migration."
+          : "Dropbox Sign disconnect state could not be confirmed.",
+        { code: error?.code },
+      );
+    }
     revalidatePath("/settings/integrations");
-    return ok(null);
+    return ok({
+      disconnected: row.disconnected,
+      sendingEnabled: row.sending_enabled,
+      credentialsPresent: row.credentials_present,
+      disconnectPending: row.disconnect_pending,
+      message: row.message,
+    });
   } catch (error) {
     reportError(error, { tags: { surface: "esign_disconnect" } });
     return safeEsignError(

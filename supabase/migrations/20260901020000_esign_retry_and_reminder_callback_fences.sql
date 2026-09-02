@@ -4,7 +4,7 @@ begin;
 -- the database boundary so a double-click or concurrent server invocation can
 -- create at most one direct child. A later retry must start from that child if
 -- it also reaches the failed state.
-create unique index esign_requests_one_retry_child_per_source_idx
+create unique index if not exists esign_requests_one_retry_child_per_source_idx
   on public.esign_requests (org_id, retry_of_request_id)
   where retry_of_request_id is not null;
 

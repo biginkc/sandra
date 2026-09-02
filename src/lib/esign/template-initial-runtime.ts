@@ -2,11 +2,11 @@ import "server-only";
 
 import { createHash } from "node:crypto";
 
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import {
-  getEsignCredentials,
+  requireEsignTemplateManagementCredentials,
   configuredDropboxSignEmbeddedDomain,
 } from "./credentials";
 import { createDropboxSignProvider } from "./dropbox-sign";
@@ -38,8 +38,9 @@ export type PreparedSourceMetadata = Readonly<{
 }>;
 
 export async function createInitialTemplateRuntime() {
-  const membership = (await getCallerMemberships())[0];
-  if (!membership) throw new Error("AUTH_REQUIRED");
+  const resolvedMembership = await getSingleActiveMembership();
+  if (!resolvedMembership.ok) throw new Error("AUTH_REQUIRED");
+  const membership = resolvedMembership.membership;
   if (membership.role !== "owner") throw new Error("OWNER_REQUIRED");
   const actorId = membership.user_id;
   const orgId = membership.org_id;
@@ -342,9 +343,8 @@ export async function createInitialTemplateRuntime() {
           "The hidden template contract could not be verified.",
         );
       }
-      const credentials = await getEsignCredentials(orgId);
+      const credentials = await requireEsignTemplateManagementCredentials(orgId);
       if (
-        !credentials ||
         credentials.providerAccountId !== local.provider_account_id
       ) {
         return failure(
@@ -569,8 +569,9 @@ export async function createInitialTemplateRuntime() {
         cleanupAttention = retired.data.cleanupAttention;
       }
 
-      let cachedCredentials: Awaited<ReturnType<typeof getEsignCredentials>> =
-        null;
+      let cachedCredentials: Awaited<
+        ReturnType<typeof requireEsignTemplateManagementCredentials>
+      > | null = null;
       const providerResult = await runInitialProviderCreate(
         {
           orgId,
@@ -586,7 +587,8 @@ export async function createInitialTemplateRuntime() {
           bytes,
           input,
           getCredentials: async () => {
-            cachedCredentials ??= await getEsignCredentials(orgId);
+            cachedCredentials ??=
+              await requireEsignTemplateManagementCredentials(orgId);
             return cachedCredentials;
           },
         }),
@@ -671,9 +673,13 @@ export async function createInitialTemplateRuntime() {
       ) {
         return failure("PROVIDER_RETRY_SOURCE_MISMATCH", "The retained private PDF no longer matches the retryable draft.");
       }
-      let retryCredentials: Awaited<ReturnType<typeof getEsignCredentials>>;
+      let retryCredentials: Awaited<
+        ReturnType<typeof requireEsignTemplateManagementCredentials>
+      >;
       try {
-        retryCredentials = await getEsignCredentials(orgId);
+        retryCredentials = await requireEsignTemplateManagementCredentials(
+          orgId,
+        );
       } catch {
         return failure(
           "PROVIDER_CONFIGURATION_FAILED",
@@ -894,7 +900,7 @@ function providerPorts(context: {
     signerRoles: readonly TemplateSignerRole[];
     sellerRoleName: string;
   };
-  getCredentials(): ReturnType<typeof getEsignCredentials>;
+  getCredentials(): ReturnType<typeof requireEsignTemplateManagementCredentials>;
   retryAlreadyBegun?: boolean;
 }): InitialProviderCreatePorts {
   const rpc = async (
@@ -1035,12 +1041,10 @@ function providerPorts(context: {
     provider: {
       async loadAccountIdentity() {
         const credentials = await context.getCredentials();
-        if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
         return { providerAccountId: credentials.providerAccountId };
       },
       async invoke() {
         const credentials = await context.getCredentials();
-        if (!credentials) throw new Error("DROPBOX_SIGN_NOT_CONNECTED");
         const provider = createDropboxSignProvider({
           apiKey: credentials.apiKey,
           clientId: credentials.clientId,

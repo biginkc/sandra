@@ -4160,51 +4160,57 @@ export type Database = {
       }
       org_esign_integrations: {
         Row: {
-          api_key_encrypted: string
-          api_key_last_four: string
+          api_key_encrypted: string | null
+          api_key_last_four: string | null
           callback_consumer_id: string
           callback_verified_at: string | null
-          client_id: string
+          client_id: string | null
           connected_by: string
           created_at: string
+          disconnect_pending_at: string | null
+          disconnect_requested_by: string | null
           id: string
           org_id: string
           provider: string
-          provider_account_id: string
+          provider_account_id: string | null
           sending_enabled: boolean
           test_mode: boolean
           updated_at: string
           updated_by: string
         }
         Insert: {
-          api_key_encrypted: string
-          api_key_last_four: string
+          api_key_encrypted?: string | null
+          api_key_last_four?: string | null
           callback_consumer_id: string
           callback_verified_at?: string | null
-          client_id: string
+          client_id?: string | null
           connected_by: string
           created_at?: string
+          disconnect_pending_at?: string | null
+          disconnect_requested_by?: string | null
           id?: string
           org_id: string
           provider?: string
-          provider_account_id: string
+          provider_account_id?: string | null
           sending_enabled?: boolean
           test_mode?: boolean
           updated_at?: string
           updated_by: string
         }
         Update: {
-          api_key_encrypted?: string
-          api_key_last_four?: string
+          api_key_encrypted?: string | null
+          api_key_last_four?: string | null
           callback_consumer_id?: string
           callback_verified_at?: string | null
-          client_id?: string
+          client_id?: string | null
           connected_by?: string
           created_at?: string
+          disconnect_pending_at?: string | null
+          disconnect_requested_by?: string | null
           id?: string
           org_id?: string
           provider?: string
-          provider_account_id?: string
+          provider_account_id?: string | null
           sending_enabled?: boolean
           test_mode?: boolean
           updated_at?: string
@@ -4690,6 +4696,16 @@ export type Database = {
         Returns: {
           outcome: string
           status: Database["public"]["Enums"]["esign_request_status"]
+        }[]
+      }
+      disconnect_org_esign_integration: {
+        Args: { p_actor_id: string; p_org_id: string }
+        Returns: {
+          credentials_present: boolean
+          disconnect_pending: boolean
+          disconnected: boolean
+          message: string
+          sending_enabled: boolean
         }[]
       }
       attach_esign_template_provider_id: {

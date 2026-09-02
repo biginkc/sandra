@@ -10,7 +10,7 @@ const sql = readFileSync(
 describe("retry and reminder callback fence migration", () => {
   it("enforces one direct retry child per failed source", () => {
     expect(sql).toContain(
-      "create unique index esign_requests_one_retry_child_per_source_idx",
+      "create unique index if not exists esign_requests_one_retry_child_per_source_idx",
     );
     expect(sql).toContain("where retry_of_request_id is not null");
   });

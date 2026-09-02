@@ -1,14 +1,148 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ProviderError } from "@/lib/errors/classes";
 import { classifyProviderFailure } from "@/lib/esign/provider-failure";
 
+const authMocks = vi.hoisted(() => ({
+  getSingleActiveMembership: vi.fn(),
+}));
+
+const supabaseMocks = vi.hoisted(() => ({
+  createAdminClient: vi.fn(),
+}));
+
+vi.mock("server-only", () => ({}));
+vi.mock("@/lib/auth/memberships", () => ({
+  getSingleActiveMembership: authMocks.getSingleActiveMembership,
+}));
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: supabaseMocks.createAdminClient,
+}));
+
 import {
+  authenticateLeadEsignActor,
   consumedRetryRequestIds,
+  createLeadEsignRepository,
   isConsumedRetryConstraint,
   mapAtomicSendBlocker,
   mapProviderMutationClaimOutcome,
 } from "./lead-esign-bindings";
+
+describe("lead eSign actor membership gate", () => {
+  it("resolves a single active membership into the eSign actor", async () => {
+    authMocks.getSingleActiveMembership.mockResolvedValueOnce({
+      ok: true,
+      membership: { user_id: "owner-1", org_id: "org-1", role: "owner" },
+    });
+
+    await expect(authenticateLeadEsignActor()).resolves.toEqual({
+      orgId: "org-1",
+      userId: "owner-1",
+      role: "owner",
+    });
+  });
+
+  it.each(["missing", "ambiguous"] as const)(
+    "fails closed before eSign work when membership resolution is %s",
+    async (reason) => {
+      authMocks.getSingleActiveMembership.mockResolvedValueOnce({
+        ok: false,
+        reason,
+      });
+
+      await expect(authenticateLeadEsignActor()).resolves.toBeNull();
+    },
+  );
+});
+
+describe("lead eSign send context", () => {
+  it("treats a credentialless integration tombstone as disconnected and sending disabled", async () => {
+    const admin = {
+      from: vi.fn((table: string) => {
+        if (table === "properties") {
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: {
+                      id: "property-1",
+                      org_id: "org-1",
+                      address: "123 Main",
+                      city: "Springfield",
+                      state: "MO",
+                      zip: "65801",
+                      homeowner_contact_id: "contact-1",
+                    },
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === "contacts") {
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: {
+                      first_name: "Sally",
+                      last_name: "Seller",
+                      entity_name: null,
+                      contact_type: "person",
+                      email: "seller@example.com",
+                    },
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === "org_esign_integrations") {
+          return {
+            select: () => ({
+              eq: () => ({
+                maybeSingle: async () => ({
+                  data: {
+                    api_key_last_four: null,
+                    sending_enabled: true,
+                    test_mode: false,
+                  },
+                  error: null,
+                }),
+              }),
+            }),
+          };
+        }
+        if (table === "available_esign_templates") {
+          return {
+            select: () => ({
+              eq: () => ({
+                order: async () => ({ data: [], error: null }),
+              }),
+            }),
+          };
+        }
+        throw new Error(`Unexpected table ${table}`);
+      }),
+    };
+    supabaseMocks.createAdminClient.mockReturnValueOnce(admin);
+
+    await expect(
+      createLeadEsignRepository().loadLeadSendContext({
+        actor: { orgId: "org-1", userId: "user-1", role: "owner" },
+        propertyId: "property-1",
+      }),
+    ).resolves.toMatchObject({
+      connected: false,
+      sendingEnabled: false,
+      sellerEmailAddress: "seller@example.com",
+    });
+  });
+});
 
 describe("atomic eSign send blocker mapping", () => {
   it.each([

@@ -24,6 +24,7 @@ import {
   ESIGN_TEST_CALLBACK_HASH,
   ESIGN_TEST_CLIENT_ID,
   ESIGN_TEST_ENCRYPTION_KEY,
+  ESIGN_TEST_PROVIDER_ACCOUNT_ID,
   esignRequestFixture,
   esignTemplateFixture,
 } from "@tests/integration/fixtures/esign";
@@ -36,6 +37,10 @@ const migrationSql = readFileSync(
 )
   .replace(/\nbegin;\s*/i, "\n")
   .replace(/\s*commit;\s*$/i, "");
+const atomicDisconnectSql = readFileSync(
+  "supabase/migrations/20260902074814_esign_atomic_disconnect_state.sql",
+  "utf8",
+);
 
 let pg: Client;
 let ownerId = "";
@@ -159,11 +164,13 @@ async function seedTemplate(
   return fixture.id;
 }
 
-async function seedVerifiedTemplateSource(input: {
-  orgId?: string;
-  actorId?: string;
-  filename?: string;
-} = {}): Promise<{ id: string; path: string }> {
+async function seedVerifiedTemplateSource(
+  input: {
+    orgId?: string;
+    actorId?: string;
+    filename?: string;
+  } = {},
+): Promise<{ id: string; path: string }> {
   const orgId = input.orgId ?? BMH_ORG_ID;
   const actorId = input.actorId ?? ownerId;
   const id = crypto.randomUUID();
@@ -234,9 +241,7 @@ async function publishTemplateEditRevision(input: {
       input.sourceProviderTemplateId,
       input.revisionProviderTemplateId,
       input.sellerRole ?? "Seller",
-      JSON.stringify(
-        input.signerRoles ?? [{ name: "Seller", order: 0 }],
-      ),
+      JSON.stringify(input.signerRoles ?? [{ name: "Seller", order: 0 }]),
       [
         "seller_name",
         "property_address",
@@ -293,12 +298,13 @@ async function connectIntegration(): Promise<void> {
   await setRequestRole("service_role");
   await pg.query(
     `select public.upsert_org_esign_integration(
-       $1, $2, right($2, 4), $3, $4, $5, $6
+       $1, $2, right($2, 4), $3, $4, $5, $6, $7
      )`,
     [
       BMH_ORG_ID,
       ESIGN_TEST_API_KEY,
       ESIGN_TEST_CLIENT_ID,
+      ESIGN_TEST_PROVIDER_ACCOUNT_ID,
       ESIGN_TEST_CALLBACK_HASH,
       ownerId,
       ESIGN_TEST_ENCRYPTION_KEY,
@@ -399,6 +405,8 @@ beforeAll(async () => {
   await pg.connect();
   await pg.query("begin");
   await pg.query(migrationSql);
+  await pg.query(atomicDisconnectSql);
+  await pg.query(atomicDisconnectSql);
 });
 
 beforeEach(async () => {
@@ -456,12 +464,13 @@ describe("Migration 20260829194500 — eSign foundation", () => {
       () =>
         pg.query(
           `select public.upsert_org_esign_integration(
-             $1,$2,right($2,4),$3,$4,$5,$6
+             $1,$2,right($2,4),$3,$4,$5,$6,$7
            )`,
           [
             BMH_ORG_ID,
             ESIGN_TEST_API_KEY,
             ESIGN_TEST_CLIENT_ID,
+            ESIGN_TEST_PROVIDER_ACCOUNT_ID,
             ESIGN_TEST_CALLBACK_HASH,
             memberId,
             ESIGN_TEST_ENCRYPTION_KEY,
@@ -483,18 +492,18 @@ describe("Migration 20260829194500 — eSign foundation", () => {
     await connectIntegration();
     await expectDatabaseError(
       () =>
-        pg.query(
-          "select public.set_org_esign_sending_enabled($1,$2,true)",
-          [BMH_ORG_ID, memberId],
-        ),
+        pg.query("select public.set_org_esign_sending_enabled($1,$2,true)", [
+          BMH_ORG_ID,
+          memberId,
+        ]),
       /owner/i,
     );
     await expectDatabaseError(
       () =>
-        pg.query(
-          "select public.set_org_esign_sending_enabled($1,$2,true)",
-          [BMH_ORG_ID, ownerId],
-        ),
+        pg.query("select public.set_org_esign_sending_enabled($1,$2,true)", [
+          BMH_ORG_ID,
+          ownerId,
+        ]),
       /verify.*callback/i,
     );
     await pg.query(
@@ -502,10 +511,10 @@ describe("Migration 20260829194500 — eSign foundation", () => {
        set callback_verified_at = now() where org_id = $1`,
       [BMH_ORG_ID],
     );
-    await pg.query(
-      "select public.set_org_esign_sending_enabled($1,$2,true)",
-      [BMH_ORG_ID, ownerId],
-    );
+    await pg.query("select public.set_org_esign_sending_enabled($1,$2,true)", [
+      BMH_ORG_ID,
+      ownerId,
+    ]);
     expect(
       (
         await pg.query<{ sending_enabled: boolean }>(
@@ -516,10 +525,10 @@ describe("Migration 20260829194500 — eSign foundation", () => {
     ).toBe(true);
     await expectDatabaseError(
       () =>
-        pg.query(
-          "select public.set_org_esign_sending_enabled($1,$2,true)",
-          [TEST_ORG_B_ID, outsiderId],
-        ),
+        pg.query("select public.set_org_esign_sending_enabled($1,$2,true)", [
+          TEST_ORG_B_ID,
+          outsiderId,
+        ]),
       /not connected/i,
     );
 
@@ -904,20 +913,139 @@ describe("Migration 20260829194500 — eSign foundation", () => {
     );
   });
 
-  it("blocks credential deletion until callbacks and signed PDF capture are complete", async () => {
+  it("preserves credentials and callback ingestion while active signatures finish", async () => {
     await connectIntegration();
     const propertyId = await seedProperty();
     const templateId = await seedTemplate();
     const requestId = await seedRequest({ propertyId, templateId });
     await setRequestRole("service_role");
+    await pg.query(
+      `update public.esign_requests
+       set delivery_state = 'sending', sign_request_id = 'provider-request-pending',
+           sent_at = now()
+       where id = $1`,
+      [requestId],
+    );
+    await pg.query(
+      `insert into public.esign_request_signers (
+         org_id, request_id, role_name, signer_order, signer_name,
+         signer_email, provider_signature_id
+       ) values ($1,$2,'Seller',0,'Seller One','seller@example.com',$3)`,
+      [BMH_ORG_ID, requestId, "provider-signature-pending"],
+    );
+    const consumerId = (
+      await pg.query<{ callback_consumer_id: string }>(
+        "select callback_consumer_id from public.org_esign_integrations where org_id = $1",
+        [BMH_ORG_ID],
+      )
+    ).rows[0].callback_consumer_id;
+
+    expect(
+      (
+        await pg.query<{
+          disconnected: boolean;
+          sending_enabled: boolean;
+          credentials_present: boolean;
+          disconnect_pending: boolean;
+          message: string;
+        }>("select * from public.disconnect_org_esign_integration($1,$2)", [
+          BMH_ORG_ID,
+          ownerId,
+        ])
+      ).rows[0],
+    ).toEqual({
+      disconnected: false,
+      sending_enabled: false,
+      credentials_present: true,
+      disconnect_pending: true,
+      message:
+        "Dropbox Sign sending is off. Active eSign work remains: 1 signature request. Callback ingestion and read credentials are preserved until the active work reaches a terminal state. Manage templates and new sends stay blocked.",
+    });
+    expect(
+      (
+        await pg.query<{
+          has_api_key: boolean;
+          api_key_last_four: string | null;
+          client_id: string | null;
+          provider_account_id: string | null;
+          sending_enabled: boolean;
+          disconnect_pending: boolean;
+        }>(
+          `select api_key_encrypted is not null as has_api_key,
+             api_key_last_four, client_id, provider_account_id,
+             sending_enabled, disconnect_pending_at is not null as disconnect_pending
+           from public.org_esign_integrations
+           where org_id = $1`,
+          [BMH_ORG_ID],
+        )
+      ).rows[0],
+    ).toEqual({
+      has_api_key: true,
+      api_key_last_four: ESIGN_TEST_API_KEY.slice(-4),
+      client_id: ESIGN_TEST_CLIENT_ID,
+      provider_account_id: ESIGN_TEST_PROVIDER_ACCOUNT_ID,
+      sending_enabled: false,
+      disconnect_pending: true,
+    });
+    expect(
+      (
+        await pg.query<{ api_key: string; provider_account_id: string }>(
+          "select * from public.get_org_esign_credentials($1,$2)",
+          [BMH_ORG_ID, ESIGN_TEST_ENCRYPTION_KEY],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        api_key: ESIGN_TEST_API_KEY,
+        client_id: ESIGN_TEST_CLIENT_ID,
+        provider_account_id: ESIGN_TEST_PROVIDER_ACCOUNT_ID,
+        sending_enabled: false,
+        test_mode: true,
+        callback_secret_hash: ESIGN_TEST_CALLBACK_HASH,
+      },
+    ]);
+    expect(
+      (
+        await pg.query(
+          "select enabled, revoked_at is not null as revoked from public.webhook_consumers where id = $1",
+          [consumerId],
+        )
+      ).rows[0],
+    ).toEqual({ enabled: true, revoked: false });
+
     await expectDatabaseError(
       () =>
-        pg.query("select public.delete_org_esign_integration($1,$2)", [
+        pg.query("select public.set_org_esign_sending_enabled($1,$2,true)", [
           BMH_ORG_ID,
           ownerId,
         ]),
-      /Finish active signatures/i,
+      /active eSign work/i,
     );
+
+    const signedReceipt = await claimWebhookReceipt({
+      consumerId,
+      eventType: "signature_request_signed",
+      signRequestId: "provider-request-pending",
+      relatedSignatureId: "provider-signature-pending",
+      eventHash: "b".repeat(64),
+      fingerprint: "c".repeat(64),
+      payloadHash: "d".repeat(64),
+    });
+    expect(signedReceipt.outcome).toBe("claimed");
+    await pg.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'ignored','AUDIT_ONLY_EVENT')",
+      [signedReceipt.receipt_id, signedReceipt.lease_id],
+    );
+    expect(
+      (
+        await pg.query<{ status: string; signed: boolean }>(
+          `select status, signed_at is not null as signed
+           from public.esign_request_signers
+           where request_id = $1`,
+          [requestId],
+        )
+      ).rows[0],
+    ).toEqual({ status: "signed", signed: true });
 
     await pg.query(
       `update public.esign_requests
@@ -926,33 +1054,23 @@ describe("Migration 20260829194500 — eSign foundation", () => {
        where id = $1`,
       [requestId],
     );
-    await expectDatabaseError(
-      () =>
-        pg.query("select public.delete_org_esign_integration($1,$2)", [
-          BMH_ORG_ID,
-          ownerId,
-        ]),
-      /save signed PDFs/i,
-    );
     await pg.query(
       "update public.esign_requests set signed_pdf_path = $2 where id = $1",
       [requestId, `${BMH_ORG_ID}/fabricated.pdf`],
     );
-    await expectDatabaseError(
-      () =>
-        pg.query("select public.delete_org_esign_integration($1,$2)", [
-          BMH_ORG_ID,
-          ownerId,
-        ]),
-      /save signed PDFs/i,
-    );
+    expect(
+      (
+        await pg.query<{
+          credentials_present: boolean;
+          disconnect_pending: boolean;
+        }>(
+          "select credentials_present, disconnect_pending from public.disconnect_org_esign_integration($1,$2)",
+          [BMH_ORG_ID, ownerId],
+        )
+      ).rows[0],
+    ).toEqual({ credentials_present: true, disconnect_pending: true });
 
-    await pg.query(
-      "update public.esign_requests set signed_pdf_path = null where id = $1",
-      [requestId],
-    );
     const validPath = `${BMH_ORG_ID}/${propertyId}/esign/${requestId}/signed.pdf`;
-    const fileName = `signed-contract-${requestId.slice(0, 8)}.pdf`;
     await pg.query(
       `insert into storage.objects (bucket_id, name, metadata)
        values ('lead-files', $1, '{"mimetype":"application/pdf","size":1024}')`,
@@ -988,10 +1106,26 @@ describe("Migration 20260829194500 — eSign foundation", () => {
         )
       ).rows[0],
     ).toEqual({ outcome: "applied", lead_file_id: requestId });
-    await pg.query("select public.delete_org_esign_integration($1,$2)", [
-      BMH_ORG_ID,
-      ownerId,
-    ]);
+    expect(
+      (
+        await pg.query<{
+          disconnected: boolean;
+          sending_enabled: boolean;
+          credentials_present: boolean;
+          disconnect_pending: boolean;
+          message: string;
+        }>("select * from public.disconnect_org_esign_integration($1,$2)", [
+          BMH_ORG_ID,
+          ownerId,
+        ])
+      ).rows[0],
+    ).toEqual({
+      disconnected: true,
+      sending_enabled: false,
+      credentials_present: false,
+      disconnect_pending: false,
+      message: "Dropbox Sign disconnected.",
+    });
     expect(
       (
         await pg.query(
@@ -1007,6 +1141,43 @@ describe("Migration 20260829194500 — eSign foundation", () => {
         )
       ).rows[0],
     ).toEqual({ enabled: false, revoked: true });
+  });
+
+  it("keeps the legacy delete RPC deploy-order compatible with active work", async () => {
+    await connectIntegration();
+    const propertyId = await seedProperty();
+    const templateId = await seedTemplate();
+    await seedRequest({ propertyId, templateId });
+    await setRequestRole("service_role");
+
+    await pg.query("select public.delete_org_esign_integration($1,$2)", [
+      BMH_ORG_ID,
+      ownerId,
+    ]);
+
+    expect(
+      (
+        await pg.query<{
+          has_api_key: boolean;
+          api_key_last_four: string | null;
+          sending_enabled: boolean;
+          disconnect_pending: boolean;
+        }>(
+          `select api_key_encrypted is not null as has_api_key,
+             api_key_last_four,
+             sending_enabled,
+             disconnect_pending_at is not null as disconnect_pending
+           from public.org_esign_integrations
+           where org_id = $1`,
+          [BMH_ORG_ID],
+        )
+      ).rows[0],
+    ).toEqual({
+      has_api_key: true,
+      api_key_last_four: ESIGN_TEST_API_KEY.slice(-4),
+      sending_enabled: false,
+      disconnect_pending: true,
+    });
   });
 
   it("deduplicates callback receipts by composite fingerprint, not event_hash", async () => {
@@ -1258,9 +1429,7 @@ describe("Migration 20260829194500 — eSign foundation", () => {
               safeWebhookEventData({
                 eventType: "signature_request_viewed",
                 eventTime: String(
-                  Math.floor(
-                    new Date("2026-08-29T20:00:01Z").getTime() / 1000,
-                  ),
+                  Math.floor(new Date("2026-08-29T20:00:01Z").getTime() / 1000),
                 ),
               }),
             ),
@@ -1871,10 +2040,12 @@ describe("Migration 20260829194500 — eSign foundation", () => {
         )
       ).rows[0].outcome,
     ).toBe("claimed");
-    await pg.query(
-      "select public.release_esign_signer_reminder($1,$2,$3,$4)",
-      [BMH_ORG_ID, signerRequestId, laterSignerId, laterClaimToken],
-    );
+    await pg.query("select public.release_esign_signer_reminder($1,$2,$3,$4)", [
+      BMH_ORG_ID,
+      signerRequestId,
+      laterSignerId,
+      laterClaimToken,
+    ]);
 
     for (const [index, transition] of [
       {
@@ -2476,12 +2647,7 @@ describe("Migration 20260829194500 — eSign foundation", () => {
       `select public.create_esign_template_draft(
          $1,$2,'Purchase agreement','purchase_agreement','Seller',$3::jsonb,$4
        ) as id`,
-      [
-        BMH_ORG_ID,
-        sourceId,
-        JSON.stringify(caseDistinctRoles),
-        ownerId,
-      ],
+      [BMH_ORG_ID, sourceId, JSON.stringify(caseDistinctRoles), ownerId],
     );
     const templateId = draft.rows[0].id;
 
@@ -2928,12 +3094,7 @@ describe("Migration 20260829194500 — eSign foundation", () => {
       () =>
         pg.query(
           "select public.create_esign_template_edit_revision($1,$2,$3,$4)",
-          [
-            BMH_ORG_ID,
-            templateId,
-            template.staging_source_id,
-            outsiderId,
-          ],
+          [BMH_ORG_ID, templateId, template.staging_source_id, outsiderId],
         ),
       () =>
         pg.query(
@@ -3693,18 +3854,18 @@ describe("Migration 20260829194500 — eSign foundation", () => {
     });
     expect(
       (
-          await pg.query<{ outcome: string; status: string }>(
-            `select * from public.apply_esign_webhook_status_decision(
+        await pg.query<{ outcome: string; status: string }>(
+          `select * from public.apply_esign_webhook_status_decision(
              $1,$2,$3,$4,'awaiting','signed',$5::timestamptz,
              'esign_signed',$6::jsonb
            )`,
           [
             BMH_ORG_ID,
             raceRequestId,
-              signedReceipt.receipt_id,
-              signedReceipt.lease_id,
-              "2026-08-29T20:00:00.000Z",
-              JSON.stringify({ template_title: "Purchase agreement" }),
+            signedReceipt.receipt_id,
+            signedReceipt.lease_id,
+            "2026-08-29T20:00:00.000Z",
+            JSON.stringify({ template_title: "Purchase agreement" }),
           ],
         )
       ).rows[0],

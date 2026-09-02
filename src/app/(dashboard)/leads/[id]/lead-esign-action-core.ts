@@ -315,7 +315,10 @@ export type EsignActionFiles = Readonly<{
 export type LeadEsignActionDependencies = Readonly<{
   authenticate(): Promise<EsignActor | null>;
   repository: EsignActionRepository;
-  providerForOrg(orgId: string): Promise<EsignActionProvider | null>;
+  providerForOrg(
+    orgId: string,
+    options?: { requireSendingEnabled?: boolean },
+  ): Promise<EsignActionProvider | null>;
   files: EsignActionFiles;
   now(): Date;
   newId(): string;
@@ -664,7 +667,9 @@ async function fixSignerEmailAndResend(
   const { candidate } = claim;
   let provider: EsignActionProvider | null;
   try {
-    provider = await dependencies.providerForOrg(actor.orgId);
+    provider = await dependencies.providerForOrg(actor.orgId, {
+      requireSendingEnabled: false,
+    });
   } catch {
     await releaseEmailBounceUpdate(
       dependencies,

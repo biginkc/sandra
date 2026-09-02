@@ -6,7 +6,10 @@ const { createClient } = vi.hoisted(() => ({
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 
-import { getCallerMemberships } from "./memberships";
+import {
+  getCallerMemberships,
+  resolveSingleActiveMembership,
+} from "./memberships";
 
 const activeMembership = {
   user_id: "user-1",
@@ -111,5 +114,30 @@ describe("getCallerMemberships", () => {
 
     await expect(getCallerMemberships()).resolves.toEqual([]);
     expect(select).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("resolveSingleActiveMembership", () => {
+  it("returns the only active membership", () => {
+    expect(resolveSingleActiveMembership([activeMembership])).toEqual({
+      ok: true,
+      membership: activeMembership,
+    });
+  });
+
+  it("fails closed with no memberships", () => {
+    expect(resolveSingleActiveMembership([])).toEqual({
+      ok: false,
+      reason: "missing",
+    });
+  });
+
+  it("fails closed when membership churn leaves multiple active rows", () => {
+    expect(
+      resolveSingleActiveMembership([
+        activeMembership,
+        { ...activeMembership, org_id: "org-2" },
+      ]),
+    ).toEqual({ ok: false, reason: "ambiguous" });
   });
 });
