@@ -53,6 +53,7 @@ export type EsignActor = Readonly<{
 export type LeadSendContext = Readonly<{
   propertyId: string;
   sellerName: string;
+  hasHomeownerContact: boolean;
   sellerEmailAddress: string | null;
   propertyAddress: string;
   connected: boolean;
@@ -117,6 +118,7 @@ export type SendClaim =
   | Readonly<{ outcome: "authorization_changed" }>
   | Readonly<{ outcome: "not_found" }>
   | Readonly<{ outcome: "invalid_send_input" }>
+  | Readonly<{ outcome: "seller_contact_conflict" }>
   | Readonly<{ outcome: "retry_ineligible" }>;
 
 export type EsignActionRepository = Readonly<{
@@ -128,6 +130,7 @@ export type EsignActionRepository = Readonly<{
     orgId: string;
     sendIntentId: string;
   }): Promise<EsignRequestRecord | null>;
+  isDialogEmailAuthorityReady(input: { orgId: string }): Promise<boolean>;
   claimSend(input: ClaimSendInput): Promise<SendClaim>;
   reconcileSent(input: {
     orgId: string;
@@ -357,6 +360,16 @@ async function send(
     signers: normalized.signers,
     mergeValues: normalized.mergeValues,
   });
+  if (
+    !(await dependencies.repository.isDialogEmailAuthorityReady({
+      orgId: actor.orgId,
+    }))
+  ) {
+    fail(
+      "SENDING_DISABLED",
+      "Contract sending is finishing an update. Try again in a minute.",
+    );
+  }
 
   const claim = await dependencies.repository.claimSend({
     actor,
@@ -388,6 +401,11 @@ async function send(
     fail(
       "INVALID_SEND_INPUT",
       "The signer details changed. Review each signer and try again.",
+    );
+  if (claim.outcome === "seller_contact_conflict")
+    fail(
+      "SELLER_EMAIL_CONFLICT",
+      "That seller email belongs to another contact. Use a unique seller email before sending.",
     );
   if (claim.outcome === "existing")
     return resolveExistingIntent(claim.request, payloadHash, actor.orgId);
@@ -816,7 +834,9 @@ function blockersFor(context: LeadSendContext): SendBlockerCode[] {
   if (!context.connected) blockers.push("provider_disconnected");
   if (!context.sendingEnabled) blockers.push("sending_disabled");
   if (context.templates.length === 0) blockers.push("no_templates");
-  if (!context.sellerEmailAddress?.trim()) blockers.push("owner_email_missing");
+  if (!context.hasHomeownerContact) blockers.push("owner_contact_missing");
+  else if (!context.sellerEmailAddress?.trim())
+    blockers.push("owner_email_missing");
   return blockers;
 }
 
@@ -856,6 +876,7 @@ function blockerMessage(blocker: SendBlockerCode): string {
     provider_disconnected: "Dropbox Sign is not connected.",
     sending_disabled: "Sending from leads is turned off.",
     no_templates: "No eSign templates are available.",
+    owner_contact_missing: "No homeowner contact is linked to this lead.",
     owner_email_missing: "Enter the seller email before sending.",
   };
   return messages[blocker];

@@ -15,6 +15,7 @@ describe("atomic eSign send blocker mapping", () => {
     ["ACTIVE_MEMBERSHIP_REQUIRED", "authorization_changed"],
     ["PROPERTY_NOT_FOUND", "not_found"],
     ["SIGNER_PAYLOAD_INVALID", "invalid_send_input"],
+    ["SELLER_EMAIL_CONFLICT", "seller_contact_conflict"],
   ] as const)("maps %s to the distinct safe %s outcome", (code, outcome) => {
     const result = mapAtomicSendBlocker(code);
     expect(result).toEqual({ outcome });

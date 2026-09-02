@@ -7,6 +7,10 @@ const migrationSql = readFileSync(
   "supabase/migrations/20260829194500_esign_foundation.sql",
   "utf8",
 );
+const uploadReservationsSql = readFileSync(
+  "supabase/migrations/20260830080000_esign_template_upload_reservations.sql",
+  "utf8",
+);
 const reconciliationFenceSql = readFileSync(
   "supabase/migrations/20260901010000_esign_provider_mutation_reconciliation_fence.sql",
   "utf8",
@@ -107,6 +111,7 @@ beforeAll(async () => {
       id uuid primary key,
       org_id uuid not null references public.organizations(id),
       email text,
+      phone_1 text,
       constraint contacts_id_org_key unique (id, org_id)
     );
     create table public.properties (
@@ -153,14 +158,9 @@ beforeAll(async () => {
       language sql immutable as $$ select string_to_array($1, '/') $$;
   `);
   await setup.query(migrationSql);
+  await setup.query(uploadReservationsSql);
   await setup.query(reconciliationFenceSql);
   await setup.query(retryReminderFenceSql);
-  await setup.query(
-    "alter table public.org_esign_integrations add column provider_account_id text not null default 'account-a'",
-  );
-  await setup.query(
-    "alter table public.esign_templates add column provider_account_id text not null default 'account-a'",
-  );
   await setup.query(sellerEmailAuthoritySql);
   await setup.query(sellerEmailAuthoritySql);
   await setup.query(sendUnknownResolutionSql);
@@ -204,8 +204,8 @@ describe("eSign foundation production lease contention", () => {
     );
     await setup.query(
       `select public.upsert_org_esign_integration(
-         $1,'synthetic-api-key','-key','synthetic-client',repeat('a',64),$2,
-         'synthetic-encryption-key'
+         $1,'synthetic-api-key','-key','synthetic-client','account-a',
+         repeat('a',64),$2,'synthetic-encryption-key'
        )`,
       [orgId, userId],
     );
@@ -232,7 +232,7 @@ describe("eSign foundation production lease contention", () => {
          $1,$2,'Purchase agreement','purchase_agreement','Seller',
          '[{"name":"Seller","order":0}]'::jsonb,
          array['seller_name','property_address','offer_price','closing_date','earnest_money'],
-         'provider-template','account-a',$3,'source.pdf',1024,'application/pdf',
+         ($1::uuid)::text,'account-a',$3,'source.pdf',1024,'application/pdf',
          repeat('b',64),($2::uuid)::text || '/' || ($3::uuid)::text || '.pdf',
          now(),'finalized',$4,$4
        )`,
@@ -312,6 +312,137 @@ describe("eSign foundation production lease contention", () => {
     }
   });
 
+  it("does not deadlock a contact-first writer while reconciling provider delivery", async () => {
+    const orgId = crypto.randomUUID();
+    const userId = crypto.randomUUID();
+    const contactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const sourceId = crypto.randomUUID();
+    const templateId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    await setServiceRole(setup);
+    await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into public.organizations values ($1)", [orgId]);
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
+      [userId, orgId],
+    );
+    await setup.query(
+      "insert into public.contacts (id,org_id,email) values ($1,$2,'canonical@example.com')",
+      [contactId, orgId],
+    );
+    await setup.query(
+      "insert into public.properties (id,org_id,homeowner_contact_id) values ($1,$2,$3)",
+      [propertyId, orgId, contactId],
+    );
+    await setup.query(
+      `insert into public.esign_template_staging_sources (
+         id,org_id,storage_path,source_filename,source_size_bytes,
+         content_type,source_sha256,created_by
+       ) values ($1,$2,($2::uuid)::text || '/' || ($1::uuid)::text || '.pdf',
+         'source.pdf',1024,'application/pdf',repeat('b',64),$3)`,
+      [sourceId, orgId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_templates (
+         id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,
+         sign_template_id,provider_account_id,staging_source_id,source_filename,
+         source_size_bytes,source_content_type,source_sha256,staging_path,
+         finalized_at,lifecycle_state,created_by,updated_by
+       ) values (
+         $1,$2,'Purchase agreement','purchase_agreement','Seller',
+         '[{"name":"Seller","order":0}]'::jsonb,
+         array['seller_name','property_address','offer_price','closing_date','earnest_money'],
+         ($1::uuid)::text,'account-a',$3,'source.pdf',1024,'application/pdf',
+         repeat('b',64),($2::uuid)::text || '/' || ($3::uuid)::text || '.pdf',
+         now(),'finalized',$4,$4
+       )`,
+      [templateId, orgId, sourceId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_requests (
+         id,org_id,property_id,template_id,signer_snapshot,merge_value_snapshot,
+         delivery_state,send_intent_id,payload_hash,claimed_homeowner_contact_id,
+         created_by
+       ) values (
+         $1,$2,$3,$4,
+         '[{"role":"Seller","order":0,"name":"Seller Owner","emailAddress":"dialog@example.com"}]',
+         '{"seller_name":"Seller Owner","property_address":"123 Test","offer_price":"1","closing_date":"2026-09-30","earnest_money":"1"}',
+         'sending',gen_random_uuid(),repeat('d',64),$5,$6
+       )`,
+      [requestId, orgId, propertyId, templateId, contactId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_request_signers (
+         org_id,request_id,role_name,signer_order,signer_name,signer_email
+       ) values ($1,$2,'Seller',0,'Seller Owner','dialog@example.com')`,
+      [orgId, requestId],
+    );
+
+    const contactFirst = new Client({
+      connectionString: isolatedUrl,
+      application_name: "contact_first_writer",
+    });
+    const deliveryReconcile = new Client({
+      connectionString: isolatedUrl,
+      application_name: "esign_delivery_reconcile",
+    });
+    await Promise.all([contactFirst.connect(), deliveryReconcile.connect()]);
+    await Promise.all([
+      setServiceRole(contactFirst),
+      setServiceRole(deliveryReconcile),
+    ]);
+    try {
+      await contactFirst.query("begin");
+      await contactFirst.query(
+        "select 1 from public.contacts where id=$1 for update",
+        [contactId],
+      );
+      const reconcilePromise = deliveryReconcile.query(
+        `select public.reconcile_esign_request_delivery(
+           $1,$2,'provider-request','https://app.hellosign.com/details',
+           '[{"role":"Seller","order":0,"name":"Seller Owner","emailAddress":"dialog@example.com","signatureId":"signature-1"}]'::jsonb
+         )`,
+        [orgId, requestId],
+      );
+
+      await expect(
+        Promise.race([
+          reconcilePromise.then(
+            (value) => ({ state: "resolved" as const, value }),
+            (error: unknown) => ({ state: "rejected" as const, error }),
+          ),
+          new Promise<{ state: "pending" }>((resolve) =>
+            setTimeout(() => resolve({ state: "pending" }), 250),
+          ),
+        ]),
+      ).resolves.toMatchObject({ state: "pending" });
+
+      await contactFirst.query(
+        "update public.properties set homeowner_contact_id=$2 where id=$1",
+        [propertyId, contactId],
+      );
+      await contactFirst.query("commit");
+      await expect(reconcilePromise).resolves.toBeDefined();
+      await expect(
+        setup.query<{ delivery_state: string; email: string | null }>(
+          `select request.delivery_state, contact.email
+           from public.esign_requests request
+           join public.contacts contact
+             on contact.id = request.claimed_homeowner_contact_id
+            and contact.org_id = request.org_id
+           where request.id=$1 and request.org_id=$2`,
+          [requestId, orgId],
+        ),
+      ).resolves.toMatchObject({
+        rows: [{ delivery_state: "sent", email: "dialog@example.com" }],
+      });
+    } finally {
+      await contactFirst.query("rollback").catch(() => undefined);
+      await Promise.all([contactFirst.end(), deliveryReconcile.end()]);
+    }
+  });
+
   it("serializes same-kind and reminder-vs-void claims at the fixed ten-minute boundary", async () => {
     const orgId = crypto.randomUUID();
     const userId = crypto.randomUUID();
@@ -353,14 +484,14 @@ describe("eSign foundation production lease contention", () => {
     await setup.query(
       `insert into public.esign_templates (
          id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,
-         sign_template_id,staging_source_id,source_filename,source_size_bytes,
+         sign_template_id,provider_account_id,staging_source_id,source_filename,source_size_bytes,
          source_content_type,source_sha256,staging_path,finalized_at,lifecycle_state,
          created_by,updated_by
        ) values (
          $1::uuid,$2::uuid,'Purchase agreement','purchase_agreement','Seller',
          '[{"name":"Seller","order":0}]'::jsonb,
          array['seller_name','property_address','offer_price','closing_date','earnest_money'],
-         'provider-template',$3::uuid,'source.pdf',1024,'application/pdf',repeat('a',64),
+         ($1::uuid)::text,'account-a',$3::uuid,'source.pdf',1024,'application/pdf',repeat('a',64),
          ($2::uuid)::text || '/' || ($3::uuid)::text || '.pdf',now(),'finalized',$4::uuid,$4::uuid
        )`,
       [templateId, orgId, sourceId, userId],
@@ -546,8 +677,8 @@ describe("eSign foundation production lease contention", () => {
     );
     await setup.query(
       `select public.upsert_org_esign_integration(
-         $1,'synthetic-api-key','-key','synthetic-client',repeat('a',64),
-         $2,'synthetic-encryption-key'
+         $1,'synthetic-api-key','-key','synthetic-client','account-a',
+         repeat('a',64),$2,'synthetic-encryption-key'
        )`,
       [orgId, userId],
     );
@@ -673,22 +804,22 @@ describe("eSign foundation production lease contention", () => {
     await setup.query(
       `insert into public.esign_templates (
          id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,
-         sign_template_id,staging_source_id,source_filename,source_size_bytes,
+         sign_template_id,provider_account_id,staging_source_id,source_filename,source_size_bytes,
          source_content_type,source_sha256,staging_path,finalized_at,lifecycle_state,
          created_by,updated_by
        ) values (
          $1::uuid,$2::uuid,'Purchase agreement','purchase_agreement','Seller',
          '[{"name":"Seller","order":0}]'::jsonb,
          array['seller_name','property_address','offer_price','closing_date','earnest_money'],
-         'provider-template',$3::uuid,'source.pdf',1024,'application/pdf',repeat('a',64),
+         ($1::uuid)::text,'account-a',$3::uuid,'source.pdf',1024,'application/pdf',repeat('a',64),
          ($2::uuid)::text || '/' || ($3::uuid)::text || '.pdf',now(),'finalized',$4::uuid,$4::uuid
        )`,
       [templateId, orgId, sourceId, userId],
     );
     await setup.query(
       `select public.upsert_org_esign_integration(
-         $1,'synthetic-api-key','-key','synthetic-client',repeat('f',64),
-         $2,'synthetic-encryption-key'
+         $1,'synthetic-api-key','-key','synthetic-client','account-a',
+         repeat('f',64),$2,'synthetic-encryption-key'
        )`,
       [orgId, userId],
     );
@@ -792,6 +923,13 @@ describe("eSign foundation production lease contention", () => {
       "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
       [userId, orgId],
     );
+    await setup.query(
+      `select public.upsert_org_esign_integration(
+         $1,'synthetic-api-key','-key','synthetic-client','account-a',
+         repeat('a',64),$2,'synthetic-encryption-key'
+       )`,
+      [orgId, userId],
+    );
     for (const sourceId of stagingSourceIds) {
       const sourcePath = `${orgId}/${sourceId}.pdf`;
       await setup.query(
@@ -810,14 +948,14 @@ describe("eSign foundation production lease contention", () => {
     await setup.query(
       `insert into public.esign_templates (
          id,org_id,name,document_type,seller_role,signer_roles,
-         merge_field_names,sign_template_id,staging_source_id,
+         merge_field_names,sign_template_id,provider_account_id,staging_source_id,
          source_filename,source_size_bytes,source_content_type,source_sha256,
          staging_path,finalized_at,lifecycle_state,created_by,updated_by
        ) values (
          $1::uuid,$2::uuid,'Purchase agreement','purchase_agreement','Seller',
          '[{"name":"Seller","order":0}]'::jsonb,
          array['seller_name','property_address','offer_price','closing_date','earnest_money'],
-         $3,$4::uuid,'source.pdf',1024,'application/pdf',repeat('a',64),
+         $3,'account-a',$4::uuid,'source.pdf',1024,'application/pdf',repeat('a',64),
          ($2::uuid)::text || '/' || ($4::uuid)::text || '.pdf',now(),'finalized',$5::uuid,$5::uuid
        )`,
       [
@@ -832,14 +970,14 @@ describe("eSign foundation production lease contention", () => {
       await setup.query(
         `insert into public.esign_templates (
            id,org_id,name,document_type,seller_role,signer_roles,
-           merge_field_names,sign_template_id,staging_source_id,
+           merge_field_names,sign_template_id,provider_account_id,staging_source_id,
            source_filename,source_size_bytes,source_content_type,source_sha256,
            staging_path,lifecycle_state,supersedes_template_id,created_by,updated_by
          ) values (
            $1::uuid,$2::uuid,'Purchase agreement','purchase_agreement','Seller',
            '[{"name":"Seller","order":0}]'::jsonb,
            array['seller_name','property_address','offer_price','closing_date','earnest_money'],
-           $3,$4::uuid,'source.pdf',1024,'application/pdf',repeat('a',64),
+           $3,'account-a',$4::uuid,'source.pdf',1024,'application/pdf',repeat('a',64),
            ($2::uuid)::text || '/' || ($4::uuid)::text || '.pdf','editing',$5::uuid,$6::uuid,$6::uuid
          )`,
         [
@@ -890,7 +1028,7 @@ describe("eSign foundation production lease contention", () => {
       expect(successes[0].value.rows[0]).toEqual({ result: "published" });
       expect(failures).toHaveLength(1);
       expect(failures[0].reason).toMatchObject({
-        message: expect.stringMatching(/no longer active or current/i),
+        message: expect.stringMatching(/no longer active/i),
       });
       expect(
         (
@@ -974,22 +1112,22 @@ describe("eSign foundation production lease contention", () => {
     await setup.query(
       `insert into public.esign_templates (
          id,org_id,name,document_type,seller_role,signer_roles,merge_field_names,
-         sign_template_id,staging_source_id,source_filename,source_size_bytes,
+         sign_template_id,provider_account_id,staging_source_id,source_filename,source_size_bytes,
          source_content_type,source_sha256,staging_path,finalized_at,lifecycle_state,
          created_by,updated_by
        ) values (
          $1,$2,'Purchase agreement','purchase_agreement','Seller',
          '[{"name":"Seller","order":0}]'::jsonb,
          array['seller_name','property_address','offer_price','closing_date','earnest_money'],
-         'provider-template',$3,'source.pdf',1024,'application/pdf',repeat('a',64),
+         ($1::uuid)::text,'account-a',$3,'source.pdf',1024,'application/pdf',repeat('a',64),
          ($2::uuid)::text || '/' || ($3::uuid)::text || '.pdf',now(),'finalized',$4,$4
        )`,
       [templateId, orgId, sourceId, userId],
     );
     await setup.query(
       `select public.upsert_org_esign_integration(
-         $1,'synthetic-api-key','-key','synthetic-client',repeat('f',64),
-         $2,'synthetic-encryption-key'
+         $1,'synthetic-api-key','-key','synthetic-client','account-a',
+         repeat('f',64),$2,'synthetic-encryption-key'
        )`,
       [orgId, userId],
     );

@@ -3,6 +3,12 @@
 -- confirmed by reconcile_esign_request_delivery. Both RPC signatures remain
 -- unchanged so either application version can run before or after this migration.
 
+alter table public.esign_requests
+  add column if not exists claimed_homeowner_contact_id uuid;
+
+comment on column public.esign_requests.claimed_homeowner_contact_id is
+  'Homeowner contact linked to the property when the eSign send was claimed. Used only after provider delivery to avoid updating a reassigned contact.';
+
 create or replace function public.create_esign_request(
   p_org_id uuid,
   p_property_id uuid,
@@ -144,7 +150,7 @@ begin
   if v_homeowner_contact_id is null then
     return query select
       'blocked'::public.esign_request_claim_outcome,
-      'MISSING_HOMEOWNER_EMAIL'::text,
+      'MISSING_HOMEOWNER_CONTACT'::text,
       null::uuid, p_org_id, p_property_id, p_template_id, p_send_intent_id,
       p_payload_hash, p_retry_of_request_id, p_signer_snapshot,
       p_merge_value_snapshot, null::public.esign_request_status,
@@ -157,7 +163,7 @@ begin
   if not found then
     return query select
       'blocked'::public.esign_request_claim_outcome,
-      'MISSING_HOMEOWNER_EMAIL'::text,
+      'MISSING_HOMEOWNER_CONTACT'::text,
       null::uuid, p_org_id, p_property_id, p_template_id, p_send_intent_id,
       p_payload_hash, p_retry_of_request_id, p_signer_snapshot,
       p_merge_value_snapshot, null::public.esign_request_status,
@@ -204,6 +210,24 @@ begin
       null::public.esign_delivery_state, true, null::timestamptz;
     return;
   end if;
+  if v_homeowner_contact.phone_1 is null
+     and exists (
+       select 1
+       from public.contacts contact
+       where contact.org_id = p_org_id
+         and contact.id <> v_homeowner_contact_id
+         and contact.phone_1 is null
+         and lower(contact.email) = lower(v_submitted_seller_email)
+     ) then
+    return query select
+      'blocked'::public.esign_request_claim_outcome,
+      'SELLER_EMAIL_CONFLICT'::text,
+      null::uuid, p_org_id, p_property_id, p_template_id, p_send_intent_id,
+      p_payload_hash, p_retry_of_request_id, p_signer_snapshot,
+      p_merge_value_snapshot, null::public.esign_request_status,
+      null::public.esign_delivery_state, true, null::timestamptz;
+    return;
+  end if;
   if p_retry_of_request_id is not null then
     select * into v_previous from public.esign_requests
     where id = p_retry_of_request_id and org_id = p_org_id
@@ -228,11 +252,13 @@ begin
   insert into public.esign_requests (
     id, org_id, property_id, template_id, signer_snapshot,
     merge_value_snapshot, status, delivery_state, test_mode,
-    send_intent_id, payload_hash, retry_of_request_id, created_by, created_at
+    send_intent_id, payload_hash, retry_of_request_id,
+    claimed_homeowner_contact_id, created_by, created_at
   ) values (
     v_id, p_org_id, p_property_id, p_template_id, p_signer_snapshot,
     p_merge_value_snapshot, 'awaiting', 'sending', true,
     p_send_intent_id, p_payload_hash, p_retry_of_request_id,
+    v_homeowner_contact_id,
     p_actor_id, v_created_at
   ) on conflict (org_id, send_intent_id) do nothing
     returning esign_requests.id into v_inserted_id;
@@ -304,8 +330,10 @@ as $$
 declare
   v_expected_count integer;
   v_property_id uuid;
-  v_homeowner_contact_id uuid;
-  v_locked_homeowner_contact_id uuid;
+  v_claimed_homeowner_contact_id uuid;
+  v_current_homeowner_contact_id uuid;
+  v_target_contact_available boolean := false;
+  v_target_contact_current boolean := false;
   v_submitted_seller_email text;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
@@ -318,39 +346,35 @@ begin
       using errcode = '23514';
   end if;
 
-  select request.property_id, property.homeowner_contact_id,
+  select request.property_id, request.claimed_homeowner_contact_id,
          btrim(seller.value ->> 'emailAddress')
-  into v_property_id, v_homeowner_contact_id, v_submitted_seller_email
+  into v_property_id, v_claimed_homeowner_contact_id, v_submitted_seller_email
   from public.esign_requests request
-  join public.properties property
-    on property.id = request.property_id and property.org_id = request.org_id
   join public.esign_templates template
     on template.id = request.template_id and template.org_id = request.org_id
   cross join lateral jsonb_array_elements(request.signer_snapshot) seller(value)
   where request.id = p_request_id
     and request.org_id = p_org_id
     and seller.value ->> 'role' = template.seller_role;
-  if not found or v_homeowner_contact_id is null then
-    raise exception 'eSign request homeowner contact is unavailable'
+  if not found then
+    raise exception 'eSign request is not awaiting provider reconciliation'
       using errcode = '55000';
   end if;
 
   -- Match Sandra's contact -> property order before touching the request rows.
-  perform 1 from public.contacts contact
-  where contact.id = v_homeowner_contact_id and contact.org_id = p_org_id
-  for update;
-  if not found then
-    raise exception 'eSign request homeowner contact is unavailable'
-      using errcode = '55000';
+  if v_claimed_homeowner_contact_id is not null then
+    perform 1 from public.contacts contact
+    where contact.id = v_claimed_homeowner_contact_id and contact.org_id = p_org_id
+    for update;
+    v_target_contact_available := found;
   end if;
-  select property.homeowner_contact_id into v_locked_homeowner_contact_id
+  select property.homeowner_contact_id into v_current_homeowner_contact_id
   from public.properties property
   where property.id = v_property_id and property.org_id = p_org_id
   for update;
-  if not found or v_locked_homeowner_contact_id is distinct from v_homeowner_contact_id then
-    raise exception 'eSign request homeowner contact changed before delivery confirmation'
-      using errcode = '40001';
-  end if;
+  v_target_contact_current := found
+    and v_claimed_homeowner_contact_id is not null
+    and v_current_homeowner_contact_id is not distinct from v_claimed_homeowner_contact_id;
   perform 1 from public.esign_requests request
   where request.id = p_request_id and request.org_id = p_org_id
     and request.property_id = v_property_id
@@ -416,13 +440,50 @@ begin
       using errcode = '55000';
   end if;
 
-  update public.contacts
-  set email = v_submitted_seller_email
-  where id = v_homeowner_contact_id and org_id = p_org_id;
-  if not found then
-    raise exception 'eSign request homeowner contact changed during reconciliation'
-      using errcode = '40001';
-  end if;
+  begin
+    update public.contacts
+    set email = v_submitted_seller_email
+    where id = v_claimed_homeowner_contact_id
+      and org_id = p_org_id
+      and v_target_contact_available
+      and v_target_contact_current;
+    if not found then
+      insert into public.lead_events (
+        org_id, property_id, actor_type, actor_id, event_type, payload,
+        source_type, source_id
+      ) values (
+        p_org_id, v_property_id, 'system', null,
+        'esign_contact_email_persist_skipped',
+        jsonb_build_object(
+          'reason',
+          case
+            when v_claimed_homeowner_contact_id is null
+              then 'missing_claimed_contact_snapshot'
+            when not v_target_contact_available then 'claimed_contact_missing'
+            when not v_target_contact_current then 'property_homeowner_changed'
+            else 'contact_update_not_applied'
+          end,
+          'claimed_homeowner_contact_id', v_claimed_homeowner_contact_id,
+          'current_homeowner_contact_id', v_current_homeowner_contact_id
+        ),
+        'esign_contact_email_persist', p_request_id
+      ) on conflict (source_type, source_id) where source_id is not null do nothing;
+    end if;
+  exception
+    when unique_violation then
+      insert into public.lead_events (
+        org_id, property_id, actor_type, actor_id, event_type, payload,
+        source_type, source_id
+      ) values (
+        p_org_id, v_property_id, 'system', null,
+        'esign_contact_email_persist_skipped',
+        jsonb_build_object(
+          'reason', 'seller_email_conflict',
+          'claimed_homeowner_contact_id', v_claimed_homeowner_contact_id
+        ),
+        'esign_contact_email_persist', p_request_id
+      ) on conflict (source_type, source_id) where source_id is not null do nothing;
+  end;
 end;
 $$;
 
@@ -435,4 +496,4 @@ grant execute on function public.reconcile_esign_request_delivery(
 
 comment on function public.reconcile_esign_request_delivery(
   uuid, uuid, text, text, jsonb
-) is 'Confirms provider delivery, then atomically persists the request Seller email using Sandra contact-first lock order.';
+) is 'Confirms provider delivery, then best-effort persists the request Seller email to the contact claimed at send time using Sandra contact-first lock order.';

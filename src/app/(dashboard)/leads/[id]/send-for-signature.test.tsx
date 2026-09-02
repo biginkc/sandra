@@ -89,6 +89,10 @@ describe("SendForSignature", () => {
       message: "Send disabled: Dropbox Sign is not connected.",
     },
     {
+      blockers: ["owner_contact_missing"],
+      message: "Send disabled: no homeowner contact is linked.",
+    },
+    {
       blockers: ["owner_email_missing", "provider_disconnected"],
       message: "Send disabled: Dropbox Sign is not connected.",
     },

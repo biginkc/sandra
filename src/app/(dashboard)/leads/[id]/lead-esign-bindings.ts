@@ -61,6 +61,13 @@ export function createLeadEsignRepository(): EsignActionRepository {
       if (error) throw error;
       return data ? loadRequest(orgId, data.id) : null;
     },
+    isDialogEmailAuthorityReady: async () => {
+      const { error } = await createAdminClient()
+        .from("esign_requests")
+        .select("claimed_homeowner_contact_id")
+        .limit(0);
+      return !error;
+    },
     claimSend: claimSend,
     reconcileSent: async (input) => {
       const { error } = await createAdminClient().rpc(
@@ -340,6 +347,7 @@ async function loadLeadSendContext({
   return {
     propertyId: property.id,
     sellerName,
+    hasHomeownerContact: Boolean(contact),
     sellerEmailAddress: contact?.email ?? null,
     propertyAddress: [
       property.address,
@@ -445,11 +453,13 @@ async function claimSend(
     const safeOutcome = mapAtomicSendBlocker(row.blocker_code);
     if (safeOutcome) return safeOutcome;
     const blocker: SendBlockerCode =
-      row.blocker_code === "MISSING_HOMEOWNER_EMAIL"
-        ? "owner_email_missing"
-        : row.blocker_code === "FINALIZED_TEMPLATE_NOT_FOUND"
-          ? "no_templates"
-          : "sending_disabled";
+      row.blocker_code === "MISSING_HOMEOWNER_CONTACT"
+        ? "owner_contact_missing"
+        : row.blocker_code === "MISSING_HOMEOWNER_EMAIL"
+          ? "owner_email_missing"
+          : row.blocker_code === "FINALIZED_TEMPLATE_NOT_FOUND"
+            ? "no_templates"
+            : "sending_disabled";
     return { outcome: "blocked", blocker };
   }
   if (!row.id) throw new Error("Missing claimed request ID.");
@@ -471,6 +481,8 @@ export function mapAtomicSendBlocker(
   if (blockerCode === "PROPERTY_NOT_FOUND") return { outcome: "not_found" };
   if (blockerCode === "SIGNER_PAYLOAD_INVALID")
     return { outcome: "invalid_send_input" };
+  if (blockerCode === "SELLER_EMAIL_CONFLICT")
+    return { outcome: "seller_contact_conflict" };
   return null;
 }
 
