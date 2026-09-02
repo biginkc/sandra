@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DatabaseError } from "@/lib/errors/classes";
+
 const mocks = vi.hoisted(() => ({
   memberships: [] as Array<{
     user_id: string;
@@ -163,7 +165,7 @@ describe("eSign server actions", () => {
       ok: false,
       error: { code: "AUTHORIZATION" },
     });
-    expect(await disconnectDropboxSignAction()).toMatchObject({
+    expect(await disconnectDropboxSignAction(true)).toMatchObject({
       ok: false,
       error: { code: "AUTHORIZATION" },
     });
@@ -291,14 +293,71 @@ describe("eSign server actions", () => {
     expect(mocks.revalidatePath).toHaveBeenCalledWith("/settings/integrations");
   });
 
+  it.each([false, undefined])(
+    "rejects disconnect unless operator confirmation is literally true (%s)",
+    async (operatorConfirmed) => {
+      const result = await disconnectDropboxSignAction(operatorConfirmed as boolean);
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message: expect.stringMatching(/confirm/i),
+        },
+      });
+      expect(mocks.deleteEsignCredentials).not.toHaveBeenCalled();
+      expect(mocks.revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
   it("passes the owner identity into fail-closed disconnect", async () => {
-    await expect(disconnectDropboxSignAction()).resolves.toEqual({
+    await expect(disconnectDropboxSignAction(true)).resolves.toEqual({
       ok: true,
-      data: null,
+      data: {
+        disconnected: true,
+        sendingEnabled: false,
+        message: "Dropbox Sign disconnected.",
+      },
     });
+    expect(mocks.adminUpdate).toHaveBeenCalledWith(
+      "set_org_esign_sending_enabled",
+      {
+        p_org_id: "org-1",
+        p_actor_id: "owner-1",
+        p_enabled: false,
+      },
+    );
     expect(mocks.deleteEsignCredentials).toHaveBeenCalledWith(
       "org-1",
       "owner-1",
     );
+  });
+
+  it("disables new sending even when active eSign work blocks full disconnect", async () => {
+    mocks.deleteEsignCredentials.mockRejectedValueOnce(
+      new DatabaseError(
+        "Finish active eSign work before disconnecting Dropbox Sign.",
+        { code: "23514" },
+      ),
+    );
+
+    await expect(disconnectDropboxSignAction(true)).resolves.toEqual({
+      ok: true,
+      data: {
+        disconnected: false,
+        sendingEnabled: false,
+        message:
+          "Dropbox Sign sending is off. Finish active eSign work before removing the connection.",
+      },
+    });
+    expect(mocks.adminUpdate).toHaveBeenCalledWith(
+      "set_org_esign_sending_enabled",
+      {
+        p_org_id: "org-1",
+        p_actor_id: "owner-1",
+        p_enabled: false,
+      },
+    );
+    expect(mocks.revalidatePath).toHaveBeenCalledWith("/settings/integrations");
   });
 });

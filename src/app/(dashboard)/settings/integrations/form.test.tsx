@@ -2,8 +2,15 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { Result } from "@/lib/errors/result";
 import { IntegrationsForm } from "./form";
 import type { IntegrationStatus } from "./actions";
+
+type MockDisconnectResult = {
+  disconnected: boolean;
+  sendingEnabled: false;
+  message: string;
+};
 
 const {
   connectDropboxSignAction,
@@ -24,7 +31,16 @@ const {
       apiKeyLastFour: "1234",
     },
   })),
-  disconnectDropboxSignAction: vi.fn(async () => ({ ok: true, data: null })),
+  disconnectDropboxSignAction: vi.fn(
+    async (): Promise<Result<MockDisconnectResult>> => ({
+      ok: true,
+      data: {
+        disconnected: true,
+        sendingEnabled: false,
+        message: "Dropbox Sign disconnected.",
+      },
+    }),
+  ),
   disconnectIntegration: vi.fn(async () => ({ ok: true, data: null })),
   setEsignSendingEnabledAction: vi.fn(
     async (): Promise<
@@ -435,6 +451,131 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
     });
   });
 
+  it("requires confirmation before disconnecting Dropbox Sign", async () => {
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: true,
+            sendingEnabled: true,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+        })}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Disconnect Dropbox Sign" }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Disconnect Dropbox Sign?" }),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/When it succeeds, new contract sending is off/i),
+    ).toBeVisible();
+    expect(disconnectDropboxSignAction).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    await waitFor(() => {
+      expect(disconnectDropboxSignAction).toHaveBeenCalledWith(true);
+      expect(screen.getByText("Dropbox Sign disconnected.")).toBeVisible();
+    });
+    expect(
+      screen.getByRole("button", { name: "Connect Dropbox Sign" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("switch", { name: "Enable contract sending" }),
+    ).toBeNull();
+  });
+
+  it("turns off sending visibly when active work blocks full disconnect", async () => {
+    disconnectDropboxSignAction.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        disconnected: false,
+        sendingEnabled: false,
+        message:
+          "Dropbox Sign sending is off. Finish active eSign work before removing the connection.",
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: true,
+            sendingEnabled: true,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+        })}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Disconnect Dropbox Sign" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Dropbox Sign sending is off. Finish active eSign work before removing the connection.",
+        ),
+      ).toBeVisible();
+      expect(
+        screen.getByRole("switch", { name: "Enable contract sending" }),
+      ).not.toBeChecked();
+    });
+    expect(
+      screen.getByRole("button", { name: "Disconnect Dropbox Sign" }),
+    ).toBeVisible();
+  });
+
+  it("keeps a visible disconnect failure reason on the card", async () => {
+    disconnectDropboxSignAction.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: "DATABASE",
+        message: "Finish active eSign work before disconnecting Dropbox Sign.",
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: true,
+            sendingEnabled: true,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+        })}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Disconnect Dropbox Sign" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    expect(
+      await screen.findByRole("alert", {
+        name: "Dropbox Sign disconnect failed",
+      }),
+    ).toHaveTextContent("Finish active eSign work before disconnecting Dropbox Sign.");
+    expect(
+      screen.getByRole("button", { name: "Disconnect Dropbox Sign" }),
+    ).toBeVisible();
+  });
+
   it("prevents members from changing or disconnecting the org connection", () => {
     render(
       <IntegrationsForm
@@ -457,6 +598,11 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
       screen.queryByRole("button", { name: "Disconnect Dropbox Sign" }),
     ).toBeNull();
     expect(screen.queryByRole("link", { name: "Manage templates" })).toBeNull();
+    expect(
+      screen.getByText(
+        "Only organization owners can disconnect Dropbox Sign or manage templates.",
+      ),
+    ).toBeVisible();
   });
 });
 

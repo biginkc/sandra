@@ -51,6 +51,12 @@ type AdminIntegrationClient = {
   ): Promise<{ error: { message: string; code?: string } | null }>;
 };
 
+export type EsignDisconnectResult = {
+  disconnected: boolean;
+  sendingEnabled: false;
+  message: string;
+};
+
 async function currentMembership(): Promise<Membership> {
   const memberships = await getCallerMemberships();
   if (memberships.length === 0) {
@@ -221,14 +227,52 @@ export async function setEsignSendingEnabledAction(
   }
 }
 
-export async function disconnectDropboxSignAction(): Promise<Result<null>> {
+export async function disconnectDropboxSignAction(
+  operatorConfirmed: boolean,
+): Promise<Result<EsignDisconnectResult>> {
+  let sendingDisabled = false;
   try {
     const membership = await currentMembership();
     requireOwner(membership);
+    if (operatorConfirmed !== true) {
+      throw new ValidationError(
+        "Confirm the Dropbox Sign disconnect before it is applied.",
+      );
+    }
+    const { error: disableError } = await (
+      createAdminClient() as unknown as AdminIntegrationClient
+    ).rpc("set_org_esign_sending_enabled", {
+      p_org_id: membership.org_id,
+      p_actor_id: membership.user_id,
+      p_enabled: false,
+    });
+    if (disableError) {
+      throw new DatabaseError("Dropbox Sign sending could not be disabled.", {
+        code: disableError.code,
+      });
+    }
+    sendingDisabled = true;
     await deleteEsignCredentials(membership.org_id, membership.user_id);
     revalidatePath("/settings/integrations");
-    return ok(null);
+    return ok({
+      disconnected: true,
+      sendingEnabled: false,
+      message: "Dropbox Sign disconnected.",
+    });
   } catch (error) {
+    if (
+      sendingDisabled &&
+      error instanceof DatabaseError &&
+      error.details?.code === "23514"
+    ) {
+      revalidatePath("/settings/integrations");
+      return ok({
+        disconnected: false,
+        sendingEnabled: false,
+        message:
+          "Dropbox Sign sending is off. Finish active eSign work before removing the connection.",
+      });
+    }
     reportError(error, { tags: { surface: "esign_disconnect" } });
     return safeEsignError(
       error,
