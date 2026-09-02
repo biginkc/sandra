@@ -17,6 +17,10 @@ const definitiveFailureSql = readFileSync(
   "supabase/migrations/20260901181004_record_definitive_esign_template_provider_create_failure.sql",
   "utf8",
 );
+const sellerEmailAuthoritySql = readFileSync(
+  "supabase/migrations/20260902010000_esign_dialog_seller_email_authority.sql",
+  "utf8",
+);
 
 let pg: Client;
 let orgId = "";
@@ -252,6 +256,8 @@ beforeAll(async () => {
   await pg.query("begin");
   await pg.query(definitiveFailureSql);
   await pg.query(definitiveFailureSql);
+  await pg.query(sellerEmailAuthoritySql);
+  await pg.query(sellerEmailAuthoritySql);
 });
 
 beforeEach(async () => {
@@ -287,7 +293,613 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
     expect(definitiveFailureSql).not.toContain(
       "mark_esign_template_provider_create_unknown(",
     );
+    expect(sellerEmailAuthoritySql).toContain(
+      "create or replace function public.reconcile_esign_request_delivery",
+    );
+    expect(sellerEmailAuthoritySql.indexOf("for update;")).toBeLessThan(
+      sellerEmailAuthoritySql.indexOf(
+        "select * into v_property from public.properties property",
+      ),
+    );
   });
+
+  it("persists the dialog Seller email only after confirmed provider delivery", async () => {
+    const finalized = await finalizeOrdinaryTemplate();
+    await pg.query(
+      `update public.org_esign_integrations
+       set callback_verified_at=now(),sending_enabled=true
+       where org_id=$1`,
+      [orgId],
+    );
+    const mergeValues = {
+      seller_name: "Seller Owner",
+      property_address: "100 eSign QA A St",
+      offer_price: "$125,000",
+      closing_date: "2026-09-30",
+      earnest_money: "$1,000",
+    };
+
+    for (const storedEmail of [null, "old-seller@example.com"] as const) {
+      const contactId = crypto.randomUUID();
+      const propertyId = crypto.randomUUID();
+      const submittedEmail = `dialog-${propertyId}@example.com`;
+      await pg.query(
+        `insert into public.contacts (id,org_id,first_name,last_name,email)
+         values ($1,$2,'Seller','Owner',$3)`,
+        [contactId, orgId, storedEmail],
+      );
+      await pg.query(
+        `insert into public.properties (
+           id,org_id,address,state,status,homeowner_contact_id
+         ) values ($1,$2,'100 eSign QA A St','MO','new_lead',$3)`,
+        [propertyId, orgId, contactId],
+      );
+      const signers = [
+        {
+          role: "Seller",
+          order: 0,
+          name: "Seller Owner",
+          emailAddress: submittedEmail,
+        },
+        {
+          role: "seller",
+          order: 1,
+          name: "Buyer One",
+          emailAddress: "buyer@example.com",
+        },
+      ];
+      const claim = await pg.query<{
+        outcome: string;
+        blocker_code: string | null;
+        id: string;
+      }>(
+        `select outcome,blocker_code,id from public.create_esign_request(
+           $1,$2,$3,$4::jsonb,$5::jsonb,$6,repeat('a',64),null,$7
+         )`,
+        [
+          orgId,
+          propertyId,
+          finalized.templateId,
+          JSON.stringify(signers),
+          JSON.stringify(mergeValues),
+          crypto.randomUUID(),
+          memberId,
+        ],
+      );
+      expect(claim.rows[0]).toMatchObject({
+        outcome: "created",
+        blocker_code: null,
+      });
+      expect(
+        (
+          await pg.query<{ email: string | null }>(
+            "select email from public.contacts where id=$1 and org_id=$2",
+            [contactId, orgId],
+          )
+        ).rows[0].email,
+      ).toBe(storedEmail);
+      await pg.query(
+        `select public.reconcile_esign_request_delivery(
+           $1,$2,$3,'https://app.hellosign.com/details',$4::jsonb
+         )`,
+        [
+          orgId,
+          claim.rows[0].id,
+          `provider-request-${propertyId}`,
+          JSON.stringify(
+            signers.map((signer, order) => ({
+              ...signer,
+              order,
+              signatureId: `signature-${propertyId}-${order}`,
+            })),
+          ),
+        ],
+      );
+      expect(
+        (
+          await pg.query<{ email: string }>(
+            "select email from public.contacts where id=$1 and org_id=$2",
+            [contactId, orgId],
+          )
+        ).rows[0].email,
+      ).toBe(submittedEmail);
+    }
+  });
+
+  it("records delivery but skips contact email persistence when the property homeowner changed", async () => {
+    const finalized = await finalizeOrdinaryTemplate();
+    await pg.query(
+      `update public.org_esign_integrations
+       set callback_verified_at=now(),sending_enabled=true
+       where org_id=$1`,
+      [orgId],
+    );
+    const contactA = crypto.randomUUID();
+    const contactB = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const submittedEmail = `dialog-${propertyId}@example.com`;
+    const signers = [
+      {
+        role: "Seller",
+        order: 0,
+        name: "Seller A",
+        emailAddress: submittedEmail,
+      },
+      {
+        role: "seller",
+        order: 1,
+        name: "Buyer One",
+        emailAddress: "buyer@example.com",
+      },
+    ];
+    await pg.query(
+      `insert into public.contacts (id,org_id,first_name,last_name,email)
+       values ($1,$2,'Seller','A','old-a@example.com'),
+              ($3,$2,'Seller','B','old-b@example.com')`,
+      [contactA, orgId, contactB],
+    );
+    await pg.query(
+      `insert into public.properties (
+         id,org_id,address,state,status,homeowner_contact_id
+       ) values ($1,$2,'103 eSign QA St','MO','new_lead',$3)`,
+      [propertyId, orgId, contactA],
+    );
+    const claim = await pg.query<{
+      outcome: string;
+      blocker_code: string | null;
+      id: string;
+    }>(
+      `select outcome,blocker_code,id
+       from public.create_esign_request(
+         $1,$2,$3,$4::jsonb,$5::jsonb,$6,repeat('d',64),null,$7
+       )`,
+      [
+        orgId,
+        propertyId,
+        finalized.templateId,
+        JSON.stringify(signers),
+        JSON.stringify({
+          seller_name: "Seller A",
+          property_address: "103 eSign QA St",
+          offer_price: "$125,000",
+          closing_date: "2026-09-30",
+          earnest_money: "$1,000",
+        }),
+        crypto.randomUUID(),
+        memberId,
+      ],
+    );
+    expect(claim.rows[0]).toMatchObject({
+      outcome: "created",
+      blocker_code: null,
+    });
+    await expect(
+      pg.query<{ claimed_homeowner_contact_id: string }>(
+        `select claimed_homeowner_contact_id
+         from public.esign_requests where id=$1 and org_id=$2`,
+        [claim.rows[0].id, orgId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ claimed_homeowner_contact_id: contactA }],
+    });
+    await pg.query(
+      "update public.properties set homeowner_contact_id=$1 where id=$2 and org_id=$3",
+      [contactB, propertyId, orgId],
+    );
+
+    await pg.query(
+      `select public.reconcile_esign_request_delivery(
+         $1,$2,$3,'https://app.hellosign.com/details',$4::jsonb
+       )`,
+      [
+        orgId,
+        claim.rows[0].id,
+        `provider-request-${propertyId}`,
+        JSON.stringify(
+          signers.map((signer, order) => ({
+            ...signer,
+            order,
+            signatureId: `signature-${propertyId}-${order}`,
+          })),
+        ),
+      ],
+    );
+
+    await expect(
+      pg.query(
+        `select delivery_state, sign_request_id
+         from public.esign_requests where id=$1 and org_id=$2`,
+        [claim.rows[0].id, orgId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          delivery_state: "sent",
+          sign_request_id: `provider-request-${propertyId}`,
+        },
+      ],
+    });
+    await expect(
+      pg.query<{ id: string; email: string }>(
+        "select id,email from public.contacts where id=any($1::uuid[]) order by id",
+        [[contactA, contactB]],
+      ),
+    ).resolves.toMatchObject({
+      rows: expect.arrayContaining([
+        { id: contactA, email: "old-a@example.com" },
+        { id: contactB, email: "old-b@example.com" },
+      ]),
+    });
+    await expect(
+      pg.query<{ reason: string }>(
+        `select payload->>'reason' reason
+         from public.lead_events
+         where org_id=$1 and source_type='esign_contact_email_persist'
+           and source_id=$2`,
+        [orgId, claim.rows[0].id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ reason: "property_homeowner_changed" }],
+    });
+  });
+
+  it("rejects a dialog Seller email owned by another email-only contact before claim", async () => {
+    const finalized = await finalizeOrdinaryTemplate();
+    await pg.query(
+      `update public.org_esign_integrations
+       set callback_verified_at=now(),sending_enabled=true
+       where org_id=$1`,
+      [orgId],
+    );
+    const contactId = crypto.randomUUID();
+    const duplicateContactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const sendIntentId = crypto.randomUUID();
+    await pg.query(
+      `insert into public.contacts (id,org_id,first_name,last_name,email,phone_1)
+       values ($1,$2,'Seller','Owner',null,null),
+              ($3,$2,'Other','Contact','duplicate@example.com',null)`,
+      [contactId, orgId, duplicateContactId],
+    );
+    await pg.query(
+      `insert into public.properties (
+         id,org_id,address,state,status,homeowner_contact_id
+       ) values ($1,$2,'104 eSign QA St','MO','new_lead',$3)`,
+      [propertyId, orgId, contactId],
+    );
+
+    const result = await pg.query<{ outcome: string; blocker_code: string }>(
+      `select outcome,blocker_code from public.create_esign_request(
+         $1,$2,$3,$4::jsonb,$5::jsonb,$6,repeat('e',64),null,$7
+       )`,
+      [
+        orgId,
+        propertyId,
+        finalized.templateId,
+        JSON.stringify([
+          {
+            role: "Seller",
+            order: 0,
+            name: "Seller Owner",
+            emailAddress: "duplicate@example.com",
+          },
+          {
+            role: "seller",
+            order: 1,
+            name: "Buyer One",
+            emailAddress: "buyer@example.com",
+          },
+        ]),
+        JSON.stringify({
+          seller_name: "Seller Owner",
+          property_address: "104 eSign QA St",
+          offer_price: "$125,000",
+          closing_date: "2026-09-30",
+          earnest_money: "$1,000",
+        }),
+        sendIntentId,
+        memberId,
+      ],
+    );
+
+    expect(result.rows[0]).toEqual({
+      outcome: "blocked",
+      blocker_code: "SELLER_EMAIL_CONFLICT",
+    });
+    await expect(
+      pg.query<{ count: string }>(
+        "select count(*) from public.esign_requests where org_id=$1 and send_intent_id=$2",
+        [orgId, sendIntentId],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: "0" }] });
+  });
+
+  it("records delivery when best-effort contact email persistence hits a unique conflict", async () => {
+    const finalized = await finalizeOrdinaryTemplate();
+    await pg.query(
+      `update public.org_esign_integrations
+       set callback_verified_at=now(),sending_enabled=true
+       where org_id=$1`,
+      [orgId],
+    );
+    const contactId = crypto.randomUUID();
+    const duplicateContactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    const signers = [
+      {
+        role: "Seller",
+        order: 0,
+        name: "Seller Owner",
+        emailAddress: "duplicate-reconcile@example.com",
+      },
+      {
+        role: "seller",
+        order: 1,
+        name: "Buyer One",
+        emailAddress: "buyer@example.com",
+      },
+    ];
+    await pg.query(
+      `insert into public.contacts (id,org_id,first_name,last_name,email,phone_1)
+       values ($1,$2,'Seller','Owner',null,null),
+              ($3,$2,'Other','Contact','duplicate-reconcile@example.com',null)`,
+      [contactId, orgId, duplicateContactId],
+    );
+    await pg.query(
+      `insert into public.properties (
+         id,org_id,address,state,status,homeowner_contact_id
+       ) values ($1,$2,'105 eSign QA St','MO','new_lead',$3)`,
+      [propertyId, orgId, contactId],
+    );
+    await pg.query(
+      `insert into public.esign_requests (
+         id,org_id,property_id,template_id,signer_snapshot,merge_value_snapshot,
+         status,delivery_state,test_mode,send_intent_id,payload_hash,
+         claimed_homeowner_contact_id,created_by
+       ) values (
+         $1,$2,$3,$4,$5::jsonb,$6::jsonb,'awaiting','sending',true,
+         gen_random_uuid(),repeat('f',64),$7,$8
+       )`,
+      [
+        requestId,
+        orgId,
+        propertyId,
+        finalized.templateId,
+        JSON.stringify(signers),
+        JSON.stringify({
+          seller_name: "Seller Owner",
+          property_address: "105 eSign QA St",
+          offer_price: "$125,000",
+          closing_date: "2026-09-30",
+          earnest_money: "$1,000",
+        }),
+        contactId,
+        memberId,
+      ],
+    );
+    await pg.query(
+      `insert into public.esign_request_signers (
+         org_id,request_id,role_name,signer_order,signer_name,signer_email
+       )
+       select $1,$2,signer.value->>'role',(signer.value->>'order')::integer,
+              signer.value->>'name',signer.value->>'emailAddress'
+       from jsonb_array_elements($3::jsonb) signer(value)`,
+      [orgId, requestId, JSON.stringify(signers)],
+    );
+
+    await pg.query(
+      `select public.reconcile_esign_request_delivery(
+         $1,$2,'provider-conflict','https://app.hellosign.com/details',$3::jsonb
+       )`,
+      [
+        orgId,
+        requestId,
+        JSON.stringify(
+          signers.map((signer, order) => ({
+            ...signer,
+            order,
+            signatureId: `signature-conflict-${order}`,
+          })),
+        ),
+      ],
+    );
+
+    await expect(
+      pg.query(
+        `select delivery_state, sign_request_id
+         from public.esign_requests where id=$1 and org_id=$2`,
+        [requestId, orgId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ delivery_state: "sent", sign_request_id: "provider-conflict" }],
+    });
+    await expect(
+      pg.query<{ email: string | null }>(
+        "select email from public.contacts where id=$1 and org_id=$2",
+        [contactId, orgId],
+      ),
+    ).resolves.toMatchObject({ rows: [{ email: null }] });
+    await expect(
+      pg.query<{ reason: string }>(
+        `select payload->>'reason' reason
+         from public.lead_events
+         where org_id=$1 and source_type='esign_contact_email_persist'
+           and source_id=$2`,
+        [orgId, requestId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ reason: "seller_email_conflict" }],
+    });
+  });
+
+  it.each([
+    {
+      outcome: "provider rejection",
+      deliveryState: "failed" as const,
+      errorMessage: "PROVIDER_REJECTED",
+    },
+    {
+      outcome: "provider timeout",
+      deliveryState: "send_unknown" as const,
+      errorMessage: null,
+    },
+    {
+      outcome: "stranded sending claim",
+      deliveryState: null,
+      errorMessage: null,
+    },
+  ])(
+    "does not mutate the canonical email after $outcome",
+    async ({ deliveryState, errorMessage }) => {
+      const finalized = await finalizeOrdinaryTemplate();
+      await pg.query(
+        `update public.org_esign_integrations
+         set callback_verified_at=now(),sending_enabled=true where org_id=$1`,
+        [orgId],
+      );
+      const contactId = crypto.randomUUID();
+      const propertyId = crypto.randomUUID();
+      const sendIntentId = crypto.randomUUID();
+      await pg.query(
+        `insert into public.contacts (id,org_id,first_name,last_name,email)
+         values ($1,$2,'Seller','Owner','canonical@example.com')`,
+        [contactId, orgId],
+      );
+      await pg.query(
+        `insert into public.properties (
+           id,org_id,address,state,status,homeowner_contact_id
+         ) values ($1,$2,'101 eSign QA St','MO','new_lead',$3)`,
+        [propertyId, orgId, contactId],
+      );
+      const claim = await pg.query<{ id: string }>(
+        `select id from public.create_esign_request(
+           $1,$2,$3,$4::jsonb,$5::jsonb,$6,repeat('b',64),null,$7
+         )`,
+        [
+          orgId,
+          propertyId,
+          finalized.templateId,
+          JSON.stringify([
+            {
+              role: "Seller",
+              order: 0,
+              name: "Seller Owner",
+              emailAddress: "dialog@example.com",
+            },
+            {
+              role: "seller",
+              order: 1,
+              name: "Buyer One",
+              emailAddress: "buyer@example.com",
+            },
+          ]),
+          JSON.stringify({
+            seller_name: "Seller Owner",
+            property_address: "101 eSign QA St",
+            offer_price: "$125,000",
+            closing_date: "2026-09-30",
+            earnest_money: "$1,000",
+          }),
+          sendIntentId,
+          memberId,
+        ],
+      );
+      if (deliveryState !== null) {
+        await pg.query(
+          "select public.mark_esign_request_send_outcome($1,$2,$3,$4)",
+          [orgId, claim.rows[0].id, deliveryState, errorMessage],
+        );
+      }
+      expect(
+        (
+          await pg.query<{ email: string }>(
+            "select email from public.contacts where id=$1",
+            [contactId],
+          )
+        ).rows[0].email,
+      ).toBe("canonical@example.com");
+    },
+  );
+
+  it.each(["   ", "seller@@example.com"])(
+    "rejects direct RPC Seller email %j without contact or request mutation",
+    async (submittedEmail) => {
+      const finalized = await finalizeOrdinaryTemplate();
+      await pg.query(
+        `update public.org_esign_integrations
+         set callback_verified_at=now(),sending_enabled=true where org_id=$1`,
+        [orgId],
+      );
+      const contactId = crypto.randomUUID();
+      const propertyId = crypto.randomUUID();
+      const sendIntentId = crypto.randomUUID();
+      await pg.query(
+        `insert into public.contacts (id,org_id,first_name,last_name,email)
+         values ($1,$2,'Seller','Owner','canonical@example.com')`,
+        [contactId, orgId],
+      );
+      await pg.query(
+        `insert into public.properties (
+           id,org_id,address,state,status,homeowner_contact_id
+         ) values ($1,$2,'102 eSign QA St','MO','new_lead',$3)`,
+        [propertyId, orgId, contactId],
+      );
+      const result = await pg.query<{ outcome: string; blocker_code: string }>(
+        `select outcome,blocker_code from public.create_esign_request(
+           $1,$2,$3,$4::jsonb,$5::jsonb,$6,repeat('c',64),null,$7
+         )`,
+        [
+          orgId,
+          propertyId,
+          finalized.templateId,
+          JSON.stringify([
+            {
+              role: "Seller",
+              order: 0,
+              name: "Seller Owner",
+              emailAddress: submittedEmail,
+            },
+            {
+              role: "seller",
+              order: 1,
+              name: "Buyer One",
+              emailAddress: "buyer@example.com",
+            },
+          ]),
+          JSON.stringify({
+            seller_name: "Seller Owner",
+            property_address: "102 eSign QA St",
+            offer_price: "$125,000",
+            closing_date: "2026-09-30",
+            earnest_money: "$1,000",
+          }),
+          sendIntentId,
+          memberId,
+        ],
+      );
+      expect(result.rows[0]).toEqual({
+        outcome: "blocked",
+        blocker_code: "SIGNER_PAYLOAD_INVALID",
+      });
+      expect(
+        (
+          await pg.query<{ email: string }>(
+            "select email from public.contacts where id=$1",
+            [contactId],
+          )
+        ).rows[0].email,
+      ).toBe("canonical@example.com");
+      expect(
+        (
+          await pg.query<{ count: string }>(
+            "select count(*) from public.esign_requests where org_id=$1 and send_intent_id=$2",
+            [orgId, sendIntentId],
+          )
+        ).rows[0].count,
+      ).toBe("0");
+    },
+  );
 
   it("keeps authenticated template options free of server-only recovery fields", async () => {
     await resetRole();

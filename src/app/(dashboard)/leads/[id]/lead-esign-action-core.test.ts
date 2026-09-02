@@ -77,6 +77,7 @@ function leadContext(
   return {
     propertyId: "property-1",
     sellerName: "Seller Owner",
+    hasHomeownerContact: true,
     sellerEmailAddress: "seller@example.com",
     propertyAddress: "123 Main St",
     connected: true,
@@ -116,6 +117,7 @@ function harness() {
   const repository = {
     loadLeadSendContext: vi.fn().mockResolvedValue(leadContext()),
     findRequestByIntent: vi.fn().mockResolvedValue(null),
+    isDialogEmailAuthorityReady: vi.fn().mockResolvedValue(true),
     claimSend: vi.fn().mockImplementation(async (input) => ({
       outcome: "created",
       request: request({
@@ -235,11 +237,6 @@ describe("lead eSign action orchestration", () => {
     ["disconnect", { connected: false }, "PROVIDER_DISCONNECTED"],
     ["toggle", { sendingEnabled: false }, "SENDING_DISABLED"],
     ["template deletion", { templates: [] }, "NO_TEMPLATES"],
-    [
-      "owner email removal",
-      { sellerEmailAddress: null },
-      "OWNER_EMAIL_MISSING",
-    ],
   ] as const)(
     "blocks a TOCTOU %s change before claiming or dispatching",
     async (_name, change, code) => {
@@ -249,6 +246,124 @@ describe("lead eSign action orchestration", () => {
       const result = await h.core.send(sendInput);
 
       expect(result).toMatchObject({ ok: false, error: { code } });
+      expect(h.repository.claimSend).not.toHaveBeenCalled();
+      expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("maps a stale database signer-authority rejection to signer guidance", async () => {
+    const h = harness();
+    h.repository.claimSend.mockResolvedValue({ outcome: "invalid_send_input" });
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "INVALID_SEND_INPUT",
+        message:
+          "The signer details changed. Review each signer and try again.",
+      },
+    });
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("uses the validated dialog seller email when the stored email is blank", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ sellerEmailAddress: null }),
+    );
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toEqual({ ok: true, data: { requestId: "request-1" } });
+    expect(h.repository.claimSend).toHaveBeenCalledWith(
+      expect.objectContaining({ signers: sendInput.signers }),
+    );
+    expect(h.provider.sendWithTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a lead with no homeowner contact blocked before provider dispatch", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ hasHomeownerContact: false, sellerEmailAddress: null }),
+    );
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "OWNER_CONTACT_MISSING",
+        message: "No homeowner contact is linked to this lead.",
+      },
+    });
+    expect(h.repository.claimSend).not.toHaveBeenCalled();
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a duplicate seller email claim before provider dispatch", async () => {
+    const h = harness();
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "seller_contact_conflict",
+    });
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "SELLER_EMAIL_CONFLICT",
+        message:
+          "That seller email belongs to another contact. Use a unique seller email before sending.",
+      },
+    });
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("does not claim or send while the safe dialog-email migration is absent", async () => {
+    const h = harness();
+    h.repository.isDialogEmailAuthorityReady.mockResolvedValue(false);
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "SENDING_DISABLED",
+        message: "Contract sending is finishing an update. Try again in a minute.",
+      },
+    });
+    expect(h.repository.claimSend).not.toHaveBeenCalled();
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "whitespace-only",
+      emailAddress: "   ",
+      code: "OWNER_EMAIL_MISSING",
+      message: "Enter the seller email before sending.",
+    },
+    {
+      label: "malformed non-empty",
+      emailAddress: "seller@@example.com",
+      code: "INVALID_SEND_INPUT",
+      message: "Enter one email address without spaces for the seller.",
+    },
+  ])(
+    "returns the seller email-field reason for $label input",
+    async ({ emailAddress, code, message }) => {
+      const h = harness();
+      const result = await h.core.send({
+        ...sendInput,
+        signers: [
+          { ...sendInput.signers[0], emailAddress },
+          sendInput.signers[1],
+        ],
+      });
+
+      expect(result).toMatchObject({ ok: false, error: { code, message } });
       expect(h.repository.claimSend).not.toHaveBeenCalled();
       expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
     },

@@ -77,10 +77,6 @@ describe("SendForSignature", () => {
     message: string;
   }>([
     {
-      blockers: ["owner_email_missing"],
-      message: "Send disabled: the seller has no email address.",
-    },
-    {
       blockers: ["no_templates"],
       message: "Send disabled: no eSign templates are available.",
     },
@@ -91,6 +87,10 @@ describe("SendForSignature", () => {
     {
       blockers: ["provider_disconnected"],
       message: "Send disabled: Dropbox Sign is not connected.",
+    },
+    {
+      blockers: ["owner_contact_missing"],
+      message: "Send disabled: no homeowner contact is linked.",
     },
     {
       blockers: ["owner_email_missing", "provider_disconnected"],
@@ -118,7 +118,67 @@ describe("SendForSignature", () => {
     },
   );
 
-  it("prefills the seller, requires every provider role, and sends the edited five-field snapshot", async () => {
+  it("lets a dialog-entered valid seller email clear the missing reason and enable Send", async () => {
+    const user = userEvent.setup();
+    const { preflightAction, sendAction } = actions({
+      ...preflight,
+      blockers: ["owner_email_missing"],
+      templates: [{ ...template, signerRoles: [{ name: "Seller", order: 0 }] }],
+      sellerDefaults: { ...preflight.sellerDefaults, emailAddress: "" },
+    });
+
+    render(
+      <SendForSignature
+        propertyId="property-1"
+        initialBlockers={["owner_email_missing"]}
+        preflightAction={preflightAction}
+        sendAction={sendAction}
+      />,
+    );
+
+    await user.click(screen.getByTestId("send-for-signature-trigger"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Enter the seller email before sending.",
+    );
+    await user.type(
+      within(screen.getByTestId("esign-signer-0")).getByLabelText("Email"),
+      "seller@example.com",
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox"));
+    const submit = screen.getByTestId("send-for-signature-submit");
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+    await waitFor(() => expect(sendAction).toHaveBeenCalledTimes(1));
+  });
+
+  it("treats a whitespace-only seller email as missing", async () => {
+    const user = userEvent.setup();
+    const { preflightAction, sendAction } = actions({
+      ...preflight,
+      templates: [{ ...template, signerRoles: [{ name: "Seller", order: 0 }] }],
+      sellerDefaults: { ...preflight.sellerDefaults, emailAddress: "" },
+    });
+    render(
+      <SendForSignature
+        propertyId="property-1"
+        initialBlockers={[]}
+        preflightAction={preflightAction}
+        sendAction={sendAction}
+      />,
+    );
+    await user.click(screen.getByTestId("send-for-signature-trigger"));
+    await user.type(await screen.findByLabelText("Email"), "   ");
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Enter the seller email before sending.",
+    );
+    expect(screen.getByTestId("send-for-signature-submit")).toBeDisabled();
+    expect(sendAction).not.toHaveBeenCalled();
+  });
+
+  it("prefills the stored seller email, requires every provider role, and sends the edited five-field snapshot", async () => {
     const user = userEvent.setup();
     const { preflightAction, sendAction } = actions();
     const onFinished = vi.fn();

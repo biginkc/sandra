@@ -10,6 +10,7 @@ export const SEND_BLOCKER_PRIORITY = [
   "provider_disconnected",
   "sending_disabled",
   "no_templates",
+  "owner_contact_missing",
   "owner_email_missing",
 ] as const;
 
@@ -19,7 +20,8 @@ const SEND_BLOCKER_MESSAGES: Record<SendBlockerCode, string> = {
   provider_disconnected: "Send disabled: Dropbox Sign is not connected.",
   sending_disabled: "Send disabled: sending from leads is turned off.",
   no_templates: "Send disabled: no eSign templates are available.",
-  owner_email_missing: "Send disabled: the seller has no email address.",
+  owner_contact_missing: "Send disabled: no homeowner contact is linked.",
+  owner_email_missing: "Enter the seller email before sending.",
 };
 
 export function sendBlockerMessage(code: SendBlockerCode): string {

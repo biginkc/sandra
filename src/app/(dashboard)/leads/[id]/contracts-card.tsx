@@ -92,7 +92,10 @@ export function ContractsCard({
                       <div className="max-w-64 whitespace-normal">
                         {[...contract.signers]
                           .sort((a, b) => a.order - b.order)
-                          .map((signer) => `${signer.role}: ${signer.name}`)
+                          .map(
+                            (signer) =>
+                              `${signer.role}: ${signer.name} sent to ${signer.emailAddress}`,
+                          )
                           .join(" · ")}
                       </div>
                     </TableCell>
