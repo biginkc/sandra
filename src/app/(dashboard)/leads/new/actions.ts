@@ -12,9 +12,8 @@ import { createClient } from "@/lib/supabase/server";
 export type NewLeadFormResult = Result<{
   propertyId: string;
   wasDuplicate: boolean;
-  /** Phone that couldn't be classified and was parked on the contact's
-   *  notes instead of saved as a callable number (hard rule). */
-  phoneDropped: string | null;
+  /** A valid phone was saved, but its mobile/landline type is unverified. */
+  phoneUnverified: boolean;
 }>;
 
 /**
@@ -150,7 +149,7 @@ export async function createLeadFromForm(
     return ok({
       propertyId: result.data.propertyId,
       wasDuplicate: result.data.wasDuplicate,
-      phoneDropped: result.data.phoneDropped,
+      phoneUnverified: result.data.phoneUnverified,
     });
   } catch (e) {
     reportError(e, { tags: { surface: "create_lead_from_form" } });
@@ -190,13 +189,13 @@ export async function submitNewLead(formData: FormData): Promise<void> {
       `/leads/new?error=${encodeURIComponent("A lead already exists at this address. Open the existing record instead.")}`,
     );
   }
-  // Degraded save: the phone couldn't be classified and sits on the
-  // contact's notes instead of a phone slot. Land on the lead page
-  // with a warning param so the operator sees it immediately.
-  if (result.data.phoneDropped) {
+  // The phone is saved and usable, but its line type is uncertain. Land on
+  // the lead page with a truthful warning that does not put the phone number
+  // itself into the URL.
+  if (result.data.phoneUnverified) {
     redirect(
       `/leads/${result.data.propertyId}?warning=${encodeURIComponent(
-        `Phone ${result.data.phoneDropped} couldn't be classified (line-type lookup unavailable) — it's saved on the contact's notes, not as a callable number.`,
+        "Phone saved, but Sandra could not check whether it is mobile or landline. Calling and one-to-one texting are still available.",
       )}`,
     );
   }

@@ -78,13 +78,10 @@ export type CreateLeadResult = {
   /** Resolved homeowner contact id for a newly created lead. Duplicate
    *  results return null because submitted contact data was not processed. */
   contactId: string | null;
-  /** Set when the submitted phone could not be classified (Telnyx
-   *  unconfigured / unreachable / unknown line type) and was therefore
-   *  not saved as a phone slot (hard rule, migration 080). The number
-   *  is preserved verbatim on the contact's notes for manual recovery —
-   *  callers must surface this degraded outcome, not report plain
-   *  success. */
-  phoneDropped: string | null;
+  /** True when a valid phone was saved but its line type could not be
+   *  verified (lookup unconfigured, unreachable, or definitively unknown).
+   *  Callers must surface the uncertainty without calling the phone invalid. */
+  phoneUnverified: boolean;
 };
 
 export type CreateLeadError = {
@@ -212,7 +209,7 @@ export async function createLead(
           propertyId: existing.id,
           wasDuplicate: true,
           contactId: null,
-          phoneDropped: null,
+          phoneUnverified: false,
         },
       };
     }
@@ -224,7 +221,7 @@ export async function createLead(
   // eligible for cleanup; an exposed property is never compensated away.
   let resolvedContact: Awaited<ReturnType<typeof resolveOrCreateContact>> = {
     id: null,
-    phoneDropped: null,
+    phoneUnverified: false,
     created: false,
   };
   const hasAnyContactField =
@@ -306,7 +303,7 @@ export async function createLead(
           propertyId: duplicatePropertyId,
           wasDuplicate: true,
           contactId: null,
-          phoneDropped: null,
+          phoneUnverified: false,
         },
       };
     }
@@ -338,7 +335,7 @@ export async function createLead(
       propertyId: inserted.id,
       wasDuplicate: false,
       contactId: resolvedContact.id,
-      phoneDropped: resolvedContact.phoneDropped,
+      phoneUnverified: resolvedContact.phoneUnverified,
     },
   };
 }
@@ -444,18 +441,17 @@ async function resolveOrCreateContact(
   supabase: SupabaseClient<Database>,
   orgId: string,
   contact: ContactIdentity,
-): Promise<{ id: string | null; phoneDropped: string | null; created: boolean }> {
+): Promise<{ id: string | null; phoneUnverified: boolean; created: boolean }> {
   const existingContactId = await findExistingContact(supabase, orgId, contact);
   if (existingContactId) {
-    return { id: existingContactId, phoneDropped: null, created: false };
+    return { id: existingContactId, phoneUnverified: false, created: false };
   }
 
-  // Hard rule (migration 080): a phone can't be saved with type
-  // 'unknown'. Lead phones arrive untyped, so classify at intake via
-  // Telnyx when configured. When the lookup is unavailable or fails,
-  // the number can't go into a phone slot — preserve it verbatim on
-  // the contact's notes (durable, visible on the lead page) and flag
-  // the degraded outcome to the caller; never silently succeed.
+  // Lead phones arrive untyped, so classify at intake via Telnyx when
+  // configured. Lookup uncertainty must not erase a valid normalized phone:
+  // save it as `unknown` and tell the caller that only its line type remains
+  // unverified. CSV import keeps its stricter pre-write drop policy because
+  // bulk texting has a different risk profile.
   let phoneType: PhoneLineType = "unknown";
   if (contact.phone_1) {
     try {
@@ -467,16 +463,14 @@ async function resolveOrCreateContact(
     }
     if (phoneType === "unknown") {
       reportError(
-        new Error("lead phone unclassified at intake — parked on notes"),
+        new Error("lead phone line type unverified at intake"),
         {
           tags: { surface: "lead_create_phone_unclassified" },
-          extra: { phone: contact.phone_1 },
         },
       );
     }
   }
-  const phoneClassified = phoneType !== "unknown";
-  const phoneDropped = !phoneClassified ? contact.phone_1 : null;
+  const phoneUnverified = !!contact.phone_1 && phoneType === "unknown";
   const { data, error } = await supabase
     .from("contacts")
     .insert({
@@ -484,12 +478,10 @@ async function resolveOrCreateContact(
       contact_type: "person",
       first_name: contact.first_name,
       last_name: contact.last_name,
-      phone_1: phoneClassified ? contact.phone_1 : null,
-      phone_1_type: phoneClassified ? phoneType : "unknown",
+      phone_1: contact.phone_1,
+      phone_1_type: phoneType,
       email: contact.email,
-      notes: phoneDropped
-        ? `Unclassified phone from lead intake (line-type lookup unavailable): ${phoneDropped}`
-        : null,
+      notes: null,
     })
     .select("id")
     .single();
@@ -500,12 +492,12 @@ async function resolveOrCreateContact(
     if (error.code === "23505") {
       const racedContactId = await findExistingContact(supabase, orgId, contact);
       if (racedContactId) {
-        return { id: racedContactId, phoneDropped: null, created: false };
+        return { id: racedContactId, phoneUnverified: false, created: false };
       }
     }
     throw new Error(`contact insert: ${error.message}`);
   }
-  return { id: data.id, phoneDropped, created: true };
+  return { id: data.id, phoneUnverified, created: true };
 }
 
 type ContactIdentity = {

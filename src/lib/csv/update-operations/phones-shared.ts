@@ -82,9 +82,8 @@ export function buildPhonesOp(role: Role): SubOperationModule {
       ];
       const headerNames = ["Phone 1", "Phone 2", "Phone 3"];
       const typeHeaderNames = ["Phone 1 Type", "Phone 2 Type", "Phone 3 Type"];
-      // Hard rule (migration 080): every written phone needs its line
-      // type in the same update — both so the trigger accepts the write
-      // and so a new number can't ride on the previous number's type.
+      // CSV update hard rule: every written phone needs its line type in the
+      // same update so a new number can't ride on the previous number's type.
       const update: Partial<ContactPhoneUpdate> = {};
       let anyValid = false;
       let dncFlagged = false;

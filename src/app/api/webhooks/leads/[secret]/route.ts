@@ -224,9 +224,11 @@ export async function POST(
     property_id: result.data.propertyId,
     was_duplicate: result.data.wasDuplicate,
     contact_id: result.data.contactId,
-    // Non-null when the submitted phone couldn't be classified and was
-    // parked on the contact's notes instead of saved as a phone slot
-    // (hard rule). Senders polling this response can alert on it.
-    phone_dropped: result.data.phoneDropped,
+    // Backward-compatible field: valid normalized phones are no longer
+    // dropped when classification is unavailable.
+    phone_dropped: null,
+    // Senders can surface lookup uncertainty without calling the saved phone
+    // invalid or leaking it back into logs and URLs.
+    phone_unverified: result.data.phoneUnverified,
   });
 }

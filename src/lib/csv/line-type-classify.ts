@@ -8,9 +8,9 @@ import { validateRow, type Mapping, type RowData } from "./validate";
  * "N phone numbers have no line type" interstitial), so the count the
  * user approves is exactly the set the workflow looks up.
  *
- * Hard rule context (migration 080): a phone with no line type is never
- * saved. Classification is the operator's chance to label those numbers
- * before ingest drops them.
+ * CSV hard-rule context: a phone with no line type is never saved by bulk
+ * ingest. Classification is the operator's chance to label those numbers
+ * before the application drops them.
  */
 
 const PHONE_SLOTS = [1, 2, 3] as const;

@@ -9,10 +9,9 @@ const supabase = createTestClient();
 const ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 const OTHER_ORG_ID = "00000000-0000-0000-0000-000000000ccc";
 
-// createLead classifies the lead's phone via Telnyx at intake (hard
-// rule: untyped phones are never saved). Stub the Telnyx endpoint so
-// these tests keep covering the phone-saved happy path; everything
-// else passes through to the real test DB.
+// createLead classifies the lead's phone via Telnyx at intake. Stub the
+// endpoint so these tests keep covering the classified happy path; focused
+// cases below prove that lookup uncertainty preserves the normalized phone.
 const realFetch = globalThis.fetch;
 
 function withOneInjectedFailure(
@@ -113,6 +112,7 @@ describe("createLead (integration)", () => {
     if (!result.ok) return;
     expect(result.data.wasDuplicate).toBe(false);
     expect(result.data.contactId).not.toBeNull();
+    expect(result.data.phoneUnverified).toBe(false);
 
     const { data: prop } = await supabase
       .from("properties")
@@ -126,11 +126,12 @@ describe("createLead (integration)", () => {
 
     const { data: contact } = await supabase
       .from("contacts")
-      .select("first_name, last_name, phone_1")
+      .select("first_name, last_name, phone_1, phone_1_type")
       .eq("id", result.data.contactId!)
       .single();
     expect(contact!.first_name).toBe("Jane");
     expect(contact!.phone_1).toBe("+18165551001");
+    expect(contact!.phone_1_type).toBe("mobile");
 
     const { data: events } = await supabase
       .from("lead_events")
@@ -392,7 +393,7 @@ describe("createLead (integration)", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.contactId).toBe(existing!.id);
-    expect(result.data.phoneDropped).toBeNull();
+    expect(result.data.phoneUnverified).toBe(false);
 
     const { count } = await supabase
       .from("contacts")
@@ -401,7 +402,7 @@ describe("createLead (integration)", () => {
     expect(count).toBe(1);
   });
 
-  it("classification unavailable → lead succeeds degraded: phone parked on notes, phoneDropped flagged, no phone slot written", async () => {
+  it("transient lookup failure preserves the phone as unverified instead of dropping it", async () => {
     // Simulate a Telnyx outage: the stub returns a 500 for lookup calls.
     globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -419,16 +420,130 @@ describe("createLead (integration)", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.data.phoneDropped).toBe("+18165553200");
+    expect(result.data.phoneUnverified).toBe(true);
     expect(result.data.contactId).not.toBeNull();
 
     const { data: contact } = await supabase
       .from("contacts")
-      .select("phone_1, notes")
+      .select("phone_1, phone_1_type, notes")
       .eq("id", result.data.contactId!)
       .single();
-    expect(contact!.phone_1).toBeNull();
-    expect(contact!.notes).toContain("+18165553200");
+    expect(contact!.phone_1).toBe("+18165553200");
+    expect(contact!.phone_1_type).toBe("unknown");
+    expect(contact!.notes).toBeNull();
+  });
+
+  it("missing lookup configuration preserves the phone as unverified", async () => {
+    vi.stubEnv("TELNYX_API_KEY", "");
+
+    const result = await createLead(supabase, {
+      orgId: ORG_ID,
+      source: "cold_call",
+      property: { address: "10 No Lookup Key Ln", state: "MO" },
+      contact: { phone_1: "+18165553201" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.phoneUnverified).toBe(true);
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, phone_1_type")
+      .eq("id", result.data.contactId!)
+      .single();
+    expect(contact).toEqual({
+      phone_1: "+18165553201",
+      phone_1_type: "unknown",
+    });
+  });
+
+  it("definitive unknown classification preserves the phone as unverified", async () => {
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://api.telnyx.com/v2/number_lookup")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ data: { carrier: { type: "other" } } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+
+    const result = await createLead(supabase, {
+      orgId: ORG_ID,
+      source: "cold_call",
+      property: { address: "11 Unknown Type Ln", state: "MO" },
+      contact: { phone_1: "+18165553202" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.phoneUnverified).toBe(true);
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, phone_1_type")
+      .eq("id", result.data.contactId!)
+      .single();
+    expect(contact).toEqual({
+      phone_1: "+18165553202",
+      phone_1_type: "unknown",
+    });
+  });
+
+  it("confirmed landline stays saved and classified", async () => {
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://api.telnyx.com/v2/number_lookup")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ data: { carrier: { type: "landline" } } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+
+    const result = await createLead(supabase, {
+      orgId: ORG_ID,
+      source: "cold_call",
+      property: { address: "12 Landline Ln", state: "MO" },
+      contact: { phone_1: "+18165553203" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.phoneUnverified).toBe(false);
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, phone_1_type")
+      .eq("id", result.data.contactId!)
+      .single();
+    expect(contact).toEqual({
+      phone_1: "+18165553203",
+      phone_1_type: "landline",
+    });
+  });
+
+  it("invalid phone input is not promoted into a saved phone slot", async () => {
+    const result = await createLead(supabase, {
+      orgId: ORG_ID,
+      source: "cold_call",
+      property: { address: "13 Invalid Phone Ln", state: "MO" },
+      contact: { first_name: "Invalid", phone_1: "12345" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.phoneUnverified).toBe(false);
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, phone_1_type")
+      .eq("id", result.data.contactId!)
+      .single();
+    expect(contact).toEqual({ phone_1: null, phone_1_type: "unknown" });
   });
 
   it("creates no property when contact creation fails and permits a clean retry", async () => {

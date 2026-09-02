@@ -114,9 +114,9 @@ export function AddLeadDialog({
 
         setDirty(false);
         setOpen(false);
-        const warning = result.data.phoneDropped
+        const warning = result.data.phoneUnverified
           ? `?warning=${encodeURIComponent(
-              `Phone ${result.data.phoneDropped} couldn't be classified (line-type lookup unavailable) — it's saved on the contact's notes, not as a callable number.`,
+              "Phone saved, but Sandra could not check whether it is mobile or landline. Calling and one-to-one texting are still available.",
             )}`
           : "";
         router.push(`/leads/${result.data.propertyId}${warning}`);

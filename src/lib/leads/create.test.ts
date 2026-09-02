@@ -256,7 +256,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
         propertyId: "prop-race-winner",
         wasDuplicate: true,
         contactId: null,
-        phoneDropped: null,
+        phoneUnverified: false,
       },
     });
     expect(
@@ -351,7 +351,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
         propertyId: "prop-retry",
         wasDuplicate: false,
         contactId: "contact-retry",
-        phoneDropped: null,
+        phoneUnverified: false,
       },
     });
   });

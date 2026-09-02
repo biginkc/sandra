@@ -71,7 +71,7 @@ beforeEach(() => {
       propertyId: "property-1",
       wasDuplicate: false,
       contactId: "contact-1",
-      phoneDropped: null,
+      phoneUnverified: false,
     },
   });
 });

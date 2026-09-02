@@ -138,7 +138,7 @@ export function validateRow(
   // Pass 1b: decode per-phone do-not-call markers. DealMachine flags a
   // number "DO NOT CALL" inside its line-type column instead of a
   // separate DNC field; that label normalizes to 'unknown' so the number
-  // itself drops at ingest (migration 080), but the protective signal
+  // itself drops in the CSV ingest path, but the protective signal
   // must survive as a contact-level Do Not Contact flag. Mirrors
   // PropStream's `Phone N DNC` fold and REISift's "DNC Excluded" sentinel.
   // One-way: only ever raises the flag, never clears an explicit `false`.

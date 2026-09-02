@@ -615,8 +615,8 @@ async function ingestRow(
     zip: n.zip as string | null,
   });
 
-  // Hard rule (migration 080): a phone with no line type is never saved.
-  // Drop unlabeled slots up front and compact typed phones forward; the
+  // CSV hard rule: a phone with no line type is never saved. Drop unlabeled
+  // slots up front and compact typed phones forward; the
   // contact itself still upserts (name/email survive) even when every
   // phone was dropped.
   const phoneSlots = compactTypedPhones(n);
@@ -698,7 +698,7 @@ async function ingestRow(
   }
 
   // Upsert agent contact + sidecar when any agent fields are present.
-  // Same hard rule for the agent's phone: no line type → not saved.
+  // Same CSV hard rule for the agent's phone: no line type → not saved.
   let agentContactId: string | null = null;
   let agentPhoneDropped = 0;
   if (hasAgentFields(n)) {

@@ -63,7 +63,7 @@ describe("AddLeadDialog", () => {
       data: {
         propertyId: "property-1",
         wasDuplicate: false,
-        phoneDropped: null,
+        phoneUnverified: false,
       },
     });
     renderDialog();
@@ -128,7 +128,7 @@ describe("AddLeadDialog", () => {
     const user = userEvent.setup();
     let resolveSave!: (value: {
       ok: true;
-      data: { propertyId: string; wasDuplicate: false; phoneDropped: null };
+      data: { propertyId: string; wasDuplicate: false; phoneUnverified: false };
     }) => void;
     createLeadFromForm.mockImplementation(
       () =>
@@ -153,7 +153,7 @@ describe("AddLeadDialog", () => {
       data: {
         propertyId: "property-1",
         wasDuplicate: false,
-        phoneDropped: null,
+        phoneUnverified: false,
       },
     });
     expect(await screen.findByRole("button", { name: "Add lead" })).toBeVisible();
@@ -167,7 +167,7 @@ describe("AddLeadDialog", () => {
       data: {
         propertyId: "property-existing",
         wasDuplicate: true,
-        phoneDropped: null,
+        phoneUnverified: false,
       },
     });
     renderDialog();
@@ -185,5 +185,29 @@ describe("AddLeadDialog", () => {
 
     await user.click(screen.getByRole("button", { name: "Open existing lead" }));
     expect(routerPush).toHaveBeenCalledWith("/leads/property-existing");
+  });
+
+  it("says an unverified phone was saved and keeps the phone number out of the URL", async () => {
+    const user = userEvent.setup();
+    createLeadFromForm.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-unverified",
+        wasDuplicate: false,
+        phoneUnverified: true,
+      },
+    });
+    renderDialog();
+
+    await user.click(screen.getByRole("button", { name: "Add lead" }));
+    await user.type(screen.getByLabelText("Street address"), "123 Main St");
+    await user.type(screen.getByLabelText("Phone"), "8165550100");
+    await user.click(screen.getByRole("button", { name: "Create lead" }));
+
+    const pushedUrl = String(routerPush.mock.calls[0]?.[0]);
+    expect(decodeURIComponent(pushedUrl)).toContain(
+      "Phone saved, but Sandra could not check whether it is mobile or landline. Calling and one-to-one texting are still available.",
+    );
+    expect(pushedUrl).not.toContain("8165550100");
   });
 });

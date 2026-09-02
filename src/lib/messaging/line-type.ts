@@ -28,7 +28,7 @@ export function lineTypeFromVendorLabel(
  * Some skip-trace exports (DealMachine) flag a do-not-call number inside
  * the line-type column itself — the value reads "DO NOT CALL" rather than
  * "Mobile"/"Landline". Such a label has no usable line type, so the
- * number drops under the no-line-type hard rule (migration 080); this
+ * number drops under the CSV/skip-trace no-line-type hard rule; this
  * predicate lets ingest still raise a contact-level Do Not Contact flag,
  * mirroring PropStream's `Phone N DNC` fold and REISift's "DNC Excluded"
  * sentinel. Compliance-protective: we'd rather over-suppress than text a

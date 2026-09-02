@@ -54,8 +54,7 @@ export async function matchUnknownSender(
       contact.phone_3 === fromAddress;
 
     if (!alreadyHas) {
-      // A number that just texted us is mobile by demonstration — and
-      // the 080 trigger requires a type on every new phone value.
+      // A number that just texted us is mobile by demonstration.
       const updates: Partial<{
         phone_2: string;
         phone_2_type: string;
@@ -149,7 +148,7 @@ export async function createContactFromUnknown(
         last_name: contact.lastName ?? null,
         entity_name: contact.entityName ?? null,
         phone_1: fromAddress,
-        // Inbound sender — mobile by demonstration (080 hard rule).
+        // Inbound sender — mobile by demonstration.
         phone_1_type: "mobile",
       })
       .select("id")
@@ -273,7 +272,7 @@ export async function mergeUnknownSenderToProperty(
         last_name: contact.lastName ?? null,
         entity_name: contact.entityName ?? null,
         phone_1: fromAddress,
-        // Inbound sender — mobile by demonstration (080 hard rule).
+        // Inbound sender — mobile by demonstration.
         phone_1_type: "mobile",
       })
       .select("id")
