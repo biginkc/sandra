@@ -10,8 +10,18 @@ const mocks = vi.hoisted(() => ({
     api_key_last_four: string | null;
     sending_enabled: boolean;
     test_mode: boolean;
+    disconnect_pending_at: string | null;
   } | null,
   statusError: null as { message: string; code?: string } | null,
+  statusResponses: [] as Array<{
+    data: {
+      api_key_last_four: string | null;
+      sending_enabled: boolean;
+      test_mode: boolean;
+      disconnect_pending_at?: string | null;
+    } | null;
+    error: { message: string; code?: string } | null;
+  }>,
   validateCredentials: vi.fn(),
   saveEsignCredentials: vi.fn(),
   deleteEsignCredentials: vi.fn(),
@@ -49,10 +59,11 @@ vi.mock("@/lib/supabase/server", () => ({
     from: () => ({
       select: () => ({
         eq: () => ({
-          maybeSingle: async () => ({
-            data: mocks.statusRow,
-            error: mocks.statusError,
-          }),
+          maybeSingle: async () =>
+            mocks.statusResponses.shift() ?? {
+              data: mocks.statusRow,
+              error: mocks.statusError,
+            },
         }),
       }),
     }),
@@ -81,6 +92,7 @@ describe("eSign server actions", () => {
     });
     mocks.statusRow = null;
     mocks.statusError = null;
+    mocks.statusResponses.splice(0, mocks.statusResponses.length);
     mocks.validateCredentials.mockResolvedValue({ accountId: "account-1" });
     mocks.saveEsignCredentials.mockResolvedValue(undefined);
     mocks.deleteEsignCredentials.mockResolvedValue(undefined);
@@ -92,6 +104,7 @@ describe("eSign server actions", () => {
                 disconnected: true,
                 sending_enabled: false,
                 credentials_present: false,
+                disconnect_pending: false,
                 message: "Dropbox Sign disconnected.",
               },
             ],
@@ -117,6 +130,7 @@ describe("eSign server actions", () => {
         connected: true,
         canManage: true,
         sendingEnabled: false,
+        disconnectPending: false,
         testMode: true,
         apiKeyLastFour: "1234",
       },
@@ -162,6 +176,7 @@ describe("eSign server actions", () => {
       api_key_last_four: "9876",
       sending_enabled: true,
       test_mode: true,
+      disconnect_pending_at: null,
     };
     await expect(getEsignConnectionStatus()).resolves.toEqual({
       ok: true,
@@ -169,6 +184,7 @@ describe("eSign server actions", () => {
         connected: true,
         canManage: false,
         sendingEnabled: true,
+        disconnectPending: false,
         testMode: true,
         apiKeyLastFour: "9876",
       },
@@ -180,6 +196,7 @@ describe("eSign server actions", () => {
       api_key_last_four: null,
       sending_enabled: true,
       test_mode: true,
+      disconnect_pending_at: null,
     };
 
     await expect(getEsignConnectionStatus()).resolves.toEqual({
@@ -188,8 +205,59 @@ describe("eSign server actions", () => {
         connected: false,
         canManage: true,
         sendingEnabled: false,
+        disconnectPending: false,
         testMode: true,
         apiKeyLastFour: null,
+      },
+    });
+  });
+
+  it("keeps pending disconnect visible without send capability", async () => {
+    mocks.statusRow = {
+      api_key_last_four: "9876",
+      sending_enabled: true,
+      test_mode: true,
+      disconnect_pending_at: "2026-09-02T12:00:00.000Z",
+    };
+
+    await expect(getEsignConnectionStatus()).resolves.toEqual({
+      ok: true,
+      data: {
+        connected: true,
+        canManage: true,
+        sendingEnabled: false,
+        disconnectPending: true,
+        testMode: true,
+        apiKeyLastFour: "9876",
+      },
+    });
+  });
+
+  it("keeps status deploy-order compatible before the pending column exists", async () => {
+    mocks.statusResponses.push(
+      {
+        data: null,
+        error: { message: "column does not exist", code: "42703" },
+      },
+      {
+        data: {
+          api_key_last_four: "9876",
+          sending_enabled: true,
+          test_mode: true,
+        },
+        error: null,
+      },
+    );
+
+    await expect(getEsignConnectionStatus()).resolves.toEqual({
+      ok: true,
+      data: {
+        connected: true,
+        canManage: true,
+        sendingEnabled: true,
+        disconnectPending: false,
+        testMode: true,
+        apiKeyLastFour: "9876",
       },
     });
   });
@@ -273,6 +341,25 @@ describe("eSign server actions", () => {
     });
   });
 
+  it("explains pending disconnect before sending can be re-enabled", async () => {
+    mocks.adminUpdate.mockResolvedValue({
+      error: {
+        message:
+          "Finish active eSign work before re-enabling Dropbox Sign sending",
+        code: "23514",
+      },
+    });
+    const result = await setEsignSendingEnabledAction(true, true);
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "DATABASE",
+        message:
+          "Finish active eSign work before re-enabling Dropbox Sign sending.",
+      },
+    });
+  });
+
   it("uses the owner-gated database boundary and sanitizes unexpected failures", async () => {
     mocks.adminUpdate.mockResolvedValue({
       error: { message: "private database diagnostic", code: "XX000" },
@@ -335,7 +422,9 @@ describe("eSign server actions", () => {
   it.each([false, undefined])(
     "rejects disconnect unless operator confirmation is literally true (%s)",
     async (operatorConfirmed) => {
-      const result = await disconnectDropboxSignAction(operatorConfirmed as boolean);
+      const result = await disconnectDropboxSignAction(
+        operatorConfirmed as boolean,
+      );
 
       expect(result).toMatchObject({
         ok: false,
@@ -357,6 +446,7 @@ describe("eSign server actions", () => {
         disconnected: true,
         sendingEnabled: false,
         credentialsPresent: false,
+        disconnectPending: false,
         message: "Dropbox Sign disconnected.",
       },
     });
@@ -376,9 +466,10 @@ describe("eSign server actions", () => {
         {
           disconnected: false,
           sending_enabled: false,
-          credentials_present: false,
+          credentials_present: true,
+          disconnect_pending: true,
           message:
-            "Dropbox Sign sending is off and credentials were removed. Reconnect Dropbox Sign before managing templates or sending new contracts.",
+            "Dropbox Sign sending is off. Active eSign work remains: 1 signature request. Callback ingestion and read credentials are preserved until the active work reaches a terminal state. Manage templates and new sends stay blocked.",
         },
       ],
       error: null,
@@ -389,9 +480,10 @@ describe("eSign server actions", () => {
       data: {
         disconnected: false,
         sendingEnabled: false,
-        credentialsPresent: false,
+        credentialsPresent: true,
+        disconnectPending: true,
         message:
-          "Dropbox Sign sending is off and credentials were removed. Reconnect Dropbox Sign before managing templates or sending new contracts.",
+          "Dropbox Sign sending is off. Active eSign work remains: 1 signature request. Callback ingestion and read credentials are preserved until the active work reaches a terminal state. Manage templates and new sends stay blocked.",
       },
     });
     expect(mocks.adminUpdate).toHaveBeenCalledWith(
@@ -411,6 +503,7 @@ describe("eSign server actions", () => {
           disconnected: false,
           sending_enabled: true,
           credentials_present: true,
+          disconnect_pending: false,
           message: "Dropbox Sign stayed connected.",
         },
       ],
@@ -423,6 +516,7 @@ describe("eSign server actions", () => {
         disconnected: false,
         sendingEnabled: true,
         credentialsPresent: true,
+        disconnectPending: false,
         message: "Dropbox Sign stayed connected.",
       },
     });

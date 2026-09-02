@@ -61,6 +61,42 @@ begin
 end;
 $$;
 
+create or replace function public.esign_require_template_management_capability(
+  p_org_id uuid
+)
+returns text
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare v_provider_account_id text;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required' using errcode = '42501';
+  end if;
+  select integration.provider_account_id into v_provider_account_id
+  from public.org_esign_integrations integration
+  join public.webhook_consumers consumer
+    on consumer.id = integration.callback_consumer_id
+   and consumer.org_id = integration.org_id
+  where integration.org_id = p_org_id
+    and integration.provider = 'dropbox_sign'
+    and integration.api_key_encrypted is not null
+    and integration.api_key_last_four is not null
+    and integration.client_id is not null
+    and integration.provider_account_id is not null
+    and consumer.consumer_type = 'esign_provider'
+    and consumer.enabled
+    and consumer.revoked_at is null
+  for share;
+  if not found then
+    raise exception 'active Dropbox Sign template management capability not found'
+      using errcode = 'P0002';
+  end if;
+  return v_provider_account_id;
+end;
+$$;
+
 create or replace function public.create_esign_template_duplicate_draft(
   p_org_id uuid, p_source_template_id uuid, p_name text, p_actor_id uuid
 )
@@ -78,15 +114,8 @@ begin
     raise exception 'service role required' using errcode = '42501';
   end if;
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
-  select integration.provider_account_id into v_provider_account_id
-  from public.org_esign_integrations integration
-  where integration.org_id = p_org_id
-    and integration.provider = 'dropbox_sign'
-  for share;
-  if not found then
-    raise exception 'current Dropbox Sign integration not found'
-      using errcode = 'P0002';
-  end if;
+  v_provider_account_id :=
+    public.esign_require_template_management_capability(p_org_id);
   select * into v_source from public.esign_templates template
   where template.id = p_source_template_id and template.org_id = p_org_id
     and template.lifecycle_state = 'finalized' and template.deleted_at is null
@@ -132,15 +161,8 @@ begin
     raise exception 'service role required' using errcode = '42501';
   end if;
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
-  select integration.provider_account_id into v_provider_account_id
-  from public.org_esign_integrations integration
-  where integration.org_id = p_org_id
-    and integration.provider = 'dropbox_sign'
-  for share;
-  if not found then
-    raise exception 'current Dropbox Sign integration not found'
-      using errcode = 'P0002';
-  end if;
+  v_provider_account_id :=
+    public.esign_require_template_management_capability(p_org_id);
 
   select * into v_source_template
   from public.esign_templates template
@@ -292,15 +314,7 @@ begin
     raise exception 'service role required' using errcode = '42501';
   end if;
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
-  perform 1
-  from public.org_esign_integrations integration
-  where integration.org_id = p_org_id
-    and integration.provider = 'dropbox_sign'
-  for share;
-  if not found then
-    raise exception 'current Dropbox Sign integration not found'
-      using errcode = 'P0002';
-  end if;
+  perform public.esign_require_template_management_capability(p_org_id);
   select * into v_source
   from public.esign_template_staging_sources source
   where source.id = p_source_id
@@ -404,8 +418,9 @@ end;
 $$;
 
 alter table public.org_esign_integrations
-  add column provider_account_id text;
+  add column if not exists provider_account_id text;
 alter table public.org_esign_integrations
+  drop constraint if exists org_esign_integrations_provider_account_check,
   add constraint org_esign_integrations_provider_account_check check (
     provider_account_id = btrim(provider_account_id)
     and provider_account_id <> ''
@@ -414,19 +429,21 @@ alter table public.org_esign_integrations
   alter column provider_account_id set not null;
 
 alter table public.esign_template_staging_sources
-  add column verification_state text not null default 'verified',
-  add column prepared_at timestamptz not null default now(),
-  add column cleanup_token uuid,
-  add column cleanup_claimed_at timestamptz;
+  add column if not exists verification_state text not null default 'verified',
+  add column if not exists prepared_at timestamptz not null default now(),
+  add column if not exists cleanup_token uuid,
+  add column if not exists cleanup_claimed_at timestamptz;
 update public.esign_template_staging_sources
 set prepared_at = created_at;
 alter table public.esign_template_staging_sources
   alter column verified_at drop not null;
 alter table public.esign_template_staging_sources
-  drop constraint esign_template_staging_sources_cleanup_check;
+  drop constraint if exists esign_template_staging_sources_cleanup_check;
 alter table public.esign_template_staging_sources
-  drop constraint esign_template_staging_sources_cleanup_outcome_check;
+  drop constraint if exists esign_template_staging_sources_cleanup_outcome_check;
 alter table public.esign_template_staging_sources
+  drop constraint if exists esign_template_staging_sources_verification_state_check,
+  drop constraint if exists esign_template_staging_sources_verification_check,
   add constraint esign_template_staging_sources_verification_state_check
     check (verification_state in ('prepared', 'verified')),
   add constraint esign_template_staging_sources_verification_check check (
@@ -475,7 +492,7 @@ as $$
   );
 $$;
 
-drop policy "esign_staging_owner_insert" on storage.objects;
+drop policy if exists "esign_staging_owner_insert" on storage.objects;
 create policy "esign_staging_owner_insert"
   on storage.objects for insert to authenticated
   with check (
@@ -490,14 +507,22 @@ grant execute on function public.esign_staging_upload_is_reserved(text)
   to authenticated, service_role;
 
 alter table public.esign_templates
-  add column provider_account_id text,
-  add column provider_create_state text,
-  add column provider_create_claim_token_hash text,
-  add column provider_create_last_released_token_hash text,
-  add column provider_create_claimed_at timestamptz,
-  add column provider_create_invocation_started_at timestamptz,
-  add column provider_create_error_code text;
+  add column if not exists provider_account_id text,
+  add column if not exists provider_create_state text,
+  add column if not exists provider_create_claim_token_hash text,
+  add column if not exists provider_create_last_released_token_hash text,
+  add column if not exists provider_create_claimed_at timestamptz,
+  add column if not exists provider_create_invocation_started_at timestamptz,
+  add column if not exists provider_create_error_code text;
 alter table public.esign_templates
+  drop constraint if exists esign_templates_sign_template_id_check,
+  drop constraint if exists esign_templates_provider_account_check,
+  drop constraint if exists esign_templates_provider_create_state_check,
+  drop constraint if exists esign_templates_provider_create_error_check,
+  drop constraint if exists esign_templates_provider_create_token_hash_check,
+  drop constraint if exists esign_templates_provider_identity_check,
+  drop constraint if exists esign_templates_provider_create_check,
+  drop constraint if exists esign_templates_provider_create_lineage_check,
   add constraint esign_templates_sign_template_id_check check (
     sign_template_id is null
     or (sign_template_id = btrim(sign_template_id) and sign_template_id <> '')
@@ -588,16 +613,16 @@ alter table public.esign_templates
     )
   );
 
-drop index public.idx_esign_templates_provider_id;
+drop index if exists public.idx_esign_templates_provider_id;
 create unique index idx_esign_templates_provider_id
   on public.esign_templates (provider_account_id, sign_template_id)
   where sign_template_id is not null;
-create index idx_esign_template_staging_sources_recovery
+create index if not exists idx_esign_template_staging_sources_recovery
   on public.esign_template_staging_sources (
     org_id, cleanup_outcome, created_at, id
   )
   where cleanup_outcome in ('pending', 'in_progress', 'failed');
-create index idx_esign_templates_provider_create_recovery
+create index if not exists idx_esign_templates_provider_create_recovery
   on public.esign_templates (
     org_id, provider_create_state, created_at, id
   )
@@ -634,7 +659,7 @@ revoke all on function public.esign_template_is_available(uuid, uuid)
 grant execute on function public.esign_template_is_available(uuid, uuid)
   to authenticated, service_role;
 
-drop view public.available_esign_templates;
+drop view if exists public.available_esign_templates;
 create view public.available_esign_templates
 with (security_invoker = true)
 as
@@ -699,6 +724,7 @@ begin
     raise exception 'service role required' using errcode = '42501';
   end if;
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
+  perform public.esign_require_template_management_capability(p_org_id);
   if p_content_type <> 'application/pdf'
      or p_source_size_bytes <= 0 or p_source_size_bytes > 41943040
      or p_source_sha256 !~ '^[a-f0-9]{64}$'
@@ -763,6 +789,7 @@ begin
     raise exception 'service role required' using errcode = '42501';
   end if;
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
+  perform public.esign_require_template_management_capability(p_org_id);
   select * into v_source
   from public.esign_template_staging_sources source
   where source.id = p_source_id
@@ -831,15 +858,8 @@ begin
     raise exception 'service role required' using errcode = '42501';
   end if;
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
-  select integration.provider_account_id into v_provider_account_id
-  from public.org_esign_integrations integration
-  where integration.org_id = p_org_id
-    and integration.provider = 'dropbox_sign'
-  for share;
-  if not found then
-    raise exception 'current Dropbox Sign integration not found'
-      using errcode = 'P0002';
-  end if;
+  v_provider_account_id :=
+    public.esign_require_template_management_capability(p_org_id);
   select * into v_template
   from public.esign_templates template
   where template.id = p_template_id
@@ -964,15 +984,8 @@ begin
     raise exception 'service role required' using errcode = '42501';
   end if;
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
-  select integration.provider_account_id into v_provider_account_id
-  from public.org_esign_integrations integration
-  where integration.org_id = p_org_id
-    and integration.provider = 'dropbox_sign'
-  for share;
-  if not found then
-    raise exception 'current Dropbox Sign integration not found'
-      using errcode = 'P0002';
-  end if;
+  v_provider_account_id :=
+    public.esign_require_template_management_capability(p_org_id);
   select * into v_template from public.esign_templates template
   where template.id = p_template_id for update;
   if not found or v_template.org_id <> p_org_id
@@ -1177,15 +1190,8 @@ begin
   end if;
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
 
-  select integration.provider_account_id into v_provider_account_id
-  from public.org_esign_integrations integration
-  where integration.org_id = p_org_id
-    and integration.provider = 'dropbox_sign'
-  for share;
-  if not found then
-    raise exception 'current Dropbox Sign integration not found'
-      using errcode = 'P0002';
-  end if;
+  v_provider_account_id :=
+    public.esign_require_template_management_capability(p_org_id);
 
   select * into v_template
   from public.esign_templates template
@@ -1368,15 +1374,8 @@ begin
      or p_provider_template_id <> btrim(p_provider_template_id) then
     raise exception 'provider template ID is required' using errcode = '22023';
   end if;
-  select integration.provider_account_id into v_provider_account_id
-  from public.org_esign_integrations integration
-  where integration.org_id = p_org_id
-    and integration.provider = 'dropbox_sign'
-  for share;
-  if not found then
-    raise exception 'current Dropbox Sign integration not found'
-      using errcode = 'P0002';
-  end if;
+  v_provider_account_id :=
+    public.esign_require_template_management_capability(p_org_id);
   select * into v_template from public.esign_templates template
   where template.id = p_template_id for update;
   if not found or v_template.org_id <> p_org_id
@@ -1442,6 +1441,7 @@ begin
     raise exception 'service role required' using errcode = '42501';
   end if;
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
+  perform public.esign_require_template_management_capability(p_org_id);
   return query
   select template.id, template.staging_source_id, template.name,
     template.provider_create_state,
@@ -1488,15 +1488,8 @@ begin
      or p_provider_template_id <> btrim(p_provider_template_id) then
     raise exception 'provider template ID is required' using errcode = '22023';
   end if;
-  select integration.provider_account_id into v_provider_account_id
-  from public.org_esign_integrations integration
-  where integration.org_id = p_org_id
-    and integration.provider = 'dropbox_sign'
-  for share;
-  if not found then
-    raise exception 'current Dropbox Sign integration not found'
-      using errcode = 'P0002';
-  end if;
+  v_provider_account_id :=
+    public.esign_require_template_management_capability(p_org_id);
   select * into v_template from public.esign_templates template
   where template.id = p_template_id and template.org_id = p_org_id
   for update;
@@ -1566,15 +1559,8 @@ begin
     raise exception 'provider-reconciled template contract is invalid'
       using errcode = '23514';
   end if;
-  select integration.provider_account_id into v_provider_account_id
-  from public.org_esign_integrations integration
-  where integration.org_id = p_org_id
-    and integration.provider = 'dropbox_sign'
-  for share;
-  if not found then
-    raise exception 'current Dropbox Sign integration not found'
-      using errcode = 'P0002';
-  end if;
+  v_provider_account_id :=
+    public.esign_require_template_management_capability(p_org_id);
   select * into v_template from public.esign_templates template
   where template.id = p_template_id and template.org_id = p_org_id
   for update;
@@ -1833,6 +1819,7 @@ begin
     raise exception 'service role required' using errcode = '42501';
   end if;
   perform public.esign_require_active_owner(p_org_id, p_actor_id);
+  perform public.esign_require_template_management_capability(p_org_id);
   select * into v_template from public.esign_templates template
   where template.id = p_template_id and template.org_id = p_org_id for update;
   if not found then
@@ -1896,15 +1883,8 @@ begin
     raise exception 'provider-reconciled edit revision contract is invalid'
       using errcode = '23514';
   end if;
-  select integration.provider_account_id into v_provider_account_id
-  from public.org_esign_integrations integration
-  where integration.org_id = p_org_id
-    and integration.provider = 'dropbox_sign'
-  for share;
-  if not found then
-    raise exception 'current Dropbox Sign integration not found'
-      using errcode = 'P0002';
-  end if;
+  v_provider_account_id :=
+    public.esign_require_template_management_capability(p_org_id);
   perform 1
   from public.esign_templates template
   where template.org_id = p_org_id
@@ -2029,10 +2009,10 @@ begin
 end;
 $$;
 
-drop function public.upsert_org_esign_integration(
+drop function if exists public.upsert_org_esign_integration(
   uuid, text, text, text, text, uuid, text
 );
-create function public.upsert_org_esign_integration(
+create or replace function public.upsert_org_esign_integration(
   p_org_id uuid,
   p_api_key text,
   p_api_key_last_four text,
@@ -2088,8 +2068,8 @@ begin
 end;
 $$;
 
-drop function public.get_org_esign_credentials(uuid, text);
-create function public.get_org_esign_credentials(p_org_id uuid, p_key text)
+drop function if exists public.get_org_esign_credentials(uuid, text);
+create or replace function public.get_org_esign_credentials(p_org_id uuid, p_key text)
 returns table (
   api_key text,
   client_id text,
@@ -2476,13 +2456,9 @@ begin
     raise exception 'only a finalized eSign template can be deleted'
       using errcode = '55000';
   end if;
-  select integration.provider_account_id into v_provider_account_id
-  from public.org_esign_integrations integration
-  where integration.org_id = p_org_id
-    and integration.provider = 'dropbox_sign'
-  for share;
-  if not found
-     or v_template.provider_account_id is distinct from v_provider_account_id then
+  v_provider_account_id :=
+    public.esign_require_template_management_capability(p_org_id);
+  if v_template.provider_account_id is distinct from v_provider_account_id then
     raise exception 'template provider account does not match current integration'
       using errcode = '23514';
   end if;

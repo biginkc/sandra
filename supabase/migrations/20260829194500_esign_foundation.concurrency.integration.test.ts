@@ -27,6 +27,10 @@ const sellerEmailAuthoritySql = readFileSync(
   "supabase/migrations/20260902010000_esign_dialog_seller_email_authority.sql",
   "utf8",
 );
+const atomicDisconnectSql = readFileSync(
+  "supabase/migrations/20260902074814_esign_atomic_disconnect_state.sql",
+  "utf8",
+);
 const emailBouncedDeliveryStateSql = readFileSync(
   "supabase/migrations/20260902110000_esign_email_bounced_delivery_state.sql",
   "utf8",
@@ -171,12 +175,15 @@ beforeAll(async () => {
   `);
   await setup.query(migrationSql);
   await setup.query(uploadReservationsSql);
+  await setup.query(uploadReservationsSql);
   await setup.query(reconciliationFenceSql);
   await setup.query(retryReminderFenceSql);
   await setup.query(sellerEmailAuthoritySql);
   await setup.query(sellerEmailAuthoritySql);
   await setup.query(sendUnknownResolutionSql);
   await setup.query(sendUnknownResolutionSql);
+  await setup.query(atomicDisconnectSql);
+  await setup.query(atomicDisconnectSql);
   await setup.query(emailBouncedDeliveryStateSql);
   await setup.query(emailBouncedDeliveryStateSql);
   await setup.query(emailBounceRecoverySql);
@@ -1655,6 +1662,269 @@ describe("eSign foundation production lease contention", () => {
     }
   });
 
+  it("preserves callback ingestion and credentials when disconnect is requested with in-flight requests", async () => {
+    const orgId = crypto.randomUUID();
+    const userId = crypto.randomUUID();
+    const contactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const sourceId = crypto.randomUUID();
+    const templateId = crypto.randomUUID();
+    const sendingRequestId = crypto.randomUUID();
+    const inFlightRequestId = crypto.randomUUID();
+    const leaseId = crypto.randomUUID();
+    const eventAt = "2026-09-02T12:00:00.000Z";
+    const signerSnapshot = JSON.stringify([
+      {
+        role: "Seller",
+        name: "Seller Owner",
+        emailAddress: "pending-disconnect@example.com",
+        order: 0,
+      },
+    ]);
+    const mergeSnapshot = JSON.stringify({
+      seller_name: "Seller Owner",
+      property_address: "106 eSign QA St",
+      offer_price: "$125,000",
+      closing_date: "2026-09-30",
+      earnest_money: "$1,000",
+    });
+
+    await setServiceRole(setup);
+    await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into public.organizations values ($1)", [orgId]);
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
+      [userId, orgId],
+    );
+    await setup.query(
+      "insert into public.contacts (id,org_id,email) values ($1,$2,'pending-disconnect@example.com')",
+      [contactId, orgId],
+    );
+    await setup.query(
+      "insert into public.properties (id,org_id,homeowner_contact_id) values ($1,$2,$3)",
+      [propertyId, orgId, contactId],
+    );
+    await setup.query(
+      `select public.upsert_org_esign_integration(
+         $1,'synthetic-api-key','-key','synthetic-client','account-a',
+         repeat('a',64),$2,'synthetic-encryption-key'
+       )`,
+      [orgId, userId],
+    );
+    await setup.query(
+      `update public.org_esign_integrations
+       set callback_verified_at=now(),sending_enabled=true
+       where org_id=$1`,
+      [orgId],
+    );
+    const consumerId = (
+      await setup.query<{ callback_consumer_id: string }>(
+        "select callback_consumer_id from public.org_esign_integrations where org_id=$1",
+        [orgId],
+      )
+    ).rows[0].callback_consumer_id;
+
+    await setup.query(
+      `insert into public.esign_template_staging_sources (
+         id,org_id,storage_path,source_filename,source_size_bytes,
+         content_type,source_sha256,cleanup_outcome,cleanup_attempted_at,created_by
+       ) values (
+         $1,$2,($2::uuid)::text || '/' || ($1::uuid)::text || '.pdf',
+         'source.pdf',1024,'application/pdf',repeat('a',64),'deleted',now(),$3
+       )`,
+      [sourceId, orgId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_templates (
+         id,org_id,name,document_type,seller_role,signer_roles,
+         merge_field_names,sign_template_id,provider_account_id,
+         staging_source_id,source_filename,source_size_bytes,
+         source_content_type,source_sha256,staging_path,finalized_at,
+         lifecycle_state,staging_deleted_at,created_by,updated_by
+       ) values (
+         $1,$2,'Purchase agreement','purchase_agreement','Seller',
+         '[{"name":"Seller","order":0}]'::jsonb,
+         array['seller_name','property_address','offer_price','closing_date','earnest_money'],
+         'provider-template-' || ($1::uuid)::text,'account-a',$3,'source.pdf',1024,
+         'application/pdf',repeat('a',64),
+         ($2::uuid)::text || '/' || ($3::uuid)::text || '.pdf',
+         now(),'finalized',now(),$4,$4
+       )`,
+      [templateId, orgId, sourceId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_requests (
+         id,org_id,property_id,template_id,signer_snapshot,merge_value_snapshot,
+         status,delivery_state,test_mode,sign_request_id,sent_at,send_intent_id,
+         payload_hash,claimed_homeowner_contact_id,created_by
+       ) values
+         ($1,$3,$4,$5,$6::jsonb,$7::jsonb,'awaiting','sending',true,null,null,gen_random_uuid(),repeat('b',64),$8,$9),
+         ($2,$3,$4,$5,$6::jsonb,$7::jsonb,'awaiting','sent',true,'provider-in-flight',now(),gen_random_uuid(),repeat('c',64),$8,$9)`,
+      [
+        sendingRequestId,
+        inFlightRequestId,
+        orgId,
+        propertyId,
+        templateId,
+        signerSnapshot,
+        mergeSnapshot,
+        contactId,
+        userId,
+      ],
+    );
+    await setup.query(
+      `insert into public.esign_request_signers (
+         org_id,request_id,role_name,signer_order,signer_name,signer_email,
+         provider_signature_id
+       ) values (
+         $1,$2,'Seller',0,'Seller Owner','pending-disconnect@example.com',
+         'signature-in-flight'
+       )`,
+      [orgId, inFlightRequestId],
+    );
+
+    const disconnect = (
+      await setup.query<{
+        disconnected: boolean;
+        sending_enabled: boolean;
+        credentials_present: boolean;
+        disconnect_pending: boolean;
+        message: string;
+      }>(
+        "select * from public.disconnect_org_esign_integration($1,$2)",
+        [orgId, userId],
+      )
+    ).rows[0];
+    expect(disconnect).toMatchObject({
+      disconnected: false,
+      sending_enabled: false,
+      credentials_present: true,
+      disconnect_pending: true,
+    });
+    expect(disconnect.message).toMatch(/2 signature requests/i);
+    expect(disconnect.message).toMatch(/callback ingestion and read credentials are preserved/i);
+
+    expect(
+      (
+        await setup.query<{
+          sending_enabled: boolean;
+          has_pending_disconnect: boolean;
+          has_credentials: boolean;
+          consumer_enabled: boolean;
+          consumer_revoked: boolean;
+        }>(
+          `select
+             integration.sending_enabled,
+             integration.disconnect_pending_at is not null as has_pending_disconnect,
+             integration.api_key_encrypted is not null as has_credentials,
+             consumer.enabled as consumer_enabled,
+             consumer.revoked_at is not null as consumer_revoked
+           from public.org_esign_integrations integration
+           join public.webhook_consumers consumer
+             on consumer.id = integration.callback_consumer_id
+           where integration.org_id=$1`,
+          [orgId],
+        )
+      ).rows[0],
+    ).toEqual({
+      sending_enabled: false,
+      has_pending_disconnect: true,
+      has_credentials: true,
+      consumer_enabled: true,
+      consumer_revoked: false,
+    });
+    expect(
+      (
+        await setup.query<{ sending_enabled: boolean; api_key: string }>(
+          "select sending_enabled, api_key from public.get_org_esign_credentials($1,$2)",
+          [orgId, "synthetic-encryption-key"],
+        )
+      ).rows[0],
+    ).toEqual({ sending_enabled: false, api_key: "synthetic-api-key" });
+
+    expect(
+      (
+        await setup.query<{ outcome: string; blocker_code: string | null }>(
+          `select outcome, blocker_code
+           from public.create_esign_request(
+             $1,$2,$3,$4::jsonb,$5::jsonb,gen_random_uuid(),repeat('d',64),null,$6
+           )`,
+          [orgId, propertyId, templateId, signerSnapshot, mergeSnapshot, userId],
+        )
+      ).rows[0],
+    ).toEqual({ outcome: "blocked", blocker_code: "ESIGN_SENDING_UNAVAILABLE" });
+    await expect(
+      setup.query(
+        `select public.prepare_esign_template_source_upload(
+          $1,$2,'new-source.pdf',1024,'application/pdf',repeat('e',64),$3
+        )`,
+        [orgId, crypto.randomUUID(), userId],
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/template management capability/i),
+    });
+
+    const claim = (
+      await setup.query<{
+        outcome: string;
+        receipt_id: string;
+        lease_id: string | null;
+      }>(
+        `select * from public.claim_esign_webhook_receipt(
+          $1,$2,repeat('1',64),repeat('2',64),repeat('3',64),
+          'signature_request_signed','provider-in-flight','signature-in-flight',
+          $3::timestamptz,
+          jsonb_build_object(
+            'event_time',floor(extract(epoch from $3::timestamptz))::bigint::text,
+            'event_type','signature_request_signed',
+            'sign_request_id','provider-in-flight',
+            'related_signature_id','signature-in-flight',
+            'reported_for_app_id','synthetic-client'
+          ),
+          now(),$4,300
+        )`,
+        [orgId, consumerId, eventAt, leaseId],
+      )
+    ).rows[0];
+    expect(claim).toEqual({
+      outcome: "claimed",
+      receipt_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      lease_id: leaseId,
+    });
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'ignored','AUDIT_ONLY_EVENT')",
+      [claim.receipt_id, leaseId],
+    );
+    expect(
+      (
+        await setup.query<{
+          signer_status: string;
+          processing_status: string;
+          processing_error: string | null;
+          esign_request_id: string;
+        }>(
+          `select
+             signer.status as signer_status,
+             receipt.processing_status,
+             receipt.processing_error,
+             receipt.esign_request_id
+           from public.esign_request_signers signer
+           join public.esign_webhook_receipts receipt
+             on receipt.esign_request_id = signer.request_id
+           where signer.org_id=$1
+             and signer.request_id=$2
+             and receipt.id=$3`,
+          [orgId, inFlightRequestId, claim.receipt_id],
+        )
+      ).rows[0],
+    ).toEqual({
+      signer_status: "signed",
+      processing_status: "ignored",
+      processing_error: "AUDIT_ONLY_EVENT",
+      esign_request_id: inFlightRequestId,
+    });
+  });
+
   it("claims one local request for simultaneous identical send intents", async () => {
     const orgId = crypto.randomUUID();
     const userId = crypto.randomUUID();
@@ -2457,12 +2727,14 @@ describe("eSign foundation production lease contention", () => {
            from public.esign_requests
            where id = any($1::uuid[])
            order by id`,
-          [[
-            operatorRequestId,
-            automaticRequestId,
-            metadataRequestId,
-            metadataMissingLocalRequestId,
-          ]],
+          [
+            [
+              operatorRequestId,
+              automaticRequestId,
+              metadataRequestId,
+              metadataMissingLocalRequestId,
+            ],
+          ],
         )
       ).rows,
     ).toEqual(

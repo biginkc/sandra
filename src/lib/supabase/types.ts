@@ -4167,6 +4167,8 @@ export type Database = {
           client_id: string | null
           connected_by: string
           created_at: string
+          disconnect_pending_at: string | null
+          disconnect_requested_by: string | null
           id: string
           org_id: string
           provider: string
@@ -4184,6 +4186,8 @@ export type Database = {
           client_id?: string | null
           connected_by: string
           created_at?: string
+          disconnect_pending_at?: string | null
+          disconnect_requested_by?: string | null
           id?: string
           org_id: string
           provider?: string
@@ -4201,6 +4205,8 @@ export type Database = {
           client_id?: string | null
           connected_by?: string
           created_at?: string
+          disconnect_pending_at?: string | null
+          disconnect_requested_by?: string | null
           id?: string
           org_id?: string
           provider?: string
@@ -4696,6 +4702,7 @@ export type Database = {
         Args: { p_actor_id: string; p_org_id: string }
         Returns: {
           credentials_present: boolean
+          disconnect_pending: boolean
           disconnected: boolean
           message: string
           sending_enabled: boolean

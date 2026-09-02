@@ -239,6 +239,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               connected: false,
               canManage: true,
               sendingEnabled: false,
+              disconnectPending: false,
               testMode: true,
               apiKeyLastFour: null,
             });
@@ -247,6 +248,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               ...current,
               connected: true,
               sendingEnabled: result.data.sendingEnabled,
+              disconnectPending: result.data.disconnectPending,
             }));
           }
           setEsignDisconnectResult({
@@ -332,7 +334,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
             </div>
             {esignDisconnectResult && (
               <p
-                role={esignDisconnectResult.variant === "error" ? "alert" : "status"}
+                role={
+                  esignDisconnectResult.variant === "error" ? "alert" : "status"
+                }
                 aria-label={
                   esignDisconnectResult.variant === "error"
                     ? "Dropbox Sign disconnect failed"
@@ -353,8 +357,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                   <span className="flex flex-col gap-1">
                     <span className="font-medium">Enable contract sending</span>
                     <span className="text-muted-foreground text-xs">
-                      Requires a verified callback and applies to new test-mode
-                      requests.
+                      {esign.disconnectPending
+                        ? "Active signature work is still finishing."
+                        : "Requires a verified callback and applies to new test-mode requests."}
                     </span>
                   </span>
                   <input
@@ -362,7 +367,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                     type="checkbox"
                     role="switch"
                     checked={esign.sendingEnabled}
-                    disabled={pending || !esign.canManage}
+                    disabled={
+                      pending || !esign.canManage || esign.disconnectPending
+                    }
                     onChange={(event) =>
                       setEsignConfirmation(event.target.checked)
                     }
@@ -377,14 +384,16 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                 <div className="flex flex-wrap gap-2">
                   {esign.canManage && (
                     <>
-                      <Link
-                        href="/settings/esign-templates"
-                        className={cn(
-                          buttonVariants({ variant: "outline", size: "sm" }),
-                        )}
-                      >
-                        Manage templates
-                      </Link>
+                      {!esign.disconnectPending && (
+                        <Link
+                          href="/settings/esign-templates"
+                          className={cn(
+                            buttonVariants({ variant: "outline", size: "sm" }),
+                          )}
+                        >
+                          Manage templates
+                        </Link>
+                      )}
                       <Button
                         ref={esignDisconnectButtonRef}
                         type="button"
@@ -406,6 +415,11 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                     Only organization owners can disconnect Dropbox Sign or
                     manage templates. The sending switch is disabled for
                     non-owner accounts.
+                  </p>
+                )}
+                {esign.canManage && esign.disconnectPending && (
+                  <p className="text-muted-foreground text-xs">
+                    Callback handling stays on until active signatures finish.
                   </p>
                 )}
               </>

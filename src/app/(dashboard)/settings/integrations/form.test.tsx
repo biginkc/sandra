@@ -10,6 +10,7 @@ type MockDisconnectResult = {
   disconnected: boolean;
   sendingEnabled: boolean;
   credentialsPresent: boolean;
+  disconnectPending: boolean;
   message: string;
 };
 
@@ -28,6 +29,7 @@ const {
       connected: true,
       canManage: true,
       sendingEnabled: false,
+      disconnectPending: false,
       testMode: true as const,
       apiKeyLastFour: "1234",
     },
@@ -39,6 +41,7 @@ const {
         disconnected: true,
         sendingEnabled: false,
         credentialsPresent: false,
+        disconnectPending: false,
         message: "Dropbox Sign disconnected.",
       },
     }),
@@ -225,6 +228,7 @@ function status(overrides: Partial<IntegrationStatus> = {}): IntegrationStatus {
       connected: false,
       canManage: true,
       sendingEnabled: false,
+      disconnectPending: false,
       testMode: true,
       apiKeyLastFour: null,
     },
@@ -269,6 +273,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
         disconnected: true,
         sendingEnabled: false,
         credentialsPresent: false,
+        disconnectPending: false,
         message: "Dropbox Sign disconnected.",
       },
     });
@@ -280,6 +285,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
             connected: true,
             canManage: true,
             sendingEnabled: false,
+            disconnectPending: false,
             testMode: true,
             apiKeyLastFour: "5678",
           },
@@ -293,7 +299,10 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
     await screen.findByText("Dropbox Sign disconnected.");
 
-    await user.type(screen.getByLabelText("Primary API key"), "secret-api-key-1234");
+    await user.type(
+      screen.getByLabelText("Primary API key"),
+      "secret-api-key-1234",
+    );
     await user.click(
       screen.getByRole("button", { name: "Connect Dropbox Sign" }),
     );
@@ -316,6 +325,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
             connected: true,
             canManage: true,
             sendingEnabled: false,
+            disconnectPending: false,
             testMode: true,
             apiKeyLastFour: "5678",
           },
@@ -351,6 +361,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
             connected: true,
             canManage: true,
             sendingEnabled: false,
+            disconnectPending: false,
             testMode: true,
             apiKeyLastFour: "5678",
           },
@@ -378,6 +389,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
             connected: true,
             canManage: true,
             sendingEnabled: false,
+            disconnectPending: false,
             testMode: true,
             apiKeyLastFour: "5678",
           },
@@ -409,6 +421,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
             connected: true,
             canManage: true,
             sendingEnabled: false,
+            disconnectPending: false,
             testMode: true,
             apiKeyLastFour: "5678",
           },
@@ -442,6 +455,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
             connected: true,
             canManage: true,
             sendingEnabled: false,
+            disconnectPending: false,
             testMode: true,
             apiKeyLastFour: "5678",
           },
@@ -473,6 +487,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
             connected: true,
             canManage: true,
             sendingEnabled: true,
+            disconnectPending: false,
             testMode: true,
             apiKeyLastFour: "5678",
           },
@@ -507,6 +522,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
             connected: true,
             canManage: true,
             sendingEnabled: true,
+            disconnectPending: false,
             testMode: true,
             apiKeyLastFour: "5678",
           },
@@ -541,14 +557,16 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
   });
 
   it("turns off sending visibly when active work blocks full disconnect", async () => {
+    const partialMessage =
+      "Dropbox Sign sending is off. Active eSign work remains: 1 signature request. Callback ingestion and read credentials are preserved until the active work reaches a terminal state. Manage templates and new sends stay blocked.";
     disconnectDropboxSignAction.mockResolvedValueOnce({
       ok: true,
       data: {
         disconnected: false,
         sendingEnabled: false,
-        credentialsPresent: false,
-        message:
-          "Dropbox Sign sending is off and credentials were removed. Reconnect Dropbox Sign before managing templates or sending new contracts.",
+        credentialsPresent: true,
+        disconnectPending: true,
+        message: partialMessage,
       },
     });
     const user = userEvent.setup();
@@ -559,6 +577,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
             connected: true,
             canManage: true,
             sendingEnabled: true,
+            disconnectPending: false,
             testMode: true,
             apiKeyLastFour: "5678",
           },
@@ -572,21 +591,22 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
 
     await waitFor(() => {
+      expect(screen.getByText(partialMessage)).toBeVisible();
       expect(
-        screen.getByText(
-          "Dropbox Sign sending is off and credentials were removed. Reconnect Dropbox Sign before managing templates or sending new contracts.",
-        ),
-      ).toBeVisible();
-      expect(
-        screen.queryByRole("switch", { name: "Enable contract sending" }),
-      ).toBeNull();
+        screen.getByRole("switch", { name: "Enable contract sending" }),
+      ).toBeDisabled();
     });
     expect(
-      screen.queryByRole("button", { name: "Disconnect Dropbox Sign" }),
-    ).toBeNull();
+      screen.getByRole("button", { name: "Disconnect Dropbox Sign" }),
+    ).toBeVisible();
     expect(screen.queryByRole("link", { name: "Manage templates" })).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Connect Dropbox Sign" }),
+      screen.queryByRole("button", { name: "Connect Dropbox Sign" }),
+    ).toBeNull();
+    expect(
+      screen.getByText(
+        /Callback handling stays on until active signatures finish/i,
+      ),
     ).toBeVisible();
   });
 
@@ -606,6 +626,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
             connected: true,
             canManage: true,
             sendingEnabled: true,
+            disconnectPending: false,
             testMode: true,
             apiKeyLastFour: "5678",
           },
@@ -622,7 +643,9 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
       await screen.findByRole("alert", {
         name: "Dropbox Sign disconnect failed",
       }),
-    ).toHaveTextContent("Finish active eSign work before disconnecting Dropbox Sign.");
+    ).toHaveTextContent(
+      "Finish active eSign work before disconnecting Dropbox Sign.",
+    );
     expect(
       screen.getByRole("button", { name: "Disconnect Dropbox Sign" }),
     ).toBeVisible();
@@ -636,6 +659,7 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
             connected: true,
             canManage: false,
             sendingEnabled: true,
+            disconnectPending: false,
             testMode: true,
             apiKeyLastFour: "5678",
           },

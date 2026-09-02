@@ -21,8 +21,8 @@
       "version": "20260830080000",
       "name": "esign_template_upload_reservations",
       "path": "supabase/migrations/20260830080000_esign_template_upload_reservations.sql",
-      "sha256": "f8339006ce12bb70ec6566799194a8c73654789272de0d3c70fdb996609a94fb",
-      "statementsSha256": "945cf7c4db0be2b2a341587253952892a0ed409bc929a8a01ab2bdd45e648358"
+      "sha256": "f2a1e065dbd12831b9f4853509b0780bb1b31b8704dbbf797a1d6cb4c1c1caaf",
+      "statementsSha256": "690eceaf851e925f6c821c991ab30fd375a23886217f405c02562802160c3597"
     },
     {
       "version": "20260830100000",
