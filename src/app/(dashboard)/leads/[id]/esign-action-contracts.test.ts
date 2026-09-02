@@ -86,6 +86,10 @@ describe("lead eSign server-action contracts", () => {
         ok: true,
         data: { requestId: "request-retry-1" },
       }),
+      fixSignerEmailAndResendAction: vi.fn().mockResolvedValue({
+        ok: true,
+        data: null,
+      }),
       confirmNotSentAction: vi.fn().mockResolvedValue({
         ok: true,
         data: null,
@@ -111,6 +115,13 @@ describe("lead eSign server-action contracts", () => {
       ok: true,
       data: { requestId: "request-retry-1" },
     });
+    await expect(
+      actions.fixSignerEmailAndResendAction({
+        requestId: "request-local-1",
+        signerId: "signature-local-1",
+        emailAddress: "fixed-seller@example.com",
+      }),
+    ).resolves.toEqual({ ok: true, data: null });
     await expect(
       actions.confirmNotSentAction({ requestId: "request-local-1" }),
     ).resolves.toEqual({ ok: true, data: null });

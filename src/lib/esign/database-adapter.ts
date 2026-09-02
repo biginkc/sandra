@@ -22,7 +22,9 @@ export const ESIGN_WEBHOOK_RPC_NAMES = {
   FIND_REQUEST: "find_esign_webhook_request",
   ATTACH_PROVIDER_DELIVERY: "attach_esign_request_provider_delivery",
   APPLY_STATUS: "apply_esign_webhook_status_decision",
+  APPLY_EMAIL_BOUNCE: "apply_esign_email_bounce_delivery_decision",
   RECONCILE_REMINDER: "reconcile_esign_reminder_callback",
+  RECONCILE_PROVIDER_SIGNERS: "reconcile_esign_webhook_provider_signers",
   LINK_ARTIFACT: "link_esign_signed_artifact",
   COMPLETE_RECEIPT: "complete_esign_webhook_receipt",
 } as const;
@@ -96,6 +98,17 @@ export type EsignWebhookRpcContract = {
     };
     result: Array<ApplyStatusDecisionResult>;
   };
+  apply_esign_email_bounce_delivery_decision: {
+    args: {
+      p_org_id: string;
+      p_request_id: string;
+      p_receipt_id: string;
+      p_lease_id: string;
+      p_expected_status: EsignStatus;
+      p_provider_event_at: string;
+    };
+    result: Array<ApplyStatusDecisionResult>;
+  };
   reconcile_esign_reminder_callback: {
     args: {
       p_org_id: string;
@@ -104,6 +117,21 @@ export type EsignWebhookRpcContract = {
       p_lease_id: string;
       p_provider_signature_id: string;
       p_provider_event_at: string;
+    };
+    result: Array<{
+      outcome:
+        "applied" | "already_reconciled" | "stale_ignored" | "superseded";
+    }>;
+  };
+  reconcile_esign_webhook_provider_signers: {
+    args: {
+      p_org_id: string;
+      p_request_id: string;
+      p_receipt_id: string;
+      p_lease_id: string;
+      p_provider_event_at: string;
+      p_provider_signatures: unknown;
+      p_signed_provider_signature_id: string | null;
     };
     result: Array<{
       outcome:
@@ -266,6 +294,31 @@ export function createEsignWebhookDatabaseAdapter(
       return row;
     },
 
+    async applyEmailBounceDecision(input) {
+      try {
+        const rows = await callRpc(
+          client,
+          ESIGN_WEBHOOK_RPC_NAMES.APPLY_EMAIL_BOUNCE,
+          {
+            p_org_id: input.orgId,
+            p_request_id: input.requestId,
+            p_receipt_id: input.claim.receiptId,
+            p_lease_id: input.claim.leaseId,
+            p_expected_status: input.decision.previousStatus,
+            p_provider_event_at: input.providerEventAt.toISOString(),
+          },
+        );
+        const row = exactlyOne(rows);
+        if (!isApplyOutcome(row.outcome) || !isEsignStatus(row.status)) {
+          invalidResponse();
+        }
+        return row;
+      } catch (error) {
+        if (isMissingRpc(error)) return null;
+        throw error;
+      }
+    },
+
     async reconcileReminderCallback(input) {
       const rows = await callRpc(
         client,
@@ -282,6 +335,30 @@ export function createEsignWebhookDatabaseAdapter(
       const row = exactlyOne(rows);
       if (!isReminderReconciliationOutcome(row.outcome)) invalidResponse();
       return row.outcome;
+    },
+
+    async reconcileProviderSigners(input) {
+      try {
+        const rows = await callRpc(
+          client,
+          ESIGN_WEBHOOK_RPC_NAMES.RECONCILE_PROVIDER_SIGNERS,
+          {
+            p_org_id: input.orgId,
+            p_request_id: input.requestId,
+            p_receipt_id: input.claim.receiptId,
+            p_lease_id: input.claim.leaseId,
+            p_provider_event_at: input.providerEventAt.toISOString(),
+            p_provider_signatures: input.providerSignatures,
+            p_signed_provider_signature_id: input.signedProviderSignatureId,
+          },
+        );
+        const row = exactlyOne(rows);
+        if (!isSignerReconciliationOutcome(row.outcome)) invalidResponse();
+        return row.outcome;
+      } catch (error) {
+        if (isMissingRpc(error)) return "unavailable";
+        throw error;
+      }
     },
 
     async markReceiptProcessed(claim) {
@@ -331,19 +408,19 @@ export function createEsignWebhookDatabaseAdapter(
 
 async function findAndAttachRequestByMetadata(
   client: EsignWebhookRpcClient,
-  input: { orgId: string; signRequestId: string; localRequestId: string | null },
+  input: { orgId: string; signRequestId: string; verifiedLocalRequestId: string | null },
 ): Promise<EsignWebhookRpcContract["find_esign_webhook_request"]["result"][number] | null> {
-  if (!input.localRequestId) return null;
+  if (!input.verifiedLocalRequestId) return null;
   try {
     await callVoidRpc(client, ESIGN_WEBHOOK_RPC_NAMES.ATTACH_PROVIDER_DELIVERY, {
       p_org_id: input.orgId,
-      p_request_id: input.localRequestId,
+      p_request_id: input.verifiedLocalRequestId,
       p_provider_request_id: input.signRequestId,
       p_resolution_source: "webhook",
       p_evidence: {
-        localRequestId: input.localRequestId,
+        localRequestId: input.verifiedLocalRequestId,
         providerRequestId: input.signRequestId,
-        source: "dropbox_metadata_sandra_request_id",
+        source: "dropbox_provider_read_sandra_request_id",
       },
     });
   } catch (error) {
@@ -369,6 +446,10 @@ async function callVoidRpc<Name extends EsignWebhookRpcName>(
 }
 
 function isMissingMetadataRepairRpc(error: unknown): boolean {
+  return isMissingRpc(error);
+}
+
+function isMissingRpc(error: unknown): boolean {
   if (!(error instanceof EsignDatabaseAdapterError)) return false;
   return error.code === "RPC_FAILED" &&
     (error.rpcCode === "42883" || error.rpcCode === "PGRST202");
@@ -460,6 +541,12 @@ function isReminderReconciliationOutcome(
     value === "stale_ignored" ||
     value === "superseded"
   );
+}
+
+function isSignerReconciliationOutcome(
+  value: unknown,
+): value is "applied" | "already_reconciled" | "stale_ignored" | "superseded" {
+  return isReminderReconciliationOutcome(value);
 }
 
 function isLinkOutcome(value: unknown): value is "applied" | "already_linked" {

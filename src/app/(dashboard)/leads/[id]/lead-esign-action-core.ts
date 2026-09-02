@@ -27,6 +27,7 @@ import {
   type ConfirmContractNotSentInput,
   type ContractMergeValues,
   type DownloadLeadFileInput,
+  type FixSignerEmailAndResendContractInput,
   type LeadEsignPreflight,
   type RemindContractInput,
   type RetryContractInput,
@@ -72,6 +73,7 @@ export type EsignRequestRecord = Readonly<{
       id?: string;
       status?: "awaiting" | "viewed" | "signed" | "declined" | "error";
       lastRemindedAt?: string | null;
+      providerSignatureId?: string | null;
     }>)[];
   mergeValues: ContractMergeValues;
   sendIntentId: string;
@@ -96,6 +98,19 @@ export type ReminderCandidate = Readonly<{
     emailAddress: string;
     status: "awaiting" | "viewed";
     lastRemindedAt: string | null;
+  }>;
+}>;
+
+export type EmailBounceUpdateCandidate = Readonly<{
+  claimToken: string;
+  providerRequestId: string;
+  signer: Readonly<{
+    id: string;
+    providerSignatureId: string;
+    role: string;
+    order: number;
+    name: string;
+    emailAddress: string;
   }>;
 }>;
 
@@ -159,6 +174,31 @@ export type EsignActionRepository = Readonly<{
     actorId: string;
     evidence: Record<string, unknown>;
   }): Promise<"updated" | "raced">;
+  claimEmailBounceUpdate(input: {
+    orgId: string;
+    requestId: string;
+    signerId: string;
+    actorId: string;
+    emailAddress: string;
+  }): Promise<
+    | Readonly<{ outcome: "eligible"; candidate: EmailBounceUpdateCandidate }>
+    | Readonly<{ outcome: "in_progress" }>
+    | Readonly<{ outcome: "reconciliation_required" }>
+    | Readonly<{ outcome: "ineligible" }>
+  >;
+  finalizeEmailBounceUpdate(input: {
+    orgId: string;
+    requestId: string;
+    signerId: string;
+    claimToken: string;
+    providerSignatureId: string;
+  }): Promise<"applied" | "lease_lost">;
+  releaseEmailBounceUpdate(input: {
+    orgId: string;
+    requestId: string;
+    signerId: string;
+    claimToken: string;
+  }): Promise<"released" | "lease_lost">;
   findRequest(input: {
     orgId: string;
     requestId: string;
@@ -226,6 +266,10 @@ export type ProviderDispatchOutcome =
 export type ProviderMutationOutcome =
   "accepted" | "ambiguous" | "definitive_failure";
 
+export type ProviderSignerUpdateOutcome =
+  | Readonly<{ outcome: "accepted"; signature: ProviderSignature }>
+  | Readonly<{ outcome: "ambiguous" | "definitive_failure" }>;
+
 export type EsignActionProvider = Readonly<{
   sendWithTemplate(input: {
     localRequestId: string;
@@ -244,6 +288,15 @@ export type EsignActionProvider = Readonly<{
     providerRequestId: string;
     signal: AbortSignal;
   }): Promise<ProviderMutationOutcome>;
+  updateSignerEmail(input: {
+    providerRequestId: string;
+    providerSignatureId: string;
+    signerName: string;
+    signerEmailAddress: string;
+    signerRole: string;
+    signerOrder: number;
+    signal: AbortSignal;
+  }): Promise<ProviderSignerUpdateOutcome>;
   findSignatureRequestIdsByLocalRequestId(input: {
     localRequestId: string;
     testMode: boolean;
@@ -287,6 +340,8 @@ export function createLeadEsignActionCore(
       safely(() => requestVoid(dependencies, input)),
     retry: (input: RetryContractInput) =>
       safely(() => retry(dependencies, input)),
+    fixSignerEmailAndResend: (input: FixSignerEmailAndResendContractInput) =>
+      safely(() => fixSignerEmailAndResend(dependencies, input)),
     confirmNotSent: (input: ConfirmContractNotSentInput) =>
       safely(() => confirmNotSent(dependencies, input)),
     view: (input: ViewContractInput) =>
@@ -564,6 +619,131 @@ async function confirmNotSent(
     fail(
       "CONFIRM_NOT_SENT_INELIGIBLE",
       "This contract changed while Dropbox Sign was being checked. Refresh and review it.",
+    );
+  }
+  return null;
+}
+
+async function fixSignerEmailAndResend(
+  dependencies: LeadEsignActionDependencies,
+  input: FixSignerEmailAndResendContractInput,
+): Promise<null> {
+  const actor = await requireActor(dependencies);
+  if (actor.role !== "owner") {
+    fail("OWNER_REQUIRED", "Only an organization owner can fix signer emails.");
+  }
+  const normalizedEmail = input.emailAddress.trim();
+  if (!isValidEsignEmail(normalizedEmail)) {
+    fail("INVALID_SIGNER_EMAIL", "Enter one email address without spaces.");
+  }
+  const claim = await dependencies.repository.claimEmailBounceUpdate({
+    orgId: actor.orgId,
+    requestId: input.requestId,
+    signerId: input.signerId,
+    actorId: actor.userId,
+    emailAddress: normalizedEmail,
+  });
+  if (claim.outcome === "in_progress") {
+    fail(
+      "EMAIL_FIX_IN_PROGRESS",
+      "A signer email update is already in progress.",
+    );
+  }
+  if (claim.outcome === "reconciliation_required") {
+    fail(
+      "EMAIL_FIX_UNKNOWN",
+      "Dropbox Sign may have accepted a prior email fix. Reconcile it before trying again.",
+    );
+  }
+  if (claim.outcome !== "eligible") {
+    fail(
+      "EMAIL_FIX_INELIGIBLE",
+      "Only bounced signer emails on existing Dropbox Sign requests can be fixed.",
+    );
+  }
+  const { candidate } = claim;
+  let provider: EsignActionProvider | null;
+  try {
+    provider = await dependencies.providerForOrg(actor.orgId);
+  } catch {
+    await releaseEmailBounceUpdate(
+      dependencies,
+      actor.orgId,
+      input.requestId,
+      input.signerId,
+      candidate.claimToken,
+    );
+    fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
+  }
+  if (!provider) {
+    await releaseEmailBounceUpdate(
+      dependencies,
+      actor.orgId,
+      input.requestId,
+      input.signerId,
+      candidate.claimToken,
+    );
+    fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
+  }
+
+  let outcome: ProviderSignerUpdateOutcome;
+  try {
+    outcome = await withProviderTimeout((signal) =>
+      provider.updateSignerEmail({
+        providerRequestId: candidate.providerRequestId,
+        providerSignatureId: candidate.signer.providerSignatureId,
+        signerName: candidate.signer.name,
+        signerEmailAddress: candidate.signer.emailAddress,
+        signerRole: candidate.signer.role,
+        signerOrder: candidate.signer.order,
+        signal,
+      }),
+    );
+  } catch {
+    outcome = { outcome: "ambiguous" };
+  }
+  if (outcome.outcome === "definitive_failure") {
+    await releaseEmailBounceUpdate(
+      dependencies,
+      actor.orgId,
+      input.requestId,
+      input.signerId,
+      candidate.claimToken,
+    );
+    fail("EMAIL_FIX_FAILED", "Dropbox Sign could not update the signer email.");
+  }
+  if (outcome.outcome === "ambiguous") {
+    fail(
+      "EMAIL_FIX_UNKNOWN",
+      "Dropbox Sign may have accepted the signer email update. Reconcile it before trying again.",
+    );
+  }
+
+  if (outcome.outcome !== "accepted") {
+    fail(
+      "EMAIL_FIX_UNKNOWN",
+      "Dropbox Sign may have accepted the signer email update. Reconcile it before trying again.",
+    );
+  }
+  let finalized: "applied" | "lease_lost";
+  try {
+    finalized = await dependencies.repository.finalizeEmailBounceUpdate({
+      orgId: actor.orgId,
+      requestId: input.requestId,
+      signerId: input.signerId,
+      claimToken: candidate.claimToken,
+      providerSignatureId: outcome.signature.signatureId,
+    });
+  } catch {
+    fail(
+      "EMAIL_FIX_UNKNOWN",
+      "Dropbox Sign accepted the signer email update, but Sandra could not confirm it. Reconcile it before trying again.",
+    );
+  }
+  if (finalized === "lease_lost") {
+    fail(
+      "EMAIL_FIX_UNKNOWN",
+      "Dropbox Sign accepted the signer email update, but Sandra could not confirm it. Reconcile it before trying again.",
     );
   }
   return null;
@@ -976,6 +1156,12 @@ function resolveExistingIntent(
       "Dropbox Sign may have received this contract. Check its status before retrying.",
     );
   }
+  if (request.deliveryState === "email_bounced") {
+    fail(
+      "EMAIL_BOUNCED",
+      "Dropbox Sign reported that the signer email bounced. Fix the signer email and resend this request.",
+    );
+  }
   fail(
     "SEND_FAILED",
     "This contract send failed. Use Retry to send a new request.",
@@ -1103,6 +1289,26 @@ async function releaseVoid(
     });
   } catch {
     // Do not replace the original safe action result with repository details.
+  }
+}
+
+async function releaseEmailBounceUpdate(
+  dependencies: LeadEsignActionDependencies,
+  orgId: string,
+  requestId: string,
+  signerId: string,
+  claimToken: string,
+): Promise<void> {
+  try {
+    await dependencies.repository.releaseEmailBounceUpdate({
+      orgId,
+      requestId,
+      signerId,
+      claimToken,
+    });
+  } catch {
+    // Keep the original provider/action result authoritative. The claim remains
+    // token-fenced so a stale replay cannot resend the same provider mutation.
   }
 }
 

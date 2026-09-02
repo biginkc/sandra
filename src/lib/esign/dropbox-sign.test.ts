@@ -4,7 +4,9 @@ const sdk = vi.hoisted(() => ({
   accountGet: vi.fn(),
   apiAppGet: vi.fn(),
   send: vi.fn(),
+  update: vi.fn(),
   list: vi.fn(),
+  get: vi.fn(),
   signUrl: vi.fn(),
   remind: vi.fn(),
   cancel: vi.fn(),
@@ -41,7 +43,9 @@ vi.mock("@dropbox/sign", () => {
   }
   class SignatureRequestApi extends BaseApi {
     signatureRequestSendWithTemplate = sdk.send;
+    signatureRequestUpdate = sdk.update;
     signatureRequestList = sdk.list;
+    signatureRequestGet = sdk.get;
     signatureRequestRemind = sdk.remind;
     signatureRequestCancel = sdk.cancel;
     signatureRequestFiles = sdk.files;
@@ -94,9 +98,24 @@ describe("Dropbox Sign provider", () => {
         },
       },
     });
+    sdk.update.mockResolvedValue({
+      body: {
+        signatureRequest: {
+          signatures: [
+            {
+              signatureId: "signature-updated",
+              signerRole: "Seller",
+              signerName: "Seller",
+              signerEmailAddress: "corrected@example.com",
+              order: 0,
+            },
+          ],
+        },
+      },
+    });
   });
 
-  it("preserves the shared Session 03 AbortSignal contract for send, remind, and cancel", async () => {
+  it("preserves the shared Session 03 AbortSignal contract for send, signer update, remind, and cancel", async () => {
     sdk.remind.mockResolvedValue({ body: {} });
     sdk.cancel.mockResolvedValue({ body: {} });
     const provider = createDropboxSignProvider({
@@ -112,13 +131,53 @@ describe("Dropbox Sign provider", () => {
       mergeValues: {},
       signal: controller.signal,
     });
+    await provider.updateSignerEmail({
+      signatureRequestId: "request-1",
+      signatureId: "signature-1",
+      name: "Seller",
+      emailAddress: "corrected@example.com",
+      role: "Seller",
+      order: 0,
+      signal: controller.signal,
+    });
     await provider.remind("request-1", { emailAddress: "seller@example.com" }, controller.signal);
     await provider.cancel("request-1", controller.signal);
     expect(sdk.interceptorOptions).toEqual([
       { signal: controller.signal },
       { signal: controller.signal },
       { signal: controller.signal },
+      { signal: controller.signal },
     ]);
+  });
+
+  it("updates a bounced signer on the existing provider request and returns the new signature id", async () => {
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+      expectedDomain: "sandra.example.com",
+    });
+
+    await expect(
+      provider.updateSignerEmail({
+        signatureRequestId: "provider-request-1",
+        signatureId: "signature-old",
+        name: "Seller",
+        emailAddress: "corrected@example.com",
+        role: "Seller",
+        order: 0,
+      }),
+    ).resolves.toEqual({
+      signatureId: "signature-updated",
+      role: "Seller",
+      name: "Seller",
+      emailAddress: "corrected@example.com",
+      order: 0,
+    });
+    expect(sdk.update).toHaveBeenCalledWith("provider-request-1", {
+      signatureId: "signature-old",
+      emailAddress: "corrected@example.com",
+      name: "Seller",
+    });
   });
 
   it("authenticates the official SDK with API-key basic auth", async () => {
@@ -242,6 +301,39 @@ describe("Dropbox Sign provider", () => {
       100,
       "metadata:local-uuid AND test_mode:false AND client_id:client-id",
     );
+    expect(sdk.interceptorOptions.at(-1)).toEqual({
+      signal: controller.signal,
+    });
+  });
+
+  it("reads provider-side request metadata for webhook attachment proof", async () => {
+    sdk.get.mockResolvedValue({
+      body: {
+        signatureRequest: {
+          signatureRequestId: "provider-request-1",
+          metadata: { sandra_request_id: "local-uuid" },
+          testMode: true,
+        },
+      },
+    });
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+      expectedDomain: "sandra.example.com",
+    });
+    const controller = new AbortController();
+
+    await expect(
+      provider.getSignatureRequestMetadata(
+        "provider-request-1",
+        controller.signal,
+      ),
+    ).resolves.toEqual({
+      signatureRequestId: "provider-request-1",
+      localRequestId: "local-uuid",
+      testMode: true,
+    });
+    expect(sdk.get).toHaveBeenCalledWith("provider-request-1");
     expect(sdk.interceptorOptions.at(-1)).toEqual({
       signal: controller.signal,
     });

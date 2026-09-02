@@ -3717,6 +3717,10 @@ export type Database = {
         Row: {
           created_at: string
           declined_at: string | null
+          email_update_claim_actor_id: string | null
+          email_update_claim_email: string | null
+          email_update_claim_token: string | null
+          email_update_claimed_at: string | null
           id: string
           last_reminded_at: string | null
           org_id: string
@@ -3736,6 +3740,10 @@ export type Database = {
         Insert: {
           created_at?: string
           declined_at?: string | null
+          email_update_claim_actor_id?: string | null
+          email_update_claim_email?: string | null
+          email_update_claim_token?: string | null
+          email_update_claimed_at?: string | null
           id?: string
           last_reminded_at?: string | null
           org_id: string
@@ -3755,6 +3763,10 @@ export type Database = {
         Update: {
           created_at?: string
           declined_at?: string | null
+          email_update_claim_actor_id?: string | null
+          email_update_claim_email?: string | null
+          email_update_claim_token?: string | null
+          email_update_claimed_at?: string | null
           id?: string
           last_reminded_at?: string | null
           org_id?: string
@@ -4666,6 +4678,20 @@ export type Database = {
           status: Database["public"]["Enums"]["esign_request_status"]
         }[]
       }
+      apply_esign_email_bounce_delivery_decision: {
+        Args: {
+          p_expected_status: Database["public"]["Enums"]["esign_request_status"]
+          p_lease_id: string
+          p_org_id: string
+          p_provider_event_at: string
+          p_receipt_id: string
+          p_request_id: string
+        }
+        Returns: {
+          outcome: string
+          status: Database["public"]["Enums"]["esign_request_status"]
+        }[]
+      }
       attach_esign_template_provider_id: {
         Args: {
           p_actor_id: string
@@ -4716,6 +4742,24 @@ export type Database = {
         Returns: {
           outcome: string
           provider_request_id: string | null
+        }[]
+      }
+      claim_esign_bounced_signer_email_update: {
+        Args: {
+          p_actor_id: string
+          p_claim_token: string
+          p_email_address: string
+          p_org_id: string
+          p_request_id: string
+          p_signer_id: string
+        }
+        Returns: {
+          outcome: string
+          provider_request_id: string | null
+          provider_signature_id: string | null
+          signer_name: string | null
+          signer_order: number | null
+          signer_role: string | null
         }[]
       }
       claim_esign_signer_reminder: {
@@ -4990,6 +5034,16 @@ export type Database = {
         Args: { p_claim_token: string; p_org_id: string; p_request_id: string }
         Returns: string
       }
+      finalize_esign_bounced_signer_email_update: {
+        Args: {
+          p_claim_token: string
+          p_org_id: string
+          p_provider_signature_id: string
+          p_request_id: string
+          p_signer_id: string
+        }
+        Returns: string
+      }
       finalize_esign_signer_reminder: {
         Args: {
           p_claim_token: string
@@ -5066,6 +5120,23 @@ export type Database = {
           p_lease_id: string
           p_org_id: string
           p_receipt_id: string
+          p_request_id: string
+          p_size_bytes: number
+          p_storage_bucket: string
+          p_storage_path: string
+        }
+        Returns: {
+          lead_file_id: string
+          outcome: string
+        }[]
+      }
+      reconcile_esign_completed_signed_artifact: {
+        Args: {
+          p_content_type: string
+          p_lead_event_payload: Json
+          p_lead_event_type: string
+          p_lead_file_id: string
+          p_org_id: string
           p_request_id: string
           p_size_bytes: number
           p_storage_bucket: string
@@ -5226,6 +5297,20 @@ export type Database = {
           outcome: string
         }[]
       }
+      reconcile_esign_webhook_provider_signers: {
+        Args: {
+          p_lease_id: string
+          p_org_id: string
+          p_provider_event_at: string
+          p_provider_signatures?: Json
+          p_receipt_id: string
+          p_request_id: string
+          p_signed_provider_signature_id?: string | null
+        }
+        Returns: {
+          outcome: string
+        }[]
+      }
       reconcile_unknown_esign_template_provider_create: {
         Args: {
           p_actor_id: string
@@ -5267,6 +5352,15 @@ export type Database = {
       }
       release_esign_request_void: {
         Args: { p_claim_token: string; p_org_id: string; p_request_id: string }
+        Returns: string
+      }
+      release_esign_bounced_signer_email_update: {
+        Args: {
+          p_claim_token: string
+          p_org_id: string
+          p_request_id: string
+          p_signer_id: string
+        }
         Returns: string
       }
       release_esign_signer_reminder: {
@@ -5873,7 +5967,8 @@ export type Database = {
       }
     }
     Enums: {
-      esign_delivery_state: "sending" | "sent" | "send_unknown" | "failed"
+      esign_delivery_state:
+        "sending" | "sent" | "send_unknown" | "email_bounced" | "failed"
       esign_request_claim_outcome:
         "created" | "existing_same_payload" | "intent_conflict" | "blocked"
       esign_request_status:
@@ -6005,7 +6100,13 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
-      esign_delivery_state: ["sending", "sent", "send_unknown", "failed"],
+      esign_delivery_state: [
+        "sending",
+        "sent",
+        "send_unknown",
+        "email_bounced",
+        "failed",
+      ],
       esign_request_claim_outcome: [
         "created",
         "existing_same_payload",

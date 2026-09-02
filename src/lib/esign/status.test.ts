@@ -36,6 +36,20 @@ describe("Dropbox Sign lifecycle normalization", () => {
     });
   });
 
+  it("allows provider completion to repair a previous local error", () => {
+    expect(apply("error", "signature_request_all_signed")).toMatchObject({
+      nextStatus: "signed",
+      changed: true,
+      reason: "all_signed",
+    });
+    expect(apply("error", "signature_request_downloadable")).toMatchObject({
+      nextStatus: "signed",
+      changed: true,
+      artifactReady: true,
+      reason: "downloadable",
+    });
+  });
+
   it("prevents out-of-order events from regressing terminal states", () => {
     expect(apply("signed", "signature_request_viewed")).toMatchObject({
       nextStatus: "signed",
@@ -72,5 +86,20 @@ describe("Dropbox Sign lifecycle normalization", () => {
     ["signature_request_email_bounce", "error"],
   ] as const)("maps %s to %s", (eventType, expected) => {
     expect(apply("awaiting", eventType).nextStatus).toBe(expected);
+  });
+
+  it("separates bounced-email evidence from generic provider errors", () => {
+    expect(
+      normalizeDropboxSignLifecycleEvent("signature_request_email_bounce"),
+    ).toMatchObject({
+      requestedStatus: "error",
+      reason: "email_bounced",
+    });
+    expect(
+      normalizeDropboxSignLifecycleEvent("signature_request_invalid"),
+    ).toMatchObject({
+      requestedStatus: "error",
+      reason: "provider_error",
+    });
   });
 });

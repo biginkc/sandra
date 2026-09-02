@@ -52,6 +52,9 @@ function actionHandlers(): ContractActionHandlers {
     retryAction: vi
       .fn()
       .mockResolvedValue({ ok: true, data: { requestId: "request-retry" } }),
+    fixSignerEmailAndResendAction: vi
+      .fn()
+      .mockResolvedValue({ ok: true, data: null }),
     confirmNotSentAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
     downloadAction: vi.fn().mockResolvedValue({
       ok: true,
@@ -84,6 +87,7 @@ function contract(overrides: Partial<LeadContractRow> = {}): LeadContractRow {
     signedPdfFileId: null,
     errorMessage: null,
     retryConsumed: false,
+    canFixSignerEmail: true,
     ...overrides,
   };
 }
@@ -150,6 +154,7 @@ describe("ContractsCard", () => {
   it.each([
     { overrides: { deliveryState: "sending" }, label: "Sending" },
     { overrides: { deliveryState: "send_unknown" }, label: "Send unknown" },
+    { overrides: { deliveryState: "email_bounced", status: "error" }, label: "Undeliverable" },
     { overrides: { deliveryState: "failed" }, label: "Error" },
     { overrides: { status: "viewed" }, label: "Viewed" },
     { overrides: { status: "signed" }, label: "Signed" },
@@ -281,6 +286,64 @@ describe("ContractActions", () => {
 
     expect(screen.queryByText("Retry send")).not.toBeInTheDocument();
     expect(screen.getByText("View in Dropbox Sign")).toBeInTheDocument();
+  });
+
+  it("offers owner-gated signer email correction instead of retry for a bounced provider request", async () => {
+    const user = userEvent.setup();
+    const actions = actionHandlers();
+    const onChanged = vi.fn();
+    render(
+      <ContractActions
+        contract={contract({
+          status: "error",
+          deliveryState: "email_bounced",
+          signers: [
+            {
+              id: "signature-1",
+              role: "Seller",
+              order: 0,
+              name: "Seller Owner",
+              emailAddress: "bad@example.invalid",
+              status: "error",
+              lastRemindedAt: null,
+            },
+          ],
+        })}
+        actions={actions}
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Actions for Purchase agreement" }),
+    );
+    expect(screen.getByText("Fix signer email and resend")).toBeInTheDocument();
+    expect(screen.queryByText("Retry send")).not.toBeInTheDocument();
+
+    await user.click(screen.getByText("Fix signer email and resend"));
+    expect(
+      screen.getByRole("heading", { name: "Fix signer email and resend?" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/existing request/)).toBeInTheDocument();
+    const submit = screen.getByRole("button", { name: "Update and resend" });
+    expect(submit).toBeDisabled();
+
+    await user.clear(screen.getByLabelText("Correct signer email"));
+    await user.type(
+      screen.getByLabelText("Correct signer email"),
+      "seller-fixed@example.com",
+    );
+    await user.click(submit);
+
+    await waitFor(() =>
+      expect(actions.fixSignerEmailAndResendAction).toHaveBeenCalledWith({
+        requestId: "request-1",
+        signerId: "signature-1",
+        emailAddress: "seller-fixed@example.com",
+      }),
+    );
+    expect(actions.retryAction).not.toHaveBeenCalled();
+    expect(onChanged).toHaveBeenCalledTimes(1);
   });
 
   it("downloads only through the injected authorized file action", async () => {
@@ -503,6 +566,27 @@ describe("ContractActions", () => {
       },
     ],
     [
+      "fix_email",
+      "Fix signer email and resend",
+      "Update and resend",
+      "Updating signer…",
+      {
+        status: "error",
+        deliveryState: "email_bounced",
+        signers: [
+          {
+            id: "signature-1",
+            role: "Seller",
+            order: 0,
+            name: "Seller Owner",
+            emailAddress: "bad@example.invalid",
+            status: "error",
+            lastRemindedAt: null,
+          },
+        ],
+      },
+    ],
+    [
       "retry",
       "Retry send",
       "Retry send",
@@ -525,6 +609,10 @@ describe("ContractActions", () => {
         vi.mocked(actions.confirmNotSentAction).mockReturnValue(
           pending.promise as never,
         );
+      } else if (mode === "fix_email") {
+        vi.mocked(actions.fixSignerEmailAndResendAction).mockReturnValue(
+          pending.promise as never,
+        );
       } else {
         vi.mocked(actions.retryAction).mockReturnValue(
           pending.promise as never,
@@ -537,6 +625,13 @@ describe("ContractActions", () => {
         />,
       );
       await user.click(screen.getByText(menuLabel));
+      if (mode === "fix_email") {
+        await user.clear(screen.getByLabelText("Correct signer email"));
+        await user.type(
+          screen.getByLabelText("Correct signer email"),
+          "seller-fixed@example.com",
+        );
+      }
       await user.click(screen.getByRole("button", { name: confirmLabel }));
 
       expect(await screen.findByRole("status")).toHaveTextContent(busyLabel);

@@ -148,6 +148,13 @@ function contractStatusPresentation(contract: LeadContractRow): {
   if (contract.deliveryState === "send_unknown") {
     return { label: "Send unknown", variant: "hot" };
   }
+  if (contract.deliveryState === "email_bounced") {
+    return {
+      label: "Undeliverable",
+      variant: "dead",
+      className: "border-destructive/30 bg-destructive/10 text-destructive",
+    };
+  }
   if (contract.deliveryState === "failed" || contract.status === "error") {
     return {
       label: "Error",

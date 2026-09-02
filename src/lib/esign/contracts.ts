@@ -13,6 +13,7 @@ export const ESIGN_DELIVERY_STATES = [
   "sending",
   "sent",
   "send_unknown",
+  "email_bounced",
   "failed",
 ] as const;
 
@@ -112,6 +113,8 @@ export type ProviderSignature = {
   name: string;
   emailAddress: string;
   order: number;
+  statusCode?: string | null;
+  signedAt?: number | null;
 };
 
 export type SendWithTemplateOutput = {
@@ -119,6 +122,12 @@ export type SendWithTemplateOutput = {
   signatures: ProviderSignature[];
   detailsUrl: string | null;
   testMode: true;
+};
+
+export type ProviderSignatureRequestMetadata = {
+  signatureRequestId: string;
+  localRequestId: string | null;
+  testMode: boolean | null;
 };
 
 export type DropboxSignProvider = {
@@ -145,11 +154,24 @@ export type DropboxSignProvider = {
   ): Promise<void>;
   deleteTemplate(providerTemplateId: string): Promise<void>;
   sendWithTemplate(input: SendWithTemplateInput): Promise<SendWithTemplateOutput>;
+  updateSignerEmail(input: {
+    signatureRequestId: string;
+    signatureId: string;
+    name: string;
+    emailAddress: string;
+    role: string;
+    order: number;
+    signal?: AbortSignal;
+  }): Promise<ProviderSignature>;
   findSignatureRequestIdsByLocalRequestId(
     localRequestId: string,
     testMode: boolean,
     signal?: AbortSignal,
   ): Promise<{ complete: boolean; providerRequestIds: string[] }>;
+  getSignatureRequestMetadata(
+    signatureRequestId: string,
+    signal?: AbortSignal,
+  ): Promise<ProviderSignatureRequestMetadata>;
   remind(
     signatureRequestId: string,
     signer: { emailAddress: string; name?: string },

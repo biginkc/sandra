@@ -101,6 +101,7 @@ export type LeadContractRow = Readonly<{
   signedPdfFileId: string | null;
   errorMessage: string | null;
   retryConsumed: boolean;
+  canFixSignerEmail: boolean;
 }>;
 
 export type RemindContractInput = Readonly<{
@@ -114,6 +115,12 @@ export type VoidContractInput = Readonly<{
 
 export type RetryContractInput = Readonly<{
   requestId: string;
+}>;
+
+export type FixSignerEmailAndResendContractInput = Readonly<{
+  requestId: string;
+  signerId: string;
+  emailAddress: string;
 }>;
 
 export type ConfirmContractNotSentInput = Readonly<{
@@ -135,6 +142,9 @@ export type ContractActionHandlers = Readonly<{
   retryAction: (
     input: RetryContractInput,
   ) => Promise<Result<SendContractOutput>>;
+  fixSignerEmailAndResendAction: (
+    input: FixSignerEmailAndResendContractInput,
+  ) => Promise<Result<null>>;
   confirmNotSentAction: (
     input: ConfirmContractNotSentInput,
   ) => Promise<Result<null>>;

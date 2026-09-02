@@ -24,11 +24,20 @@ const CLAIM = {
 
 function callbackRequest(input: {
   eventType?: string;
-	  eventHash?: string;
-	  signRequestId?: string | null;
-	  localRequestId?: string | null;
-	  relatedSignatureId?: string | null;
-	} = {}): Request {
+  eventHash?: string;
+  signRequestId?: string | null;
+  localRequestId?: string | null;
+  relatedSignatureId?: string | null;
+  providerSignatures?: Array<{
+    signature_id: string;
+    signer_role: string;
+    signer_name: string;
+    signer_email_address: string;
+    order: number;
+    status_code?: string;
+    signed_at?: number;
+  }>;
+} = {}): Request {
   const eventTime = "1788054000";
   const eventType = input.eventType ?? "signature_request_viewed";
   const eventHash =
@@ -55,13 +64,14 @@ function callbackRequest(input: {
       ...(input.signRequestId === null
         ? {}
         : {
-	            signature_request: {
-	              signature_request_id:
-	                input.signRequestId ?? "provider-request-1",
-	              metadata: {
-	                sandra_request_id: input.localRequestId ?? REQUEST_ID,
-	              },
-	            },
+            signature_request: {
+              signature_request_id:
+                input.signRequestId ?? "provider-request-1",
+              metadata: {
+                sandra_request_id: input.localRequestId ?? REQUEST_ID,
+              },
+              signatures: input.providerSignatures ?? [],
+            },
           }),
     }),
   );
@@ -90,7 +100,12 @@ function dependencies(
       outcome: "applied" as const,
       status: decision.nextStatus,
     })),
+    applyEmailBounceDecision: vi.fn(async () => ({
+      outcome: "applied" as const,
+      status: "error" as const,
+    })),
     reconcileReminderCallback: vi.fn(async () => "applied" as const),
+    reconcileProviderSigners: vi.fn(async () => "applied" as const),
     markReceiptProcessed: vi.fn(async () => undefined),
     markReceiptIgnored: vi.fn(async () => undefined),
     markReceiptFailed: vi.fn(async () => undefined),
@@ -109,6 +124,11 @@ function dependencies(
       })),
     }),
     persistence,
+    metadataProvider: {
+      confirmProviderLocalRequestId: vi.fn(async ({ localRequestId }) =>
+        localRequestId === REQUEST_ID ? "matched" : "mismatch",
+      ),
+    },
     pdfProvider: {
       downloadSignedPdf: vi.fn(async () => Buffer.from("%PDF-1.7\nsigned")),
     },
@@ -134,11 +154,11 @@ describe("injectable Dropbox Sign webhook handler", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
     expect(await response.text()).toBe(DROPBOX_SIGN_ACKNOWLEDGEMENT);
-	    expect(deps.persistence.findRequest).toHaveBeenCalledWith({
-	      orgId: ORG_ID,
-	      signRequestId: "provider-request-1",
-	      localRequestId: REQUEST_ID,
-	    });
+    expect(deps.persistence.findRequest).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      signRequestId: "provider-request-1",
+      verifiedLocalRequestId: null,
+    });
     expect(deps.persistence.applyStatusDecision).toHaveBeenCalledWith(
       expect.objectContaining({
         orgId: ORG_ID,
@@ -153,41 +173,145 @@ describe("injectable Dropbox Sign webhook handler", () => {
       }),
     );
     expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
-	  });
+  });
 
-	  it("continues normal webhook processing after metadata repairs a timeout-stranded send", async () => {
-	    const deps = dependencies();
-	    vi.mocked(deps.persistence.findRequest).mockImplementation(async (input) => {
-	      expect(input).toEqual({
-	        orgId: ORG_ID,
-	        signRequestId: "provider-after-timeout",
-	        localRequestId: REQUEST_ID,
-	      });
-	      return {
-	        id: REQUEST_ID,
-	        orgId: ORG_ID,
-	        propertyId: PROPERTY_ID,
-	        status: "awaiting" as const,
-	        signedPdfPath: null,
-	        templateTitle: "Purchase Agreement",
-	      };
-	    });
+  it("applies email-bounce delivery truth without the generic provider-error transition", async () => {
+    const deps = dependencies();
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        eventType: "signature_request_email_bounce",
+        providerSignatures: [{
+          signature_id: "provider-signature-1",
+          signer_role: "Seller",
+          signer_name: "Seller Owner",
+          signer_email_address: "bad@example.invalid",
+          order: 0,
+        }],
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
 
-	    const response = await handleDropboxSignWebhook({
-	      request: callbackRequest({ signRequestId: "provider-after-timeout" }),
-	      pathSecret: PATH_SECRET,
-	      dependencies: deps,
-	    });
+    expect(response.status).toBe(200);
+    expect(deps.persistence.applyEmailBounceDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orgId: ORG_ID,
+        requestId: REQUEST_ID,
+        claim: CLAIM,
+        decision: expect.objectContaining({
+          previousStatus: "awaiting",
+          nextStatus: "error",
+          reason: "email_bounced",
+        }),
+      }),
+    );
+    expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+    expect(deps.persistence.reconcileProviderSigners).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
+  });
 
-	    expect(response.status).toBe(200);
-	    expect(deps.persistence.applyStatusDecision).toHaveBeenCalledWith(
-	      expect.objectContaining({
-	        requestId: REQUEST_ID,
-	        decision: expect.objectContaining({ nextStatus: "viewed" }),
-	      }),
-	    );
-	    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
-	  });
+  it("keeps a bounce callback retryable when code reaches a pre-bounce-RPC database", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.persistence.applyEmailBounceDecision).mockResolvedValue(null);
+
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        eventType: "signature_request_email_bounce",
+        providerSignatures: [{
+          signature_id: "provider-signature-1",
+          signer_role: "Seller",
+          signer_name: "Seller Owner",
+          signer_email_address: "bad@example.invalid",
+          order: 0,
+        }],
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(503);
+    expect(deps.persistence.applyEmailBounceDecision).toHaveBeenCalled();
+    expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptProcessed).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptFailed).toHaveBeenCalledWith(
+      CLAIM,
+      "EMAIL_BOUNCE_RPC_UNAVAILABLE",
+    );
+  });
+
+  it("continues normal webhook processing after provider-read metadata repairs a timeout-stranded send", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.persistence.findRequest)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: REQUEST_ID,
+        orgId: ORG_ID,
+        propertyId: PROPERTY_ID,
+        status: "awaiting" as const,
+        signedPdfPath: null,
+        templateTitle: "Purchase Agreement",
+      });
+
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({ signRequestId: "provider-after-timeout" }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(deps.metadataProvider.confirmProviderLocalRequestId).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      callbackConsumerId: CONSUMER_ID,
+      signRequestId: "provider-after-timeout",
+      localRequestId: REQUEST_ID,
+    });
+    expect(deps.persistence.findRequest).toHaveBeenNthCalledWith(1, {
+      orgId: ORG_ID,
+      signRequestId: "provider-after-timeout",
+      verifiedLocalRequestId: null,
+    });
+    expect(deps.persistence.findRequest).toHaveBeenNthCalledWith(2, {
+      orgId: ORG_ID,
+      signRequestId: "provider-after-timeout",
+      verifiedLocalRequestId: REQUEST_ID,
+    });
+    expect(deps.persistence.applyStatusDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestId: REQUEST_ID,
+        decision: expect.objectContaining({ nextStatus: "viewed" }),
+      }),
+    );
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
+  });
+
+  it("rejects spoofed body metadata when provider-side metadata does not match", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.persistence.findRequest).mockResolvedValue(null);
+
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        signRequestId: "provider-after-timeout",
+        localRequestId: "spoofed-local-request",
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(DROPBOX_SIGN_ACKNOWLEDGEMENT);
+    expect(deps.metadataProvider.confirmProviderLocalRequestId).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      callbackConsumerId: CONSUMER_ID,
+      signRequestId: "provider-after-timeout",
+      localRequestId: "spoofed-local-request",
+    });
+    expect(deps.persistence.findRequest).toHaveBeenCalledTimes(1);
+    expect(deps.persistence.markReceiptIgnored).toHaveBeenCalledWith(
+      CLAIM,
+      "PROVIDER_METADATA_MISMATCH",
+    );
+    expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+  });
 
   it("rejects an invalid event hash before claiming a receipt", async () => {
     const deps = dependencies();
@@ -228,10 +352,108 @@ describe("injectable Dropbox Sign webhook handler", () => {
 
     expect(response.status).toBe(200);
     expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
-    expect(deps.persistence.markReceiptIgnored).toHaveBeenCalledWith(
-      CLAIM,
-      "AUDIT_ONLY_EVENT",
+    expect(deps.persistence.reconcileProviderSigners).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      requestId: REQUEST_ID,
+      claim: CLAIM,
+      providerEventAt: new Date("2026-08-30T01:40:00.000Z"),
+      providerSignatures: [],
+      signedProviderSignatureId: "provider-signature-1",
+    });
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
+    expect(deps.persistence.markReceiptIgnored).not.toHaveBeenCalled();
+  });
+
+  it("reconciles the provider-updated signer identity before signer-level signed processing", async () => {
+    const deps = dependencies();
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        eventType: "signature_request_signed",
+        relatedSignatureId: "bb67df41911f964aa66f488bd2878cbd",
+        providerSignatures: [{
+          signature_id: "bb67df41911f964aa66f488bd2878cbd",
+          signer_role: "Seller",
+          signer_name: "eSign QA A PRIMARY_E2E",
+          signer_email_address: "jarrad.henry@gmail.com",
+          order: 0,
+          status_code: "signed",
+          signed_at: 1788331417,
+        }],
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(deps.persistence.reconcileProviderSigners).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      requestId: REQUEST_ID,
+      claim: CLAIM,
+      providerEventAt: new Date("2026-08-30T01:40:00.000Z"),
+      providerSignatures: [{
+        signatureId: "bb67df41911f964aa66f488bd2878cbd",
+        role: "Seller",
+        name: "eSign QA A PRIMARY_E2E",
+        emailAddress: "jarrad.henry@gmail.com",
+        order: 0,
+        statusCode: "signed",
+        signedAt: 1788331417,
+      }],
+      signedProviderSignatureId: "bb67df41911f964aa66f488bd2878cbd",
+    });
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
+  });
+
+  it("repairs local error state before signed completion and PDF download", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.persistence.findRequest).mockResolvedValue({
+      id: REQUEST_ID,
+      orgId: ORG_ID,
+      propertyId: PROPERTY_ID,
+      status: "error",
+      signedPdfPath: null,
+      templateTitle: "Purchase Agreement",
+    });
+    vi.mocked(deps.persistence.applyStatusDecision).mockResolvedValue({
+      outcome: "applied",
+      status: "signed",
+    });
+
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        eventType: "signature_request_downloadable",
+        relatedSignatureId: null,
+        providerSignatures: [{
+          signature_id: "bb67df41911f964aa66f488bd2878cbd",
+          signer_role: "Seller",
+          signer_name: "eSign QA A PRIMARY_E2E",
+          signer_email_address: "jarrad.henry@gmail.com",
+          order: 0,
+          status_code: "signed",
+          signed_at: 1788331417,
+        }],
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(deps.persistence.reconcileProviderSigners).toHaveBeenCalled();
+    expect(deps.persistence.applyStatusDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        decision: expect.objectContaining({
+          previousStatus: "error",
+          nextStatus: "signed",
+          reason: "downloadable",
+        }),
+      }),
     );
+    expect(deps.pdfProvider.downloadSignedPdf).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      callbackConsumerId: CONSUMER_ID,
+      signRequestId: "provider-request-1",
+    });
+    expect(deps.artifactPersistence.storeLinkAndRecordReady).toHaveBeenCalled();
   });
 
   it("reconciles a verified reminder callback before completing its receipt", async () => {

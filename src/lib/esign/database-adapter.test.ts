@@ -29,6 +29,7 @@ function receiptInput(): VerifiedReceiptInput {
       localRequestId: REQUEST_ID,
       relatedSignatureId: "provider-signature-1",
       reportedForAppId: "provider-app-1",
+      providerSignatures: [],
     },
     receivedAt: new Date("2026-08-29T20:00:00.000Z"),
   };
@@ -193,6 +194,61 @@ describe("typed eSign webhook database adapter", () => {
     },
   );
 
+  it("uses the dedicated email-bounce delivery RPC without lead-event PII", async () => {
+    const { client, rpc } = clientWith(() => [
+      { outcome: "applied", status: "error" },
+    ]);
+    const adapter = createEsignWebhookDatabaseAdapter(client);
+
+    await expect(
+      adapter.applyEmailBounceDecision({
+        orgId: ORG_ID,
+        requestId: REQUEST_ID,
+        claim: CLAIM,
+        decision: {
+          previousStatus: "awaiting",
+          nextStatus: "error",
+          changed: true,
+          artifactReady: false,
+          reason: "email_bounced",
+        },
+        providerEventAt: new Date("2026-08-29T23:00:00.000Z"),
+      }),
+    ).resolves.toEqual({ outcome: "applied", status: "error" });
+    expect(rpc).toHaveBeenCalledWith(
+      "apply_esign_email_bounce_delivery_decision",
+      {
+        p_org_id: ORG_ID,
+        p_request_id: REQUEST_ID,
+        p_receipt_id: RECEIPT_ID,
+        p_lease_id: LEASE_ID,
+        p_expected_status: "awaiting",
+        p_provider_event_at: "2026-08-29T23:00:00.000Z",
+      },
+    );
+    expect(JSON.stringify(rpc.mock.calls[0][1])).not.toMatch(/email|actor/i);
+  });
+
+  it.each(["42883", "PGRST202"] as const)(
+    "returns null when the email-bounce RPC is missing with %s",
+    async (code) => {
+      const rpc = vi.fn(async () => ({ data: null, error: { code } }));
+      const adapter = createEsignWebhookDatabaseAdapter({
+        rpc: rpc as EsignWebhookRpcClient["rpc"],
+      });
+
+      await expect(
+        adapter.applyEmailBounceDecision({
+          orgId: ORG_ID,
+          requestId: REQUEST_ID,
+          claim: CLAIM,
+          decision: VIEWED_DECISION,
+          providerEventAt: new Date("2026-08-29T23:00:00.000Z"),
+        }),
+      ).resolves.toBeNull();
+    },
+  );
+
   it("finds an already attached request by provider request id without repair", async () => {
     const { client, rpc } = clientWith((name) => {
       if (name === "find_esign_webhook_request") {
@@ -212,7 +268,7 @@ describe("typed eSign webhook database adapter", () => {
     await expect(adapter.findRequest({
       orgId: ORG_ID,
       signRequestId: "provider-request-1",
-      localRequestId: REQUEST_ID,
+      verifiedLocalRequestId: REQUEST_ID,
     })).resolves.toEqual({
       id: REQUEST_ID,
       orgId: ORG_ID,
@@ -228,7 +284,7 @@ describe("typed eSign webhook database adapter", () => {
     );
   });
 
-  it("repairs a timeout-stranded request by Sandra request id metadata", async () => {
+  it("repairs a timeout-stranded request only after verified provider-read metadata", async () => {
     const findRows = [
       [],
       [{
@@ -250,7 +306,7 @@ describe("typed eSign webhook database adapter", () => {
     await expect(adapter.findRequest({
       orgId: ORG_ID,
       signRequestId: "provider-after-timeout",
-      localRequestId: REQUEST_ID,
+      verifiedLocalRequestId: REQUEST_ID,
     })).resolves.toMatchObject({ id: REQUEST_ID, status: "awaiting" });
 
     expect(rpc).toHaveBeenCalledWith("attach_esign_request_provider_delivery", {
@@ -261,7 +317,7 @@ describe("typed eSign webhook database adapter", () => {
       p_evidence: {
         localRequestId: REQUEST_ID,
         providerRequestId: "provider-after-timeout",
-        source: "dropbox_metadata_sandra_request_id",
+        source: "dropbox_provider_read_sandra_request_id",
       },
     });
   });
@@ -281,7 +337,7 @@ describe("typed eSign webhook database adapter", () => {
     await expect(adapter.findRequest({
       orgId: ORG_ID,
       signRequestId: "provider-after-timeout",
-      localRequestId: REQUEST_ID,
+      verifiedLocalRequestId: REQUEST_ID,
     })).resolves.toBeNull();
   });
 
@@ -348,6 +404,74 @@ describe("typed eSign webhook database adapter", () => {
       p_provider_signature_id: "provider-signature-1",
       p_provider_event_at: "2026-08-29T23:00:00.000Z",
     });
+  });
+
+  it.each([
+    "applied",
+    "already_reconciled",
+    "stale_ignored",
+    "superseded",
+  ] as const)("maps provider signer identity reconciliation outcome %s", async (outcome) => {
+    const { client, rpc } = clientWith(() => [{ outcome }]);
+    const adapter = createEsignWebhookDatabaseAdapter(client);
+
+    await expect(adapter.reconcileProviderSigners({
+      orgId: ORG_ID,
+      requestId: REQUEST_ID,
+      claim: CLAIM,
+      providerEventAt: new Date("2026-09-02T06:46:57.000Z"),
+      providerSignatures: [{
+        signatureId: "bb67df41911f964aa66f488bd2878cbd",
+        role: "Seller",
+        name: "eSign QA A PRIMARY_E2E",
+        emailAddress: "jarrad.henry@gmail.com",
+        order: 0,
+        statusCode: "signed",
+        signedAt: 1788331417,
+      }],
+      signedProviderSignatureId: "bb67df41911f964aa66f488bd2878cbd",
+    })).resolves.toBe(outcome);
+    expect(rpc).toHaveBeenCalledWith(
+      "reconcile_esign_webhook_provider_signers",
+      {
+        p_org_id: ORG_ID,
+        p_request_id: REQUEST_ID,
+        p_receipt_id: RECEIPT_ID,
+        p_lease_id: LEASE_ID,
+        p_provider_event_at: "2026-09-02T06:46:57.000Z",
+        p_provider_signatures: [{
+          signatureId: "bb67df41911f964aa66f488bd2878cbd",
+          role: "Seller",
+          name: "eSign QA A PRIMARY_E2E",
+          emailAddress: "jarrad.henry@gmail.com",
+          order: 0,
+          statusCode: "signed",
+          signedAt: 1788331417,
+        }],
+        p_signed_provider_signature_id: "bb67df41911f964aa66f488bd2878cbd",
+      },
+    );
+  });
+
+  it("keeps webhook processing retryable before the provider-signer reconciliation migration", async () => {
+    const rpc = vi.fn(async (name: string) => {
+      if (name === "reconcile_esign_webhook_provider_signers") {
+        return { data: null, error: { code: "PGRST202" } };
+      }
+      return { data: null, error: null };
+    });
+    const adapter = createEsignWebhookDatabaseAdapter({
+      rpc: rpc as EsignWebhookRpcClient["rpc"],
+    });
+
+    await expect(adapter.reconcileProviderSigners({
+      orgId: ORG_ID,
+      requestId: REQUEST_ID,
+      claim: CLAIM,
+      providerEventAt: new Date("2026-09-02T06:46:57.000Z"),
+      providerSignatures: [],
+      signedProviderSignatureId: "signature-1",
+    })).resolves.toBe("unavailable");
   });
 
   it("allows status convergence with a blank historical title via the presentation fallback payload", async () => {

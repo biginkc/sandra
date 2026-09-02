@@ -9,6 +9,7 @@ import {
   SubMergeField,
   TemplateApi,
   type SignatureRequestSendWithTemplateRequest,
+  type SignatureRequestUpdateRequest,
 } from "@dropbox/sign";
 
 import { ProviderError } from "@/lib/errors/classes";
@@ -279,6 +280,48 @@ export function createDropboxSignProvider(input: {
       }
     },
 
+    async updateSignerEmail(request) {
+      const body: SignatureRequestUpdateRequest = {
+        signatureId: request.signatureId,
+        emailAddress: request.emailAddress,
+        name: request.name,
+      };
+      try {
+        const response = await abortableSignatureApi(
+          input.apiKey,
+          request.signal,
+        ).signatureRequestUpdate(request.signatureRequestId, body);
+        const updated = (response.body.signatureRequest.signatures ?? []).find(
+          (signature) =>
+            signature.signerRole === request.role &&
+            signature.signerName === request.name &&
+            signature.signerEmailAddress === request.emailAddress &&
+            (signature.order ?? request.order) === request.order,
+        );
+        if (
+          !updated?.signatureId ||
+          !updated.signerRole ||
+          !updated.signerName ||
+          !updated.signerEmailAddress
+        ) {
+          throw new ProviderError(
+            "Dropbox Sign did not return the updated signer identity.",
+            "dropbox_sign",
+            { providerCode: "updated_signature_missing" },
+          );
+        }
+        return {
+          signatureId: updated.signatureId,
+          role: updated.signerRole,
+          name: updated.signerName,
+          emailAddress: updated.signerEmailAddress,
+          order: updated.order ?? request.order,
+        };
+      } catch (error) {
+        throw normalizeDropboxSignError(error);
+      }
+    },
+
     async findSignatureRequestIdsByLocalRequestId(localRequestId, testMode, signal) {
       try {
         const response = await abortableSignatureApi(
@@ -303,6 +346,26 @@ export function createDropboxSignProvider(input: {
             (listInfo.numPages ?? 1) === 1 &&
             (listInfo.numResults ?? requests.length) === requests.length,
           providerRequestIds,
+        };
+      } catch (error) {
+        throw normalizeDropboxSignError(error);
+      }
+    },
+
+    async getSignatureRequestMetadata(signatureRequestId, signal) {
+      try {
+        const response = await abortableSignatureApi(
+          input.apiKey,
+          signal,
+        ).signatureRequestGet(signatureRequestId);
+        const request = response.body.signatureRequest;
+        return {
+          signatureRequestId: request.signatureRequestId ?? "",
+          localRequestId:
+            typeof request.metadata?.sandra_request_id === "string"
+              ? request.metadata.sandra_request_id
+              : null,
+          testMode: typeof request.testMode === "boolean" ? request.testMode : null,
         };
       } catch (error) {
         throw normalizeDropboxSignError(error);

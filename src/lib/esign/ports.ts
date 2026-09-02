@@ -1,4 +1,5 @@
 import type { DropboxSignReplayData } from "./dropbox-callback";
+import type { ProviderSignature } from "./contracts";
 import type { SignedPdfArtifact } from "./signed-pdf";
 import type { EsignStatus, EsignStatusDecision } from "./status";
 
@@ -42,7 +43,7 @@ export interface EsignWebhookPersistence {
   findRequest(input: {
     orgId: string;
     signRequestId: string;
-    localRequestId: string | null;
+    verifiedLocalRequestId: string | null;
   }): Promise<{
     id: string;
     orgId: string;
@@ -61,6 +62,13 @@ export interface EsignWebhookPersistence {
     providerEventAt: Date;
     templateTitle: string;
   }): Promise<ApplyStatusDecisionResult>;
+  applyEmailBounceDecision(input: {
+    orgId: string;
+    requestId: string;
+    claim: ActiveReceiptClaim;
+    decision: EsignStatusDecision;
+    providerEventAt: Date;
+  }): Promise<ApplyStatusDecisionResult | null>;
   reconcileReminderCallback(input: {
     orgId: string;
     requestId: string;
@@ -69,6 +77,20 @@ export interface EsignWebhookPersistence {
     providerEventAt: Date;
   }): Promise<
     "applied" | "already_reconciled" | "stale_ignored" | "superseded"
+  >;
+  reconcileProviderSigners(input: {
+    orgId: string;
+    requestId: string;
+    claim: ActiveReceiptClaim;
+    providerEventAt: Date;
+    providerSignatures: readonly ProviderSignature[];
+    signedProviderSignatureId: string | null;
+  }): Promise<
+    | "applied"
+    | "already_reconciled"
+    | "stale_ignored"
+    | "superseded"
+    | "unavailable"
   >;
   markReceiptProcessed(claim: ActiveReceiptClaim): Promise<void>;
   markReceiptIgnored(
@@ -87,6 +109,15 @@ export interface DropboxSignedPdfProvider {
     callbackConsumerId: string;
     signRequestId: string;
   }): Promise<Buffer>;
+}
+
+export interface DropboxSignatureRequestMetadataProvider {
+  confirmProviderLocalRequestId(input: {
+    orgId: string;
+    callbackConsumerId: string;
+    signRequestId: string;
+    localRequestId: string;
+  }): Promise<"matched" | "mismatch">;
 }
 
 export interface SignedPdfArtifactPersistence {
@@ -117,6 +148,7 @@ export type EsignWebhookDependencies = {
   secretResolver: EsignCallbackSecretResolver;
   authenticator: DropboxSignEventAuthenticator;
   persistence: EsignWebhookPersistence;
+  metadataProvider: DropboxSignatureRequestMetadataProvider;
   pdfProvider: DropboxSignedPdfProvider;
   artifactPersistence: SignedPdfArtifactPersistence;
   signedPdfMaxBytes?: number;

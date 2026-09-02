@@ -27,6 +27,18 @@ const sellerEmailAuthoritySql = readFileSync(
   "supabase/migrations/20260902010000_esign_dialog_seller_email_authority.sql",
   "utf8",
 );
+const emailBouncedDeliveryStateSql = readFileSync(
+  "supabase/migrations/20260902110000_esign_email_bounced_delivery_state.sql",
+  "utf8",
+);
+const emailBounceRecoverySql = readFileSync(
+  "supabase/migrations/20260902111000_esign_email_bounce_recovery.sql",
+  "utf8",
+);
+const providerTruthfulLifecycleSql = readFileSync(
+  "supabase/migrations/20260902112000_esign_provider_truthful_lifecycle.sql",
+  "utf8",
+);
 const sourceUrl = process.env.TEST_SUPABASE_DB_URL;
 const databaseName = `sandra_esign_race_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 let admin: Client;
@@ -165,6 +177,12 @@ beforeAll(async () => {
   await setup.query(sellerEmailAuthoritySql);
   await setup.query(sendUnknownResolutionSql);
   await setup.query(sendUnknownResolutionSql);
+  await setup.query(emailBouncedDeliveryStateSql);
+  await setup.query(emailBouncedDeliveryStateSql);
+  await setup.query(emailBounceRecoverySql);
+  await setup.query(emailBounceRecoverySql);
+  await setup.query(providerTruthfulLifecycleSql);
+  await setup.query(providerTruthfulLifecycleSql);
 }, 60_000);
 
 afterAll(async () => {
@@ -180,6 +198,881 @@ afterAll(async () => {
 });
 
 describe("eSign foundation production lease contention", () => {
+  it("turns a Dropbox Sign email bounce into same-request signer correction", async () => {
+    const orgId = crypto.randomUUID();
+    const userId = crypto.randomUUID();
+    const contactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const sourceId = crypto.randomUUID();
+    const templateId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    const signerId = crypto.randomUUID();
+    const consumerId = crypto.randomUUID();
+    const providerRequestId = `provider-request-${requestId}`;
+    const oldSignatureId = `signature-old-${signerId}`;
+    const newSignatureId = `signature-new-${signerId}`;
+    const leaseId = crypto.randomUUID();
+    const claimToken = crypto.randomUUID();
+    const bounceAt = "2026-09-02T06:00:00.000Z";
+
+    await setServiceRole(setup);
+    await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into public.organizations values ($1)", [orgId]);
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
+      [userId, orgId],
+    );
+    await setup.query(
+      "insert into public.contacts (id,org_id,email) values ($1,$2,'old-contact@example.com')",
+      [contactId, orgId],
+    );
+    await setup.query(
+      "insert into public.properties (id,org_id,homeowner_contact_id) values ($1,$2,$3)",
+      [propertyId, orgId, contactId],
+    );
+    await setup.query(
+      `insert into public.webhook_consumers (
+         id,org_id,name,secret_hash,consumer_type
+       ) values ($1,$2,$3,repeat('a',64),'esign_provider')`,
+      [consumerId, orgId, `esign-${consumerId}`],
+    );
+    await setup.query(
+      `insert into public.org_esign_integrations (
+         org_id,api_key_encrypted,api_key_last_four,client_id,
+         callback_consumer_id,callback_verified_at,sending_enabled,
+         provider_account_id,
+         connected_by,updated_by
+       ) values ($1,'\\x00','1234','client-1',$2,now(),true,'account-1',$3,$3)`,
+      [orgId, consumerId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_template_staging_sources (
+         id,org_id,storage_path,source_filename,source_size_bytes,
+         content_type,source_sha256,created_by
+       ) values ($1,$2,$3,'contract.pdf',1024,'application/pdf',repeat('b',64),$4)`,
+      [sourceId, orgId, `${orgId}/${sourceId}.pdf`, userId],
+    );
+    await setup.query(
+      `insert into public.esign_templates (
+         id,org_id,name,document_type,seller_role,signer_roles,
+         merge_field_names,sign_template_id,staging_source_id,
+         source_filename,source_size_bytes,source_content_type,source_sha256,
+         staging_path,provider_account_id,finalized_at,lifecycle_state,
+         created_by,updated_by
+       ) values (
+         $1,$2,'Purchase agreement','purchase_agreement','Seller',
+         '[{"name":"Seller","order":0}]'::jsonb,
+         array['seller_name','property_address','offer_price','closing_date','earnest_money'],
+         $6,$3,'contract.pdf',1024,'application/pdf',
+         repeat('b',64),$4,'account-1',now(),'finalized',$5,$5
+       )`,
+      [
+        templateId,
+        orgId,
+        sourceId,
+        `${orgId}/${sourceId}.pdf`,
+        userId,
+        `provider-template-${templateId}`,
+      ],
+    );
+    await setup.query(
+      `insert into public.esign_requests (
+         id,org_id,property_id,template_id,signer_snapshot,
+         merge_value_snapshot,status,delivery_state,sign_request_id,
+         details_url,send_intent_id,payload_hash,sent_at,created_by,
+         claimed_homeowner_contact_id
+       ) values (
+         $1,$2,$3,$4,
+         '[{"role":"Seller","order":0,"name":"Seller Owner","emailAddress":"bad@example.invalid"}]'::jsonb,
+         '{"seller_name":"Seller Owner","property_address":"123 Main St","offer_price":"$1","closing_date":"2026-09-30","earnest_money":"$1"}'::jsonb,
+         'awaiting','sent',$5,'https://app.hellosign.com/home/manage?guid=provider-request',
+         $6,repeat('c',64),now(),$7,$8
+       )`,
+      [
+        requestId,
+        orgId,
+        propertyId,
+        templateId,
+        providerRequestId,
+        crypto.randomUUID(),
+        userId,
+        contactId,
+      ],
+    );
+    await setup.query(
+      `insert into public.esign_request_signers (
+         id,org_id,request_id,role_name,signer_order,signer_name,
+         signer_email,provider_signature_id,status
+       ) values ($1,$2,$3,'Seller',0,'Seller Owner',$4,$5,'awaiting')`,
+      [signerId, orgId, requestId, "bad@example.invalid", oldSignatureId],
+    );
+
+    const receipt = await setup.query<{ receipt_id: string }>(
+      `select receipt_id
+       from public.claim_esign_webhook_receipt(
+         $1,$2,repeat('d',64),repeat('e',64),repeat('f',64),
+         'signature_request_email_bounce',$3,$4,$5,
+         jsonb_build_object(
+           'event_time', extract(epoch from $5::timestamptz)::bigint::text,
+           'event_type', 'signature_request_email_bounce',
+           'sign_request_id', $3::text,
+           'related_signature_id', $4::text,
+           'reported_for_app_id', 'client-1'
+         ),
+         now(),$6,300
+       )`,
+      [orgId, consumerId, providerRequestId, oldSignatureId, bounceAt, leaseId],
+    );
+
+    const bounced = await setup.query<{ outcome: string; status: string }>(
+      `select * from public.apply_esign_email_bounce_delivery_decision(
+         $1,$2,$3,$4,'awaiting',$5
+       )`,
+      [orgId, requestId, receipt.rows[0].receipt_id, leaseId, bounceAt],
+    );
+    expect(bounced.rows[0]).toEqual({ outcome: "applied", status: "error" });
+
+    const bouncedRequest = await setup.query<{
+      status: string;
+      delivery_state: string;
+      sign_request_id: string;
+      error_message: string;
+    }>(
+      `select status,delivery_state,sign_request_id,error_message
+       from public.esign_requests where id=$1`,
+      [requestId],
+    );
+    expect(bouncedRequest.rows[0]).toEqual({
+      status: "error",
+      delivery_state: "email_bounced",
+      sign_request_id: providerRequestId,
+      error_message: "PROVIDER_EMAIL_BOUNCE",
+    });
+
+    const claim = await setup.query<{
+      outcome: string;
+      provider_request_id: string;
+      provider_signature_id: string;
+    }>(
+      `select outcome,provider_request_id,provider_signature_id
+       from public.claim_esign_bounced_signer_email_update(
+         $1,$2,$3,$4,'seller-fixed@example.com',$5
+       )`,
+      [orgId, requestId, signerId, userId, claimToken],
+    );
+    expect(claim.rows[0]).toEqual({
+      outcome: "claimed",
+      provider_request_id: providerRequestId,
+      provider_signature_id: oldSignatureId,
+    });
+
+    const providerSignatures = JSON.stringify([{
+      signatureId: newSignatureId,
+      role: "Seller",
+      name: "Seller Owner",
+      emailAddress: "seller-fixed@example.com",
+      order: 0,
+      statusCode: "signed",
+      signedAt: 1788331417,
+    }]);
+    const webhookBeforeFinalizerAt = "2026-09-02T06:00:30.000Z";
+    const webhookBeforeFinalizerLeaseId = crypto.randomUUID();
+    const webhookBeforeFinalizerReceipt = await setup.query<{
+      receipt_id: string;
+      lease_id: string;
+    }>(
+      `select receipt_id,lease_id
+       from public.claim_esign_webhook_receipt(
+         $1,$2,repeat('1',64),repeat('2',64),repeat('3',64),
+         'signature_request_viewed',$3,$4,$5,
+         jsonb_build_object(
+           'event_time', extract(epoch from $5::timestamptz)::bigint::text,
+           'event_type', 'signature_request_viewed',
+           'sign_request_id', $3::text,
+           'related_signature_id', $4::text,
+           'reported_for_app_id', 'client-1'
+         ),
+         now(),$6,300
+       )`,
+      [
+        orgId,
+        consumerId,
+        providerRequestId,
+        newSignatureId,
+        webhookBeforeFinalizerAt,
+        webhookBeforeFinalizerLeaseId,
+      ],
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string }>(
+          `select outcome from public.reconcile_esign_webhook_provider_signers(
+             $1,$2,$3,$4,$5,$6::jsonb,$7
+           )`,
+          [
+            orgId,
+            requestId,
+            webhookBeforeFinalizerReceipt.rows[0].receipt_id,
+            webhookBeforeFinalizerReceipt.rows[0].lease_id,
+            webhookBeforeFinalizerAt,
+            providerSignatures,
+            null,
+          ],
+        )
+      ).rows[0].outcome,
+    ).toBe("applied");
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [
+        webhookBeforeFinalizerReceipt.rows[0].receipt_id,
+        webhookBeforeFinalizerReceipt.rows[0].lease_id,
+      ],
+    );
+    expect(
+      (
+        await setup.query<{
+          signer_email: string;
+          provider_signature_id: string;
+          email_update_claim_token: string | null;
+          email_update_claim_email: string | null;
+          contact_email: string | null;
+        }>(
+          `select signer.signer_email,
+             signer.provider_signature_id,
+             signer.email_update_claim_token::text,
+             signer.email_update_claim_email,
+             contact.email as contact_email
+           from public.esign_request_signers signer
+           join public.contacts contact on contact.id=$4 and contact.org_id=$1
+           where signer.org_id=$1 and signer.request_id=$2 and signer.id=$3`,
+          [orgId, requestId, signerId, contactId],
+        )
+      ).rows[0],
+    ).toEqual({
+      signer_email: "seller-fixed@example.com",
+      provider_signature_id: newSignatureId,
+      email_update_claim_token: claimToken,
+      email_update_claim_email: "seller-fixed@example.com",
+      contact_email: "old-contact@example.com",
+    });
+
+    const finalized = await setup.query<{ result: string }>(
+      `select public.finalize_esign_bounced_signer_email_update(
+         $1,$2,$3,$4,$5
+       ) as result`,
+      [orgId, requestId, signerId, claimToken, newSignatureId],
+    );
+    expect(finalized.rows[0].result).toBe("applied");
+    const duplicateFinalize = await setup.query<{ result: string }>(
+      `select public.finalize_esign_bounced_signer_email_update(
+         $1,$2,$3,$4,$5
+       ) as result`,
+      [orgId, requestId, signerId, claimToken, newSignatureId],
+    );
+    expect(duplicateFinalize.rows[0].result).toBe("lease_lost");
+
+    const finalRows = await setup.query<{
+      request_count: string;
+      request_status: string;
+      delivery_state: string;
+      sign_request_id: string;
+      signer_email: string;
+      provider_signature_id: string;
+      signer_status: string;
+      contact_email: string;
+    }>(
+      `select
+         (select count(*)::text from public.esign_requests where org_id=$1) as request_count,
+         request.status::text as request_status,
+         request.delivery_state::text as delivery_state,
+         request.sign_request_id,
+         signer.signer_email,
+         signer.provider_signature_id,
+         signer.status as signer_status,
+         contact.email as contact_email
+       from public.esign_requests request
+       join public.esign_request_signers signer
+         on signer.request_id=request.id and signer.org_id=request.org_id
+       join public.contacts contact on contact.id=$4 and contact.org_id=$1
+       where request.id=$2 and signer.id=$3`,
+      [orgId, requestId, signerId, contactId],
+    );
+    expect(finalRows.rows[0]).toEqual({
+      request_count: "1",
+      request_status: "awaiting",
+      delivery_state: "sent",
+      sign_request_id: providerRequestId,
+      signer_email: "seller-fixed@example.com",
+      provider_signature_id: newSignatureId,
+      signer_status: "awaiting",
+      contact_email: "seller-fixed@example.com",
+    });
+
+    const events = await setup.query<{ event_type: string; payload: unknown }>(
+      `select event_type,payload
+       from public.lead_events
+       where org_id=$1 and property_id=$2
+       order by event_type`,
+      [orgId, propertyId],
+    );
+    expect(events.rows.map((event) => event.event_type)).toEqual([
+      "esign_email_bounced",
+      "esign_email_bounced_resend",
+    ]);
+    expect(JSON.stringify(events.rows.map((event) => event.payload))).not.toMatch(
+      /bad@example|seller-fixed@example/i,
+    );
+
+    const claimLifecycle = async (
+      eventType: string,
+      eventAt: string,
+      relatedSignatureId: string | null,
+    ) => {
+      const lease = crypto.randomUUID();
+      const receipt = await setup.query<{ receipt_id: string; lease_id: string }>(
+        `select receipt_id,lease_id
+         from public.claim_esign_webhook_receipt(
+           $1,$2,repeat('d',64),encode(sha256(($3 || coalesce($4,''))::bytea),'hex'),
+           repeat('f',64),$3,$5,$4,$6,
+           jsonb_build_object(
+             'event_time', extract(epoch from $6::timestamptz)::bigint::text,
+             'event_type', $3::text,
+             'sign_request_id', $5::text,
+             'related_signature_id', $4::text,
+             'reported_for_app_id', 'client-1'
+           ),
+           now(),$7,300
+         )`,
+        [
+          orgId,
+          consumerId,
+          eventType,
+          relatedSignatureId,
+          providerRequestId,
+          eventAt,
+          lease,
+        ],
+      );
+      return receipt.rows[0];
+    };
+
+    const viewedAt = "2026-09-02T06:01:00.000Z";
+    const viewedReceipt = await claimLifecycle(
+      "signature_request_viewed",
+      viewedAt,
+      newSignatureId,
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string }>(
+          `select outcome from public.reconcile_esign_webhook_provider_signers(
+             $1,$2,$3,$4,$5,$6::jsonb,$7
+           )`,
+          [
+            orgId,
+            requestId,
+            viewedReceipt.receipt_id,
+            viewedReceipt.lease_id,
+            viewedAt,
+            providerSignatures,
+            null,
+          ],
+        )
+      ).rows[0].outcome,
+    ).toMatch(/applied|already_reconciled/);
+    expect(
+      (
+        await setup.query<{ outcome: string; status: string }>(
+          `select * from public.apply_esign_webhook_status_decision(
+             $1,$2,$3,$4,'awaiting','viewed',$5,'esign_viewed',$6::jsonb
+           )`,
+          [
+            orgId,
+            requestId,
+            viewedReceipt.receipt_id,
+            viewedReceipt.lease_id,
+            viewedAt,
+            JSON.stringify({ template_title: "Purchase agreement" }),
+          ],
+        )
+      ).rows[0],
+    ).toEqual({ outcome: "applied", status: "viewed" });
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [viewedReceipt.receipt_id, viewedReceipt.lease_id],
+    );
+
+    const signedAt = "2026-09-02T06:02:00.000Z";
+    const signedReceipt = await claimLifecycle(
+      "signature_request_signed",
+      signedAt,
+      newSignatureId,
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string }>(
+          `select outcome from public.reconcile_esign_webhook_provider_signers(
+             $1,$2,$3,$4,$5,$6::jsonb,$7
+           )`,
+          [
+            orgId,
+            requestId,
+            signedReceipt.receipt_id,
+            signedReceipt.lease_id,
+            signedAt,
+            providerSignatures,
+            newSignatureId,
+          ],
+        )
+      ).rows[0].outcome,
+    ).toMatch(/applied|already_reconciled/);
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [signedReceipt.receipt_id, signedReceipt.lease_id],
+    );
+
+    const allSignedAt = "2026-09-02T06:03:00.000Z";
+    const allSignedReceipt = await claimLifecycle(
+      "signature_request_all_signed",
+      allSignedAt,
+      null,
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string }>(
+          `select outcome from public.reconcile_esign_webhook_provider_signers(
+             $1,$2,$3,$4,$5,$6::jsonb,$7
+           )`,
+          [
+            orgId,
+            requestId,
+            allSignedReceipt.receipt_id,
+            allSignedReceipt.lease_id,
+            allSignedAt,
+            providerSignatures,
+            null,
+          ],
+        )
+      ).rows[0].outcome,
+    ).toMatch(/applied|already_reconciled/);
+    expect(
+      (
+        await setup.query<{ outcome: string; status: string }>(
+          `select * from public.apply_esign_webhook_status_decision(
+             $1,$2,$3,$4,'viewed','signed',$5,'esign_signed',$6::jsonb
+           )`,
+          [
+            orgId,
+            requestId,
+            allSignedReceipt.receipt_id,
+            allSignedReceipt.lease_id,
+            allSignedAt,
+            JSON.stringify({ template_title: "Purchase agreement" }),
+          ],
+        )
+      ).rows[0],
+    ).toEqual({ outcome: "applied", status: "signed" });
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [allSignedReceipt.receipt_id, allSignedReceipt.lease_id],
+    );
+
+    const downloadableAt = "2026-09-02T06:04:00.000Z";
+    const downloadableReceipt = await claimLifecycle(
+      "signature_request_downloadable",
+      downloadableAt,
+      null,
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string; status: string }>(
+          `select * from public.apply_esign_webhook_status_decision(
+             $1,$2,$3,$4,'signed','signed',$5,'esign_signed',$6::jsonb
+           )`,
+          [
+            orgId,
+            requestId,
+            downloadableReceipt.receipt_id,
+            downloadableReceipt.lease_id,
+            downloadableAt,
+            JSON.stringify({ template_title: "Purchase agreement" }),
+          ],
+        )
+      ).rows[0],
+    ).toEqual({ outcome: "terminal_ignored", status: "signed" });
+    const storagePath = `${orgId}/${propertyId}/esign/${requestId}/signed.pdf`;
+    await setup.query(
+      `insert into storage.objects (bucket_id, name, metadata)
+       values ('lead-files',$1,'{"mimetype":"application/pdf","size":1024}')`,
+      [storagePath],
+    );
+    const leadFileId = crypto.randomUUID();
+    expect(
+      (
+        await setup.query<{ outcome: string; lead_file_id: string }>(
+          `select * from public.reconcile_esign_completed_signed_artifact(
+             $1,$2,$3,'lead-files',$4,'application/pdf',1024,
+             'esign_signed_pdf_ready',$5::jsonb
+           )`,
+          [
+            orgId,
+            requestId,
+            leadFileId,
+            storagePath,
+            JSON.stringify({ template_title: "Purchase agreement" }),
+          ],
+        )
+      ).rows[0],
+    ).toEqual({
+      outcome: "applied",
+      lead_file_id: leadFileId,
+    });
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [downloadableReceipt.receipt_id, downloadableReceipt.lease_id],
+    );
+
+    expect(
+      (
+        await setup.query<{
+          request_status: string;
+          delivery_state: string;
+          signed_pdf_path: string | null;
+          signer_status: string;
+          contact_email: string;
+          lead_files_count: string;
+        }>(
+          `select request.status::text as request_status,
+             request.delivery_state::text as delivery_state,
+             request.signed_pdf_path,
+             signer.status as signer_status,
+             contact.email as contact_email,
+             (select count(*)::text from public.lead_files
+              where org_id=$1 and source_request_id=$2) as lead_files_count
+           from public.esign_requests request
+           join public.esign_request_signers signer
+             on signer.org_id=request.org_id and signer.request_id=request.id
+           join public.contacts contact on contact.id=$3 and contact.org_id=$1
+           where request.id=$2`,
+          [orgId, requestId, contactId],
+        )
+      ).rows[0],
+    ).toEqual({
+      request_status: "signed",
+      delivery_state: "sent",
+      signed_pdf_path: storagePath,
+      signer_status: "signed",
+      contact_email: "seller-fixed@example.com",
+      lead_files_count: "1",
+    });
+  });
+
+  it("repairs the observed provider-updated signed request without stale signature-id failures", async () => {
+    const orgId = crypto.randomUUID();
+    const userId = crypto.randomUUID();
+    const contactId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const sourceId = crypto.randomUUID();
+    const templateId = crypto.randomUUID();
+    const requestId = "87e9726a-c09a-4f9b-aa20-eccae6d3b60e";
+    const consumerId = crypto.randomUUID();
+    const providerRequestId = "47bde6019bf33ab33dc0cf8f862fe37a1476e42a";
+    const oldSignatureId = "3d10fd2cc296c276bae2ed4e28ca7195";
+    const newSignatureId = "bb67df41911f964aa66f488bd2878cbd";
+    const eventAt = "2026-09-02T06:43:37.000Z";
+    const providerSignatures = JSON.stringify([{
+      signatureId: newSignatureId,
+      role: "Seller",
+      name: "eSign QA A PRIMARY_E2E",
+      emailAddress: "jarrad.henry@gmail.com",
+      order: 0,
+      statusCode: "signed",
+      signedAt: 1788331417,
+    }]);
+
+    await setServiceRole(setup);
+    await setup.query("insert into auth.users values ($1)", [userId]);
+    await setup.query("insert into public.organizations values ($1)", [orgId]);
+    await setup.query(
+      "insert into public.memberships (user_id,org_id,role) values ($1,$2,'owner')",
+      [userId, orgId],
+    );
+    await setup.query(
+      "insert into public.contacts (id,org_id,email) values ($1,$2,'e2e-test@bmhgroupkc.com')",
+      [contactId, orgId],
+    );
+    await setup.query(
+      "insert into public.properties (id,org_id,homeowner_contact_id) values ($1,$2,$3)",
+      [propertyId, orgId, contactId],
+    );
+    await setup.query(
+      `insert into public.webhook_consumers (
+         id,org_id,name,secret_hash,consumer_type
+       ) values ($1,$2,$3,repeat('a',64),'esign_provider')`,
+      [consumerId, orgId, `esign-${consumerId}`],
+    );
+    await setup.query(
+      `insert into public.org_esign_integrations (
+         org_id,api_key_encrypted,api_key_last_four,client_id,
+         callback_consumer_id,callback_verified_at,sending_enabled,
+         provider_account_id,
+         connected_by,updated_by
+       ) values ($1,'\\x00','1234','client-1',$2,now(),true,'account-1',$3,$3)`,
+      [orgId, consumerId, userId],
+    );
+    await setup.query(
+      `insert into public.esign_template_staging_sources (
+         id,org_id,storage_path,source_filename,source_size_bytes,
+         content_type,source_sha256,created_by
+       ) values ($1,$2,$3,'contract.pdf',1024,'application/pdf',repeat('b',64),$4)`,
+      [sourceId, orgId, `${orgId}/${sourceId}.pdf`, userId],
+    );
+    await setup.query(
+      `insert into public.esign_templates (
+         id,org_id,name,document_type,seller_role,signer_roles,
+         merge_field_names,sign_template_id,staging_source_id,
+         source_filename,source_size_bytes,source_content_type,source_sha256,
+         staging_path,provider_account_id,finalized_at,lifecycle_state,
+         created_by,updated_by
+       ) values (
+         $1,$2,'Purchase agreement','purchase_agreement','Seller',
+         '[{"name":"Seller","order":0}]'::jsonb,
+         array['seller_name','property_address','offer_price','closing_date','earnest_money'],
+         'provider-template-1',$3,'contract.pdf',1024,'application/pdf',
+         repeat('b',64),$4,'account-1',now(),'finalized',$5,$5
+       )`,
+      [templateId, orgId, sourceId, `${orgId}/${sourceId}.pdf`, userId],
+    );
+    await setup.query(
+      `insert into public.esign_requests (
+         id,org_id,property_id,template_id,signer_snapshot,
+         merge_value_snapshot,status,delivery_state,sign_request_id,
+         details_url,send_intent_id,payload_hash,sent_at,completed_at,
+         error_message,created_by,claimed_homeowner_contact_id
+       ) values (
+         $1,$2,$3,$4,
+         '[{"role":"Seller","order":0,"name":"eSign QA A PRIMARY_E2E","emailAddress":"e2e-test@bmhgroupkc.com"}]'::jsonb,
+         '{"seller_name":"eSign QA A PRIMARY_E2E","property_address":"123 Main St","offer_price":"$1","closing_date":"2026-09-30","earnest_money":"$1"}'::jsonb,
+         'error','sent',$5,'https://app.hellosign.com/home/manage?guid=provider-request',
+         $6,repeat('c',64),now(),'2026-09-02T05:55:30.000Z',
+         'PROVIDER_ERROR',$7,$8
+       )`,
+      [
+        requestId,
+        orgId,
+        propertyId,
+        templateId,
+        providerRequestId,
+        crypto.randomUUID(),
+        userId,
+        contactId,
+      ],
+    );
+    await setup.query(
+      `insert into public.esign_request_signers (
+         org_id,request_id,role_name,signer_order,signer_name,
+         signer_email,provider_signature_id,status
+       ) values ($1,$2,'Seller',0,'eSign QA A PRIMARY_E2E',$3,$4,'error')`,
+      [orgId, requestId, "e2e-test@bmhgroupkc.com", oldSignatureId],
+    );
+
+    const claim = async (
+      eventType: string,
+      relatedSignatureId: string | null,
+      leaseId = crypto.randomUUID(),
+    ) => {
+      const claimed = await setup.query<{ receipt_id: string; lease_id: string }>(
+        `select receipt_id,lease_id
+         from public.claim_esign_webhook_receipt(
+           $1,$2,repeat('d',64),encode(sha256(($3 || coalesce($4,''))::bytea),'hex'),
+           repeat('f',64),$3,$5,$4,$6,
+           jsonb_build_object(
+             'event_time', extract(epoch from $6::timestamptz)::bigint::text,
+             'event_type', $3::text,
+             'sign_request_id', $5::text,
+             'related_signature_id', $4::text,
+             'reported_for_app_id', 'client-1'
+           ),
+           now(),$7,300
+         )`,
+        [
+          orgId,
+          consumerId,
+          eventType,
+          relatedSignatureId,
+          providerRequestId,
+          eventAt,
+          leaseId,
+        ],
+      );
+      return claimed.rows[0];
+    };
+
+    const signerReceipt = await claim(
+      "signature_request_signed",
+      newSignatureId,
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string }>(
+          `select outcome from public.reconcile_esign_webhook_provider_signers(
+             $1,$2,$3,$4,$5,$6::jsonb,$7
+           )`,
+          [
+            orgId,
+            requestId,
+            signerReceipt.receipt_id,
+            signerReceipt.lease_id,
+            eventAt,
+            providerSignatures,
+            newSignatureId,
+          ],
+        )
+      ).rows[0].outcome,
+    ).toBe("applied");
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [signerReceipt.receipt_id, signerReceipt.lease_id],
+    );
+
+    const allSignedReceipt = await claim(
+      "signature_request_all_signed",
+      null,
+    );
+    expect(
+      (
+        await setup.query<{ outcome: string; status: string }>(
+          `select * from public.apply_esign_webhook_status_decision(
+             $1,$2,$3,$4,'error','signed',$5,'esign_signed',$6::jsonb
+           )`,
+          [
+            orgId,
+            requestId,
+            allSignedReceipt.receipt_id,
+            allSignedReceipt.lease_id,
+            eventAt,
+            JSON.stringify({ template_title: "Purchase agreement" }),
+          ],
+        )
+      ).rows[0],
+    ).toEqual({ outcome: "applied", status: "signed" });
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [allSignedReceipt.receipt_id, allSignedReceipt.lease_id],
+    );
+
+    const downloadableReceipt = await claim(
+      "signature_request_downloadable",
+      null,
+    );
+    const storagePath = `${orgId}/${propertyId}/esign/${requestId}/signed.pdf`;
+    await setup.query(
+      "select public.complete_esign_webhook_receipt($1,$2,'processed',null)",
+      [downloadableReceipt.receipt_id, downloadableReceipt.lease_id],
+    );
+    expect(
+      (
+        await setup.query<{ signed_pdf_path: string | null; lead_files_count: string }>(
+          `select request.signed_pdf_path,
+             (select count(*)::text from public.lead_files where source_request_id=$1)
+               as lead_files_count
+           from public.esign_requests request where request.id=$1`,
+          [requestId],
+        )
+      ).rows[0],
+    ).toEqual({
+      signed_pdf_path: null,
+      lead_files_count: "0",
+    });
+
+    await setup.query(
+      `insert into storage.objects (bucket_id, name, metadata)
+       values ('lead-files',$1,'{"mimetype":"application/pdf","size":1024}')`,
+      [storagePath],
+    );
+    const repairedLeadFileId = crypto.randomUUID();
+    expect(
+      (
+        await setup.query<{ outcome: string; lead_file_id: string }>(
+          `select * from public.reconcile_esign_completed_signed_artifact(
+             $1,$2,$3,'lead-files',$4,'application/pdf',1024,
+             'esign_signed_pdf_ready',$5::jsonb
+           )`,
+          [
+            orgId,
+            requestId,
+            repairedLeadFileId,
+            storagePath,
+            JSON.stringify({ template_title: "Purchase agreement" }),
+          ],
+        )
+      ).rows[0],
+    ).toEqual({
+      outcome: "applied",
+      lead_file_id: repairedLeadFileId,
+    });
+    expect(
+      (
+        await setup.query<{ outcome: string; lead_file_id: string }>(
+          `select * from public.reconcile_esign_completed_signed_artifact(
+             $1,$2,$3,'lead-files',$4,'application/pdf',1024,
+             'esign_signed_pdf_ready',$5::jsonb
+           )`,
+          [
+            orgId,
+            requestId,
+            crypto.randomUUID(),
+            storagePath,
+            JSON.stringify({ template_title: "Purchase agreement" }),
+          ],
+        )
+      ).rows[0],
+    ).toEqual({
+      outcome: "already_linked",
+      lead_file_id: repairedLeadFileId,
+    });
+
+    const repaired = await setup.query<{
+      request_status: string;
+      delivery_state: string;
+      error_message: string | null;
+      signed_pdf_path: string | null;
+      lead_files_count: string;
+      signer_email: string;
+      provider_signature_id: string;
+      signer_status: string;
+      signer_signed: boolean;
+    }>(
+      `select
+         request.status::text as request_status,
+         request.delivery_state::text as delivery_state,
+         request.error_message,
+         request.signed_pdf_path,
+         (select count(*)::text from public.lead_files file
+          where file.org_id=$1 and file.source_request_id=$2) as lead_files_count,
+         signer.signer_email,
+         signer.provider_signature_id,
+         signer.status as signer_status,
+         signer.signed_at is not null as signer_signed
+       from public.esign_requests request
+       join public.esign_request_signers signer
+         on signer.org_id=request.org_id and signer.request_id=request.id
+       where request.org_id=$1 and request.id=$2`,
+      [orgId, requestId],
+    );
+    expect(repaired.rows[0]).toEqual({
+      request_status: "signed",
+      delivery_state: "sent",
+      error_message: null,
+      signed_pdf_path: storagePath,
+      lead_files_count: "1",
+      signer_email: "jarrad.henry@gmail.com",
+      provider_signature_id: newSignatureId,
+      signer_status: "signed",
+      signer_signed: true,
+    });
+  });
+
   it("does not deadlock a contact-first writer while claiming a request", async () => {
     const orgId = crypto.randomUUID();
     const userId = crypto.randomUUID();
@@ -1473,11 +2366,24 @@ describe("eSign foundation production lease contention", () => {
       )`,
       [orgId, automaticRequestId],
     );
+    await expect(
+      setup.query(
+        `select public.attach_esign_request_provider_delivery(
+          $1,$2::uuid,'provider-body-only','webhook',
+          jsonb_build_object(
+            'source','dropbox_metadata_sandra_request_id',
+            'localRequestId',$2::text,
+            'providerRequestId','provider-body-only'
+          )
+        )`,
+        [orgId, metadataRequestId],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
     await setup.query(
       `select public.attach_esign_request_provider_delivery(
         $1,$2::uuid,'provider-after-timeout','webhook',
         jsonb_build_object(
-          'source','dropbox_metadata_sandra_request_id',
+          'source','dropbox_provider_read_sandra_request_id',
           'localRequestId',$2::text,
           'providerRequestId','provider-after-timeout'
         )

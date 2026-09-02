@@ -96,13 +96,64 @@ export async function handleDropboxSignWebhook(input: {
       return acknowledgement();
     }
 
-    const request = await input.dependencies.persistence.findRequest({
+    let request = await input.dependencies.persistence.findRequest({
       orgId: identity.orgId,
       signRequestId: replay.signRequestId,
-      localRequestId: replay.localRequestId,
+      verifiedLocalRequestId: null,
     });
+    if (!request && replay.localRequestId !== null) {
+      const metadataMatch =
+        await input.dependencies.metadataProvider.confirmProviderLocalRequestId({
+          ...identity,
+          signRequestId: replay.signRequestId,
+          localRequestId: replay.localRequestId,
+        });
+      if (metadataMatch === "matched") {
+        request = await input.dependencies.persistence.findRequest({
+          orgId: identity.orgId,
+          signRequestId: replay.signRequestId,
+          verifiedLocalRequestId: replay.localRequestId,
+        });
+      } else {
+        await input.dependencies.persistence.markReceiptIgnored(
+          activeClaim,
+          "PROVIDER_METADATA_MISMATCH",
+        );
+        return acknowledgement();
+      }
+    }
     if (!request || request.orgId !== identity.orgId) {
       throw new SafeWebhookProcessingError("REQUEST_NOT_FOUND", 503);
+    }
+
+    const providerEventAt = providerEventDate(replay);
+
+    const supportsSignerReconciliation =
+      replay.eventType === "signature_request_viewed" ||
+      replay.eventType === "signature_request_signed" ||
+      replay.eventType === "signature_request_all_signed" ||
+      replay.eventType === "signature_request_downloadable" ||
+      replay.eventType === "signature_request_declined" ||
+      replay.eventType === "signature_request_remind";
+    const signerReconciliation =
+      supportsSignerReconciliation &&
+      (replay.providerSignatures.length > 0 ||
+        replay.eventType === "signature_request_signed")
+        ? await input.dependencies.persistence.reconcileProviderSigners({
+            orgId: identity.orgId,
+            requestId: request.id,
+            claim: activeClaim,
+            providerEventAt,
+            providerSignatures: replay.providerSignatures,
+            signedProviderSignatureId: replay.relatedSignatureId,
+          })
+        : null;
+    if (
+      signerReconciliation === "unavailable" &&
+      (request.status === "error" ||
+        replay.providerSignatures.length > 0)
+    ) {
+      throw new SafeWebhookProcessingError("SIGNER_RECONCILE_UNAVAILABLE", 503);
     }
 
     if (replay.eventType === "signature_request_remind") {
@@ -118,13 +169,24 @@ export async function handleDropboxSignWebhook(input: {
         requestId: request.id,
         claim: activeClaim,
         providerSignatureId: replay.relatedSignatureId,
-        providerEventAt: providerEventDate(replay),
+        providerEventAt,
       });
       await input.dependencies.persistence.markReceiptProcessed(activeClaim);
       return acknowledgement();
     }
 
     const normalized = normalizeDropboxSignLifecycleEvent(replay.eventType);
+    if (replay.eventType === "signature_request_signed") {
+      if (signerReconciliation === "unavailable") {
+        await input.dependencies.persistence.markReceiptIgnored(
+          activeClaim,
+          "AUDIT_ONLY_EVENT",
+        );
+        return acknowledgement();
+      }
+      await input.dependencies.persistence.markReceiptProcessed(activeClaim);
+      return acknowledgement();
+    }
     const decision = reduceEsignStatus(request.status, normalized);
     if (normalized.requestedStatus === null && !normalized.artifactReady) {
       await input.dependencies.persistence.markReceiptIgnored(
@@ -136,17 +198,38 @@ export async function handleDropboxSignWebhook(input: {
 
     let authoritativeStatus = request.status;
     if (normalized.requestedStatus !== null) {
-      const transition = await input.dependencies.persistence.applyStatusDecision({
-        orgId: identity.orgId,
-        requestId: request.id,
-        propertyId: request.propertyId,
-        claim: activeClaim,
-        decision,
-        requestedStatus: normalized.requestedStatus,
-        providerEventAt: providerEventDate(replay),
-        templateTitle: request.templateTitle,
-      });
+      const transition = normalized.reason === "email_bounced"
+        ? await input.dependencies.persistence.applyEmailBounceDecision({
+            orgId: identity.orgId,
+            requestId: request.id,
+            claim: activeClaim,
+            decision,
+            providerEventAt,
+          })
+        : await input.dependencies.persistence.applyStatusDecision({
+          orgId: identity.orgId,
+          requestId: request.id,
+          propertyId: request.propertyId,
+          claim: activeClaim,
+          decision,
+          requestedStatus: normalized.requestedStatus,
+          providerEventAt,
+          templateTitle: request.templateTitle,
+        });
+      if (transition === null) {
+        throw new SafeWebhookProcessingError(
+          "EMAIL_BOUNCE_RPC_UNAVAILABLE",
+          503,
+        );
+      }
       authoritativeStatus = transition.status;
+      if (
+        request.status === "error" &&
+        normalized.requestedStatus === "signed" &&
+        transition.status !== "signed"
+      ) {
+        throw new SafeWebhookProcessingError("SIGNED_RECOVERY_UNAVAILABLE", 503);
+      }
     }
 
     if (

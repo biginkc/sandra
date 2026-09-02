@@ -27,6 +27,7 @@ import type {
 import {
   createDefaultLeadEsignActionDependencies,
   createLeadEsignActionCore,
+  type EmailBounceUpdateCandidate,
   type EsignActionProvider,
   type EsignActionRepository,
   type EsignActor,
@@ -128,6 +129,83 @@ export function createLeadEsignRepository(): EsignActionRepository {
       if (error?.code === "55000") return "raced";
       if (error) throw error;
       return "updated";
+    },
+    claimEmailBounceUpdate: async ({
+      orgId,
+      requestId,
+      signerId,
+      actorId,
+      emailAddress,
+    }) => {
+      const claimToken = randomUUID();
+      const { data, error } = await createAdminClient().rpc(
+        "claim_esign_bounced_signer_email_update",
+        {
+          p_org_id: orgId,
+          p_request_id: requestId,
+          p_signer_id: signerId,
+          p_actor_id: actorId,
+          p_email_address: emailAddress,
+          p_claim_token: claimToken,
+        },
+      );
+      if (error) throw error;
+      const row = data?.[0];
+      const fenced = mapProviderMutationClaimOutcome(row?.outcome);
+      if (fenced) return fenced;
+      if (!row || row.outcome === "ineligible")
+        return { outcome: "ineligible" };
+      if (row.outcome !== "claimed")
+        throw new Error("Unexpected bounced signer email claim outcome.");
+      if (
+        !row.provider_request_id ||
+        !row.provider_signature_id ||
+        !row.signer_role ||
+        row.signer_order === null ||
+        !row.signer_name
+      ) {
+        throw new Error("Incomplete bounced signer email claim response.");
+      }
+      const candidate: EmailBounceUpdateCandidate = {
+        claimToken,
+        providerRequestId: row.provider_request_id,
+        signer: {
+          id: signerId,
+          providerSignatureId: row.provider_signature_id,
+          role: row.signer_role,
+          order: row.signer_order,
+          name: row.signer_name,
+          emailAddress,
+        },
+      };
+      return { outcome: "eligible", candidate };
+    },
+    finalizeEmailBounceUpdate: async (input) => {
+      const { data, error } = await createAdminClient().rpc(
+        "finalize_esign_bounced_signer_email_update",
+        {
+          p_org_id: input.orgId,
+          p_request_id: input.requestId,
+          p_signer_id: input.signerId,
+          p_claim_token: input.claimToken,
+          p_provider_signature_id: input.providerSignatureId,
+        },
+      );
+      if (error) throw error;
+      return data === "applied" ? "applied" : "lease_lost";
+    },
+    releaseEmailBounceUpdate: async (input) => {
+      const { data, error } = await createAdminClient().rpc(
+        "release_esign_bounced_signer_email_update",
+        {
+          p_org_id: input.orgId,
+          p_request_id: input.requestId,
+          p_signer_id: input.signerId,
+          p_claim_token: input.claimToken,
+        },
+      );
+      if (error) throw error;
+      return data === "released" ? "released" : "lease_lost";
     },
     findRequest: ({ orgId, requestId }) => loadRequest(orgId, requestId),
     claimReminder: async ({ orgId, requestId, signerId }) => {
@@ -530,7 +608,7 @@ async function loadRequest(
     admin
       .from("esign_request_signers")
       .select(
-        "id,role_name,signer_order,signer_name,signer_email,status,last_reminded_at",
+        "id,role_name,signer_order,signer_name,signer_email,provider_signature_id,status,last_reminded_at",
       )
       .eq("org_id", orgId)
       .eq("request_id", requestId)
@@ -561,6 +639,7 @@ async function loadRequest(
       order: signer.signer_order,
       name: signer.signer_name,
       emailAddress: signer.signer_email,
+      providerSignatureId: signer.provider_signature_id,
       status: signer.status,
       lastRemindedAt: signer.last_reminded_at,
     })) as EsignRequestRecord["signers"],
@@ -569,14 +648,14 @@ async function loadRequest(
     payloadHash: row.payload_hash,
     retryOfRequestId: row.retry_of_request_id,
     status: row.status,
-            deliveryState: row.delivery_state,
-            testMode: row.test_mode,
-            providerRequestId: row.sign_request_id,
-            detailsUrl: row.details_url,
-            errorMessage: row.error_message,
-            voidRequestedAt: row.void_requested_at,
-            signedPdfFileId: fileRow?.id ?? null,
-          };
+    deliveryState: row.delivery_state,
+    testMode: row.test_mode,
+    providerRequestId: row.sign_request_id,
+    detailsUrl: row.details_url,
+    errorMessage: row.error_message,
+    voidRequestedAt: row.void_requested_at,
+    signedPdfFileId: fileRow?.id ?? null,
+  };
 }
 
 function parseMergeValues(value: Json): ContractMergeValues | null {
@@ -653,6 +732,30 @@ export async function providerForOrg(
         return "accepted";
       } catch (error) {
         return classifyProviderFailure(error);
+      }
+    },
+    updateSignerEmail: async ({
+      providerRequestId,
+      providerSignatureId,
+      signerName,
+      signerEmailAddress,
+      signerRole,
+      signerOrder,
+      signal,
+    }) => {
+      try {
+        const signature = await provider.updateSignerEmail({
+          signatureRequestId: providerRequestId,
+          signatureId: providerSignatureId,
+          name: signerName,
+          emailAddress: signerEmailAddress,
+          role: signerRole,
+          order: signerOrder,
+          signal,
+        });
+        return { outcome: "accepted", signature };
+      } catch (error) {
+        return { outcome: classifyProviderFailure(error) };
       }
     },
     findSignatureRequestIdsByLocalRequestId: ({
@@ -774,6 +877,7 @@ export async function loadLeadEsignPageModel(
         signedPdfFileId: request.signedPdfFileId,
         errorMessage: row?.error_message ?? null,
         retryConsumed: consumedRequestIds.has(request.id),
+        canFixSignerEmail: actor.role === "owner",
       });
     }
   }

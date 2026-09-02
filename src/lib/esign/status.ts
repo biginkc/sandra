@@ -13,6 +13,7 @@ export type NormalizedEsignLifecycleEvent = {
     | "declined"
     | "canceled"
     | "provider_error"
+    | "email_bounced"
     | "audit_only";
 };
 
@@ -47,8 +48,9 @@ export function normalizeDropboxSignLifecycleEvent(
       return lifecycle(eventType, "voided", false, "canceled");
     case "signature_request_invalid":
     case "signature_request_expired":
-    case "signature_request_email_bounce":
       return lifecycle(eventType, "error", false, "provider_error");
+    case "signature_request_email_bounce":
+      return lifecycle(eventType, "error", false, "email_bounced");
     default:
       return lifecycle(eventType, null, false, "audit_only");
   }
@@ -58,6 +60,20 @@ export function reduceEsignStatus(
   currentStatus: EsignStatus,
   event: NormalizedEsignLifecycleEvent,
 ): EsignStatusDecision {
+  if (
+    currentStatus === "error" &&
+    event.requestedStatus === "signed" &&
+    (event.reason === "all_signed" || event.reason === "downloadable")
+  ) {
+    return {
+      previousStatus: currentStatus,
+      nextStatus: "signed",
+      changed: true,
+      artifactReady: event.artifactReady,
+      reason: event.reason,
+    };
+  }
+
   if (TERMINAL_STATUSES.has(currentStatus)) {
     return {
       previousStatus: currentStatus,
