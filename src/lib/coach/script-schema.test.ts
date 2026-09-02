@@ -10,6 +10,58 @@ function validScript(): Record<string, unknown> {
   return JSON.parse(JSON.stringify(scriptJson));
 }
 
+const SELLER_EMAIL_REQUEST = "What's the best email address for you?";
+const ESIGN_HANDOFF = "Awesome, I just sent it to your email. Please pull it up for me.";
+
+const FORBIDDEN_ESIGN_PHRASES = [
+  "share your screen",
+  "share screen",
+  "screen share",
+  "screenshare",
+  "click the link",
+  "walk you through signing",
+  "walk through signing",
+  "view documents",
+  "press sign",
+  "red flashing box",
+  "adopt and sign",
+  "second red box",
+  "second novation box",
+  "share back",
+  "esign steps",
+] as const;
+
+function normalizeForAcceptanceScan(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/\p{Cf}+/gu, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function isSellerEmailRequest(value: string): boolean {
+  const text = normalizeForAcceptanceScan(value);
+  if (!/\bemail(?: address)?\b/.test(text)) return false;
+  return (
+    /\b(?:what is|what s|whats|which)\b.{0,80}\bemail(?: address)?\b/.test(text) ||
+    /\b(?:can|could|may)\b.{0,40}\b(?:i|we)\b.{0,40}\b(?:get|have|use)\b.{0,40}\b(?:your|the)\b.{0,20}\bemail(?: address)?\b/.test(text)
+  );
+}
+
+function collectAllStrings(value: unknown, out: string[] = []): string[] {
+  if (typeof value === "string") {
+    out.push(value);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectAllStrings(item, out);
+  } else if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) collectAllStrings(item, out);
+  }
+  return out;
+}
+
 describe("assertValidClosrScript", () => {
   it("accepts the real closr-script-v0.json unmodified", () => {
     expect(() => assertValidClosrScript(scriptJson)).not.toThrow();
@@ -17,7 +69,8 @@ describe("assertValidClosrScript", () => {
 
   it("identifies the authoritative Google Doc and keeps the approved BMH substitutions", () => {
     const script = scriptJson as unknown as ClosrScript;
-    expect(script.version).toBe("1.1.0");
+    expect(script.version).toBe("1.2.0");
+    expect(sectionsJson).toMatchObject({ version: "1.2.0", script_version: "1.2.0" });
     expect(script.source).toContain("1ab9k0VIUQ4kkSTmdR5XV7qeuiRe2-czgmKGouM-lCag");
     expect(script.brand).toEqual({ company: "BMH Group", website: "bmhgroupkc.com" });
     expect(script.tokens).toContain("dream_outcome");
@@ -99,31 +152,36 @@ describe("assertValidClosrScript", () => {
       .map((line) => line.text)
       .join("\u0000");
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "103e28750aa267b808afd0b90b789c98e569f514cea032ed665c1d3de8fe9402",
+      "892ada1497695a760e96463d41417cb0def8872b644a0f2c88015fa66aeb5293",
     );
   });
 
-  it("keeps the spoken email request exactly once in the underwriting readiness section", () => {
+  it("keeps exactly one seller email-address request, in the underwriting readiness section only", () => {
     const script = scriptJson as unknown as ClosrScript;
-    const spokenEmailRequests = script.phases
-      .flatMap((phase) => phase.display.branches.flatMap((branch) => branch.variants))
-      .flatMap((variant) => variant.lines)
-      .filter((line) => line.type === "say" && /(?:what(?:'s| is)|where).{0,80}\bemail\b/i.test(line.text));
+    const spokenEmailRequests = script.phases.flatMap((phase) =>
+      phase.display.branches.flatMap((branch) =>
+        branch.variants.flatMap((variant) =>
+          variant.lines
+            .filter((line) => isSellerEmailRequest(line.text))
+            .map((line) => ({ phaseId: phase.id, branchTag: branch.tag, line })),
+        ),
+      ),
+    );
 
     expect(spokenEmailRequests).toHaveLength(1);
     expect(spokenEmailRequests[0]).toMatchObject({
-      id: "secure_positioning.back-from-hold-final-questions.default.08",
-      text: "What's the best email address for you?",
+      phaseId: "secure_positioning",
+      branchTag: "Back from hold — final questions",
+      line: {
+        id: "secure_positioning.back-from-hold-final-questions.default.08",
+        type: "say",
+        text: SELLER_EMAIL_REQUEST,
+      },
     });
-
-    const underwritingQuestions = script.phases
-      .find((phase) => phase.id === "secure_positioning")
-      ?.display.branches.find((branch) => branch.tag === "Back from hold — final questions");
-    expect(underwritingQuestions?.variants[0]?.lines.some((line) => line.id === spokenEmailRequests[0]?.id)).toBe(true);
 
     const sectionsWithRequest = sectionsJson.sections.filter((section) =>
       section.content.some((content) =>
-        content.variants.some((variant) => variant.line_ids.includes(spokenEmailRequests[0]!.id)),
+        content.variants.some((variant) => variant.line_ids.includes(spokenEmailRequests[0]!.line.id)),
       ),
     );
     expect(sectionsWithRequest).toEqual([
@@ -137,14 +195,80 @@ describe("assertValidClosrScript", () => {
     const goodNews = script.phases.find((phase) => phase.id === "offer")?.display.branches.find((branch) => branch.tag === "Good news");
     const sellerAccepts = script.phases.find((phase) => phase.id === "close")?.display.branches.find((branch) => branch.tag === "They accept");
     const proofOfFunds = script.objections.find((objection) => objection.id === "proof_of_funds");
-    const excludedCopy = [
-      ...goodNews!.variants.flatMap((variant) => variant.lines.map((line) => line.text)),
-      ...sellerAccepts!.variants.flatMap((variant) => variant.lines.map((line) => line.text)),
+    const introductionCopy = script.phases.find((phase) => phase.id === "introduction")!.display.branches.flatMap((branch) =>
+        branch.variants.flatMap((variant) => variant.lines.map((line) => line.text)),
+      );
+    const goodNewsCopy = goodNews!.variants.flatMap((variant) => variant.lines.map((line) => line.text));
+    const sellerAcceptsCopy = sellerAccepts!.variants.flatMap((variant) => variant.lines.map((line) => line.text));
+    const proofOfFundsCopy = [
       proofOfFunds!.display.acknowledge,
       proofOfFunds!.display.disarm,
       proofOfFunds!.display.overcome,
-    ].join("\n");
-    expect(excludedCopy).not.toMatch(/(?:what(?:'s| is)|where).{0,80}\bemail\b/i);
+    ];
+    expect(introductionCopy.filter(isSellerEmailRequest), "Introduction must contain no seller email request").toEqual([]);
+    expect(goodNewsCopy.filter(isSellerEmailRequest), "Good News must contain no seller email request").toEqual([]);
+    expect(sellerAcceptsCopy.filter(isSellerEmailRequest), "They accept must contain no seller email request").toEqual([]);
+    expect(proofOfFundsCopy.filter(isSellerEmailRequest), "Proof of Funds must contain no seller email request").toEqual([]);
+  });
+
+  it.each([
+    "What's your email?",
+    "What is the best email address for you?",
+    "Which email should we use?",
+    "Can I get your email address?",
+    "Could we have the email address you use?",
+    "What is your e\u200bmail address?",
+  ])("recognizes seller email-address request wording %j", (wording) => {
+    expect(isSellerEmailRequest(wording)).toBe(true);
+  });
+
+  it("keeps prohibited e-sign walkthrough semantics out of every script and section-manifest string", () => {
+    const normalizedStrings = [...collectAllStrings(scriptJson), ...collectAllStrings(sectionsJson)]
+      .map(normalizeForAcceptanceScan);
+    for (const phrase of FORBIDDEN_ESIGN_PHRASES) {
+      expect(
+        normalizedStrings.some((value) => value.includes(phrase)),
+        `forbidden e-sign phrase "${phrase}" found in the script or section manifest`,
+      ).toBe(false);
+    }
+  });
+
+  it.each([
+    "click.the/link",
+    "walk—you_through/signing",
+    "share your screen",
+    "share/screen",
+    "screen-share",
+    "view_documents",
+    "press/sign",
+    "adopt & sign",
+    "cl\u200bick the li\u2060nk",
+    "walk you through sign\u200ding",
+    "screen\u200bshare",
+    "view docu\u2060ments",
+  ])("normalizes prohibited walkthrough evasion %j into a rejected phrase", (wording) => {
+    const normalized = normalizeForAcceptanceScan(wording);
+    expect(FORBIDDEN_ESIGN_PHRASES.some((phrase) => normalized.includes(phrase))).toBe(true);
+  });
+
+  it("uses the exact replacement handoff once, at the final Close handoff line", () => {
+    const script = scriptJson as unknown as ClosrScript;
+    const replacementMatches = script.phases.flatMap((phase) =>
+      phase.display.branches.flatMap((branch) =>
+        branch.variants.flatMap((variant) =>
+          variant.lines
+            .filter((line) => line.type === "say" && line.text === ESIGN_HANDOFF)
+            .map((line) => ({ phaseId: phase.id, branchTag: branch.tag, line })),
+        ),
+      ),
+    );
+    expect(replacementMatches).toEqual([
+      expect.objectContaining({
+        phaseId: "close",
+        branchTag: "Going over the contract",
+        line: expect.objectContaining({ id: "close.going-over-the-contract.default.03" }),
+      }),
+    ]);
   });
 
   it("rejects a phase missing match.entry_landmarks/advance_landmarks", () => {
