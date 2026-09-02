@@ -115,6 +115,38 @@ describe("ContractsCard", () => {
     expect(screen.queryByText("No contracts sent.")).not.toBeInTheDocument();
   });
 
+  it("shows the email captured on the sent contract instead of the current contact email", () => {
+    const sentContract = {
+      ...contract({
+        signers: [
+          {
+            id: "signature-1",
+            role: "Seller",
+            order: 0,
+            name: "Seller Owner",
+            emailAddress: "snapshot-seller@example.com",
+            status: "awaiting",
+            lastRemindedAt: null,
+          },
+        ],
+      }),
+      contactEmail: "current-contact@example.com",
+    } as LeadContractRow & { contactEmail: string };
+
+    render(
+      <ContractsCard
+        contracts={[sentContract]}
+        actions={actionHandlers()}
+      />,
+    );
+
+    const row = screen.getByTestId("contract-row-request-1");
+    expect(row).toHaveTextContent(
+      "Seller: Seller Owner sent to snapshot-seller@example.com",
+    );
+    expect(row).not.toHaveTextContent("current-contact@example.com");
+  });
+
   it.each([
     { overrides: { deliveryState: "sending" }, label: "Sending" },
     { overrides: { deliveryState: "send_unknown" }, label: "Send unknown" },
