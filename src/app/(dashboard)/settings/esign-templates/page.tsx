@@ -2,6 +2,7 @@ import { PlusIcon } from "lucide-react";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
+import { getEsignConnectionStatus } from "@/lib/esign/actions";
 
 import { AddTemplateDialog } from "./add-template-dialog";
 import { loadPendingTemplateCopies, loadTemplateLibrary } from "./template-lane-adapter";
@@ -10,10 +11,17 @@ import { PendingTemplateCopies } from "./pending-template-copies";
 import { TestModeBanner } from "./test-mode-banner";
 
 export default async function EsignTemplatesPage() {
-  const [result, pendingCopies] = await Promise.all([
+  const [result, pendingCopies, esignStatus] = await Promise.all([
     loadTemplateLibrary(),
     loadPendingTemplateCopies(),
+    getEsignConnectionStatus(),
   ]);
+  const dropboxSignDisconnected = esignStatus.ok && !esignStatus.data.connected;
+  const addTemplateDisabledReason = dropboxSignDisconnected
+    ? "Connect Dropbox Sign before adding templates."
+    : result.ok && pendingCopies.ok
+      ? undefined
+      : "Templates and pending copies must load before another template can be added.";
 
   return (
     <Page>
@@ -26,11 +34,7 @@ export default async function EsignTemplatesPage() {
         description="Manage the test-mode Dropbox Sign templates used to prepare offers and agreements."
         actions={
           <AddTemplateDialog
-            disabledReason={
-              result.ok && pendingCopies.ok
-                ? undefined
-                : "Templates and pending copies must load before another template can be added."
-            }
+            disabledReason={addTemplateDisabledReason}
             trigger={
               <>
                 <PlusIcon data-icon="inline-start" />
@@ -44,7 +48,12 @@ export default async function EsignTemplatesPage() {
       <TestModeBanner />
 
       <PendingTemplateCopies result={pendingCopies} />
-      <TemplateLibrary result={result} actions={pendingCopies.ok ? undefined : null} />
+      <TemplateLibrary
+        result={result}
+        actions={pendingCopies.ok ? undefined : null}
+        dropboxSignConnected={!dropboxSignDisconnected}
+        templateCreationDisabledReason={addTemplateDisabledReason}
+      />
     </Page>
   );
 }
