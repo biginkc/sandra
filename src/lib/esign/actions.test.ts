@@ -1,7 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DatabaseError } from "@/lib/errors/classes";
-
 const mocks = vi.hoisted(() => ({
   memberships: [] as Array<{
     user_id: string;
@@ -9,7 +7,7 @@ const mocks = vi.hoisted(() => ({
     role: "owner" | "member";
   }>,
   statusRow: null as {
-    api_key_last_four: string;
+    api_key_last_four: string | null;
     sending_enabled: boolean;
     test_mode: boolean;
   } | null,
@@ -25,7 +23,15 @@ vi.mock("server-only", () => ({}));
 vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidatePath }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("@/lib/auth/memberships", () => ({
-  getCallerMemberships: async () => mocks.memberships,
+  getSingleActiveMembership: async () => {
+    if (mocks.memberships.length === 0) {
+      return { ok: false, reason: "missing" };
+    }
+    if (mocks.memberships.length !== 1) {
+      return { ok: false, reason: "ambiguous" };
+    }
+    return { ok: true, membership: mocks.memberships[0] };
+  },
 }));
 vi.mock("@/lib/esign/credentials", () => ({
   configuredDropboxSignClientId: () => "client-id",
@@ -78,7 +84,21 @@ describe("eSign server actions", () => {
     mocks.validateCredentials.mockResolvedValue({ accountId: "account-1" });
     mocks.saveEsignCredentials.mockResolvedValue(undefined);
     mocks.deleteEsignCredentials.mockResolvedValue(undefined);
-    mocks.adminUpdate.mockResolvedValue({ error: null });
+    mocks.adminUpdate.mockImplementation(async (fn: string) =>
+      fn === "disconnect_org_esign_integration"
+        ? {
+            data: [
+              {
+                disconnected: true,
+                sending_enabled: false,
+                credentials_present: false,
+                message: "Dropbox Sign disconnected.",
+              },
+            ],
+            error: null,
+          }
+        : { error: null },
+    );
   });
 
   it("validates upstream before encrypting and returns only a mask", async () => {
@@ -151,6 +171,25 @@ describe("eSign server actions", () => {
         sendingEnabled: true,
         testMode: true,
         apiKeyLastFour: "9876",
+      },
+    });
+  });
+
+  it("treats credentialless disconnect tombstones as disconnected status", async () => {
+    mocks.statusRow = {
+      api_key_last_four: null,
+      sending_enabled: true,
+      test_mode: true,
+    };
+
+    await expect(getEsignConnectionStatus()).resolves.toEqual({
+      ok: true,
+      data: {
+        connected: false,
+        canManage: true,
+        sendingEnabled: false,
+        testMode: true,
+        apiKeyLastFour: null,
       },
     });
   });
@@ -307,6 +346,7 @@ describe("eSign server actions", () => {
       });
       expect(mocks.deleteEsignCredentials).not.toHaveBeenCalled();
       expect(mocks.revalidatePath).not.toHaveBeenCalled();
+      expect(mocks.adminUpdate).not.toHaveBeenCalled();
     },
   );
 
@@ -316,48 +356,93 @@ describe("eSign server actions", () => {
       data: {
         disconnected: true,
         sendingEnabled: false,
+        credentialsPresent: false,
         message: "Dropbox Sign disconnected.",
       },
     });
     expect(mocks.adminUpdate).toHaveBeenCalledWith(
-      "set_org_esign_sending_enabled",
+      "disconnect_org_esign_integration",
       {
         p_org_id: "org-1",
         p_actor_id: "owner-1",
-        p_enabled: false,
       },
     );
-    expect(mocks.deleteEsignCredentials).toHaveBeenCalledWith(
-      "org-1",
-      "owner-1",
-    );
+    expect(mocks.deleteEsignCredentials).not.toHaveBeenCalled();
   });
 
-  it("disables new sending even when active eSign work blocks full disconnect", async () => {
-    mocks.deleteEsignCredentials.mockRejectedValueOnce(
-      new DatabaseError(
-        "Finish active eSign work before disconnecting Dropbox Sign.",
-        { code: "23514" },
-      ),
-    );
+  it("reports the atomic disconnect state returned by the database", async () => {
+    mocks.adminUpdate.mockResolvedValueOnce({
+      data: [
+        {
+          disconnected: false,
+          sending_enabled: false,
+          credentials_present: false,
+          message:
+            "Dropbox Sign sending is off and credentials were removed. Reconnect Dropbox Sign before managing templates or sending new contracts.",
+        },
+      ],
+      error: null,
+    });
 
     await expect(disconnectDropboxSignAction(true)).resolves.toEqual({
       ok: true,
       data: {
         disconnected: false,
         sendingEnabled: false,
+        credentialsPresent: false,
         message:
-          "Dropbox Sign sending is off. Finish active eSign work before removing the connection.",
+          "Dropbox Sign sending is off and credentials were removed. Reconnect Dropbox Sign before managing templates or sending new contracts.",
       },
     });
     expect(mocks.adminUpdate).toHaveBeenCalledWith(
-      "set_org_esign_sending_enabled",
+      "disconnect_org_esign_integration",
       {
         p_org_id: "org-1",
         p_actor_id: "owner-1",
-        p_enabled: false,
       },
     );
     expect(mocks.revalidatePath).toHaveBeenCalledWith("/settings/integrations");
+  });
+
+  it("surfaces an unconfirmed disconnect state instead of reporting from a local flag", async () => {
+    mocks.adminUpdate.mockResolvedValueOnce({
+      data: [
+        {
+          disconnected: false,
+          sending_enabled: true,
+          credentials_present: true,
+          message: "Dropbox Sign stayed connected.",
+        },
+      ],
+      error: null,
+    });
+
+    await expect(disconnectDropboxSignAction(true)).resolves.toEqual({
+      ok: true,
+      data: {
+        disconnected: false,
+        sendingEnabled: true,
+        credentialsPresent: true,
+        message: "Dropbox Sign stayed connected.",
+      },
+    });
+  });
+
+  it("fails closed if the atomic disconnect RPC has not deployed yet", async () => {
+    mocks.adminUpdate.mockResolvedValueOnce({
+      data: null,
+      error: { message: "function not found", code: "42883" },
+    });
+
+    await expect(disconnectDropboxSignAction(true)).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "DATABASE",
+        message:
+          "Dropbox Sign disconnect requires the latest database migration.",
+      },
+    });
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
+    expect(mocks.deleteEsignCredentials).not.toHaveBeenCalled();
   });
 });

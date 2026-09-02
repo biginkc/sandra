@@ -77,6 +77,10 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const esignConfirmingRef = useRef(false);
   const esignDisconnectingRef = useRef(false);
   const [pending, startTransition] = useTransition();
+  const esignOwnerReasonId = "esign-owner-required-description";
+  const esignToggleDescriptionId = esign.canManage
+    ? undefined
+    : esignOwnerReasonId;
 
   const toggleSlack = (next: boolean) => {
     const previous = slackEnabled;
@@ -157,6 +161,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   };
 
   const connectEsign = () => {
+    setEsignDisconnectResult(null);
     startTransition(async () => {
       const result = await callAction(connectDropboxSignAction(esignApiKey), {
         successMessage: "Dropbox Sign connected",
@@ -229,7 +234,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
           fallbackMessage: "Could not disconnect Dropbox Sign",
         });
         if (result.ok) {
-          if (result.data.disconnected) {
+          if (result.data.disconnected || !result.data.credentialsPresent) {
             setEsign({
               connected: false,
               canManage: true,
@@ -238,7 +243,11 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               apiKeyLastFour: null,
             });
           } else {
-            setEsign((current) => ({ ...current, sendingEnabled: false }));
+            setEsign((current) => ({
+              ...current,
+              connected: true,
+              sendingEnabled: result.data.sendingEnabled,
+            }));
           }
           setEsignDisconnectResult({
             variant: "success",
@@ -362,6 +371,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                     aria-label="Enable contract sending"
                     aria-expanded={esignConfirmation !== null}
                     aria-controls="esign-sending-confirmation"
+                    aria-describedby={esignToggleDescriptionId}
                   />
                 </label>
                 <div className="flex flex-wrap gap-2">
@@ -389,9 +399,13 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                   )}
                 </div>
                 {!esign.canManage && (
-                  <p className="text-muted-foreground text-xs">
+                  <p
+                    id={esignOwnerReasonId}
+                    className="text-muted-foreground text-xs"
+                  >
                     Only organization owners can disconnect Dropbox Sign or
-                    manage templates.
+                    manage templates. The sending switch is disabled for
+                    non-owner accounts.
                   </p>
                 )}
               </>

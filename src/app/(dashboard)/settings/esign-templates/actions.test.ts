@@ -26,7 +26,12 @@ const mocks = vi.hoisted(() => ({
 vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidate }));
 vi.mock("@/lib/errors/report", () => ({ reportError: mocks.report }));
 vi.mock("@/lib/auth/memberships", () => ({
-  getCallerMemberships: mocks.memberships,
+  getSingleActiveMembership: async () => {
+    const memberships = await mocks.memberships();
+    if (memberships.length === 0) return { ok: false, reason: "missing" };
+    if (memberships.length !== 1) return { ok: false, reason: "ambiguous" };
+    return { ok: true, membership: memberships[0] };
+  },
 }));
 vi.mock("@/lib/esign/template-foundation-adapter", () => ({
   createFoundationTemplateOrchestrator: mocks.factory,

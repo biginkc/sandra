@@ -35,9 +35,9 @@ type EsignRpcClient = {
     args: { p_org_id: string; p_key: string },
   ): Promise<{
     data: Array<{
-      api_key: string;
-      client_id: string;
-      provider_account_id: string;
+      api_key: string | null;
+      client_id: string | null;
+      provider_account_id: string | null;
       sending_enabled: boolean;
       test_mode: boolean;
       callback_secret_hash: string;
@@ -147,6 +147,7 @@ export async function getEsignCredentials(
   }
   const row = data?.[0];
   if (!row) return null;
+  if (!row.api_key || !row.client_id || !row.provider_account_id) return null;
   if (!row.test_mode) {
     throw new ConfigurationError(
       "Dropbox Sign must remain in test mode for Sandra v1.",

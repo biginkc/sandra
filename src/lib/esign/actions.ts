@@ -2,7 +2,11 @@
 
 import { revalidatePath } from "next/cache";
 
-import { getCallerMemberships, type Membership } from "@/lib/auth/memberships";
+import {
+  getSingleActiveMembership,
+  type Membership,
+  type SingleActiveMembershipResolution,
+} from "@/lib/auth/memberships";
 import {
   AuthorizationError,
   DatabaseError,
@@ -18,7 +22,6 @@ import type { EsignConnectionStatus } from "./contracts";
 import {
   configuredDropboxSignClientId,
   configuredDropboxSignEmbeddedDomain,
-  deleteEsignCredentials,
   saveEsignCredentials,
 } from "./credentials";
 import { createDropboxSignProvider } from "./dropbox-sign";
@@ -33,7 +36,7 @@ type StatusClient = {
       ): {
         maybeSingle(): Promise<{
           data: {
-            api_key_last_four: string;
+            api_key_last_four: string | null;
             sending_enabled: boolean;
             test_mode: boolean;
           } | null;
@@ -49,25 +52,46 @@ type AdminIntegrationClient = {
     fn: "set_org_esign_sending_enabled",
     args: { p_org_id: string; p_actor_id: string; p_enabled: boolean },
   ): Promise<{ error: { message: string; code?: string } | null }>;
+  rpc(
+    fn: "disconnect_org_esign_integration",
+    args: { p_org_id: string; p_actor_id: string },
+  ): Promise<{
+    data:
+      | Array<{
+          disconnected: boolean;
+          sending_enabled: boolean;
+          credentials_present: boolean;
+          message: string;
+        }>
+      | null;
+    error: { message: string; code?: string } | null;
+  }>;
 };
 
 export type EsignDisconnectResult = {
   disconnected: boolean;
-  sendingEnabled: false;
+  sendingEnabled: boolean;
+  credentialsPresent: boolean;
   message: string;
 };
 
 async function currentMembership(): Promise<Membership> {
-  const memberships = await getCallerMemberships();
-  if (memberships.length === 0) {
-    throw new AuthorizationError("Sign in with active organization access.");
+  const resolution = await getSingleActiveMembership();
+  if (!resolution.ok) {
+    throw authorizationErrorForMembershipResolution(resolution);
   }
-  if (memberships.length !== 1) {
-    throw new AuthorizationError(
-      "Choose a single active organization before managing Dropbox Sign.",
-    );
+  return resolution.membership;
+}
+
+function authorizationErrorForMembershipResolution(
+  resolution: Extract<SingleActiveMembershipResolution, { ok: false }>,
+): AuthorizationError {
+  if (resolution.reason === "missing") {
+    return new AuthorizationError("Sign in with active organization access.");
   }
-  return memberships[0];
+  return new AuthorizationError(
+    "Choose a single active organization before managing Dropbox Sign.",
+  );
 }
 
 function safeEsignError(
@@ -121,10 +145,11 @@ export async function getEsignConnectionStatus(): Promise<
     if (data && !data.test_mode) {
       throw new DatabaseError("Dropbox Sign is not safely configured for v1.");
     }
+    const credentialsPresent = Boolean(data?.api_key_last_four);
     return ok({
-      connected: Boolean(data),
+      connected: credentialsPresent,
       canManage: membership.role === "owner",
-      sendingEnabled: data?.sending_enabled ?? false,
+      sendingEnabled: credentialsPresent && (data?.sending_enabled ?? false),
       testMode: true,
       apiKeyLastFour: data?.api_key_last_four ?? null,
     });
@@ -230,7 +255,6 @@ export async function setEsignSendingEnabledAction(
 export async function disconnectDropboxSignAction(
   operatorConfirmed: boolean,
 ): Promise<Result<EsignDisconnectResult>> {
-  let sendingDisabled = false;
   try {
     const membership = await currentMembership();
     requireOwner(membership);
@@ -239,40 +263,29 @@ export async function disconnectDropboxSignAction(
         "Confirm the Dropbox Sign disconnect before it is applied.",
       );
     }
-    const { error: disableError } = await (
+    const { data, error } = await (
       createAdminClient() as unknown as AdminIntegrationClient
-    ).rpc("set_org_esign_sending_enabled", {
+    ).rpc("disconnect_org_esign_integration", {
       p_org_id: membership.org_id,
       p_actor_id: membership.user_id,
-      p_enabled: false,
     });
-    if (disableError) {
-      throw new DatabaseError("Dropbox Sign sending could not be disabled.", {
-        code: disableError.code,
-      });
+    const row = data?.[0];
+    if (error || !row) {
+      throw new DatabaseError(
+        error?.code === "42883"
+          ? "Dropbox Sign disconnect requires the latest database migration."
+          : "Dropbox Sign disconnect state could not be confirmed.",
+        { code: error?.code },
+      );
     }
-    sendingDisabled = true;
-    await deleteEsignCredentials(membership.org_id, membership.user_id);
     revalidatePath("/settings/integrations");
     return ok({
-      disconnected: true,
-      sendingEnabled: false,
-      message: "Dropbox Sign disconnected.",
+      disconnected: row.disconnected,
+      sendingEnabled: row.sending_enabled,
+      credentialsPresent: row.credentials_present,
+      message: row.message,
     });
   } catch (error) {
-    if (
-      sendingDisabled &&
-      error instanceof DatabaseError &&
-      error.details?.code === "23514"
-    ) {
-      revalidatePath("/settings/integrations");
-      return ok({
-        disconnected: false,
-        sendingEnabled: false,
-        message:
-          "Dropbox Sign sending is off. Finish active eSign work before removing the connection.",
-      });
-    }
     reportError(error, { tags: { surface: "esign_disconnect" } });
     return safeEsignError(
       error,

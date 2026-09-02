@@ -3,7 +3,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 
 import { ProviderError } from "@/lib/errors/classes";
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import { ESIGN_MERGE_FIELD_NAMES, type TemplateOption, type TemplateSignerRole } from "./contracts";
@@ -32,11 +32,15 @@ export type TemplateLibraryRecord = TemplateOption & {
 };
 
 export async function createFoundationTemplateOrchestrator() {
-  const selectedMembership = (await getCallerMemberships())[0];
+  const selectedMembership = await getSingleActiveMembership();
   const actorPort = {
     async getActor() {
-      return selectedMembership
-        ? { userId: selectedMembership.user_id, orgId: selectedMembership.org_id, isOwner: selectedMembership.role === "owner" }
+      return selectedMembership.ok
+        ? {
+            userId: selectedMembership.membership.user_id,
+            orgId: selectedMembership.membership.org_id,
+            isOwner: selectedMembership.membership.role === "owner",
+          }
         : null;
     },
   };

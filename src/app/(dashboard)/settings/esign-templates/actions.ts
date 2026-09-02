@@ -5,7 +5,7 @@ import { revalidatePath } from "next/cache";
 import { reportError } from "@/lib/errors/report";
 import { createFoundationTemplateOrchestrator } from "@/lib/esign/template-foundation-adapter";
 import { createInitialTemplateRuntime } from "@/lib/esign/template-initial-runtime";
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { getSingleActiveMembership } from "@/lib/auth/memberships";
 
 import type {
   CreatedTemplateDraft,
@@ -32,8 +32,8 @@ async function run<T>(
   ) => Promise<TemplateLaneResult<T>>,
 ): Promise<TemplateLaneResult<T>> {
   try {
-    const membership = (await getCallerMemberships())[0];
-    if (!membership)
+    const resolvedMembership = await getSingleActiveMembership();
+    if (!resolvedMembership.ok)
       return {
         ok: false,
         error: {
@@ -41,7 +41,7 @@ async function run<T>(
           message: "Sign in to manage eSign templates.",
         },
       };
-    if (membership.role !== "owner")
+    if (resolvedMembership.membership.role !== "owner")
       return {
         ok: false,
         error: {
@@ -60,8 +60,8 @@ export async function prepareTemplateUploadAction(
   input: PrepareTemplateUploadInput,
 ): Promise<TemplateLaneResult<PreparedTemplateUpload>> {
   try {
-    const membership = (await getCallerMemberships())[0];
-    if (!membership)
+    const resolvedMembership = await getSingleActiveMembership();
+    if (!resolvedMembership.ok)
       return {
         ok: false,
         error: {
@@ -69,7 +69,7 @@ export async function prepareTemplateUploadAction(
           message: "Sign in to manage eSign templates.",
         },
       };
-    if (membership.role !== "owner")
+    if (resolvedMembership.membership.role !== "owner")
       return {
         ok: false,
         error: {

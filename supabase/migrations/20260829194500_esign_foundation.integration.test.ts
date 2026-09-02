@@ -36,6 +36,10 @@ const migrationSql = readFileSync(
 )
   .replace(/\nbegin;\s*/i, "\n")
   .replace(/\s*commit;\s*$/i, "");
+const atomicDisconnectSql = readFileSync(
+  "supabase/migrations/20260902074814_esign_atomic_disconnect_state.sql",
+  "utf8",
+);
 
 let pg: Client;
 let ownerId = "";
@@ -399,6 +403,8 @@ beforeAll(async () => {
   await pg.connect();
   await pg.query("begin");
   await pg.query(migrationSql);
+  await pg.query(atomicDisconnectSql);
+  await pg.query(atomicDisconnectSql);
 });
 
 beforeEach(async () => {
@@ -904,20 +910,72 @@ describe("Migration 20260829194500 — eSign foundation", () => {
     );
   });
 
-  it("blocks credential deletion until callbacks and signed PDF capture are complete", async () => {
+  it("atomically removes credentials when active work blocks full row deletion", async () => {
     await connectIntegration();
     const propertyId = await seedProperty();
     const templateId = await seedTemplate();
     const requestId = await seedRequest({ propertyId, templateId });
     await setRequestRole("service_role");
-    await expectDatabaseError(
-      () =>
-        pg.query("select public.delete_org_esign_integration($1,$2)", [
+    expect(
+      (
+        await pg.query<{
+          disconnected: boolean;
+          sending_enabled: boolean;
+          credentials_present: boolean;
+          message: string;
+        }>("select * from public.disconnect_org_esign_integration($1,$2)", [
           BMH_ORG_ID,
           ownerId,
-        ]),
-      /Finish active signatures/i,
-    );
+        ])
+      ).rows[0],
+    ).toEqual({
+      disconnected: false,
+      sending_enabled: false,
+      credentials_present: false,
+      message:
+        "Dropbox Sign sending is off and credentials were removed. Reconnect Dropbox Sign before managing templates or sending new contracts.",
+    });
+    expect(
+      (
+        await pg.query<{
+          has_api_key: boolean;
+          api_key_last_four: string | null;
+          client_id: string | null;
+          provider_account_id: string | null;
+          sending_enabled: boolean;
+        }>(
+          `select api_key_encrypted is not null as has_api_key,
+             api_key_last_four, client_id, provider_account_id,
+             sending_enabled
+           from public.org_esign_integrations
+           where org_id = $1`,
+          [BMH_ORG_ID],
+        )
+      ).rows[0],
+    ).toEqual({
+      has_api_key: false,
+      api_key_last_four: null,
+      client_id: null,
+      provider_account_id: null,
+      sending_enabled: false,
+    });
+    expect(
+      (
+        await pg.query(
+          "select * from public.get_org_esign_credentials($1,$2)",
+          [BMH_ORG_ID, ESIGN_TEST_ENCRYPTION_KEY],
+        )
+      ).rows,
+    ).toEqual([]);
+    expect(
+      (
+        await pg.query(
+          "select enabled, revoked_at is not null as revoked from public.webhook_consumers where consumer_type = 'esign_provider'",
+        )
+      ).rows[0],
+    ).toEqual({ enabled: false, revoked: true });
+
+    await connectIntegration();
 
     await pg.query(
       `update public.esign_requests
@@ -926,27 +984,24 @@ describe("Migration 20260829194500 — eSign foundation", () => {
        where id = $1`,
       [requestId],
     );
-    await expectDatabaseError(
-      () =>
-        pg.query("select public.delete_org_esign_integration($1,$2)", [
-          BMH_ORG_ID,
-          ownerId,
-        ]),
-      /save signed PDFs/i,
-    );
+    await pg.query("select public.disconnect_org_esign_integration($1,$2)", [
+      BMH_ORG_ID,
+      ownerId,
+    ]);
     await pg.query(
       "update public.esign_requests set signed_pdf_path = $2 where id = $1",
       [requestId, `${BMH_ORG_ID}/fabricated.pdf`],
     );
-    await expectDatabaseError(
-      () =>
-        pg.query("select public.delete_org_esign_integration($1,$2)", [
-          BMH_ORG_ID,
-          ownerId,
-        ]),
-      /save signed PDFs/i,
-    );
+    expect(
+      (
+        await pg.query<{ credentials_present: boolean }>(
+          "select credentials_present from public.disconnect_org_esign_integration($1,$2)",
+          [BMH_ORG_ID, ownerId],
+        )
+      ).rows[0],
+    ).toEqual({ credentials_present: false });
 
+    await connectIntegration();
     await pg.query(
       "update public.esign_requests set signed_pdf_path = null where id = $1",
       [requestId],
@@ -988,10 +1043,24 @@ describe("Migration 20260829194500 — eSign foundation", () => {
         )
       ).rows[0],
     ).toEqual({ outcome: "applied", lead_file_id: requestId });
-    await pg.query("select public.delete_org_esign_integration($1,$2)", [
-      BMH_ORG_ID,
-      ownerId,
-    ]);
+    expect(
+      (
+        await pg.query<{
+          disconnected: boolean;
+          sending_enabled: boolean;
+          credentials_present: boolean;
+          message: string;
+        }>("select * from public.disconnect_org_esign_integration($1,$2)", [
+          BMH_ORG_ID,
+          ownerId,
+        ])
+      ).rows[0],
+    ).toEqual({
+      disconnected: true,
+      sending_enabled: false,
+      credentials_present: false,
+      message: "Dropbox Sign disconnected.",
+    });
     expect(
       (
         await pg.query(
@@ -1007,6 +1076,40 @@ describe("Migration 20260829194500 — eSign foundation", () => {
         )
       ).rows[0],
     ).toEqual({ enabled: false, revoked: true });
+  });
+
+  it("keeps the legacy delete RPC deploy-order compatible with active work", async () => {
+    await connectIntegration();
+    const propertyId = await seedProperty();
+    const templateId = await seedTemplate();
+    await seedRequest({ propertyId, templateId });
+    await setRequestRole("service_role");
+
+    await pg.query("select public.delete_org_esign_integration($1,$2)", [
+      BMH_ORG_ID,
+      ownerId,
+    ]);
+
+    expect(
+      (
+        await pg.query<{
+          has_api_key: boolean;
+          api_key_last_four: string | null;
+          sending_enabled: boolean;
+        }>(
+          `select api_key_encrypted is not null as has_api_key,
+             api_key_last_four,
+             sending_enabled
+           from public.org_esign_integrations
+           where org_id = $1`,
+          [BMH_ORG_ID],
+        )
+      ).rows[0],
+    ).toEqual({
+      has_api_key: false,
+      api_key_last_four: null,
+      sending_enabled: false,
+    });
   });
 
   it("deduplicates callback receipts by composite fingerprint, not event_hash", async () => {

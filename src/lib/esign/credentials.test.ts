@@ -80,6 +80,24 @@ describe("eSign credential store", () => {
     expect(JSON.stringify(credentials)).not.toContain("dropbox-key");
   });
 
+  it("treats credentialless disconnect tombstones as disconnected", async () => {
+    admin.rpc.mockResolvedValue({
+      data: [
+        {
+          api_key: null,
+          client_id: null,
+          provider_account_id: null,
+          sending_enabled: false,
+          test_mode: true,
+          callback_secret_hash: "a".repeat(64),
+        },
+      ],
+      error: null,
+    });
+
+    await expect(getEsignCredentials("org-1")).resolves.toBeNull();
+  });
+
   it("surfaces the safe disconnect blocker without leaking database details", async () => {
     admin.rpc.mockResolvedValue({
       error: { code: "23514", message: "db detail" },

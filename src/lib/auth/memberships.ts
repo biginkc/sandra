@@ -13,6 +13,10 @@ export type Membership = {
   deletion_prepared_at?: string | null;
 };
 
+export type SingleActiveMembershipResolution =
+  | { ok: true; membership: Membership }
+  | { ok: false; reason: "missing" | "ambiguous" };
+
 type MembershipReader = {
   from(table: "memberships"): {
     select(columns: string): Promise<{
@@ -52,4 +56,16 @@ export async function getCallerMemberships(): Promise<Membership[]> {
 
   const legacy = await reader.from("memberships").select("user_id, org_id, role");
   return legacy.error ? [] : legacy.data ?? [];
+}
+
+export function resolveSingleActiveMembership(
+  memberships: readonly Membership[],
+): SingleActiveMembershipResolution {
+  if (memberships.length === 0) return { ok: false, reason: "missing" };
+  if (memberships.length !== 1) return { ok: false, reason: "ambiguous" };
+  return { ok: true, membership: memberships[0] };
+}
+
+export async function getSingleActiveMembership(): Promise<SingleActiveMembershipResolution> {
+  return resolveSingleActiveMembership(await getCallerMemberships());
 }

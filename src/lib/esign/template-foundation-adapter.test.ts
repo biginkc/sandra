@@ -13,7 +13,13 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("server-only", () => ({}));
-vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships: mocks.memberships }));
+vi.mock("@/lib/auth/memberships", () => ({
+  getSingleActiveMembership: async () => {
+    const memberships = await mocks.memberships();
+    if (memberships.length !== 1) return { ok: false, reason: "ambiguous" };
+    return { ok: true, membership: memberships[0] };
+  },
+}));
 vi.mock("./credentials", () => ({
   getEsignCredentials: mocks.credentials,
   configuredDropboxSignEmbeddedDomain: () => "app.example.com",
@@ -77,6 +83,23 @@ describe("foundation template staging adapter without Dropbox credentials", () =
       p_storage_path: storagePath,
       p_source_sha256: sha256,
     }));
+    expect(mocks.credentials).not.toHaveBeenCalled();
+    expect(mocks.providerFactory).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when active membership resolution is ambiguous", async () => {
+    mocks.memberships.mockResolvedValue([
+      { user_id: "owner-1", org_id: orgId, role: "owner" },
+      { user_id: "owner-1", org_id: "other-org", role: "owner" },
+    ]);
+
+    await expect((await createFoundationTemplateOrchestrator()).list()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "AUTH_REQUIRED",
+        message: "Sign in to manage eSign templates.",
+      },
+    });
     expect(mocks.credentials).not.toHaveBeenCalled();
     expect(mocks.providerFactory).not.toHaveBeenCalled();
   });

@@ -2,7 +2,7 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import type { Result } from "@/lib/errors/result";
 import {
   ESIGN_TEMPLATE_MERGE_FIELDS,
@@ -40,12 +40,13 @@ import {
 const SIGNED_URL_SECONDS = 300;
 
 export async function authenticateLeadEsignActor(): Promise<EsignActor | null> {
-  const memberships = await getCallerMemberships();
-  if (memberships.length !== 1) return null;
+  const resolvedMembership = await getSingleActiveMembership();
+  if (!resolvedMembership.ok) return null;
+  const membership = resolvedMembership.membership;
   return {
-    orgId: memberships[0].org_id,
-    userId: memberships[0].user_id,
-    role: memberships[0].role,
+    orgId: membership.org_id,
+    userId: membership.user_id,
+    role: membership.role,
   };
 }
 
@@ -402,7 +403,7 @@ async function loadLeadSendContext({
         : Promise.resolve({ data: null, error: null }),
       admin
         .from("org_esign_integrations")
-        .select("sending_enabled,test_mode")
+        .select("api_key_last_four,sending_enabled,test_mode")
         .eq("org_id", actor.orgId)
         .maybeSingle(),
       admin
@@ -435,8 +436,10 @@ async function loadLeadSendContext({
     ]
       .filter(Boolean)
       .join(", "),
-    connected: Boolean(integrationResult.data),
-    sendingEnabled: integrationResult.data?.sending_enabled ?? false,
+    connected: Boolean(integrationResult.data?.api_key_last_four),
+    sendingEnabled:
+      Boolean(integrationResult.data?.api_key_last_four) &&
+      (integrationResult.data?.sending_enabled ?? false),
     testMode: true,
     templates: (templatesResult.data ?? []).flatMap(toTemplateOption),
   };

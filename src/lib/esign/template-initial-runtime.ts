@@ -2,7 +2,7 @@ import "server-only";
 
 import { createHash } from "node:crypto";
 
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import {
@@ -38,8 +38,9 @@ export type PreparedSourceMetadata = Readonly<{
 }>;
 
 export async function createInitialTemplateRuntime() {
-  const membership = (await getCallerMemberships())[0];
-  if (!membership) throw new Error("AUTH_REQUIRED");
+  const resolvedMembership = await getSingleActiveMembership();
+  if (!resolvedMembership.ok) throw new Error("AUTH_REQUIRED");
+  const membership = resolvedMembership.membership;
   if (membership.role !== "owner") throw new Error("OWNER_REQUIRED");
   const actorId = membership.user_id;
   const orgId = membership.org_id;

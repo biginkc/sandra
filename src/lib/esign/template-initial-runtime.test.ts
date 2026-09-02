@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderError } from "@/lib/errors/classes";
 
 const mocks = vi.hoisted(() => ({
+  memberships: vi.fn(),
   rpc: vi.fn(),
   from: vi.fn(),
   download: vi.fn(),
@@ -14,9 +15,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/auth/memberships", () => ({
-  getCallerMemberships: async () => [
-    { user_id: "owner-1", org_id: "org-1", role: "owner" },
-  ],
+  getSingleActiveMembership: async () => {
+    const memberships = await mocks.memberships();
+    if (memberships.length !== 1) return { ok: false, reason: "ambiguous" };
+    return { ok: true, membership: memberships[0] };
+  },
 }));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
@@ -246,6 +249,9 @@ function successfulRpc(name: string, args: Record<string, unknown>) {
 describe("foundation initial-template runtime", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.memberships.mockResolvedValue([
+      { user_id: "owner-1", org_id: "org-1", role: "owner" },
+    ]);
     retireOriginal.mockResolvedValue({
       ok: true,
       data: { cleanupAttention: false },
@@ -299,6 +305,17 @@ describe("foundation initial-template runtime", () => {
         p_source_sha256: sha256,
       }),
     );
+    expect(mocks.credentials).not.toHaveBeenCalled();
+    expect(mocks.providerFactory).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before provider work when active membership is ambiguous", async () => {
+    mocks.memberships.mockResolvedValue([
+      { user_id: "owner-1", org_id: "org-1", role: "owner" },
+      { user_id: "owner-1", org_id: "org-2", role: "owner" },
+    ]);
+
+    await expect(createInitialTemplateRuntime()).rejects.toThrow("AUTH_REQUIRED");
     expect(mocks.credentials).not.toHaveBeenCalled();
     expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
