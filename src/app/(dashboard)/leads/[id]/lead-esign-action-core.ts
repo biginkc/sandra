@@ -59,7 +59,12 @@ export type LeadSendContext = Readonly<{
   propertyAddress: string;
   connected: boolean;
   sendingEnabled: boolean;
-  testMode: true;
+  testMode: boolean;
+  liveSendLimit?: Readonly<{
+    monthlyLimit: number;
+    usedThisMonth: number;
+    remainingThisMonth: number;
+  }> | null;
   templates: readonly TemplateOption[];
 }>;
 
@@ -160,6 +165,11 @@ export type EsignActionRepository = Readonly<{
     deliveryState: "send_unknown" | "failed";
     safeErrorMessage: string | null;
   }): Promise<void>;
+  reserveLiveSend(input: {
+    orgId: string;
+    requestId: string;
+    providerRemaining: number;
+  }): Promise<"reserved" | "blocked">;
   findProviderLookupReference(input: {
     orgId: string;
     requestId: string;
@@ -261,7 +271,8 @@ export type ProviderDispatchOutcome =
       signatures: readonly ProviderSignature[];
     }>
   | Readonly<{ outcome: "ambiguous" }>
-  | Readonly<{ outcome: "definitive_failure" }>;
+  | Readonly<{ outcome: "definitive_failure" }>
+  | Readonly<{ outcome: "provider_plan_required" }>;
 
 export type ProviderMutationOutcome =
   "accepted" | "ambiguous" | "definitive_failure";
@@ -273,6 +284,7 @@ export type ProviderSignerUpdateOutcome =
 export type EsignActionProvider = Readonly<{
   sendWithTemplate(input: {
     localRequestId: string;
+    testMode?: boolean;
     providerTemplateId: string;
     signers: readonly SignerAssignment[];
     mergeValues: ContractMergeValues;
@@ -302,6 +314,9 @@ export type EsignActionProvider = Readonly<{
     testMode: boolean;
     signal: AbortSignal;
   }): Promise<{ complete: boolean; providerRequestIds: readonly string[] }>;
+  getRemainingSignatureRequests(input: {
+    signal: AbortSignal;
+  }): Promise<number | null>;
 }>;
 
 export type EsignActionFiles = Readonly<{
@@ -367,7 +382,8 @@ async function loadPreflight(
   const blockers = blockersFor(context);
   return {
     propertyId: context.propertyId,
-    testMode: true,
+    testMode: context.testMode,
+    liveSendLimit: context.liveSendLimit,
     blockers,
     templates: context.templates,
     sellerDefaults: {
@@ -502,11 +518,46 @@ async function dispatchClaimed(
     fail("PROVIDER_DISCONNECTED", "Dropbox Sign is not connected.");
   }
 
+  if (!request.testMode) {
+    let providerRemaining: number | null;
+    try {
+      providerRemaining = await withProviderTimeout((signal) =>
+        provider.getRemainingSignatureRequests({ signal }),
+      );
+    } catch {
+      await markFailed(dependencies, request, "PROVIDER_QUOTA_UNAVAILABLE");
+      fail(
+        "LIVE_QUOTA_BLOCKED",
+        "Dropbox Sign live quota could not be confirmed. No live request was sent.",
+      );
+    }
+    if (providerRemaining === null || providerRemaining <= 10) {
+      await markFailed(dependencies, request, "PROVIDER_QUOTA_TOO_LOW");
+      fail(
+        "LIVE_QUOTA_BLOCKED",
+        "Dropbox Sign reports too few signature requests remaining. No live request was sent.",
+      );
+    }
+    const reservation = await dependencies.repository.reserveLiveSend({
+      orgId: request.orgId,
+      requestId: request.id,
+      providerRemaining,
+    });
+    if (reservation !== "reserved") {
+      await markFailed(dependencies, request, "SANDRA_LIVE_LIMIT_REACHED");
+      fail(
+        "LIVE_QUOTA_BLOCKED",
+        "Sandra's monthly live-send safety limit is reached. No live request was sent.",
+      );
+    }
+  }
+
   let outcome: ProviderDispatchOutcome;
   try {
     outcome = await withProviderTimeout((signal) =>
       provider.sendWithTemplate({
         localRequestId: request.id,
+        testMode: request.testMode,
         providerTemplateId: request.template.providerTemplateId,
         signers: request.signers,
         mergeValues: request.mergeValues,
@@ -530,6 +581,13 @@ async function dispatchClaimed(
   if (outcome.outcome === "definitive_failure") {
     await markFailed(dependencies, request, "PROVIDER_REJECTED");
     fail("SEND_FAILED", "Dropbox Sign could not send this contract.");
+  }
+  if (outcome.outcome === "provider_plan_required") {
+    await markFailed(dependencies, request, "PROVIDER_PLAN_REQUIRED");
+    fail(
+      "PROVIDER_PLAN_REQUIRED",
+      "Dropbox Sign rejected this live request because the connected account plan or billing allowance is not ready.",
+    );
   }
 
   try {
@@ -1019,6 +1077,9 @@ function blockersFor(context: LeadSendContext): SendBlockerCode[] {
   if (!context.connected) blockers.push("provider_disconnected");
   if (!context.sendingEnabled) blockers.push("sending_disabled");
   if (context.templates.length === 0) blockers.push("no_templates");
+  if (!context.testMode && context.liveSendLimit?.remainingThisMonth === 0) {
+    blockers.push("live_quota_blocked");
+  }
   if (!context.hasHomeownerContact) blockers.push("owner_contact_missing");
   else if (!context.sellerEmailAddress?.trim())
     blockers.push("owner_email_missing");
@@ -1063,6 +1124,8 @@ function blockerMessage(blocker: SendBlockerCode): string {
     no_templates: "No eSign templates are available.",
     owner_contact_missing: "No homeowner contact is linked to this lead.",
     owner_email_missing: "Enter the seller email before sending.",
+    live_quota_blocked:
+      "Sandra's live Dropbox Sign safety limit is reached.",
   };
   return messages[blocker];
 }

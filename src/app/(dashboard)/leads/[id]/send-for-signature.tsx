@@ -363,7 +363,21 @@ export function SendForSignatureDialog({
                 Dropbox Sign is in test mode. This document is watermarked and
                 not legally binding.
               </div>
-            ) : null}
+            ) : (
+              <div
+                className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm"
+                data-testid="esign-live-mode-notice"
+              >
+                Dropbox Sign is in live mode. This send is legally binding and
+                counts against Dropbox Sign billing. Sandra&apos;s fuse covers
+                Sandra-originated sends only.
+                {preflight.liveSendLimit ? (
+                  <span className="mt-1 block text-xs text-muted-foreground">
+                    Sandra live-send fuse: {preflight.liveSendLimit.usedThisMonth} of {preflight.liveSendLimit.monthlyLimit} used this provider quota month.
+                  </span>
+                ) : null}
+              </div>
+            )}
 
             {blocker ? (
               <p role="alert" className="text-sm text-destructive">

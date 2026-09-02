@@ -107,6 +107,7 @@ export async function handleDropboxSignWebhook(input: {
           ...identity,
           signRequestId: replay.signRequestId,
           localRequestId: replay.localRequestId,
+          ...(replay.testMode == null ? {} : { testMode: replay.testMode }),
         });
       if (metadataMatch === "matched") {
         request = await input.dependencies.persistence.findRequest({
@@ -124,6 +125,13 @@ export async function handleDropboxSignWebhook(input: {
     }
     if (!request || request.orgId !== identity.orgId) {
       throw new SafeWebhookProcessingError("REQUEST_NOT_FOUND", 503);
+    }
+    if (replay.testMode != null && replay.testMode !== (request.testMode ?? true)) {
+      await input.dependencies.persistence.markReceiptIgnored(
+        activeClaim,
+        "REQUEST_MODE_MISMATCH",
+      );
+      return acknowledgement();
     }
 
     const providerEventAt = providerEventDate(replay);
