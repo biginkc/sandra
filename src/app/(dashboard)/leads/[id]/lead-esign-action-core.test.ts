@@ -901,6 +901,9 @@ describe("lead eSign action orchestration", () => {
       actorId: "user-1",
       emailAddress: "seller-fixed@example.com",
     });
+    expect(h.dependencies.providerForOrg).toHaveBeenCalledWith("org-1", {
+      requireSendingEnabled: false,
+    });
     expect(h.provider.updateSignerEmail).toHaveBeenCalledWith({
       providerRequestId: "provider-request-1",
       providerSignatureId: "signature-old",

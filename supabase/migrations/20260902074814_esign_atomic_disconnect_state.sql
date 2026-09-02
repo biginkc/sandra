@@ -280,7 +280,7 @@ begin
   where request.org_id = p_org_id
     and (
       request.status in ('awaiting', 'viewed')
-      or request.delivery_state in ('sending', 'send_unknown')
+      or request.delivery_state::text in ('sending', 'send_unknown', 'email_bounced')
       or (
         request.status = 'signed'
         and not exists (

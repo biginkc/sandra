@@ -1395,6 +1395,7 @@ describe("Migration 20260830080000 — durable template upload reservations", ()
   });
 
   it("allows browser upload only for an exact durable reservation", async () => {
+    await connectIntegration(orgId, creatorId, "account-a");
     await setRole("service_role");
     const sourceId = crypto.randomUUID();
     const path = `${orgId}/${sourceId}.pdf`;

@@ -255,8 +255,11 @@ describe("eSign foundation production lease contention", () => {
     await setup.query(
       `insert into public.esign_template_staging_sources (
          id,org_id,storage_path,source_filename,source_size_bytes,
-         content_type,source_sha256,created_by
-       ) values ($1,$2,$3,'contract.pdf',1024,'application/pdf',repeat('b',64),$4)`,
+         content_type,source_sha256,cleanup_outcome,cleanup_attempted_at,created_by
+       ) values (
+         $1,$2,$3,'contract.pdf',1024,'application/pdf',repeat('b',64),
+         'deleted',now(),$4
+       )`,
       [sourceId, orgId, `${orgId}/${sourceId}.pdf`, userId],
     );
     await setup.query(
@@ -265,13 +268,16 @@ describe("eSign foundation production lease contention", () => {
          merge_field_names,sign_template_id,staging_source_id,
          source_filename,source_size_bytes,source_content_type,source_sha256,
          staging_path,provider_account_id,finalized_at,lifecycle_state,
+         provider_create_state,provider_create_claim_token_hash,
+         provider_create_claimed_at,provider_create_invocation_started_at,
          created_by,updated_by
        ) values (
          $1,$2,'Purchase agreement','purchase_agreement','Seller',
          '[{"name":"Seller","order":0}]'::jsonb,
          array['seller_name','property_address','offer_price','closing_date','earnest_money'],
          $6,$3,'contract.pdf',1024,'application/pdf',
-         repeat('b',64),$4,'account-1',now(),'finalized',$5,$5
+         repeat('b',64),$4,'account-1',now(),'finalized',
+         'attached',repeat('9',64),now(),now(),$5,$5
        )`,
       [
         templateId,
@@ -354,6 +360,44 @@ describe("eSign foundation production lease contention", () => {
       delivery_state: "email_bounced",
       sign_request_id: providerRequestId,
       error_message: "PROVIDER_EMAIL_BOUNCE",
+    });
+
+    const disconnect = await setup.query<{
+      disconnected: boolean;
+      sending_enabled: boolean;
+      credentials_present: boolean;
+      disconnect_pending: boolean;
+      message: string;
+    }>("select * from public.disconnect_org_esign_integration($1,$2)", [
+      orgId,
+      userId,
+    ]);
+    expect(disconnect.rows[0]).toMatchObject({
+      disconnected: false,
+      sending_enabled: false,
+      credentials_present: true,
+      disconnect_pending: true,
+    });
+    expect(disconnect.rows[0].message).toMatch(/1 signature request/i);
+    expect(
+      (
+        await setup.query<{
+          sending_enabled: boolean;
+          credentials_present: boolean;
+          disconnect_pending: boolean;
+        }>(
+          `select sending_enabled,
+             api_key_encrypted is not null as credentials_present,
+             disconnect_pending_at is not null as disconnect_pending
+           from public.org_esign_integrations
+           where org_id=$1`,
+          [orgId],
+        )
+      ).rows[0],
+    ).toEqual({
+      sending_enabled: false,
+      credentials_present: true,
+      disconnect_pending: true,
     });
 
     const claim = await setup.query<{

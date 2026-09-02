@@ -673,9 +673,13 @@ function parseMergeValues(value: Json): ContractMergeValues | null {
 
 export async function providerForOrg(
   orgId: string,
+  options: { requireSendingEnabled?: boolean } = {},
 ): Promise<EsignActionProvider | null> {
   const credentials = await getEsignCredentials(orgId);
-  if (!credentials?.sendingEnabled) return null;
+  if (!credentials) return null;
+  if (options.requireSendingEnabled !== false && !credentials.sendingEnabled) {
+    return null;
+  }
   const provider = createDropboxSignProvider({
     apiKey: credentials.apiKey,
     clientId: credentials.clientId,

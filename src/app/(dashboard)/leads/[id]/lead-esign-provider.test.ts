@@ -136,6 +136,34 @@ describe("bound lead eSign provider classification", () => {
     expect(providerMocks.sendWithTemplate).not.toHaveBeenCalled();
   });
 
+  it("can build a repair-only provider while sending is disabled", async () => {
+    providerMocks.getCredentials.mockResolvedValueOnce({
+      sendingEnabled: false,
+      apiKey: "secret-wrapper",
+      clientId: "client-id",
+    });
+
+    await expect(
+      providerForOrg("org-1", { requireSendingEnabled: false }),
+    ).resolves.toBeTruthy();
+    expect(providerMocks.createProvider).toHaveBeenCalledWith({
+      apiKey: "secret-wrapper",
+      clientId: "client-id",
+      expectedDomain: "sandra.example.com",
+    });
+  });
+
+  it("does not create a provider client for normal mutations when sending is disabled", async () => {
+    providerMocks.getCredentials.mockResolvedValueOnce({
+      sendingEnabled: false,
+      apiKey: "secret-wrapper",
+      clientId: "client-id",
+    });
+
+    await expect(providerForOrg("org-1")).resolves.toBeNull();
+    expect(providerMocks.createProvider).not.toHaveBeenCalled();
+  });
+
   it("does not create a provider client after credentials are removed", async () => {
     providerMocks.getCredentials.mockResolvedValueOnce(null);
 
