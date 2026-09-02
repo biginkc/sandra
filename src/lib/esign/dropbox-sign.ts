@@ -279,7 +279,7 @@ export function createDropboxSignProvider(input: {
       }
     },
 
-    async findSignatureRequestIdsByLocalRequestId(localRequestId, signal) {
+    async findSignatureRequestIdsByLocalRequestId(localRequestId, testMode, signal) {
       try {
         const response = await abortableSignatureApi(
           input.apiKey,
@@ -288,7 +288,7 @@ export function createDropboxSignProvider(input: {
           undefined,
           1,
           100,
-          `metadata:${localRequestId} AND test_mode:true AND client_id:${input.clientId}`,
+          `metadata:${localRequestId} AND test_mode:${testMode} AND client_id:${input.clientId}`,
         );
         const requests = response.body.signatureRequests ?? [];
         const providerRequestIds = requests.flatMap((request) =>

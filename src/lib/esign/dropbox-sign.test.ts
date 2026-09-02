@@ -229,6 +229,7 @@ describe("Dropbox Sign provider", () => {
     await expect(
       provider.findSignatureRequestIdsByLocalRequestId(
         "local-uuid",
+        false,
         controller.signal,
       ),
     ).resolves.toEqual({
@@ -239,7 +240,7 @@ describe("Dropbox Sign provider", () => {
       undefined,
       1,
       100,
-      "metadata:local-uuid AND test_mode:true AND client_id:client-id",
+      "metadata:local-uuid AND test_mode:false AND client_id:client-id",
     );
     expect(sdk.interceptorOptions.at(-1)).toEqual({
       signal: controller.signal,

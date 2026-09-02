@@ -147,6 +147,7 @@ export type DropboxSignProvider = {
   sendWithTemplate(input: SendWithTemplateInput): Promise<SendWithTemplateOutput>;
   findSignatureRequestIdsByLocalRequestId(
     localRequestId: string,
+    testMode: boolean,
     signal?: AbortSignal,
   ): Promise<{ complete: boolean; providerRequestIds: string[] }>;
   remind(
