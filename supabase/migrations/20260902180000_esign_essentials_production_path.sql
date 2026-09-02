@@ -1067,6 +1067,8 @@ revoke all on function public.reserve_esign_live_send(uuid, uuid, integer)
 grant execute on function public.reserve_esign_live_send(uuid, uuid, integer)
   to service_role;
 
+drop function if exists public.find_esign_webhook_request(uuid, text);
+
 create or replace function public.find_esign_webhook_request(
   p_org_id uuid,
   p_sign_request_id text

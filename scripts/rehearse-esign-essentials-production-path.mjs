@@ -352,10 +352,49 @@ returns boolean language sql immutable as $$
       'property_address', 'seller_name'
     ]::text[];
 $$;
+create or replace function public.find_esign_webhook_request(
+  p_org_id uuid,
+  p_sign_request_id text
+)
+returns table (
+  id uuid,
+  org_id uuid,
+  property_id uuid,
+  status public.esign_request_status,
+  signed_pdf_path text,
+  template_title text
+)
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select request.id, request.org_id, request.property_id, request.status,
+    request.signed_pdf_path, template.name
+  from public.esign_requests request
+  join public.esign_templates template
+    on template.id = request.template_id and template.org_id = request.org_id
+  where request.org_id = p_org_id
+    and request.sign_request_id = p_sign_request_id
+    and coalesce(auth.role(), '') = 'service_role'
+  limit 1;
+$$;
+revoke all on function public.find_esign_webhook_request(uuid, text)
+  from public, anon, authenticated;
+grant execute on function public.find_esign_webhook_request(uuid, text)
+  to service_role;
 `;
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+async function findWebhookRequestColumns(client) {
+  const result = await client.query(
+    `select * from public.find_esign_webhook_request($1,$2) limit 0`,
+    [ids.org, "missing-signature-request"],
+  );
+  return result.fields.map((field) => field.name);
 }
 
 async function setServiceRole(client) {
@@ -392,8 +431,18 @@ try {
   await client.connect();
   try {
     await client.query(baseSql);
+    assert(
+      (await findWebhookRequestColumns(client)).join(",") ===
+        "id,org_id,property_id,status,signed_pdf_path,template_title",
+      "base webhook lookup fixture did not start with the six-column return shape",
+    );
     await client.query(migrationSql);
     await client.query(migrationSql);
+    assert(
+      (await findWebhookRequestColumns(client)).join(",") ===
+        "id,org_id,property_id,status,signed_pdf_path,template_title,test_mode",
+      "migration did not safely replace webhook lookup with the seven-column return shape",
+    );
     await setServiceRole(client);
 
     await client.query(
