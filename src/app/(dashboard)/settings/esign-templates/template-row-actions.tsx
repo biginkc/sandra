@@ -1,6 +1,6 @@
 "use client";
 
-import { CopyIcon, PencilIcon, Trash2Icon } from "lucide-react";
+import { CopyIcon, PencilIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 
@@ -13,12 +13,48 @@ import { getTemplateTitleValidationError } from "@/lib/esign/template-contract";
 import type { EsignTemplateRow, TemplateLibraryActions } from "./types";
 
 export function TemplateRowActions({ template, actions }: { template: EsignTemplateRow; actions?: TemplateLibraryActions }) {
+  if (template.templateOrigin === "dropbox_website") {
+    return (
+      <>
+        <RevalidateWebsiteTemplateButton template={template} actions={actions} />
+        <DeleteTemplateDialog template={template} actions={actions} />
+      </>
+    );
+  }
   return (
     <>
       <EditTemplateButton template={template} actions={actions} />
       <DuplicateTemplateDialog template={template} actions={actions} />
       <DeleteTemplateDialog template={template} actions={actions} />
     </>
+  );
+}
+
+function RevalidateWebsiteTemplateButton({ template, actions }: { template: EsignTemplateRow; actions?: TemplateLibraryActions }) {
+  const router = useRouter();
+  const [error, setError] = useState<string | null>(null);
+  const [pending, startTransition] = useTransition();
+  const revalidate = () => {
+    const revalidateWebsiteTemplate = actions?.revalidateWebsiteTemplate;
+    if (!revalidateWebsiteTemplate) return;
+    startTransition(async () => {
+    setError(null);
+    const result = await revalidateWebsiteTemplate(
+      template.id,
+      template.providerTemplateId,
+    );
+    if (!result.ok) return setError(result.error.message);
+    router.refresh();
+    });
+  };
+  return (
+    <div>
+      <Button variant="ghost" size="sm" onClick={revalidate} disabled={!actions?.revalidateWebsiteTemplate || pending}>
+        <RefreshCwIcon data-icon="inline-start" />
+        {pending ? "Checking…" : "Revalidate"}
+      </Button>
+      {error && <p role="alert" className="text-destructive max-w-52 text-xs">{error}</p>}
+    </div>
   );
 }
 
@@ -146,12 +182,12 @@ export function DeleteTemplateDialog({ template, actions }: { template: EsignTem
   });
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <Button variant="ghost" size="sm" className="text-destructive" onClick={() => { setConfirmRecentSends(template.recentSendCount30d > 0); setError(null); setOpen(true); }}><Trash2Icon data-icon="inline-start" /> Delete</Button>
+      <Button variant="ghost" size="sm" className="text-destructive" onClick={() => { setConfirmRecentSends(template.recentSendCount30d > 0); setError(null); setOpen(true); }}><Trash2Icon data-icon="inline-start" /> {template.templateOrigin === "dropbox_website" ? "Remove" : "Delete"}</Button>
       <DialogContent className="sm:max-w-xl">
-        <DialogHeader><DialogTitle>Delete {template.name}?</DialogTitle><DialogDescription>The reusable template will be removed. Existing contract records and saved PDFs stay in Sandra.</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>{template.templateOrigin === "dropbox_website" ? "Remove" : "Delete"} {template.name}?</DialogTitle><DialogDescription>{template.templateOrigin === "dropbox_website" ? "The template will be removed from Sandra only. The Dropbox Sign website template is not deleted." : "The reusable template will be removed. Existing contract records and saved PDFs stay in Sandra."}</DialogDescription></DialogHeader>
         {confirmRecentSends && <div className="border-destructive/20 bg-destructive/10 text-destructive rounded-lg border p-3 text-sm">{template.recentSendCount30d > 0 ? `This template was used for ${template.recentSendCount30d} contract${template.recentSendCount30d === 1 ? "" : "s"} in the last 30 days.` : "This template was used recently."} Deleting it will not remove existing contract history or signed PDFs.</div>}
         {(error || !actions) && <p role="alert" className="text-destructive text-sm">{error ?? "Template actions are not connected yet."}</p>}
-        <DialogFooter><DialogClose render={<Button variant="outline" disabled={pending} />}>Cancel</DialogClose><Button variant="destructive" onClick={submit} disabled={!actions || pending}>{pending ? "Deleting…" : "Delete template"}</Button></DialogFooter>
+        <DialogFooter><DialogClose render={<Button variant="outline" disabled={pending} />}>Cancel</DialogClose><Button variant="destructive" onClick={submit} disabled={!actions || pending}>{pending ? "Removing…" : template.templateOrigin === "dropbox_website" ? "Remove from Sandra" : "Delete template"}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   );

@@ -6,6 +6,10 @@ import { reportError } from "@/lib/errors/report";
 import { createFoundationTemplateOrchestrator } from "@/lib/esign/template-foundation-adapter";
 import { createInitialTemplateRuntime } from "@/lib/esign/template-initial-runtime";
 import { getSingleActiveMembership } from "@/lib/auth/memberships";
+import {
+  registerDropboxWebsiteTemplate,
+  revalidateDropboxWebsiteTemplate,
+} from "@/lib/esign/website-template-registration";
 
 import type {
   CreatedTemplateDraft,
@@ -80,6 +84,80 @@ export async function prepareTemplateUploadAction(
     return await (await createInitialTemplateRuntime()).prepare(input);
   } catch (error) {
     reportError(error, { tags: { surface: "esign_template_prepare_upload" } });
+    return { ok: false, error: SAFE_FAILURE };
+  }
+}
+
+export async function registerWebsiteTemplateAction(input: {
+  providerTemplateId: string;
+  name: string;
+  documentType: string;
+}): Promise<TemplateLaneResult<TemplateOption>> {
+  try {
+    const resolvedMembership = await getSingleActiveMembership();
+    if (!resolvedMembership.ok)
+      return {
+        ok: false,
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Sign in to manage eSign templates.",
+        },
+      };
+    if (resolvedMembership.membership.role !== "owner")
+      return {
+        ok: false,
+        error: {
+          code: "OWNER_REQUIRED",
+          message: "Only an organization owner can manage eSign templates.",
+        },
+      };
+    const result = await registerDropboxWebsiteTemplate({
+      orgId: resolvedMembership.membership.org_id,
+      actorId: resolvedMembership.membership.user_id,
+      providerTemplateId: input.providerTemplateId,
+      name: input.name,
+      documentType: input.documentType,
+    });
+    revalidatePath("/settings/esign-templates");
+    return { ok: true, data: result };
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_template_register_website" } });
+    return { ok: false, error: SAFE_FAILURE };
+  }
+}
+
+export async function revalidateWebsiteTemplateAction(
+  templateId: string,
+  providerTemplateId: string,
+): Promise<TemplateLaneResult<{ status: "valid" | "unavailable" }>> {
+  try {
+    const resolvedMembership = await getSingleActiveMembership();
+    if (!resolvedMembership.ok)
+      return {
+        ok: false,
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Sign in to manage eSign templates.",
+        },
+      };
+    if (resolvedMembership.membership.role !== "owner")
+      return {
+        ok: false,
+        error: {
+          code: "OWNER_REQUIRED",
+          message: "Only an organization owner can manage eSign templates.",
+        },
+      };
+    const status = await revalidateDropboxWebsiteTemplate({
+      orgId: resolvedMembership.membership.org_id,
+      actorId: resolvedMembership.membership.user_id,
+      templateId,
+      providerTemplateId,
+    });
+    revalidatePath("/settings/esign-templates");
+    return { ok: true, data: { status } };
+  } catch (error) {
+    reportError(error, { tags: { surface: "esign_template_revalidate_website" } });
     return { ok: false, error: SAFE_FAILURE };
   }
 }

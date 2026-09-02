@@ -12,6 +12,8 @@ import {
   promoteStaleInitialTemplateProviderCreateAction,
   deleteTemplateAction,
   duplicateTemplateAction,
+  registerWebsiteTemplateAction,
+  revalidateWebsiteTemplateAction,
   retryTemplateSourceCleanupAction,
   retryUnattachedTemplateSourceCleanupAction,
   retryInitialTemplateProviderCreateAction,
@@ -30,6 +32,19 @@ declare global {
 let chooserLoad: Promise<DropboxChooserSdk> | null = null;
 
 export const templateLibraryActions: TemplateLibraryActions = {
+  registerWebsiteTemplate(input) {
+    return safeTemplateCallAction(registerWebsiteTemplateAction(input), {
+      fallbackMessage: "The Dropbox Sign template could not be registered.",
+    });
+  },
+  revalidateWebsiteTemplate(templateId, providerTemplateId) {
+    return safeTemplateCallAction(
+      revalidateWebsiteTemplateAction(templateId, providerTemplateId),
+      {
+        fallbackMessage: "The Dropbox Sign template could not be revalidated.",
+      },
+    );
+  },
   createDraft(input, options) {
     return uploadAndCreateDraft(input, options);
   },

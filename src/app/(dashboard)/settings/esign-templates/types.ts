@@ -14,6 +14,9 @@ export {
 
 export type EsignTemplateRow = TemplateOption &
   Readonly<{
+  templateOrigin?: "sandra_embedded" | "dropbox_website";
+    websiteTemplateStatus?: "valid" | "unavailable";
+    websiteTemplateUnavailableReason?: string | null;
     sourceFilename: string;
     sourceSizeBytes: number;
     pageCount: number | null;
@@ -123,6 +126,15 @@ export type RetriedTemplateDraft = Readonly<{
 }>;
 
 export type TemplateLibraryActions = Readonly<{
+  registerWebsiteTemplate?(input: {
+    providerTemplateId: string;
+    name: string;
+    documentType: string;
+  }): Promise<TemplateLaneResult<TemplateOption>>;
+  revalidateWebsiteTemplate?(
+    templateId: string,
+    providerTemplateId: string,
+  ): Promise<TemplateLaneResult<{ status: "valid" | "unavailable" }>>;
   createDraft(
     input: CreateTemplateDraftInput,
     options?: Readonly<{ signal?: AbortSignal; stagingSourceId?: string }>,

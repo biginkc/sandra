@@ -8,7 +8,7 @@ import { AddTemplateDialog } from "./add-template-dialog";
 import { loadPendingTemplateCopies, loadTemplateLibrary } from "./template-lane-adapter";
 import { TemplateLibrary } from "./template-library";
 import { PendingTemplateCopies } from "./pending-template-copies";
-import { TestModeBanner } from "./test-mode-banner";
+import { EsignModeBanner } from "./test-mode-banner";
 
 export default async function EsignTemplatesPage() {
   const [result, pendingCopies, esignStatus] = await Promise.all([
@@ -31,7 +31,7 @@ export default async function EsignTemplatesPage() {
           { label: "eSign templates" },
         ]}
         title="eSign templates"
-        description="Manage the test-mode Dropbox Sign templates used to prepare offers and agreements."
+        description="Register website-created Dropbox Sign templates for Sandra sends. Embedded editing stays off unless the server capability is enabled."
         actions={
           <AddTemplateDialog
             disabledReason={addTemplateDisabledReason}
@@ -45,7 +45,7 @@ export default async function EsignTemplatesPage() {
         }
       />
 
-      <TestModeBanner />
+      <EsignModeBanner testMode={esignStatus.ok ? esignStatus.data.testMode : true} />
 
       <PendingTemplateCopies result={pendingCopies} />
       <TemplateLibrary
