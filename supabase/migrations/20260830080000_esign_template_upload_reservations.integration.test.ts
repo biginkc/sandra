@@ -22,7 +22,7 @@ const forwardSql = readFileSync(
   "utf8",
 );
 const definitiveFailureSql = readFileSync(
-  "supabase/migrations/20260901181004_record_definitive_esign_template_provider_create_failure.sql",
+  "supabase/migrations/20260902120000_record_definitive_esign_template_provider_create_failure.sql",
   "utf8",
 );
 const sellerEmailAuthoritySql = readFileSync(
@@ -30,7 +30,7 @@ const sellerEmailAuthoritySql = readFileSync(
   "utf8",
 );
 const atomicDisconnectSql = readFileSync(
-  "supabase/migrations/20260902074814_esign_atomic_disconnect_state.sql",
+  "supabase/migrations/20260902120100_esign_atomic_disconnect_state.sql",
   "utf8",
 );
 

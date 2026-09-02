@@ -270,6 +270,39 @@ test("a legitimate new timestamp migration newer than history's max passes", () 
   );
 });
 
+test("renamed eSign migrations pass when older filenames were already applied before later eSign history", () => {
+  const history = [
+    { version: "086", isPlaceholder: false },
+    { version: "20260901181004", isPlaceholder: false },
+    { version: "20260901193023", isPlaceholder: false },
+    { version: "20260902074814", isPlaceholder: false },
+    { version: "20260902110000", isPlaceholder: false },
+    { version: "20260902111000", isPlaceholder: false },
+    { version: "20260902112000", isPlaceholder: false },
+  ];
+  const local = [
+    { file: "086_x.sql", version: "086" },
+    { file: "20260901193023_esign_finish_sync_deadline.sql", version: "20260901193023" },
+    { file: "20260902110000_esign_email_bounced_delivery_state.sql", version: "20260902110000" },
+    { file: "20260902111000_esign_email_bounce_recovery.sql", version: "20260902111000" },
+    { file: "20260902112000_esign_provider_truthful_lifecycle.sql", version: "20260902112000" },
+    {
+      file: "20260902120000_record_definitive_esign_template_provider_create_failure.sql",
+      version: "20260902120000",
+    },
+    { file: "20260902120100_esign_atomic_disconnect_state.sql", version: "20260902120100" },
+  ];
+  const result = evaluateSafety(history, local);
+  assert.equal(result.ok, true, `expected pass, got refusal: ${JSON.stringify(result)}`);
+  assert.deepEqual(
+    result.pending.map((entry) => entry.file),
+    [
+      "20260902120000_record_definitive_esign_template_provider_create_failure.sql",
+      "20260902120100_esign_atomic_disconnect_state.sql",
+    ],
+  );
+});
+
 test("mixed scheme does not produce a false FAIL: a new legacy-width pending file newer only within its own namespace is not blocked by the far-larger timestamp max", () => {
   // Global BigInt comparison (no namespacing) would compare 087 against the
   // overall max across ALL history, which is the huge timestamp

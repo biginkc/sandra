@@ -38,7 +38,7 @@ const migrationSql = readFileSync(
   .replace(/\nbegin;\s*/i, "\n")
   .replace(/\s*commit;\s*$/i, "");
 const atomicDisconnectSql = readFileSync(
-  "supabase/migrations/20260902074814_esign_atomic_disconnect_state.sql",
+  "supabase/migrations/20260902120100_esign_atomic_disconnect_state.sql",
   "utf8",
 );
 

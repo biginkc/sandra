@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const sql = readFileSync(
-  "supabase/migrations/20260901181004_record_definitive_esign_template_provider_create_failure.sql",
+  "supabase/migrations/20260902120000_record_definitive_esign_template_provider_create_failure.sql",
   "utf8",
 );
 
