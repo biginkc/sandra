@@ -80,7 +80,7 @@ export function TemplateLibrary({
             </h2>
             <p className="text-muted-foreground max-w-md text-sm leading-relaxed">
               {dropboxSignConnected
-                ? "Upload a contract PDF and place the signature, initials, date, and merge fields once. Every send after that is two clicks from a lead."
+                ? "Register a website-created Dropbox Sign template with Sandra's required signer roles and merge fields."
                 : "Connect Dropbox Sign in Integrations before adding or managing eSign templates."}
             </p>
           </div>
@@ -93,8 +93,8 @@ export function TemplateLibrary({
           />
           <p className="text-muted-foreground font-mono text-[11px]">
             {dropboxSignConnected
-              ? "PDF up to 40 MB · or pick a file from Dropbox"
-              : "Reconnect Dropbox Sign to upload contract PDFs."}
+              ? "Register a website-created Dropbox Sign template"
+              : "Reconnect Dropbox Sign to register templates."}
           </p>
         </div>
       </DataTableShell>

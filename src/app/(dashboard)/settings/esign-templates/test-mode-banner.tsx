@@ -1,4 +1,4 @@
-export function EsignModeBanner({ testMode = true }: { testMode?: boolean }) {
+export function EsignModeBanner({ testMode }: { testMode: boolean }) {
   return (
     <div className={`${testMode ? "border-alert-warning/40 bg-alert-warning/10" : "border-destructive/30 bg-destructive/5"} text-foreground flex flex-col gap-1 rounded-xl border px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between`}>
       <span className="flex items-center gap-3">

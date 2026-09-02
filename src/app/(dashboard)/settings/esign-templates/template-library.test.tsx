@@ -47,8 +47,10 @@ describe("TemplateLibrary", () => {
       </InitialEditorSessionProvider>,
     );
     expect(screen.getByText("No templates yet")).toBeVisible();
-    expect(screen.getByText(/Every send after that is two clicks from a lead/)).toBeVisible();
-    expect(screen.getByText("PDF up to 40 MB · or pick a file from Dropbox")).toBeVisible();
+    expect(screen.getByText(
+      "Register a website-created Dropbox Sign template with Sandra's required signer roles and merge fields.",
+    )).toBeVisible();
+    expect(screen.getByText("Register a website-created Dropbox Sign template")).toBeVisible();
   });
 
   it("explains that Dropbox Sign must be connected before templates can be added", () => {
