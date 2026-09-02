@@ -373,7 +373,7 @@ export function SendForSignatureDialog({
                 Sandra-originated sends only.
                 {preflight.liveSendLimit ? (
                   <span className="mt-1 block text-xs text-muted-foreground">
-                    Sandra live-send fuse: {preflight.liveSendLimit.usedThisMonth} of {preflight.liveSendLimit.monthlyLimit} used this provider quota month.
+                    Sandra local calendar-month ceiling: {preflight.liveSendLimit.usedThisMonth} of {preflight.liveSendLimit.monthlyLimit} live sends used.
                   </span>
                 ) : null}
               </div>

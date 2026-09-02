@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProviderError } from "@/lib/errors/classes";
 
-import { ESIGN_MERGE_FIELD_NAMES } from "./contracts";
+import { ESIGN_MERGE_FIELD_NAMES, type ProviderTemplateMetadata } from "./contracts";
 import {
   registerDropboxWebsiteTemplate,
   revalidateDropboxWebsiteTemplate,
@@ -56,6 +56,74 @@ function templateQuery(
   };
 }
 
+function field(
+  name: string,
+  overrides: Partial<ProviderTemplateMetadata["mergeFields"][number]> = {},
+): ProviderTemplateMetadata["mergeFields"][number] {
+  return {
+    documentIndex: 0,
+    apiId: `${name}-api`,
+    name,
+    type: "text",
+    required: false,
+    signer: null,
+    assignedTo: "sender",
+    signerRoleName: null,
+    ...overrides,
+  };
+}
+
+function metadata(
+  overrides: Partial<ProviderTemplateMetadata> = {},
+): ProviderTemplateMetadata {
+  const mergeFields = ESIGN_MERGE_FIELD_NAMES.map((name) => field(name));
+  const formFields: ProviderTemplateMetadata["formFields"] = [
+    field("seller_signature", {
+      apiId: "seller-signature-api",
+      type: "signature",
+      required: true,
+      signer: "1",
+      assignedTo: "signer",
+      signerRoleName: "Seller",
+    }),
+    field("buyer_signature", {
+      apiId: "buyer-signature-api",
+      type: "signature",
+      required: true,
+      signer: "2",
+      assignedTo: "signer",
+      signerRoleName: "Buyer",
+    }),
+  ];
+  const documents = [
+    {
+      index: 0,
+      name: "purchase-agreement.pdf",
+      customFields: mergeFields,
+      formFields,
+    },
+  ];
+  return {
+    providerTemplateId: "provider-template-1",
+    localTemplateId: null,
+    title: "Provider title",
+    isEmbedded: false,
+    canEdit: null,
+    isCreator: null,
+    isLocked: false,
+    accounts: [{ accountId: "provider-account-1", isLocked: null }],
+    signerRoles: [
+      { name: "Seller", order: 0 },
+      { name: "Buyer", order: 1 },
+    ],
+    mergeFieldNames: [...ESIGN_MERGE_FIELD_NAMES],
+    documents,
+    mergeFields,
+    formFields,
+    ...overrides,
+  };
+}
+
 describe("Dropbox website eSign template registration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -66,21 +134,7 @@ describe("Dropbox website eSign template registration", () => {
       sendingEnabled: false,
       testMode: true,
     });
-    mocks.getTemplate.mockResolvedValue({
-      providerTemplateId: "provider-template-1",
-      localTemplateId: null,
-      title: "Provider title",
-      isEmbedded: false,
-      canEdit: true,
-      isCreator: true,
-      isLocked: false,
-      accounts: [{ accountId: "provider-account-1", isLocked: false }],
-      signerRoles: [
-        { name: "Seller", order: 0 },
-        { name: "Buyer", order: 1 },
-      ],
-      mergeFieldNames: [...ESIGN_MERGE_FIELD_NAMES],
-    });
+    mocks.getTemplate.mockResolvedValue(metadata());
     mocks.from.mockReturnValue(templateQuery());
     mocks.rpc.mockResolvedValue({
       data: [{ outcome: "registered", template_id: "template-local-1" }],
@@ -114,35 +168,42 @@ describe("Dropbox website eSign template registration", () => {
         p_provider_template_id: "provider-template-1",
         p_provider_metadata: expect.objectContaining({
           isEmbedded: false,
-          canEdit: true,
+          canEdit: null,
           isLocked: false,
-          accounts: [{ accountId: "provider-account-1", isLocked: false }],
+          accounts: [{ accountId: "provider-account-1", isLocked: null }],
           signerRoles: [
             { name: "Seller", order: 0 },
             { name: "Buyer", order: 1 },
           ],
           mergeFieldNames: [...ESIGN_MERGE_FIELD_NAMES],
+          documents: [
+            expect.objectContaining({
+              customFields: expect.arrayContaining([
+                expect.objectContaining({
+                  name: "seller_name",
+                  assignedTo: "sender",
+                  signer: null,
+                }),
+              ]),
+              formFields: expect.arrayContaining([
+                expect.objectContaining({
+                  type: "signature",
+                  signerRoleName: "Seller",
+                }),
+                expect.objectContaining({
+                  type: "signature",
+                  signerRoleName: "Buyer",
+                }),
+              ]),
+            }),
+          ],
         }),
       }),
     );
   });
 
   it("rejects embedded templates before registration", async () => {
-    mocks.getTemplate.mockResolvedValue({
-      providerTemplateId: "provider-template-1",
-      localTemplateId: null,
-      title: "Provider title",
-      isEmbedded: true,
-      canEdit: true,
-      isCreator: true,
-      isLocked: false,
-      accounts: [{ accountId: "provider-account-1", isLocked: false }],
-      signerRoles: [
-        { name: "Seller", order: 0 },
-        { name: "Buyer", order: 1 },
-      ],
-      mergeFieldNames: [...ESIGN_MERGE_FIELD_NAMES],
-    });
+    mocks.getTemplate.mockResolvedValue(metadata({ isEmbedded: true }));
 
     await expect(
       registerDropboxWebsiteTemplate({
@@ -157,19 +218,14 @@ describe("Dropbox website eSign template registration", () => {
   });
 
   it("rejects duplicate merge fields by raw count before registration", async () => {
-    mocks.getTemplate.mockResolvedValue({
-      providerTemplateId: "provider-template-1",
-      localTemplateId: null,
-      title: "Provider title",
-      isEmbedded: false,
-      canEdit: true,
-      isCreator: true,
-      isLocked: false,
-      accounts: [{ accountId: "provider-account-1", isLocked: false }],
-      signerRoles: [
-        { name: "Seller", order: 0 },
-        { name: "Buyer", order: 1 },
-      ],
+    const duplicateFields = [
+      field("seller_name"),
+      field("seller_name", { apiId: "seller-name-duplicate-api" }),
+      field("property_address"),
+      field("offer_price"),
+      field("closing_date"),
+    ];
+    mocks.getTemplate.mockResolvedValue(metadata({
       mergeFieldNames: [
         "seller_name",
         "seller_name",
@@ -177,7 +233,16 @@ describe("Dropbox website eSign template registration", () => {
         "offer_price",
         "closing_date",
       ],
-    });
+      mergeFields: duplicateFields,
+      documents: [
+        {
+          index: 0,
+          name: "purchase-agreement.pdf",
+          customFields: duplicateFields,
+          formFields: metadata().formFields,
+        },
+      ],
+    }));
 
     await expect(
       registerDropboxWebsiteTemplate({
@@ -190,6 +255,54 @@ describe("Dropbox website eSign template registration", () => {
     ).rejects.toBeInstanceOf(ProviderError);
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
+
+  const ambiguousProviderCases: Array<[string, Partial<ProviderTemplateMetadata>]> = [
+    ["missing embedded flag", { isEmbedded: null }],
+    ["missing locked flag", { isLocked: null }],
+    ["locked provider template", { isLocked: true }],
+    ["missing documents", { documents: [], mergeFields: [], formFields: [] }],
+    [
+      "merge fields assigned to a signer",
+      {
+        mergeFields: ESIGN_MERGE_FIELD_NAMES.map((name) =>
+          field(name, { signer: "1", assignedTo: "signer", signerRoleName: "Seller" }),
+        ),
+      },
+    ],
+    [
+      "missing Buyer signature",
+      { formFields: [metadata().formFields[0]] },
+    ],
+  ];
+
+  it.each(ambiguousProviderCases)(
+    "rejects ambiguous provider readiness: %s",
+    async (_name, overrides) => {
+      const candidate = metadata(overrides);
+      mocks.getTemplate.mockResolvedValue({
+        ...candidate,
+        documents: overrides.documents ?? [
+          {
+            index: 0,
+            name: "purchase-agreement.pdf",
+            customFields: candidate.mergeFields,
+            formFields: candidate.formFields,
+          },
+        ],
+      });
+
+      await expect(
+        registerDropboxWebsiteTemplate({
+          orgId: "org-1",
+          actorId: "user-1",
+          providerTemplateId: "provider-template-1",
+          name: "Purchase agreement",
+          documentType: "Purchase agreement",
+        }),
+      ).rejects.toBeInstanceOf(ProviderError);
+      expect(mocks.rpc).not.toHaveBeenCalled();
+    },
+  );
 
   it("revalidates the canonical stored provider id while preserving local label metadata", async () => {
     mocks.rpc.mockResolvedValueOnce({

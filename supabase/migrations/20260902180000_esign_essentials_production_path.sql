@@ -132,45 +132,102 @@ language sql
 immutable
 set search_path = public, pg_temp
 as $$
+  with documents as (
+    select document.value as document
+    from jsonb_array_elements(
+      case
+        when jsonb_typeof(p_metadata -> 'documents') = 'array'
+          then p_metadata -> 'documents'
+        else '[]'::jsonb
+      end
+    ) document(value)
+  ),
+  custom_fields as (
+    select field.value as field
+    from documents
+    cross join lateral jsonb_array_elements(
+      case
+        when jsonb_typeof(documents.document -> 'customFields') = 'array'
+          then documents.document -> 'customFields'
+        else '[]'::jsonb
+      end
+    ) field(value)
+    where field.value ->> 'name' in (
+      'seller_name',
+      'property_address',
+      'offer_price',
+      'earnest_money',
+      'closing_date'
+    )
+  ),
+  sender_merge_fields as (
+    select field
+    from custom_fields
+    where field ->> 'assignedTo' = 'sender'
+      and field ->> 'type' = 'text'
+      and btrim(coalesce(field ->> 'apiId', '')) <> ''
+  ),
+  required_signature_fields as (
+    select field.value ->> 'signerRoleName' as role_name
+    from documents
+    cross join lateral jsonb_array_elements(
+      case
+        when jsonb_typeof(documents.document -> 'formFields') = 'array'
+          then documents.document -> 'formFields'
+        else '[]'::jsonb
+      end
+    ) field(value)
+    where field.value ->> 'assignedTo' = 'signer'
+      and field.value ->> 'type' = 'signature'
+      and field.value -> 'required' = 'true'::jsonb
+      and btrim(coalesce(field.value ->> 'apiId', '')) <> ''
+      and field.value ->> 'signerRoleName' in ('Seller', 'Buyer')
+  )
   select btrim(coalesce(p_provider_template_id, '')) <> ''
     and btrim(coalesce(p_provider_account_id, '')) <> ''
     and jsonb_typeof(p_metadata) = 'object'
     and p_metadata ->> 'providerTemplateId' = p_provider_template_id
-    and (p_metadata ->> 'isEmbedded')::boolean is false
-    and coalesce((p_metadata ->> 'canEdit')::boolean, false) is true
-    and coalesce((p_metadata ->> 'isLocked')::boolean, false) is false
-    and case
-      when jsonb_typeof(p_metadata -> 'accounts') = 'array' then exists (
-        select 1
-        from jsonb_array_elements(p_metadata -> 'accounts') account(value)
-        where account.value ->> 'accountId' = p_provider_account_id
+    and p_metadata -> 'isEmbedded' = 'false'::jsonb
+    and p_metadata -> 'isLocked' = 'false'::jsonb
+    and exists (
+      select 1
+      from jsonb_array_elements(
+        case
+          when jsonb_typeof(p_metadata -> 'accounts') = 'array'
+            then p_metadata -> 'accounts'
+          else '[]'::jsonb
+        end
+      ) account(value)
+      where account.value ->> 'accountId' = p_provider_account_id
+    )
+    and p_metadata -> 'signerRoles' =
+      jsonb_build_array(
+        jsonb_build_object('name', 'Seller', 'order', 0),
+        jsonb_build_object('name', 'Buyer', 'order', 1)
       )
-      else false
-    end
-    and case
-      when jsonb_typeof(p_metadata -> 'signerRoles') = 'array' then
-        p_metadata -> 'signerRoles' =
-          jsonb_build_array(
-            jsonb_build_object('name', 'Seller', 'order', 0),
-            jsonb_build_object('name', 'Buyer', 'order', 1)
-          )
-      else false
-    end
-    and case
-      when jsonb_typeof(p_metadata -> 'mergeFieldNames') = 'array' then
-        jsonb_array_length(p_metadata -> 'mergeFieldNames') = 5
-        and array(
-          select jsonb_array_elements_text(p_metadata -> 'mergeFieldNames')
-          order by 1
-        ) = array[
-          'closing_date',
-          'earnest_money',
-          'offer_price',
-          'property_address',
-          'seller_name'
-        ]::text[]
-      else false
-    end;
+    and exists (select 1 from documents)
+    and (
+      select count(*) from custom_fields
+    ) = 5
+    and (
+      select array_agg(field ->> 'name' order by field ->> 'name')
+      from sender_merge_fields
+    ) = array[
+      'closing_date',
+      'earnest_money',
+      'offer_price',
+      'property_address',
+      'seller_name'
+    ]::text[]
+    and (
+      select count(*) from sender_merge_fields
+    ) = 5
+    and exists (
+      select 1 from required_signature_fields where role_name = 'Seller'
+    )
+    and exists (
+      select 1 from required_signature_fields where role_name = 'Buyer'
+    );
 $$;
 
 revoke all on function public.esign_website_template_metadata_is_valid(text, text, jsonb)

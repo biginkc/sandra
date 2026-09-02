@@ -49,6 +49,24 @@ export type TemplateSignerRole = {
   order: number;
 };
 
+export type ProviderTemplateField = {
+  documentIndex: number | null;
+  apiId: string | null;
+  name: string | null;
+  type: string | null;
+  required: boolean | null;
+  signer: string | null;
+  assignedTo: "sender" | "signer" | "unknown";
+  signerRoleName: string | null;
+};
+
+export type ProviderTemplateDocument = {
+  index: number | null;
+  name: string | null;
+  customFields: ProviderTemplateField[];
+  formFields: ProviderTemplateField[];
+};
+
 export type TemplateOption = {
   id: string;
   name: string;
@@ -90,6 +108,9 @@ export type ProviderTemplateMetadata = {
   accounts: readonly { accountId: string | null; isLocked: boolean | null }[];
   signerRoles: TemplateSignerRole[];
   mergeFieldNames: string[];
+  documents: ProviderTemplateDocument[];
+  mergeFields: ProviderTemplateField[];
+  formFields: ProviderTemplateField[];
 };
 
 export type TemplatePdf = {

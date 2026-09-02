@@ -8,6 +8,7 @@ import {
   ESIGN_MERGE_FIELD_NAMES,
   ESIGN_TEMPLATE_SIGNER_ROLES,
   requireTemplateTitle,
+  type ProviderTemplateField,
   type ProviderTemplateMetadata,
   type TemplateOption,
 } from "./contracts";
@@ -209,18 +210,23 @@ function validateWebsiteProviderMetadata(
       { providerCode: "embedded_template_not_supported" },
     );
   }
-  if (metadata.canEdit !== true || metadata.isLocked === true) {
+  if (metadata.isLocked !== false) {
     throw new ProviderError(
-      "Dropbox Sign template must be unlocked and editable before Sandra can send it.",
+      "Dropbox Sign template must be unlocked before Sandra can send it.",
       "dropbox_sign",
       { providerCode: "template_not_usable" },
     );
   }
+  if (metadata.documents.length === 0) {
+    throw new ProviderError(
+      "Dropbox Sign template must include at least one document.",
+      "dropbox_sign",
+      { providerCode: "template_document_mismatch" },
+    );
+  }
   if (
     !metadata.accounts.some(
-      (account) =>
-        account.accountId === expectedProviderAccountId &&
-        account.isLocked !== true,
+      (account) => account.accountId === expectedProviderAccountId,
     )
   ) {
     throw new ProviderError(
@@ -236,18 +242,69 @@ function validateWebsiteProviderMetadata(
       { providerCode: "signer_role_mismatch" },
     );
   }
-  const actualFields = [...metadata.mergeFieldNames].sort();
-  const expectedFields = [...ESIGN_MERGE_FIELD_NAMES].sort();
-  if (
-    actualFields.length !== expectedFields.length ||
-    actualFields.some((field, index) => field !== expectedFields[index])
-  ) {
+  const customFields = metadata.documents.flatMap((document) => document.customFields);
+  if (!hasExactSenderMergeFields(customFields)) {
     throw new ProviderError(
-      "Dropbox Sign merge fields must exactly match Sandra's five fields.",
+      "Dropbox Sign merge fields must exactly match Sandra's five Sender fields.",
       "dropbox_sign",
       { providerCode: "merge_field_mismatch" },
     );
   }
+  if (!hasRequiredSignatureFields(metadata.formFields)) {
+    throw new ProviderError(
+      "Dropbox Sign template must include required signature fields for Seller and Buyer.",
+      "dropbox_sign",
+      { providerCode: "template_field_mismatch" },
+    );
+  }
+}
+
+function hasExactSenderMergeFields(fields: readonly ProviderTemplateField[]): boolean {
+  const expectedFields = [...ESIGN_MERGE_FIELD_NAMES].sort();
+  const relevantFields = fields.filter(
+    (field) =>
+      typeof field.name === "string" &&
+      ESIGN_MERGE_FIELD_NAMES.includes(
+        field.name as (typeof ESIGN_MERGE_FIELD_NAMES)[number],
+      ),
+  );
+  const actualFields = relevantFields
+    .filter(isValidSenderMergeField)
+    .map((field) => field.name as string)
+    .sort();
+  return (
+    relevantFields.length === expectedFields.length &&
+    actualFields.length === expectedFields.length &&
+    actualFields.every((field, index) => field === expectedFields[index])
+  );
+}
+
+function isValidSenderMergeField(field: ProviderTemplateField): boolean {
+  return (
+    field.assignedTo === "sender" &&
+    field.type === "text" &&
+    typeof field.apiId === "string" &&
+    field.apiId.trim().length > 0 &&
+    typeof field.name === "string"
+  );
+}
+
+function hasRequiredSignatureFields(fields: readonly ProviderTemplateField[]): boolean {
+  const rolesWithRequiredSignature = new Set(
+    fields
+      .filter((field) =>
+        field.assignedTo === "signer" &&
+        field.type === "signature" &&
+        field.required === true &&
+        field.signerRoleName !== null &&
+        typeof field.apiId === "string" &&
+        field.apiId.trim().length > 0,
+      )
+      .map((field) => field.signerRoleName),
+  );
+  return ESIGN_TEMPLATE_SIGNER_ROLES.every((role) =>
+    rolesWithRequiredSignature.has(role.name),
+  );
 }
 
 async function registerAttestedTemplate(
@@ -307,6 +364,14 @@ function metadataForStorage(metadata: ProviderTemplateMetadata): Json {
     accounts: metadata.accounts.map((account) => ({ ...account })),
     signerRoles: metadata.signerRoles.map((role) => ({ ...role })),
     mergeFieldNames: [...metadata.mergeFieldNames],
+    documents: metadata.documents.map((document) => ({
+      index: document.index,
+      name: document.name,
+      customFields: document.customFields.map((field) => ({ ...field })),
+      formFields: document.formFields.map((field) => ({ ...field })),
+    })),
+    mergeFields: metadata.mergeFields.map((field) => ({ ...field })),
+    formFields: metadata.formFields.map((field) => ({ ...field })),
   };
 }
 
@@ -329,6 +394,8 @@ function isDefinitiveTemplateDrift(error: unknown): boolean {
     "template_account_mismatch",
     "signer_role_mismatch",
     "merge_field_mismatch",
+    "template_document_mismatch",
+    "template_field_mismatch",
   ].includes(providerCode ?? "");
 }
 

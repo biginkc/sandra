@@ -207,15 +207,53 @@ describe("Dropbox Sign provider", () => {
       templateId: "provider-1",
       title: "Offer",
       metadata: { sandra_template_id: "local-1" },
-      signerRoles: [{ name: "Seller", order: 0 }],
-      namedFormFields: [{ name: "seller_name" }, { name: "property_address" }, { name: "offer_price" }, { name: "closing_date" }, { name: "earnest_money" }],
+      isEmbedded: false,
+      isLocked: false,
+      canEdit: false,
+      isCreator: false,
+      accounts: [{ accountId: "provider-account-1" }],
+      signerRoles: [{ name: "Seller", order: 0 }, { name: "Buyer", order: 1 }],
+      documents: [
+        {
+          name: "purchase-agreement.pdf",
+          index: 0,
+          customFields: [
+            { type: "text", apiId: "seller-name", name: "seller_name", signer: null },
+            { type: "text", apiId: "address", name: "property_address", signer: "sender" },
+            { type: "text", apiId: "offer", name: "offer_price", signer: null },
+            { type: "text", apiId: "closing", name: "closing_date", signer: null },
+            { type: "text", apiId: "earnest", name: "earnest_money", signer: null },
+          ],
+          formFields: [
+            { type: "signature", apiId: "seller-signature", name: "Seller signature", signer: "1", required: true },
+            { type: "signature", apiId: "buyer-signature", name: "Buyer signature", signer: "2", required: true },
+          ],
+        },
+      ],
+      namedFormFields: [{ name: "deprecated_should_not_be_used" }],
     } } });
     const provider = createDropboxSignProvider({ apiKey: new EsignSecret("api-key"), clientId: "client-id", expectedDomain: "sandra.example.com" });
     await expect(provider.getTemplate("provider-1")).resolves.toMatchObject({
       providerTemplateId: "provider-1",
       localTemplateId: "local-1",
       title: "Offer",
-      signerRoles: [{ name: "Seller", order: 0 }],
+      isEmbedded: false,
+      canEdit: false,
+      isCreator: false,
+      isLocked: false,
+      signerRoles: [{ name: "Seller", order: 0 }, { name: "Buyer", order: 1 }],
+      mergeFieldNames: ["seller_name", "property_address", "offer_price", "closing_date", "earnest_money"],
+      mergeFields: [
+        expect.objectContaining({ name: "seller_name", assignedTo: "sender", signer: null }),
+        expect.objectContaining({ name: "property_address", assignedTo: "sender", signer: "sender" }),
+        expect.objectContaining({ name: "offer_price", assignedTo: "sender", signer: null }),
+        expect.objectContaining({ name: "closing_date", assignedTo: "sender", signer: null }),
+        expect.objectContaining({ name: "earnest_money", assignedTo: "sender", signer: null }),
+      ],
+      formFields: [
+        expect.objectContaining({ type: "signature", signer: "1", signerRoleName: "Seller" }),
+        expect.objectContaining({ type: "signature", signer: "2", signerRoleName: "Buyer" }),
+      ],
     });
   });
 

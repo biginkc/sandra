@@ -19,8 +19,11 @@ import type {
   CreateEmbeddedTemplateDraftInput,
   SendWithTemplateInput,
   SendWithTemplateOutput,
+  ProviderTemplateDocument,
+  ProviderTemplateField,
   ProviderTemplateMetadata,
   TemplatePdf,
+  TemplateSignerRole,
 } from "./contracts";
 import { EsignSecret } from "./secret";
 
@@ -456,8 +459,23 @@ function providerTemplateMetadata(template: {
   accounts?: Array<{ accountId?: string; isLocked?: boolean }>;
   metadata?: Record<string, unknown>;
   signerRoles?: Array<{ name?: string; order?: number }>;
-  namedFormFields?: Array<{ name?: string }> | null;
+  documents?: Array<{
+    name?: string;
+    index?: number;
+    customFields?: Array<ProviderTemplateFieldSource> | null;
+    formFields?: Array<ProviderTemplateFieldSource> | null;
+  }>;
 }): ProviderTemplateMetadata {
+  const signerRoles = (template.signerRoles ?? [])
+    .map((role, index) => ({ name: role.name ?? "", order: role.order ?? index }))
+    .sort((a, b) => a.order - b.order);
+  const documents = (template.documents ?? []).map((document) =>
+    providerTemplateDocument(document, signerRoles),
+  );
+  const mergeFields = documents.flatMap((document) =>
+    document.customFields.filter((field) => field.assignedTo === "sender"),
+  );
+  const formFields = documents.flatMap((document) => document.formFields);
   return {
     providerTemplateId: template.templateId ?? "",
     localTemplateId: typeof template.metadata?.sandra_template_id === "string"
@@ -472,13 +490,99 @@ function providerTemplateMetadata(template: {
       accountId: account.accountId ?? null,
       isLocked: typeof account.isLocked === "boolean" ? account.isLocked : null,
     })),
-    signerRoles: (template.signerRoles ?? [])
-      .map((role, index) => ({ name: role.name ?? "", order: role.order ?? index }))
-      .sort((a, b) => a.order - b.order),
-    mergeFieldNames: (template.namedFormFields ?? [])
+    signerRoles,
+    mergeFieldNames: mergeFields
       .map((field) => field.name)
       .filter((name): name is string => Boolean(name)),
+    documents,
+    mergeFields,
+    formFields,
   };
+}
+
+type ProviderTemplateFieldSource = {
+  apiId?: string;
+  name?: string;
+  type?: string;
+  required?: boolean;
+  signer?: number | string | null;
+};
+
+function providerTemplateDocument(
+  document: {
+    name?: string;
+    index?: number;
+    customFields?: Array<ProviderTemplateFieldSource> | null;
+    formFields?: Array<ProviderTemplateFieldSource> | null;
+  },
+  signerRoles: readonly TemplateSignerRole[],
+): ProviderTemplateDocument {
+  const documentIndex = typeof document.index === "number" ? document.index : null;
+  return {
+    index: documentIndex,
+    name: document.name ?? null,
+    customFields: (document.customFields ?? []).map((field) =>
+      providerTemplateField(field, documentIndex, signerRoles, "custom"),
+    ),
+    formFields: (document.formFields ?? []).map((field) =>
+      providerTemplateField(field, documentIndex, signerRoles, "form"),
+    ),
+  };
+}
+
+function providerTemplateField(
+  field: ProviderTemplateFieldSource,
+  documentIndex: number | null,
+  signerRoles: readonly TemplateSignerRole[],
+  source: "custom" | "form",
+): ProviderTemplateField {
+  const rawSigner = normalizeSignerValue(field.signer);
+  const assignedTo = source === "custom" && isSenderAssignment(rawSigner)
+    ? "sender"
+    : rawSigner === null
+      ? "unknown"
+      : "signer";
+  return {
+    documentIndex,
+    apiId: field.apiId ?? null,
+    name: field.name ?? null,
+    type: field.type ?? null,
+    required: typeof field.required === "boolean" ? field.required : null,
+    signer: rawSigner,
+    assignedTo,
+    signerRoleName: assignedTo === "signer"
+      ? signerRoleNameForField(rawSigner, signerRoles)
+      : null,
+  };
+}
+
+function normalizeSignerValue(value: number | string | null | undefined): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  return null;
+}
+
+function isSenderAssignment(value: string | null): boolean {
+  return value === null || value.toLowerCase() === "sender";
+}
+
+function signerRoleNameForField(
+  signer: string | null,
+  signerRoles: readonly TemplateSignerRole[],
+): string | null {
+  if (signer === null) return null;
+  const byName = signerRoles.find((role) => role.name === signer);
+  if (byName) return byName.name;
+  const numeric = Number.parseInt(signer, 10);
+  if (!Number.isFinite(numeric) || String(numeric) !== signer) return null;
+  return (
+    signerRoles[numeric - 1]?.name ??
+    signerRoles.find((role) => role.order === numeric)?.name ??
+    null
+  );
 }
 
 function providerFile(file: TemplatePdf) {

@@ -52,10 +52,10 @@ const metadata = {
   providerTemplateId: "provider-template-1",
   title: "Provider title",
   isEmbedded: false,
-  canEdit: true,
-  isCreator: true,
+  canEdit: null,
+  isCreator: null,
   isLocked: false,
-  accounts: [{ accountId: "provider-account-1", isLocked: false }],
+  accounts: [{ accountId: "provider-account-1", isLocked: null }],
   signerRoles: [
     { name: "Seller", order: 0 },
     { name: "Buyer", order: 1 },
@@ -67,7 +67,89 @@ const metadata = {
     "closing_date",
     "earnest_money",
   ],
+  documents: [
+    {
+      index: 0,
+      name: "purchase-agreement.pdf",
+      customFields: [
+        {
+          documentIndex: 0,
+          apiId: "seller-name-api",
+          name: "seller_name",
+          type: "text",
+          required: false,
+          signer: null,
+          assignedTo: "sender",
+          signerRoleName: null,
+        },
+        {
+          documentIndex: 0,
+          apiId: "property-address-api",
+          name: "property_address",
+          type: "text",
+          required: false,
+          signer: null,
+          assignedTo: "sender",
+          signerRoleName: null,
+        },
+        {
+          documentIndex: 0,
+          apiId: "offer-price-api",
+          name: "offer_price",
+          type: "text",
+          required: false,
+          signer: null,
+          assignedTo: "sender",
+          signerRoleName: null,
+        },
+        {
+          documentIndex: 0,
+          apiId: "closing-date-api",
+          name: "closing_date",
+          type: "text",
+          required: false,
+          signer: null,
+          assignedTo: "sender",
+          signerRoleName: null,
+        },
+        {
+          documentIndex: 0,
+          apiId: "earnest-money-api",
+          name: "earnest_money",
+          type: "text",
+          required: false,
+          signer: null,
+          assignedTo: "sender",
+          signerRoleName: null,
+        },
+      ],
+      formFields: [
+        {
+          documentIndex: 0,
+          apiId: "seller-signature-api",
+          name: "Seller signature",
+          type: "signature",
+          required: true,
+          signer: "1",
+          assignedTo: "signer",
+          signerRoleName: "Seller",
+        },
+        {
+          documentIndex: 0,
+          apiId: "buyer-signature-api",
+          name: "Buyer signature",
+          type: "signature",
+          required: true,
+          signer: "2",
+          assignedTo: "signer",
+          signerRoleName: "Buyer",
+        },
+      ],
+    },
+  ],
 };
+metadata.mergeFields = metadata.documents.flatMap((document) => document.customFields);
+metadata.formFields = metadata.documents.flatMap((document) => document.formFields);
 
 const signerSnapshot = [
   { role: "Seller", name: "Seller Owner", emailAddress: "seller@example.com" },
@@ -157,6 +239,18 @@ create table public.org_esign_integrations(
   provider_account_id text,
   unique(org_id, provider)
 );
+alter table public.org_esign_integrations enable row level security;
+create policy org_esign_integrations_org_select
+  on public.org_esign_integrations for select to authenticated
+  using (public.hugo_has_active_org_access(org_id));
+revoke all on table public.org_esign_integrations
+  from public, anon, authenticated, service_role;
+grant select (
+  id, org_id, provider, api_key_last_four, client_id, sending_enabled,
+  test_mode, callback_verified_at, disconnect_pending_at, connected_by,
+  created_at, updated_by, updated_at
+) on public.org_esign_integrations to authenticated;
+grant all on table public.org_esign_integrations to service_role;
 create table public.esign_templates(
   id uuid primary key default gen_random_uuid(),
   org_id uuid not null,
@@ -379,6 +473,25 @@ try {
        where provider_account_id = 'provider-account-1' and sign_template_id = 'provider-template-1'`,
     );
     assert(duplicateCount.rows[0].count === 1, "provider pair duplicated across soft deletion");
+    const deprecatedOnlyMetadata = {
+      ...metadata,
+      documents: [],
+      mergeFields: [],
+      formFields: [],
+      namedFormFields: metadata.mergeFieldNames.map((name) => ({ name })),
+    };
+    const deprecatedOnlyValid = await client.query(
+      `select public.esign_website_template_metadata_is_valid($1,$2,$3::jsonb) as valid`,
+      [
+        metadata.providerTemplateId,
+        "provider-account-1",
+        JSON.stringify(deprecatedOnlyMetadata),
+      ],
+    );
+    assert(
+      deprecatedOnlyValid.rows[0].valid === false,
+      "SQL accepted deprecated-only template metadata",
+    );
 
     const requestId = await createRequest(client);
     const reserved = await client.query(
@@ -474,6 +587,27 @@ try {
     const granted = new Set(grants.rows.map((row) => row.column_name));
     assert(granted.has("live_send_monthly_period_key"), "authenticated lacks safe period-key read grant");
     assert(!granted.has("api_key_encrypted"), "authenticated can read encrypted Dropbox credentials");
+    await client.query("set role authenticated");
+    try {
+      await client.query(
+        `select live_send_monthly_used, live_send_monthly_period_key
+         from public.org_esign_integrations where org_id = $1`,
+        [ids.org],
+      );
+      let encryptedReadBlocked = false;
+      try {
+        await client.query(
+          `select api_key_encrypted from public.org_esign_integrations where org_id = $1`,
+          [ids.org],
+        );
+      } catch {
+        encryptedReadBlocked = true;
+      }
+      assert(encryptedReadBlocked, "authenticated selected encrypted Dropbox credentials");
+    } finally {
+      await client.query("reset role");
+      await setServiceRole(client);
+    }
 
     console.log("eSign Essentials local rehearsal passed");
   } finally {

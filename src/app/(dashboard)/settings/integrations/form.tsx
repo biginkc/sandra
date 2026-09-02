@@ -438,7 +438,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                 )}
                 {!esign.testMode && esign.liveSendLimit ? (
                   <div className="rounded-md border px-3 py-2 text-xs text-muted-foreground">
-                    Sandra live-send fuse: {esign.liveSendLimit.usedThisMonth} of {esign.liveSendLimit.monthlyLimit} used this provider quota month. Dropbox may count manual dashboard sends and other API clients outside this counter.
+                    Sandra local calendar-month ceiling: {esign.liveSendLimit.usedThisMonth} of {esign.liveSendLimit.monthlyLimit} live sends used. Dropbox may count manual dashboard sends and other API clients outside this counter.
                   </div>
                 ) : null}
                 {!esign.embeddedTemplateManagementEnabled ? (
