@@ -294,11 +294,10 @@ function sendingEnabledErrorMessage(
     if (/website template/i.test(error.message)) {
       return "Register a Dropbox Sign website template before enabling live sending.";
     }
-    // Unrecognized 23514 message: fall back to the RPC's own text rather
-    // than a generic message that could point the owner at the wrong fix.
-    return enabled
-      ? error.message
-      : "Dropbox Sign sending could not be updated.";
+    // Unrecognized 23514 message: never surface the RPC's raw text here —
+    // it can carry a private database detail. Fall back to the generic
+    // message instead of guessing at a friendlier one.
+    return "Dropbox Sign sending could not be updated.";
   }
   return "Dropbox Sign sending could not be updated.";
 }

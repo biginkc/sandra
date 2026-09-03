@@ -372,6 +372,26 @@ describe("eSign server actions", () => {
     });
   });
 
+  it("never surfaces an unrecognized 23514 message — falls back to the generic message", async () => {
+    mocks.adminUpdate.mockResolvedValue({
+      error: {
+        message: "private database diagnostic detail leaked from a trigger",
+        code: "23514",
+      },
+    });
+    const result = await setEsignSendingEnabledAction(true, true);
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "DATABASE",
+        message: "Dropbox Sign sending could not be updated.",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(
+      "private database diagnostic detail leaked from a trigger",
+    );
+  });
+
   it("explains that a website template must be registered before live sending — not the generic callback message", async () => {
     mocks.adminUpdate.mockResolvedValue({
       error: {
