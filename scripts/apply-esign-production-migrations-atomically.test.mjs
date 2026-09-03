@@ -457,14 +457,14 @@ test("official CLI tag remains pinned for ledger compatibility evidence", () => 
   assert.equal(manifest.supabaseCliVersion, "2.109.1");
 });
 
-test("CI verify job passes a password-bearing local Postgres URL to eSign rehearsal", () => {
+test("CI verify job uses ankane/setup-postgres runner account without a password", () => {
   const workflow = readFileSync(verifyWorkflowPath, "utf8");
   assert.match(
     workflow,
-    /SUPABASE_LOCAL_DB_URL:\s*postgresql:\/\/postgres:postgres@localhost:5432\/postgres/u,
+    /SUPABASE_LOCAL_DB_URL:\s*postgresql:\/\/runner@localhost:5432\/postgres/u,
   );
   assert.doesNotMatch(
     workflow,
-    /SUPABASE_LOCAL_DB_URL:\s*postgresql:\/\/postgres@localhost:5432\/postgres/u,
+    /SUPABASE_LOCAL_DB_URL:\s*postgresql:\/\/postgres(?::postgres)?@localhost:5432\/postgres/u,
   );
 });
