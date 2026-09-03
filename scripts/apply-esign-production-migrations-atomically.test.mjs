@@ -13,6 +13,7 @@ import {
 
 const repoRoot = join(import.meta.dirname, "..");
 const planPath = join(import.meta.dirname, "esign-atomic-production-plan.json");
+const verifyWorkflowPath = join(repoRoot, ".github/workflows/verify.yml");
 const switchboardPath = join(
   repoRoot,
   "supabase/migrations/20260830092331_switchboard_contact_preferences.sql",
@@ -429,4 +430,16 @@ test("the manual packet refuses before reading credentials when arguments are in
 test("official CLI tag remains pinned for ledger compatibility evidence", () => {
   const manifest = JSON.parse(readFileSync(planPath, "utf8"));
   assert.equal(manifest.supabaseCliVersion, "2.109.1");
+});
+
+test("CI verify job passes a password-bearing local Postgres URL to eSign rehearsal", () => {
+  const workflow = readFileSync(verifyWorkflowPath, "utf8");
+  assert.match(
+    workflow,
+    /SUPABASE_LOCAL_DB_URL:\s*postgresql:\/\/postgres:postgres@localhost:5432\/postgres/u,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /SUPABASE_LOCAL_DB_URL:\s*postgresql:\/\/postgres@localhost:5432\/postgres/u,
+  );
 });
