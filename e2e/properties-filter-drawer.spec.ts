@@ -428,7 +428,7 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
       page.getByRole("radio", { name: /yes \(vacant\)/i }),
     ).toBeChecked();
     await expect(
-      page.getByRole("checkbox", { name: /^unverified$/i }),
+      page.getByRole("checkbox", { name: /^Not verified$/i }),
     ).toBeChecked();
   });
 
@@ -449,9 +449,9 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
     });
 
     await addFilterBlock(page, "CASS");
-    await page.getByRole("checkbox", { name: /^unverified$/i }).click();
+    await page.getByRole("checkbox", { name: /^Not verified$/i }).click();
     await expect(
-      page.getByRole("checkbox", { name: /^unverified$/i }),
+      page.getByRole("checkbox", { name: /^Not verified$/i }),
     ).toBeChecked({
       timeout: 250,
     });
