@@ -3,7 +3,10 @@ import { Suspense } from "react";
 import { Page } from "@/components/page";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { getCallerMemberships } from "@/lib/auth/memberships";
-import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  loadOrgTeamMembers,
+  loadTeamMembersForOrgs,
+} from "@/lib/auth/team-roster";
 import { createClient } from "@/lib/supabase/server";
 import {
   applyFilters,
@@ -33,7 +36,6 @@ import { renderBlock } from "./_components/blocks/registry";
 import type { Preset } from "./_components/quick-filter-chip";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
 import { LEAD_SOURCES } from "@/lib/leads/sources";
-
 
 const PAGE_SIZE = 50;
 
@@ -148,7 +150,8 @@ export default async function PropertiesPage({
   // PresetDropdown components, which all need an orgId prop to scope the
   // saved_filters reads + writes.
   const memberships = await getCallerMemberships();
-  const orgId = memberships[0]?.org_id ?? "";
+  const orgIds = memberships.map((membership) => membership.org_id);
+  const orgId = orgIds[0] ?? "";
 
   // Plan 09 — base properties query. Per the gotchas in 05-09-PLAN.md, when
   // the block stack contains a pipeline_status block we DROP the hardcoded
@@ -178,7 +181,10 @@ export default async function PropertiesPage({
       query = query.ilike("address", `%${search}%`);
     }
     if (rawSearchParams.imported === "today") {
-      const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), "America/Chicago");
+      const { dayStart, dayEnd } = getDayBoundsInZone(
+        new Date(),
+        "America/Chicago",
+      );
       query = query
         .not("source_import_id", "is", null)
         .gte("source_imported_at", dayStart.toISOString())
@@ -207,7 +213,10 @@ export default async function PropertiesPage({
   // them in one latency wave with the properties query; this is the page's
   // largest set of independent top-level reads.
   const optionsPromise = Promise.all([
-    supabase.from("counties").select("market").order("market", { ascending: true }),
+    supabase
+      .from("counties")
+      .select("market")
+      .order("market", { ascending: true }),
     supabase
       .from("properties")
       .select("state")
@@ -225,14 +234,13 @@ export default async function PropertiesPage({
       .eq("category", "custom")
       .eq("system_managed", false)
       .order("name", { ascending: true }),
-    (async () => {
-      try {
-        const admin = createAdminClient();
-        return await admin.auth.admin.listUsers({ perPage: 200 });
-      } catch {
-        return { data: null };
-      }
-    })(),
+    Promise.all(
+      orgIds.map(async (orgId) => ({
+        orgId,
+        members: await loadOrgTeamMembers(orgId),
+      })),
+    ),
+    loadTeamMembersForOrgs(orgIds, { includeInactiveMembers: true }),
     supabase
       .from("saved_filters")
       .select("id, name, filters_json, starred, is_base")
@@ -243,7 +251,15 @@ export default async function PropertiesPage({
 
   const [
     { query: propertyQuery },
-    [countyResult, stateResult, listResult, tagResult, usersResult, presetResult],
+    [
+      countyResult,
+      stateResult,
+      listResult,
+      tagResult,
+      activeTeamRosters,
+      assigneeFilterMembers,
+      presetResult,
+    ],
   ] = await Promise.all([propertiesPromise, optionsPromise]);
   const { data: propertyRows, count, error } = await propertyQuery;
   // Relationship embeds above are select-only filter helpers; the table
@@ -288,6 +304,7 @@ export default async function PropertiesPage({
     const homeowner = Array.isArray(p.homeowner) ? p.homeowner[0] : p.homeowner;
     return {
       id: p.id,
+      org_id: p.org_id,
       address: p.address,
       city: p.city,
       state: p.state,
@@ -303,9 +320,8 @@ export default async function PropertiesPage({
       dnc_reason: p.is_dnc_locked
         ? "Permanent Do Not Contact lock. This record is read-only."
         : null,
-      channel_restriction: !p.is_dnc_locked && homeowner?.sms_opted_out
-        ? "SMS opted out"
-        : null,
+      channel_restriction:
+        !p.is_dnc_locked && homeowner?.sms_opted_out ? "SMS opted out" : null,
     };
   });
 
@@ -345,13 +361,18 @@ export default async function PropertiesPage({
     color: t.color,
   }));
 
-  // Team members for the Assign submenu + assignee block picker.
-  // Admin-only API; non-fatal on failure (the picker just renders empty).
-  const usersPage = usersResult.data;
-  const teamMembers: TeamMemberOption[] = (usersPage?.users ?? [])
-    .filter((u) => !!u.email)
-    .map((u) => ({ id: u.id, email: u.email as string }))
-    .sort((a, b) => a.email.localeCompare(b.email));
+  // Assignment is active-only. Filtering keeps former memberships visible
+  // so their existing records remain reachable.
+  const teamMembersByOrg = Object.fromEntries(
+    activeTeamRosters.map(({ orgId, members }) => [orgId, members]),
+  );
+  const teamMembers: TeamMemberOption[] = Array.from(
+    new Map(
+      activeTeamRosters
+        .flatMap(({ members }) => members)
+        .map((member) => [member.id, member]),
+    ).values(),
+  );
 
   const isAdmin = isAdminEmail(user?.email);
 
@@ -378,7 +399,7 @@ export default async function PropertiesPage({
     })),
     markets,
     states,
-    assignees: teamMembers,
+    assignees: assigneeFilterMembers,
     sources: SOURCES,
     pipelineStatuses: PIPELINE_STATUSES,
     motivationLevels: MOTIVATION_LEVELS,
@@ -424,9 +445,8 @@ export default async function PropertiesPage({
             .gte("source_imported_at", dayStart.toISOString())
             .lt("source_imported_at", dayEnd.toISOString());
         }
-        countQuery = (
-          await applyFilters(countQuery, blockStack, supabase)
-        ).builder;
+        countQuery = (await applyFilters(countQuery, blockStack, supabase))
+          .builder;
         const { count: c } = await countQuery;
         return [s, c ?? 0] as const;
       }),
@@ -487,6 +507,7 @@ export default async function PropertiesPage({
           lists={lists}
           tags={tags}
           teamMembers={teamMembers}
+          teamMembersByOrg={teamMembersByOrg}
           currentUserId={user?.id ?? null}
           canDelete={isAdmin}
           headerCount={headerCount}

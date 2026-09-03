@@ -30,37 +30,12 @@ describe("Lead Detail v2 integration contract", () => {
     expect(source).toContain("key={lead.id}");
   });
 
-  it("excludes cross-org and inactive auth users from note author payloads", () => {
-    for (const token of [
-      '.from("memberships")',
-      '.eq("org_id", lead.org_id)',
-      '.eq("access_status", "active")',
-      '.is("deletion_prepared_at", null)',
-      "access_expires_at.is.null,access_expires_at.gt.${activeMembershipAt}",
-      ".limit(orgAuthorCap + 1)",
-      "membershipResult.data.length > orgAuthorCap",
-      "const authUsersPerPage = 200",
-      "const maxAuthUserPages = 25",
-      "page <= maxAuthUserPages",
-      "page += 1",
-      "admin.auth.admin.listUsers",
-      "perPage: authUsersPerPage",
-      "authUsersById.size >= orgMemberIds.size",
-      "authUsers.length < authUsersPerPage",
-      "orgMemberIds.has(user.id)",
-    ]) {
-      expect(source).toContain(token);
-    }
-    expect(source).not.toContain("data.nextPage");
-    const authError = source.indexOf("if (authUsersResult.error)");
-    expect(authError).toBeGreaterThan(-1);
-    expect(source.indexOf("return []", authError)).toBeGreaterThan(authError);
-    const orgFilter = source.indexOf("orgMemberIds.has(user.id)");
-    const clientAuthorMap = source.indexOf(
-      "if (u.email) authorEmails[u.id] = u.email",
-    );
-    expect(orgFilter).toBeGreaterThan(-1);
-    expect(clientAuthorMap).toBeGreaterThan(orgFilter);
+  it("uses the shared org-scoped roster and keeps former authors readable", () => {
+    expect(source).toContain("loadOrgTeamMembers(lead.org_id");
+    expect(source).toContain("includeInactiveMembers: true");
+    expect(source).toContain("allowMissingIdentityLabels: true");
+    expect(source).toContain("teamMemberPrimaryLabel(member");
+    expect(source).not.toContain("admin.auth.admin.listUsers");
   });
 
   it("shares consent state while restricting each SMS entry point by its exact phone", () => {
@@ -78,16 +53,12 @@ describe("Lead Detail v2 integration contract", () => {
       inlineGateStart,
       source.indexOf("</SmsEntryPointGate>", inlineGateStart),
     );
-    expect(headerGate).toContain(
-      "restricted={smsPresentation.smsRestricted}",
-    );
+    expect(headerGate).toContain("restricted={smsPresentation.smsRestricted}");
     expect(inlineGate).toContain(
       "restricted={inlineSmsPresentation.smsRestricted}",
     );
 
-    const headerPresentationStart = source.indexOf(
-      "const smsPresentation =",
-    );
+    const headerPresentationStart = source.indexOf("const smsPresentation =");
     const inlinePresentationStart = source.indexOf(
       "const inlineSmsPresentation =",
     );
@@ -103,9 +74,7 @@ describe("Lead Detail v2 integration contract", () => {
     expect(inlinePresentation).toContain("consentState,");
     expect(headerPresentation).toContain("phoneSuppressionResult");
     expect(inlinePresentation).toContain("inlinePhoneSuppressionResult");
-    expect(inlinePresentation).toContain(
-      "latestHomeownerSmsRoute",
-    );
+    expect(inlinePresentation).toContain("latestHomeownerSmsRoute");
     expect(inlinePresentation).toContain(": smsPresentation");
   });
 
@@ -177,9 +146,7 @@ describe("Lead Detail v2 integration contract", () => {
   });
 
   it("offers Skip Trace only when the homeowner or primary phone is missing", () => {
-    expect(source).toContain(
-      "!lead.homeowner || !lead.homeowner.phone_1 ? (",
-    );
+    expect(source).toContain("!lead.homeowner || !lead.homeowner.phone_1 ? (");
     expect(source).not.toContain(
       "<SkipTraceButton propertyId={lead.id} />\n      <span",
     );

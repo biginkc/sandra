@@ -1,5 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
+import { teamMemberOptionLabel } from "@/lib/auth/team-member";
 
 import type { CalendarAppointmentRow } from "./types";
 
@@ -47,14 +49,14 @@ export async function fetchCalendarAppointments(
 }
 
 /**
- * One roster entry: a real ACTIVE membership `id` (identity, from the
- * `memberships` table) paired with a display `label` that may be a real
- * email or a safe fallback (see `labelsDegraded` below).
+ * One roster entry: an active or former membership id paired with a
+ * human-readable label. Former members remain filterable so their existing
+ * appointments never become unreachable.
  */
 export type OrgRosterEntry = { id: string; label: string };
 
 /**
- * Full ACTIVE-membership roster for `orgId` — used to populate the
+ * Full membership roster for `orgId` — used to populate the
  * calendar's assignee filter (and per-appointment assignee labels)
  * independently of which appointments happen to fall in the displayed
  * week (Codex round 1 — the previous roster was built only from the
@@ -70,21 +72,14 @@ export type OrgRosterEntry = { id: string; label: string };
  *   for ownership attribution. If this fails, `ok: false` — there is no
  *   safe partial roster to fall back to, so the caller must treat it like
  *   any other load failure, not silently narrow to "just me."
- * - LABELS = the display string for each identity, resolved via
- *   `fetchAssigneeEmails` (the `auth.users` lookup). This is cosmetic. If
- *   `listUsers` errors, throws, paginates only partially, or simply has no
- *   email for a given id, that id is NEVER dropped from the roster — it
- *   keeps its real membership id with a safe fallback label
- *   (`"Teammate (<id-prefix>)"`), and `labelsDegraded` is set so the
- *   caller can show a muted "names unavailable" note. Ownership and
- *   filtering stay correct even when every label falls back, because the
- *   underlying id is still the real one.
+ * - LABELS = the authoritative display name (with email fallback) from
+ *   `auth.users`. This is cosmetic. If that lookup fails or is partial, no
+ *   identity is dropped and no UUID fragment is exposed; the safe fallback
+ *   is "Name not set" and `labelsDegraded` lets the caller explain why.
  *
- * Reuses the exact active/non-deletion-prepared/unexpired membership
- * predicate `listBookingAssignees` uses
- * (`components/appointments/book-appointment-action.ts`) so "who can be
- * assigned an appointment" and "who shows up in the calendar filter" never
- * disagree.
+ * Unlike an assignment picker, this filter includes inactive memberships.
+ * That is deliberate: records owned by a former teammate must remain
+ * reachable even though that teammate can no longer receive new work.
  */
 export type FetchOrgRosterResult =
   | { ok: true; roster: OrgRosterEntry[]; labelsDegraded: boolean }
@@ -99,34 +94,21 @@ const ROSTER_CAP = 400; // sentinel-safe under the same 1000-row transport ceili
 export async function fetchOrgRoster(
   orgId: string,
 ): Promise<FetchOrgRosterResult> {
-  const admin = createAdminClient();
-  const activeAt = new Date().toISOString();
-
-  const { data, error } = await admin
-    .from("memberships")
-    .select("user_id")
-    .eq("org_id", orgId)
-    .eq("access_status", "active")
-    .is("deletion_prepared_at", null)
-    .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`)
-    .order("user_id", { ascending: true })
-    .limit(ROSTER_CAP + 1);
-
-  if (error || !data) {
-    if (error) {
-      console.error("[calendar] fetchOrgRoster failed (membership identity)", {
-        message: error.message,
-        code: error.code,
-      });
-    }
+  let members;
+  try {
+    members = await loadOrgTeamMembers(orgId, {
+      includeInactiveMembers: true,
+    });
+  } catch (error) {
+    console.error("[calendar] fetchOrgRoster failed", { error });
     return { ok: false };
   }
 
-  // The extra (CAP+1)th row came back — the org has more active members
-  // than the cap covers. Fail closed rather than silently truncate the
+  // The extra (CAP+1)th row came back — the org has more members than the
+  // cap covers. Fail closed rather than silently truncate the
   // roster (dropping real teammates from both the filter and ownership
   // attribution would be worse than a visible load failure).
-  if (data.length > ROSTER_CAP) {
+  if (members.length > ROSTER_CAP) {
     console.error("[calendar] fetchOrgRoster exceeded ROSTER_CAP", {
       orgId,
       cap: ROSTER_CAP,
@@ -134,17 +116,10 @@ export async function fetchOrgRoster(
     return { ok: false };
   }
 
-  const ids = data.map((m) => m.user_id as string);
-  const emails = await fetchAssigneeEmails(ids);
-  // Any id whose email didn't come back — whatever the cause (error,
-  // throw, partial pagination, or the user simply has none) — is a
-  // labels-degraded roster, but the identity is kept with a fallback
-  // label rather than dropped.
-  const labelsDegraded = ids.some((id) => !emails[id]);
-
-  const roster: OrgRosterEntry[] = ids.map((id) => ({
-    id,
-    label: emails[id] ?? `Teammate (${id.slice(0, 8)})`,
+  const labelsDegraded = members.some((member) => !member.displayName);
+  const roster: OrgRosterEntry[] = members.map((member) => ({
+    id: member.id,
+    label: teamMemberOptionLabel(member),
   }));
 
   return { ok: true, roster, labelsDegraded };

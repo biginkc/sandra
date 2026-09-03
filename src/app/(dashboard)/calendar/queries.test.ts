@@ -46,11 +46,15 @@ function makeBuilder(): Record<string, unknown> {
   return builder;
 }
 
-// .from("memberships").select().eq("org_id",…).eq("access_status","active")
-// .is("deletion_prepared_at", null).or(activeAt filter).order("user_id")
-// .limit(n) — mirrors `listBookingAssignees`'s predicate
-// (book-appointment-action.test.ts).
-let membershipRows: Array<{ user_id: string }> | null = [];
+// Calendar filters intentionally load the complete org membership history:
+// active members remain assignable elsewhere, while former owners stay
+// reachable in historical filters.
+let membershipRows: Array<{
+  user_id: string;
+  access_status?: string | null;
+  access_expires_at?: string | null;
+  deletion_prepared_at?: string | null;
+}> | null = [];
 let membershipError: { message: string; code?: string } | null = null;
 let membershipEqCalls: Array<[string, unknown]> = [];
 let membershipIsCalls: Array<[string, unknown]> = [];
@@ -79,7 +83,15 @@ function makeMembershipsBuilder(): Record<string, unknown> {
   };
   builder.limit = (n: number) => {
     membershipLimitCalls.push(n);
-    return Promise.resolve({ data: membershipRows, error: membershipError });
+    return Promise.resolve({
+      data: membershipRows?.map((row) => ({
+        access_status: "active",
+        access_expires_at: null,
+        deletion_prepared_at: null,
+        ...row,
+      })),
+      error: membershipError,
+    });
   };
   return builder;
 }
@@ -549,8 +561,16 @@ describe("fetchOrgRoster", () => {
     mocks.listUsers.mockResolvedValueOnce({
       data: {
         users: [
-          { id: "user-1", email: "owner@bmh.com" },
-          { id: "rep-2", email: "rep2@bmh.com" },
+          {
+            id: "rep-2",
+            email: "rep2@bmh.com",
+            app_metadata: { display_name: "Riley Rep" },
+          },
+          {
+            id: "user-1",
+            email: "owner@bmh.com",
+            app_metadata: { display_name: "Olivia Owner" },
+          },
         ],
         nextPage: null,
       },
@@ -562,29 +582,66 @@ describe("fetchOrgRoster", () => {
       ok: true,
       labelsDegraded: false,
       roster: [
-        { id: "user-1", label: "owner@bmh.com" },
-        { id: "rep-2", label: "rep2@bmh.com" },
+        { id: "user-1", label: "Olivia Owner — owner@bmh.com" },
+        { id: "rep-2", label: "Riley Rep — rep2@bmh.com" },
       ],
     });
   });
 
-  it("scopes to the org and to active, non-deletion-prepared, unexpired memberships", async () => {
-    membershipRows = [];
-    await fetchOrgRoster("org-1");
+  it("scopes to the org and keeps former members filterable", async () => {
+    membershipRows = [
+      { user_id: "active-1" },
+      { user_id: "former-1", access_status: "revoked" },
+    ];
+    mocks.listUsers.mockResolvedValueOnce({
+      data: {
+        users: [
+          {
+            id: "active-1",
+            email: "active@example.test",
+            app_metadata: { display_name: "Active Agent" },
+          },
+          {
+            id: "former-1",
+            email: "former@example.test",
+            app_metadata: { display_name: "Former Agent" },
+          },
+        ],
+        nextPage: null,
+      },
+      error: null,
+    });
+
+    const result = await fetchOrgRoster("org-1");
 
     expect(membershipEqCalls).toContainEqual(["org_id", "org-1"]);
-    expect(membershipEqCalls).toContainEqual(["access_status", "active"]);
-    expect(membershipIsCalls).toContainEqual(["deletion_prepared_at", null]);
-    expect(membershipOrCalls[0]).toMatch(
-      /^access_expires_at\.is\.null,access_expires_at\.gt\./,
-    );
+    expect(result).toEqual({
+      ok: true,
+      labelsDegraded: false,
+      roster: [
+        { id: "active-1", label: "Active Agent — active@example.test" },
+        {
+          id: "former-1",
+          label: "Former Agent (former) — former@example.test",
+        },
+      ],
+    });
   });
 
   it("keeps the full roster available even when the current week's appointments are empty (decoupled from `fetchCalendarAppointments`)", async () => {
     queuedData = [];
     membershipRows = [{ user_id: "rep-2" }];
     mocks.listUsers.mockResolvedValueOnce({
-      data: { users: [{ id: "rep-2", email: "rep2@bmh.com" }], nextPage: null },
+      data: {
+        users: [
+          {
+            id: "rep-2",
+            email: "rep2@bmh.com",
+            app_metadata: { display_name: "Riley Rep" },
+          },
+        ],
+        nextPage: null,
+      },
       error: null,
     });
 
@@ -598,7 +655,7 @@ describe("fetchOrgRoster", () => {
     expect(result).toEqual({
       ok: true,
       labelsDegraded: false,
-      roster: [{ id: "rep-2", label: "rep2@bmh.com" }],
+      roster: [{ id: "rep-2", label: "Riley Rep — rep2@bmh.com" }],
     });
   });
 
@@ -611,25 +668,17 @@ describe("fetchOrgRoster", () => {
     expect(mocks.listUsers).not.toHaveBeenCalled();
   });
 
-  it("keeps every identity with a fallback label and sets labelsDegraded when listUsers throws", async () => {
+  it("fails closed when auth labels cannot distinguish roster identities", async () => {
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
     mocks.listUsers.mockImplementationOnce(() => {
       throw new Error("network boom");
     });
 
     const result = await fetchOrgRoster("org-1");
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error("expected ok:true");
-    expect(result.labelsDegraded).toBe(true);
-    expect(result.roster).toEqual([
-      { id: "user-1", label: "Teammate (user-1)" },
-      { id: "rep-2", label: "Teammate (rep-2)" },
-    ]);
-    // No identity dropped even though every label failed.
-    expect(result.roster.map((r) => r.id)).toEqual(["user-1", "rep-2"]);
+    expect(result).toEqual({ ok: false });
   });
 
-  it("keeps every identity with a fallback label and sets labelsDegraded on partial pagination failure", async () => {
+  it("fails closed on a partial auth-label inventory", async () => {
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
     mocks.listUsers
       .mockResolvedValueOnce({
@@ -642,17 +691,10 @@ describe("fetchOrgRoster", () => {
       .mockResolvedValueOnce({ data: null, error: { message: "boom" } });
 
     const result = await fetchOrgRoster("org-1");
-    expect(result).toEqual({
-      ok: true,
-      labelsDegraded: true,
-      roster: [
-        { id: "user-1", label: "owner@bmh.com" },
-        { id: "rep-2", label: "Teammate (rep-2)" },
-      ],
-    });
+    expect(result).toEqual({ ok: false });
   });
 
-  it("keeps the identity with a fallback label and sets labelsDegraded when a member has no email on auth.users", async () => {
+  it("fails closed when an auth identity has neither an authoritative name nor an email", async () => {
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
     mocks.listUsers.mockResolvedValueOnce({
       data: {
@@ -666,14 +708,7 @@ describe("fetchOrgRoster", () => {
     });
 
     const result = await fetchOrgRoster("org-1");
-    expect(result).toEqual({
-      ok: true,
-      labelsDegraded: true,
-      roster: [
-        { id: "user-1", label: "owner@bmh.com" },
-        { id: "rep-2", label: "Teammate (rep-2)" },
-      ],
-    });
+    expect(result).toEqual({ ok: false });
   });
 
   describe("single-statement read (Codex round 6 — replaces keyset pagination)", () => {
@@ -691,6 +726,27 @@ describe("fetchOrgRoster", () => {
       membershipRows = Array.from({ length: CAP }, (_, i) => ({
         user_id: userId(i),
       }));
+      mocks.listUsers
+        .mockResolvedValueOnce({
+          data: {
+            users: Array.from({ length: 200 }, (_, i) => ({
+              id: userId(i),
+              email: `${userId(i)}@example.test`,
+            })),
+            nextPage: 2,
+          },
+          error: null,
+        })
+        .mockResolvedValueOnce({
+          data: {
+            users: Array.from({ length: 200 }, (_, i) => ({
+              id: userId(i + 200),
+              email: `${userId(i + 200)}@example.test`,
+            })),
+            nextPage: null,
+          },
+          error: null,
+        });
 
       const result = await fetchOrgRoster("org-1");
       if (!result.ok) throw new Error("expected ok:true");

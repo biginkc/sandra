@@ -86,6 +86,7 @@ vi.mock("../leads/actions", () => ({
   sendSmsFromLead: vi.fn(),
   loadLeadVars: vi.fn(async () => ({ ok: true, data: {} })),
   listOrgUsers: vi.fn(async () => ({ ok: true, data: [] })),
+  listPropertyOrgUsers: vi.fn(async () => ({ ok: true, data: [] })),
   updateLeadAssignee: vi.fn(),
 }));
 

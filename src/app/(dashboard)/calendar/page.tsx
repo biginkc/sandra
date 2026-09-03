@@ -262,7 +262,7 @@ export default async function CalendarPage({
   const assigneeLabels: Record<string, string> = { ...assignees };
   for (const id of inactiveAssigneeIds) {
     assigneeLabels[id] =
-      inactiveEmails[id] ?? `Former teammate (${id.slice(0, 8)})`;
+      inactiveEmails[id] ?? "Former teammate (name unavailable)";
   }
 
   return (
@@ -291,7 +291,8 @@ export default async function CalendarPage({
       />
       {labelsDegraded && (
         <div className="text-muted-foreground text-xs">
-          Some teammate names are unavailable — showing IDs instead.
+          Some teammate names are unavailable — showing verified emails or a
+          generic label instead.
         </div>
       )}
       <CalendarView

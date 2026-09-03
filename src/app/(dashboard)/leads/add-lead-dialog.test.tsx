@@ -22,9 +22,15 @@ function renderDialog() {
     <AddLeadDialog
       markets={["Jackson County MO", "Johnson County KS"]}
       sources={["cold_call", "referral"]}
-      teamMembers={[
-        { id: "user-me", email: "me@example.com" },
-        { id: "user-other", email: "teammate@example.com" },
+      workspaces={[
+        {
+          id: "org-1",
+          name: "BMH Group",
+          teamMembers: [
+            { id: "user-me", email: "me@example.com" },
+            { id: "user-other", email: "teammate@example.com" },
+          ],
+        },
       ]}
       currentUserId="user-me"
     />,
@@ -37,6 +43,50 @@ beforeEach(() => {
 });
 
 describe("AddLeadDialog", () => {
+  it("scopes assignees to the explicitly selected workspace", async () => {
+    const user = userEvent.setup();
+    render(
+      <AddLeadDialog
+        markets={["Jackson County MO"]}
+        sources={["cold_call"]}
+        workspaces={[
+          {
+            id: "org-1",
+            name: "North team",
+            teamMembers: [
+              {
+                id: "north-user",
+                email: "north@example.com",
+                displayName: "North Rep",
+              },
+            ],
+          },
+          {
+            id: "org-2",
+            name: "South team",
+            teamMembers: [
+              {
+                id: "south-user",
+                email: "south@example.com",
+                displayName: "South Rep",
+              },
+            ],
+          },
+        ]}
+        currentUserId="north-user"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Add lead" }));
+    expect(screen.getByLabelText("Assigned teammate")).toBeDisabled();
+    await user.selectOptions(screen.getByLabelText("Workspace"), "org-2");
+    expect(screen.getByLabelText("Assigned teammate")).toHaveValue(
+      "south-user",
+    );
+    expect(screen.getByRole("option", { name: /South Rep/ })).toBeVisible();
+    expect(screen.queryByRole("option", { name: /North Rep/ })).toBeNull();
+  });
+
   it("preserves the real create form fields and includes prototype-approved persisted fields", async () => {
     const user = userEvent.setup();
     renderDialog();
@@ -52,6 +102,7 @@ describe("AddLeadDialog", () => {
     expect(screen.getByLabelText("Last name")).toBeVisible();
     expect(screen.getByLabelText("Phone")).toBeVisible();
     expect(screen.getByLabelText("Email")).toBeVisible();
+    expect(screen.getByLabelText("Workspace")).toHaveValue("org-1");
     expect(screen.getByLabelText("Assigned teammate")).toHaveValue("user-me");
     expect(screen.getByLabelText("Motivation (optional)")).toHaveValue("");
   });

@@ -279,6 +279,27 @@ describe("<JobsList />", () => {
     expect(screen.queryByText("Done job")).not.toBeInTheDocument();
   });
 
+  it("replaces missing job titles and machine job types with readable labels", async () => {
+    const rawId = "6f06eddd-ea55-42a8-8908-555a9883c428";
+    await renderJobs({
+      jobs: [
+        makeJob({
+          id: rawId,
+          title: "   ",
+          type: "ncoa_refresh",
+          created_at: "2026-06-30T18:00:00.000Z",
+        }),
+      ],
+    });
+
+    expect(
+      screen.getByText(/Change-of-address refresh · Jun 30, 2026/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Change-of-address refresh")).toBeInTheDocument();
+    expect(screen.queryByText(rawId)).not.toBeInTheDocument();
+    expect(screen.queryByText("ncoa_refresh")).not.toBeInTheDocument();
+  });
+
   it("typing search renders the realtime jobs initially, then debounces + fires router.replace with /jobs?search=...", async () => {
     // Note: in mode: "client" the URL update happens via router.replace, but
     // the visible filter only updates when the parent re-renders with a new

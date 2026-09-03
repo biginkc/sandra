@@ -5,6 +5,11 @@ import { PageHeader } from "@/components/page-header";
 import { getOutboundSmsMetrics } from "@/lib/messages/message-metrics";
 import { createClient } from "@/lib/supabase/server";
 import type { Database, Json } from "@/lib/supabase/types";
+import {
+  JOB_TYPE_LABELS,
+  jobDisplayTitle,
+  systemLabel,
+} from "@/lib/presentation/system-labels";
 
 import { JobDetail, type BulkSmsJobMetrics } from "./job-detail";
 
@@ -114,6 +119,47 @@ export default async function JobDetailPage({
     );
   }
 
+  const itemRows = (itemsRes.data ?? []) as JobItem[];
+  const propertyIds = [
+    ...new Set(itemRows.map((item) => item.property_id).filter(Boolean)),
+  ] as string[];
+  const contactIds = [
+    ...new Set(itemRows.map((item) => item.contact_id).filter(Boolean)),
+  ] as string[];
+  const [propertyLabelsResult, contactLabelsResult] = await Promise.all([
+    propertyIds.length
+      ? supabase
+          .from("properties")
+          .select("id, address, city, state")
+          .in("id", propertyIds)
+      : Promise.resolve({ data: [], error: null }),
+    contactIds.length
+      ? supabase
+          .from("contacts")
+          .select("id, first_name, last_name, entity_name, phone_1, email")
+          .in("id", contactIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (propertyLabelsResult.error || contactLabelsResult.error) {
+    throw new Error("Could not load readable job item labels.");
+  }
+  const itemLabels: Record<string, string> = {};
+  for (const property of propertyLabelsResult.data ?? []) {
+    const locality = [property.city, property.state].filter(Boolean).join(", ");
+    itemLabels[`property:${property.id}`] = locality
+      ? `${property.address} · ${locality}`
+      : property.address;
+  }
+  for (const contact of contactLabelsResult.data ?? []) {
+    const name =
+      contact.entity_name?.trim() ||
+      [contact.first_name, contact.last_name].filter(Boolean).join(" ").trim();
+    itemLabels[`contact:${contact.id}`] =
+      [name, contact.phone_1, contact.email].find(
+        (value) => typeof value === "string" && value.trim(),
+      ) ?? "Contact details unavailable";
+  }
+
   return (
     <Page>
       <PageHeader
@@ -122,13 +168,18 @@ export default async function JobDetailPage({
           { label: "Jobs", href: "/jobs" },
           { label: shortenForCrumb(job) },
         ]}
-        title={job.title ?? job.id.slice(0, 8)}
-        description={`${job.type} · ${humanizeAge(job.created_at)}`}
+        title={jobDisplayTitle({
+          title: job.title,
+          type: job.type,
+          createdAt: job.created_at,
+        })}
+        description={`${systemLabel(JOB_TYPE_LABELS, job.type)} · ${humanizeAge(job.created_at)}`}
       />
 
       <JobDetail
         job={job as Job}
-        items={(itemsRes.data ?? []) as JobItem[]}
+        items={itemRows}
+        itemLabels={itemLabels}
         parent={parentRes.data ?? null}
         childJobs={childrenRes.data ?? []}
         csvImport={csvImportRes.data ?? null}
@@ -175,7 +226,7 @@ function shortenForCrumb(job: Job): string {
   if (job.title) {
     return job.title.length > 50 ? `${job.title.slice(0, 47)}…` : job.title;
   }
-  return job.id.slice(0, 8);
+  return systemLabel(JOB_TYPE_LABELS, job.type);
 }
 
 function humanizeAge(iso: string): string {

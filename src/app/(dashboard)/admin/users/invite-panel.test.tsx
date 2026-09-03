@@ -172,7 +172,7 @@ describe("Hugo-managed lifecycle state", () => {
       );
 
       expect(screen.getByText(label)).toBeInTheDocument();
-      expect(screen.getByText("member")).toBeInTheDocument();
+      expect(screen.getByText("Member")).toBeInTheDocument();
       expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     },
   );

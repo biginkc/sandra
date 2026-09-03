@@ -29,6 +29,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { callAction } from "@/lib/errors/call-action";
 import { copyToClipboard } from "@/lib/csv/export";
 import { LEAD_SOURCES, type LeadSource } from "@/lib/leads/sources";
+import {
+  LEAD_SOURCE_LABELS,
+  systemLabel,
+} from "@/lib/presentation/system-labels";
 
 import { createWebhookConsumer } from "./actions";
 import type { WebhookConsumerType } from "./url";
@@ -54,8 +58,7 @@ export function CreateConsumerDialog() {
 
   // Form state
   const [name, setName] = useState("");
-  const [consumerType, setConsumerType] =
-    useState<WebhookConsumerType>("lead");
+  const [consumerType, setConsumerType] = useState<WebhookConsumerType>("lead");
   const [defaultSource, setDefaultSource] = useState<LeadSource | "">("");
   const [notes, setNotes] = useState("");
 
@@ -143,8 +146,8 @@ export function CreateConsumerDialog() {
               <DialogDescription>
                 Each consumer gets its own secret. Lead consumers feed the
                 lead-intake webhook; provider consumers receive results
-                callbacks (skip-trace and similar). The plaintext secret
-                will be shown exactly once after submit.
+                callbacks (skip-trace and similar). The plaintext secret will be
+                shown exactly once after submit.
               </DialogDescription>
             </DialogHeader>
 
@@ -207,9 +210,7 @@ export function CreateConsumerDialog() {
                 <Label htmlFor="webhook-source">Default source *</Label>
                 <Select
                   value={defaultSource}
-                  onValueChange={(v) =>
-                    setDefaultSource(v as LeadSource)
-                  }
+                  onValueChange={(v) => setDefaultSource(v as LeadSource)}
                 >
                   <SelectTrigger
                     id="webhook-source"
@@ -221,14 +222,14 @@ export function CreateConsumerDialog() {
                   <SelectContent>
                     {LEAD_SOURCES.map((s) => (
                       <SelectItem key={s} value={s}>
-                        {s}
+                        {systemLabel(LEAD_SOURCE_LABELS, s)}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
                 <p className="text-muted-foreground text-xs">
-                  Stamped onto every property created via this webhook
-                  unless the payload includes its own <code>source</code>.
+                  Stamped onto every property created via this webhook unless
+                  the payload includes its own <code>source</code>.
                 </p>
               </div>
             )}
@@ -293,11 +294,9 @@ export function SuccessState({
       <DialogHeader>
         <DialogTitle>{title}</DialogTitle>
         <DialogDescription>
-          <span className="text-foreground font-semibold">
-            {name}
-          </span>{" "}
-          ({type}) — copy the secret now. We don&apos;t store the plaintext;
-          if you lose it, you&apos;ll have to rotate the consumer.
+          <span className="text-foreground font-semibold">{name}</span> ({type})
+          — copy the secret now. We don&apos;t store the plaintext; if you lose
+          it, you&apos;ll have to rotate the consumer.
         </DialogDescription>
       </DialogHeader>
 
@@ -309,9 +308,8 @@ export function SuccessState({
           This is the only time you&apos;ll see this — copy it now.
         </div>
         <p className="text-muted-foreground text-xs">
-          The secret is hashed and stored. After you close this dialog,
-          there is no way to retrieve it. Refreshing the page won&apos;t
-          show it again.
+          The secret is hashed and stored. After you close this dialog, there is
+          no way to retrieve it. Refreshing the page won&apos;t show it again.
         </p>
       </div>
 

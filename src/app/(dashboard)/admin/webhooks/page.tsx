@@ -15,6 +15,10 @@ import {
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import {
+  LEAD_SOURCE_LABELS,
+  systemLabel,
+} from "@/lib/presentation/system-labels";
 
 import { CreateConsumerDialog } from "./create-consumer-dialog";
 import { RowActions } from "./row-actions";
@@ -152,7 +156,7 @@ function ConsumerRow({ row }: { row: WebhookConsumerRow }) {
       </TableCell>
       <TableCell className="text-muted-foreground text-sm">
         {row.default_source ? (
-          <span className="font-mono text-xs">{row.default_source}</span>
+          <span>{systemLabel(LEAD_SOURCE_LABELS, row.default_source)}</span>
         ) : (
           <span className="italic">—</span>
         )}

@@ -17,6 +17,7 @@ vi.mock("next/navigation", () => ({ redirect }));
 import { createLeadFromForm, submitNewLead } from "./actions";
 
 const baseInput = {
+  org_id: "org-1",
   source: "cold_call",
   address: "123 Main St",
   city: "Kansas City",
@@ -41,12 +42,10 @@ function cookieClient() {
 }
 
 function adminMembershipResult({
-  actorMemberships = [
-    { org_id: "org-1", created_at: "2026-01-01T00:00:00.000Z" },
-  ],
+  actorMembership = { org_id: "org-1" },
   assigneeMember = true,
 }: {
-  actorMemberships?: Array<{ org_id: string; created_at: string }>;
+  actorMembership?: { org_id: string } | null;
   assigneeMember?: boolean;
 } = {}) {
   let queryNumber = 0;
@@ -54,13 +53,13 @@ function adminMembershipResult({
     from: vi.fn(() => {
       const response =
         queryNumber++ === 0
-          ? { data: actorMemberships, error: null }
+          ? { data: actorMembership, error: null }
           : {
               data: assigneeMember ? { user_id: "user-other" } : null,
               error: null,
             };
       const builder: Record<string, unknown> = {};
-      for (const method of ["select", "eq", "or", "order", "limit"]) {
+      for (const method of ["select", "eq", "is", "or", "order", "limit"]) {
         builder[method] = vi.fn(() => builder);
       }
       builder.maybeSingle = vi.fn().mockResolvedValue(response);
@@ -199,7 +198,7 @@ describe("createLeadFromForm quick-entry fields", () => {
 
   it("rejects creation when the creator has no active workspace", async () => {
     createAdminClient.mockReturnValue(
-      adminMembershipResult({ actorMemberships: [] }),
+      adminMembershipResult({ actorMembership: null }),
     );
 
     const result = await createLeadFromForm({
@@ -214,26 +213,23 @@ describe("createLeadFromForm quick-entry fields", () => {
     expect(createLead).not.toHaveBeenCalled();
   });
 
-  it("uses the deterministic earliest active workspace and rejects an assignee outside it", async () => {
+  it("uses the explicitly selected active workspace", async () => {
     createAdminClient.mockReturnValue(
       adminMembershipResult({
-        actorMemberships: [
-          { org_id: "org-earliest", created_at: "2025-01-01T00:00:00.000Z" },
-          { org_id: "org-later", created_at: "2026-01-01T00:00:00.000Z" },
-        ],
-        assigneeMember: false,
+        actorMembership: { org_id: "org-later" },
       }),
     );
 
     const result = await createLeadFromForm({
       ...baseInput,
+      org_id: "org-later",
       assigned_user_id: "user-other",
     });
 
-    expect(result).toMatchObject({
-      ok: false,
-      error: { code: "INVALID_ASSIGNEE" },
-    });
-    expect(createLead).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    expect(createLead).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ orgId: "org-later" }),
+    );
   });
 });

@@ -381,7 +381,7 @@ export function WeekGrid({
                   ({ appointment, top, height, column, columnCount }) => {
                     const assignee =
                       assignees[appointment.assignee_id] ??
-                      `Former teammate (${appointment.assignee_id.slice(0, 8)})`;
+                      "Former teammate (name unavailable)";
                     const width = 100 / columnCount;
                     return (
                       <EventShell
@@ -425,7 +425,7 @@ export function WeekGrid({
                 {outsideHours[dayIndex].map((appointment) => {
                   const assignee =
                     assignees[appointment.assignee_id] ??
-                    `Former teammate (${appointment.assignee_id.slice(0, 8)})`;
+                    "Former teammate (name unavailable)";
                   return (
                     <EventShell
                       key={appointment.id}

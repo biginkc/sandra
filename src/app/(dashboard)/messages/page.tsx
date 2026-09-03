@@ -1,5 +1,7 @@
-import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { getSingleActiveMembership } from "@/lib/auth/memberships";
+import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
+import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
 import {
   listThreadPage,
   type ThreadPageFilter,
@@ -139,8 +141,8 @@ export default async function MessagesPage({
     ? queueStatsResult.data
     : EMPTY_QUEUE_STATS;
 
-  // Hydrate assignee emails for whichever assignee ids appear on the
-  // visible threads. One auth.admin.listUsers call covers the whole page.
+  // Hydrate human labels for visible active or former assignees. Assignment
+  // pickers still use the active-only listOrgUsers action.
   const assigneeEmails: Record<string, string> = {};
   const assigneeIds = new Set<string>();
   for (const t of visibleThreads) {
@@ -148,13 +150,18 @@ export default async function MessagesPage({
   }
   if (assigneeIds.size > 0) {
     try {
-      const admin = createAdminClient();
-      const { data: usersPage } = await admin.auth.admin.listUsers({
-        perPage: 200,
-      });
-      for (const u of usersPage?.users ?? []) {
-        if (u.email && assigneeIds.has(u.id)) {
-          assigneeEmails[u.id] = u.email;
+      const membership = await getSingleActiveMembership();
+      if (membership.ok) {
+        const members = await loadOrgTeamMembers(membership.membership.org_id, {
+          historicalAssigneeIds: [...assigneeIds],
+        });
+        for (const member of members) {
+          if (assigneeIds.has(member.id)) {
+            assigneeEmails[member.id] = teamMemberPrimaryLabel(
+              member,
+              currentUserId,
+            );
+          }
         }
       }
     } catch {

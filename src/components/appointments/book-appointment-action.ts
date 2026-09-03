@@ -8,6 +8,8 @@ import {
   requireOrgMembership,
   requireOrgMembershipByResource,
 } from "@/lib/auth/require-org-membership";
+import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
+export type { TeamMember } from "@/lib/auth/team-member";
 import { errFromUnknown, err, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import {
@@ -570,36 +572,12 @@ function buildAppointmentDeepLink(
   return `${normalizedBaseUrl}/dashboard`;
 }
 
-export type TeamMember = { id: string; email: string };
-
 export type BookingAssigneeContext = {
   /** Property this booking is linked to, if any — mirrors BookAppointmentInput. */
   propertyId?: string;
   /** Contact this booking is linked to, if any (independent of property). */
   contactId?: string;
 };
-
-type AuthUserPageUser = { id: string; email?: string | null };
-
-async function listAllAuthUsers(
-  admin: ReturnType<typeof createAdminClient>,
-): Promise<Result<AuthUserPageUser[]>> {
-  const users: AuthUserPageUser[] = [];
-  let page = 1;
-  const perPage = 200;
-
-  while (true) {
-    const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
-    if (error) {
-      return err({ code: "TEAM_FETCH_FAILED", message: error.message });
-    }
-    users.push(...((data?.users ?? []) as AuthUserPageUser[]));
-    if (!data?.nextPage || data.users.length === 0) break;
-    page = data.nextPage;
-  }
-
-  return ok(users);
-}
 
 /**
  * Assignee picker for the booking popover (Codex round 2 — the popover
@@ -619,7 +597,7 @@ async function listAllAuthUsers(
  */
 export async function listBookingAssignees(
   ctx: BookingAssigneeContext,
-): Promise<Result<TeamMember[]>> {
+): Promise<Result<import("@/lib/auth/team-member").TeamMember[]>> {
   try {
     const supabase = await createClient();
     const {
@@ -632,32 +610,7 @@ export async function listBookingAssignees(
     const orgResult = await resolveBookingOrgId(supabase, user, ctx);
     if (!orgResult.ok) return orgResult;
 
-    const admin = createAdminClient();
-    const activeAt = new Date().toISOString();
-    const { data: orgMemberships, error: orgMembershipsError } = await admin
-      .from("memberships")
-      .select("user_id")
-      .eq("org_id", orgResult.data)
-      .eq("access_status", "active")
-      .is("deletion_prepared_at", null)
-      .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`);
-    if (orgMembershipsError) {
-      return err({
-        code: "TEAM_FETCH_FAILED",
-        message: orgMembershipsError.message,
-      });
-    }
-
-    const memberIds = new Set((orgMemberships ?? []).map((m) => m.user_id));
-    if (memberIds.size === 0) return ok([]);
-
-    const users = await listAllAuthUsers(admin);
-    if (!users.ok) return users;
-    const members: TeamMember[] = users.data
-      .filter((u) => memberIds.has(u.id) && !!u.email)
-      .map((u) => ({ id: u.id, email: u.email as string }))
-      .sort((a, b) => a.email.localeCompare(b.email));
-    return ok(members);
+    return ok(await loadOrgTeamMembers(orgResult.data));
   } catch (e) {
     reportError(e, { tags: { surface: "list_booking_assignees" }, extra: ctx });
     return errFromUnknown(e, "TEAM_FETCH_FAILED");

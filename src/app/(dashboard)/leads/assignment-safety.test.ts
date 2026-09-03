@@ -39,6 +39,10 @@ describe("validateActiveAssigneeForProperties", () => {
 
     expect(result.ok).toBe(true);
     expect((membershipQuery.eq as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith("access_status", "active");
+    expect((membershipQuery.is as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
+      "deletion_prepared_at",
+      null,
+    );
     expect((membershipQuery.or as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
       "access_expires_at.is.null,access_expires_at.gt.2026-08-16T00:00:00.000Z",
     );

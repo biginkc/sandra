@@ -4,17 +4,22 @@ const {
   createClient,
   fetchLeadBoardData,
   getCallerMemberships,
-  listOrgUsers,
+  loadOrgTeamMembers,
+  loadTeamMembersForOrgs,
 } = vi.hoisted(() => ({
   createClient: vi.fn(),
   fetchLeadBoardData: vi.fn(),
   getCallerMemberships: vi.fn(),
-  listOrgUsers: vi.fn(),
+  loadOrgTeamMembers: vi.fn(),
+  loadTeamMembersForOrgs: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships }));
-vi.mock("./actions", () => ({ listOrgUsers }));
+vi.mock("@/lib/auth/team-roster", () => ({
+  loadOrgTeamMembers,
+  loadTeamMembersForOrgs,
+}));
 vi.mock("./board-query", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./board-query")>();
   return { ...actual, fetchLeadBoardData };
@@ -37,9 +42,12 @@ beforeEach(() => {
   createClient.mockReset();
   fetchLeadBoardData.mockReset();
   getCallerMemberships.mockReset();
-  listOrgUsers.mockReset();
+  loadOrgTeamMembers.mockReset();
+  loadTeamMembersForOrgs.mockReset();
   createClient.mockResolvedValue({
-    auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) },
+    auth: {
+      getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }),
+    },
     from: vi.fn().mockReturnValue({
       select: vi.fn().mockReturnValue({
         order: vi.fn().mockReturnValue({
@@ -48,7 +56,8 @@ beforeEach(() => {
       }),
     }),
   });
-  listOrgUsers.mockResolvedValue({ ok: true, data: [] });
+  loadTeamMembersForOrgs.mockResolvedValue([]);
+  loadOrgTeamMembers.mockResolvedValue([]);
   fetchLeadBoardData.mockResolvedValue({
     leads: [],
     totals: emptyTotals,

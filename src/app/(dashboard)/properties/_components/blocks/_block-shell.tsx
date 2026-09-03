@@ -4,6 +4,7 @@ import { XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createContext, useContext } from "react";
 import type { ReactNode } from "react";
+import type { TeamMember } from "@/lib/auth/team-member";
 
 // ---------------------------------------------------------------------------
 // BlockOptions — the data contract that Plan 09 must provide via context.
@@ -20,7 +21,7 @@ export type BlockOptions = {
   /** Distinct 2-letter properties.state values */
   states: string[];
   /** Auth users for assignee picker; "unassigned" sentinel is added by the block */
-  assignees: Array<{ id: string; email: string }>;
+  assignees: TeamMember[];
   /** properties.source enum values */
   sources: string[];
   /** properties.status enum values (e.g., ['prospect','lead','contract','closed']) */

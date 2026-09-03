@@ -450,8 +450,8 @@ describe("CalendarPage — appointment owned by an inactive/former assignee (Cod
       labelsDegraded: false,
       roster: [{ id: "user-1", label: "owner@bmh.com" }],
     });
-    // No email resolvable for the suspended id — falls back to the
-    // id-prefix label rather than dropping the attribution.
+    // No identity label is resolvable for the suspended id. Keep the
+    // attribution without exposing a machine identifier.
     fetchAssigneeEmails.mockResolvedValue({});
 
     const jsx = await CalendarPage({ searchParams: Promise.resolve({}) });
@@ -460,11 +460,11 @@ describe("CalendarPage — appointment owned by an inactive/former assignee (Cod
     // Filter/roster stays active-roster-only (just the owner).
     expect(screen.getByTestId("assignee-count")).toHaveTextContent("1");
     // But the label map used for per-row attribution covers the inactive
-    // assignee too, with a "Former teammate" fallback carrying the id
-    // prefix — never silently dropped.
+    // assignee too, with a safe former-teammate fallback — never silently
+    // dropped and never represented by a UUID fragment.
     expect(
       screen.getByTestId("assignee-label-rep-suspended"),
-    ).toHaveTextContent("Former teammate (rep-susp)");
+    ).toHaveTextContent("Former teammate (name unavailable)");
     expect(fetchAssigneeEmails).toHaveBeenCalledWith(["rep-suspended"]);
   });
 

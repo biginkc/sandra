@@ -58,7 +58,7 @@ test.describe("/admin/webhooks", () => {
     await nameInput.fill(consumerName);
     // type=lead is the default radio; select default_source = cold_call.
     await page.getByTestId("webhook-source").click();
-    await page.getByRole("option", { name: "cold_call" }).click();
+    await page.getByRole("option", { name: "Cold call" }).click();
     await page.getByTestId("webhook-submit").click();
 
     // Success state shows the plaintext + URL.
@@ -81,7 +81,7 @@ test.describe("/admin/webhooks", () => {
     const row = page.getByRole("row").filter({ hasText: consumerName });
     await expect(row).toBeVisible({ timeout: 15_000 });
     await expect(row.getByText("lead", { exact: true })).toBeVisible();
-    await expect(row.getByText("cold_call")).toBeVisible();
+    await expect(row.getByText("Cold call")).toBeVisible();
 
     // ----- Refresh-hides-plaintext check -----
     await page.reload();

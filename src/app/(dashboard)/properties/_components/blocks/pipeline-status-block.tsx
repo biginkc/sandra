@@ -2,6 +2,10 @@
 
 import { useEffect } from "react";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
+import {
+  PROPERTY_STATUS_LABELS,
+  systemLabel,
+} from "@/lib/presentation/system-labels";
 import { BlockShell, CombinatorSelect, useBlockOptions } from "./_block-shell";
 
 type Block = Extract<FilterBlock, { kind: "pipeline_status" }>;
@@ -42,13 +46,16 @@ export default function PipelineStatusBlock({
       />
       <div className="flex flex-col gap-1 mt-1">
         {pipelineStatuses.map((s) => (
-          <label key={s} className="flex items-center gap-2 text-sm cursor-pointer capitalize">
+          <label
+            key={s}
+            className="flex items-center gap-2 text-sm cursor-pointer"
+          >
             <input
               type="checkbox"
               checked={block.values.includes(s)}
               onChange={() => toggle(s)}
             />
-            {s}
+            {systemLabel(PROPERTY_STATUS_LABELS, s)}
           </label>
         ))}
       </div>

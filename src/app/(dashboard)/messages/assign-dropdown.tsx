@@ -13,9 +13,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { callAction } from "@/lib/errors/call-action";
+import {
+  teamMemberPrimaryLabel,
+  teamMemberSecondaryLabel,
+} from "@/lib/auth/team-member";
 
 import {
-  listOrgUsers,
+  listPropertyOrgUsers,
   updateLeadAssignee,
   type TeamMember,
 } from "../leads/actions";
@@ -81,7 +85,7 @@ function AssignDropdownContent({
     if (loaded || loading) return;
     setLoading(true);
     setLoadError(null);
-    listOrgUsers()
+    listPropertyOrgUsers(propertyId)
       .then((result) => {
         if (result.ok) {
           setMembers(result.data);
@@ -97,9 +101,8 @@ function AssignDropdownContent({
     if (nextId === assigneeId || pending) return;
     const previousId = assigneeId;
     const previousEmail = assigneeEmail;
-    const nextEmail = nextId
-      ? (members.find((m) => m.id === nextId)?.email ?? null)
-      : null;
+    const nextMember = nextId ? members.find((m) => m.id === nextId) : null;
+    const nextEmail = nextMember?.email ?? null;
 
     // Optimistic update.
     setAssigneeId(nextId);
@@ -108,7 +111,7 @@ function AssignDropdownContent({
     startTransition(async () => {
       const result = await callAction(updateLeadAssignee(propertyId, nextId), {
         successMessage: nextId
-          ? `Assigned to ${nextEmail ?? "user"}`
+          ? `Assigned to ${nextMember ? teamMemberPrimaryLabel(nextMember, currentUserId) : "teammate"}`
           : "Owner removed",
         fallbackMessage: "Could not update assignee",
       });
@@ -121,11 +124,14 @@ function AssignDropdownContent({
     });
   };
 
+  const selectedMember = members.find((member) => member.id === assigneeId);
   const label = !assigneeId
     ? "No owner"
-    : assigneeId === currentUserId
-      ? "Assigned: me"
-      : `Assigned: ${assigneeEmail ? shortenEmail(assigneeEmail) : "Teammate"}`;
+    : selectedMember
+      ? `Assigned: ${teamMemberPrimaryLabel(selectedMember, currentUserId)}`
+      : loading
+        ? "Loading assignee…"
+        : `Assigned: ${assigneeEmail ?? "Name not set"}`;
   const hasSelfOption = Boolean(
     currentUserId && loaded && members.some((m) => m.id === currentUserId),
   );
@@ -139,7 +145,7 @@ function AssignDropdownContent({
             size="sm"
             className="min-h-11"
             disabled={pending}
-            aria-label="Change assignee"
+            aria-label={`Change assignee. Current owner: ${label}`}
             data-testid="assign-dropdown-trigger"
           >
             <UserIcon className="mr-1 size-3.5" />
@@ -161,7 +167,12 @@ function AssignDropdownContent({
               className="min-h-11 items-center justify-between gap-4"
               data-testid="assign-dropdown-me"
             >
-              <span>Me</span>
+              <span>
+                {teamMemberPrimaryLabel(
+                  members.find((m) => m.id === currentUserId)!,
+                  currentUserId,
+                )}
+              </span>
               {assigneeId === currentUserId ? (
                 <CheckIcon className="size-4" />
               ) : null}
@@ -179,7 +190,14 @@ function AssignDropdownContent({
                 className="min-h-11 items-center justify-between gap-4"
                 data-testid={`assign-dropdown-user-${m.id}`}
               >
-                <span>{m.email}</span>
+                <span className="flex min-w-0 flex-col">
+                  <span>{teamMemberPrimaryLabel(m, currentUserId)}</span>
+                  {teamMemberSecondaryLabel(m) ? (
+                    <span className="text-muted-foreground text-xs">
+                      {teamMemberSecondaryLabel(m)}
+                    </span>
+                  ) : null}
+                </span>
                 {m.id === assigneeId ? <CheckIcon className="size-4" /> : null}
               </DropdownMenuItem>
             ))}
@@ -199,9 +217,4 @@ function AssignDropdownContent({
       </DropdownMenuContent>
     </DropdownMenu>
   );
-}
-
-function shortenEmail(email: string): string {
-  const at = email.indexOf("@");
-  return at > 0 ? email.slice(0, at) : email;
 }

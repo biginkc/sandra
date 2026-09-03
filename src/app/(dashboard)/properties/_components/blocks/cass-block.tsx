@@ -1,6 +1,10 @@
 "use client";
 
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
+import {
+  CASS_STATUS_LABELS,
+  systemLabel,
+} from "@/lib/presentation/system-labels";
 import { BlockShell, CombinatorSelect, useBlockOptions } from "./_block-shell";
 
 type Block = Extract<FilterBlock, { kind: "cass" }>;
@@ -37,7 +41,7 @@ export default function CassBlock({
               checked={block.values.includes(s)}
               onChange={() => toggle(s)}
             />
-            {s}
+            {systemLabel(CASS_STATUS_LABELS, s)}
           </label>
         ))}
       </div>

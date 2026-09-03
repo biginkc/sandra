@@ -1,15 +1,23 @@
 import Link from "next/link";
 
 import { getCallerMemberships } from "@/lib/auth/memberships";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { loadTeamMembersForOrgs } from "@/lib/auth/team-roster";
 import { createClient } from "@/lib/supabase/server";
-import { buildTableHref, parseTableSearch, type SortDirection } from "@/components/table/use-table-url-state.helpers";
+import {
+  buildTableHref,
+  parseTableSearch,
+  type SortDirection,
+} from "@/components/table/use-table-url-state.helpers";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Button, buttonVariants } from "@/components/ui/button";
 import type { BlockOptions } from "@/app/(dashboard)/properties/_components/blocks/_block-shell";
 
-import { CampaignsTable, type CampaignRow, type CampaignsFilters } from "./campaigns-table";
+import {
+  CampaignsTable,
+  type CampaignRow,
+  type CampaignsFilters,
+} from "./campaigns-table";
 import { CreateCampaignForm } from "./create-campaign-form";
 
 export const metadata = {
@@ -25,12 +33,7 @@ export const CAMPAIGNS_SORTABLE_COLUMNS = [
 ] as const;
 
 type CampaignStatus =
-  | "active"
-  | "launching"
-  | "paused"
-  | "completed"
-  | "failed"
-  | "archived";
+  "active" | "launching" | "paused" | "completed" | "failed" | "archived";
 
 const CAMPAIGNS_BUILD_CONFIG = {
   defaultSort: "created_at" as const,
@@ -93,30 +96,40 @@ function summarizeAudience(snapshot: unknown): string {
     blockStack?: unknown;
   };
   const filterSource =
-    raw.filters && typeof raw.filters === "object" && !Array.isArray(raw.filters)
+    raw.filters &&
+    typeof raw.filters === "object" &&
+    !Array.isArray(raw.filters)
       ? raw.filters
       : raw;
   const blockStack = Array.isArray(filterSource.blockStack)
     ? filterSource.blockStack
     : [];
   const search =
-    typeof filterSource.search === "string" && filterSource.search.trim().length > 0
+    typeof filterSource.search === "string" &&
+    filterSource.search.trim().length > 0
       ? filterSource.search.trim()
       : null;
 
   const parts: string[] = [];
   if (search) parts.push(`search "${search}"`);
   if (blockStack.length > 0) {
-    parts.push(`${blockStack.length} filter${blockStack.length === 1 ? "" : "s"}`);
+    parts.push(
+      `${blockStack.length} filter${blockStack.length === 1 ? "" : "s"}`,
+    );
   }
 
   return parts.length > 0 ? parts.join(" + ") : "No audience saved";
 }
 
-function summarizeMessage(body: string | null, templateCategory: string | null): string {
+function summarizeMessage(
+  body: string | null,
+  templateCategory: string | null,
+): string {
   const trimmedBody = body?.trim() ?? "";
   if (trimmedBody.length > 0) {
-    return trimmedBody.length > 90 ? `${trimmedBody.slice(0, 87)}...` : trimmedBody;
+    return trimmedBody.length > 90
+      ? `${trimmedBody.slice(0, 87)}...`
+      : trimmedBody;
   }
   if (templateCategory?.trim()) {
     return `Template pool: ${templateCategory.trim()}`;
@@ -128,23 +141,11 @@ async function loadBlockOptions(
   supabase: Awaited<ReturnType<typeof createClient>>,
 ): Promise<BlockOptions> {
   const memberships = await getCallerMemberships();
-  const orgId = memberships[0]?.org_id ?? "";
-
-  const assigneesPromise = orgId
-    ? (async () => {
-        try {
-          const { data } = await createAdminClient().auth.admin.listUsers({
-            perPage: 200,
-          });
-          return (data?.users ?? [])
-            .filter((user) => !!user.email)
-            .map((user) => ({ id: user.id, email: user.email as string }))
-            .sort((a, b) => a.email.localeCompare(b.email));
-        } catch {
-          return [];
-        }
-      })()
-    : Promise.resolve([] as Array<{ id: string; email: string }>);
+  const orgIds = memberships.map((membership) => membership.org_id);
+  const assigneesPromise =
+    orgIds.length > 0
+      ? loadTeamMembersForOrgs(orgIds, { includeInactiveMembers: true })
+      : Promise.resolve([]);
 
   const [countyResult, stateResult, listResult, tagResult, assignees] =
     await Promise.all([
@@ -175,7 +176,9 @@ async function loadBlockOptions(
   const markets: string[] = (countyResult.data ?? []).map((c) => c.market);
   const states: string[] = Array.from(
     new Set(
-      (stateResult.data ?? []).map((row) => row.state).filter(Boolean) as string[],
+      (stateResult.data ?? [])
+        .map((row) => row.state)
+        .filter(Boolean) as string[],
     ),
   ).sort();
   const listRows = listResult.data;
@@ -275,7 +278,11 @@ export default async function CampaignsPage({
     .order(sort, { ascending: dir === "asc" })
     .order("id", { ascending: true });
 
-  const { data: campaignsData, count, error } = await campaignsQuery.range(from, to);
+  const {
+    data: campaignsData,
+    count,
+    error,
+  } = await campaignsQuery.range(from, to);
 
   const pageIds = (campaignsData ?? []).map((campaign) => campaign.id);
   const recipientCounts = new Map<string, number>();
@@ -296,7 +303,9 @@ export default async function CampaignsPage({
   const rows: CampaignRow[] = (campaignsData ?? []).map((campaign) => ({
     id: campaign.id,
     name: campaign.name,
-    status: (campaign.archived_at ? "archived" : campaign.status) as CampaignStatus,
+    status: (campaign.archived_at
+      ? "archived"
+      : campaign.status) as CampaignStatus,
     archived_at: campaign.archived_at,
     created_at: campaign.created_at,
     bodyPreview: summarizeMessage(campaign.body, campaign.template_category),

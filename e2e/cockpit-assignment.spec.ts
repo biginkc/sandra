@@ -6,6 +6,7 @@ import {
   resetTenantTables,
   seedProspects,
   TEST_ASSIGNEE_EMAIL,
+  TEST_USER_EMAIL,
 } from "./fixtures";
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
@@ -155,7 +156,7 @@ test('Side panel shows "No owner" picker on an unassigned thread; choosing Me as
 
   const selfOption = page.getByTestId("assign-dropdown-me");
   await expect(selfOption).toBeVisible();
-  await expect(selfOption).toContainText("Me");
+  await expect(selfOption).toHaveText(`${TEST_USER_EMAIL} (you)`);
   await expect(page.getByTestId("assign-dropdown-unassign")).toBeVisible();
   await selfOption.click();
 
@@ -169,8 +170,8 @@ test('Side panel shows "No owner" picker on an unassigned thread; choosing Me as
   }).toPass({ timeout: 10_000 });
 
   await expect(page.getByTestId("assign-to-me")).toHaveCount(0);
-  await expect(page.getByTestId("assign-dropdown-trigger")).toContainText(
-    "Assigned: me",
+  await expect(page.getByTestId("assign-dropdown-trigger")).toHaveText(
+    `Assigned: ${TEST_USER_EMAIL} (you)`,
   );
 });
 

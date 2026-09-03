@@ -6,6 +6,10 @@ import { after } from "next/server";
 import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
+import { hasActiveSandraAccess } from "@/lib/auth/access-state";
+import { getCallerMemberships } from "@/lib/auth/memberships";
+import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
+export type { TeamMember } from "@/lib/auth/team-member";
 import { cassBulkWorkflow } from "@/workflows/cass-bulk";
 import {
   parseThreadId,
@@ -1917,7 +1921,7 @@ export async function createLeadTaskAction(
 
     const { data: actorMembership, error: actorMembershipErr } = await supabase
       .from("memberships")
-      .select("user_id")
+      .select("user_id, access_status, access_expires_at, deletion_prepared_at")
       .eq("org_id", property.org_id)
       .eq("user_id", user.id)
       .maybeSingle();
@@ -1930,7 +1934,7 @@ export async function createLeadTaskAction(
         },
       };
     }
-    if (!actorMembership) {
+    if (!actorMembership || !hasActiveSandraAccess(actorMembership)) {
       return {
         ok: false,
         error: {
@@ -1943,7 +1947,7 @@ export async function createLeadTaskAction(
     const admin = createAdminClient();
     const { data: assignee, error: assigneeErr } = await admin
       .from("memberships")
-      .select("user_id")
+      .select("user_id, access_status, access_expires_at, deletion_prepared_at")
       .eq("org_id", property.org_id)
       .eq("user_id", input.assigneeId)
       .maybeSingle();
@@ -1956,12 +1960,14 @@ export async function createLeadTaskAction(
         },
       };
     }
-    if (!assignee) {
+    if (!assignee || !hasActiveSandraAccess(assignee)) {
       return {
         ok: false,
         error: {
-          code: "ASSIGNEE_NOT_IN_ORG",
-          message: "Choose a team member in this lead's org.",
+          code: assignee ? "ASSIGNEE_NOT_ACTIVE" : "ASSIGNEE_NOT_IN_ORG",
+          message: assignee
+            ? "Choose an active team member in this lead's organization."
+            : "Choose a team member in this lead's organization.",
         },
       };
     }
@@ -2189,19 +2195,10 @@ async function captureConsent(params: {
 // Lead assignment · unread indicator · activity notes
 // ============================================================================
 
-export type TeamMember = {
-  id: string;
-  email: string;
-};
-
-/**
- * List authed team members for assignee pickers. Uses the admin client
- * because `auth.admin.listUsers()` requires service role, but we limit
- * the returned shape to {id, email} — no sign-in timestamps or metadata
- * leak through. Middleware already gates `/leads/**` behind auth, so any
- * caller reaching this action is already a trusted org member.
- */
-export async function listOrgUsers(): Promise<Result<TeamMember[]>> {
+/** Assignment roster pinned to the lead's organization, never membership order. */
+export async function listPropertyOrgUsers(
+  propertyId: string,
+): Promise<Result<import("@/lib/auth/team-member").TeamMember[]>> {
   try {
     const supabase = await createClient();
     const {
@@ -2213,86 +2210,41 @@ export async function listOrgUsers(): Promise<Result<TeamMember[]>> {
         error: { code: "UNAUTHENTICATED", message: "Not signed in" },
       };
     }
-
-    const { data: myMemberships, error: myMembershipsError } = await supabase
-      .from("memberships")
+    const { data: property, error: propertyError } = await supabase
+      .from("properties")
       .select("org_id")
-      .eq("user_id", user.id);
-    if (myMembershipsError) {
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (propertyError || !property) {
       return {
         ok: false,
         error: {
-          code: "TEAM_FETCH_FAILED",
-          message: myMembershipsError.message,
+          code: "TEAM_SCOPE_INVALID",
+          message: propertyError?.message ?? "Lead not found.",
         },
       };
     }
-
-    const orgIds = Array.from(
-      new Set((myMemberships ?? []).map((membership) => membership.org_id)),
-    );
-    if (orgIds.length === 0) return ok([]);
-
-    const admin = createAdminClient();
-    const { data: orgMemberships, error: orgMembershipsError } = await admin
-      .from("memberships")
-      .select("user_id")
-      .in("org_id", orgIds);
-    if (orgMembershipsError) {
+    // Reuse the compatibility-aware caller membership path. It fails closed
+    // in production and has the intentionally narrow shared-E2E fallback for
+    // schemas that predate Hugo lifecycle columns.
+    const memberships = await getCallerMemberships();
+    if (!memberships.some((membership) => membership.org_id === property.org_id)) {
       return {
         ok: false,
         error: {
-          code: "TEAM_FETCH_FAILED",
-          message: orgMembershipsError.message,
+          code: "TEAM_SCOPE_INVALID",
+          message: "No active membership for this lead.",
         },
       };
     }
-
-    const memberIds = new Set(
-      (orgMemberships ?? []).map((membership) => membership.user_id),
-    );
-    if (memberIds.size === 0) return ok([]);
-
-    const users = await listAllAuthUsers(admin);
-    if (!users.ok) return users;
-    const members: TeamMember[] = users.data
-      .filter((u) => memberIds.has(u.id) && !!u.email)
-      .map((u) => ({ id: u.id, email: u.email as string }))
-      .sort((a, b) => a.email.localeCompare(b.email));
-    return ok(members);
+    return ok(await loadOrgTeamMembers(property.org_id));
   } catch (e) {
-    reportError(e, { tags: { surface: "list_org_users" } });
+    reportError(e, {
+      tags: { surface: "list_property_org_users" },
+      extra: { propertyId },
+    });
     return errFromUnknown(e, "TEAM_FETCH_FAILED");
   }
-}
-
-type AuthUserPageUser = { id: string; email?: string | null };
-
-async function listAllAuthUsers(
-  admin: ReturnType<typeof createAdminClient>,
-): Promise<Result<AuthUserPageUser[]>> {
-  const users: AuthUserPageUser[] = [];
-  let page = 1;
-  const perPage = 200;
-
-  while (true) {
-    const { data, error } = await admin.auth.admin.listUsers({
-      page,
-      perPage,
-    });
-    if (error) {
-      return {
-        ok: false,
-        error: { code: "TEAM_FETCH_FAILED", message: error.message },
-      };
-    }
-
-    users.push(...((data?.users ?? []) as AuthUserPageUser[]));
-    if (!data?.nextPage || data.users.length === 0) break;
-    page = data.nextPage;
-  }
-
-  return ok(users);
 }
 
 /**

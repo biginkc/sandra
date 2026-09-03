@@ -44,18 +44,18 @@ import {
 import { isAwaitingManualStart } from "@/lib/enrichment/cass-job-state";
 import { callAction } from "@/lib/errors/call-action";
 import { CASS_COST_PER_LOOKUP_USD } from "@/lib/provider-pricing";
-import {
-  denySkipTraceJob,
-} from "@/lib/skip-trace/actions";
+import { denySkipTraceJob } from "@/lib/skip-trace/actions";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
+import {
+  JOB_STATUS_LABELS,
+  JOB_TYPE_LABELS,
+  jobDisplayTitle,
+  systemLabel,
+} from "@/lib/presentation/system-labels";
 
 import { retryFailedCassItems, startQueuedCassJob } from "./actions";
-import type {
-  JobStatus,
-  JobsFilters,
-  JobsSortableColumn,
-} from "./page";
+import type { JobStatus, JobsFilters, JobsSortableColumn } from "./page";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 
@@ -224,9 +224,7 @@ export function JobsList({
   return (
     <>
       <TableToolbar
-        state={
-          ts as unknown as UseTableUrlStateReturn<Record<string, unknown>>
-        }
+        state={ts as unknown as UseTableUrlStateReturn<Record<string, unknown>>}
       >
         <TableToolbarSearch
           ariaLabel="Search jobs by title or id"
@@ -377,26 +375,36 @@ export function JobsList({
                 const rawSkipTracePropertyIds = (
                   job.input_params as { property_ids?: unknown } | null
                 )?.property_ids;
-                const skipTracePropertyIds = Array.isArray(rawSkipTracePropertyIds)
+                const skipTracePropertyIds = Array.isArray(
+                  rawSkipTracePropertyIds,
+                )
                   ? rawSkipTracePropertyIds.filter(
                       (id): id is string => typeof id === "string",
                     )
                   : [];
                 const canRetryCass =
                   job.type === "cass_dsf2_ncoa" &&
-                  (["partial", "partially_completed", "failed"].includes(job.status)) &&
+                  ["partial", "partially_completed", "failed"].includes(
+                    job.status,
+                  ) &&
                   cassRetryable > 0;
                 return (
                   <TableRow key={job.id}>
                     <TableCell className="font-medium">
-                      {job.title ?? job.id.slice(0, 8)}
+                      {jobDisplayTitle({
+                        title: job.title,
+                        type: job.type,
+                        createdAt: job.created_at,
+                      })}
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline">{job.type}</Badge>
+                      <Badge variant="outline">
+                        {systemLabel(JOB_TYPE_LABELS, job.type)}
+                      </Badge>
                     </TableCell>
                     <TableCell>
                       <Badge variant={statusVariant(job.status)}>
-                        {job.status}
+                        {systemLabel(JOB_STATUS_LABELS, job.status)}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm">
@@ -456,7 +464,8 @@ export function JobsList({
         </Table>
         <DataTableFooter>
           <span className="text-muted-foreground text-sm">
-            {visibleJobs.length} of {jobs.length} job{jobs.length === 1 ? "" : "s"}
+            {visibleJobs.length} of {jobs.length} job
+            {jobs.length === 1 ? "" : "s"}
           </span>
         </DataTableFooter>
       </DataTableShell>
@@ -469,7 +478,8 @@ function statusVariant(
 ): "default" | "secondary" | "destructive" | "outline" {
   if (status === "completed") return "default";
   if (status === "failed") return "destructive";
-  if (status === "partial" || status === "partially_completed") return "secondary";
+  if (status === "partial" || status === "partially_completed")
+    return "secondary";
   if (status === "canceled" || status === "denied") return "outline";
   return "secondary";
 }
@@ -496,12 +506,7 @@ function SkipTraceApproveButtons({
 
   return (
     <div className="flex justify-end gap-1">
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={onDeny}
-        disabled={pending}
-      >
+      <Button variant="outline" size="sm" onClick={onDeny} disabled={pending}>
         Deny
       </Button>
       <Button
@@ -558,8 +563,8 @@ function StartCassButton({
             This will verify {totalItems} propert
             {totalItems === 1 ? "y" : "ies"} against SmartyStreets. Estimated
             cost: ${estimatedCost} ({totalItems} × $
-            {CASS_COST_PER_LOOKUP_USD.toFixed(2)}/lookup). Cached addresses
-            from prior imports count as $0.
+            {CASS_COST_PER_LOOKUP_USD.toFixed(2)}/lookup). Cached addresses from
+            prior imports count as $0.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -614,8 +619,8 @@ function RetryCassButton({
           <DialogDescription>
             Creates a fresh CASS job for the {failedItems.toLocaleString()}{" "}
             {failedItems === 1 ? "property" : "properties"} that previously
-            failed. Saved provider responses and cached addresses replay with
-            no new charge; only addresses without saved output cost $
+            failed. Saved provider responses and cached addresses replay with no
+            new charge; only addresses without saved output cost $
             {CASS_COST_PER_LOOKUP_USD.toFixed(2)}/lookup.
           </DialogDescription>
         </DialogHeader>

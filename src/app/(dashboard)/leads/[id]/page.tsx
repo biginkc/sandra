@@ -9,8 +9,9 @@ import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
+import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
 import { leadNoticeMessage } from "@/lib/leads/notices";
-import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import {
@@ -26,6 +27,13 @@ import {
 import { findLatestAuthoritativeSmsRoute } from "@/lib/messages/sms-parties";
 import { canShowCallButton } from "@/lib/dialer/eligibility";
 import { zillowUrl } from "@/lib/utils/zillow-url";
+import {
+  CASS_STATUS_LABELS,
+  LEAD_SOURCE_LABELS,
+  OUTREACH_DISPOSITION_LABELS,
+  PROPERTY_STATUS_LABELS,
+  systemLabel,
+} from "@/lib/presentation/system-labels";
 
 import {
   getPropertyNeighbors,
@@ -344,15 +352,16 @@ export default async function LeadDetailPage({
   // An existing thread's customer and business numbers are one route. Pick
   // both from the same newest homeowner SMS row so a lead with multiple saved
   // phones cannot accidentally reply from sender B to customer phone A.
-  const latestHomeownerSmsRoute = findLatestAuthoritativeSmsRoute(
-    initialMessages.filter(
-      (message) =>
-        message.channel === "sms" &&
-        Boolean(homeownerContactId) &&
-        message.contact_id === homeownerContactId &&
-        message.property_id === lead.id,
-    ),
-  )?.parties ?? null;
+  const latestHomeownerSmsRoute =
+    findLatestAuthoritativeSmsRoute(
+      initialMessages.filter(
+        (message) =>
+          message.channel === "sms" &&
+          Boolean(homeownerContactId) &&
+          message.contact_id === homeownerContactId &&
+          message.property_id === lead.id,
+      ),
+    )?.parties ?? null;
   const inlineRoutePhoneChoice = latestHomeownerSmsRoute
     ? selectSmsPhoneByNumber(
         lead.homeowner,
@@ -404,78 +413,13 @@ export default async function LeadDetailPage({
     .limit(200);
   const initialLeadEvents = (leadEventsRaw ?? []) as LeadEvent[];
 
-  // auth.admin.listUsers() spans the entire Auth project, not this lead's
-  // organization. Build an active-org membership allowlist first, fail closed
-  // if it cannot be trusted, and only then retain matching auth identities.
-  const admin = createAdminClient();
-  const orgAuthorCap = 400;
-  const activeMembershipAt = new Date(requestNowMs).toISOString();
-  const usersPromise = (async () => {
-    try {
-      const membershipResult = await admin
-        .from("memberships")
-        .select("user_id")
-        .eq("org_id", lead.org_id)
-        .eq("access_status", "active")
-        .is("deletion_prepared_at", null)
-        .or(
-          `access_expires_at.is.null,access_expires_at.gt.${activeMembershipAt}`,
-        )
-        .order("user_id", { ascending: true })
-        .limit(orgAuthorCap + 1);
-      if (
-        membershipResult.error ||
-        !membershipResult.data ||
-        membershipResult.data.length > orgAuthorCap
-      ) {
-        console.error("[leads] org author identity lookup failed", {
-          membershipCode: membershipResult.error?.code ?? null,
-          membershipCapExceeded:
-            (membershipResult.data?.length ?? 0) > orgAuthorCap,
-        });
-        return [];
-      }
-      const orgMemberIds = new Set(
-        membershipResult.data.map((membership) => membership.user_id),
-      );
-      if (orgMemberIds.size === 0) return [];
-
-      const authUsersById = new Map<
-        string,
-        { id: string; email?: string | null }
-      >();
-      const authUsersPerPage = 200;
-      // Advance page numbers locally: auth-js can mis-parse multi-digit
-      // nextPage values. Terminate on complete resolution, a short page, or
-      // this hard 5,000-user project bound.
-      const maxAuthUserPages = 25;
-      for (let page = 1; page <= maxAuthUserPages; page += 1) {
-        const authUsersResult = await admin.auth.admin.listUsers({
-          page,
-          perPage: authUsersPerPage,
-        });
-        if (authUsersResult.error) {
-          console.error("[leads] org author auth lookup failed", {
-            page,
-          });
-          return [];
-        }
-        const authUsers = authUsersResult.data?.users ?? [];
-        for (const user of authUsers) {
-          if (orgMemberIds.has(user.id)) authUsersById.set(user.id, user);
-        }
-        if (
-          authUsersById.size >= orgMemberIds.size ||
-          authUsers.length < authUsersPerPage
-        ) {
-          break;
-        }
-      }
-      return [...authUsersById.values()];
-    } catch {
-      return [];
-    }
-  })();
+  const usersPromise = loadOrgTeamMembers(lead.org_id, {
+    includeInactiveMembers: true,
+    historicalAssigneeIds: lead.assigned_user_id
+      ? [lead.assigned_user_id]
+      : [],
+    allowMissingIdentityLabels: true,
+  }).catch(() => []);
 
   // PostgREST cannot order by COALESCE(started_at, created_at). Fetch the top
   // 20 from each disjoint subgroup, then deterministically merge to the
@@ -539,8 +483,7 @@ export default async function LeadDetailPage({
     ? await smsConsentEventsPromise
     : { data: [], error: null };
   const phoneSuppressionResult = await smsPhoneSuppressionPromise;
-  const inlinePhoneSuppressionResult =
-    await inlineSmsPhoneSuppressionPromise;
+  const inlinePhoneSuppressionResult = await inlineSmsPhoneSuppressionPromise;
   const consentState: ConsentState | null = smsConsentEventsResult.error
     ? null
     : computeConsentState(smsConsentEventsResult.data ?? []);
@@ -608,14 +551,14 @@ export default async function LeadDetailPage({
     }));
   }
 
-  // Resolve author + assignee emails via the admin client (auth.users isn't
-  // RLS-accessible to end-users). The identities are already filtered through
-  // this lead's active-org membership allowlist above.
+  // Resolve both active and former organization members. Former owners and
+  // note authors remain named for audit history but are excluded from pickers.
   const authorEmails: Record<string, string> = {};
   let assigneeEmail: string | null = null;
   const assigneeUsers = await usersPromise;
-  for (const u of assigneeUsers) {
-    if (u.email) authorEmails[u.id] = u.email;
+  for (const member of assigneeUsers) {
+    const label = teamMemberPrimaryLabel(member, sessionUser?.id ?? null);
+    if (label) authorEmails[member.id] = label;
   }
   if (lead.assigned_user_id) {
     assigneeEmail = authorEmails[lead.assigned_user_id] ?? null;
@@ -827,7 +770,7 @@ export default async function LeadDetailPage({
             <Badge
               variant={lead.cass_status === "verified" ? "default" : "outline"}
             >
-              CASS {lead.cass_status}
+              Address: {systemLabel(CASS_STATUS_LABELS, lead.cass_status)}
             </Badge>
             <Badge
               variant={smsPresentation.smsRestricted ? "outline" : "secondary"}
@@ -913,9 +856,7 @@ export default async function LeadDetailPage({
                   homeownerPhone={inlineReplyPhone}
                   replyToPhone={inlineReplyPhone}
                   preferredFromNumber={inlineReplyFromNumber}
-                  phoneUnavailableMessage={
-                    inlineReplyPhoneUnavailableMessage
-                  }
+                  phoneUnavailableMessage={inlineReplyPhoneUnavailableMessage}
                   footerAction={
                     !inlineSmsPresentation.smsRestricted &&
                     !inlineReplyUnavailable ? (
@@ -924,8 +865,7 @@ export default async function LeadDetailPage({
                   }
                 />
               </SmsEntryPointGate>
-              {inlineSmsPresentation.smsRestricted ||
-              inlineReplyUnavailable ? (
+              {inlineSmsPresentation.smsRestricted || inlineReplyUnavailable ? (
                 <div className="mt-2 flex justify-end">
                   <AddNoteComposer propertyId={lead.id} compact />
                 </div>
@@ -1112,8 +1052,18 @@ export default async function LeadDetailPage({
                   value={lead.equity_estimate}
                   format="currency"
                 />
-                <Row label="Source" value={lead.source} />
-                <Row label="CASS status" value={lead.cass_status} />
+                <Row
+                  label="Source"
+                  value={
+                    lead.source
+                      ? systemLabel(LEAD_SOURCE_LABELS, lead.source)
+                      : null
+                  }
+                />
+                <Row
+                  label="CASS status"
+                  value={systemLabel(CASS_STATUS_LABELS, lead.cass_status)}
+                />
                 <Row
                   label="Last verified"
                   value={formatDate(lead.cass_verified_at)}
@@ -1385,12 +1335,13 @@ function LockedDncPropertyDetail({
 
       <div className="flex flex-wrap gap-2">
         <Badge variant="outline">
-          Historical stage: {lead.status.replaceAll("_", " ")}
+          Historical stage: {systemLabel(PROPERTY_STATUS_LABELS, lead.status)}
         </Badge>
         {lead.market ? <Badge variant="secondary">{lead.market}</Badge> : null}
         {lead.outreach_dispo ? (
           <Badge variant="outline">
-            Disposition: {lead.outreach_dispo.replaceAll("_", " ")}
+            Disposition:{" "}
+            {systemLabel(OUTREACH_DISPOSITION_LABELS, lead.outreach_dispo)}
           </Badge>
         ) : null}
       </div>
@@ -1401,7 +1352,12 @@ function LockedDncPropertyDetail({
           <Row label="Baths" value={lead.baths} />
           <Row label="Square feet" value={lead.sqft} />
           <Row label="Year built" value={lead.year_built} />
-          <Row label="Source" value={lead.source} />
+          <Row
+            label="Source"
+            value={
+              lead.source ? systemLabel(LEAD_SOURCE_LABELS, lead.source) : null
+            }
+          />
           <Row label="Created" value={formatDate(lead.created_at)} />
         </Section>
 
