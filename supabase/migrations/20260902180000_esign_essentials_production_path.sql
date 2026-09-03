@@ -482,38 +482,6 @@ begin
     raise exception 'Dropbox Sign template belongs to a different provider account'
       using errcode = '23514';
   end if;
-  select * into v_existing
-  from public.esign_templates template
-  where template.provider_account_id = p_provider_account_id
-    and template.sign_template_id = p_provider_template_id
-  for update;
-  if found then
-    if v_existing.org_id <> p_org_id then
-      raise exception 'Dropbox Sign template is already registered to another organization'
-        using errcode = '23505';
-    end if;
-    if v_existing.template_origin <> 'dropbox_website' then
-      raise exception 'Dropbox Sign template is already managed by Sandra embedded tooling'
-        using errcode = '23505';
-    end if;
-    update public.esign_templates
-    set name = btrim(p_name),
-        document_type = btrim(p_document_type),
-        deleted_at = null,
-        deleted_by = null,
-        provider_metadata = p_provider_metadata,
-        provider_metadata_attested_at = now(),
-        provider_metadata_unavailable_at = null,
-        provider_metadata_unavailable_reason = null,
-        updated_by = p_actor_id,
-        updated_at = now()
-    where id = v_existing.id
-      and org_id = p_org_id;
-    return query select
-      case when v_existing.deleted_at is null then 'existing' else 'restored' end,
-      v_existing.id;
-    return;
-  end if;
   insert into public.esign_templates (
     org_id, name, document_type, seller_role, signer_roles, merge_field_names,
     sign_template_id, provider_account_id, template_origin, provider_metadata,
@@ -535,8 +503,48 @@ begin
     p_provider_template_id, p_provider_account_id, 'dropbox_website',
     p_provider_metadata, now(), now(), 'finalized', p_actor_id, p_actor_id
   )
+  on conflict (provider_account_id, sign_template_id)
+    where sign_template_id is not null
+  do nothing
   returning id into v_template_id;
-  return query select 'registered'::text, v_template_id;
+  if found then
+    return query select 'registered'::text, v_template_id;
+    return;
+  end if;
+
+  select * into v_existing
+  from public.esign_templates template
+  where template.provider_account_id = p_provider_account_id
+    and template.sign_template_id = p_provider_template_id
+  for update;
+  if not found then
+    raise exception 'Dropbox Sign template registration conflict was not readable'
+      using errcode = '40001';
+  end if;
+  if v_existing.org_id <> p_org_id then
+    raise exception 'Dropbox Sign template is already registered to another organization'
+      using errcode = '23514';
+  end if;
+  if v_existing.template_origin <> 'dropbox_website' then
+    raise exception 'Dropbox Sign template is already managed by Sandra embedded tooling'
+      using errcode = '23514';
+  end if;
+  update public.esign_templates
+  set name = btrim(p_name),
+      document_type = btrim(p_document_type),
+      deleted_at = null,
+      deleted_by = null,
+      provider_metadata = p_provider_metadata,
+      provider_metadata_attested_at = now(),
+      provider_metadata_unavailable_at = null,
+      provider_metadata_unavailable_reason = null,
+      updated_by = p_actor_id,
+      updated_at = now()
+  where id = v_existing.id
+    and org_id = p_org_id;
+  return query select
+    case when v_existing.deleted_at is null then 'existing' else 'restored' end,
+    v_existing.id;
 end;
 $$;
 

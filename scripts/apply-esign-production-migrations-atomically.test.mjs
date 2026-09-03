@@ -441,6 +441,25 @@ test("applyProductionPacket rolls back when immutable request-mode trigger is mi
   assert.equal(calls.some((call) => call.sql === "commit"), false);
 });
 
+test("applyProductionPacket requires service-role grant for send-unknown resolution RPC", async () => {
+  const plan = loadReviewedPlan(planPath);
+  const signature =
+    "public.resolve_esign_send_unknown_not_sent(uuid,uuid,uuid,text,text,jsonb)";
+  const { calls, client, snapshot } = packetHarness(plan, {
+    missingServiceRoleGrant: signature,
+  });
+  await assert.rejects(
+    applyProductionPacket(client, plan, snapshot),
+    /resolve_esign_send_unknown_not_sent\(uuid,uuid,uuid,text,text,jsonb\) is not executable by service_role/u,
+  );
+  assert.ok(
+    calls.some((call) => call.params?.[0] === signature),
+    "send-unknown resolution RPC signature was not checked",
+  );
+  assert.ok(calls.some((call) => call.sql === "rollback"));
+  assert.equal(calls.some((call) => call.sql === "commit"), false);
+});
+
 test("the manual packet refuses before reading credentials when arguments are incomplete", () => {
   const result = spawnSync(
     process.execPath,

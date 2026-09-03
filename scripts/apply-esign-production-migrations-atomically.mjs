@@ -62,6 +62,7 @@ const SERVICE_ROLE_ONLY_ESIGN_FUNCTIONS = Object.freeze([
   "public.reserve_esign_live_send(uuid,uuid,integer)",
   "public.mark_esign_request_send_outcome(uuid,uuid,public.esign_delivery_state,text)",
   "public.repair_esign_provider_plan_required_send(uuid,uuid)",
+  "public.resolve_esign_send_unknown_not_sent(uuid,uuid,uuid,text,text,jsonb)",
   "public.find_esign_webhook_request(uuid,text)",
 ]);
 const AUTHENTICATED_ESIGN_FUNCTIONS = Object.freeze([

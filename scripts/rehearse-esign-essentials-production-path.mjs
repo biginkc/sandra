@@ -600,6 +600,59 @@ async function assertConcurrentReservationSaturation(
   }
 }
 
+async function assertConcurrentWebsiteTemplateRegistration(client) {
+  const providerTemplateId = "provider-template-concurrent-1";
+  const concurrentMetadata = {
+    ...metadata,
+    providerTemplateId,
+  };
+  const clients = [localClient(dbName), localClient(dbName)];
+  await Promise.all(clients.map((raceClient) => raceClient.connect()));
+  try {
+    await Promise.all(clients.map((raceClient) => setServiceRole(raceClient)));
+    const outcomes = await Promise.all(
+      clients.map((raceClient, index) =>
+        raceClient.query(
+          `select * from public.register_dropbox_website_esign_template(
+            $1,$2,$3,$4,$5,$6,$7::jsonb
+          )`,
+          [
+            ids.org,
+            ids.owner,
+            providerTemplateId,
+            `Concurrent label ${index + 1}`,
+            "Purchase agreement",
+            "provider-account-1",
+            JSON.stringify(concurrentMetadata),
+          ],
+        ),
+      ),
+    );
+    const returnedRows = outcomes.map((result) => result.rows[0]);
+    assert(
+      returnedRows.every((row) => row.template_id === returnedRows[0].template_id),
+      "concurrent website template registrations did not converge to one template id",
+    );
+    assert(
+      returnedRows.map((row) => row.outcome).sort().join(",") === "existing,registered",
+      "concurrent website template registrations did not report one insert and one existing row",
+    );
+    const duplicateCount = await client.query(
+      `select count(*)::int as count
+       from public.esign_templates
+       where provider_account_id = 'provider-account-1'
+         and sign_template_id = $1`,
+      [providerTemplateId],
+    );
+    assert(
+      duplicateCount.rows[0].count === 1,
+      "concurrent website template registration duplicated the provider pair",
+    );
+  } finally {
+    await Promise.all(clients.map((raceClient) => raceClient.end().catch(() => {})));
+  }
+}
+
 async function assertDuplicateProviderPairPreflight(adminClient) {
   const duplicateDbName = `${dbName}_duplicate_pair`;
   await adminClient.query(`create database ${q(duplicateDbName)}`);
@@ -817,6 +870,7 @@ try {
        where provider_account_id = 'provider-account-1' and sign_template_id = 'provider-template-1'`,
     );
     assert(duplicateCount.rows[0].count === 1, "provider pair duplicated across soft deletion");
+    await assertConcurrentWebsiteTemplateRegistration(client);
     const deprecatedOnlyMetadata = {
       ...metadata,
       documents: [],
