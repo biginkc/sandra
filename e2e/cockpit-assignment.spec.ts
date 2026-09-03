@@ -170,8 +170,8 @@ test('Side panel shows "No owner" picker on an unassigned thread; choosing Me as
   }).toPass({ timeout: 10_000 });
 
   await expect(page.getByTestId("assign-to-me")).toHaveCount(0);
-  await expect(page.getByTestId("assign-dropdown-trigger")).toContainText(
-    "Assigned: me",
+  await expect(page.getByTestId("assign-dropdown-trigger")).toHaveText(
+    `Assigned: ${TEST_USER_EMAIL} (you)`,
   );
 });
 
