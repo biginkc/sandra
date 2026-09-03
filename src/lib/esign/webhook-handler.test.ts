@@ -397,6 +397,115 @@ describe("injectable Dropbox Sign webhook handler", () => {
     expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
   });
 
+  it("uses Sandra-stored live mode after provider metadata recovers a callback without test_mode", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.persistence.findRequest)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: REQUEST_ID,
+        orgId: ORG_ID,
+        propertyId: PROPERTY_ID,
+        status: "awaiting" as const,
+        testMode: false,
+        signedPdfPath: null,
+        templateTitle: "Purchase Agreement",
+      });
+
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        signRequestId: "provider-after-timeout",
+        localRequestId: REQUEST_ID,
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(deps.metadataProvider.confirmProviderLocalRequestId).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      callbackConsumerId: CONSUMER_ID,
+      signRequestId: "provider-after-timeout",
+      localRequestId: REQUEST_ID,
+      testMode: null,
+    });
+    expect(deps.persistence.markReceiptIgnored).not.toHaveBeenCalled();
+    expect(deps.persistence.applyStatusDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestId: REQUEST_ID,
+        decision: expect.objectContaining({ nextStatus: "viewed" }),
+      }),
+    );
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
+  });
+
+  it("keeps metadata-recovered callbacks retryable when Sandra's stored mode is unavailable", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.persistence.findRequest)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: REQUEST_ID,
+        orgId: ORG_ID,
+        propertyId: PROPERTY_ID,
+        status: "awaiting" as const,
+        testMode: null as unknown as boolean,
+        signedPdfPath: null,
+        templateTitle: "Purchase Agreement",
+      });
+
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        signRequestId: "provider-after-timeout",
+        localRequestId: REQUEST_ID,
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(503);
+    expect(deps.persistence.markReceiptIgnored).not.toHaveBeenCalled();
+    expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptFailed).toHaveBeenCalledWith(
+      CLAIM,
+      "LOCAL_REQUEST_MODE_UNVERIFIED",
+    );
+  });
+
+  it("keeps callback/local request-mode mismatches retryable after metadata recovery", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.persistence.findRequest)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: REQUEST_ID,
+        orgId: ORG_ID,
+        propertyId: PROPERTY_ID,
+        status: "awaiting" as const,
+        testMode: false,
+        signedPdfPath: null,
+        templateTitle: "Purchase Agreement",
+      });
+
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        signRequestId: "provider-after-timeout",
+        localRequestId: REQUEST_ID,
+        testMode: true,
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(503);
+    expect(deps.persistence.markReceiptIgnored).not.toHaveBeenCalledWith(
+      CLAIM,
+      "REQUEST_MODE_MISMATCH",
+    );
+    expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptFailed).toHaveBeenCalledWith(
+      CLAIM,
+      "REQUEST_MODE_MISMATCH",
+    );
+  });
+
   it("keeps a metadata-repaired callback retryable when provider mode cannot be proven", async () => {
     const deps = dependencies();
     vi.mocked(deps.persistence.findRequest).mockResolvedValue(null);

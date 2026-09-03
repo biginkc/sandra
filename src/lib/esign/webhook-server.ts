@@ -75,10 +75,13 @@ export function createConcreteDropboxSignWebhookDependencies(
         ) {
           return "mismatch";
         }
-        if (metadata.testMode === null) return "mode_unverified";
-        return input.testMode === null || metadata.testMode === input.testMode
-          ? "matched"
-          : "mismatch";
+        // Dropbox GET metadata can omit test_mode. In that case this provider
+        // read proves only the provider request/local Sandra request mapping;
+        // webhook handling must use Sandra's immutable stored request mode.
+        if (metadata.testMode !== null && input.testMode !== null) {
+          return metadata.testMode === input.testMode ? "matched" : "mismatch";
+        }
+        return "matched";
       },
     },
     pdfProvider: {

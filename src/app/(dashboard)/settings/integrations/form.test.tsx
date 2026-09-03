@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -519,16 +519,22 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
       screen.getByRole("switch", { name: "Enable contract sending" }),
     );
 
-    expect(screen.getByText(/live requests can be sent/i)).toBeVisible();
+    const dialog = screen.getByRole("dialog", {
+      name: "Turn on contract sending?",
+    });
+    expect(within(dialog).getByText(/live requests can be sent/i)).toBeVisible();
     expect(
       screen.getByText(/Sandra local calendar-month ceiling: 4 of 40/i),
     ).toBeVisible();
     expect(
       screen.getByText(/America\/Chicago calendar-month boundary/i),
     ).toBeVisible();
-    expect(screen.getAllByText(/automatically upgrade at quota exhaustion/i))
-      .not.toHaveLength(0);
-    expect(screen.getAllByText(/does not provide an API hard stop/i)).not.toHaveLength(0);
+    expect(
+      within(dialog).getByText(/automatically upgrade at quota exhaustion/i),
+    ).toBeVisible();
+    expect(
+      within(dialog).getByText(/does not provide an API hard stop/i),
+    ).toBeVisible();
   });
 
   it("keeps the committed switch unchanged when confirmation fails", async () => {

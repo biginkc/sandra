@@ -644,7 +644,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
             <DialogDescription>
               {esignConfirmation
                 ? esign.testMode === false
-                  ? "New legally binding live requests can be sent after you confirm. Sandra's cost fuse cannot control manual Dropbox dashboard sends or other API clients."
+                  ? "New legally binding live requests can be sent after you confirm. Sandra's cost fuse cannot control manual Dropbox dashboard sends or other API clients. Dropbox may automatically upgrade at quota exhaustion and does not provide an API hard stop."
                   : "New test-mode signature requests can be sent after you confirm."
                 : "New signature requests will stay blocked after you confirm."}
             </DialogDescription>

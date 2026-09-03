@@ -131,12 +131,14 @@ export async function handleDropboxSignWebhook(input: {
     if (!request || request.orgId !== identity.orgId) {
       throw new SafeWebhookProcessingError("REQUEST_NOT_FOUND", 503);
     }
+    if (typeof request.testMode !== "boolean") {
+      throw new SafeWebhookProcessingError("LOCAL_REQUEST_MODE_UNVERIFIED", 503);
+    }
+    // If Dropbox omitted test_mode, authenticated provider metadata only proved
+    // the provider request/local request mapping. Sandra's immutable request row
+    // is the mode authority; no provider-mode proof is claimed here.
     if (replay.testMode != null && replay.testMode !== request.testMode) {
-      await input.dependencies.persistence.markReceiptIgnored(
-        activeClaim,
-        "REQUEST_MODE_MISMATCH",
-      );
-      return acknowledgement();
+      throw new SafeWebhookProcessingError("REQUEST_MODE_MISMATCH", 503);
     }
 
     const providerEventAt = providerEventDate(replay);

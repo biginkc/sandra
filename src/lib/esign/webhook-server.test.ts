@@ -200,7 +200,7 @@ describe("concrete eSign webhook server binding", () => {
     })).resolves.toBe("matched");
   });
 
-  it("accepts an omitted callback mode only when Dropbox metadata includes authoritative mode", async () => {
+  it("accepts omitted provider mode after Dropbox metadata proves the Sandra local request id", async () => {
     serverMocks.getEsignCredentials.mockClear();
     serverMocks.createDropboxSignProvider.mockClear();
     serverMocks.getEsignCredentials.mockResolvedValue({
@@ -247,7 +247,7 @@ describe("concrete eSign webhook server binding", () => {
       signRequestId: "provider-request-1",
       localRequestId: REQUEST_ID,
       testMode: null,
-    })).resolves.toBe("mode_unverified");
+    })).resolves.toBe("matched");
   });
 
   it("treats an existing opaque PDF object as retry convergence, then links atomically", async () => {

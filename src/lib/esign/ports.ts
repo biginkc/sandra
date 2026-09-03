@@ -49,7 +49,7 @@ export interface EsignWebhookPersistence {
     orgId: string;
     propertyId: string;
     status: EsignStatus;
-    testMode: boolean;
+    testMode: boolean | null;
     signedPdfPath: string | null;
     templateTitle: string;
   } | null>;
