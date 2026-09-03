@@ -150,7 +150,7 @@ describe("concrete eSign webhook server binding", () => {
     expect(serverMocks.createDropboxSignProvider).not.toHaveBeenCalled();
   });
 
-  it("attaches a stranded webhook request only when Dropbox metadata proves mode truth", async () => {
+  it("returns Dropbox provider mode after metadata proves the Sandra local request id", async () => {
     serverMocks.getEsignCredentials.mockClear();
     serverMocks.createDropboxSignProvider.mockClear();
     serverMocks.getEsignCredentials.mockResolvedValue({
@@ -190,14 +190,20 @@ describe("concrete eSign webhook server binding", () => {
       signRequestId: "provider-request-1",
       localRequestId: REQUEST_ID,
       testMode: true,
-    })).resolves.toBe("mismatch");
+    })).resolves.toEqual({
+      outcome: "matched",
+      providerTestMode: false,
+    });
     await expect(dependencies.metadataProvider.confirmProviderLocalRequestId({
       orgId: ORG_ID,
       callbackConsumerId: CONSUMER_ID,
       signRequestId: "provider-request-1",
       localRequestId: REQUEST_ID,
       testMode: true,
-    })).resolves.toBe("matched");
+    })).resolves.toEqual({
+      outcome: "matched",
+      providerTestMode: true,
+    });
   });
 
   it("accepts omitted provider mode after Dropbox metadata proves the Sandra local request id", async () => {
@@ -240,14 +246,20 @@ describe("concrete eSign webhook server binding", () => {
       signRequestId: "provider-request-1",
       localRequestId: REQUEST_ID,
       testMode: null,
-    })).resolves.toBe("matched");
+    })).resolves.toEqual({
+      outcome: "matched",
+      providerTestMode: false,
+    });
     await expect(dependencies.metadataProvider.confirmProviderLocalRequestId({
       orgId: ORG_ID,
       callbackConsumerId: CONSUMER_ID,
       signRequestId: "provider-request-1",
       localRequestId: REQUEST_ID,
       testMode: null,
-    })).resolves.toBe("matched");
+    })).resolves.toEqual({
+      outcome: "matched",
+      providerTestMode: null,
+    });
   });
 
   it("treats an existing opaque PDF object as retry convergence, then links atomically", async () => {

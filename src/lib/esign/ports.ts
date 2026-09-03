@@ -119,7 +119,11 @@ export interface DropboxSignatureRequestMetadataProvider {
     signRequestId: string;
     localRequestId: string;
     testMode: boolean | null;
-  }): Promise<"matched" | "mismatch" | "mode_unverified">;
+  }): Promise<
+    | { outcome: "matched"; providerTestMode: boolean | null }
+    | { outcome: "mismatch" }
+    | { outcome: "mode_unverified" }
+  >;
 }
 
 export interface SignedPdfArtifactPersistence {

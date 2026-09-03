@@ -101,24 +101,26 @@ export async function handleDropboxSignWebhook(input: {
       signRequestId: replay.signRequestId,
       verifiedLocalRequestId: null,
     });
+    let providerMetadataTestMode: boolean | null = null;
     if (!request && replay.localRequestId !== null) {
       // Dropbox callbacks may omit test_mode. In that recovery path Sandra can
-      // only prove provider metadata and the stored local request mode; when
-      // provider mode cannot be confirmed, keep the callback retryable.
-      const metadataMatch =
+      // prove provider request/local Sandra request mapping before comparing
+      // every known provider mode with Sandra's immutable stored request mode.
+      const metadataConfirmation =
         await input.dependencies.metadataProvider.confirmProviderLocalRequestId({
           ...identity,
           signRequestId: replay.signRequestId,
           localRequestId: replay.localRequestId,
           testMode: replay.testMode ?? null,
         });
-      if (metadataMatch === "matched") {
+      if (metadataConfirmation.outcome === "matched") {
+        providerMetadataTestMode = metadataConfirmation.providerTestMode;
         request = await input.dependencies.persistence.findRequest({
           orgId: identity.orgId,
           signRequestId: replay.signRequestId,
           verifiedLocalRequestId: replay.localRequestId,
         });
-      } else if (metadataMatch === "mode_unverified") {
+      } else if (metadataConfirmation.outcome === "mode_unverified") {
         throw new SafeWebhookProcessingError("PROVIDER_MODE_UNVERIFIED", 503);
       } else {
         await input.dependencies.persistence.markReceiptIgnored(
@@ -134,10 +136,13 @@ export async function handleDropboxSignWebhook(input: {
     if (typeof request.testMode !== "boolean") {
       throw new SafeWebhookProcessingError("LOCAL_REQUEST_MODE_UNVERIFIED", 503);
     }
-    // If Dropbox omitted test_mode, authenticated provider metadata only proved
-    // the provider request/local request mapping. Sandra's immutable request row
-    // is the mode authority; no provider-mode proof is claimed here.
     if (replay.testMode != null && replay.testMode !== request.testMode) {
+      throw new SafeWebhookProcessingError("REQUEST_MODE_MISMATCH", 503);
+    }
+    if (
+      providerMetadataTestMode != null &&
+      providerMetadataTestMode !== request.testMode
+    ) {
       throw new SafeWebhookProcessingError("REQUEST_MODE_MISMATCH", 503);
     }
 
