@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LEAD_SOURCES } from "@/lib/leads/sources";
+import { getCallerMemberships } from "@/lib/auth/memberships";
 import { createClient } from "@/lib/supabase/server";
 
 import { submitNewLead } from "./actions";
@@ -44,6 +45,18 @@ export default async function NewLeadPage({
     .order("state", { ascending: true })
     .order("name", { ascending: true });
   const markets: string[] = (counties ?? []).map((c) => c.market);
+  const memberships = await getCallerMemberships();
+  const orgIds = memberships.map((membership) => membership.org_id);
+  const { data: organizations, error: organizationsError } = orgIds.length
+    ? await supabase
+        .from("organizations")
+        .select("id, name")
+        .in("id", orgIds)
+        .order("name", { ascending: true })
+    : { data: [], error: null };
+  if (organizationsError || organizations.length !== orgIds.length) {
+    throw new Error("Could not load your workspaces.");
+  }
 
   return (
     <Page>
@@ -64,6 +77,27 @@ export default async function NewLeadPage({
       ) : null}
 
       <form action={submitNewLead} className="flex flex-col gap-6">
+        <fieldset className="border-border flex flex-col gap-2 rounded-lg border p-4">
+          <legend className="text-sm font-semibold">Workspace</legend>
+          <Label htmlFor="org_id">Create this lead in</Label>
+          <select
+            id="org_id"
+            name="org_id"
+            required
+            defaultValue={organizations.length === 1 ? organizations[0].id : ""}
+            className="border-input bg-background ring-offset-background flex h-10 w-full rounded-md border px-3 py-2 text-sm"
+          >
+            {organizations.length > 1 ? (
+              <option value="">Choose workspace</option>
+            ) : null}
+            {organizations.map((organization) => (
+              <option key={organization.id} value={organization.id}>
+                {organization.name}
+              </option>
+            ))}
+          </select>
+        </fieldset>
+
         {/* Source — required, drives KPI / attribution */}
         <fieldset className="border-border flex flex-col gap-2 rounded-lg border p-4">
           <legend className="text-sm font-semibold">Source</legend>

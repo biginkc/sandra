@@ -37,6 +37,11 @@ import {
 } from "@/lib/auth/team-member";
 import type { Database } from "@/lib/supabase/types";
 import type { ContractStatusRecord } from "@/lib/esign/contract-status";
+import {
+  CASS_STATUS_LABELS,
+  OUTREACH_DISPOSITION_LABELS,
+  systemLabel,
+} from "@/lib/presentation/system-labels";
 
 import {
   updatePropertyStatus,
@@ -1434,7 +1439,7 @@ function LeadCard({
         ) : null}
         {lead.outreach_dispo ? (
           <Badge variant="outline" className="font-mono text-[9px] uppercase">
-            {formatDisposition(lead.outreach_dispo)}
+            {systemLabel(OUTREACH_DISPOSITION_LABELS, lead.outreach_dispo)}
           </Badge>
         ) : null}
         {lead.homeowner_sms_opted_out ? (
@@ -1482,7 +1487,7 @@ function LeadCard({
         ) : null}
         {lead.cass_status && lead.cass_status !== "verified" ? (
           <Badge variant="outline" className="text-[10px]">
-            {lead.cass_status}
+            {systemLabel(CASS_STATUS_LABELS, lead.cass_status)}
           </Badge>
         ) : null}
       </div>
@@ -1748,8 +1753,4 @@ export function formatRelativeAge(isoDate: string, nowMs: number): string {
   const months = Math.floor(days / 30);
   if (months < 12) return `${months}mo`;
   return `${Math.floor(days / 365)}y`;
-}
-
-function formatDisposition(disposition: string): string {
-  return disposition.replaceAll("_", " ");
 }

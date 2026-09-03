@@ -98,7 +98,6 @@ export async function fetchOrgRoster(
   try {
     members = await loadOrgTeamMembers(orgId, {
       includeInactiveMembers: true,
-      allowMissingIdentityLabels: true,
     });
   } catch (error) {
     console.error("[calendar] fetchOrgRoster failed", { error });

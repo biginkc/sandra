@@ -83,6 +83,7 @@ import { PromoteLeadsDialog } from "./promote-leads-dialog";
 
 export type ProspectRow = {
   id: string;
+  org_id: string;
   address: string;
   city: string | null;
   state: string;
@@ -113,6 +114,7 @@ type Props = {
   lists: ListOption[];
   tags: TagOption[];
   teamMembers: TeamMemberOption[];
+  teamMembersByOrg?: Record<string, TeamMemberOption[]>;
   currentUserId: string | null;
   canDelete: boolean;
   /** Rendered into the header subhead so the count stays right next to the title. */
@@ -177,6 +179,7 @@ export function ProspectsTable({
   lists,
   tags,
   teamMembers,
+  teamMembersByOrg,
   currentUserId,
   canDelete,
   headerCount,
@@ -226,6 +229,31 @@ export function ProspectsTable({
     () => (selectionScopeStale ? new Set<string>() : selected),
     [selected, selectionScopeStale],
   );
+  const eligibleTeamMembers = useMemo(() => {
+    if (!teamMembersByOrg) return teamMembers;
+    if (selectAllMatching) return [];
+    const selectedRows = prospects.filter((prospect) =>
+      selectedInScope.has(prospect.id),
+    );
+    if (selectedRows.length !== selectedInScope.size) return [];
+    const selectedOrgIds = [
+      ...new Set(selectedRows.map((prospect) => prospect.org_id)),
+    ];
+    if (selectedOrgIds.length === 0) return [];
+    return teamMembers.filter((member) =>
+      selectedOrgIds.every((orgId) =>
+        (teamMembersByOrg[orgId] ?? []).some(
+          (candidate) => candidate.id === member.id,
+        ),
+      ),
+    );
+  }, [
+    prospects,
+    selectAllMatching,
+    selectedInScope,
+    teamMembers,
+    teamMembersByOrg,
+  ]);
 
   // URL-state machine — extracted into the shared hook in Phase 1.
   // Mode: "ssr" because /properties is a server-rendered page; the hook
@@ -505,7 +533,7 @@ export function ProspectsTable({
 
   const hasLists = lists.length > 0;
   const hasTags = tags.length > 0;
-  const hasTeam = teamMembers.length > 0;
+  const hasTeam = eligibleTeamMembers.length > 0;
 
   const hasSelection = selectedInScope.size > 0;
 
@@ -565,7 +593,7 @@ export function ProspectsTable({
                             Unassign
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
-                          {teamMembers.map((m) => (
+                          {eligibleTeamMembers.map((m) => (
                             <DropdownMenuItem
                               key={m.id}
                               onClick={() => handleAssign(m.id)}
@@ -585,7 +613,9 @@ export function ProspectsTable({
                         </>
                       ) : (
                         <DropdownMenuItem disabled>
-                          No team members
+                          {selectAllMatching
+                            ? "Select rows on one page to assign"
+                            : "No teammate has access to every selection"}
                         </DropdownMenuItem>
                       )}
                     </DropdownMenuSubContent>

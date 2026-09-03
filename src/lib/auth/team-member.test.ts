@@ -9,7 +9,7 @@ import {
 } from "./team-member";
 
 describe("team member presentation", () => {
-  it("uses authoritative identity metadata in preference order", () => {
+  it("uses only administrator-controlled identity metadata", () => {
     expect(
       authoritativeDisplayName({
         user_metadata: {
@@ -17,7 +17,7 @@ describe("team member presentation", () => {
           full_name: "Ignored Name",
         },
       }),
-    ).toBe("Alex Rivera");
+    ).toBeNull();
     expect(
       authoritativeDisplayName({
         app_metadata: { display_name: "Admin Verified" },
@@ -28,7 +28,7 @@ describe("team member presentation", () => {
       authoritativeDisplayName({
         user_metadata: { given_name: "Alex", family_name: "Rivera" },
       }),
-    ).toBe("Alex Rivera");
+    ).toBeNull();
   });
 
   it("never fabricates a name from an email or exposes an id fragment", () => {
@@ -60,7 +60,8 @@ describe("team member presentation", () => {
       {
         id: "user-1",
         email: "alex@example.com",
-        user_metadata: { full_name: "Alex Rivera" },
+        user_metadata: { full_name: "User Editable" },
+        app_metadata: { full_name: "Alex Rivera" },
       },
       false,
     );

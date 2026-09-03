@@ -11,6 +11,8 @@ const {
   dispatchTaskAssignedSlack,
   dispatchTaskCalendarEvent,
   loadIntegrationPrefs,
+  getCallerMemberships,
+  loadOrgTeamMembers,
   recordLeadEvent,
   recordLeadEvents,
   revalidatePath,
@@ -33,6 +35,8 @@ const {
     calendarEnabled: false,
     timezone: "America/Chicago",
   })),
+  getCallerMemberships: vi.fn(),
+  loadOrgTeamMembers: vi.fn(),
   recordLeadEvent: vi.fn(),
   recordLeadEvents: vi.fn(),
   revalidatePath: vi.fn(),
@@ -57,6 +61,9 @@ vi.mock("@/lib/dnc/property-lock", () => ({
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient,
 }));
+
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships }));
+vi.mock("@/lib/auth/team-roster", () => ({ loadOrgTeamMembers }));
 
 vi.mock("@/lib/errors/report", () => ({
   reportError: vi.fn(),
@@ -118,7 +125,7 @@ import {
   assignLeadsBulk,
   createLeadTaskAction,
   getPropertyNeighbors,
-  listOrgUsers,
+  listPropertyOrgUsers,
   markMessagesReadForThread,
   updatePropertyStatus,
   updateLeadAssignee,
@@ -1145,60 +1152,42 @@ describe("createLeadTaskAction", () => {
   });
 });
 
-describe("listOrgUsers", () => {
-  it("returns only auth users who belong to the caller's orgs", async () => {
-    createClient.mockResolvedValue(makeListUsersSupabase());
-    createAdminClient.mockReturnValue(
-      makeListUsersAdmin([
-        {
-          data: {
-            users: [
-              {
-                id: "member-2",
-                email: "z@example.test",
-                user_metadata: { display_name: "Zara Seller" },
-              },
-              { id: "outside", email: "outside@example.test" },
-            ],
-            nextPage: 2,
-          },
-          error: null,
-        },
-        {
-          data: {
-            users: [
-              {
-                id: "member-1",
-                email: "a@example.test",
-                user_metadata: { display_name: "Alex Agent" },
-              },
-            ],
-            nextPage: null,
-          },
-          error: null,
-        },
-      ]),
-    );
+describe("listPropertyOrgUsers", () => {
+  it("uses the compatibility-aware caller membership result for the property workspace", async () => {
+    const propertyBuilder = {
+      select: vi.fn(() => propertyBuilder),
+      eq: vi.fn(() => propertyBuilder),
+      maybeSingle: vi.fn(async () => ({
+        data: { org_id: "org-property" },
+        error: null,
+      })),
+    };
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn(async () => ({ data: { user: { id: "actor-1" } } })),
+      },
+      from: vi.fn((table: string) => {
+        if (table !== "properties") throw new Error(`unexpected table ${table}`);
+        return propertyBuilder;
+      }),
+    });
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "actor-1", org_id: "org-property", role: "member" },
+    ]);
+    loadOrgTeamMembers.mockResolvedValue([
+      {
+        id: "actor-1",
+        email: "actor@example.test",
+        displayName: "Active Agent",
+        isActive: true,
+      },
+    ]);
 
-    const result = await listOrgUsers();
+    const result = await listPropertyOrgUsers("property-1");
 
     expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.data).toEqual([
-        {
-          id: "member-1",
-          email: "a@example.test",
-          displayName: "Alex Agent",
-          isActive: true,
-        },
-        {
-          id: "member-2",
-          email: "z@example.test",
-          displayName: "Zara Seller",
-          isActive: true,
-        },
-      ]);
-    }
+    expect(getCallerMemberships).toHaveBeenCalledTimes(1);
+    expect(loadOrgTeamMembers).toHaveBeenCalledWith("org-property");
   });
 });
 
@@ -1261,71 +1250,6 @@ function makeLeadTaskAdmin(opts: {
       };
       return builder;
     }),
-  };
-}
-
-function makeListUsersSupabase() {
-  return {
-    auth: {
-      getUser: vi.fn(async () => ({
-        data: { user: { id: "actor-1" } },
-      })),
-    },
-    from: vi.fn((table: string) => {
-      if (table !== "memberships") throw new Error(`unexpected table ${table}`);
-      return {
-        select: vi.fn(() => ({
-          eq: vi.fn(async () => ({
-            data: [
-              {
-                org_id: "org-1",
-                access_status: "active",
-                access_expires_at: null,
-                deletion_prepared_at: null,
-              },
-            ],
-            error: null,
-          })),
-        })),
-      };
-    }),
-  };
-}
-
-function makeListUsersAdmin(
-  userPages: Array<{
-    data: {
-      users: Array<{
-        id: string;
-        email: string;
-        user_metadata?: Record<string, unknown>;
-      }>;
-      nextPage: number | null;
-    };
-    error: null;
-  }>,
-) {
-  const listUsers = vi.fn(async () => userPages.shift()!);
-  return {
-    from: vi.fn((table: string) => {
-      if (table !== "memberships") throw new Error(`unexpected table ${table}`);
-      const builder = {
-        select: vi.fn(() => builder),
-        eq: vi.fn(() => builder),
-        order: vi.fn(() => builder),
-        limit: vi.fn(async () => ({
-          data: [
-            { user_id: "member-1", access_status: "active" },
-            { user_id: "member-2", access_status: "active" },
-          ],
-          error: null,
-        })),
-      };
-      return builder;
-    }),
-    auth: {
-      admin: { listUsers },
-    },
   };
 }
 

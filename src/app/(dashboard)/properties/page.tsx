@@ -3,7 +3,10 @@ import { Suspense } from "react";
 import { Page } from "@/components/page";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { getCallerMemberships } from "@/lib/auth/memberships";
-import { loadTeamMembersForOrgs } from "@/lib/auth/team-roster";
+import {
+  loadOrgTeamMembers,
+  loadTeamMembersForOrgs,
+} from "@/lib/auth/team-roster";
 import { createClient } from "@/lib/supabase/server";
 import {
   applyFilters,
@@ -231,7 +234,12 @@ export default async function PropertiesPage({
       .eq("category", "custom")
       .eq("system_managed", false)
       .order("name", { ascending: true }),
-    loadTeamMembersForOrgs(orgIds),
+    Promise.all(
+      orgIds.map(async (orgId) => ({
+        orgId,
+        members: await loadOrgTeamMembers(orgId),
+      })),
+    ),
     loadTeamMembersForOrgs(orgIds, { includeInactiveMembers: true }),
     supabase
       .from("saved_filters")
@@ -248,7 +256,7 @@ export default async function PropertiesPage({
       stateResult,
       listResult,
       tagResult,
-      activeTeamMembers,
+      activeTeamRosters,
       assigneeFilterMembers,
       presetResult,
     ],
@@ -296,6 +304,7 @@ export default async function PropertiesPage({
     const homeowner = Array.isArray(p.homeowner) ? p.homeowner[0] : p.homeowner;
     return {
       id: p.id,
+      org_id: p.org_id,
       address: p.address,
       city: p.city,
       state: p.state,
@@ -354,7 +363,16 @@ export default async function PropertiesPage({
 
   // Assignment is active-only. Filtering keeps former memberships visible
   // so their existing records remain reachable.
-  const teamMembers: TeamMemberOption[] = activeTeamMembers;
+  const teamMembersByOrg = Object.fromEntries(
+    activeTeamRosters.map(({ orgId, members }) => [orgId, members]),
+  );
+  const teamMembers: TeamMemberOption[] = Array.from(
+    new Map(
+      activeTeamRosters
+        .flatMap(({ members }) => members)
+        .map((member) => [member.id, member]),
+    ).values(),
+  );
 
   const isAdmin = isAdminEmail(user?.email);
 
@@ -489,6 +507,7 @@ export default async function PropertiesPage({
           lists={lists}
           tags={tags}
           teamMembers={teamMembers}
+          teamMembersByOrg={teamMembersByOrg}
           currentUserId={user?.id ?? null}
           canDelete={isAdmin}
           headerCount={headerCount}

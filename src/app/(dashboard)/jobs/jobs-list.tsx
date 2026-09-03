@@ -50,6 +50,7 @@ import type { Database } from "@/lib/supabase/types";
 import {
   JOB_STATUS_LABELS,
   JOB_TYPE_LABELS,
+  jobDisplayTitle,
   systemLabel,
 } from "@/lib/presentation/system-labels";
 
@@ -390,7 +391,11 @@ export function JobsList({
                 return (
                   <TableRow key={job.id}>
                     <TableCell className="font-medium">
-                      {job.title ?? job.id.slice(0, 8)}
+                      {jobDisplayTitle({
+                        title: job.title,
+                        type: job.type,
+                        createdAt: job.created_at,
+                      })}
                     </TableCell>
                     <TableCell>
                       <Badge variant="outline">

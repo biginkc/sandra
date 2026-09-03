@@ -128,6 +128,68 @@ describe("<JobDetail /> bulk SMS panel", () => {
   });
 });
 
+describe("<JobDetail /> readable item identities", () => {
+  it("shows property and contact labels without exposing raw database ids", () => {
+    const propertyId = "25155239-2027-4820-a91c-e0d604716770";
+    const contactId = "c10d0585-edbe-42d7-8384-b7a447192d35";
+    render(
+      <JobDetail
+        job={makeJob({ type: "csv_update" })}
+        items={[
+          {
+            id: "item-property",
+            job_id: "job-1",
+            org_id: "org-1",
+            property_id: propertyId,
+            contact_id: null,
+            message_id: null,
+            status: "completed",
+            input_payload: null,
+            output_payload: null,
+            error_message: null,
+            error_class: null,
+            retry_count: 0,
+            processed_at: null,
+            source_row_index: null,
+            compliance_locked: false,
+            item_key: propertyId,
+          },
+          {
+            id: "item-contact",
+            job_id: "job-1",
+            org_id: "org-1",
+            property_id: null,
+            contact_id: contactId,
+            message_id: null,
+            status: "completed",
+            input_payload: null,
+            output_payload: null,
+            error_message: null,
+            error_class: null,
+            retry_count: 0,
+            processed_at: null,
+            source_row_index: null,
+            compliance_locked: false,
+            item_key: contactId,
+          },
+        ] as JobDetailProps["items"]}
+        itemLabels={{
+          [`property:${propertyId}`]: "123 Main St · Kansas City, MO",
+          [`contact:${contactId}`]: "Taylor Morgan",
+        }}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+
+    expect(screen.getByText("123 Main St · Kansas City, MO")).toBeVisible();
+    expect(screen.getByText("Taylor Morgan")).toBeVisible();
+    expect(screen.queryByText(propertyId)).not.toBeInTheDocument();
+    expect(screen.queryByText(contactId)).not.toBeInTheDocument();
+  });
+});
+
 describe("<JobDetail /> Promote to Leads results", () => {
   it("refreshes running promotion progress without requiring a manual page reload", () => {
     vi.useFakeTimers();

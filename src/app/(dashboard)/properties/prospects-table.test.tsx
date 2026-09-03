@@ -132,6 +132,7 @@ vi.mock("sonner", () => ({
 function makeRow(overrides: Partial<ProspectRow> & { id: string }): ProspectRow {
   return {
     id: overrides.id,
+    org_id: overrides.org_id ?? "org-1",
     address: overrides.address ?? `${overrides.id} Main St`,
     city: overrides.city ?? "Albany",
     state: overrides.state ?? "NY",
@@ -296,6 +297,45 @@ describe("<ProspectsTable />", () => {
     });
     expect(actions).toBeEnabled();
     expect(actions).toHaveTextContent(/^Actions \(1\)$/);
+  });
+
+  it("offers only teammates active in every selected workspace", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderTable(
+      [
+        makeRow({ id: "north", org_id: "org-north" }),
+        makeRow({ id: "south", org_id: "org-south" }),
+      ],
+      [],
+      {
+        teamMembers: [
+          { id: "shared", email: "shared@example.com", displayName: "Shared Rep" },
+          { id: "north-only", email: "north@example.com", displayName: "North Rep" },
+          { id: "south-only", email: "south@example.com", displayName: "South Rep" },
+        ],
+        teamMembersByOrg: {
+          "org-north": [
+            { id: "shared", email: "shared@example.com", displayName: "Shared Rep" },
+            { id: "north-only", email: "north@example.com", displayName: "North Rep" },
+          ],
+          "org-south": [
+            { id: "shared", email: "shared@example.com", displayName: "Shared Rep" },
+            { id: "south-only", email: "south@example.com", displayName: "South Rep" },
+          ],
+        },
+      },
+    );
+    await user.click(screen.getByLabelText("Select north Main St"));
+    await user.click(screen.getByLabelText("Select south Main St"));
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 2 selected/ }),
+    );
+    const trigger = await screen.findByRole("menuitem", { name: /Assign to/ });
+    trigger.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(await screen.findByRole("menuitem", { name: /Shared Rep/ })).toBeVisible();
+    expect(screen.queryByRole("menuitem", { name: /North Rep/ })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /South Rep/ })).toBeNull();
   });
 
   it("bulk add-to-list calls the action with the selected ids and chosen list", async () => {

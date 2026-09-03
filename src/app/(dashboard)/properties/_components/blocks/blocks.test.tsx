@@ -186,7 +186,9 @@ describe("cass-block", () => {
   it("onChange fires when a status is checked", () => {
     const onChange = vi.fn();
     wrap(<CassBlock block={base} onChange={onChange} onRemove={vi.fn()} />);
-    fireEvent.click(screen.getByRole("checkbox", { name: "verified" }));
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /^verified$/i }),
+    );
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ values: ["verified"] }));
   });
 

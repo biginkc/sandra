@@ -4,17 +4,22 @@ const {
   createClient,
   fetchLeadBoardData,
   getCallerMemberships,
+  loadOrgTeamMembers,
   loadTeamMembersForOrgs,
 } = vi.hoisted(() => ({
   createClient: vi.fn(),
   fetchLeadBoardData: vi.fn(),
   getCallerMemberships: vi.fn(),
+  loadOrgTeamMembers: vi.fn(),
   loadTeamMembersForOrgs: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships }));
-vi.mock("@/lib/auth/team-roster", () => ({ loadTeamMembersForOrgs }));
+vi.mock("@/lib/auth/team-roster", () => ({
+  loadOrgTeamMembers,
+  loadTeamMembersForOrgs,
+}));
 vi.mock("./board-query", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./board-query")>();
   return { ...actual, fetchLeadBoardData };
@@ -37,6 +42,7 @@ beforeEach(() => {
   createClient.mockReset();
   fetchLeadBoardData.mockReset();
   getCallerMemberships.mockReset();
+  loadOrgTeamMembers.mockReset();
   loadTeamMembersForOrgs.mockReset();
   createClient.mockResolvedValue({
     auth: {
@@ -51,6 +57,7 @@ beforeEach(() => {
     }),
   });
   loadTeamMembersForOrgs.mockResolvedValue([]);
+  loadOrgTeamMembers.mockResolvedValue([]);
   fetchLeadBoardData.mockResolvedValue({
     leads: [],
     totals: emptyTotals,

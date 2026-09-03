@@ -130,16 +130,16 @@ export async function loadOrgTeamMembers(
       .map((membership) => membership.user_id),
   );
   const historicalIds = options.historicalAssigneeIds ?? [];
-  const membershipIds = new Set(
-    memberships.map((membership) => membership.user_id),
-  );
   const inactiveMembershipIds = options.includeInactiveMembers
     ? memberships.map((membership) => membership.user_id)
     : [];
   const neededIds = new Set([
     ...activeIds,
     ...inactiveMembershipIds,
-    ...historicalIds.filter((id) => Boolean(id) && membershipIds.has(id)),
+    // Historical ids must come from a row the caller already read through
+    // tenant-scoped RLS (for example, the lead's stored owner). Membership
+    // deletion must not erase the readable audit label for that row.
+    ...historicalIds.filter(Boolean),
   ]);
   const usersById = await listNeededAuthUsers(
     neededIds,
@@ -159,12 +159,10 @@ export async function loadOrgTeamMembers(
 
   if (
     !options.allowMissingIdentityLabels &&
-    members.some(
-      (member) => member.isActive && !member.displayName && !member.email,
-    )
+    members.some((member) => !member.displayName && !member.email)
   ) {
     throw new Error(
-      "An active organization member has no verified identity label.",
+      "An organization member has no verified identity label.",
     );
   }
 

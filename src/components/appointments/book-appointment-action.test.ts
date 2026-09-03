@@ -1101,6 +1101,7 @@ describe("listBookingAssignees", () => {
     users?: {
       id: string;
       email?: string | null;
+      app_metadata?: Record<string, unknown>;
       user_metadata?: Record<string, unknown>;
     }[];
   }) {
@@ -1163,7 +1164,8 @@ describe("listBookingAssignees", () => {
         {
           id: "active-1",
           email: "active@example.test",
-          user_metadata: { display_name: "Avery Agent" },
+          app_metadata: { display_name: "Avery Agent" },
+          user_metadata: { display_name: "User Editable" },
         },
       ],
     });

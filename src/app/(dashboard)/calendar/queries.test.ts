@@ -564,12 +564,12 @@ describe("fetchOrgRoster", () => {
           {
             id: "rep-2",
             email: "rep2@bmh.com",
-            user_metadata: { display_name: "Riley Rep" },
+            app_metadata: { display_name: "Riley Rep" },
           },
           {
             id: "user-1",
             email: "owner@bmh.com",
-            user_metadata: { display_name: "Olivia Owner" },
+            app_metadata: { display_name: "Olivia Owner" },
           },
         ],
         nextPage: null,
@@ -599,12 +599,12 @@ describe("fetchOrgRoster", () => {
           {
             id: "active-1",
             email: "active@example.test",
-            user_metadata: { display_name: "Active Agent" },
+            app_metadata: { display_name: "Active Agent" },
           },
           {
             id: "former-1",
             email: "former@example.test",
-            user_metadata: { display_name: "Former Agent" },
+            app_metadata: { display_name: "Former Agent" },
           },
         ],
         nextPage: null,
@@ -637,7 +637,7 @@ describe("fetchOrgRoster", () => {
           {
             id: "rep-2",
             email: "rep2@bmh.com",
-            user_metadata: { display_name: "Riley Rep" },
+            app_metadata: { display_name: "Riley Rep" },
           },
         ],
         nextPage: null,
@@ -668,25 +668,17 @@ describe("fetchOrgRoster", () => {
     expect(mocks.listUsers).not.toHaveBeenCalled();
   });
 
-  it("keeps every identity with a fallback label and sets labelsDegraded when listUsers throws", async () => {
+  it("fails closed when auth labels cannot distinguish roster identities", async () => {
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
     mocks.listUsers.mockImplementationOnce(() => {
       throw new Error("network boom");
     });
 
     const result = await fetchOrgRoster("org-1");
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error("expected ok:true");
-    expect(result.labelsDegraded).toBe(true);
-    expect(result.roster).toEqual([
-      { id: "user-1", label: "Name not set" },
-      { id: "rep-2", label: "Name not set" },
-    ]);
-    // No identity dropped even though every label failed.
-    expect(result.roster.map((r) => r.id)).toEqual(["user-1", "rep-2"]);
+    expect(result).toEqual({ ok: false });
   });
 
-  it("keeps every identity with a fallback label and sets labelsDegraded on partial pagination failure", async () => {
+  it("fails closed on a partial auth-label inventory", async () => {
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
     mocks.listUsers
       .mockResolvedValueOnce({
@@ -699,17 +691,10 @@ describe("fetchOrgRoster", () => {
       .mockResolvedValueOnce({ data: null, error: { message: "boom" } });
 
     const result = await fetchOrgRoster("org-1");
-    expect(result).toEqual({
-      ok: true,
-      labelsDegraded: true,
-      roster: [
-        { id: "rep-2", label: "Name not set" },
-        { id: "user-1", label: "owner@bmh.com — name not set" },
-      ],
-    });
+    expect(result).toEqual({ ok: false });
   });
 
-  it("keeps the identity with a fallback label and sets labelsDegraded when a member has no email on auth.users", async () => {
+  it("fails closed when an auth identity has neither an authoritative name nor an email", async () => {
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
     mocks.listUsers.mockResolvedValueOnce({
       data: {
@@ -723,14 +708,7 @@ describe("fetchOrgRoster", () => {
     });
 
     const result = await fetchOrgRoster("org-1");
-    expect(result).toEqual({
-      ok: true,
-      labelsDegraded: true,
-      roster: [
-        { id: "rep-2", label: "Name not set" },
-        { id: "user-1", label: "owner@bmh.com — name not set" },
-      ],
-    });
+    expect(result).toEqual({ ok: false });
   });
 
   describe("single-statement read (Codex round 6 — replaces keyset pagination)", () => {
@@ -748,6 +726,27 @@ describe("fetchOrgRoster", () => {
       membershipRows = Array.from({ length: CAP }, (_, i) => ({
         user_id: userId(i),
       }));
+      mocks.listUsers
+        .mockResolvedValueOnce({
+          data: {
+            users: Array.from({ length: 200 }, (_, i) => ({
+              id: userId(i),
+              email: `${userId(i)}@example.test`,
+            })),
+            nextPage: 2,
+          },
+          error: null,
+        })
+        .mockResolvedValueOnce({
+          data: {
+            users: Array.from({ length: 200 }, (_, i) => ({
+              id: userId(i + 200),
+              email: `${userId(i + 200)}@example.test`,
+            })),
+            nextPage: null,
+          },
+          error: null,
+        });
 
       const result = await fetchOrgRoster("org-1");
       if (!result.ok) throw new Error("expected ok:true");

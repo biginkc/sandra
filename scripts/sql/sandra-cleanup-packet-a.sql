@@ -51,6 +51,18 @@ insert into packet_a_sequences (id) values
   ('9693dc11-4a68-4785-ac65-ecdc785d342c'),
   ('fccef243-c4c9-441a-8bba-563496a91b5e');
 
+create temp table packet_a_properties_union (id uuid primary key) on commit drop;
+insert into packet_a_properties_union (id)
+select id from packet_a_synthetic_properties
+union all
+select id from packet_a_explicit_qa_properties;
+
+create temp table packet_a_synthetic_contacts_union (id uuid primary key) on commit drop;
+insert into packet_a_synthetic_contacts_union (id)
+select id from packet_a_synthetic_contacts
+union all
+select id from packet_a_explicit_qa_contacts;
+
 do $$
 declare
   v_count bigint;
@@ -142,6 +154,7 @@ begin
     or exists (select 1 from public.lead_files r join packet_a_synthetic_properties x on x.id=r.property_id)
     or exists (select 1 from public.lead_notes r join packet_a_synthetic_properties x on x.id=r.property_id)
     or exists (select 1 from public.property_merges r join packet_a_synthetic_properties x on x.id=r.keeper_id)
+    or exists (select 1 from public.property_merges r join packet_a_synthetic_properties x on x.id=r.loser_id)
     or exists (select 1 from public.sms_inbound_intents r join packet_a_synthetic_properties x on x.id=r.property_id)
   then
     raise exception 'Synthetic cohort gained an operational/compliance reference';
@@ -190,6 +203,7 @@ begin
     or exists (select 1 from public.lead_files r join packet_a_explicit_qa_properties x on x.id=r.property_id)
     or exists (select 1 from public.lead_notes r join packet_a_explicit_qa_properties x on x.id=r.property_id)
     or exists (select 1 from public.property_merges r join packet_a_explicit_qa_properties x on x.id=r.keeper_id)
+    or exists (select 1 from public.property_merges r join packet_a_explicit_qa_properties x on x.id=r.loser_id)
     or exists (select 1 from public.sms_inbound_intents r join packet_a_explicit_qa_properties x on x.id=r.property_id)
     or exists (select 1 from public.agent_details r join packet_a_explicit_qa_contacts x on x.id=r.contact_id)
     or exists (select 1 from public.ai_response_claims r join packet_a_explicit_qa_contacts x on x.id=r.contact_id)
@@ -219,11 +233,113 @@ begin
     raise exception 'Sequence artifact manifest/dependency drift';
   end if;
 
+  select encode(
+    digest(string_agg(to_jsonb(s)::text, chr(30) order by s.id), 'sha256'),
+    'hex'
+  ) into v_hash
+  from public.sequences s
+  join packet_a_sequences x using (id);
+  if v_hash <> 'fd99eb349c7ed1786f93ae3b4ce80ea5721d1772bb0fac6468bb840131750226'
+    or exists (
+      select 1
+      from public.sequences s
+      join packet_a_sequences x using (id)
+      where s.org_id <> '00000000-0000-0000-0000-000000000bbb'::uuid
+         or not s.active
+         or s.archived_at is not null
+         or s.name not like 'SMOKE TEST — safe to delete %'
+         or s.description <> 'One-off prod smoke; script deletes this when it exits'
+    )
+  then
+    raise exception 'Deletable smoke sequence identity/provenance digest drift';
+  end if;
+
   if (select count(*) from public.sequence_enrollments where sequence_id='8847daf2-3a65-44f3-821e-b491a6c6a877') <> 3
     or (select count(*) from public.sequence_enrollments where sequence_id='8847daf2-3a65-44f3-821e-b491a6c6a877' and status='completed') <> 3
   then
     raise exception 'Retained smoke sequence history drift';
   end if;
+
+  select encode(digest(to_jsonb(s)::text, 'sha256'), 'hex') into v_hash
+  from public.sequences s
+  where s.id='8847daf2-3a65-44f3-821e-b491a6c6a877'::uuid;
+  if v_hash <> '3d0488ce27e858d1b3f685fcc63c3c50b966f486efb34f4ee33a57f3f6bfbd45'
+    or exists (
+      select 1 from public.sequences s
+      where s.id='8847daf2-3a65-44f3-821e-b491a6c6a877'::uuid
+        and (
+          s.org_id <> '00000000-0000-0000-0000-000000000bbb'::uuid
+          or not s.active
+          or s.archived_at is not null
+          or s.name not like 'SMOKE TEST — safe to delete %'
+          or s.description <> 'One-off prod smoke; script deletes this when it exits'
+        )
+    )
+  then
+    raise exception 'Retained smoke sequence identity/provenance digest drift';
+  end if;
+end $$;
+
+-- Catalog-derived final dependency gate. Every current foreign key to a row
+-- being removed is checked in the same transaction. Only the child rows that
+-- this reviewed packet itself deletes are allowed; any new table or reference
+-- added after review fails closed, including ON DELETE CASCADE relationships.
+do $$
+declare
+  dependency record;
+  v_count bigint;
+  v_expected bigint;
+  v_target_table text;
+begin
+  for dependency in
+    select
+      child_ns.nspname as child_schema,
+      child.relname as child_table,
+      parent.relname as parent_table,
+      child_att.attname as child_column
+    from pg_constraint constraint_row
+    join pg_class child on child.oid=constraint_row.conrelid
+    join pg_namespace child_ns on child_ns.oid=child.relnamespace
+    join pg_class parent on parent.oid=constraint_row.confrelid
+    join pg_namespace parent_ns on parent_ns.oid=parent.relnamespace
+    join lateral unnest(constraint_row.conkey, constraint_row.confkey)
+      with ordinality as columns(child_num, parent_num, ordinal) on true
+    join pg_attribute child_att on child_att.attrelid=child.oid and child_att.attnum=columns.child_num
+    join pg_attribute parent_att on parent_att.attrelid=parent.oid and parent_att.attnum=columns.parent_num
+    where constraint_row.contype='f'
+      and child_ns.nspname='public'
+      and parent_ns.nspname='public'
+      and parent.relname=any(array['contacts','properties','sequences'])
+      and parent_att.attname='id'
+  loop
+    v_target_table := case dependency.parent_table
+      when 'contacts' then 'packet_a_synthetic_contacts_union'
+      when 'properties' then 'packet_a_properties_union'
+      when 'sequences' then 'packet_a_sequences'
+    end;
+
+    -- Build the two union target tables lazily below before this block.
+    execute format(
+      'select count(*) from %I.%I child where child.%I in (select id from %I)',
+      dependency.child_schema,
+      dependency.child_table,
+      dependency.child_column,
+      v_target_table
+    ) into v_count;
+
+    v_expected := case
+      when dependency.child_table='properties' and dependency.child_column='homeowner_contact_id' and dependency.parent_table='contacts' then 1327
+      when dependency.child_table='lead_events' and dependency.child_column='property_id' and dependency.parent_table='properties' then 1330
+      when dependency.child_table='tasks' and dependency.child_column='related_property_id' and dependency.parent_table='properties' then 1
+      when dependency.child_table='sequence_steps' and dependency.child_column='sequence_id' and dependency.parent_table='sequences' then 3
+      else 0
+    end;
+    if v_count <> v_expected then
+      raise exception 'Foreign-key dependency drift %.% -> %: expected %, got %',
+        dependency.child_table, dependency.child_column, dependency.parent_table,
+        v_expected, v_count;
+    end if;
+  end loop;
 end $$;
 
 with deleted as (

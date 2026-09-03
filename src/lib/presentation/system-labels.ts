@@ -58,6 +58,9 @@ export const JOB_TYPE_LABELS: Readonly<Record<string, string>> = {
   skip_trace: "Skip trace",
   bulk_sms: "Bulk SMS",
   promote_leads: "Promote leads",
+  csv_update: "CSV update",
+  cass_refresh: "Address refresh",
+  ncoa_refresh: "Change-of-address refresh",
 };
 
 export const JOB_STATUS_LABELS: Readonly<Record<string, string>> = {
@@ -86,4 +89,25 @@ export function systemLabel(
   value: string,
 ): string {
   return labels[value] ?? humanizeMachineValue(value);
+}
+
+export function jobDisplayTitle(input: {
+  title: string | null;
+  type: string;
+  createdAt: string;
+}): string {
+  if (input.title?.trim()) return input.title.trim();
+  const timestamp = new Date(input.createdAt);
+  const when = Number.isFinite(timestamp.getTime())
+    ? new Intl.DateTimeFormat("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZone: "America/Chicago",
+        timeZoneName: "short",
+      }).format(timestamp)
+    : "time unavailable";
+  return `${systemLabel(JOB_TYPE_LABELS, input.type)} · ${when}`;
 }

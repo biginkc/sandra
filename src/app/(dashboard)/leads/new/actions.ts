@@ -29,6 +29,7 @@ export type NewLeadFormResult = Result<{
  */
 export async function createLeadFromForm(
   input: {
+    org_id: string;
     source: string;
     address: string;
     city: string;
@@ -57,15 +58,25 @@ export async function createLeadFromForm(
 
     const nowIso = new Date().toISOString();
     const admin = createAdminClient();
-    const { data: activeMemberships, error: activeMembershipError } = await admin
+    const requestedOrgId = input.org_id.trim();
+    if (!requestedOrgId) {
+      return {
+        ok: false,
+        error: {
+          code: "WORKSPACE_REQUIRED",
+          message: "Choose the workspace for this lead.",
+        },
+      };
+    }
+    const { data: activeMembership, error: activeMembershipError } = await admin
       .from("memberships")
-      .select("org_id, created_at")
+      .select("org_id")
       .eq("user_id", user.id)
+      .eq("org_id", requestedOrgId)
       .eq("access_status", "active")
+      .is("deletion_prepared_at", null)
       .or(`access_expires_at.is.null,access_expires_at.gt.${nowIso}`)
-      .order("created_at", { ascending: true })
-      .order("org_id", { ascending: true })
-      .limit(1);
+      .maybeSingle();
     if (activeMembershipError) {
       return {
         ok: false,
@@ -75,7 +86,7 @@ export async function createLeadFromForm(
         },
       };
     }
-    const orgId = activeMemberships?.[0]?.org_id;
+    const orgId = activeMembership?.org_id;
     if (!orgId) {
       return {
         ok: false,
@@ -97,6 +108,7 @@ export async function createLeadFromForm(
         .eq("user_id", assignedUserId)
         .eq("org_id", orgId)
         .eq("access_status", "active")
+        .is("deletion_prepared_at", null)
         .or(`access_expires_at.is.null,access_expires_at.gt.${nowIso}`)
         .limit(1)
         .maybeSingle();
@@ -167,6 +179,7 @@ export async function createLeadFromForm(
  */
 export async function submitNewLead(formData: FormData): Promise<void> {
   const input = {
+    org_id: String(formData.get("org_id") ?? "").trim(),
     source: String(formData.get("source") ?? ""),
     address: String(formData.get("address") ?? "").trim(),
     city: String(formData.get("city") ?? "").trim(),

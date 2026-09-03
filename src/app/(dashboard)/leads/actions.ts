@@ -7,6 +7,7 @@ import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
+import { getCallerMemberships } from "@/lib/auth/memberships";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
 export type { TeamMember } from "@/lib/auth/team-member";
 import { cassBulkWorkflow } from "@/workflows/cass-bulk";
@@ -2194,58 +2195,6 @@ async function captureConsent(params: {
 // Lead assignment · unread indicator · activity notes
 // ============================================================================
 
-/**
- * List assignable team members for the caller's one current organization.
- * The shared roster loader applies the Hugo lifecycle predicate and returns
- * only the presentation-safe identity fields used by people controls.
- */
-export async function listOrgUsers(): Promise<
-  Result<import("@/lib/auth/team-member").TeamMember[]>
-> {
-  try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
-      return {
-        ok: false,
-        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
-      };
-    }
-
-    const { data: memberships, error: membershipsError } = await supabase
-      .from("memberships")
-      .select("org_id, access_status, access_expires_at, deletion_prepared_at")
-      .eq("user_id", user.id);
-    if (membershipsError) {
-      return {
-        ok: false,
-        error: { code: "TEAM_FETCH_FAILED", message: membershipsError.message },
-      };
-    }
-    const activeMemberships = (memberships ?? []).filter((membership) =>
-      hasActiveSandraAccess(membership),
-    );
-    if (activeMemberships.length !== 1) {
-      return {
-        ok: false,
-        error: {
-          code: "TEAM_SCOPE_INVALID",
-          message:
-            activeMemberships.length > 1
-              ? "Could not resolve one active organization."
-              : "No active organization membership was found.",
-        },
-      };
-    }
-    return ok(await loadOrgTeamMembers(activeMemberships[0].org_id));
-  } catch (e) {
-    reportError(e, { tags: { surface: "list_org_users" } });
-    return errFromUnknown(e, "TEAM_FETCH_FAILED");
-  }
-}
-
 /** Assignment roster pinned to the lead's organization, never membership order. */
 export async function listPropertyOrgUsers(
   propertyId: string,
@@ -2275,19 +2224,16 @@ export async function listPropertyOrgUsers(
         },
       };
     }
-    const { data: membership, error: membershipError } = await supabase
-      .from("memberships")
-      .select("access_status, access_expires_at, deletion_prepared_at")
-      .eq("org_id", property.org_id)
-      .eq("user_id", user.id)
-      .maybeSingle();
-    if (membershipError || !hasActiveSandraAccess(membership)) {
+    // Reuse the compatibility-aware caller membership path. It fails closed
+    // in production and has the intentionally narrow shared-E2E fallback for
+    // schemas that predate Hugo lifecycle columns.
+    const memberships = await getCallerMemberships();
+    if (!memberships.some((membership) => membership.org_id === property.org_id)) {
       return {
         ok: false,
         error: {
           code: "TEAM_SCOPE_INVALID",
-          message:
-            membershipError?.message ?? "No active membership for this lead.",
+          message: "No active membership for this lead.",
         },
       };
     }
@@ -2297,59 +2243,6 @@ export async function listPropertyOrgUsers(
       tags: { surface: "list_property_org_users" },
       extra: { propertyId },
     });
-    return errFromUnknown(e, "TEAM_FETCH_FAILED");
-  }
-}
-
-/**
- * Filter-only roster. Former members remain representable so historical
- * assignments do not disappear when someone loses access.
- */
-export async function listOrgAssigneeFilterUsers(): Promise<
-  Result<import("@/lib/auth/team-member").TeamMember[]>
-> {
-  try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
-      return {
-        ok: false,
-        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
-      };
-    }
-
-    const { data: memberships, error: membershipsError } = await supabase
-      .from("memberships")
-      .select("org_id, access_status, access_expires_at, deletion_prepared_at")
-      .eq("user_id", user.id);
-    if (membershipsError) {
-      return {
-        ok: false,
-        error: { code: "TEAM_FETCH_FAILED", message: membershipsError.message },
-      };
-    }
-    const activeMemberships = (memberships ?? []).filter((membership) =>
-      hasActiveSandraAccess(membership),
-    );
-    if (activeMemberships.length !== 1) {
-      return {
-        ok: false,
-        error: {
-          code: "TEAM_SCOPE_INVALID",
-          message: "Could not resolve one active organization.",
-        },
-      };
-    }
-
-    return ok(
-      await loadOrgTeamMembers(activeMemberships[0].org_id, {
-        includeInactiveMembers: true,
-      }),
-    );
-  } catch (e) {
-    reportError(e, { tags: { surface: "list_org_assignee_filter_users" } });
     return errFromUnknown(e, "TEAM_FETCH_FAILED");
   }
 }

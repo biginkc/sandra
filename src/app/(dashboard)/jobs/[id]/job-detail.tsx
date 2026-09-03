@@ -63,6 +63,7 @@ export type BulkSmsJobMetrics = {
 export type JobDetailProps = {
   job: Job;
   items: JobItem[];
+  itemLabels?: Record<string, string>;
   parent: {
     id: string;
     type: string;
@@ -86,6 +87,7 @@ export type JobDetailProps = {
 export function JobDetail({
   job,
   items,
+  itemLabels = {},
   parent,
   childJobs,
   csvImport,
@@ -303,7 +305,11 @@ export function JobDetail({
           <TabsTrigger value="audit">Audit / raw</TabsTrigger>
         </TabsList>
         <TabsContent value="items" className="mt-4">
-          <ItemsTable items={items} totalItems={job.total_items} />
+          <ItemsTable
+            items={items}
+            totalItems={job.total_items}
+            itemLabels={itemLabels}
+          />
         </TabsContent>
         <TabsContent value="audit" className="mt-4">
           <AuditPanel job={job} />
@@ -744,9 +750,11 @@ function DetailRow({
 function ItemsTable({
   items,
   totalItems,
+  itemLabels,
 }: {
   items: JobItem[];
   totalItems: number;
+  itemLabels: Record<string, string>;
 }) {
   const [filter, setFilter] = useState<"all" | "error" | "skipped" | "success">(
     "all",
@@ -831,11 +839,13 @@ function ItemsTable({
                         href={`/leads/${item.property_id}`}
                         className="hover:underline"
                       >
-                        {item.property_id.slice(0, 8)}…
+                        {itemLabels[`property:${item.property_id}`] ??
+                          "Property no longer available"}
                       </Link>
                     ) : item.contact_id ? (
-                      <span className="text-muted-foreground font-mono text-xs">
-                        contact: {item.contact_id.slice(0, 8)}…
+                      <span className="text-muted-foreground text-xs">
+                        {itemLabels[`contact:${item.contact_id}`] ??
+                          "Contact no longer available"}
                       </span>
                     ) : (
                       <span className="text-muted-foreground">—</span>

@@ -37,23 +37,11 @@ export function authoritativeDisplayName(
     const value = cleanMetadataValue(administratorMetadata[key]);
     if (value) return value;
   }
-
-  // Legacy Sandra identities were created by an administrator with names in
-  // user_metadata. Keep those readable during the Hugo app_metadata migration,
-  // but never treat an email address copied into a name field as a real name.
-  const metadata = user?.user_metadata ?? {};
-  for (const key of ["display_name", "full_name", "name"] as const) {
-    const value = cleanMetadataValue(metadata[key]);
-    const email = cleanMetadataValue(
-      (user as { email?: unknown } | null)?.email,
-    )?.toLowerCase();
-    if (value && value.toLowerCase() !== email) return value;
-  }
-
-  const givenName = cleanMetadataValue(metadata.given_name);
-  const familyName = cleanMetadataValue(metadata.family_name);
-  const combined = [givenName, familyName].filter(Boolean).join(" ");
-  return combined || null;
+  // Supabase user_metadata is editable by the signed-in user. It must never
+  // become an authoritative assignment label. Legacy administrator-entered
+  // names are sealed into app_metadata by the reviewed one-time migration;
+  // until then, the verified email is the honest fallback.
+  return null;
 }
 
 export function teamMemberFromAuthUser(

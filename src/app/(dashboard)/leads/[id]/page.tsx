@@ -415,6 +415,9 @@ export default async function LeadDetailPage({
 
   const usersPromise = loadOrgTeamMembers(lead.org_id, {
     includeInactiveMembers: true,
+    historicalAssigneeIds: lead.assigned_user_id
+      ? [lead.assigned_user_id]
+      : [],
     allowMissingIdentityLabels: true,
   }).catch(() => []);
 

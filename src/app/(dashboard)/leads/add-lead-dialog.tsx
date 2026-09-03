@@ -25,15 +25,21 @@ import type { TeamMember } from "./actions";
 type AddLeadDialogProps = {
   markets: string[];
   sources: string[];
-  teamMembers: TeamMember[];
+  workspaces: LeadWorkspaceOption[];
   currentUserId: string | null;
   buttonClassName?: string;
+};
+
+export type LeadWorkspaceOption = {
+  id: string;
+  name: string;
+  teamMembers: TeamMember[];
 };
 
 export function AddLeadDialog({
   markets,
   sources,
-  teamMembers,
+  workspaces,
   currentUserId,
   buttonClassName,
 }: AddLeadDialogProps) {
@@ -48,6 +54,12 @@ export function AddLeadDialog({
     null,
   );
   const [showContactWarning, setShowContactWarning] = useState(false);
+  const defaultWorkspaceId = workspaces.length === 1 ? workspaces[0].id : "";
+  const [workspaceId, setWorkspaceId] = useState(defaultWorkspaceId);
+  const selectedWorkspace = workspaces.find(
+    (workspace) => workspace.id === workspaceId,
+  );
+  const teamMembers = selectedWorkspace?.teamMembers ?? [];
 
   const resetDialog = () => {
     formRef.current?.reset();
@@ -55,6 +67,7 @@ export function AddLeadDialog({
     setError(null);
     setDuplicatePropertyId(null);
     setShowContactWarning(false);
+    setWorkspaceId(defaultWorkspaceId);
   };
 
   const requestClose = () => {
@@ -77,6 +90,7 @@ export function AddLeadDialog({
     setError(null);
     setDuplicatePropertyId(null);
     const input = {
+      org_id: String(formData.get("org_id") ?? "").trim(),
       source: String(formData.get("source") ?? ""),
       address: String(formData.get("address") ?? "").trim(),
       city: String(formData.get("city") ?? "").trim(),
@@ -164,6 +178,26 @@ export function AddLeadDialog({
             <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
               <fieldset className="border-border flex flex-col gap-3 rounded-lg border p-4">
                 <legend className="px-1 text-sm font-semibold">Source</legend>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="add-lead-workspace">Workspace</Label>
+                  <select
+                    id="add-lead-workspace"
+                    name="org_id"
+                    required
+                    value={workspaceId}
+                    onChange={(event) => setWorkspaceId(event.target.value)}
+                    className="border-input bg-background flex h-10 w-full rounded-md border px-3 py-2 text-sm"
+                  >
+                    {workspaces.length > 1 ? (
+                      <option value="">Choose workspace</option>
+                    ) : null}
+                    {workspaces.map((workspace) => (
+                      <option key={workspace.id} value={workspace.id}>
+                        {workspace.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div className="flex flex-col gap-1.5">
                     <Label htmlFor="add-lead-source">
@@ -186,10 +220,18 @@ export function AddLeadDialog({
                   <div className="flex flex-col gap-1.5">
                     <Label htmlFor="add-lead-assignee">Assigned teammate</Label>
                     <select
+                      key={workspaceId}
                       id="add-lead-assignee"
                       name="assigned_user_id"
                       className="border-input bg-background flex h-10 w-full rounded-md border px-3 py-2 text-sm"
-                      defaultValue={currentUserId ?? ""}
+                      defaultValue={
+                        teamMembers.some(
+                          (member) => member.id === currentUserId,
+                        )
+                          ? (currentUserId ?? "")
+                          : (teamMembers[0]?.id ?? "")
+                      }
+                      disabled={!selectedWorkspace}
                     >
                       {teamMembers.map((member) => (
                         <option key={member.id} value={member.id}>

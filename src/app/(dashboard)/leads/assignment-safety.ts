@@ -51,6 +51,7 @@ export async function validateActiveAssigneeForProperties(
     .eq("user_id", userId)
     .in("org_id", orgIds)
     .eq("access_status", "active")
+    .is("deletion_prepared_at", null)
     .or(`access_expires_at.is.null,access_expires_at.gt.${nowIso}`);
   if (membershipsError) {
     return {

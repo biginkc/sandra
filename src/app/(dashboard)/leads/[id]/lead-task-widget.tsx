@@ -78,7 +78,14 @@ export function LeadTaskWidget({
   }, [currentUserId, initialAssigneeId, propertyId]);
 
   const submit = () => {
-    if (!dueAt || !assigneeId || pending) return;
+    if (
+      !dueAt ||
+      !assigneeId ||
+      pending ||
+      loadingMembers ||
+      memberLoadError
+    )
+      return;
     startTransition(async () => {
       const result = await callAction(
         createLeadTaskAction(propertyId, {
@@ -160,7 +167,13 @@ export function LeadTaskWidget({
           <Button
             type="button"
             size="sm"
-            disabled={!dueAt || !assigneeId || pending}
+            disabled={
+              !dueAt ||
+              !assigneeId ||
+              pending ||
+              loadingMembers ||
+              memberLoadError
+            }
             onClick={submit}
             data-testid="lead-task-submit"
           >

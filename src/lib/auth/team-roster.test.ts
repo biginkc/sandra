@@ -59,7 +59,7 @@ afterEach(() => {
 });
 
 describe("loadOrgTeamMembers", () => {
-  it("does not hydrate a historical id that is outside the organization", async () => {
+  it("hydrates a server-sourced historical owner after its membership row is removed", async () => {
     createAdminClient.mockReturnValue(
       adminStub({
         memberships: [{ user_id: "active-1", access_status: "active" }],
@@ -74,7 +74,7 @@ describe("loadOrgTeamMembers", () => {
             id: "foreign-1",
             email: "foreign@example.test",
             user_metadata: {},
-            app_metadata: { display_name: "Foreign Agent" },
+            app_metadata: { display_name: "Former Agent" },
           },
         ],
       }),
@@ -84,7 +84,14 @@ describe("loadOrgTeamMembers", () => {
       historicalAssigneeIds: ["foreign-1"],
     });
 
-    expect(members.map((member) => member.id)).toEqual(["active-1"]);
+    expect(members).toEqual([
+      expect.objectContaining({ id: "active-1", isActive: true }),
+      expect.objectContaining({
+        id: "foreign-1",
+        displayName: "Former Agent",
+        isActive: false,
+      }),
+    ]);
   });
 
   it("uses the legacy membership shape only in the local E2E lane", async () => {

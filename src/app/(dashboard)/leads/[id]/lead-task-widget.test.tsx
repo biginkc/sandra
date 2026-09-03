@@ -120,4 +120,31 @@ describe("<LeadTaskWidget />", () => {
       screen.queryByRole("option", { name: /former/i }),
     ).not.toBeInTheDocument();
   });
+
+  it("keeps Create disabled until a valid active roster has loaded", async () => {
+    let resolveRoster!: (value: unknown) => void;
+    listPropertyOrgUsers.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRoster = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <LeadTaskWidget
+        propertyId="prop-1"
+        address="123 Main"
+        currentUserId="user-1"
+        initialAssigneeId="user-1"
+      />,
+    );
+    await user.type(screen.getByTestId("lead-task-due-at"), "2026-06-20T10:00");
+    expect(screen.getByTestId("lead-task-submit")).toBeDisabled();
+    resolveRoster({
+      ok: true,
+      data: [{ id: "user-1", email: "me@example.com", isActive: true }],
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("lead-task-submit")).not.toBeDisabled(),
+    );
+  });
 });
