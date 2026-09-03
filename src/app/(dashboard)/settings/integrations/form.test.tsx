@@ -526,6 +526,9 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
     expect(
       screen.getByText(/America\/Chicago calendar-month boundary/i),
     ).toBeVisible();
+    expect(screen.getAllByText(/automatically upgrade at quota exhaustion/i))
+      .not.toHaveLength(0);
+    expect(screen.getAllByText(/does not provide an API hard stop/i)).not.toHaveLength(0);
   });
 
   it("keeps the committed switch unchanged when confirmation fails", async () => {

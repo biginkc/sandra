@@ -5366,6 +5366,10 @@ export type Database = {
         }
         Returns: undefined
       }
+      repair_esign_provider_plan_required_send: {
+        Args: { p_org_id: string; p_request_id: string }
+        Returns: string
+      }
       reconcile_esign_reminder_callback: {
         Args: {
           p_lease_id: string

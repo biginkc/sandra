@@ -369,7 +369,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               {esign.testMode === true
                 ? "Dropbox Sign is in test mode. Test signatures are watermarked and not legally binding."
                 : esign.testMode === false
-                  ? "Dropbox Sign is in live mode. New sends are legally binding and count against Dropbox Sign billing."
+                  ? "Dropbox Sign is in live mode. New sends are legally binding and count against Dropbox Sign billing. Dropbox may automatically upgrade at quota exhaustion and does not provide an API hard stop."
                   : "Dropbox Sign status is unavailable. Registration, template management, and sending controls are disabled until status loads."}
             </div>
             {esignDisconnectResult && (
@@ -428,7 +428,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                         Use live Dropbox Sign requests
                       </span>
                       <span className="text-muted-foreground text-xs">
-                        Changing modes turns sending off. Sandra&apos;s monthly fuse covers Sandra-originated live sends only.
+                        Changing modes turns sending off. Sandra&apos;s monthly fuse covers Sandra-originated live sends only; Dropbox may automatically upgrade at quota exhaustion and does not provide an API hard stop.
                       </span>
                     </span>
                     <input
@@ -451,7 +451,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                 )}
                 {esign.testMode === false && esign.liveSendLimit ? (
                   <div className="rounded-md border px-3 py-2 text-xs text-muted-foreground">
-                    Sandra local calendar-month ceiling: {esign.liveSendLimit.usedThisMonth} of {esign.liveSendLimit.monthlyLimit} live sends used. It resets on Sandra&apos;s America/Chicago calendar-month boundary. Dropbox may count manual dashboard sends and other API clients outside this counter.
+                    Sandra local calendar-month ceiling: {esign.liveSendLimit.usedThisMonth} of {esign.liveSendLimit.monthlyLimit} live sends used. It resets on Sandra&apos;s America/Chicago calendar-month boundary. Dropbox may count manual dashboard sends and other API clients outside this counter, may automatically upgrade at quota exhaustion, and does not provide an API hard stop.
                   </div>
                 ) : null}
                 {!esign.embeddedTemplateManagementEnabled ? (
@@ -723,7 +723,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
             <DialogDescription>
               {esignModeConfirmation
                 ? "New Dropbox Sign sends will be watermarked test requests after sending is turned back on."
-                : "New Dropbox Sign sends will be legally binding live requests after sending is turned back on. Sandra's cost fuse cannot control manual Dropbox dashboard sends or other API clients."}
+                : "New Dropbox Sign sends will be legally binding live requests after sending is turned back on. Sandra's cost fuse cannot control manual Dropbox dashboard sends or other API clients. Dropbox may automatically upgrade at quota exhaustion and does not provide an API hard stop."}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

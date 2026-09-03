@@ -102,6 +102,9 @@ export async function handleDropboxSignWebhook(input: {
       verifiedLocalRequestId: null,
     });
     if (!request && replay.localRequestId !== null) {
+      // Dropbox callbacks may omit test_mode. In that recovery path Sandra can
+      // only prove provider metadata and the stored local request mode; when
+      // provider mode cannot be confirmed, keep the callback retryable.
       const metadataMatch =
         await input.dependencies.metadataProvider.confirmProviderLocalRequestId({
           ...identity,

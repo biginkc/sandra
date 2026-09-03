@@ -61,6 +61,7 @@ const SERVICE_ROLE_ONLY_ESIGN_FUNCTIONS = Object.freeze([
   "public.create_esign_request(uuid,uuid,uuid,jsonb,jsonb,uuid,text,uuid,uuid)",
   "public.reserve_esign_live_send(uuid,uuid,integer)",
   "public.mark_esign_request_send_outcome(uuid,uuid,public.esign_delivery_state,text)",
+  "public.repair_esign_provider_plan_required_send(uuid,uuid)",
   "public.find_esign_webhook_request(uuid,text)",
 ]);
 const AUTHENTICATED_ESIGN_FUNCTIONS = Object.freeze([
@@ -583,6 +584,36 @@ export async function assertPostApplyEsignEssentials(client) {
   assertPacket(
     webhookShape.fields.map((field) => field.name).join(",") === EXPECTED_WEBHOOK_REQUEST_COLUMNS.join(","),
     "find_esign_webhook_request(uuid,text) does not expose the required seven-column return shape",
+  );
+
+  const immutableFunction = await client.query(
+    `select to_regprocedure($1) is not null as exists`,
+    ["public.reject_esign_request_snapshot_change()"],
+  );
+  assertPacket(
+    immutableFunction.rows[0]?.exists === true,
+    "reject_esign_request_snapshot_change() is missing",
+  );
+  const immutableTrigger = await client.query(
+    `select trigger.tgname, proc.proname,
+       pg_get_triggerdef(trigger.oid,true) as definition
+       from pg_trigger trigger
+       join pg_proc proc on proc.oid = trigger.tgfoid
+      where trigger.tgrelid = 'public.esign_requests'::regclass
+        and trigger.tgname = 'trg_esign_requests_created_at_immutable'
+        and not trigger.tgisinternal`,
+  );
+  assertPacket(
+    immutableTrigger.rows.length === 1,
+    "trg_esign_requests_created_at_immutable is missing",
+  );
+  assertPacket(
+    immutableTrigger.rows[0].proname === "reject_esign_request_snapshot_change",
+    "trg_esign_requests_created_at_immutable is not attached to reject_esign_request_snapshot_change()",
+  );
+  assertPacket(
+    /BEFORE UPDATE/iu.test(immutableTrigger.rows[0].definition ?? ""),
+    "trg_esign_requests_created_at_immutable is not a BEFORE UPDATE trigger",
   );
 
   for (const signature of SERVICE_ROLE_ONLY_ESIGN_FUNCTIONS) {

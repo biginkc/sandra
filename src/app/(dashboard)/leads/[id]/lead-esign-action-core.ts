@@ -165,6 +165,10 @@ export type EsignActionRepository = Readonly<{
     deliveryState: "send_unknown" | "failed";
     safeErrorMessage: string | null;
   }): Promise<void>;
+  repairProviderPlanRequiredSend(input: {
+    orgId: string;
+    requestId: string;
+  }): Promise<"repaired" | "already_repaired" | "raced">;
   reserveLiveSend(input: {
     orgId: string;
     requestId: string;
@@ -593,12 +597,8 @@ async function dispatchClaimed(
     fail("SEND_FAILED", "Dropbox Sign could not send this contract.");
   }
   if (outcome.outcome === "provider_plan_required") {
-    const recorded = await markFailed(
-      dependencies,
-      request,
-      "PROVIDER_PLAN_REQUIRED",
-    );
-    if (!recorded) {
+    const repaired = await repairProviderPlanRequiredSend(dependencies, request);
+    if (!repaired) {
       fail(
         "SEND_UNKNOWN",
         "Dropbox Sign rejected this live request, but Sandra could not confirm local reservation cleanup. Reconciliation must verify the request before retrying.",
@@ -1442,6 +1442,27 @@ async function markFailed(
     return true;
   } catch {
     reportSendOutcomePersistenceFailure("failed");
+    return false;
+  }
+}
+
+async function repairProviderPlanRequiredSend(
+  dependencies: LeadEsignActionDependencies,
+  request: Pick<EsignRequestRecord, "id" | "orgId">,
+): Promise<boolean> {
+  try {
+    const outcome =
+      await dependencies.repository.repairProviderPlanRequiredSend({
+        orgId: request.orgId,
+        requestId: request.id,
+      });
+    return outcome === "repaired" || outcome === "already_repaired";
+  } catch {
+    reportError(new Error("eSign provider-plan cleanup repair failed."), {
+      tags: {
+        surface: "esign_provider_plan_required_repair",
+      },
+    });
     return false;
   }
 }

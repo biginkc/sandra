@@ -108,6 +108,18 @@ function packetHarness(plan, options = {}) {
           ],
         };
       }
+      if (/from pg_trigger trigger/u.test(sql) && /trg_esign_requests_created_at_immutable/u.test(sql)) {
+        return {
+          rows: options.missingRequestModeTrigger
+            ? []
+            : [{
+                tgname: "trg_esign_requests_created_at_immutable",
+                proname: "reject_esign_request_snapshot_change",
+                definition:
+                  "CREATE TRIGGER trg_esign_requests_created_at_immutable BEFORE UPDATE ON public.esign_requests FOR EACH ROW EXECUTE FUNCTION reject_esign_request_snapshot_change()",
+              }],
+        };
+      }
       if (/from information_schema\.columns/u.test(sql)) {
         return {
           rows: [
@@ -411,6 +423,19 @@ test("applyProductionPacket rolls back when post-apply eSign assertions fail", a
   await assert.rejects(
     applyProductionPacket(client, plan, snapshot),
     /seven-column return shape/u,
+  );
+  assert.ok(calls.some((call) => call.sql === "rollback"));
+  assert.equal(calls.some((call) => call.sql === "commit"), false);
+});
+
+test("applyProductionPacket rolls back when immutable request-mode trigger is missing", async () => {
+  const plan = loadReviewedPlan(planPath);
+  const { calls, client, snapshot } = packetHarness(plan, {
+    missingRequestModeTrigger: true,
+  });
+  await assert.rejects(
+    applyProductionPacket(client, plan, snapshot),
+    /trg_esign_requests_created_at_immutable/u,
   );
   assert.ok(calls.some((call) => call.sql === "rollback"));
   assert.equal(calls.some((call) => call.sql === "commit"), false);

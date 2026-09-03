@@ -93,6 +93,18 @@ export function createLeadEsignRepository(): EsignActionRepository {
       );
       if (error) throw error;
     },
+    repairProviderPlanRequiredSend: async (input) => {
+      const { data, error } = await createAdminClient().rpc(
+        "repair_esign_provider_plan_required_send",
+        {
+          p_org_id: input.orgId,
+          p_request_id: input.requestId,
+        },
+      );
+      if (error?.code === "55000") return "raced";
+      if (error) throw error;
+      return data === "already_repaired" ? "already_repaired" : "repaired";
+    },
     reserveLiveSend: async (input) => {
       const { data, error } = await createAdminClient().rpc(
         "reserve_esign_live_send",

@@ -44,6 +44,37 @@ comment on column public.esign_requests.test_mode is
 comment on column public.esign_requests.provider_remaining_at_claim is
   'Dropbox Sign reported api_signature_requests_left at Sandra live-send reservation time.';
 
+create or replace function public.reject_esign_request_snapshot_change()
+returns trigger
+language plpgsql
+set search_path = public, pg_temp
+as $$
+begin
+  if new.created_at is distinct from old.created_at
+     or new.org_id is distinct from old.org_id
+     or new.template_id is distinct from old.template_id
+     or new.signer_snapshot is distinct from old.signer_snapshot
+     or new.merge_value_snapshot is distinct from old.merge_value_snapshot
+     or new.test_mode is distinct from old.test_mode
+     or new.send_intent_id is distinct from old.send_intent_id
+     or new.payload_hash is distinct from old.payload_hash
+     or new.retry_of_request_id is distinct from old.retry_of_request_id then
+    raise exception 'esign request identity and send snapshots are immutable'
+      using errcode = '22000';
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function public.reject_esign_request_snapshot_change()
+  from public, anon, authenticated, service_role;
+
+drop trigger if exists trg_esign_requests_created_at_immutable
+  on public.esign_requests;
+create trigger trg_esign_requests_created_at_immutable
+  before update on public.esign_requests
+  for each row execute function public.reject_esign_request_snapshot_change();
+
 do $$
 declare
   v_duplicate record;
@@ -1218,6 +1249,91 @@ revoke all on function public.mark_esign_request_send_outcome(
 grant execute on function public.mark_esign_request_send_outcome(
   uuid, uuid, public.esign_delivery_state, text
 ) to service_role;
+
+create or replace function public.repair_esign_provider_plan_required_send(
+  p_org_id uuid,
+  p_request_id uuid
+)
+returns text
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_request public.esign_requests%rowtype;
+  v_reservation_period_key text;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required' using errcode = '42501';
+  end if;
+
+  select * into v_request
+  from public.esign_requests request
+  where request.id = p_request_id
+    and request.org_id = p_org_id
+  for update;
+
+  if not found then
+    raise exception 'eSign request not found' using errcode = 'P0002';
+  end if;
+  if v_request.delivery_state = 'failed'
+     and v_request.status = 'error'
+     and v_request.sign_request_id is null
+     and v_request.live_send_reserved_at is null
+     and v_request.provider_remaining_at_claim is null
+     and v_request.error_message = 'PROVIDER_PLAN_REQUIRED' then
+    return 'already_repaired';
+  end if;
+  if v_request.delivery_state <> 'sending'
+     or v_request.test_mode
+     or v_request.sign_request_id is not null
+     or v_request.live_send_reserved_at is null then
+    raise exception 'eSign request is not a provider-plan-required live reservation'
+      using errcode = '55000';
+  end if;
+
+  v_reservation_period_key :=
+    to_char(v_request.live_send_reserved_at at time zone 'America/Chicago', 'YYYY-MM');
+
+  update public.org_esign_integrations integration
+  set live_send_monthly_used = greatest(0, integration.live_send_monthly_used - 1),
+      updated_at = now()
+  where integration.org_id = p_org_id
+    and integration.provider = 'dropbox_sign'
+    and integration.live_send_monthly_period_key = v_reservation_period_key
+    and integration.live_send_monthly_used > 0;
+
+  update public.esign_requests
+  set delivery_state = 'failed',
+      status = 'error',
+      completed_at = now(),
+      error_message = 'PROVIDER_PLAN_REQUIRED',
+      live_send_reserved_at = null,
+      provider_remaining_at_claim = null,
+      updated_by = null,
+      updated_at = now()
+  where id = p_request_id
+    and org_id = p_org_id
+    and delivery_state = 'sending'
+    and test_mode = false
+    and sign_request_id is null
+    and live_send_reserved_at is not null;
+  if not found then
+    raise exception 'eSign request is not a provider-plan-required live reservation'
+      using errcode = '55000';
+  end if;
+
+  return 'repaired';
+end;
+$$;
+
+revoke all on function public.repair_esign_provider_plan_required_send(uuid, uuid)
+  from public, anon, authenticated, service_role;
+grant execute on function public.repair_esign_provider_plan_required_send(uuid, uuid)
+  to service_role;
+
+comment on function public.repair_esign_provider_plan_required_send(uuid, uuid) is
+  'Service-role repair for a known Dropbox Sign PROVIDER_PLAN_REQUIRED live-send reservation with no provider request id. Releases only Sandra-owned local fuse state and never retries or resends.';
 
 create or replace function public.resolve_esign_send_unknown_not_sent(
   p_org_id uuid,

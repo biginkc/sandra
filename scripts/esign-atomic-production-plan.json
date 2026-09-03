@@ -42,8 +42,8 @@
       "version": "20260902180000",
       "name": "esign_essentials_production_path",
       "path": "supabase/migrations/20260902180000_esign_essentials_production_path.sql",
-      "sha256": "fcecbc96517942351b77330dd31ebbdca4c9b0b9a3ebbca7e234e093aca5b2b0",
-      "statementsSha256": "b6f39643310302a92d24387f939d4e6ae671235be76412a1b81dfda4f251ff90"
+      "sha256": "990c7bff2719ba2caa769c2eecc098c038fbae9e3ee08f33948ff68d9aa6a089",
+      "statementsSha256": "cff13a1b08727562d096bd314b62924683d61ea55958fa530835930f4262cd79"
     }
   ]
 }

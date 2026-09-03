@@ -132,6 +132,7 @@ function harness() {
     })),
     reconcileSent: vi.fn().mockResolvedValue(undefined),
     markSendOutcome: vi.fn().mockResolvedValue(undefined),
+    repairProviderPlanRequiredSend: vi.fn().mockResolvedValue("repaired"),
     findProviderLookupReference: vi.fn().mockResolvedValue({
       localRequestId: "known-local-request",
       providerRequestId: "known-provider-request",
@@ -826,7 +827,7 @@ describe("lead eSign action orchestration", () => {
     });
   });
 
-  it("records a provider-plan rejection as terminal failed history", async () => {
+  it("records a provider-plan rejection through the durable reservation repair RPC", async () => {
     const h = harness();
     h.repository.loadLeadSendContext.mockResolvedValue(
       leadContext({ testMode: false }),
@@ -845,15 +846,16 @@ describe("lead eSign action orchestration", () => {
       ok: false,
       error: { code: "PROVIDER_PLAN_REQUIRED" },
     });
-    expect(h.repository.markSendOutcome).toHaveBeenCalledWith({
+    expect(h.repository.repairProviderPlanRequiredSend).toHaveBeenCalledWith({
       orgId: "org-1",
       requestId: "request-1",
-      deliveryState: "failed",
-      safeErrorMessage: "PROVIDER_PLAN_REQUIRED",
     });
+    expect(h.repository.markSendOutcome).not.toHaveBeenCalledWith(
+      expect.objectContaining({ safeErrorMessage: "PROVIDER_PLAN_REQUIRED" }),
+    );
   });
 
-  it("keeps provider-plan rejection retryable when local reservation cleanup is unconfirmed", async () => {
+  it("keeps provider-plan rejection retryable when the repair RPC fails transiently", async () => {
     const h = harness();
     h.repository.loadLeadSendContext.mockResolvedValue(
       leadContext({ testMode: false }),
@@ -865,7 +867,7 @@ describe("lead eSign action orchestration", () => {
     h.provider.sendWithTemplate.mockResolvedValue({
       outcome: "provider_plan_required",
     });
-    h.repository.markSendOutcome.mockRejectedValueOnce(
+    h.repository.repairProviderPlanRequiredSend.mockRejectedValueOnce(
       new Error("private rpc commit state unknown"),
     );
 
@@ -878,12 +880,11 @@ describe("lead eSign action orchestration", () => {
     expect(JSON.stringify(result)).not.toContain("private rpc commit");
     expect(reportMocks.reportError).toHaveBeenCalledWith(
       expect.objectContaining({
-        message: "eSign send outcome bookkeeping failed.",
+        message: "eSign provider-plan cleanup repair failed.",
       }),
       {
         tags: {
-          surface: "esign_send_outcome_bookkeeping",
-          delivery_state: "failed",
+          surface: "esign_provider_plan_required_repair",
         },
       },
     );

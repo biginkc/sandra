@@ -370,7 +370,8 @@ export function SendForSignatureDialog({
               >
                 Dropbox Sign is in live mode. This live request is legally binding and
                 counts against Dropbox Sign billing. Sandra&apos;s fuse covers
-                Sandra-originated sends only.
+                Sandra-originated sends only. Dropbox may automatically upgrade at
+                quota exhaustion and does not provide an API hard stop.
                 {preflight.liveSendLimit ? (
                   <span className="mt-1 block text-xs text-muted-foreground">
                     Sandra local calendar-month ceiling: {preflight.liveSendLimit.usedThisMonth} of {preflight.liveSendLimit.monthlyLimit} live sends used.

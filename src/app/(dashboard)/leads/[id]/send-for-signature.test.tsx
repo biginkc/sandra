@@ -282,7 +282,7 @@ describe("SendForSignature", () => {
     await user.click(screen.getByTestId("send-for-signature-trigger"));
 
     expect(await screen.findByTestId("esign-live-mode-notice")).toHaveTextContent(
-      "Dropbox Sign is in live mode. This live request is legally binding and counts against Dropbox Sign billing. Sandra's fuse covers Sandra-originated sends only.",
+      "Dropbox Sign is in live mode. This live request is legally binding and counts against Dropbox Sign billing. Sandra's fuse covers Sandra-originated sends only. Dropbox may automatically upgrade at quota exhaustion and does not provide an API hard stop.",
     );
     expect(screen.getByTestId("esign-live-mode-notice")).toHaveTextContent(
       "Sandra local calendar-month ceiling: 17 of 40 live sends used.",

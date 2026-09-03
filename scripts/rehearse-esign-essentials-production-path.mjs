@@ -528,6 +528,78 @@ async function createRequest(client, sendIntentId = randomUUID()) {
   return result.rows[0].id;
 }
 
+async function assertRequestModeImmutable(client, requestId) {
+  let modeUpdateRejected = false;
+  try {
+    await client.query(
+      `update public.esign_requests
+       set test_mode = true
+       where id = $1`,
+      [requestId],
+    );
+  } catch (error) {
+    modeUpdateRejected = /immutable|send snapshots/u.test(error.message);
+  }
+  assert(modeUpdateRejected, "request test_mode update did not fail");
+}
+
+async function assertConcurrentReservationSaturation(
+  client,
+  { startUsed, attempts, expectedReserved, label },
+) {
+  await client.query(
+    `update public.org_esign_integrations
+     set live_send_monthly_used = $2,
+         sending_enabled = true,
+         test_mode = false,
+         live_send_monthly_period_key = to_char(now() at time zone 'America/Chicago', 'YYYY-MM')
+     where org_id = $1`,
+    [ids.org, startUsed],
+  );
+  const requestIds = [];
+  for (let index = 0; index < attempts; index += 1) {
+    requestIds.push(await createRequest(client));
+  }
+  const clients = requestIds.map(() => localClient(dbName));
+  await Promise.all(clients.map((raceClient) => raceClient.connect()));
+  try {
+    await Promise.all(clients.map((raceClient) => setServiceRole(raceClient)));
+    const outcomes = await Promise.all(
+      clients.map((raceClient, index) =>
+        raceClient.query(
+          `select public.reserve_esign_live_send($1,$2,11) as outcome`,
+          [ids.org, requestIds[index]],
+        ),
+      ),
+    );
+    const counts = outcomes.reduce((accumulator, result) => {
+      const outcome = result.rows[0].outcome;
+      accumulator[outcome] = (accumulator[outcome] ?? 0) + 1;
+      return accumulator;
+    }, {});
+    assert(
+      counts.reserved === expectedReserved,
+      `${label} reserved ${counts.reserved ?? 0}; expected ${expectedReserved}`,
+    );
+    assert(
+      (counts.blocked ?? 0) === attempts - expectedReserved,
+      `${label} blocked ${counts.blocked ?? 0}; expected ${attempts - expectedReserved}`,
+    );
+    const saturated = await client.query(
+      `select live_send_monthly_used
+       from public.org_esign_integrations
+       where org_id = $1`,
+      [ids.org],
+    );
+    assert(
+      saturated.rows[0].live_send_monthly_used === Math.min(40, startUsed + expectedReserved),
+      `${label} did not stop exactly at Sandra's 40-request local ceiling`,
+    );
+  } finally {
+    await Promise.all(clients.map((raceClient) => raceClient.end().catch(() => {})));
+  }
+}
+
 async function assertDuplicateProviderPairPreflight(adminClient) {
   const duplicateDbName = `${dbName}_duplicate_pair`;
   await adminClient.query(`create database ${q(duplicateDbName)}`);
@@ -823,6 +895,7 @@ try {
       [ids.org, requestId],
     );
     assert(reserved.rows[0].outcome === "reserved", "provider remaining 11 should reserve");
+    await assertRequestModeImmutable(client, requestId);
     const quota = await client.query(
       `select live_send_monthly_used, live_send_monthly_period_key
        from public.org_esign_integrations where org_id = $1`,
@@ -830,13 +903,21 @@ try {
     );
     assert(quota.rows[0].live_send_monthly_used === 1, "monthly period did not reset atomically");
     assert(quota.rows[0].live_send_monthly_period_key !== "2026-08", "period key did not roll over");
-    await client.query(
-      `select public.mark_esign_request_send_outcome($1,$2,'failed',$3)`,
-      [ids.org, requestId, "PROVIDER_PLAN_REQUIRED"],
+    const providerPlanRepair = await client.query(
+      `select public.repair_esign_provider_plan_required_send($1,$2) as outcome`,
+      [ids.org, requestId],
     );
-    await client.query(
-      `select public.mark_esign_request_send_outcome($1,$2,'failed',$3)`,
-      [ids.org, requestId, "PROVIDER_PLAN_REQUIRED"],
+    assert(
+      providerPlanRepair.rows[0].outcome === "repaired",
+      "provider-plan repair did not repair the reservation",
+    );
+    const repeatedProviderPlanRepair = await client.query(
+      `select public.repair_esign_provider_plan_required_send($1,$2) as outcome`,
+      [ids.org, requestId],
+    );
+    assert(
+      repeatedProviderPlanRepair.rows[0].outcome === "already_repaired",
+      "provider-plan repair is not idempotent",
     );
     const released = await client.query(
       `select integration.live_send_monthly_used, request.live_send_reserved_at,
@@ -1040,6 +1121,30 @@ try {
     } finally {
       await Promise.all([c3.end(), c4.end(), c5.end()]);
     }
+    await assertConcurrentReservationSaturation(client, {
+      startUsed: 0,
+      attempts: 40,
+      expectedReserved: 40,
+      label: "40-way live-send race from 0",
+    });
+    await assertConcurrentReservationSaturation(client, {
+      startUsed: 0,
+      attempts: 45,
+      expectedReserved: 40,
+      label: "45-way live-send race from 0",
+    });
+    await assertConcurrentReservationSaturation(client, {
+      startUsed: 0,
+      attempts: 50,
+      expectedReserved: 40,
+      label: "50-way live-send race from 0",
+    });
+    await assertConcurrentReservationSaturation(client, {
+      startUsed: 39,
+      attempts: 40,
+      expectedReserved: 1,
+      label: "40-way live-send race from 39",
+    });
 
     const grants = await client.query(
       `select column_name
