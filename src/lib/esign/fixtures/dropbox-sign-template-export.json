@@ -1,0 +1,142 @@
+{
+  "template_id": "template-export-fixture",
+  "title": "Purchase Agreement",
+  "signer_roles": [
+    { "name": "Seller", "order": 0 },
+    { "name": "Buyer", "order": 1 }
+  ],
+  "custom_fields": [
+    { "type": "text", "api_id": "merge-seller-name", "name": "seller_name", "signer": null },
+    { "type": "text", "api_id": "merge-property-address", "name": "property_address", "signer": null },
+    { "type": "text", "api_id": "merge-offer-price", "name": "offer_price", "signer": "sender" },
+    { "type": "text", "api_id": "merge-closing-date", "name": "closing_date", "signer": null },
+    { "type": "text", "api_id": "merge-earnest-money", "name": "earnest_money", "signer": null }
+  ],
+  "documents": [
+    {
+      "index": 0,
+      "name": "purchase-agreement.pdf",
+      "form_fields": [
+        {
+          "type": "signature",
+          "api_id": "seller-signature",
+          "name": "Seller signature",
+          "signer": "1",
+          "page": 0,
+          "x": 72,
+          "y": 612,
+          "width": 180,
+          "height": 36,
+          "required": true
+        },
+        {
+          "type": "initials",
+          "api_id": "seller-initials",
+          "name": "Seller initials",
+          "signer": "Seller",
+          "page": 1,
+          "x": 72,
+          "y": 96,
+          "width": 54,
+          "height": 30,
+          "required": true,
+          "group": "seller-initials"
+        }
+      ],
+      "custom_fields": [
+        {
+          "type": "text",
+          "api_id": "merge-seller-name",
+          "name": "seller_name",
+          "signer": null,
+          "page": 0,
+          "x": 72,
+          "y": 140,
+          "width": 240,
+          "height": 24,
+          "required": false
+        },
+        {
+          "type": "text",
+          "api_id": "merge-property-address",
+          "name": "property_address",
+          "signer": null,
+          "page": 0,
+          "x": 72,
+          "y": 184,
+          "width": 360,
+          "height": 24,
+          "required": false
+        },
+        {
+          "type": "text",
+          "api_id": "merge-offer-price",
+          "name": "offer_price",
+          "signer": "sender",
+          "page": 0,
+          "x": 72,
+          "y": 228,
+          "width": 160,
+          "height": 24,
+          "required": false
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "name": "disclosures.pdf",
+      "form_fields": [
+        {
+          "type": "signature",
+          "api_id": "buyer-signature",
+          "name": "Buyer signature",
+          "signer": "2",
+          "page": 0,
+          "x": 72,
+          "y": 540,
+          "width": 180,
+          "height": 36,
+          "required": true
+        },
+        {
+          "type": "checkbox",
+          "api_id": "buyer-approval",
+          "name": "Buyer approval",
+          "signer": "Buyer",
+          "page": 0,
+          "x": 72,
+          "y": 480,
+          "width": 18,
+          "height": 18,
+          "required": true
+        }
+      ],
+      "custom_fields": [
+        {
+          "type": "text",
+          "api_id": "merge-closing-date",
+          "name": "closing_date",
+          "signer": null,
+          "page": 0,
+          "x": 72,
+          "y": 160,
+          "width": 160,
+          "height": 24,
+          "required": false
+        },
+        {
+          "type": "text",
+          "api_id": "merge-earnest-money",
+          "name": "earnest_money",
+          "signer": null,
+          "page": 0,
+          "x": 72,
+          "y": 204,
+          "width": 160,
+          "height": 24,
+          "required": false
+        }
+      ]
+    }
+  ]
+}

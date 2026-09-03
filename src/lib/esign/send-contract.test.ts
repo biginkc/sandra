@@ -77,6 +77,7 @@ function provider(
     getEmbeddedTemplateEditUrl: vi.fn(),
     getTemplate: vi.fn(),
     getTemplateFiles: vi.fn(),
+    exportTemplateSnapshot: vi.fn(),
     duplicateTemplate: vi.fn(),
     updateTemplateFiles: vi.fn(),
     deleteTemplate: vi.fn(),

@@ -49,6 +49,37 @@ export type TemplateSignerRole = {
   order: number;
 };
 
+export type TemplateFieldLayoutField = {
+  apiId: string;
+  name: string;
+  type: string;
+  signer: number | "sender";
+  page: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  required: boolean;
+  group?: string;
+};
+
+export type TemplateFieldLayout = {
+  version: 1;
+  signerRoles: TemplateSignerRole[];
+  mergeFieldNames: string[];
+  documents: Array<{
+    index: number;
+    name: string;
+    fields: TemplateFieldLayoutField[];
+  }>;
+};
+
+export type TemplateSnapshot = {
+  layout: TemplateFieldLayout;
+  pdf: Buffer;
+  sha256: string;
+};
+
 export type ProviderTemplateField = {
   documentIndex: number | null;
   apiId: string | null;
@@ -178,6 +209,7 @@ export type DropboxSignProvider = {
     signal?: AbortSignal,
   ): Promise<ProviderTemplateMetadata>;
   getTemplateFiles(providerTemplateId: string): Promise<Buffer>;
+  exportTemplateSnapshot(providerTemplateId: string): Promise<TemplateSnapshot>;
   duplicateTemplate(
     providerTemplateId: string,
     file: TemplatePdf,

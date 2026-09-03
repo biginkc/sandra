@@ -1,5 +1,7 @@
 import "server-only";
 
+import { createHash } from "node:crypto";
+
 import {
   AccountApi,
   ApiAppApi,
@@ -26,6 +28,7 @@ import type {
   TemplateSignerRole,
 } from "./contracts";
 import { EsignSecret } from "./secret";
+import { normalizeTemplateLayout } from "./template-layout";
 
 type DropboxApiSet = {
   account: AccountApi;
@@ -201,6 +204,25 @@ export function createDropboxSignProvider(input: {
     async getTemplateFiles(providerTemplateId: string) {
       try {
         return (await api.template.templateFiles(providerTemplateId, "pdf")).body;
+      } catch (error) {
+        throw normalizeDropboxSignError(error);
+      }
+    },
+
+    async exportTemplateSnapshot(providerTemplateId: string) {
+      try {
+        const [templateResponse, filesResponse] = await Promise.all([
+          api.template.templateGet(providerTemplateId),
+          api.template.templateFiles(providerTemplateId, "pdf"),
+        ]);
+        const pdf = Buffer.from(filesResponse.body);
+        return {
+          layout: normalizeTemplateLayout(
+            templateResponse.body.template as unknown as Record<string, unknown>,
+          ),
+          pdf,
+          sha256: createHash("sha256").update(pdf).digest("hex"),
+        };
       } catch (error) {
         throw normalizeDropboxSignError(error);
       }

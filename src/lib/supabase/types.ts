@@ -3886,10 +3886,15 @@ export type Database = {
           deleted_at: string | null
           deleted_by: string | null
           document_type: string
+          document_storage_bucket: string | null
+          document_storage_path: string | null
           duplicate_of_template_id: string | null
+          export_sha256: string | null
+          field_layout: Json | null
           finalized_at: string | null
           id: string
           lifecycle_state: string
+          layout_exported_at: string | null
           merge_field_names: string[]
           name: string
           org_id: string
@@ -3929,10 +3934,15 @@ export type Database = {
           deleted_at?: string | null
           deleted_by?: string | null
           document_type: string
+          document_storage_bucket?: string | null
+          document_storage_path?: string | null
           duplicate_of_template_id?: string | null
+          export_sha256?: string | null
+          field_layout?: Json | null
           finalized_at?: string | null
           id?: string
           lifecycle_state?: string
+          layout_exported_at?: string | null
           merge_field_names: string[]
           name: string
           org_id: string
@@ -3972,10 +3982,15 @@ export type Database = {
           deleted_at?: string | null
           deleted_by?: string | null
           document_type?: string
+          document_storage_bucket?: string | null
+          document_storage_path?: string | null
           duplicate_of_template_id?: string | null
+          export_sha256?: string | null
+          field_layout?: Json | null
           finalized_at?: string | null
           id?: string
           lifecycle_state?: string
+          layout_exported_at?: string | null
           merge_field_names?: string[]
           name?: string
           org_id?: string

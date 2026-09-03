@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { createAdminClient } from "@/lib/supabase/admin";
+
 import {
   buildEsignMaterialEventPayload,
   ESIGN_MATERIAL_EVENT_TYPES,
@@ -15,6 +17,7 @@ import type {
   SignedPdfArtifactLinkPersistence,
   VerifiedReceiptInput,
 } from "./ports";
+import type { TemplateFieldLayout } from "./contracts";
 import type { EsignStatus } from "./status";
 
 export const ESIGN_WEBHOOK_RPC_NAMES = {
@@ -184,6 +187,136 @@ export interface EsignWebhookRpcClient {
 
 export type EsignWebhookDatabaseAdapter = EsignWebhookPersistence &
   SignedPdfArtifactLinkPersistence;
+
+export const ESIGN_DOCUMENTS_BUCKET = "esign-documents";
+
+export type StoreTemplateSnapshotInput = {
+  orgId: string;
+  templateId: string;
+  pdf: Buffer;
+  sha256: string;
+  layout: TemplateFieldLayout;
+};
+
+type SnapshotStorageError = { code?: string } | null;
+
+export type TemplateSnapshotDatabaseClient = {
+  storage: {
+    from(bucket: string): {
+      upload(
+        path: string,
+        body: Buffer,
+        options: { contentType: "application/pdf"; upsert: false },
+      ): Promise<{ data: unknown; error: SnapshotStorageError }>;
+      remove(paths: string[]): Promise<{
+        data: Array<{ name?: string }> | null;
+        error: SnapshotStorageError;
+      }>;
+    };
+  };
+  from(table: "esign_templates"): {
+    update(values: {
+      document_storage_bucket: string;
+      document_storage_path: string;
+      field_layout: TemplateFieldLayout;
+      layout_exported_at: string;
+      export_sha256: string;
+    }): {
+      eq(column: "org_id" | "id", value: string): {
+        eq(column: "id", value: string): {
+          is(column: "layout_exported_at", value: null): {
+            select(columns: "id"): {
+              maybeSingle(): Promise<{
+                data: { id: string } | null;
+                error: SnapshotStorageError;
+              }>;
+            };
+          };
+        };
+      };
+    };
+  };
+};
+
+export type EsignTemplateSnapshotPersistence = {
+  storeTemplateSnapshot(input: StoreTemplateSnapshotInput): Promise<void>;
+};
+
+export function createEsignTemplateSnapshotDatabaseAdapter(
+  client: TemplateSnapshotDatabaseClient,
+): EsignTemplateSnapshotPersistence {
+  return {
+    storeTemplateSnapshot(input) {
+      return storeTemplateSnapshotWithClient(client, input);
+    },
+  };
+}
+
+export async function storeTemplateSnapshot(
+  input: StoreTemplateSnapshotInput,
+): Promise<void> {
+  return storeTemplateSnapshotWithClient(
+    createAdminClient() as unknown as TemplateSnapshotDatabaseClient,
+    input,
+  );
+}
+
+async function storeTemplateSnapshotWithClient(
+  client: TemplateSnapshotDatabaseClient,
+  input: StoreTemplateSnapshotInput,
+): Promise<void> {
+  const path = `${input.orgId}/${randomUUID()}.pdf`;
+  const bucket = client.storage.from(ESIGN_DOCUMENTS_BUCKET);
+  let uploadResult: { data: unknown; error: SnapshotStorageError };
+  try {
+    uploadResult = await bucket.upload(path, input.pdf, {
+      contentType: "application/pdf",
+      upsert: false,
+    });
+  } catch {
+    throw new EsignTemplateSnapshotError("UPLOAD_FAILED");
+  }
+  if (uploadResult.error) {
+    throw new EsignTemplateSnapshotError("UPLOAD_FAILED");
+  }
+
+  let updateSucceeded = false;
+  try {
+    const result = await client
+      .from("esign_templates")
+      .update({
+        document_storage_bucket: ESIGN_DOCUMENTS_BUCKET,
+        document_storage_path: path,
+        field_layout: input.layout,
+        layout_exported_at: new Date().toISOString(),
+        export_sha256: input.sha256,
+      })
+      .eq("org_id", input.orgId)
+      .eq("id", input.templateId)
+      .is("layout_exported_at", null)
+      .select("id")
+      .maybeSingle();
+    updateSucceeded = !result.error && result.data?.id === input.templateId;
+  } catch {
+    updateSucceeded = false;
+  }
+  if (updateSucceeded) return;
+
+  let cleanupSucceeded = false;
+  try {
+    const cleanup = await bucket.remove([path]);
+    cleanupSucceeded =
+      !cleanup.error &&
+      cleanup.data?.length === 1 &&
+      cleanup.data[0]?.name === path;
+  } catch {
+    cleanupSucceeded = false;
+  }
+  if (!cleanupSucceeded) {
+    throw new EsignTemplateSnapshotError("UPDATE_AND_CLEANUP_FAILED");
+  }
+  throw new EsignTemplateSnapshotError("UPDATE_FAILED");
+}
 
 const DEFAULT_STALE_AFTER_SECONDS = 300;
 const MIN_STALE_AFTER_SECONDS = 60;
@@ -585,6 +718,18 @@ export type EsignDatabaseAdapterErrorCode =
   | "INVALID_RPC_RESPONSE"
   | "INVALID_SAFE_CODE"
   | "RPC_FAILED";
+
+export type EsignTemplateSnapshotErrorCode =
+  | "UPLOAD_FAILED"
+  | "UPDATE_FAILED"
+  | "UPDATE_AND_CLEANUP_FAILED";
+
+export class EsignTemplateSnapshotError extends Error {
+  constructor(public readonly code: EsignTemplateSnapshotErrorCode) {
+    super("The eSign template snapshot operation failed.");
+    this.name = "EsignTemplateSnapshotError";
+  }
+}
 
 export class EsignDatabaseAdapterError extends Error {
   constructor(

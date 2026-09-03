@@ -12,6 +12,7 @@ const sdk = vi.hoisted(() => ({
   cancel: vi.fn(),
   files: vi.fn(),
   templateGet: vi.fn(),
+  templateFiles: vi.fn(),
   interceptorOptions: [] as Array<{ signal?: AbortSignal }>,
   credentials: [] as Array<{ username?: string; password?: string }>,
 }));
@@ -50,7 +51,10 @@ vi.mock("@dropbox/sign", () => {
     signatureRequestCancel = sdk.cancel;
     signatureRequestFiles = sdk.files;
   }
-  class TemplateApi extends BaseApi { templateGet = sdk.templateGet; }
+  class TemplateApi extends BaseApi {
+    templateGet = sdk.templateGet;
+    templateFiles = sdk.templateFiles;
+  }
   class HttpError extends Error {}
   return {
     AccountApi,
@@ -114,6 +118,7 @@ describe("Dropbox Sign provider", () => {
         },
       },
     });
+    sdk.templateFiles.mockResolvedValue({ body: Buffer.from("%PDF-fixture") });
   });
 
   it("preserves the shared Session 03 AbortSignal contract for send, signer update, remind, and cancel", async () => {
@@ -256,6 +261,52 @@ describe("Dropbox Sign provider", () => {
         expect.objectContaining({ type: "signature", signer: "2", signerRoleName: "Buyer" }),
       ],
     });
+  });
+
+  it("exports the provider layout and PDF with one shared safe error boundary", async () => {
+    sdk.templateGet.mockResolvedValue({
+      body: {
+        template: {
+          templateId: "provider-template-1",
+          signerRoles: [{ name: "Seller", order: 0 }],
+          documents: [{
+            name: "agreement.pdf",
+            index: 0,
+            formFields: [{
+              type: "signature",
+              apiId: "seller-signature",
+              name: "Seller signature",
+              signer: "Seller",
+              x: 10,
+              y: 20,
+              width: 100,
+              height: 30,
+              required: true,
+            }],
+            customFields: [],
+          }],
+        },
+      },
+    });
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+    });
+
+    await expect(provider.exportTemplateSnapshot("provider-template-1"))
+      .resolves.toMatchObject({
+        layout: {
+          version: 1,
+          signerRoles: [{ name: "Seller", order: 0 }],
+          documents: [{
+            fields: [{ signer: 0, x: 10, y: 20, width: 100, height: 30 }],
+          }],
+        },
+        pdf: Buffer.from("%PDF-fixture"),
+        sha256: "ed41915c09594a9cfbd60c7094cde97444d46c73277d2d84947f73edfc251742",
+      });
+    expect(sdk.templateGet).toHaveBeenCalledWith("provider-template-1");
+    expect(sdk.templateFiles).toHaveBeenCalledWith("provider-template-1", "pdf");
   });
 
   it("preserves missing custom-field signer as unknown while null and Sender mean Sender", async () => {
