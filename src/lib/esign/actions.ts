@@ -271,6 +271,37 @@ export async function connectDropboxSignAction(
   }
 }
 
+function sendingEnabledErrorMessage(
+  enabled: boolean,
+  error: { message: string; code?: string },
+): string {
+  if (error.code === "P0002") {
+    return "Connect Dropbox Sign before enabling sending.";
+  }
+  if (error.code === "23514") {
+    // The RPC raises a distinct message per constraint violation. Match on
+    // the RPC's own wording so the owner sees the actual blocker instead of
+    // a single catch-all message that hides which check failed.
+    if (/active eSign work/i.test(error.message)) {
+      return "Finish active eSign work before re-enabling Dropbox Sign sending.";
+    }
+    if (/callback/i.test(error.message)) {
+      return "Verify the Dropbox Sign callback before enabling sending.";
+    }
+    if (/monthly limit/i.test(error.message)) {
+      return "Sandra live-send monthly limit has been reached.";
+    }
+    if (/website template/i.test(error.message)) {
+      return "Register a Dropbox Sign website template before enabling live sending.";
+    }
+    // Unrecognized 23514 message: never surface the RPC's raw text here —
+    // it can carry a private database detail. Fall back to the generic
+    // message instead of guessing at a friendlier one.
+    return "Dropbox Sign sending could not be updated.";
+  }
+  return "Dropbox Sign sending could not be updated.";
+}
+
 export async function setEsignSendingEnabledAction(
   enabled: boolean,
   operatorConfirmed: boolean,
@@ -291,16 +322,8 @@ export async function setEsignSendingEnabledAction(
       p_enabled: enabled,
     });
     if (error) {
-      const activeWorkError =
-        error.code === "23514" && /active eSign work/i.test(error.message);
       throw new DatabaseError(
-        enabled && activeWorkError
-          ? "Finish active eSign work before re-enabling Dropbox Sign sending."
-          : enabled && error.code === "23514"
-            ? "Verify the Dropbox Sign callback before enabling sending."
-            : error.code === "P0002"
-              ? "Connect Dropbox Sign before enabling sending."
-              : "Dropbox Sign sending could not be updated.",
+        sendingEnabledErrorMessage(enabled, error),
         { code: error.code },
       );
     }

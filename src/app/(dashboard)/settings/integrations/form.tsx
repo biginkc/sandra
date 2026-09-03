@@ -41,6 +41,7 @@ import {
 
 import {
   disconnectIntegration,
+  getEsignCallbackUrlAction,
   setChannelEnabledAction,
   setReminderPhoneAction,
   setTimezoneAction,
@@ -55,6 +56,40 @@ const TIMEZONES = [
   { value: "America/Phoenix", label: "Arizona (America/Phoenix)" },
 ] as const;
 
+function CallbackUrlRow({ url }: { url: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access can fail (permissions, insecure context); the URL
+      // is still selectable text, so this is a soft failure.
+    }
+  };
+  return (
+    <div className="flex flex-col gap-1 rounded-md border p-3 text-sm">
+      <span className="font-medium">Callback URL</span>
+      <span className="text-muted-foreground text-xs">
+        Paste this into Dropbox Sign under Account &rarr; API &rarr; Account
+        callback so Sandra receives signature status updates.
+      </span>
+      <div className="mt-1 flex items-center gap-2">
+        <code
+          data-testid="esign-callback-url"
+          className="bg-muted flex-1 overflow-x-auto rounded px-2 py-1 text-xs"
+        >
+          {url}
+        </code>
+        <Button type="button" variant="outline" size="sm" onClick={copy}>
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const [slackEnabled, setSlackEnabled] = useState(initial.slack.enabled);
   const [googleEnabled, setGoogleEnabled] = useState(initial.google.enabled);
@@ -63,6 +98,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const [savedPhone, setSavedPhone] = useState(initial.sms.phone);
   const [phoneInput, setPhoneInput] = useState(initial.sms.phone ?? "");
   const [esign, setEsign] = useState(initial.esign);
+  const [esignCallbackUrl, setEsignCallbackUrl] = useState(
+    initial.esignCallbackUrl,
+  );
   const [esignApiKey, setEsignApiKey] = useState("");
   const [esignConfirmation, setEsignConfirmation] = useState<boolean | null>(
     null,
@@ -181,6 +219,12 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
       if (result.ok) {
         setEsign(result.data);
         setEsignApiKey("");
+        // connectDropboxSignAction's return value is the shared connection
+        // status shape and doesn't carry the callback URL — fetch it
+        // separately so the owner sees it immediately instead of needing a
+        // page reload.
+        const callbackUrl = await getEsignCallbackUrlAction();
+        if (callbackUrl.ok) setEsignCallbackUrl(callbackUrl.data);
       }
     });
   };
@@ -280,6 +324,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               liveSendLimit: null,
               statusUnavailable: false,
             });
+            setEsignCallbackUrl(null);
           } else {
             setEsign((current) => ({
               ...current,
@@ -393,6 +438,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
             )}
             {esign.connected ? (
               <>
+                {esign.canManage && esignCallbackUrl && (
+                  <CallbackUrlRow url={esignCallbackUrl} />
+                )}
                 <label className="flex items-center justify-between gap-4 rounded-md border p-3 text-sm">
                   <span className="flex flex-col gap-1">
                     <span className="font-medium">Enable contract sending</span>

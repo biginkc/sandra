@@ -340,7 +340,10 @@ describe("eSign server actions", () => {
 
   it("explains that callback verification is required before sending", async () => {
     mocks.adminUpdate.mockResolvedValue({
-      error: { message: "constraint detail", code: "23514" },
+      error: {
+        message: "Verify the Dropbox Sign callback before enabling sending",
+        code: "23514",
+      },
     });
     const result = await setEsignSendingEnabledAction(true, true);
     expect(result).toMatchObject({
@@ -348,6 +351,69 @@ describe("eSign server actions", () => {
       error: {
         code: "DATABASE",
         message: "Verify the Dropbox Sign callback before enabling sending.",
+      },
+    });
+  });
+
+  it("explains that a live monthly send limit has been reached", async () => {
+    mocks.adminUpdate.mockResolvedValue({
+      error: {
+        message: "Sandra live-send monthly limit has been reached",
+        code: "23514",
+      },
+    });
+    const result = await setEsignSendingEnabledAction(true, true);
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "DATABASE",
+        message: "Sandra live-send monthly limit has been reached.",
+      },
+    });
+  });
+
+  it("never surfaces an unrecognized 23514 message — falls back to the generic message", async () => {
+    mocks.adminUpdate.mockResolvedValue({
+      error: {
+        message: "private database diagnostic detail leaked from a trigger",
+        code: "23514",
+      },
+    });
+    const result = await setEsignSendingEnabledAction(true, true);
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "DATABASE",
+        message: "Dropbox Sign sending could not be updated.",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(
+      "private database diagnostic detail leaked from a trigger",
+    );
+  });
+
+  it("explains that a website template must be registered before live sending — not the generic callback message", async () => {
+    mocks.adminUpdate.mockResolvedValue({
+      error: {
+        message:
+          "Register a Dropbox Sign website template before enabling live sending",
+        code: "23514",
+      },
+    });
+    const result = await setEsignSendingEnabledAction(true, true);
+    // Regression guard: previously every non-"active eSign work" 23514 error
+    // was mapped to the callback message, hiding the real blocker.
+    expect(result).not.toMatchObject({
+      error: {
+        message: "Verify the Dropbox Sign callback before enabling sending.",
+      },
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "DATABASE",
+        message:
+          "Register a Dropbox Sign website template before enabling live sending.",
       },
     });
   });

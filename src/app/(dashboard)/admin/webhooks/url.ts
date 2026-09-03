@@ -22,6 +22,9 @@ export const PROD_BASE_URL = "https://sandra-sooty.vercel.app";
 
 export function webhookBaseUrl(): string {
   // Trim a trailing slash if present so we can always template `${base}/api/...`.
+  // Production must set NEXT_PUBLIC_SITE_URL to the apex (sandra.bmhgroupkc.com)
+  // — every consumer of this helper (webhook URLs, the Dropbox Sign callback
+  // URL) falls back to the Vercel deployment alias otherwise.
   const fromEnv = process.env.NEXT_PUBLIC_SITE_URL?.trim();
   const base = fromEnv && fromEnv.length > 0 ? fromEnv : PROD_BASE_URL;
   return base.replace(/\/$/, "");
