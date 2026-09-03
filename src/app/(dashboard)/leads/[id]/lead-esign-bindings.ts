@@ -812,7 +812,10 @@ export async function providerForOrg(
         signal,
       ),
     getRemainingSignatureRequests: ({ signal }) =>
-      provider.getRemainingSignatureRequests?.(signal) ?? Promise.resolve(null),
+      provider.getRemainingSignatureRequests?.(
+        credentials.providerAccountId,
+        signal,
+      ) ?? Promise.resolve(null),
   };
 }
 

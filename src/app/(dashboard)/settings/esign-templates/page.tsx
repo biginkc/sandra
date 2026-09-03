@@ -16,8 +16,13 @@ export default async function EsignTemplatesPage() {
     loadPendingTemplateCopies(),
     getEsignConnectionStatus(),
   ]);
-  const dropboxSignDisconnected = esignStatus.ok && !esignStatus.data.connected;
-  const addTemplateDisabledReason = dropboxSignDisconnected
+  const dropboxSignStatusUnavailable =
+    !esignStatus.ok || esignStatus.data.statusUnavailable === true;
+  const dropboxSignDisconnected =
+    !dropboxSignStatusUnavailable && !esignStatus.data.connected;
+  const addTemplateDisabledReason = dropboxSignStatusUnavailable
+    ? "Dropbox Sign status is temporarily unavailable."
+    : dropboxSignDisconnected
     ? "Connect Dropbox Sign before adding templates."
     : result.ok && pendingCopies.ok
       ? undefined
@@ -45,13 +50,17 @@ export default async function EsignTemplatesPage() {
         }
       />
 
-      <EsignModeBanner testMode={esignStatus.ok ? esignStatus.data.testMode : true} />
+      <EsignModeBanner
+        testMode={dropboxSignStatusUnavailable ? null : esignStatus.data.testMode}
+      />
 
       <PendingTemplateCopies result={pendingCopies} />
       <TemplateLibrary
         result={result}
         actions={pendingCopies.ok ? undefined : null}
-        dropboxSignConnected={!dropboxSignDisconnected}
+        dropboxSignConnected={
+          !dropboxSignStatusUnavailable && !dropboxSignDisconnected
+        }
         templateCreationDisabledReason={addTemplateDisabledReason}
       />
     </Page>

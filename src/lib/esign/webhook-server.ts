@@ -69,9 +69,14 @@ export function createConcreteDropboxSignWebhookDependencies(
           apiKey: credentials.apiKey,
           clientId: credentials.clientId,
         }).getSignatureRequestMetadata(input.signRequestId);
-        return metadata.signatureRequestId === input.signRequestId &&
-          metadata.localRequestId === input.localRequestId &&
-          metadata.testMode === input.testMode
+        if (
+          metadata.signatureRequestId !== input.signRequestId ||
+          metadata.localRequestId !== input.localRequestId
+        ) {
+          return "mismatch";
+        }
+        if (metadata.testMode === null) return "mode_unverified";
+        return input.testMode === null || metadata.testMode === input.testMode
           ? "matched"
           : "mismatch";
       },

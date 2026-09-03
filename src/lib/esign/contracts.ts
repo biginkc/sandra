@@ -190,7 +190,10 @@ export type DropboxSignProvider = {
   sendWithTemplate(
     input: SendWithTemplateInput,
   ): Promise<SendWithTemplateOutput>;
-  getRemainingSignatureRequests?(signal?: AbortSignal): Promise<number | null>;
+  getRemainingSignatureRequests?(
+    providerAccountId: string,
+    signal?: AbortSignal,
+  ): Promise<number | null>;
   updateSignerEmail(input: {
     signatureRequestId: string;
     signatureId: string;
@@ -223,7 +226,8 @@ export type EsignConnectionStatus = {
   canManage: boolean;
   sendingEnabled: boolean;
   disconnectPending: boolean;
-  testMode: boolean;
+  testMode: boolean | null;
+  statusUnavailable?: boolean;
   apiKeyLastFour: string | null;
   embeddedTemplateManagementEnabled?: boolean;
   liveSendLimit?: {

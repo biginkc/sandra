@@ -256,6 +256,64 @@ describe("Dropbox website eSign template registration", () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
+  it("rejects the canonical five plus an extra Sender custom field", async () => {
+    const customFields = [
+      ...ESIGN_MERGE_FIELD_NAMES.map((name) => field(name)),
+      field("unexpected_sender_field"),
+    ];
+    mocks.getTemplate.mockResolvedValue(metadata({
+      mergeFieldNames: customFields.map((customField) => customField.name!),
+      mergeFields: customFields,
+      documents: [
+        {
+          index: 0,
+          name: "purchase-agreement.pdf",
+          customFields,
+          formFields: metadata().formFields,
+        },
+      ],
+    }));
+
+    await expect(
+      registerDropboxWebsiteTemplate({
+        orgId: "org-1",
+        actorId: "user-1",
+        providerTemplateId: "provider-template-1",
+        name: "Purchase agreement",
+        documentType: "Purchase agreement",
+      }),
+    ).rejects.toBeInstanceOf(ProviderError);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("rejects expected merge field names with unknown signer assignment", async () => {
+    const customFields = ESIGN_MERGE_FIELD_NAMES.map((name) =>
+      field(name, { signer: null, assignedTo: "unknown" }),
+    );
+    mocks.getTemplate.mockResolvedValue(metadata({
+      mergeFields: customFields,
+      documents: [
+        {
+          index: 0,
+          name: "purchase-agreement.pdf",
+          customFields,
+          formFields: metadata().formFields,
+        },
+      ],
+    }));
+
+    await expect(
+      registerDropboxWebsiteTemplate({
+        orgId: "org-1",
+        actorId: "user-1",
+        providerTemplateId: "provider-template-1",
+        name: "Purchase agreement",
+        documentType: "Purchase agreement",
+      }),
+    ).rejects.toBeInstanceOf(ProviderError);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
   const ambiguousProviderCases: Array<[string, Partial<ProviderTemplateMetadata>]> = [
     ["missing embedded flag", { isEmbedded: null }],
     ["missing locked flag", { isLocked: null }],

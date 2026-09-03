@@ -257,6 +257,70 @@ describe("Dropbox Sign provider", () => {
     });
   });
 
+  it("preserves missing custom-field signer as unknown while null and Sender mean Sender", async () => {
+    sdk.templateGet.mockResolvedValue({ body: { template: {
+      templateId: "provider-1",
+      isEmbedded: false,
+      isLocked: false,
+      signerRoles: [{ name: "Seller", order: 0 }, { name: "Buyer", order: 1 }],
+      documents: [
+        {
+          name: "purchase-agreement.pdf",
+          index: 0,
+          customFields: [
+            { type: "text", apiId: "seller-name", name: "seller_name", signer: null },
+            { type: "text", apiId: "sender-case", name: "property_address", signer: "Sender" },
+            { type: "text", apiId: "missing-signer", name: "offer_price" },
+          ],
+          formFields: [],
+        },
+      ],
+    } } });
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+    });
+
+    await expect(provider.getTemplate("provider-1")).resolves.toMatchObject({
+      documents: [
+        expect.objectContaining({
+          customFields: [
+            expect.objectContaining({ name: "seller_name", assignedTo: "sender", signer: null }),
+            expect.objectContaining({ name: "property_address", assignedTo: "sender", signer: "Sender" }),
+            expect.objectContaining({ name: "offer_price", assignedTo: "unknown", signer: null }),
+          ],
+        }),
+      ],
+      mergeFieldNames: ["seller_name", "property_address"],
+    });
+  });
+
+  it("passes the stored provider account id into accountGet for live quota reads", async () => {
+    sdk.accountGet.mockResolvedValue({
+      body: {
+        account: {
+          quotas: { api_signature_requests_left: 17 },
+        },
+      },
+    });
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+    });
+    const controller = new AbortController();
+
+    await expect(
+      provider.getRemainingSignatureRequests?.(
+        "provider-account-1",
+        controller.signal,
+      ),
+    ).resolves.toBe(17);
+    expect(sdk.accountGet).toHaveBeenCalledWith("provider-account-1");
+    expect(sdk.interceptorOptions.at(-1)).toEqual({
+      signal: controller.signal,
+    });
+  });
+
   it("forces test mode and preserves local/provider identifiers separately", async () => {
     const provider = createDropboxSignProvider({
       apiKey: new EsignSecret("api-key"),

@@ -86,6 +86,12 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const esignToggleDescriptionId = esign.canManage
     ? undefined
     : esignOwnerReasonId;
+  const esignModeLabel =
+    esign.testMode === true
+      ? "test"
+      : esign.testMode === false
+        ? "live"
+        : "unavailable";
 
   const toggleSlack = (next: boolean) => {
     const previous = slackEnabled;
@@ -272,6 +278,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               apiKeyLastFour: null,
               embeddedTemplateManagementEnabled: false,
               liveSendLimit: null,
+              statusUnavailable: false,
             });
           } else {
             setEsign((current) => ({
@@ -358,10 +365,12 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
             </CardAction>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
-            <div className={`${esign.testMode ? "border-alert-warning/40 bg-alert-warning/10" : "border-destructive/30 bg-destructive/5"} rounded-md border px-3 py-2 text-sm`}>
-              {esign.testMode
+            <div className={`${esign.testMode === true ? "border-alert-warning/40 bg-alert-warning/10" : esign.testMode === false ? "border-destructive/30 bg-destructive/5" : "border-muted bg-muted/30"} rounded-md border px-3 py-2 text-sm`}>
+              {esign.testMode === true
                 ? "Dropbox Sign is in test mode. Test signatures are watermarked and not legally binding."
-                : "Dropbox Sign is in live mode. New sends are legally binding and count against Dropbox Sign billing."}
+                : esign.testMode === false
+                  ? "Dropbox Sign is in live mode. New sends are legally binding and count against Dropbox Sign billing."
+                  : "Dropbox Sign status is unavailable. Registration, template management, and sending controls are disabled until status loads."}
             </div>
             {esignDisconnectResult && (
               <p
@@ -390,7 +399,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                     <span className="text-muted-foreground text-xs">
                       {esign.disconnectPending
                         ? "Active signature work is still finishing."
-                        : `Requires a verified callback and applies to new ${esign.testMode ? "test" : "live"} requests.`}
+                        : `Requires a verified callback and applies to new ${esignModeLabel} requests.`}
                     </span>
                   </span>
                   <input
@@ -425,8 +434,12 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                     <input
                       type="checkbox"
                       role="switch"
-                      checked={!esign.testMode}
-                      disabled={pending || esign.disconnectPending}
+                      checked={esign.testMode === false}
+                      disabled={
+                        pending ||
+                        esign.disconnectPending ||
+                        esign.testMode === null
+                      }
                       onChange={(event) =>
                         setEsignModeConfirmation(!event.target.checked)
                       }
@@ -436,9 +449,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                     />
                   </label>
                 )}
-                {!esign.testMode && esign.liveSendLimit ? (
+                {esign.testMode === false && esign.liveSendLimit ? (
                   <div className="rounded-md border px-3 py-2 text-xs text-muted-foreground">
-                    Sandra local calendar-month ceiling: {esign.liveSendLimit.usedThisMonth} of {esign.liveSendLimit.monthlyLimit} live sends used. Dropbox may count manual dashboard sends and other API clients outside this counter.
+                    Sandra local calendar-month ceiling: {esign.liveSendLimit.usedThisMonth} of {esign.liveSendLimit.monthlyLimit} live sends used. It resets on Sandra&apos;s America/Chicago calendar-month boundary. Dropbox may count manual dashboard sends and other API clients outside this counter.
                   </div>
                 ) : null}
                 {!esign.embeddedTemplateManagementEnabled ? (
@@ -488,6 +501,11 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                   </p>
                 )}
               </>
+            ) : esign.statusUnavailable ? (
+              <p className="text-muted-foreground text-sm">
+                Dropbox Sign status is unavailable. Registration and template
+                management are disabled until Sandra can load the connection.
+              </p>
             ) : esign.canManage ? (
               <div className="flex flex-col gap-2">
                 <label
@@ -625,7 +643,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
             </DialogTitle>
             <DialogDescription>
               {esignConfirmation
-                ? "New test-mode signature requests can be sent after you confirm."
+                ? esign.testMode === false
+                  ? "New legally binding live requests can be sent after you confirm. Sandra's cost fuse cannot control manual Dropbox dashboard sends or other API clients."
+                  : "New test-mode signature requests can be sent after you confirm."
                 : "New signature requests will stay blocked after you confirm."}
             </DialogDescription>
           </DialogHeader>

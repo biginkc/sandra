@@ -44,6 +44,31 @@ comment on column public.esign_requests.test_mode is
 comment on column public.esign_requests.provider_remaining_at_claim is
   'Dropbox Sign reported api_signature_requests_left at Sandra live-send reservation time.';
 
+do $$
+declare
+  v_duplicate record;
+begin
+  select provider_account_id, sign_template_id, count(*) as duplicate_count,
+    array_agg(id order by created_at, id) as template_ids
+  into v_duplicate
+  from public.esign_templates
+  where provider_account_id is not null
+    and sign_template_id is not null
+  group by provider_account_id, sign_template_id
+  having count(*) > 1
+  limit 1;
+
+  if found then
+    raise exception
+      'Duplicate eSign provider template pair blocks 20260902180000: provider_account_id %, sign_template_id %, template_ids %. Retire or reconcile duplicates before applying global provider template uniqueness.',
+      v_duplicate.provider_account_id,
+      v_duplicate.sign_template_id,
+      v_duplicate.template_ids
+      using errcode = '23505';
+  end if;
+end;
+$$;
+
 alter table public.esign_templates
   add column if not exists template_origin text not null default 'sandra_embedded',
   add column if not exists provider_metadata jsonb,
@@ -160,12 +185,31 @@ as $$
       'closing_date'
     )
   ),
+  sender_custom_fields as (
+    select field.value as field
+    from documents
+    cross join lateral jsonb_array_elements(
+      case
+        when jsonb_typeof(documents.document -> 'customFields') = 'array'
+          then documents.document -> 'customFields'
+        else '[]'::jsonb
+      end
+    ) field(value)
+    where field.value ->> 'assignedTo' = 'sender'
+  ),
   sender_merge_fields as (
     select field
-    from custom_fields
+    from sender_custom_fields
     where field ->> 'assignedTo' = 'sender'
       and field ->> 'type' = 'text'
       and btrim(coalesce(field ->> 'apiId', '')) <> ''
+      and field ->> 'name' in (
+        'seller_name',
+        'property_address',
+        'offer_price',
+        'earnest_money',
+        'closing_date'
+      )
   ),
   required_signature_fields as (
     select field.value ->> 'signerRoleName' as role_name
@@ -208,6 +252,9 @@ as $$
     and exists (select 1 from documents)
     and (
       select count(*) from custom_fields
+    ) = 5
+    and (
+      select count(*) from sender_custom_fields
     ) = 5
     and (
       select array_agg(field ->> 'name' order by field ->> 'name')
@@ -1066,6 +1113,87 @@ revoke all on function public.reserve_esign_live_send(uuid, uuid, integer)
   from public, anon, authenticated, service_role;
 grant execute on function public.reserve_esign_live_send(uuid, uuid, integer)
   to service_role;
+
+create or replace function public.mark_esign_request_send_outcome(
+  p_org_id uuid,
+  p_request_id uuid,
+  p_delivery_state public.esign_delivery_state,
+  p_error_message text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_request public.esign_requests%rowtype;
+  v_release_local_live_reservation boolean := false;
+  v_reservation_period_key text;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required' using errcode = '42501';
+  end if;
+  if p_delivery_state not in ('send_unknown', 'failed')
+     or (p_delivery_state = 'failed'
+       and coalesce(p_error_message, '') !~ '^[A-Z][A-Z0-9_]{0,127}$')
+     or (p_delivery_state = 'send_unknown' and p_error_message is not null) then
+    raise exception 'invalid send outcome' using errcode = '23514';
+  end if;
+
+  select * into v_request
+  from public.esign_requests request
+  where request.id = p_request_id
+    and request.org_id = p_org_id
+  for update;
+
+  if not found or v_request.delivery_state <> 'sending' then
+    raise exception 'eSign request is not sending' using errcode = '55000';
+  end if;
+
+  v_release_local_live_reservation :=
+    p_delivery_state = 'failed'
+    and v_request.test_mode = false
+    and v_request.live_send_reserved_at is not null
+    and v_request.sign_request_id is null
+    and p_error_message in ('PROVIDER_REJECTED', 'PROVIDER_PLAN_REQUIRED');
+
+  if v_release_local_live_reservation then
+    v_reservation_period_key :=
+      to_char(v_request.live_send_reserved_at at time zone 'America/Chicago', 'YYYY-MM');
+    update public.org_esign_integrations integration
+    set live_send_monthly_used = greatest(0, integration.live_send_monthly_used - 1),
+        updated_at = now()
+    where integration.org_id = p_org_id
+      and integration.provider = 'dropbox_sign'
+      and integration.live_send_monthly_period_key = v_reservation_period_key
+      and integration.live_send_monthly_used > 0;
+  end if;
+
+  update public.esign_requests
+  set delivery_state = p_delivery_state,
+      status = case when p_delivery_state = 'failed' then 'error' else status end,
+      completed_at = case
+        when p_delivery_state = 'failed' then now() else completed_at end,
+      error_message = case when p_delivery_state = 'failed'
+        then p_error_message else null end,
+      live_send_reserved_at = case
+        when v_release_local_live_reservation then null else live_send_reserved_at end,
+      provider_remaining_at_claim = case
+        when v_release_local_live_reservation then null else provider_remaining_at_claim end,
+      updated_by = null,
+      updated_at = now()
+  where id = p_request_id
+    and org_id = p_org_id
+    and delivery_state = 'sending';
+end;
+$$;
+
+revoke all on function public.mark_esign_request_send_outcome(
+  uuid, uuid, public.esign_delivery_state, text
+) from public, anon, authenticated, service_role;
+grant execute on function public.mark_esign_request_send_outcome(
+  uuid, uuid, public.esign_delivery_state, text
+) to service_role;
 
 drop function if exists public.find_esign_webhook_request(uuid, text);
 

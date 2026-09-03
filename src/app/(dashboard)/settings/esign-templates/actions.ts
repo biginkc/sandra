@@ -3,6 +3,11 @@
 import { revalidatePath } from "next/cache";
 
 import { reportError } from "@/lib/errors/report";
+import {
+  DatabaseError,
+  ProviderError,
+  ValidationError,
+} from "@/lib/errors/classes";
 import { createFoundationTemplateOrchestrator } from "@/lib/esign/template-foundation-adapter";
 import { createInitialTemplateRuntime } from "@/lib/esign/template-initial-runtime";
 import { getSingleActiveMembership } from "@/lib/auth/memberships";
@@ -26,6 +31,61 @@ const SAFE_FAILURE = {
   code: "ESIGN_TEMPLATE_ACTION_FAILED",
   message: "The eSign template action could not be completed.",
 } as const;
+
+const KNOWN_WEBSITE_TEMPLATE_ERRORS: Record<string, string> = {
+  template_id_mismatch:
+    "Dropbox Sign returned a different template ID. Copy the template ID again from Dropbox Sign.",
+  embedded_template_not_supported:
+    "Register a non-embedded template created on the Dropbox Sign website.",
+  template_not_usable:
+    "Unlock the Dropbox Sign template before registering it.",
+  template_document_mismatch:
+    "The Dropbox Sign template must include at least one document.",
+  template_account_mismatch:
+    "The template must be available to the connected Dropbox Sign account.",
+  signer_role_mismatch:
+    "Dropbox Sign signer roles must be exactly Seller then Buyer.",
+  merge_field_mismatch:
+    "Dropbox Sign Sender merge fields must be exactly seller_name, property_address, offer_price, closing_date, and earnest_money.",
+  template_field_mismatch:
+    "Dropbox Sign must include required signature fields for Seller and Buyer.",
+};
+
+function safeWebsiteTemplateActionFailure(error: unknown) {
+  if (error instanceof ValidationError) {
+    return { code: "VALIDATION", message: error.message };
+  }
+  if (error instanceof ProviderError) {
+    const providerCode =
+      typeof error.details?.providerCode === "string"
+        ? error.details.providerCode
+        : null;
+    const statusCode =
+      typeof error.details?.statusCode === "number"
+        ? error.details.statusCode
+        : null;
+    if (providerCode && KNOWN_WEBSITE_TEMPLATE_ERRORS[providerCode]) {
+      return {
+        code: providerCode.toUpperCase(),
+        message: KNOWN_WEBSITE_TEMPLATE_ERRORS[providerCode],
+      };
+    }
+    if (statusCode === 429 || (statusCode !== null && statusCode >= 500)) {
+      return {
+        code: "PROVIDER_TEMPORARILY_UNAVAILABLE",
+        message: "Dropbox Sign could not validate the template right now. Try again.",
+      };
+    }
+  }
+  if (error instanceof Error && error.message === "DROPBOX_SIGN_NOT_CONNECTED") {
+    return {
+      code: "DROPBOX_SIGN_NOT_CONNECTED",
+      message: "Connect Dropbox Sign before registering website templates.",
+    };
+  }
+  if (error instanceof DatabaseError) return SAFE_FAILURE;
+  return SAFE_FAILURE;
+}
 
 async function run<T>(
   surface: string,
@@ -122,7 +182,7 @@ export async function registerWebsiteTemplateAction(input: {
     return { ok: true, data: result };
   } catch (error) {
     reportError(error, { tags: { surface: "esign_template_register_website" } });
-    return { ok: false, error: SAFE_FAILURE };
+    return { ok: false, error: safeWebsiteTemplateActionFailure(error) };
   }
 }
 
@@ -158,7 +218,7 @@ export async function revalidateWebsiteTemplateAction(
     return { ok: true, data: { status } };
   } catch (error) {
     reportError(error, { tags: { surface: "esign_template_revalidate_website" } });
-    return { ok: false, error: SAFE_FAILURE };
+    return { ok: false, error: safeWebsiteTemplateActionFailure(error) };
   }
 }
 

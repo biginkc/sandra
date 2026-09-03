@@ -261,19 +261,27 @@ function validateWebsiteProviderMetadata(
 
 function hasExactSenderMergeFields(fields: readonly ProviderTemplateField[]): boolean {
   const expectedFields = [...ESIGN_MERGE_FIELD_NAMES].sort();
-  const relevantFields = fields.filter(
+  const expectedNameFields = fields.filter(
     (field) =>
       typeof field.name === "string" &&
       ESIGN_MERGE_FIELD_NAMES.includes(
         field.name as (typeof ESIGN_MERGE_FIELD_NAMES)[number],
       ),
   );
-  const actualFields = relevantFields
-    .filter(isValidSenderMergeField)
+  const senderFields = fields.filter((field) => field.assignedTo === "sender");
+  const actualFields = senderFields
+    .filter(
+      (field) =>
+        isValidSenderMergeField(field) &&
+        ESIGN_MERGE_FIELD_NAMES.includes(
+          field.name as (typeof ESIGN_MERGE_FIELD_NAMES)[number],
+        ),
+    )
     .map((field) => field.name as string)
     .sort();
   return (
-    relevantFields.length === expectedFields.length &&
+    expectedNameFields.length === expectedFields.length &&
+    senderFields.length === expectedFields.length &&
     actualFields.length === expectedFields.length &&
     actualFields.every((field, index) => field === expectedFields[index])
   );

@@ -5,7 +5,11 @@ import pg from "pg";
 
 const { Client } = pg;
 
-const adminUrl = process.env.LOCAL_REHEARSAL_DATABASE_URL ?? null;
+const adminUrl =
+  process.env.LOCAL_REHEARSAL_DATABASE_URL ??
+  process.env.SUPABASE_LOCAL_DB_URL ??
+  process.env.SUPABASE_DB_URL ??
+  null;
 const parsedAdminUrl = adminUrl ? new URL(adminUrl) : null;
 if (parsedAdminUrl) {
   if (
@@ -309,8 +313,11 @@ create table public.esign_requests(
   claimed_homeowner_contact_id uuid,
   sign_request_id text,
   signed_pdf_path text,
+  error_message text,
   created_by uuid,
+  updated_by uuid,
   created_at timestamptz not null default now(),
+  completed_at timestamptz,
   updated_at timestamptz not null default now(),
   unique(org_id, send_intent_id)
 );
@@ -401,6 +408,84 @@ async function setServiceRole(client) {
   await client.query("select set_config('request.jwt.claim.role','service_role',false)");
 }
 
+async function assertServiceRoleOnlyFunction(client, signature) {
+  const result = await client.query(
+    `select
+       has_function_privilege('service_role', $1::regprocedure, 'EXECUTE') as service_role,
+       has_function_privilege('authenticated', $1::regprocedure, 'EXECUTE') as authenticated,
+       has_function_privilege('anon', $1::regprocedure, 'EXECUTE') as anon`,
+    [signature],
+  );
+  assert(result.rows[0].service_role === true, `${signature} is not executable by service_role`);
+  assert(result.rows[0].authenticated === false, `${signature} is executable by authenticated`);
+  assert(result.rows[0].anon === false, `${signature} is executable by anon`);
+}
+
+async function assertPostApplyShape(client) {
+  for (const signature of [
+    "public.esign_website_template_metadata_is_valid(text,text,jsonb)",
+    "public.register_dropbox_website_esign_template(uuid,uuid,text,text,text,text,jsonb)",
+    "public.mark_dropbox_website_esign_template_unavailable(uuid,uuid,uuid,text)",
+    "public.set_org_esign_test_mode(uuid,uuid,boolean)",
+    "public.set_org_esign_sending_enabled(uuid,uuid,boolean)",
+    "public.create_esign_request(uuid,uuid,uuid,jsonb,jsonb,uuid,text,uuid,uuid)",
+    "public.reserve_esign_live_send(uuid,uuid,integer)",
+    "public.mark_esign_request_send_outcome(uuid,uuid,public.esign_delivery_state,text)",
+    "public.find_esign_webhook_request(uuid,text)",
+  ]) {
+    await assertServiceRoleOnlyFunction(client, signature);
+  }
+  const integrationColumns = await client.query(
+    `select column_name
+     from information_schema.columns
+     where table_schema = 'public'
+       and table_name = 'org_esign_integrations'
+       and column_name in (
+         'live_send_monthly_limit',
+         'live_send_monthly_used',
+         'live_send_monthly_period_key',
+         'live_send_monthly_period_started_at'
+       )`,
+  );
+  assert(integrationColumns.rowCount === 4, "missing live-send quota columns");
+  const requestColumns = await client.query(
+    `select column_name
+     from information_schema.columns
+     where table_schema = 'public'
+       and table_name = 'esign_requests'
+       and column_name in ('live_send_reserved_at', 'provider_remaining_at_claim')`,
+  );
+  assert(requestColumns.rowCount === 2, "missing request reservation columns");
+  const templateColumns = await client.query(
+    `select column_name
+     from information_schema.columns
+     where table_schema = 'public'
+       and table_name = 'esign_templates'
+       and column_name in (
+         'template_origin',
+         'provider_metadata',
+         'provider_metadata_attested_at',
+         'provider_metadata_unavailable_at',
+         'provider_metadata_unavailable_reason'
+       )`,
+  );
+  assert(templateColumns.rowCount === 5, "missing website template origin/attestation columns");
+  const rls = await client.query(
+    `select relrowsecurity
+     from pg_class
+     where oid = 'public.org_esign_integrations'::regclass`,
+  );
+  assert(rls.rows[0].relrowsecurity === true, "org_esign_integrations RLS is not enabled");
+  const policies = await client.query(
+    `select count(*)::int as count
+     from pg_policies
+     where schemaname = 'public'
+       and tablename = 'org_esign_integrations'
+       and policyname = 'org_esign_integrations_org_select'`,
+  );
+  assert(policies.rows[0].count === 1, "org_esign_integrations select policy missing");
+}
+
 async function createRequest(client, sendIntentId = randomUUID()) {
   const result = await client.query(
     `select * from public.create_esign_request(
@@ -423,9 +508,51 @@ async function createRequest(client, sendIntentId = randomUUID()) {
   return result.rows[0].id;
 }
 
+async function assertDuplicateProviderPairPreflight(adminClient) {
+  const duplicateDbName = `${dbName}_duplicate_pair`;
+  await adminClient.query(`create database ${q(duplicateDbName)}`);
+  const duplicateClient = localClient(duplicateDbName);
+  await duplicateClient.connect();
+  try {
+    await duplicateClient.query(baseSql);
+    await duplicateClient.query(
+      `insert into public.esign_templates(
+        id, org_id, name, document_type, seller_role, signer_roles,
+        merge_field_names, sign_template_id, provider_account_id
+      ) values
+        ($1,$3,'A','purchase_agreement','Seller','[]'::jsonb,array[]::text[],$5,$6),
+        ($2,$4,'B','purchase_agreement','Seller','[]'::jsonb,array[]::text[],$5,$6)`,
+      [
+        randomUUID(),
+        randomUUID(),
+        ids.org,
+        randomUUID(),
+        "duplicate-provider-template",
+        "duplicate-provider-account",
+      ],
+    );
+    let blocked = false;
+    try {
+      await duplicateClient.query(migrationSql);
+    } catch (error) {
+      blocked = error.code === "23505" &&
+        /Duplicate eSign provider template pair blocks 20260902180000/.test(
+          error.message,
+        );
+    }
+    assert(blocked, "duplicate provider-account/template preflight did not fail closed");
+  } finally {
+    await duplicateClient.end().catch(() => {});
+    await adminClient
+      .query(`drop database if exists ${q(duplicateDbName)} with (force)`)
+      .catch(() => {});
+  }
+}
+
 const admin = localClient();
 await admin.connect();
 try {
+  await assertDuplicateProviderPairPreflight(admin);
   await admin.query(`create database ${q(dbName)}`);
   const client = localClient(dbName);
   await client.connect();
@@ -443,7 +570,25 @@ try {
         "id,org_id,property_id,status,signed_pdf_path,template_title,test_mode",
       "migration did not safely replace webhook lookup with the seven-column return shape",
     );
+    await assertPostApplyShape(client);
     await setServiceRole(client);
+    let invalidOriginRejected = false;
+    try {
+      await client.query(
+        `insert into public.esign_templates(
+          org_id,name,document_type,seller_role,signer_roles,merge_field_names,
+          sign_template_id,provider_account_id,template_origin,finalized_at,lifecycle_state
+        ) values (
+          $1,'Invalid origin','purchase_agreement','Seller','[]'::jsonb,
+          array[]::text[],'invalid-origin-template','provider-account-1',
+          'dropbox_unknown',now(),'finalized'
+        )`,
+        [ids.org],
+      );
+    } catch {
+      invalidOriginRejected = true;
+    }
+    assert(invalidOriginRejected, "invalid template_origin was accepted");
 
     await client.query(
       `insert into auth.users(id) values ($1),($2),($3)`,
@@ -541,6 +686,32 @@ try {
       deprecatedOnlyValid.rows[0].valid === false,
       "SQL accepted deprecated-only template metadata",
     );
+    const extraSenderMetadata = JSON.parse(JSON.stringify(metadata));
+    extraSenderMetadata.documents[0].customFields.push({
+      documentIndex: 0,
+      apiId: "unexpected-sender-api",
+      name: "unexpected_sender_field",
+      type: "text",
+      required: false,
+      signer: null,
+      assignedTo: "sender",
+      signerRoleName: null,
+    });
+    extraSenderMetadata.mergeFields = extraSenderMetadata.documents.flatMap(
+      (document) => document.customFields,
+    );
+    const extraSenderValid = await client.query(
+      `select public.esign_website_template_metadata_is_valid($1,$2,$3::jsonb) as valid`,
+      [
+        metadata.providerTemplateId,
+        "provider-account-1",
+        JSON.stringify(extraSenderMetadata),
+      ],
+    );
+    assert(
+      extraSenderValid.rows[0].valid === false,
+      "SQL accepted an extra Sender custom field",
+    );
 
     const requestId = await createRequest(client);
     const reserved = await client.query(
@@ -555,6 +726,24 @@ try {
     );
     assert(quota.rows[0].live_send_monthly_used === 1, "monthly period did not reset atomically");
     assert(quota.rows[0].live_send_monthly_period_key !== "2026-08", "period key did not roll over");
+    await client.query(
+      `select public.mark_esign_request_send_outcome($1,$2,'failed',$3)`,
+      [ids.org, requestId, "PROVIDER_PLAN_REQUIRED"],
+    );
+    const released = await client.query(
+      `select integration.live_send_monthly_used, request.live_send_reserved_at,
+        request.provider_remaining_at_claim, request.delivery_state,
+        request.error_message
+       from public.org_esign_integrations integration
+       join public.esign_requests request on request.org_id = integration.org_id
+       where integration.org_id = $1 and request.id = $2`,
+      [ids.org, requestId],
+    );
+    assert(released.rows[0].live_send_monthly_used === 0, "provider-plan failure did not release Sandra local live-send fuse");
+    assert(released.rows[0].live_send_reserved_at === null, "provider-plan failure did not clear request reservation");
+    assert(released.rows[0].provider_remaining_at_claim === null, "provider-plan failure did not clear provider remaining snapshot");
+    assert(released.rows[0].delivery_state === "failed", "provider-plan failure did not fail the request");
+    assert(released.rows[0].error_message === "PROVIDER_PLAN_REQUIRED", "provider-plan failure did not preserve safe error");
 
     const lowQuotaRequestId = await createRequest(client);
     const blocked = await client.query(
@@ -562,6 +751,20 @@ try {
       [ids.org, lowQuotaRequestId],
     );
     assert(blocked.rows[0].outcome === "blocked", "provider remaining 10 must fail closed");
+    for (const limit of [45, 50]) {
+      let limitRejected = false;
+      try {
+        await client.query(
+          `update public.org_esign_integrations
+           set live_send_monthly_limit = $2
+           where org_id = $1`,
+          [ids.org, limit],
+        );
+      } catch {
+        limitRejected = true;
+      }
+      assert(limitRejected, `Sandra local live-send ceiling accepted ${limit}`);
+    }
 
     await client.query(
       `insert into public.esign_templates(
@@ -597,11 +800,54 @@ try {
       embeddedBlocked.rows[0].blocker_code === "FINALIZED_TEMPLATE_NOT_FOUND",
       "live request accepted an embedded-origin template",
     );
+    await client.query(
+      `update public.org_esign_integrations
+       set sending_enabled = true, test_mode = false
+       where org_id = $1`,
+      [ids.org],
+    );
+    await client.query(
+      `select public.set_org_esign_test_mode($1,$2,true)`,
+      [ids.org, ids.owner],
+    );
+    const modeToggle = await client.query(
+      `select test_mode, sending_enabled
+       from public.org_esign_integrations
+       where org_id = $1`,
+      [ids.org],
+    );
+    assert(modeToggle.rows[0].test_mode === true, "mode toggle did not switch to test");
+    assert(modeToggle.rows[0].sending_enabled === false, "mode toggle did not disable sending");
+    await client.query(
+      `update public.org_esign_integrations
+       set test_mode = false
+       where org_id = $1`,
+      [ids.org],
+    );
 
     await client.query(
       `update public.org_esign_integrations
        set live_send_monthly_used = 39,
+           sending_enabled = true,
            live_send_monthly_period_key = to_char(now() at time zone 'America/Chicago', 'YYYY-MM')
+       where org_id = $1`,
+      [ids.org],
+    );
+    await client.query(
+      `update public.org_esign_integrations
+       set live_send_monthly_used = 40
+       where org_id = $1`,
+      [ids.org],
+    );
+    const requestAt40 = await createRequest(client);
+    const blockedAt40 = await client.query(
+      `select public.reserve_esign_live_send($1,$2,11) as outcome`,
+      [ids.org, requestAt40],
+    );
+    assert(blockedAt40.rows[0].outcome === "blocked", "local cap at 40 did not block reservation");
+    await client.query(
+      `update public.org_esign_integrations
+       set live_send_monthly_used = 39
        where org_id = $1`,
       [ids.org],
     );

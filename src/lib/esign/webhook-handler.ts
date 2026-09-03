@@ -102,19 +102,12 @@ export async function handleDropboxSignWebhook(input: {
       verifiedLocalRequestId: null,
     });
     if (!request && replay.localRequestId !== null) {
-      if (replay.testMode == null) {
-        await input.dependencies.persistence.markReceiptIgnored(
-          activeClaim,
-          "CALLBACK_MODE_MISSING",
-        );
-        return acknowledgement();
-      }
       const metadataMatch =
         await input.dependencies.metadataProvider.confirmProviderLocalRequestId({
           ...identity,
           signRequestId: replay.signRequestId,
           localRequestId: replay.localRequestId,
-          testMode: replay.testMode,
+          testMode: replay.testMode ?? null,
         });
       if (metadataMatch === "matched") {
         request = await input.dependencies.persistence.findRequest({
@@ -122,6 +115,8 @@ export async function handleDropboxSignWebhook(input: {
           signRequestId: replay.signRequestId,
           verifiedLocalRequestId: replay.localRequestId,
         });
+      } else if (metadataMatch === "mode_unverified") {
+        throw new SafeWebhookProcessingError("PROVIDER_MODE_UNVERIFIED", 503);
       } else {
         await input.dependencies.persistence.markReceiptIgnored(
           activeClaim,

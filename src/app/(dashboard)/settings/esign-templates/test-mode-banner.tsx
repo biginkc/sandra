@@ -1,4 +1,25 @@
-export function EsignModeBanner({ testMode }: { testMode: boolean }) {
+export function EsignModeBanner({ testMode }: { testMode: boolean | null }) {
+  if (testMode === null) {
+    return (
+      <div className="border-muted bg-muted/30 text-foreground flex flex-col gap-1 rounded-xl border px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+        <span className="flex items-center gap-3">
+          <span className="border-muted-foreground/30 text-muted-foreground inline-flex h-5 shrink-0 items-center rounded-full border px-2 text-[10px] font-bold tracking-[0.1em]">
+            STATUS UNAVAILABLE
+          </span>
+          <span>
+            Dropbox Sign status is unavailable. Template registration and
+            management are disabled until status loads.
+          </span>
+        </span>
+        <a
+          href="/settings/integrations"
+          className="font-medium underline underline-offset-4"
+        >
+          Integration settings
+        </a>
+      </div>
+    );
+  }
   return (
     <div className={`${testMode ? "border-alert-warning/40 bg-alert-warning/10" : "border-destructive/30 bg-destructive/5"} text-foreground flex flex-col gap-1 rounded-xl border px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between`}>
       <span className="flex items-center gap-3">

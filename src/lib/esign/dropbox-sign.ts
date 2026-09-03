@@ -300,9 +300,9 @@ export function createDropboxSignProvider(input: {
       }
     },
 
-    async getRemainingSignatureRequests(signal?: AbortSignal) {
+    async getRemainingSignatureRequests(providerAccountId: string, signal?: AbortSignal) {
       try {
-        const response = await abortableAccountApi(input.apiKey, signal).accountGet();
+        const response = await abortableAccountApi(input.apiKey, signal).accountGet(providerAccountId);
         const account = response.body.account as unknown as {
           quotas?: {
             api_signature_requests_left?: unknown;
@@ -536,8 +536,9 @@ function providerTemplateField(
   signerRoles: readonly TemplateSignerRole[],
   source: "custom" | "form",
 ): ProviderTemplateField {
-  const rawSigner = normalizeSignerValue(field.signer);
-  const assignedTo = source === "custom" && isSenderAssignment(rawSigner)
+  const signerPresent = Object.hasOwn(field, "signer");
+  const rawSigner = signerPresent ? normalizeSignerValue(field.signer) : null;
+  const assignedTo = source === "custom" && signerPresent && isSenderAssignment(rawSigner)
     ? "sender"
     : rawSigner === null
       ? "unknown"

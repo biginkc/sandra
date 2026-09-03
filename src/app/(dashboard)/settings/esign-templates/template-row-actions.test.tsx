@@ -198,6 +198,24 @@ describe("DeleteTemplateDialog", () => {
       "bg-destructive/10",
     );
   });
+
+  it("uses removing language for website-origin template history warnings", () => {
+    render(
+      <TemplateRowActions
+        template={{
+          ...template,
+          templateOrigin: "dropbox_website",
+          recentSendCount30d: 2,
+        }}
+        actions={actions}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+    expect(screen.getByText(/Removing it will not remove existing contract history/i)).toBeVisible();
+    expect(screen.queryByText(/Deleting it will not remove existing contract history/i)).toBeNull();
+  });
 });
 
 function deferred<T>() {
