@@ -1,6 +1,9 @@
 import { ProviderError } from "@/lib/errors/classes";
 
-export type ProviderFailureOutcome = "ambiguous" | "definitive_failure";
+export type ProviderFailureOutcome =
+  | "ambiguous"
+  | "definitive_failure"
+  | "provider_plan_required";
 
 export function classifyProviderFailure(
   error: unknown,
@@ -10,6 +13,7 @@ export function classifyProviderFailure(
       typeof error.details?.statusCode === "number"
         ? error.details.statusCode
         : 0;
+    if (status === 402) return "provider_plan_required";
     if (
       error.details?.retryable === true ||
       status === 408 ||

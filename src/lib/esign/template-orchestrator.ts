@@ -27,6 +27,7 @@ export type TemplateActor = Readonly<{
 }>;
 
 export type TemplateListItem = TemplateOption & Readonly<{
+  templateOrigin: "sandra_embedded" | "dropbox_website";
   sourceFilename: string;
   sourceSizeBytes: number;
   pageCount: number | null;
@@ -84,6 +85,7 @@ export type TemplateDraftRecord = Readonly<{
   stagingSourceId: string | null;
   supersedesTemplateId: string | null;
   providerSyncStartedAt?: string | null;
+  templateOrigin?: "sandra_embedded" | "dropbox_website";
   lifecycle: "preparing" | "editing" | "finalized" | "abandoned" | "deleted" | "error";
 }>;
 
@@ -733,13 +735,15 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       if (deletion.outcome === "needs_confirmation") {
         return failure("TEMPLATE_RECENTLY_USED", `Confirm deletion of a template used ${deletion.recentSendCount} time${deletion.recentSendCount === 1 ? "" : "s"} in the last 30 days.`);
       }
-      try {
-        await ports.provider.deleteTemplate(template.providerTemplateId);
-      } catch (error) {
-        if (isTemplateManagementUnavailable(error)) {
-          return templateManagementDisabled();
+      if (template.templateOrigin !== "dropbox_website") {
+        try {
+          await ports.provider.deleteTemplate(template.providerTemplateId);
+        } catch (error) {
+          if (isTemplateManagementUnavailable(error)) {
+            return templateManagementDisabled();
+          }
+          if (!ports.provider.isNotFound(error)) return failure("DELETE_PROVIDER_RECONCILIATION_FAILED", "Sandra retained the deletion record, but Dropbox Sign still needs deletion reconciliation.");
         }
-        if (!ports.provider.isNotFound(error)) return failure("DELETE_PROVIDER_RECONCILIATION_FAILED", "Sandra retained the deletion record, but Dropbox Sign still needs deletion reconciliation.");
       }
       return success(null);
     },
@@ -762,7 +766,10 @@ function templateManagementDisabled(): TemplateActionResult<never> {
 }
 
 function isTemplateManagementUnavailable(error: unknown) {
-  return error instanceof Error && error.message === "DROPBOX_SIGN_NOT_CONNECTED";
+  return error instanceof Error && (
+    error.message === "DROPBOX_SIGN_NOT_CONNECTED" ||
+    error.message === "DROPBOX_SIGN_EMBEDDED_TEMPLATE_MANAGEMENT_DISABLED"
+  );
 }
 
 function safeTitle(value: string): TemplateActionResult<string> {

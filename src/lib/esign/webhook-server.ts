@@ -10,7 +10,6 @@ import {
   type EsignWebhookRpcClient,
 } from "./database-adapter";
 import {
-  configuredDropboxSignEmbeddedDomain,
   getEsignCredentials,
 } from "./credentials";
 import { createDropboxSignProvider } from "./dropbox-sign";
@@ -69,13 +68,17 @@ export function createConcreteDropboxSignWebhookDependencies(
         const metadata = await createDropboxSignProvider({
           apiKey: credentials.apiKey,
           clientId: credentials.clientId,
-          expectedDomain: configuredDropboxSignEmbeddedDomain(),
         }).getSignatureRequestMetadata(input.signRequestId);
-        return metadata.signatureRequestId === input.signRequestId &&
-          metadata.localRequestId === input.localRequestId &&
-          metadata.testMode === true
-          ? "matched"
-          : "mismatch";
+        if (
+          metadata.signatureRequestId !== input.signRequestId ||
+          metadata.localRequestId !== input.localRequestId
+        ) {
+          return { outcome: "mismatch" };
+        }
+        return {
+          outcome: "matched",
+          providerTestMode: metadata.testMode,
+        };
       },
     },
     pdfProvider: {
@@ -87,7 +90,6 @@ export function createConcreteDropboxSignWebhookDependencies(
         return createDropboxSignProvider({
           apiKey: credentials.apiKey,
           clientId: credentials.clientId,
-          expectedDomain: configuredDropboxSignEmbeddedDomain(),
         }).downloadSignedPdf(input.signRequestId);
       },
     },

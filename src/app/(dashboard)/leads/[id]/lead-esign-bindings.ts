@@ -9,11 +9,7 @@ import {
   type TemplateOption,
   type TemplateSignerRole,
 } from "@/lib/esign/contracts";
-import {
-  configuredDropboxSignEmbeddedDomain,
-  getEsignCredentials,
-  requireEsignTemplateManagementCredentials,
-} from "@/lib/esign/credentials";
+import { getEsignCredentials } from "@/lib/esign/credentials";
 import { createDropboxSignProvider } from "@/lib/esign/dropbox-sign";
 import { classifyProviderFailure } from "@/lib/esign/provider-failure";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -96,6 +92,30 @@ export function createLeadEsignRepository(): EsignActionRepository {
         },
       );
       if (error) throw error;
+    },
+    repairProviderPlanRequiredSend: async (input) => {
+      const { data, error } = await createAdminClient().rpc(
+        "repair_esign_provider_plan_required_send",
+        {
+          p_org_id: input.orgId,
+          p_request_id: input.requestId,
+        },
+      );
+      if (error?.code === "55000") return "raced";
+      if (error) throw error;
+      return data === "already_repaired" ? "already_repaired" : "repaired";
+    },
+    reserveLiveSend: async (input) => {
+      const { data, error } = await createAdminClient().rpc(
+        "reserve_esign_live_send",
+        {
+          p_org_id: input.orgId,
+          p_request_id: input.requestId,
+          p_provider_remaining: input.providerRemaining,
+        },
+      );
+      if (error) throw error;
+      return data === "reserved" ? "reserved" : "blocked";
     },
     findProviderLookupReference: async ({ orgId, requestId, testMode }) => {
       const { data, error } = await createAdminClient()
@@ -404,13 +424,13 @@ async function loadLeadSendContext({
         : Promise.resolve({ data: null, error: null }),
       admin
         .from("org_esign_integrations")
-        .select("api_key_last_four,sending_enabled,test_mode")
+        .select("api_key_last_four,sending_enabled,test_mode,live_send_monthly_limit,live_send_monthly_used")
         .eq("org_id", actor.orgId)
         .maybeSingle(),
       admin
         .from("available_esign_templates")
         .select(
-          "id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names",
+          "id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names,template_origin",
         )
         .eq("org_id", actor.orgId)
         .order("updated_at", { ascending: false }),
@@ -424,6 +444,7 @@ async function loadLeadSendContext({
     contact?.contact_type === "entity"
       ? (contact.entity_name ?? "")
       : [contact?.first_name, contact?.last_name].filter(Boolean).join(" ");
+  const testMode = integrationResult.data?.test_mode ?? true;
   return {
     propertyId: property.id,
     sellerName,
@@ -441,8 +462,23 @@ async function loadLeadSendContext({
     sendingEnabled:
       Boolean(integrationResult.data?.api_key_last_four) &&
       (integrationResult.data?.sending_enabled ?? false),
-    testMode: true,
-    templates: (templatesResult.data ?? []).flatMap(toTemplateOption),
+    testMode,
+    liveSendLimit:
+      typeof integrationResult.data?.live_send_monthly_limit === "number" &&
+      typeof integrationResult.data?.live_send_monthly_used === "number"
+        ? {
+            monthlyLimit: integrationResult.data.live_send_monthly_limit,
+            usedThisMonth: integrationResult.data.live_send_monthly_used,
+            remainingThisMonth: Math.max(
+              0,
+              integrationResult.data.live_send_monthly_limit -
+                integrationResult.data.live_send_monthly_used,
+            ),
+          }
+        : null,
+    templates: (templatesResult.data ?? []).flatMap((row) =>
+      toTemplateOption(row, { testMode }),
+    ),
   };
 }
 
@@ -454,7 +490,9 @@ function toTemplateOption(row: {
   seller_role: string | null;
   signer_roles: Json | null;
   merge_field_names: string[] | null;
-}): TemplateOption[] {
+  template_origin?: string | null;
+}, options: { testMode: boolean }): TemplateOption[] {
+  if (!options.testMode && row.template_origin !== "dropbox_website") return [];
   const roles = parseRoles(row.signer_roles);
   if (
     !row.id ||
@@ -628,7 +666,9 @@ async function loadRequest(
   if (templateError) throw templateError;
   if (signerError) throw signerError;
   if (fileError) throw fileError;
-  const template = templateRow ? toTemplateOption(templateRow)[0] : null;
+  const template = templateRow
+    ? toTemplateOption(templateRow, { testMode: true })[0]
+    : null;
   if (!template) throw new Error("Request template snapshot is unavailable.");
   const merge = parseMergeValues(row.merge_value_snapshot);
   if (!merge) throw new Error("Request merge snapshot is invalid.");
@@ -681,15 +721,14 @@ export async function providerForOrg(
   if (options.requireSendingEnabled !== false && !credentials.sendingEnabled) {
     return null;
   }
-  await requireEsignTemplateManagementCredentials(orgId);
   const provider = createDropboxSignProvider({
     apiKey: credentials.apiKey,
     clientId: credentials.clientId,
-    expectedDomain: configuredDropboxSignEmbeddedDomain(),
   });
   return {
     sendWithTemplate: async ({
       localRequestId,
+      testMode,
       providerTemplateId,
       signers,
       mergeValues,
@@ -698,6 +737,7 @@ export async function providerForOrg(
       try {
         const output = await provider.sendWithTemplate({
           localRequestId,
+          testMode,
           templateId: providerTemplateId,
           signers: signers.map(({ role, name, emailAddress }) => ({
             role,
@@ -732,7 +772,8 @@ export async function providerForOrg(
         );
         return "accepted";
       } catch (error) {
-        return classifyProviderFailure(error);
+        const outcome = classifyProviderFailure(error);
+        return outcome === "provider_plan_required" ? "definitive_failure" : outcome;
       }
     },
     cancel: async ({ providerRequestId, signal }) => {
@@ -740,7 +781,8 @@ export async function providerForOrg(
         await provider.cancel(providerRequestId, signal);
         return "accepted";
       } catch (error) {
-        return classifyProviderFailure(error);
+        const outcome = classifyProviderFailure(error);
+        return outcome === "provider_plan_required" ? "definitive_failure" : outcome;
       }
     },
     updateSignerEmail: async ({
@@ -764,7 +806,11 @@ export async function providerForOrg(
         });
         return { outcome: "accepted", signature };
       } catch (error) {
-        return { outcome: classifyProviderFailure(error) };
+        const outcome = classifyProviderFailure(error);
+        return {
+          outcome:
+            outcome === "provider_plan_required" ? "definitive_failure" : outcome,
+        };
       }
     },
     findSignatureRequestIdsByLocalRequestId: ({
@@ -777,6 +823,11 @@ export async function providerForOrg(
         testMode,
         signal,
       ),
+    getRemainingSignatureRequests: ({ signal }) =>
+      provider.getRemainingSignatureRequests?.(
+        credentials.providerAccountId,
+        signal,
+      ) ?? Promise.resolve(null),
   };
 }
 
@@ -839,6 +890,9 @@ export async function loadLeadEsignPageModel(
         ...(!context.connected ? ["provider_disconnected" as const] : []),
         ...(!context.sendingEnabled ? ["sending_disabled" as const] : []),
         ...(context.templates.length === 0 ? ["no_templates" as const] : []),
+        ...(!context.testMode && context.liveSendLimit?.remainingThisMonth === 0
+          ? ["live_quota_blocked" as const]
+          : []),
         ...(!context.sellerEmailAddress?.trim()
           ? ["owner_email_missing" as const]
           : []),

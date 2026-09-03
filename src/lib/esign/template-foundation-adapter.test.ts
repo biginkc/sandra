@@ -111,6 +111,77 @@ describe("foundation template staging adapter without Dropbox credentials", () =
     expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
 
+  it("lists unavailable website templates from settings without using the send-chooser view", async () => {
+    function query(data: unknown[]) {
+      const chain = {
+        select: vi.fn(),
+        eq: vi.fn(),
+        is: vi.fn(),
+        not: vi.fn(),
+        gte: vi.fn(),
+        order: vi.fn(),
+        then: (resolve: (value: unknown) => unknown) =>
+          Promise.resolve(resolve({ data, error: null })),
+      };
+      for (const method of [
+        chain.select,
+        chain.eq,
+        chain.is,
+        chain.not,
+        chain.gte,
+        chain.order,
+      ]) {
+        method.mockReturnValue(chain);
+      }
+      return chain;
+    }
+    const templatesQuery = query([
+      {
+        id: "website-template-1",
+        name: "Website template",
+        document_type: "purchase_agreement",
+        sign_template_id: "provider-template-1",
+        seller_role: "Seller",
+        signer_roles: [
+          { name: "Seller", order: 0 },
+          { name: "Buyer", order: 1 },
+        ],
+        merge_field_names: [
+          "seller_name",
+          "property_address",
+          "offer_price",
+          "closing_date",
+          "earnest_money",
+        ],
+        source_filename: null,
+        source_size_bytes: null,
+        updated_at: "2026-09-02T00:00:00.000Z",
+        updated_by: "owner-1",
+        template_origin: "dropbox_website",
+        provider_metadata_unavailable_at: "2026-09-02T00:00:00.000Z",
+        provider_metadata_unavailable_reason: "PROVIDER_METADATA_DRIFT",
+      },
+    ]);
+    const requestsQuery = query([]);
+    mocks.from.mockReturnValueOnce(templatesQuery).mockReturnValueOnce(requestsQuery);
+
+    await expect((await createFoundationTemplateOrchestrator()).list()).resolves.toMatchObject({
+      ok: true,
+      data: [
+        {
+          id: "website-template-1",
+          websiteTemplateStatus: "unavailable",
+          websiteTemplateUnavailableReason: "PROVIDER_METADATA_DRIFT",
+        },
+      ],
+    });
+    expect(mocks.from).toHaveBeenNthCalledWith(1, "esign_templates");
+    expect(mocks.from).not.toHaveBeenCalledWith("available_esign_templates");
+    expect(templatesQuery.is).toHaveBeenCalledWith("deleted_at", null);
+    expect(templatesQuery.not).toHaveBeenCalledWith("finalized_at", "is", null);
+    expect(templatesQuery.eq).toHaveBeenCalledWith("lifecycle_state", "finalized");
+  });
+
   it("labels cleanup as placement restart only when a scoped replacement exists", async () => {
     const finalizedSourceId = "123e4567-e89b-42d3-a456-426614174099";
     const restartSourceId = "123e4567-e89b-42d3-a456-426614174098";

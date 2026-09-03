@@ -80,7 +80,7 @@ export function TemplateLibrary({
             </h2>
             <p className="text-muted-foreground max-w-md text-sm leading-relaxed">
               {dropboxSignConnected
-                ? "Upload a contract PDF and place the signature, initials, date, and merge fields once. Every send after that is two clicks from a lead."
+                ? "Register a website-created Dropbox Sign template with Sandra's required signer roles and merge fields."
                 : "Connect Dropbox Sign in Integrations before adding or managing eSign templates."}
             </p>
           </div>
@@ -93,8 +93,8 @@ export function TemplateLibrary({
           />
           <p className="text-muted-foreground font-mono text-[11px]">
             {dropboxSignConnected
-              ? "PDF up to 40 MB · or pick a file from Dropbox"
-              : "Reconnect Dropbox Sign to upload contract PDFs."}
+              ? "Register a website-created Dropbox Sign template"
+              : "Reconnect Dropbox Sign to register templates."}
           </p>
         </div>
       </DataTableShell>
@@ -108,6 +108,7 @@ export function TemplateLibrary({
           <TableRow>
             <TableHead>Name</TableHead>
             <TableHead>Document type</TableHead>
+            <TableHead>Origin</TableHead>
             <TableHead>Signer roles</TableHead>
             <TableHead>Last edited</TableHead>
             <TableHead className="text-right">Actions</TableHead>
@@ -144,12 +145,28 @@ function TemplateTableRow({
             {template.name}
           </span>
           <span className="text-muted-foreground text-xs">
-            {template.sourceFilename} · {formatBytes(template.sourceSizeBytes)}
+            {template.templateOrigin === "dropbox_website"
+              ? template.sourceFilename
+              : `${template.sourceFilename} · ${formatBytes(template.sourceSizeBytes)}`}
           </span>
         </div>
       </TableCell>
       <TableCell>
         <Badge variant="outline">{template.documentType}</Badge>
+      </TableCell>
+      <TableCell>
+        <div className="flex flex-col gap-1">
+          <Badge variant={template.templateOrigin === "dropbox_website" ? "secondary" : "outline"}>
+            {template.templateOrigin === "dropbox_website"
+              ? "Dropbox website"
+              : "Sandra editor"}
+          </Badge>
+          {template.websiteTemplateStatus === "unavailable" ? (
+            <span className="text-destructive text-xs">
+              Revalidation required
+            </span>
+          ) : null}
+        </div>
       </TableCell>
       <TableCell>
         <ol aria-label={`Required signer roles for ${template.name}`} className="space-y-0.5">
@@ -185,7 +202,7 @@ export function TemplateLibraryLoading() {
       <Table>
         <TableHeader>
           <TableRow>
-            {Array.from({ length: 5 }).map((_, index) => (
+            {Array.from({ length: 6 }).map((_, index) => (
               <TableHead key={index}><Skeleton className="h-3 w-24" /></TableHead>
             ))}
           </TableRow>
@@ -193,7 +210,7 @@ export function TemplateLibraryLoading() {
         <TableBody>
           {Array.from({ length: 5 }).map((_, row) => (
             <TableRow key={row}>
-              {Array.from({ length: 5 }).map((__, cell) => (
+              {Array.from({ length: 6 }).map((__, cell) => (
                 <TableCell key={cell}><Skeleton className="h-5 w-28" /></TableCell>
               ))}
             </TableRow>

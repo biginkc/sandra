@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   reconcileInitial: vi.fn(),
   promoteInitial: vi.fn(),
   retryProviderInitial: vi.fn(),
+  registerWebsiteTemplate: vi.fn(),
+  revalidateWebsiteTemplate: vi.fn(),
   revalidate: vi.fn(),
   verifyStagedSource: vi.fn(),
   add: vi.fn(),
@@ -39,7 +41,12 @@ vi.mock("@/lib/esign/template-foundation-adapter", () => ({
 vi.mock("@/lib/esign/template-initial-runtime", () => ({
   createInitialTemplateRuntime: mocks.initialFactory,
 }));
+vi.mock("@/lib/esign/website-template-registration", () => ({
+  registerDropboxWebsiteTemplate: mocks.registerWebsiteTemplate,
+  revalidateDropboxWebsiteTemplate: mocks.revalidateWebsiteTemplate,
+}));
 
+import { DatabaseError, ProviderError } from "@/lib/errors/classes";
 import { ESIGN_MERGE_FIELD_NAMES } from "@/lib/esign/contracts";
 import {
   createTemplateDraftAction,
@@ -54,6 +61,7 @@ import {
   promoteStaleInitialTemplateProviderCreateAction,
   retryInitialTemplateProviderCreateAction,
   restartTemplatePlacementAction,
+  registerWebsiteTemplateAction,
 } from "./actions";
 
 describe("template server action boundary", () => {
@@ -120,6 +128,19 @@ describe("template server action boundary", () => {
         },
       },
     });
+    mocks.registerWebsiteTemplate.mockResolvedValue({
+      id: "website-template-1",
+      name: "Website template",
+      documentType: "Purchase agreement",
+      providerTemplateId: "provider-template-1",
+      sellerRoleName: "Seller",
+      signerRoles: [
+        { name: "Seller", order: 0 },
+        { name: "Buyer", order: 1 },
+      ],
+      mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
+    });
+    mocks.revalidateWebsiteTemplate.mockResolvedValue("valid");
     mocks.initialFactory.mockResolvedValue({
       prepare: mocks.prepareUpload,
       create: mocks.createInitial,
@@ -176,6 +197,49 @@ describe("template server action boundary", () => {
       },
     });
     expect(mocks.factory).not.toHaveBeenCalled();
+  });
+
+  it("returns safe actionable messages for known website template provider validation", async () => {
+    mocks.registerWebsiteTemplate.mockRejectedValueOnce(
+      new ProviderError("private provider detail", "dropbox_sign", {
+        providerCode: "merge_field_mismatch",
+      }),
+    );
+
+    await expect(
+      registerWebsiteTemplateAction({
+        providerTemplateId: "provider-template-1",
+        name: "Purchase agreement",
+        documentType: "Purchase agreement",
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "MERGE_FIELD_MISMATCH",
+        message:
+          "Dropbox Sign Sender merge fields must be exactly seller_name, property_address, offer_price, closing_date, and earnest_money.",
+      },
+    });
+  });
+
+  it("keeps website template database failures generic", async () => {
+    mocks.registerWebsiteTemplate.mockRejectedValueOnce(
+      new DatabaseError("duplicate provider-template pair private detail"),
+    );
+
+    await expect(
+      registerWebsiteTemplateAction({
+        providerTemplateId: "provider-template-1",
+        name: "Purchase agreement",
+        documentType: "Purchase agreement",
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "ESIGN_TEMPLATE_ACTION_FAILED",
+        message: "The eSign template action could not be completed.",
+      },
+    });
   });
 
   it("prepares an opaque owner/org-scoped private path without constructing the provider", async () => {

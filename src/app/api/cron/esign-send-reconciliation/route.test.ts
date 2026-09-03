@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/esign/credentials", () => ({
-  configuredDropboxSignEmbeddedDomain: vi.fn(),
   getEsignCredentials: vi.fn(),
 }));
 vi.mock("@/lib/esign/dropbox-sign", () => ({
@@ -203,6 +202,7 @@ describe("eSign send reconciliation cron", () => {
   });
 
   it("repairs a provider-accepted timeout by attaching the found provider request id", async () => {
+    vi.stubEnv("DROPBOX_SIGN_EMBEDDED_DOMAIN", "");
     vi.mocked(getEsignCredentials).mockResolvedValue({
       apiKey: { reveal: () => "secret" },
       clientId: "client-1",
@@ -266,6 +266,10 @@ describe("eSign send reconciliation cron", () => {
         providerRequestId: "provider-after-timeout",
         positiveControl: "passed",
       }),
+    });
+    expect(createDropboxSignProvider).toHaveBeenCalledWith({
+      apiKey: expect.anything(),
+      clientId: "client-1",
     });
   });
 });

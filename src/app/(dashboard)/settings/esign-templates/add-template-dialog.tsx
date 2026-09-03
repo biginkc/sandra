@@ -60,7 +60,11 @@ export function AddTemplateDialog({
   const uploadAbort = useRef<AbortController | null>(null);
   const stagingSourceId = useRef<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<"website" | "embedded">(
+    actions?.registerWebsiteTemplate ? "website" : "embedded",
+  );
   const [name, setName] = useState("");
+  const [providerTemplateId, setProviderTemplateId] = useState("");
   const [documentType, setDocumentType] =
     useState<(typeof DOCUMENT_TYPES)[number]>("Purchase agreement");
   const [source, setSource] = useState<TemplateSource | null>(null);
@@ -72,8 +76,11 @@ export function AddTemplateDialog({
   const [pending, startTransition] = useTransition();
 
   const validationError = useMemo(
-    () => validateDraft({ name, source, roles, sellerRoleName }),
-    [name, source, roles, sellerRoleName],
+    () =>
+      mode === "website"
+        ? validateWebsiteRegistration({ name, providerTemplateId })
+        : validateDraft({ name, source, roles, sellerRoleName }),
+    [mode, name, providerTemplateId, source, roles, sellerRoleName],
   );
 
   useEffect(() => () => uploadAbort.current?.abort(), []);
@@ -121,7 +128,29 @@ export function AddTemplateDialog({
   };
 
   const submit = () => {
-    if (!actions || !source || validationError) return;
+    if (!actions || validationError) return;
+    if (mode === "website") {
+      const registerWebsiteTemplate = actions.registerWebsiteTemplate;
+      if (!registerWebsiteTemplate) {
+        setError("Website template registration is unavailable.");
+        return;
+      }
+      startTransition(async () => {
+        const result = await registerWebsiteTemplate({
+          providerTemplateId: providerTemplateId.trim(),
+          name: name.trim(),
+          documentType,
+        });
+        if (!result.ok) {
+          setError(result.error.message);
+          return;
+        }
+        setOpen(false);
+        router.refresh();
+      });
+      return;
+    }
+    if (!source) return;
     uploadAbort.current?.abort();
     const controller = new AbortController();
     uploadAbort.current = controller;
@@ -180,11 +209,50 @@ export function AddTemplateDialog({
         <DialogHeader>
           <DialogTitle>Add template</DialogTitle>
           <DialogDescription>
-            Upload the contract PDF. You place the fields in the next step.
+            Register a Dropbox Sign website template, or use Sandra&apos;s embedded editor when that server capability is enabled.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-2 rounded-md border p-1">
+            <Button
+              type="button"
+              variant={mode === "website" ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setMode("website")}
+              aria-pressed={mode === "website"}
+            >
+              Register ID
+            </Button>
+            <Button
+              type="button"
+              variant={mode === "embedded" ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setMode("embedded")}
+              disabled={Boolean(disabledReason)}
+              title={disabledReason}
+              aria-pressed={mode === "embedded"}
+            >
+              Upload PDF
+            </Button>
+          </div>
+
+          {mode === "website" ? (
+            <div className="space-y-2">
+              <Label htmlFor="esign-provider-template-id">
+                Dropbox Sign template ID
+              </Label>
+              <Input
+                id="esign-provider-template-id"
+                value={providerTemplateId}
+                onChange={(event) => setProviderTemplateId(event.target.value)}
+                placeholder="Template ID from Dropbox Sign"
+              />
+              <p className="text-muted-foreground text-xs">
+                Sandra validates the provider template server-side. It must be a non-embedded website template with Seller then Buyer signer roles and Sandra&apos;s five merge fields.
+              </p>
+            </div>
+          ) : (
           <div className="space-y-2">
             <input
               ref={fileInput}
@@ -239,6 +307,7 @@ export function AddTemplateDialog({
               </p>
             )}
           </div>
+          )}
 
           <div className="space-y-2">
             <Label htmlFor="esign-template-name">Template name</Label>
@@ -266,14 +335,16 @@ export function AddTemplateDialog({
             </select>
           </div>
 
-          <SignerRoleEditor
-            roles={roles}
-            sellerRoleName={sellerRoleName}
-            onChange={(nextRoles, nextSeller) => {
-              setRoles(nextRoles);
-              setSellerRoleName(nextSeller);
-            }}
-          />
+          {mode === "embedded" ? (
+            <SignerRoleEditor
+              roles={roles}
+              sellerRoleName={sellerRoleName}
+              onChange={(nextRoles, nextSeller) => {
+                setRoles(nextRoles);
+                setSellerRoleName(nextSeller);
+              }}
+            />
+          ) : null}
 
           <div className="bg-muted/50 rounded-lg border p-3 text-xs">
             <p className="font-medium">Merge fields included</p>
@@ -298,12 +369,24 @@ export function AddTemplateDialog({
             onClick={submit}
             disabled={!actions || pending || Boolean(validationError)}
           >
-            {pending ? "Preparing…" : "Upload and place fields"}
+            {pending
+              ? mode === "website" ? "Registering…" : "Preparing…"
+              : mode === "website" ? "Register template" : "Upload and place fields"}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
+}
+
+function validateWebsiteRegistration(input: {
+  name: string;
+  providerTemplateId: string;
+}): string | null {
+  const titleError = getTemplateTitleValidationError(input.name);
+  if (titleError) return titleError;
+  if (!input.providerTemplateId.trim()) return "Enter the Dropbox Sign template ID.";
+  return null;
 }
 
 function validatePdf(file: File): string | null {

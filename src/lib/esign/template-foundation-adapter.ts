@@ -21,10 +21,13 @@ import {
 } from "./template-orchestrator";
 
 const STAGING_BUCKET = "esign-staging";
-const TEMPLATE_DRAFT_SELECT = "id,org_id,name,document_type,sign_template_id,provider_account_id,seller_role,signer_roles,merge_field_names,staging_source_id,supersedes_template_id,lifecycle_state";
+const TEMPLATE_DRAFT_SELECT = "id,org_id,name,document_type,sign_template_id,provider_account_id,seller_role,signer_roles,merge_field_names,staging_source_id,supersedes_template_id,lifecycle_state,template_origin";
 const EXPIRED_PROVIDER_SYNC_STARTED_AT = "1970-01-01T00:00:00.000Z";
 
 export type TemplateLibraryRecord = TemplateOption & {
+  templateOrigin: "sandra_embedded" | "dropbox_website";
+  websiteTemplateStatus?: "valid" | "unavailable";
+  websiteTemplateUnavailableReason?: string | null;
   sourceFilename: string;
   sourceSizeBytes: number;
   pageCount: number | null;
@@ -98,9 +101,12 @@ export async function createFoundationTemplateOrchestrator() {
   const repository: TemplateOrchestratorPorts["repository"] = {
     async listFinalized(orgId) {
       const { data, error } = await admin
-        .from("available_esign_templates")
-        .select("id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names,source_filename,source_size_bytes,updated_at,updated_by")
+        .from("esign_templates")
+        .select("id,name,document_type,sign_template_id,seller_role,signer_roles,merge_field_names,source_filename,source_size_bytes,updated_at,updated_by,template_origin,provider_metadata_unavailable_at,provider_metadata_unavailable_reason")
         .eq("org_id", orgId)
+        .is("deleted_at", null)
+        .not("finalized_at", "is", null)
+        .eq("lifecycle_state", "finalized")
         .order("updated_at", { ascending: false });
       if (error) throw error;
       const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
@@ -116,7 +122,17 @@ export async function createFoundationTemplateOrchestrator() {
         const option = optionFromRow(row);
         return {
           ...option,
-          sourceFilename: row.source_filename ?? "Dropbox Sign template",
+          templateOrigin: templateOrigin(row.template_origin),
+          websiteTemplateStatus:
+            templateOrigin(row.template_origin) === "dropbox_website" &&
+            row.provider_metadata_unavailable_at
+              ? "unavailable"
+              : "valid",
+          websiteTemplateUnavailableReason:
+            row.provider_metadata_unavailable_reason ?? null,
+          sourceFilename: templateOrigin(row.template_origin) === "dropbox_website"
+            ? "Managed in Dropbox Sign"
+            : row.source_filename ?? "Dropbox Sign template",
           sourceSizeBytes: row.source_size_bytes ?? 0,
           pageCount: null,
           fieldCount: row.merge_field_names?.length ?? null,
@@ -603,6 +619,7 @@ function draftFromRow(row: {
   seller_role: string; signer_roles: unknown; merge_field_names: string[]; staging_source_id: string | null;
   supersedes_template_id?: string | null; lifecycle_state: string; provider_account_id?: string | null;
   provider_sync_started_at?: string | null;
+  template_origin?: string | null;
 }): TemplateDraftRecord {
   if (!["preparing", "editing", "finalized", "abandoned", "deleted", "error"].includes(row.lifecycle_state)) throw new Error("invalid template lifecycle");
   return {
@@ -618,8 +635,13 @@ function draftFromRow(row: {
     stagingSourceId: row.staging_source_id,
     supersedesTemplateId: row.supersedes_template_id ?? null,
     providerSyncStartedAt: row.provider_sync_started_at ?? null,
+    templateOrigin: templateOrigin(row.template_origin),
     lifecycle: row.lifecycle_state as TemplateDraftRecord["lifecycle"],
   };
+}
+
+function templateOrigin(value: unknown): "sandra_embedded" | "dropbox_website" {
+  return value === "dropbox_website" ? "dropbox_website" : "sandra_embedded";
 }
 
 function stageFromRow(row: {

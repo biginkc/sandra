@@ -59,6 +59,7 @@ function input(
 ): ProviderSendContractInput {
   return {
     localRequestId: "request-local-1",
+    testMode: true,
     template,
     signers,
     mergeValues,
@@ -104,6 +105,7 @@ describe("sendContractWithTemplate", () => {
 
     expect(adapter.sendWithTemplate).toHaveBeenCalledWith({
       localRequestId: "request-local-1",
+      testMode: true,
       templateId: "provider-template-1",
       signers: [
         {

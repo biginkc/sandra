@@ -1,9 +1,6 @@
 import { NextResponse } from "next/server";
 
-import {
-  configuredDropboxSignEmbeddedDomain,
-  getEsignCredentials,
-} from "@/lib/esign/credentials";
+import { getEsignCredentials } from "@/lib/esign/credentials";
 import { createDropboxSignProvider } from "@/lib/esign/dropbox-sign";
 import {
   ESIGN_STUCK_SEND_MIN_AGE_MS,
@@ -80,7 +77,6 @@ async function handle(request: Request) {
         const provider = createDropboxSignProvider({
           apiKey: credentials.apiKey,
           clientId: credentials.clientId,
-          expectedDomain: configuredDropboxSignEmbeddedDomain(),
         });
         const { data: reference, error: referenceError } = await admin
           .from("esign_requests")

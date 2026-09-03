@@ -101,19 +101,27 @@ export async function handleDropboxSignWebhook(input: {
       signRequestId: replay.signRequestId,
       verifiedLocalRequestId: null,
     });
+    let providerMetadataTestMode: boolean | null = null;
     if (!request && replay.localRequestId !== null) {
-      const metadataMatch =
+      // Dropbox callbacks may omit test_mode. In that recovery path Sandra can
+      // prove provider request/local Sandra request mapping before comparing
+      // every known provider mode with Sandra's immutable stored request mode.
+      const metadataConfirmation =
         await input.dependencies.metadataProvider.confirmProviderLocalRequestId({
           ...identity,
           signRequestId: replay.signRequestId,
           localRequestId: replay.localRequestId,
+          testMode: replay.testMode ?? null,
         });
-      if (metadataMatch === "matched") {
+      if (metadataConfirmation.outcome === "matched") {
+        providerMetadataTestMode = metadataConfirmation.providerTestMode;
         request = await input.dependencies.persistence.findRequest({
           orgId: identity.orgId,
           signRequestId: replay.signRequestId,
           verifiedLocalRequestId: replay.localRequestId,
         });
+      } else if (metadataConfirmation.outcome === "mode_unverified") {
+        throw new SafeWebhookProcessingError("PROVIDER_MODE_UNVERIFIED", 503);
       } else {
         await input.dependencies.persistence.markReceiptIgnored(
           activeClaim,
@@ -124,6 +132,18 @@ export async function handleDropboxSignWebhook(input: {
     }
     if (!request || request.orgId !== identity.orgId) {
       throw new SafeWebhookProcessingError("REQUEST_NOT_FOUND", 503);
+    }
+    if (typeof request.testMode !== "boolean") {
+      throw new SafeWebhookProcessingError("LOCAL_REQUEST_MODE_UNVERIFIED", 503);
+    }
+    if (replay.testMode != null && replay.testMode !== request.testMode) {
+      throw new SafeWebhookProcessingError("REQUEST_MODE_MISMATCH", 503);
+    }
+    if (
+      providerMetadataTestMode != null &&
+      providerMetadataTestMode !== request.testMode
+    ) {
+      throw new SafeWebhookProcessingError("REQUEST_MODE_MISMATCH", 503);
     }
 
     const providerEventAt = providerEventDate(replay);

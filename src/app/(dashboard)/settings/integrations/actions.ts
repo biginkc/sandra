@@ -37,6 +37,20 @@ export interface IntegrationStatus {
 
 type Provider = "slack" | "google";
 
+function unavailableEsignStatus(): EsignConnectionStatus {
+  return {
+    connected: false,
+    canManage: false,
+    sendingEnabled: false,
+    disconnectPending: false,
+    testMode: null,
+    apiKeyLastFour: null,
+    embeddedTemplateManagementEnabled: false,
+    liveSendLimit: null,
+    statusUnavailable: true,
+  };
+}
+
 /** E.164 — mirrors the DB CHECK
  *  (`user_integration_prefs_reminder_phone_format_check`, 20260814150000). */
 const E164_RE = /^\+[1-9][0-9]{6,14}$/;
@@ -80,7 +94,6 @@ export async function getIntegrationStatus(): Promise<
 
     const prefs = await loadIntegrationPrefs(supabase, user.id);
     const esign = await getEsignConnectionStatus();
-    if (!esign.ok) return esign;
     const slackRow = data?.find(
       (row) => row.provider === "slack" && row.token_type === "bot",
     );
@@ -104,7 +117,7 @@ export async function getIntegrationStatus(): Promise<
         enabled: prefs.smsRemindersEnabled,
         phone: prefs.reminderPhone,
       },
-      esign: esign.data,
+      esign: esign.ok ? esign.data : unavailableEsignStatus(),
       timezone: prefs.timezone,
     });
   } catch (error) {

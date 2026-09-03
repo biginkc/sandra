@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -19,6 +19,7 @@ const {
   disconnectDropboxSignAction,
   disconnectIntegration,
   setEsignSendingEnabledAction,
+  setEsignRequestModeAction,
   setChannelEnabledAction,
   setReminderPhoneAction,
   setTimezoneAction,
@@ -53,6 +54,17 @@ const {
       | { ok: false; error: { code: string; message: string } }
     > => ({ ok: true, data: null }),
   ),
+  setEsignRequestModeAction: vi.fn(async () => ({
+    ok: true,
+    data: {
+      connected: true,
+      canManage: true,
+      sendingEnabled: false,
+      disconnectPending: false,
+      testMode: false as const,
+      apiKeyLastFour: "5678",
+    },
+  })),
   setChannelEnabledAction: vi.fn(async () => ({ ok: true, data: null })),
   setReminderPhoneAction: vi.fn(async () => ({ ok: true, data: null })),
   setTimezoneAction: vi.fn(async () => ({ ok: true, data: null })),
@@ -62,6 +74,7 @@ vi.mock("@/lib/esign/actions", () => ({
   connectDropboxSignAction,
   disconnectDropboxSignAction,
   setEsignSendingEnabledAction,
+  setEsignRequestModeAction,
 }));
 
 vi.mock("./actions", () => ({
@@ -84,6 +97,7 @@ describe("<IntegrationsForm />", () => {
     setReminderPhoneAction.mockClear();
     setTimezoneAction.mockClear();
     setEsignSendingEnabledAction.mockClear();
+    setEsignRequestModeAction.mockClear();
   });
 
   it("renders connect links when no integration tokens exist", () => {
@@ -97,8 +111,44 @@ describe("<IntegrationsForm />", () => {
       screen.getByRole("link", { name: "Connect Google Calendar" }),
     ).toHaveAttribute("href", "/api/oauth/google/start");
     expect(screen.getAllByText("Disconnected")).toHaveLength(3);
-    expect(screen.getByText(/Test mode is always on for v1/i)).toBeVisible();
+    expect(
+      screen.getByText(/Use the Primary Key from your Dropbox Sign API settings/i),
+    ).toBeVisible();
     expect(screen.queryByRole("link", { name: "Manage templates" })).toBeNull();
+  });
+
+  it("renders Dropbox Sign status unavailable without defaulting to test mode controls", () => {
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: false,
+            canManage: false,
+            sendingEnabled: false,
+            disconnectPending: false,
+            testMode: null,
+            apiKeyLastFour: null,
+            embeddedTemplateManagementEnabled: false,
+            liveSendLimit: null,
+            statusUnavailable: true,
+          },
+        })}
+      />,
+    );
+
+    expect(
+      screen.getAllByText(/Dropbox Sign status is unavailable/i),
+    ).toHaveLength(2);
+    expect(
+      screen.getByText(/Registration and template management are disabled/i),
+    ).toBeVisible();
+    expect(
+      screen.queryByText(/Dropbox Sign is in test mode/i),
+    ).toBeNull();
+    expect(screen.queryByRole("link", { name: "Manage templates" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Connect Dropbox Sign" }),
+    ).toBeNull();
   });
 
   it("renders disconnect controls when Slack is connected", () => {
@@ -299,13 +349,14 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
     await screen.findByText("Dropbox Sign disconnected.");
 
-    await user.type(
-      screen.getByLabelText("Primary API key"),
-      "secret-api-key-1234",
-    );
-    await user.click(
-      screen.getByRole("button", { name: "Connect Dropbox Sign" }),
-    );
+    const apiKeyInput = await screen.findByLabelText("Primary API key");
+    await waitFor(() => expect(apiKeyInput).toBeEnabled());
+    await user.type(apiKeyInput, "secret-api-key-1234");
+    const connectButton = screen.getByRole("button", {
+      name: "Connect Dropbox Sign",
+    });
+    await waitFor(() => expect(connectButton).toBeEnabled());
+    await user.click(connectButton);
 
     await waitFor(() => {
       expect(connectDropboxSignAction).toHaveBeenCalledWith(
@@ -440,6 +491,50 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
       expect(setEsignSendingEnabledAction).toHaveBeenCalledWith(true, true);
       expect(toggle).toBeChecked();
     });
+  });
+
+  it("uses live-request confirmation copy when enabling live-mode sending", async () => {
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: true,
+            sendingEnabled: false,
+            disconnectPending: false,
+            testMode: false,
+            apiKeyLastFour: "5678",
+            liveSendLimit: {
+              monthlyLimit: 40,
+              usedThisMonth: 4,
+              remainingThisMonth: 36,
+            },
+          },
+        })}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("switch", { name: "Enable contract sending" }),
+    );
+
+    const dialog = screen.getByRole("dialog", {
+      name: "Turn on contract sending?",
+    });
+    expect(within(dialog).getByText(/live requests can be sent/i)).toBeVisible();
+    expect(
+      screen.getByText(/Sandra local calendar-month ceiling: 4 of 40/i),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/America\/Chicago calendar-month boundary/i),
+    ).toBeVisible();
+    expect(
+      within(dialog).getByText(/automatically upgrade at quota exhaustion/i),
+    ).toBeVisible();
+    expect(
+      within(dialog).getByText(/does not provide an API hard stop/i),
+    ).toBeVisible();
   });
 
   it("keeps the committed switch unchanged when confirmation fails", async () => {

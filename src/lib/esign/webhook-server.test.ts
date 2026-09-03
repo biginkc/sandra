@@ -150,7 +150,7 @@ describe("concrete eSign webhook server binding", () => {
     expect(serverMocks.createDropboxSignProvider).not.toHaveBeenCalled();
   });
 
-  it("attaches a stranded webhook request only when Dropbox metadata is test-mode truth", async () => {
+  it("returns Dropbox provider mode after metadata proves the Sandra local request id", async () => {
     serverMocks.getEsignCredentials.mockClear();
     serverMocks.createDropboxSignProvider.mockClear();
     serverMocks.getEsignCredentials.mockResolvedValue({
@@ -189,13 +189,77 @@ describe("concrete eSign webhook server binding", () => {
       callbackConsumerId: CONSUMER_ID,
       signRequestId: "provider-request-1",
       localRequestId: REQUEST_ID,
-    })).resolves.toBe("mismatch");
+      testMode: true,
+    })).resolves.toEqual({
+      outcome: "matched",
+      providerTestMode: false,
+    });
     await expect(dependencies.metadataProvider.confirmProviderLocalRequestId({
       orgId: ORG_ID,
       callbackConsumerId: CONSUMER_ID,
       signRequestId: "provider-request-1",
       localRequestId: REQUEST_ID,
-    })).resolves.toBe("matched");
+      testMode: true,
+    })).resolves.toEqual({
+      outcome: "matched",
+      providerTestMode: true,
+    });
+  });
+
+  it("accepts omitted provider mode after Dropbox metadata proves the Sandra local request id", async () => {
+    serverMocks.getEsignCredentials.mockClear();
+    serverMocks.createDropboxSignProvider.mockClear();
+    serverMocks.getEsignCredentials.mockResolvedValue({
+      apiKey: { reveal: () => "dropbox-api-key" },
+      clientId: "client-1",
+    });
+    const activeConsumer = queryResult({ id: CONSUMER_ID, org_id: ORG_ID });
+    const integration = queryResult({ org_id: ORG_ID });
+    const client = {
+      from: vi.fn()
+        .mockReturnValueOnce(integration)
+        .mockReturnValueOnce(activeConsumer)
+        .mockReturnValueOnce(integration)
+        .mockReturnValueOnce(activeConsumer),
+      rpc: vi.fn(),
+      storage: { from: vi.fn() },
+    } as unknown as AdminClient;
+    const provider = {
+      getSignatureRequestMetadata: vi.fn()
+        .mockResolvedValueOnce({
+          signatureRequestId: "provider-request-1",
+          localRequestId: REQUEST_ID,
+          testMode: false,
+        })
+        .mockResolvedValueOnce({
+          signatureRequestId: "provider-request-1",
+          localRequestId: REQUEST_ID,
+          testMode: null,
+        }),
+    };
+    serverMocks.createDropboxSignProvider.mockReturnValue(provider);
+    const dependencies = createConcreteDropboxSignWebhookDependencies(client);
+
+    await expect(dependencies.metadataProvider.confirmProviderLocalRequestId({
+      orgId: ORG_ID,
+      callbackConsumerId: CONSUMER_ID,
+      signRequestId: "provider-request-1",
+      localRequestId: REQUEST_ID,
+      testMode: null,
+    })).resolves.toEqual({
+      outcome: "matched",
+      providerTestMode: false,
+    });
+    await expect(dependencies.metadataProvider.confirmProviderLocalRequestId({
+      orgId: ORG_ID,
+      callbackConsumerId: CONSUMER_ID,
+      signRequestId: "provider-request-1",
+      localRequestId: REQUEST_ID,
+      testMode: null,
+    })).resolves.toEqual({
+      outcome: "matched",
+      providerTestMode: null,
+    });
   });
 
   it("treats an existing opaque PDF object as retry convergence, then links atomically", async () => {

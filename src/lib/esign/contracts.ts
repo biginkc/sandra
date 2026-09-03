@@ -36,12 +36,35 @@ export const ESIGN_MERGE_FIELD_NAMES = [
 export const ESIGN_TEMPLATE_MERGE_FIELDS = ESIGN_MERGE_FIELD_NAMES;
 export const ESIGN_TEMPLATE_TITLE_MAX_LENGTH = 160;
 
+export const ESIGN_TEMPLATE_SIGNER_ROLES = [
+  { name: "Seller", order: 0 },
+  { name: "Buyer", order: 1 },
+] as const;
+
 export type EsignMergeFieldName = (typeof ESIGN_MERGE_FIELD_NAMES)[number];
 export type EsignTemplateMergeField = EsignMergeFieldName;
 
 export type TemplateSignerRole = {
   name: string;
   order: number;
+};
+
+export type ProviderTemplateField = {
+  documentIndex: number | null;
+  apiId: string | null;
+  name: string | null;
+  type: string | null;
+  required: boolean | null;
+  signer: string | null;
+  assignedTo: "sender" | "signer" | "unknown";
+  signerRoleName: string | null;
+};
+
+export type ProviderTemplateDocument = {
+  index: number | null;
+  name: string | null;
+  customFields: ProviderTemplateField[];
+  formFields: ProviderTemplateField[];
 };
 
 export type TemplateOption = {
@@ -78,8 +101,16 @@ export type ProviderTemplateMetadata = {
   providerTemplateId: string;
   localTemplateId: string | null;
   title: string | null;
+  isEmbedded: boolean | null;
+  canEdit: boolean | null;
+  isCreator: boolean | null;
+  isLocked: boolean | null;
+  accounts: readonly { accountId: string | null; isLocked: boolean | null }[];
   signerRoles: TemplateSignerRole[];
   mergeFieldNames: string[];
+  documents: ProviderTemplateDocument[];
+  mergeFields: ProviderTemplateField[];
+  formFields: ProviderTemplateField[];
 };
 
 export type TemplatePdf = {
@@ -98,6 +129,7 @@ export type CreateEmbeddedTemplateDraftInput = {
 export type SendWithTemplateInput = {
   localRequestId: string;
   templateId: string;
+  testMode: boolean;
   signers: EsignSigner[];
   mergeValues: Record<string, string>;
   title?: string;
@@ -120,7 +152,7 @@ export type SendWithTemplateOutput = {
   signatureRequestId: string;
   signatures: ProviderSignature[];
   detailsUrl: string | null;
-  testMode: true;
+  testMode: boolean;
 };
 
 export type ProviderSignatureRequestMetadata = {
@@ -158,6 +190,10 @@ export type DropboxSignProvider = {
   sendWithTemplate(
     input: SendWithTemplateInput,
   ): Promise<SendWithTemplateOutput>;
+  getRemainingSignatureRequests?(
+    providerAccountId: string,
+    signal?: AbortSignal,
+  ): Promise<number | null>;
   updateSignerEmail(input: {
     signatureRequestId: string;
     signatureId: string;
@@ -190,6 +226,13 @@ export type EsignConnectionStatus = {
   canManage: boolean;
   sendingEnabled: boolean;
   disconnectPending: boolean;
-  testMode: true;
+  testMode: boolean | null;
+  statusUnavailable?: boolean;
   apiKeyLastFour: string | null;
+  embeddedTemplateManagementEnabled?: boolean;
+  liveSendLimit?: {
+    monthlyLimit: number;
+    usedThisMonth: number;
+    remainingThisMonth: number;
+  } | null;
 };

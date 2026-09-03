@@ -33,6 +33,7 @@ export type SafeEventData = {
   event_time: string;
   event_type: string;
   sign_request_id: string | null;
+  test_mode?: boolean | null;
   related_signature_id: string | null;
   reported_for_app_id: string | null;
 };
@@ -67,6 +68,7 @@ export type EsignWebhookRpcContract = {
       org_id: string;
       property_id: string;
       status: EsignStatus;
+      test_mode: boolean;
       signed_pdf_path: string | null;
       template_title: string;
     }>;
@@ -255,6 +257,7 @@ export function createEsignWebhookDatabaseAdapter(
         !isNonEmptyString(row.org_id) ||
         !isNonEmptyString(row.property_id) ||
         !isEsignStatus(row.status) ||
+        typeof row.test_mode !== "boolean" ||
         (row.signed_pdf_path !== null &&
           typeof row.signed_pdf_path !== "string") ||
         typeof row.template_title !== "string"
@@ -266,6 +269,7 @@ export function createEsignWebhookDatabaseAdapter(
         orgId: row.org_id,
         propertyId: row.property_id,
         status: row.status,
+        testMode: row.test_mode,
         signedPdfPath: row.signed_pdf_path,
         templateTitle: row.template_title,
       };
@@ -477,6 +481,9 @@ function safeEventData(input: VerifiedReceiptInput): SafeEventData {
     event_time: input.replay.eventTime,
     event_type: input.replay.eventType,
     sign_request_id: input.replay.signRequestId,
+    ...(input.replay.testMode == null
+      ? {}
+      : { test_mode: input.replay.testMode }),
     related_signature_id: input.replay.relatedSignatureId,
     reported_for_app_id: input.replay.reportedForAppId,
   };

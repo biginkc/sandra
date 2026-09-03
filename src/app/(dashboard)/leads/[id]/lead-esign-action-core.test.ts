@@ -132,6 +132,7 @@ function harness() {
     })),
     reconcileSent: vi.fn().mockResolvedValue(undefined),
     markSendOutcome: vi.fn().mockResolvedValue(undefined),
+    repairProviderPlanRequiredSend: vi.fn().mockResolvedValue("repaired"),
     findProviderLookupReference: vi.fn().mockResolvedValue({
       localRequestId: "known-local-request",
       providerRequestId: "known-provider-request",
@@ -150,6 +151,7 @@ function harness() {
     finalizeVoid: vi.fn().mockResolvedValue("applied"),
     releaseVoid: vi.fn().mockResolvedValue("released"),
     findSignedFile: vi.fn().mockResolvedValue(null),
+    reserveLiveSend: vi.fn().mockResolvedValue("reserved"),
   } as unknown as EsignActionRepository;
   const provider = {
     sendWithTemplate: vi.fn().mockResolvedValue({
@@ -177,6 +179,7 @@ function harness() {
         providerRequestIds: ["known-provider-request"],
       })
       .mockResolvedValueOnce({ complete: true, providerRequestIds: [] }),
+    getRemainingSignatureRequests: vi.fn().mockResolvedValue(39),
   } as unknown as EsignActionProvider;
   const files = {
     authorizeSignedFile: vi.fn().mockResolvedValue({
@@ -296,6 +299,116 @@ describe("lead eSign action orchestration", () => {
       expect.objectContaining({ signers: sendInput.signers }),
     );
     expect(h.provider.sendWithTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  it("reserves a live send only after Dropbox quota is above the fail-closed threshold", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({
+        testMode: false,
+        liveSendLimit: {
+          monthlyLimit: 40,
+          usedThisMonth: 12,
+          remainingThisMonth: 28,
+        },
+      }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({ testMode: false }),
+    });
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toEqual({ ok: true, data: { requestId: "request-1" } });
+    expect(h.provider.getRemainingSignatureRequests).toHaveBeenCalledTimes(1);
+    expect(h.repository.reserveLiveSend).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      providerRemaining: 39,
+    });
+    expect(h.provider.sendWithTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({ testMode: false }),
+    );
+  });
+
+  it("blocks live send dispatch when Dropbox remaining quota is at the fail-closed threshold", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ testMode: false }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({ testMode: false }),
+    });
+    h.provider.getRemainingSignatureRequests.mockResolvedValue(10);
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "LIVE_QUOTA_BLOCKED" },
+    });
+    expect(h.repository.markSendOutcome).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      deliveryState: "failed",
+      safeErrorMessage: "PROVIDER_QUOTA_TOO_LOW",
+    });
+    expect(h.repository.reserveLiveSend).not.toHaveBeenCalled();
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
+  it("allows live send dispatch when Dropbox remaining quota is above the fail-closed threshold", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ testMode: false }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({ testMode: false }),
+    });
+    h.provider.getRemainingSignatureRequests.mockResolvedValue(11);
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toEqual({ ok: true, data: { requestId: "request-1" } });
+    expect(h.repository.reserveLiveSend).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      providerRemaining: 11,
+    });
+    expect(h.provider.sendWithTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({ testMode: false }),
+    );
+  });
+
+  it("fails a claimed live request when the Sandra reservation RPC is uncertain", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ testMode: false }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({ testMode: false }),
+    });
+    h.repository.reserveLiveSend.mockRejectedValue(
+      new Error("database connection lost"),
+    );
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "LIVE_QUOTA_BLOCKED" },
+    });
+    expect(h.repository.markSendOutcome).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      deliveryState: "failed",
+      safeErrorMessage: "SANDRA_LIVE_RESERVATION_UNCERTAIN",
+    });
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
   });
 
   it("keeps a lead with no homeowner contact blocked before provider dispatch", async () => {
@@ -712,6 +825,69 @@ describe("lead eSign action orchestration", () => {
       deliveryState: "failed",
       safeErrorMessage: "PROVIDER_REJECTED",
     });
+  });
+
+  it("records a provider-plan rejection through the durable reservation repair RPC", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ testMode: false }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({ testMode: false }),
+    });
+    h.provider.sendWithTemplate.mockResolvedValue({
+      outcome: "provider_plan_required",
+    });
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_PLAN_REQUIRED" },
+    });
+    expect(h.repository.repairProviderPlanRequiredSend).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+    });
+    expect(h.repository.markSendOutcome).not.toHaveBeenCalledWith(
+      expect.objectContaining({ safeErrorMessage: "PROVIDER_PLAN_REQUIRED" }),
+    );
+  });
+
+  it("keeps provider-plan rejection retryable when the repair RPC fails transiently", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ testMode: false }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({ testMode: false }),
+    });
+    h.provider.sendWithTemplate.mockResolvedValue({
+      outcome: "provider_plan_required",
+    });
+    h.repository.repairProviderPlanRequiredSend.mockRejectedValueOnce(
+      new Error("private rpc commit state unknown"),
+    );
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "SEND_UNKNOWN" },
+    });
+    expect(JSON.stringify(result)).not.toContain("private rpc commit");
+    expect(reportMocks.reportError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "eSign provider-plan cleanup repair failed.",
+      }),
+      {
+        tags: {
+          surface: "esign_provider_plan_required_repair",
+        },
+      },
+    );
   });
 
   it.each([

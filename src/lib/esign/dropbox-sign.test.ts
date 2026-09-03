@@ -64,6 +64,7 @@ vi.mock("@dropbox/sign", () => {
 
 import { createDropboxSignProvider } from "./dropbox-sign";
 import { EsignSecret } from "./secret";
+import { HttpError } from "@dropbox/sign";
 
 describe("Dropbox Sign provider", () => {
   beforeEach(() => {
@@ -127,6 +128,7 @@ describe("Dropbox Sign provider", () => {
     await provider.sendWithTemplate({
       localRequestId: "local-uuid",
       templateId: "provider-template",
+      testMode: true,
       signers: [{ role: "Seller", name: "Seller", emailAddress: "seller@example.com" }],
       mergeValues: {},
       signal: controller.signal,
@@ -206,15 +208,175 @@ describe("Dropbox Sign provider", () => {
       templateId: "provider-1",
       title: "Offer",
       metadata: { sandra_template_id: "local-1" },
-      signerRoles: [{ name: "Seller", order: 0 }],
-      namedFormFields: [{ name: "seller_name" }, { name: "property_address" }, { name: "offer_price" }, { name: "closing_date" }, { name: "earnest_money" }],
+      isEmbedded: false,
+      isLocked: false,
+      canEdit: false,
+      isCreator: false,
+      accounts: [{ accountId: "provider-account-1" }],
+      signerRoles: [{ name: "Seller", order: 0 }, { name: "Buyer", order: 1 }],
+      documents: [
+        {
+          name: "purchase-agreement.pdf",
+          index: 0,
+          customFields: [
+            { type: "text", apiId: "seller-name", name: "seller_name", signer: null },
+            { type: "text", apiId: "address", name: "property_address", signer: "sender" },
+            { type: "text", apiId: "offer", name: "offer_price", signer: null },
+            { type: "text", apiId: "closing", name: "closing_date", signer: null },
+            { type: "text", apiId: "earnest", name: "earnest_money", signer: null },
+          ],
+          formFields: [
+            { type: "signature", apiId: "seller-signature", name: "Seller signature", signer: "1", required: true },
+            { type: "signature", apiId: "buyer-signature", name: "Buyer signature", signer: "2", required: true },
+          ],
+        },
+      ],
+      namedFormFields: [{ name: "deprecated_should_not_be_used" }],
     } } });
     const provider = createDropboxSignProvider({ apiKey: new EsignSecret("api-key"), clientId: "client-id", expectedDomain: "sandra.example.com" });
     await expect(provider.getTemplate("provider-1")).resolves.toMatchObject({
       providerTemplateId: "provider-1",
       localTemplateId: "local-1",
       title: "Offer",
-      signerRoles: [{ name: "Seller", order: 0 }],
+      isEmbedded: false,
+      canEdit: false,
+      isCreator: false,
+      isLocked: false,
+      signerRoles: [{ name: "Seller", order: 0 }, { name: "Buyer", order: 1 }],
+      mergeFieldNames: ["seller_name", "property_address", "offer_price", "closing_date", "earnest_money"],
+      mergeFields: [
+        expect.objectContaining({ name: "seller_name", assignedTo: "sender", signer: null }),
+        expect.objectContaining({ name: "property_address", assignedTo: "sender", signer: "sender" }),
+        expect.objectContaining({ name: "offer_price", assignedTo: "sender", signer: null }),
+        expect.objectContaining({ name: "closing_date", assignedTo: "sender", signer: null }),
+        expect.objectContaining({ name: "earnest_money", assignedTo: "sender", signer: null }),
+      ],
+      formFields: [
+        expect.objectContaining({ type: "signature", signer: "1", signerRoleName: "Seller" }),
+        expect.objectContaining({ type: "signature", signer: "2", signerRoleName: "Buyer" }),
+      ],
+    });
+  });
+
+  it("preserves missing custom-field signer as unknown while null and Sender mean Sender", async () => {
+    sdk.templateGet.mockResolvedValue({ body: { template: {
+      templateId: "provider-1",
+      isEmbedded: false,
+      isLocked: false,
+      signerRoles: [{ name: "Seller", order: 0 }, { name: "Buyer", order: 1 }],
+      documents: [
+        {
+          name: "purchase-agreement.pdf",
+          index: 0,
+          customFields: [
+            { type: "text", apiId: "seller-name", name: "seller_name", signer: null },
+            { type: "text", apiId: "sender-case", name: "property_address", signer: "Sender" },
+            { type: "text", apiId: "missing-signer", name: "offer_price" },
+          ],
+          formFields: [],
+        },
+      ],
+    } } });
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+    });
+
+    await expect(provider.getTemplate("provider-1")).resolves.toMatchObject({
+      documents: [
+        expect.objectContaining({
+          customFields: [
+            expect.objectContaining({ name: "seller_name", assignedTo: "sender", signer: null }),
+            expect.objectContaining({ name: "property_address", assignedTo: "sender", signer: "Sender" }),
+            expect.objectContaining({ name: "offer_price", assignedTo: "unknown", signer: null }),
+          ],
+        }),
+      ],
+      mergeFieldNames: ["seller_name", "property_address"],
+    });
+  });
+
+  it("passes the stored provider account id into accountGet for live quota reads", async () => {
+    sdk.accountGet.mockResolvedValue({
+      body: {
+        account: {
+          quotas: { api_signature_requests_left: 17 },
+        },
+      },
+    });
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+    });
+    const controller = new AbortController();
+
+    await expect(
+      provider.getRemainingSignatureRequests?.(
+        "provider-account-1",
+        controller.signal,
+      ),
+    ).resolves.toBe(17);
+    expect(sdk.accountGet).toHaveBeenCalledWith("provider-account-1");
+    expect(sdk.interceptorOptions.at(-1)).toEqual({
+      signal: controller.signal,
+    });
+  });
+
+  it("preserves bounded Dropbox rate-limit reset metadata on 429 failures", async () => {
+    const error = new HttpError(
+      { headers: { "X-Ratelimit-Reset": "1788054300" } } as never,
+      {
+        error: {
+          errorName: "rate_limited",
+          errorMsg: "Too many requests",
+        },
+      } as never,
+      429,
+    ) as Error & {
+      statusCode: number;
+      body: { error: { errorName: string; errorMsg: string } };
+      response: { headers: Record<string, string> };
+    };
+    error.statusCode = 429;
+    error.body = {
+      error: {
+        errorName: "rate_limited",
+        errorMsg: "Too many requests",
+      },
+    };
+    error.response = {
+      headers: {
+        "X-Ratelimit-Reset": "1788054300",
+      },
+    };
+    sdk.send.mockRejectedValueOnce(error);
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+    });
+
+    await expect(
+      provider.sendWithTemplate({
+        localRequestId: "local-uuid",
+        templateId: "provider-template",
+        testMode: true,
+        signers: [
+          {
+            role: "Seller",
+            name: "Seller",
+            emailAddress: "seller@example.com",
+          },
+        ],
+        mergeValues: {},
+      }),
+    ).rejects.toMatchObject({
+      provider: "dropbox_sign",
+      details: {
+        providerCode: "rate_limited",
+        statusCode: 429,
+        retryable: true,
+        rateLimitResetUnixSeconds: 1788054300,
+      },
     });
   });
 
@@ -227,6 +389,7 @@ describe("Dropbox Sign provider", () => {
     const result = await provider.sendWithTemplate({
       localRequestId: "local-uuid",
       templateId: "provider-template",
+      testMode: true,
       signers: [
         {
           role: "Seller",

@@ -19,8 +19,11 @@ import type {
   CreateEmbeddedTemplateDraftInput,
   SendWithTemplateInput,
   SendWithTemplateOutput,
+  ProviderTemplateDocument,
+  ProviderTemplateField,
   ProviderTemplateMetadata,
   TemplatePdf,
+  TemplateSignerRole,
 } from "./contracts";
 import { EsignSecret } from "./secret";
 
@@ -69,10 +72,22 @@ function abortableTemplateApi(apiKey: EsignSecret, signal?: AbortSignal) {
   return template;
 }
 
+function abortableAccountApi(apiKey: EsignSecret, signal?: AbortSignal) {
+  const account = new AccountApi();
+  account.username = apiKey.reveal();
+  account.password = "";
+  if (signal) {
+    account.addInterceptor((options) => {
+      options.signal = signal;
+    });
+  }
+  return account;
+}
+
 export function createDropboxSignProvider(input: {
   apiKey: EsignSecret;
   clientId: string;
-  expectedDomain: string;
+  expectedDomain?: string;
 }): DropboxSignProvider {
   const api = authenticatedApiSet(input.apiKey);
 
@@ -92,8 +107,13 @@ export function createDropboxSignProvider(input: {
           );
         }
         const domains = apiApp.domains ?? [];
-        const expectedHost = normalizedDomain(input.expectedDomain);
-        if (!domains.some((domain) => normalizedDomain(domain) === expectedHost)) {
+        const expectedHost = input.expectedDomain
+          ? normalizedDomain(input.expectedDomain)
+          : null;
+        if (
+          expectedHost &&
+          !domains.some((domain) => normalizedDomain(domain) === expectedHost)
+        ) {
           throw new ProviderError(
             "The Dropbox Sign API app does not allow Sandra's embedded domain.",
             "dropbox_sign",
@@ -242,7 +262,7 @@ export function createDropboxSignProvider(input: {
         title: request.title,
         subject: request.subject,
         message: request.message,
-        testMode: true,
+        testMode: request.testMode,
       };
       try {
         const response =
@@ -273,8 +293,28 @@ export function createDropboxSignProvider(input: {
                 : [],
           ),
           detailsUrl: signatureRequest.detailsUrl ?? null,
-          testMode: true,
+          testMode: request.testMode,
         };
+      } catch (error) {
+        throw normalizeDropboxSignError(error);
+      }
+    },
+
+    async getRemainingSignatureRequests(providerAccountId: string, signal?: AbortSignal) {
+      try {
+        const response = await abortableAccountApi(input.apiKey, signal).accountGet(providerAccountId);
+        const account = response.body.account as unknown as {
+          quotas?: {
+            api_signature_requests_left?: unknown;
+            apiSignatureRequestsLeft?: unknown;
+          };
+        };
+        const remaining =
+          account.quotas?.api_signature_requests_left ??
+          account.quotas?.apiSignatureRequestsLeft;
+        return typeof remaining === "number" && Number.isFinite(remaining)
+          ? remaining
+          : null;
       } catch (error) {
         throw normalizeDropboxSignError(error);
       }
@@ -365,7 +405,7 @@ export function createDropboxSignProvider(input: {
             typeof request.metadata?.sandra_request_id === "string"
               ? request.metadata.sandra_request_id
               : null,
-          testMode: typeof request.testMode === "boolean" ? request.testMode : null,
+        testMode: typeof request.testMode === "boolean" ? request.testMode : null,
         };
       } catch (error) {
         throw normalizeDropboxSignError(error);
@@ -412,23 +452,138 @@ export function createDropboxSignProvider(input: {
 function providerTemplateMetadata(template: {
   templateId?: string;
   title?: string;
+  isEmbedded?: boolean | null;
+  isCreator?: boolean;
+  canEdit?: boolean;
+  isLocked?: boolean;
+  accounts?: Array<{ accountId?: string; isLocked?: boolean }>;
   metadata?: Record<string, unknown>;
   signerRoles?: Array<{ name?: string; order?: number }>;
-  namedFormFields?: Array<{ name?: string }> | null;
+  documents?: Array<{
+    name?: string;
+    index?: number;
+    customFields?: Array<ProviderTemplateFieldSource> | null;
+    formFields?: Array<ProviderTemplateFieldSource> | null;
+  }>;
 }): ProviderTemplateMetadata {
+  const signerRoles = (template.signerRoles ?? [])
+    .map((role, index) => ({ name: role.name ?? "", order: role.order ?? index }))
+    .sort((a, b) => a.order - b.order);
+  const documents = (template.documents ?? []).map((document) =>
+    providerTemplateDocument(document, signerRoles),
+  );
+  const mergeFields = documents.flatMap((document) =>
+    document.customFields.filter((field) => field.assignedTo === "sender"),
+  );
+  const formFields = documents.flatMap((document) => document.formFields);
   return {
     providerTemplateId: template.templateId ?? "",
     localTemplateId: typeof template.metadata?.sandra_template_id === "string"
       ? template.metadata.sandra_template_id
       : null,
     title: template.title ?? null,
-    signerRoles: (template.signerRoles ?? [])
-      .map((role, index) => ({ name: role.name ?? "", order: role.order ?? index }))
-      .sort((a, b) => a.order - b.order),
-    mergeFieldNames: (template.namedFormFields ?? [])
+    isEmbedded: typeof template.isEmbedded === "boolean" ? template.isEmbedded : null,
+    canEdit: typeof template.canEdit === "boolean" ? template.canEdit : null,
+    isCreator: typeof template.isCreator === "boolean" ? template.isCreator : null,
+    isLocked: typeof template.isLocked === "boolean" ? template.isLocked : null,
+    accounts: (template.accounts ?? []).map((account) => ({
+      accountId: account.accountId ?? null,
+      isLocked: typeof account.isLocked === "boolean" ? account.isLocked : null,
+    })),
+    signerRoles,
+    mergeFieldNames: mergeFields
       .map((field) => field.name)
       .filter((name): name is string => Boolean(name)),
+    documents,
+    mergeFields,
+    formFields,
   };
+}
+
+type ProviderTemplateFieldSource = {
+  apiId?: string;
+  name?: string;
+  type?: string;
+  required?: boolean;
+  signer?: number | string | null;
+};
+
+function providerTemplateDocument(
+  document: {
+    name?: string;
+    index?: number;
+    customFields?: Array<ProviderTemplateFieldSource> | null;
+    formFields?: Array<ProviderTemplateFieldSource> | null;
+  },
+  signerRoles: readonly TemplateSignerRole[],
+): ProviderTemplateDocument {
+  const documentIndex = typeof document.index === "number" ? document.index : null;
+  return {
+    index: documentIndex,
+    name: document.name ?? null,
+    customFields: (document.customFields ?? []).map((field) =>
+      providerTemplateField(field, documentIndex, signerRoles, "custom"),
+    ),
+    formFields: (document.formFields ?? []).map((field) =>
+      providerTemplateField(field, documentIndex, signerRoles, "form"),
+    ),
+  };
+}
+
+function providerTemplateField(
+  field: ProviderTemplateFieldSource,
+  documentIndex: number | null,
+  signerRoles: readonly TemplateSignerRole[],
+  source: "custom" | "form",
+): ProviderTemplateField {
+  const signerPresent = Object.hasOwn(field, "signer");
+  const rawSigner = signerPresent ? normalizeSignerValue(field.signer) : null;
+  const assignedTo = source === "custom" && signerPresent && isSenderAssignment(rawSigner)
+    ? "sender"
+    : rawSigner === null
+      ? "unknown"
+      : "signer";
+  return {
+    documentIndex,
+    apiId: field.apiId ?? null,
+    name: field.name ?? null,
+    type: field.type ?? null,
+    required: typeof field.required === "boolean" ? field.required : null,
+    signer: rawSigner,
+    assignedTo,
+    signerRoleName: assignedTo === "signer"
+      ? signerRoleNameForField(rawSigner, signerRoles)
+      : null,
+  };
+}
+
+function normalizeSignerValue(value: number | string | null | undefined): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  return null;
+}
+
+function isSenderAssignment(value: string | null): boolean {
+  return value === null || value.toLowerCase() === "sender";
+}
+
+function signerRoleNameForField(
+  signer: string | null,
+  signerRoles: readonly TemplateSignerRole[],
+): string | null {
+  if (signer === null) return null;
+  const byName = signerRoles.find((role) => role.name === signer);
+  if (byName) return byName.name;
+  const numeric = Number.parseInt(signer, 10);
+  if (!Number.isFinite(numeric) || String(numeric) !== signer) return null;
+  return (
+    signerRoles[numeric - 1]?.name ??
+    signerRoles.find((role) => role.order === numeric)?.name ??
+    null
+  );
 }
 
 function providerFile(file: TemplatePdf) {
@@ -458,7 +613,10 @@ export function normalizeDropboxSignError(
 ): ProviderError {
   if (error instanceof ProviderError) return error;
   if (error instanceof HttpError) {
-    const retryAfter = error.response?.headers?.["retry-after"];
+    const retryAfter = headerValue(error.response?.headers, "retry-after");
+    const rateLimitReset = boundedUnixTimestamp(
+      headerValue(error.response?.headers, "x-ratelimit-reset"),
+    );
     return new ProviderError(
       error.body?.error?.errorMsg || "Dropbox Sign rejected the request.",
       "dropbox_sign",
@@ -467,6 +625,7 @@ export function normalizeDropboxSignError(
         statusCode: error.statusCode,
         retryAfterSeconds:
           typeof retryAfter === "string" ? Number(retryAfter) : undefined,
+        rateLimitResetUnixSeconds: rateLimitReset ?? undefined,
         retryable:
           error.statusCode === 429 ||
           (error.statusCode ?? 0) >= 500 ||
@@ -480,4 +639,25 @@ export function normalizeDropboxSignError(
       : "Dropbox Sign request failed unexpectedly.",
     "dropbox_sign",
   );
+}
+
+function headerValue(
+  headers: Record<string, unknown> | undefined,
+  name: string,
+): string | undefined {
+  if (!headers) return undefined;
+  const exact = headers[name];
+  if (typeof exact === "string") return exact;
+  const lower = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === lower && typeof value === "string") return value;
+  }
+  return undefined;
+}
+
+function boundedUnixTimestamp(value: string | undefined): number | null {
+  if (typeof value !== "string" || !/^\d{1,10}$/.test(value)) return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return null;
+  return parsed <= 4_102_444_800 ? parsed : null;
 }

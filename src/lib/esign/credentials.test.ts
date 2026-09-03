@@ -17,14 +17,16 @@ import {
 
 describe("eSign credential store", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    admin.rpc.mockReset();
     process.env.ESIGN_CREDENTIAL_ENCRYPTION_KEY = "encryption-key";
     process.env.DROPBOX_SIGN_CALLBACK_SECRET_KEY = "callback-root-key";
+    delete process.env.ESIGN_EMBEDDED_TEMPLATE_MANAGEMENT_ENABLED;
   });
 
   afterEach(() => {
     delete process.env.ESIGN_CREDENTIAL_ENCRYPTION_KEY;
     delete process.env.DROPBOX_SIGN_CALLBACK_SECRET_KEY;
+    delete process.env.ESIGN_EMBEDDED_TEMPLATE_MANAGEMENT_ENABLED;
   });
 
   it("derives stable org-specific callback secrets without persisting plaintext", () => {
@@ -100,6 +102,7 @@ describe("eSign credential store", () => {
   });
 
   it("requires the SQL template-management capability before provider use", async () => {
+    process.env.ESIGN_EMBEDDED_TEMPLATE_MANAGEMENT_ENABLED = "true";
     admin.rpc
       .mockResolvedValueOnce({
         data: [
@@ -131,6 +134,7 @@ describe("eSign credential store", () => {
   });
 
   it("rejects provider use when the SQL capability is absent or mismatched", async () => {
+    process.env.ESIGN_EMBEDDED_TEMPLATE_MANAGEMENT_ENABLED = "true";
     admin.rpc
       .mockResolvedValueOnce({
         data: [

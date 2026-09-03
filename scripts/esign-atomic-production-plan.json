@@ -37,6 +37,13 @@
       "path": "supabase/migrations/20260902120100_esign_atomic_disconnect_state.sql",
       "sha256": "3a3fcc87da6a48062861fac5758cef5b1231bfc0babc9549e044486d61daa111",
       "statementsSha256": "5abfc78a20255fdb4df5e24e75fdde1cbb3872b096e8d1a3a6b8441a9a9891eb"
+    },
+    {
+      "version": "20260902180000",
+      "name": "esign_essentials_production_path",
+      "path": "supabase/migrations/20260902180000_esign_essentials_production_path.sql",
+      "sha256": "3444de5670a84e6f0d5a78390344c847cd587eef91303ab0219a52eb7f93823a",
+      "statementsSha256": "505dc41dd1831fc008407c0a5a4962fa5a784576800039514a4ed9dba93b75d7"
     }
   ]
 }

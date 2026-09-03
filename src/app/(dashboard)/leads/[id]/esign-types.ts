@@ -12,6 +12,7 @@ export const SEND_BLOCKER_PRIORITY = [
   "no_templates",
   "owner_contact_missing",
   "owner_email_missing",
+  "live_quota_blocked",
 ] as const;
 
 export type SendBlockerCode = (typeof SEND_BLOCKER_PRIORITY)[number];
@@ -22,6 +23,8 @@ const SEND_BLOCKER_MESSAGES: Record<SendBlockerCode, string> = {
   no_templates: "Send disabled: no eSign templates are available.",
   owner_contact_missing: "Send disabled: no homeowner contact is linked.",
   owner_email_missing: "Enter the seller email before sending.",
+  live_quota_blocked:
+    "Send disabled: Sandra's live Dropbox Sign safety limit is reached.",
 };
 
 export function sendBlockerMessage(code: SendBlockerCode): string {
@@ -48,7 +51,12 @@ export type SignerAssignment = Readonly<{
 
 export type LeadEsignPreflight = Readonly<{
   propertyId: string;
-  testMode: true;
+  testMode: boolean;
+  liveSendLimit?: Readonly<{
+    monthlyLimit: number;
+    usedThisMonth: number;
+    remainingThisMonth: number;
+  }> | null;
   blockers: readonly SendBlockerCode[];
   templates: readonly TemplateOption[];
   sellerDefaults: Readonly<{

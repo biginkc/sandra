@@ -20,10 +20,16 @@ jobs:
           node-version: "24"
           cache: "npm"
 
+      - uses: ankane/setup-postgres@e9cd5bc1babecb0e441a640646d782056dbb67f5
+        with:
+          postgres-version: 17
+
       - name: Install dependencies
         run: npm ci
 
       - name: Run verify
+        env:
+          SUPABASE_LOCAL_DB_URL: postgresql://runner@localhost:5432/postgres
         run: npm run verify
 
       - name: Run database-free synthetic Playwright gates

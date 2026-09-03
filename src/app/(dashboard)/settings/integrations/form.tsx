@@ -35,6 +35,7 @@ import { cn } from "@/lib/utils";
 import {
   connectDropboxSignAction,
   disconnectDropboxSignAction,
+  setEsignRequestModeAction,
   setEsignSendingEnabledAction,
 } from "@/lib/esign/actions";
 
@@ -66,6 +67,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const [esignConfirmation, setEsignConfirmation] = useState<boolean | null>(
     null,
   );
+  const [esignModeConfirmation, setEsignModeConfirmation] = useState<
+    boolean | null
+  >(null);
   const [esignDisconnectConfirmation, setEsignDisconnectConfirmation] =
     useState(false);
   const [esignDisconnectResult, setEsignDisconnectResult] = useState<{
@@ -76,11 +80,18 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const esignDisconnectButtonRef = useRef<HTMLButtonElement>(null);
   const esignConfirmingRef = useRef(false);
   const esignDisconnectingRef = useRef(false);
+  const esignModeChangingRef = useRef(false);
   const [pending, startTransition] = useTransition();
   const esignOwnerReasonId = "esign-owner-required-description";
   const esignToggleDescriptionId = esign.canManage
     ? undefined
     : esignOwnerReasonId;
+  const esignModeLabel =
+    esign.testMode === true
+      ? "test"
+      : esign.testMode === false
+        ? "live"
+        : "unavailable";
 
   const toggleSlack = (next: boolean) => {
     const previous = slackEnabled;
@@ -220,6 +231,29 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
     });
   };
 
+  const confirmEsignModeChange = () => {
+    const nextTestMode = esignModeConfirmation;
+    if (nextTestMode === null || esignModeChangingRef.current) return;
+    esignModeChangingRef.current = true;
+    startTransition(async () => {
+      try {
+        const result = await callAction(
+          setEsignRequestModeAction(nextTestMode, true),
+          {
+            successMessage: nextTestMode
+              ? "Dropbox Sign test mode selected"
+              : "Dropbox Sign live mode selected",
+            fallbackMessage: "Could not update Dropbox Sign mode",
+          },
+        );
+        if (result.ok) setEsign(result.data);
+      } finally {
+        esignModeChangingRef.current = false;
+        setEsignModeConfirmation(null);
+      }
+    });
+  };
+
   const disconnectEsign = () => {
     setEsignDisconnectResult(null);
     setEsignDisconnectConfirmation(true);
@@ -242,6 +276,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               disconnectPending: false,
               testMode: true,
               apiKeyLastFour: null,
+              embeddedTemplateManagementEnabled: false,
+              liveSendLimit: null,
+              statusUnavailable: false,
             });
           } else {
             setEsign((current) => ({
@@ -328,9 +365,12 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
             </CardAction>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
-            <div className="border-alert-warning/40 bg-alert-warning/10 rounded-md border px-3 py-2 text-sm">
-              Test mode is always on for v1. Test signatures are not legally
-              binding.
+            <div className={`${esign.testMode === true ? "border-alert-warning/40 bg-alert-warning/10" : esign.testMode === false ? "border-destructive/30 bg-destructive/5" : "border-muted bg-muted/30"} rounded-md border px-3 py-2 text-sm`}>
+              {esign.testMode === true
+                ? "Dropbox Sign is in test mode. Test signatures are watermarked and not legally binding."
+                : esign.testMode === false
+                  ? "Dropbox Sign is in live mode. New sends are legally binding and count against Dropbox Sign billing. Dropbox may automatically upgrade at quota exhaustion and does not provide an API hard stop."
+                  : "Dropbox Sign status is unavailable. Registration, template management, and sending controls are disabled until status loads."}
             </div>
             {esignDisconnectResult && (
               <p
@@ -359,7 +399,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                     <span className="text-muted-foreground text-xs">
                       {esign.disconnectPending
                         ? "Active signature work is still finishing."
-                        : "Requires a verified callback and applies to new test-mode requests."}
+                        : `Requires a verified callback and applies to new ${esignModeLabel} requests.`}
                     </span>
                   </span>
                   <input
@@ -381,6 +421,44 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                     aria-describedby={esignToggleDescriptionId}
                   />
                 </label>
+                {esign.canManage && (
+                  <label className="flex items-center justify-between gap-4 rounded-md border p-3 text-sm">
+                    <span className="flex flex-col gap-1">
+                      <span className="font-medium">
+                        Use live Dropbox Sign requests
+                      </span>
+                      <span className="text-muted-foreground text-xs">
+                        Changing modes turns sending off. Sandra&apos;s monthly fuse covers Sandra-originated live sends only; Dropbox may automatically upgrade at quota exhaustion and does not provide an API hard stop.
+                      </span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={esign.testMode === false}
+                      disabled={
+                        pending ||
+                        esign.disconnectPending ||
+                        esign.testMode === null
+                      }
+                      onChange={(event) =>
+                        setEsignModeConfirmation(!event.target.checked)
+                      }
+                      data-testid="esign-live-mode-toggle"
+                      className="accent-primary size-5"
+                      aria-label="Use live Dropbox Sign requests"
+                    />
+                  </label>
+                )}
+                {esign.testMode === false && esign.liveSendLimit ? (
+                  <div className="rounded-md border px-3 py-2 text-xs text-muted-foreground">
+                    Sandra local calendar-month ceiling: {esign.liveSendLimit.usedThisMonth} of {esign.liveSendLimit.monthlyLimit} live sends used. It resets on Sandra&apos;s America/Chicago calendar-month boundary. Dropbox may count manual dashboard sends and other API clients outside this counter, may automatically upgrade at quota exhaustion, and does not provide an API hard stop.
+                  </div>
+                ) : null}
+                {!esign.embeddedTemplateManagementEnabled ? (
+                  <p className="text-muted-foreground text-xs">
+                    Embedded Add/Edit/Duplicate is off. Register templates created on the Dropbox Sign website.
+                  </p>
+                ) : null}
                 <div className="flex flex-wrap gap-2">
                   {esign.canManage && (
                     <>
@@ -423,6 +501,11 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
                   </p>
                 )}
               </>
+            ) : esign.statusUnavailable ? (
+              <p className="text-muted-foreground text-sm">
+                Dropbox Sign status is unavailable. Registration and template
+                management are disabled until Sandra can load the connection.
+              </p>
             ) : esign.canManage ? (
               <div className="flex flex-col gap-2">
                 <label
@@ -560,7 +643,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
             </DialogTitle>
             <DialogDescription>
               {esignConfirmation
-                ? "New test-mode signature requests can be sent after you confirm."
+                ? esign.testMode === false
+                  ? "New legally binding live requests can be sent after you confirm. Sandra's cost fuse cannot control manual Dropbox dashboard sends or other API clients. Dropbox may automatically upgrade at quota exhaustion and does not provide an API hard stop."
+                  : "New test-mode signature requests can be sent after you confirm."
                 : "New signature requests will stay blocked after you confirm."}
             </DialogDescription>
           </DialogHeader>
@@ -617,6 +702,46 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               onClick={confirmEsignDisconnect}
             >
               Disconnect
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={esignModeConfirmation !== null}
+        onOpenChange={(open) => {
+          if (!open && !esignModeChangingRef.current) {
+            setEsignModeConfirmation(null);
+          }
+        }}
+      >
+        <DialogContent id="esign-mode-confirmation">
+          <DialogHeader>
+            <DialogTitle>
+              {esignModeConfirmation ? "Switch to test mode?" : "Switch to live mode?"}
+            </DialogTitle>
+            <DialogDescription>
+              {esignModeConfirmation
+                ? "New Dropbox Sign sends will be watermarked test requests after sending is turned back on."
+                : "New Dropbox Sign sends will be legally binding live requests after sending is turned back on. Sandra's cost fuse cannot control manual Dropbox dashboard sends or other API clients. Dropbox may automatically upgrade at quota exhaustion and does not provide an API hard stop."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending}
+              onClick={() => setEsignModeConfirmation(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              autoFocus
+              disabled={pending}
+              onClick={confirmEsignModeChange}
+            >
+              {esignModeConfirmation ? "Use test mode" : "Use live mode"}
             </Button>
           </DialogFooter>
         </DialogContent>

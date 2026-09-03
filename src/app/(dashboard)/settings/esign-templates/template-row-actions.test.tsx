@@ -33,6 +33,7 @@ const actions: TemplateLibraryActions = {
   checkEditorReadiness: vi.fn(),
   abandonDraft: vi.fn(),
   retryCleanup: vi.fn(),
+  revalidateWebsiteTemplate: vi.fn(),
   deleteTemplate: vi.fn(),
 };
 
@@ -179,6 +180,39 @@ describe("versioned Edit", () => {
   });
 });
 
+describe("website template Revalidate", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("checks the stored Dropbox website template and refreshes the library", async () => {
+    const revalidateWebsiteTemplate = vi.mocked(
+      actions.revalidateWebsiteTemplate!,
+    );
+    revalidateWebsiteTemplate.mockResolvedValue({
+      ok: true,
+      data: { status: "valid" },
+    });
+    render(
+      <TemplateRowActions
+        template={{ ...template, templateOrigin: "dropbox_website" }}
+        actions={actions}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Revalidate" }));
+
+    await waitFor(() =>
+      expect(revalidateWebsiteTemplate).toHaveBeenCalledWith(
+        "local-1",
+        "provider-1",
+      ),
+    );
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("DeleteTemplateDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -197,6 +231,24 @@ describe("DeleteTemplateDialog", () => {
     expect(screen.getByRole("button", { name: "Delete template" })).toHaveClass(
       "bg-destructive/10",
     );
+  });
+
+  it("uses removing language for website-origin template history warnings", () => {
+    render(
+      <TemplateRowActions
+        template={{
+          ...template,
+          templateOrigin: "dropbox_website",
+          recentSendCount30d: 2,
+        }}
+        actions={actions}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+    expect(screen.getByText(/Removing it will not remove existing contract history/i)).toBeVisible();
+    expect(screen.queryByText(/Deleting it will not remove existing contract history/i)).toBeNull();
   });
 });
 

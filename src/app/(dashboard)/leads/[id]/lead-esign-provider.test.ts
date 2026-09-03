@@ -61,6 +61,7 @@ describe("bound lead eSign provider classification", () => {
       await expect(
         provider!.sendWithTemplate({
           localRequestId: "request-1",
+          testMode: true,
           providerTemplateId: "template-1",
           signers: [],
           mergeValues: {
@@ -88,6 +89,7 @@ describe("bound lead eSign provider classification", () => {
     await expect(
       provider!.sendWithTemplate({
         localRequestId: "request-1",
+        testMode: true,
         providerTemplateId: "template-1",
         signers: [],
         mergeValues: {
@@ -159,12 +161,11 @@ describe("bound lead eSign provider classification", () => {
     expect(providerMocks.createProvider).toHaveBeenCalledWith({
       apiKey: "secret-wrapper",
       clientId: "client-id",
-      expectedDomain: "sandra.example.com",
     });
-    expect(providerMocks.templateCapability).toHaveBeenCalledWith("org-1");
+    expect(providerMocks.templateCapability).not.toHaveBeenCalled();
   });
 
-  it("does not create a repair-only provider while disconnect is pending", async () => {
+  it("does not require embedded template-management capability for a repair-only provider", async () => {
     providerMocks.getCredentials.mockResolvedValueOnce({
       sendingEnabled: false,
       apiKey: "secret-wrapper",
@@ -177,9 +178,9 @@ describe("bound lead eSign provider classification", () => {
 
     await expect(
       providerForOrg("org-1", { requireSendingEnabled: false }),
-    ).rejects.toThrow("template management unavailable");
-    expect(providerMocks.templateCapability).toHaveBeenCalledWith("org-1");
-    expect(providerMocks.createProvider).not.toHaveBeenCalled();
+    ).resolves.toBeTruthy();
+    expect(providerMocks.templateCapability).not.toHaveBeenCalled();
+    expect(providerMocks.createProvider).toHaveBeenCalled();
   });
 
   it("does not create a provider client for normal mutations when sending is disabled", async () => {
