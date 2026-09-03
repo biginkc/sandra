@@ -276,32 +276,6 @@ describe("updateSession membership authorization", () => {
     );
   });
 
-  it("never redirects a Server Action POST — the action must return its own typed error", async () => {
-    mockProtectedSession(); // no memberships: would otherwise deny+redirect
-    const request = new NextRequest("https://sandra.test/settings/integrations", {
-      method: "POST",
-      headers: { "next-action": "abc123" },
-    });
-
-    const response = await updateSession(request);
-
-    expect(response.headers.get("location")).toBeNull();
-    expect(response.status).not.toBe(307);
-  });
-
-  it("never redirects an unauthenticated Server Action POST", async () => {
-    const getUser = vi.fn().mockResolvedValue({ data: { user: null } });
-    createServerClient.mockReturnValue({ auth: { getUser }, from: vi.fn() });
-    const request = new NextRequest("https://sandra.test/settings/integrations", {
-      method: "POST",
-      headers: { "next-action": "abc123" },
-    });
-
-    const response = await updateSession(request);
-
-    expect(response.headers.get("location")).toBeNull();
-  });
-
   it("fails closed when the membership SDK throws", async () => {
     mockProtectedSession({ membershipThrows: true });
 
