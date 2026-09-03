@@ -41,6 +41,7 @@ import {
 
 import {
   disconnectIntegration,
+  getEsignCallbackUrlAction,
   setChannelEnabledAction,
   setReminderPhoneAction,
   setTimezoneAction,
@@ -97,6 +98,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const [savedPhone, setSavedPhone] = useState(initial.sms.phone);
   const [phoneInput, setPhoneInput] = useState(initial.sms.phone ?? "");
   const [esign, setEsign] = useState(initial.esign);
+  const [esignCallbackUrl, setEsignCallbackUrl] = useState(
+    initial.esignCallbackUrl,
+  );
   const [esignApiKey, setEsignApiKey] = useState("");
   const [esignConfirmation, setEsignConfirmation] = useState<boolean | null>(
     null,
@@ -215,6 +219,12 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
       if (result.ok) {
         setEsign(result.data);
         setEsignApiKey("");
+        // connectDropboxSignAction's return value is the shared connection
+        // status shape and doesn't carry the callback URL — fetch it
+        // separately so the owner sees it immediately instead of needing a
+        // page reload.
+        const callbackUrl = await getEsignCallbackUrlAction();
+        if (callbackUrl.ok) setEsignCallbackUrl(callbackUrl.data);
       }
     });
   };
@@ -314,6 +324,7 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
               liveSendLimit: null,
               statusUnavailable: false,
             });
+            setEsignCallbackUrl(null);
           } else {
             setEsign((current) => ({
               ...current,
@@ -427,8 +438,8 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
             )}
             {esign.connected ? (
               <>
-                {esign.canManage && initial.esignCallbackUrl && (
-                  <CallbackUrlRow url={initial.esignCallbackUrl} />
+                {esign.canManage && esignCallbackUrl && (
+                  <CallbackUrlRow url={esignCallbackUrl} />
                 )}
                 <label className="flex items-center justify-between gap-4 rounded-md border p-3 text-sm">
                   <span className="flex flex-col gap-1">

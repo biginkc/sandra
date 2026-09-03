@@ -18,6 +18,7 @@ const {
   connectDropboxSignAction,
   disconnectDropboxSignAction,
   disconnectIntegration,
+  getEsignCallbackUrlAction,
   setEsignSendingEnabledAction,
   setEsignRequestModeAction,
   setChannelEnabledAction,
@@ -48,6 +49,10 @@ const {
     }),
   ),
   disconnectIntegration: vi.fn(async () => ({ ok: true, data: null })),
+  getEsignCallbackUrlAction: vi.fn(async () => ({
+    ok: true as const,
+    data: "https://sandra-sooty.vercel.app/api/webhooks/esign/secret-value",
+  })),
   setEsignSendingEnabledAction: vi.fn(
     async (): Promise<
       | { ok: true; data: null }
@@ -79,6 +84,7 @@ vi.mock("@/lib/esign/actions", () => ({
 
 vi.mock("./actions", () => ({
   disconnectIntegration,
+  getEsignCallbackUrlAction,
   setChannelEnabledAction,
   setReminderPhoneAction,
   setTimezoneAction,
@@ -93,6 +99,7 @@ describe("<IntegrationsForm />", () => {
     connectDropboxSignAction.mockClear();
     disconnectDropboxSignAction.mockClear();
     disconnectIntegration.mockClear();
+    getEsignCallbackUrlAction.mockClear();
     setChannelEnabledAction.mockClear();
     setReminderPhoneAction.mockClear();
     setTimezoneAction.mockClear();
@@ -315,6 +322,17 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
     });
     expect(screen.queryByDisplayValue("secret-api-key-1234")).toBeNull();
     expect(screen.getByText(/Connected ·••••1234/)).toBeVisible();
+
+    // The callback URL row must appear right after connect — no page
+    // reload / router.refresh() required — because connectDropboxSignAction's
+    // own return value doesn't carry it.
+    await waitFor(() => {
+      expect(getEsignCallbackUrlAction).toHaveBeenCalled();
+    });
+    expect(await screen.findByText("Callback URL")).toBeVisible();
+    expect(screen.getByTestId("esign-callback-url")).toHaveTextContent(
+      "https://sandra-sooty.vercel.app/api/webhooks/esign/secret-value",
+    );
   });
 
   it("clears a stale disconnect result after reconnect succeeds", async () => {

@@ -82,6 +82,25 @@ async function resolveEsignCallbackUrl(
   return `${webhookBaseUrl()}/api/webhooks/esign/${secret.reveal()}`;
 }
 
+/**
+ * Owner-gated fetch of just the callback URL, for the client to call right
+ * after a successful `connectDropboxSignAction` — that action's own return
+ * value is the shared `EsignConnectionStatus` shape and doesn't carry the
+ * callback URL, so without this the owner only saw it after a manual page
+ * reload re-ran `getIntegrationStatus`.
+ */
+export async function getEsignCallbackUrlAction(): Promise<
+  Result<string | null>
+> {
+  try {
+    const esign = await getEsignConnectionStatus();
+    return ok(await resolveEsignCallbackUrl(esign));
+  } catch (error) {
+    reportError(error, { tags: { surface: "get_esign_callback_url" } });
+    return errFromUnknown(error, "ESIGN_CALLBACK_URL_FAILED");
+  }
+}
+
 /** E.164 — mirrors the DB CHECK
  *  (`user_integration_prefs_reminder_phone_format_check`, 20260814150000). */
 const E164_RE = /^\+[1-9][0-9]{6,14}$/;
