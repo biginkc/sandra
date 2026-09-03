@@ -20,12 +20,12 @@ const DATABASE_URL_ENV = "SANDRA_PRODUCTION_DATABASE_URL";
 export const PACKETS = Object.freeze({
   a: {
     file: "sandra-cleanup-packet-a.sql",
-    sha256: "7008acfe77a65835bec1ecf3a40c00269fe94d1db14d249aa821b0183bfadfc7",
+    sha256: "3f4f18c0bce9cfbc2f30e7fc57984ea3b9fea6264edc909e6a55199044c2042d",
     applyArm: "DELETE_REVIEWED_PACKET_A",
   },
   b: {
     file: "sandra-cleanup-packet-b-access.sql",
-    sha256: "52a5a3cb7a5aee0ee20bb7842c5a8092d9ea9cefefa173057dd5ce58992875b5",
+    sha256: "9a40b93052c10f9444632970836f58e207c3ecf6780ca6c4a0fafbbb4de8e8a1",
     applyArm: "DELETE_REVIEWED_PACKET_B_ACCESS",
   },
 });

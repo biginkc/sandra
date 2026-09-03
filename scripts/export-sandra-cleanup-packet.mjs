@@ -168,7 +168,10 @@ export function assertDatabaseTarget(connectionString, expectedRef) {
     decodeURIComponent(url.username) === "postgres";
   const pooler =
     /^aws-[0-9]+-us-east-1\.pooler\.supabase\.com$/u.test(url.hostname) &&
-    decodeURIComponent(url.username) === `postgres.${expectedRef}`;
+    [
+      `postgres.${expectedRef}`,
+      `cli_login_postgres.${expectedRef}`,
+    ].includes(decodeURIComponent(url.username));
   assert(direct || pooler, "Refusing an unexpected database target.");
   assert(
     !url.pathname || url.pathname === "/postgres",

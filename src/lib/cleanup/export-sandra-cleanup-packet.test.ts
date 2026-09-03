@@ -46,6 +46,12 @@ describe("Sandra cleanup packet export safeguards", () => {
     ).not.toThrow();
     expect(() =>
       assertDatabaseTarget(
+        `postgresql://cli_login_postgres.${EXPECTED_PROJECT_REF}:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres`,
+        EXPECTED_PROJECT_REF,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertDatabaseTarget(
         `postgresql://postgres.${EXPECTED_PROJECT_REF}:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres?host=db.${EXPECTED_TEST_PROJECT_REF}.supabase.co&user=postgres`,
         EXPECTED_PROJECT_REF,
       ),

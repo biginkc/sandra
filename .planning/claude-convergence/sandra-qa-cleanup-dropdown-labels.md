@@ -93,6 +93,7 @@ Make affected Sandra dropdowns human-readable with correctly scoped assignee nam
 - Packet A now uses repeatable-read and verifies ID hashes for the synthetic events, explicit properties/events/task, and sequence steps in the deletion transaction. Both packets verify the exact nine-row production membership fingerprint before changing rows.
 - `run-sandra-cleanup-packet.mjs` is the sole commit path. It pins each SQL file hash, requires a different exact arm for Packet A and Packet B, and performs the tested in-memory `ROLLBACK_REHEARSAL` to `COMMIT_PENDING` plus final `rollback` to `commit` transformation. It reports `COMMITTED` only after the database call succeeds.
 - Focused safeguards: 21/21 tests passed; TypeScript check and `git diff --check` passed. Fresh exact-project rollback rehearsals again produced Packet A 3,993 deletions plus one archive and Packet B four membership deletions; both rolled back and production remains unchanged.
+- The live runner path uses Supabase's short-lived, project-scoped CLI login, switches to the standard `postgres` role inside each transaction, and declares the `extensions` search path used by the digest checks. Certificate validation uses the Supabase Root 2021 CA. Final live runner preflights rolled back Packet A at SQL SHA-256 `3f4f18c0bce9cfbc2f30e7fc57984ea3b9fea6264edc909e6a55199044c2042d` and Packet B at `9a40b93052c10f9444632970836f58e207c3ecf6780ca6c4a0fafbbb4de8e8a1`; production counts remained unchanged.
 
 ## Packet B classification (no deletion authority)
 

@@ -8,6 +8,8 @@
 -- separate Fable approval and commit arm.
 
 begin isolation level repeatable read;
+set local role postgres;
+set local search_path = public, extensions, pg_catalog;
 set local lock_timeout = '5s';
 set local statement_timeout = '30s';
 set local idle_in_transaction_session_timeout = '60s';
