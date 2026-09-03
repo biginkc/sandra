@@ -44,6 +44,18 @@ describe("Sandra cleanup packet export safeguards", () => {
         EXPECTED_PROJECT_REF,
       ),
     ).not.toThrow();
+    expect(() =>
+      assertDatabaseTarget(
+        `postgresql://postgres.${EXPECTED_PROJECT_REF}:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres?host=db.${EXPECTED_TEST_PROJECT_REF}.supabase.co&user=postgres`,
+        EXPECTED_PROJECT_REF,
+      ),
+    ).toThrow(/query parameters/i);
+    expect(() =>
+      assertDatabaseTarget(
+        `postgresql://postgres.${EXPECTED_PROJECT_REF}:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres?sslmode=disable`,
+        EXPECTED_PROJECT_REF,
+      ),
+    ).toThrow(/query parameters/i);
   });
 
   it("computes generated-time-independent payload and row digests", () => {

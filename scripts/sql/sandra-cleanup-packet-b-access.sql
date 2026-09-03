@@ -4,10 +4,10 @@
 -- public.memberships rows. Auth identities, Hugo grants/operations, and all
 -- business/provider/compliance history remain untouched.
 --
--- Keep the final statement as ROLLBACK for rehearsal. A one-time COMMIT is
--- allowed only after separate exact-byte Fable approval.
+-- Execute only through run-sandra-cleanup-packet.mjs. Packet B keeps its own
+-- separate Fable approval and commit arm.
 
-begin;
+begin isolation level repeatable read;
 set local lock_timeout = '5s';
 set local statement_timeout = '30s';
 set local idle_in_transaction_session_timeout = '60s';
@@ -30,6 +30,13 @@ declare
   v_count bigint;
   v_hash text;
 begin
+  select count(*), encode(digest(coalesce(string_agg(to_jsonb(m)::text, E'\n' order by org_id, user_id), ''), 'sha256'), 'hex')
+  into v_count, v_hash
+  from public.memberships m;
+  if v_count <> 9 or v_hash <> '2685f7bf1a4b27077ced69006454df9d5f005b663c10ae7adc3ddaff9e92d3fd' then
+    raise exception 'Sandra production identity fingerprint drift: count %, hash %', v_count, v_hash;
+  end if;
+
   select
     count(*),
     encode(
@@ -69,6 +76,17 @@ begin
      )
   then
     raise exception 'Packet B access lifecycle drifted';
+  end if;
+
+  if exists (
+    select 1 from public.properties p
+    join packet_b_memberships q on q.user_id=p.assigned_user_id
+    where p.deleted_at is null
+  ) or exists (
+    select 1 from public.tasks t
+    join packet_b_memberships q on q.user_id=t.assignee_id
+  ) then
+    raise exception 'A QA membership still owns a retained property or task';
   end if;
 
   -- The membership table is currently a leaf. If a future migration makes

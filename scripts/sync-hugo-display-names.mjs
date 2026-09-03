@@ -8,6 +8,8 @@ import { pathToFileURL } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 
 export const APPLY_ARM = "SYNC_REVIEWED_HUGO_NAMES";
+export const HUGO_PROJECT_REF = "fwmdgskpdbacjqjefjqm";
+export const SANDRA_PROJECT_REF = "copflsklaefwzipsrjqz";
 export const REVIEWED_DISPLAY_NAME_OVERRIDES = Object.freeze({
   "gretchen@bmhgroupkc.com": "Gretchen",
   "info@bmhgroupkc.com": "BMH Group Info",
@@ -152,16 +154,40 @@ function requiredEnv(name) {
   return value;
 }
 
+export function assertSupabaseProjectUrl(value, expectedRef, label) {
+  const url = new URL(value);
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== `${expectedRef}.supabase.co` ||
+    (url.pathname !== "" && url.pathname !== "/") ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(`Refusing an unexpected ${label} project URL.`);
+  }
+  return url.origin;
+}
+
 async function main() {
   const args = parseNameSyncArgs(process.argv.slice(2));
   if (args.env) process.loadEnvFile(path.resolve(args.env));
-  const hugo = createClient(
+  const hugoUrl = assertSupabaseProjectUrl(
     requiredEnv("HUGO_SUPABASE_URL"),
+    HUGO_PROJECT_REF,
+    "Hugo",
+  );
+  const sandraUrl = assertSupabaseProjectUrl(
+    requiredEnv("NEXT_PUBLIC_SUPABASE_URL"),
+    SANDRA_PROJECT_REF,
+    "Sandra",
+  );
+  const hugo = createClient(
+    hugoUrl,
     requiredEnv("HUGO_SUPABASE_SERVICE_ROLE_KEY"),
     { auth: { autoRefreshToken: false, persistSession: false } },
   );
   const sandra = createClient(
-    requiredEnv("NEXT_PUBLIC_SUPABASE_URL"),
+    sandraUrl,
     requiredEnv("SUPABASE_SERVICE_ROLE_KEY"),
     { auth: { autoRefreshToken: false, persistSession: false } },
   );

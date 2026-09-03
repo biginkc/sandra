@@ -155,6 +155,14 @@ function quoteIdentifier(value) {
 
 export function assertDatabaseTarget(connectionString, expectedRef) {
   const url = new URL(connectionString);
+  assert(
+    url.protocol === "postgresql:" || url.protocol === "postgres:",
+    "Refusing a non-Postgres database URL.",
+  );
+  assert(
+    [...url.searchParams].length === 0 && !url.hash,
+    "Refusing database URL query parameters or fragments.",
+  );
   const direct =
     url.hostname === `db.${expectedRef}.supabase.co` &&
     decodeURIComponent(url.username) === "postgres";
@@ -166,7 +174,7 @@ export function assertDatabaseTarget(connectionString, expectedRef) {
     !url.pathname || url.pathname === "/postgres",
     "Refusing a non-postgres database target.",
   );
-  return { direct, pooler };
+  return { direct, pooler, connectionString: url.toString() };
 }
 
 async function exists(target) {
@@ -635,11 +643,11 @@ async function main() {
   if (args.env) process.loadEnvFile(path.resolve(args.env));
   const connectionString = process.env[DATABASE_URL_ENV];
   assert(connectionString, `${DATABASE_URL_ENV} is missing.`);
-  assertDatabaseTarget(connectionString, EXPECTED_PROJECT_REF);
+  const target = assertDatabaseTarget(connectionString, EXPECTED_PROJECT_REF);
 
   const client = new Client({
-    connectionString,
-    ssl: { rejectUnauthorized: false },
+    connectionString: target.connectionString,
+    ssl: { rejectUnauthorized: true },
   });
   await client.connect();
   let packet;

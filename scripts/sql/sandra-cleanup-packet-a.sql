@@ -1,17 +1,25 @@
 -- Sandra production cleanup packet A.
 --
--- Safety contract:
---   1. Run with `rollback` (the default final statement) for rehearsal.
---   2. The target project must be independently verified as
---      copflsklaefwzipsrjqz before execution.
---   3. Compare every expected count and SHA-256 with the sealed manifest.
---   4. Only after exact-head Fable approval may the final `rollback` be
---      replaced with `commit` for one authorized execution.
+-- Safety contract: execute only through run-sandra-cleanup-packet.mjs.
+-- The runner pins the production endpoint and supplies the reviewed commit arm.
 
-begin;
+begin isolation level repeatable read;
 set local lock_timeout = '5s';
 set local statement_timeout = '60s';
 set local idle_in_transaction_session_timeout = '60s';
+
+do $$
+declare
+  v_count bigint;
+  v_hash text;
+begin
+  select count(*), encode(digest(coalesce(string_agg(to_jsonb(m)::text, E'\n' order by org_id, user_id), ''), 'sha256'), 'hex')
+  into v_count, v_hash
+  from public.memberships m;
+  if v_count <> 9 or v_hash <> '2685f7bf1a4b27077ced69006454df9d5f005b663c10ae7adc3ddaff9e92d3fd' then
+    raise exception 'Sandra production identity fingerprint drift: count %, hash %', v_count, v_hash;
+  end if;
+end $$;
 
 create temp table packet_a_results (
   operation text primary key,
@@ -114,6 +122,14 @@ begin
     raise exception 'Synthetic lead-event count drift: %', v_count;
   end if;
 
+  select count(*), encode(digest(string_agg(e.id::text, ',' order by e.id), 'sha256'), 'hex')
+    into v_count, v_hash
+  from public.lead_events e
+  join packet_a_synthetic_properties x on x.id = e.property_id;
+  if v_count <> 1326 or v_hash <> '87dba28bf4e2041a20300e4535df16411edaccf51414629490a9a92d543a67a5' then
+    raise exception 'Synthetic lead-event manifest drift: count %, hash %', v_count, v_hash;
+  end if;
+
   if exists (
     select 1
     from public.lead_events e
@@ -160,8 +176,11 @@ begin
     raise exception 'Synthetic cohort gained an operational/compliance reference';
   end if;
 
-  if (select count(*) from public.properties p join packet_a_explicit_qa_properties x using(id)) <> 3 then
-    raise exception 'Explicit QA property manifest drift';
+  select count(*), encode(digest(string_agg(p.id::text, ',' order by p.id), 'sha256'), 'hex')
+    into v_count, v_hash
+  from public.properties p join packet_a_explicit_qa_properties x using(id);
+  if v_count <> 3 or v_hash <> '990f2227a53d4da9cda9798e0f24417e4b9d9807d3f84cb269a6fff915a58708' then
+    raise exception 'Explicit QA property manifest drift: count %, hash %', v_count, v_hash;
   end if;
   if exists (
     select 1
@@ -178,11 +197,17 @@ begin
   ) then
     raise exception 'Explicit QA identity, scope, or lifecycle changed';
   end if;
-  if (select count(*) from public.lead_events e join packet_a_explicit_qa_properties x on x.id=e.property_id) <> 4 then
-    raise exception 'Explicit QA lead-event count drift';
+  select count(*), encode(digest(string_agg(e.id::text, ',' order by e.id), 'sha256'), 'hex')
+    into v_count, v_hash
+  from public.lead_events e join packet_a_explicit_qa_properties x on x.id=e.property_id;
+  if v_count <> 4 or v_hash <> '96b34815aee49014e4d67dafe1b92455f4576468b054b70352375b1c29c86b77' then
+    raise exception 'Explicit QA lead-event manifest drift: count %, hash %', v_count, v_hash;
   end if;
-  if (select count(*) from public.tasks t join packet_a_explicit_qa_properties x on x.id=t.related_property_id) <> 1 then
-    raise exception 'Explicit QA task count drift';
+  select count(*), encode(digest(string_agg(t.id::text, ',' order by t.id), 'sha256'), 'hex')
+    into v_count, v_hash
+  from public.tasks t join packet_a_explicit_qa_properties x on x.id=t.related_property_id;
+  if v_count <> 1 or v_hash <> 'db74795b891a652656dca3207f5481a1655b3c7d7a708f0ccdd6da408929bd0b' then
+    raise exception 'Explicit QA task manifest drift: count %, hash %', v_count, v_hash;
   end if;
   if exists (select 1 from public.messages r join packet_a_explicit_qa_properties x on x.id=r.property_id)
     or exists (select 1 from public.message_threads r join packet_a_explicit_qa_properties x on x.id=r.property_id)
@@ -231,6 +256,13 @@ begin
     or (select count(*) from public.sequence_steps st join packet_a_sequences x on x.id=st.sequence_id) <> 3
   then
     raise exception 'Sequence artifact manifest/dependency drift';
+  end if;
+
+  select count(*), encode(digest(string_agg(st.id::text, ',' order by st.id), 'sha256'), 'hex')
+    into v_count, v_hash
+  from public.sequence_steps st join packet_a_sequences x on x.id=st.sequence_id;
+  if v_count <> 3 or v_hash <> 'a8ed590295909e53b1563739184467cd4ddb4c6c2e0affca7ec143804ca57b4e' then
+    raise exception 'Sequence-step manifest drift: count %, hash %', v_count, v_hash;
   end if;
 
   select encode(

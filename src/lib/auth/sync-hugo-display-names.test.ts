@@ -2,12 +2,32 @@ import { describe, expect, it } from "vitest";
 
 import {
   APPLY_ARM,
+  HUGO_PROJECT_REF,
+  SANDRA_PROJECT_REF,
+  assertSupabaseProjectUrl,
   buildNameSyncPlan,
   buildReviewedOverrideGrants,
   parseNameSyncArgs,
 } from "../../../scripts/sync-hugo-display-names.mjs";
 
 describe("Hugo authoritative display-name sync", () => {
+  it("pins both identity endpoints to the reviewed Supabase projects", () => {
+    expect(
+      assertSupabaseProjectUrl(
+        `https://${HUGO_PROJECT_REF}.supabase.co`,
+        HUGO_PROJECT_REF,
+        "Hugo",
+      ),
+    ).toBe(`https://${HUGO_PROJECT_REF}.supabase.co`);
+    expect(() =>
+      assertSupabaseProjectUrl(
+        `https://${SANDRA_PROJECT_REF}.supabase.co`,
+        HUGO_PROJECT_REF,
+        "Hugo",
+      ),
+    ).toThrow(/unexpected Hugo project URL/i);
+  });
+
   it("is dry-run by default and requires the exact apply arm", () => {
     expect(parseNameSyncArgs([])).toEqual({ apply: false });
     expect(parseNameSyncArgs([`--apply=${APPLY_ARM}`])).toEqual({ apply: true });

@@ -85,6 +85,15 @@ Make affected Sandra dropdowns human-readable with correctly scoped assignee nam
 - Adversarial review corrections now fail closed on missing identity labels, keep former owners readable without making them assignable, require explicit workspace choice, intersect multi-workspace assignees, and reject deletion-prepared assignees in both current and legacy-compatible paths.
 - Repository verification is green: eSign packet checks 7/7, unit files 314/314 with 3,541/3,541 tests, and browser-component files 108/108 with 1,134/1,134 tests. The repository-wide lint command remains red on 365 pre-existing errors in bundled `.claude/get-shit-done` code and unrelated legacy files; linting every changed JavaScript/TypeScript file has 0 errors (5 pre-existing warnings in the large leads action module/test).
 
+### Iteration 4 — Fable scope triage and minimum deletion safeguards
+
+- Jarrad rejected speculative hardening and required Fable to decide relevance before more implementation. Fable returned `APPROVE_AFTER_MINIMUM_FIXES`: fix only exact target safety, in-transaction count/ID-hash checks, a tested packet-specific commit arm, and proof that the four QA identities own no retained properties/tasks. It explicitly deferred full export-byte coupling, extra locks, persistent historical import into test, production restore tooling, job/toast text polish, and unrelated formatting.
+- A direct production query proved each of the four Packet B identities owns 0 retained properties and 0 tasks. Packet B repeats that precondition in its transaction and refuses deletion if it changes.
+- Database URLs now reject query-string/fragment overrides and use certificate verification. The Hugo and Sandra display-name endpoints are pinned to exact project refs.
+- Packet A now uses repeatable-read and verifies ID hashes for the synthetic events, explicit properties/events/task, and sequence steps in the deletion transaction. Both packets verify the exact nine-row production membership fingerprint before changing rows.
+- `run-sandra-cleanup-packet.mjs` is the sole commit path. It pins each SQL file hash, requires a different exact arm for Packet A and Packet B, and performs the tested in-memory `ROLLBACK_REHEARSAL` to `COMMIT_PENDING` plus final `rollback` to `commit` transformation. It reports `COMMITTED` only after the database call succeeds.
+- Focused safeguards: 21/21 tests passed; TypeScript check and `git diff --check` passed. Fresh exact-project rollback rehearsals again produced Packet A 3,993 deletions plus one archive and Packet B four membership deletions; both rolled back and production remains unchanged.
+
 ## Packet B classification (no deletion authority)
 
 - Retain: STOP/opt-out/DNC and suppression evidence; messages and provider receipts; call recordings/transcripts; completed enrollments; e-sign/Closer/coach outcomes; live operational leads; the completed dialer batch with unclear provenance; production canary proof records.

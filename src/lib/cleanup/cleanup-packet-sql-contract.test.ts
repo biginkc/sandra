@@ -17,6 +17,7 @@ describe("Sandra Packet A SQL contract", () => {
     expect(sql.trimEnd().endsWith("rollback;")).toBe(true);
     expect(sql).not.toMatch(/^\s*commit\s*;/imu);
     expect(sql).toContain("'mode', 'ROLLBACK_REHEARSAL'");
+    expect(sql).toContain("Sandra production identity fingerprint drift");
   });
 
   it("pins exact allowlists and excludes retained hidden artifacts", () => {
@@ -24,6 +25,12 @@ describe("Sandra Packet A SQL contract", () => {
     expect(sql).toContain("9693dc11-4a68-4785-ac65-ecdc785d342c");
     expect(sql).toContain("fccef243-c4c9-441a-8bba-563496a91b5e");
     expect(sql).not.toContain("7dfedf79-120a-434b-b417-c920b3227475");
+    expect(sql).toContain(
+      "87dba28bf4e2041a20300e4535df16411edaccf51414629490a9a92d543a67a5",
+    );
+    expect(sql).toContain(
+      "96b34815aee49014e4d67dafe1b92455f4576468b054b70352375b1c29c86b77",
+    );
   });
 
   it("seals sequence provenance and every current foreign-key dependency", () => {
@@ -49,7 +56,7 @@ describe("Sandra Packet B access SQL contract", () => {
     expect(accessSql).not.toMatch(/^\s*commit\s*;/imu);
     expect(accessSql).toContain("delete from public.memberships");
     expect(accessSql).not.toMatch(/delete from auth\.users/iu);
-    expect(accessSql).toContain("separate exact-byte Fable approval");
+    expect(accessSql).toContain("separate Fable approval and commit arm");
   });
 
   it("pins the exact four-row manifest and fails on future dependencies", () => {
@@ -59,5 +66,8 @@ describe("Sandra Packet B access SQL contract", () => {
     expect(accessSql).toContain("v_count <> 4");
     expect(accessSql).toContain("parent.relname='memberships'");
     expect(accessSql).toContain("qa_memberships_deleted");
+    expect(accessSql).toContain(
+      "A QA membership still owns a retained property or task",
+    );
   });
 });

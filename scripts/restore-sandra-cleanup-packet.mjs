@@ -333,8 +333,11 @@ async function main() {
 
   const connectionString = process.env[DATABASE_URL_ENV];
   assert(connectionString, `${DATABASE_URL_ENV} is missing.`);
-  assertDatabaseTarget(connectionString, EXPECTED_TEST_PROJECT_REF);
-  const client = new Client({ connectionString, ssl: { rejectUnauthorized: false } });
+  const target = assertDatabaseTarget(connectionString, EXPECTED_TEST_PROJECT_REF);
+  const client = new Client({
+    connectionString: target.connectionString,
+    ssl: { rejectUnauthorized: true },
+  });
   await client.connect();
   try {
     await client.query("begin isolation level serializable");
