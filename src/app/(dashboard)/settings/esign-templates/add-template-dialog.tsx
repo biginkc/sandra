@@ -220,6 +220,7 @@ export function AddTemplateDialog({
               variant={mode === "website" ? "default" : "ghost"}
               size="sm"
               onClick={() => setMode("website")}
+              aria-pressed={mode === "website"}
             >
               Register ID
             </Button>
@@ -230,6 +231,7 @@ export function AddTemplateDialog({
               onClick={() => setMode("embedded")}
               disabled={Boolean(disabledReason)}
               title={disabledReason}
+              aria-pressed={mode === "embedded"}
             >
               Upload PDF
             </Button>

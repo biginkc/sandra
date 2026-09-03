@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AddTemplateDialog } from "./add-template-dialog";
 import {
@@ -9,11 +9,16 @@ import {
 import { ESIGN_MERGE_FIELD_NAMES, type TemplateLibraryActions } from "./types";
 
 const push = vi.fn();
+const refresh = vi.fn();
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push, refresh: vi.fn() }),
+  useRouter: () => ({ push, refresh }),
 }));
 
 describe("AddTemplateDialog", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("exposes an accessible max-xl PDF drop surface with browse and Dropbox choices", () => {
     renderDialog(makeActions());
     fireEvent.click(screen.getByRole("button", { name: "Add template" }));
@@ -135,6 +140,73 @@ describe("AddTemplateDialog", () => {
       }),
     );
     expect(push).toHaveBeenCalledWith("/settings/esign-templates/local-1/edit");
+  });
+
+  it("registers website templates with validation, provider error display, success refresh, and pressed mode state", async () => {
+    const registerWebsiteTemplate = vi
+      .fn<NonNullable<TemplateLibraryActions["registerWebsiteTemplate"]>>()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: {
+          code: "MERGE_FIELD_MISMATCH",
+          message:
+            "Dropbox Sign Sender merge fields must be exactly seller_name, property_address, offer_price, closing_date, and earnest_money.",
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          id: "website-template-1",
+          name: "Offer",
+          documentType: "Purchase agreement",
+          providerTemplateId: "provider-template-1",
+          sellerRoleName: "Seller",
+          signerRoles: [
+            { name: "Seller", order: 0 },
+            { name: "Buyer", order: 1 },
+          ],
+          mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
+        },
+      });
+    renderDialog(makeActions({ registerWebsiteTemplate }));
+    fireEvent.click(screen.getByRole("button", { name: "Add template" }));
+
+    const registerMode = screen.getByRole("button", { name: "Register ID" });
+    const uploadMode = screen.getByRole("button", { name: "Upload PDF" });
+    expect(registerMode).toHaveAttribute("aria-pressed", "true");
+    expect(uploadMode).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.change(screen.getByLabelText("Template name"), {
+      target: { value: "Offer" },
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Enter the Dropbox Sign template ID.",
+    );
+    fireEvent.change(screen.getByLabelText("Dropbox Sign template ID"), {
+      target: { value: " provider-template-1 " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Register template" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Dropbox Sign Sender merge fields must be exactly",
+      ),
+    );
+    expect(registerWebsiteTemplate).toHaveBeenCalledWith({
+      providerTemplateId: "provider-template-1",
+      name: "Offer",
+      documentType: "Purchase agreement",
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Register template" }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Register template" }));
+
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(registerWebsiteTemplate).toHaveBeenCalledTimes(2);
   });
 
   it("stores the create-response editor session for the new template's editor", async () => {

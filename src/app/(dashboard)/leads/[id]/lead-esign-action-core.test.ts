@@ -826,6 +826,69 @@ describe("lead eSign action orchestration", () => {
     });
   });
 
+  it("records a provider-plan rejection as terminal failed history", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ testMode: false }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({ testMode: false }),
+    });
+    h.provider.sendWithTemplate.mockResolvedValue({
+      outcome: "provider_plan_required",
+    });
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PROVIDER_PLAN_REQUIRED" },
+    });
+    expect(h.repository.markSendOutcome).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      deliveryState: "failed",
+      safeErrorMessage: "PROVIDER_PLAN_REQUIRED",
+    });
+  });
+
+  it("keeps provider-plan rejection retryable when local reservation cleanup is unconfirmed", async () => {
+    const h = harness();
+    h.repository.loadLeadSendContext.mockResolvedValue(
+      leadContext({ testMode: false }),
+    );
+    h.repository.claimSend.mockResolvedValue({
+      outcome: "created",
+      request: request({ testMode: false }),
+    });
+    h.provider.sendWithTemplate.mockResolvedValue({
+      outcome: "provider_plan_required",
+    });
+    h.repository.markSendOutcome.mockRejectedValueOnce(
+      new Error("private rpc commit state unknown"),
+    );
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "SEND_UNKNOWN" },
+    });
+    expect(JSON.stringify(result)).not.toContain("private rpc commit");
+    expect(reportMocks.reportError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "eSign send outcome bookkeeping failed.",
+      }),
+      {
+        tags: {
+          surface: "esign_send_outcome_bookkeeping",
+          delivery_state: "failed",
+        },
+      },
+    );
+  });
+
   it.each([
     ["unknown", "SEND_UNKNOWN"],
     ["failed", "SEND_FAILED"],

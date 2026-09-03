@@ -368,7 +368,7 @@ export function SendForSignatureDialog({
                 className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm"
                 data-testid="esign-live-mode-notice"
               >
-                Dropbox Sign is in live mode. This send is legally binding and
+                Dropbox Sign is in live mode. This live request is legally binding and
                 counts against Dropbox Sign billing. Sandra&apos;s fuse covers
                 Sandra-originated sends only.
                 {preflight.liveSendLimit ? (

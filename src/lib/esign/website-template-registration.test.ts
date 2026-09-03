@@ -331,6 +331,38 @@ describe("Dropbox website eSign template registration", () => {
       "missing Buyer signature",
       { formFields: [metadata().formFields[0]] },
     ],
+    [
+      "extra required signature for an unsupported signer role",
+      {
+        formFields: [
+          ...metadata().formFields,
+          field("agent_signature", {
+            apiId: "agent-signature-api",
+            type: "signature",
+            required: true,
+            signer: "Agent",
+            assignedTo: "signer",
+            signerRoleName: "Agent",
+          }),
+        ],
+      },
+    ],
+    [
+      "required signature with an unknown signer",
+      {
+        formFields: [
+          ...metadata().formFields,
+          field("unknown_signature", {
+            apiId: "unknown-signature-api",
+            type: "signature",
+            required: true,
+            signer: null,
+            assignedTo: "unknown",
+            signerRoleName: null,
+          }),
+        ],
+      },
+    ],
   ];
 
   it.each(ambiguousProviderCases)(

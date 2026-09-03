@@ -211,8 +211,9 @@ as $$
         'closing_date'
       )
   ),
-  required_signature_fields as (
-    select field.value ->> 'signerRoleName' as role_name
+  all_required_signature_fields as (
+    select field.value as field,
+      field.value ->> 'signerRoleName' as role_name
     from documents
     cross join lateral jsonb_array_elements(
       case
@@ -221,11 +222,15 @@ as $$
         else '[]'::jsonb
       end
     ) field(value)
-    where field.value ->> 'assignedTo' = 'signer'
-      and field.value ->> 'type' = 'signature'
+    where field.value ->> 'type' = 'signature'
       and field.value -> 'required' = 'true'::jsonb
-      and btrim(coalesce(field.value ->> 'apiId', '')) <> ''
-      and field.value ->> 'signerRoleName' in ('Seller', 'Buyer')
+  ),
+  required_signature_fields as (
+    select role_name
+    from all_required_signature_fields
+    where field ->> 'assignedTo' = 'signer'
+      and btrim(coalesce(field ->> 'apiId', '')) <> ''
+      and field ->> 'signerRoleName' in ('Seller', 'Buyer')
   )
   select btrim(coalesce(p_provider_template_id, '')) <> ''
     and btrim(coalesce(p_provider_account_id, '')) <> ''
@@ -269,6 +274,13 @@ as $$
     and (
       select count(*) from sender_merge_fields
     ) = 5
+    and not exists (
+      select 1
+      from all_required_signature_fields
+      where field ->> 'assignedTo' is distinct from 'signer'
+        or role_name is null
+        or role_name not in ('Seller', 'Buyer')
+    )
     and exists (
       select 1 from required_signature_fields where role_name = 'Seller'
     )
@@ -1146,7 +1158,19 @@ begin
     and request.org_id = p_org_id
   for update;
 
-  if not found or v_request.delivery_state <> 'sending' then
+  if not found then
+    raise exception 'eSign request is not sending' using errcode = '55000';
+  end if;
+  if v_request.delivery_state = p_delivery_state
+     and p_delivery_state = 'failed'
+     and v_request.status = 'error'
+     and v_request.sign_request_id is null
+     and v_request.live_send_reserved_at is null
+     and v_request.provider_remaining_at_claim is null
+     and v_request.error_message is not distinct from p_error_message then
+    return;
+  end if;
+  if v_request.delivery_state <> 'sending' then
     raise exception 'eSign request is not sending' using errcode = '55000';
   end if;
 
@@ -1193,6 +1217,168 @@ revoke all on function public.mark_esign_request_send_outcome(
 ) from public, anon, authenticated, service_role;
 grant execute on function public.mark_esign_request_send_outcome(
   uuid, uuid, public.esign_delivery_state, text
+) to service_role;
+
+create or replace function public.resolve_esign_send_unknown_not_sent(
+  p_org_id uuid,
+  p_request_id uuid,
+  p_actor_id uuid,
+  p_resolution_source text,
+  p_error_message text,
+  p_evidence jsonb
+)
+returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_request public.esign_requests%rowtype;
+  v_event_type text;
+  v_release_local_live_reservation boolean := false;
+  v_reservation_period_key text;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required' using errcode = '42501';
+  end if;
+  if p_resolution_source not in ('automatic', 'operator')
+     or (p_resolution_source = 'operator' and p_actor_id is null)
+     or (p_resolution_source = 'automatic' and p_actor_id is not null)
+     or coalesce(p_error_message, '') !~ '^[A-Z][A-Z0-9_]{0,127}$'
+     or jsonb_typeof(coalesce(p_evidence, '{}'::jsonb)) <> 'object'
+     or (
+       p_resolution_source = 'automatic'
+       and coalesce(p_evidence ->> 'positiveControl', '') <> 'passed'
+     )
+     or (
+       p_resolution_source = 'operator'
+       and coalesce(p_evidence ->> 'acknowledgedFailure', '') <> p_error_message
+     ) then
+    raise exception 'invalid eSign send-not-found resolution'
+      using errcode = '23514';
+  end if;
+  if p_resolution_source = 'operator' then
+    perform public.esign_require_active_owner(p_org_id, p_actor_id);
+  end if;
+  v_event_type := case p_resolution_source
+    when 'operator' then 'esign_send_not_found_operator'
+    else 'esign_send_not_found_automatic'
+  end;
+
+  select request.* into v_request
+  from public.esign_requests request
+  where request.id = p_request_id
+    and request.org_id = p_org_id
+  for update;
+  if not found then
+    raise exception 'eSign request not found' using errcode = 'P0002';
+  end if;
+  if p_resolution_source = 'automatic'
+     and (v_request.delivery_state <> 'send_unknown'
+       or v_request.sign_request_id is not null) then
+    raise exception 'eSign request is not an unresolved unknown send'
+      using errcode = '55000';
+  end if;
+  if p_resolution_source = 'operator'
+     and (v_request.delivery_state <> 'failed'
+       or v_request.sign_request_id is not null
+       or v_request.error_message is distinct from p_error_message) then
+    raise exception 'eSign request is not an evidenced failed send'
+      using errcode = '55000';
+  end if;
+  if p_resolution_source = 'operator'
+     and exists (
+       select 1
+       from public.lead_events event
+       where event.source_type = v_event_type
+         and event.source_id = p_request_id
+         and event.org_id = p_org_id
+         and event.property_id = v_request.property_id
+         and event.actor_type = 'user'
+         and event.event_type = v_event_type
+     ) then
+    return;
+  end if;
+
+  v_release_local_live_reservation :=
+    p_resolution_source = 'automatic'
+    and v_request.test_mode = false
+    and v_request.live_send_reserved_at is not null
+    and v_request.sign_request_id is null
+    and p_error_message = 'PROVIDER_SEND_NOT_FOUND';
+
+  if v_release_local_live_reservation then
+    v_reservation_period_key :=
+      to_char(v_request.live_send_reserved_at at time zone 'America/Chicago', 'YYYY-MM');
+    update public.org_esign_integrations integration
+    set live_send_monthly_used = greatest(0, integration.live_send_monthly_used - 1),
+        updated_at = now()
+    where integration.org_id = p_org_id
+      and integration.provider = 'dropbox_sign'
+      and integration.live_send_monthly_period_key = v_reservation_period_key
+      and integration.live_send_monthly_used > 0;
+  end if;
+
+  if p_resolution_source = 'automatic' then
+    update public.esign_requests
+    set delivery_state = 'failed',
+        status = 'error',
+        completed_at = now(),
+        error_message = p_error_message,
+        live_send_reserved_at = case
+          when v_release_local_live_reservation then null else live_send_reserved_at end,
+        provider_remaining_at_claim = case
+          when v_release_local_live_reservation then null else provider_remaining_at_claim end,
+        updated_by = null,
+        updated_at = now()
+    where id = p_request_id
+      and org_id = p_org_id
+      and delivery_state = 'send_unknown'
+      and sign_request_id is null;
+    if not found then
+      raise exception 'eSign request is not an unresolved unknown send'
+        using errcode = '55000';
+    end if;
+  else
+    update public.esign_requests
+    set updated_by = p_actor_id,
+        updated_at = now()
+    where id = p_request_id
+      and org_id = p_org_id
+      and delivery_state = 'failed'
+      and sign_request_id is null
+      and error_message = p_error_message;
+    if not found then
+      raise exception 'eSign request is not an evidenced failed send'
+        using errcode = '55000';
+    end if;
+  end if;
+
+  insert into public.lead_events (
+    org_id, property_id, actor_type, actor_id, event_type, payload,
+    source_type, source_id
+  ) values (
+    p_org_id,
+    v_request.property_id,
+    case when p_resolution_source = 'operator' then 'user' else 'system' end,
+    p_actor_id,
+    v_event_type,
+    jsonb_build_object(
+      'request_id', p_request_id,
+      'error_message', p_error_message,
+      'evidence', coalesce(p_evidence, '{}'::jsonb)
+    ),
+    v_event_type,
+    p_request_id
+  ) on conflict (source_type, source_id) where source_id is not null do nothing;
+end;
+$$;
+
+revoke all on function public.resolve_esign_send_unknown_not_sent(
+  uuid, uuid, uuid, text, text, jsonb
+) from public, anon, authenticated;
+grant execute on function public.resolve_esign_send_unknown_not_sent(
+  uuid, uuid, uuid, text, text, jsonb
 ) to service_role;
 
 drop function if exists public.find_esign_webhook_request(uuid, text);

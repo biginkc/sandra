@@ -613,7 +613,10 @@ export function normalizeDropboxSignError(
 ): ProviderError {
   if (error instanceof ProviderError) return error;
   if (error instanceof HttpError) {
-    const retryAfter = error.response?.headers?.["retry-after"];
+    const retryAfter = headerValue(error.response?.headers, "retry-after");
+    const rateLimitReset = boundedUnixTimestamp(
+      headerValue(error.response?.headers, "x-ratelimit-reset"),
+    );
     return new ProviderError(
       error.body?.error?.errorMsg || "Dropbox Sign rejected the request.",
       "dropbox_sign",
@@ -622,6 +625,7 @@ export function normalizeDropboxSignError(
         statusCode: error.statusCode,
         retryAfterSeconds:
           typeof retryAfter === "string" ? Number(retryAfter) : undefined,
+        rateLimitResetUnixSeconds: rateLimitReset ?? undefined,
         retryable:
           error.statusCode === 429 ||
           (error.statusCode ?? 0) >= 500 ||
@@ -635,4 +639,25 @@ export function normalizeDropboxSignError(
       : "Dropbox Sign request failed unexpectedly.",
     "dropbox_sign",
   );
+}
+
+function headerValue(
+  headers: Record<string, unknown> | undefined,
+  name: string,
+): string | undefined {
+  if (!headers) return undefined;
+  const exact = headers[name];
+  if (typeof exact === "string") return exact;
+  const lower = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === lower && typeof value === "string") return value;
+  }
+  return undefined;
+}
+
+function boundedUnixTimestamp(value: string | undefined): number | null {
+  if (typeof value !== "string" || !/^\d{1,10}$/.test(value)) return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return null;
+  return parsed <= 4_102_444_800 ? parsed : null;
 }

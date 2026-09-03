@@ -593,7 +593,17 @@ async function dispatchClaimed(
     fail("SEND_FAILED", "Dropbox Sign could not send this contract.");
   }
   if (outcome.outcome === "provider_plan_required") {
-    await markFailed(dependencies, request, "PROVIDER_PLAN_REQUIRED");
+    const recorded = await markFailed(
+      dependencies,
+      request,
+      "PROVIDER_PLAN_REQUIRED",
+    );
+    if (!recorded) {
+      fail(
+        "SEND_UNKNOWN",
+        "Dropbox Sign rejected this live request, but Sandra could not confirm local reservation cleanup. Reconciliation must verify the request before retrying.",
+      );
+    }
     fail(
       "PROVIDER_PLAN_REQUIRED",
       "Dropbox Sign rejected this live request because the connected account plan or billing allowance is not ready.",
@@ -1402,7 +1412,7 @@ async function requireActor(
 async function markUnknown(
   dependencies: LeadEsignActionDependencies,
   request: EsignRequestRecord,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await dependencies.repository.markSendOutcome({
       orgId: request.orgId,
@@ -1410,8 +1420,10 @@ async function markUnknown(
       deliveryState: "send_unknown",
       safeErrorMessage: null,
     });
+    return true;
   } catch {
     reportSendOutcomePersistenceFailure("send_unknown");
+    return false;
   }
 }
 
@@ -1419,7 +1431,7 @@ async function markFailed(
   dependencies: LeadEsignActionDependencies,
   request: Pick<EsignRequestRecord, "id" | "orgId">,
   safeErrorMessage: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await dependencies.repository.markSendOutcome({
       orgId: request.orgId,
@@ -1427,8 +1439,10 @@ async function markFailed(
       deliveryState: "failed",
       safeErrorMessage,
     });
+    return true;
   } catch {
     reportSendOutcomePersistenceFailure("failed");
+    return false;
   }
 }
 

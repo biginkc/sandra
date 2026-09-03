@@ -790,6 +790,32 @@ try {
       extraSenderValid.rows[0].valid === false,
       "SQL accepted an extra Sender custom field",
     );
+    const unsupportedSignerMetadata = JSON.parse(JSON.stringify(metadata));
+    unsupportedSignerMetadata.documents[0].formFields.push({
+      documentIndex: 0,
+      apiId: "agent-signature-api",
+      name: "Agent signature",
+      type: "signature",
+      required: true,
+      signer: "Agent",
+      assignedTo: "signer",
+      signerRoleName: "Agent",
+    });
+    unsupportedSignerMetadata.formFields = unsupportedSignerMetadata.documents.flatMap(
+      (document) => document.formFields,
+    );
+    const unsupportedSignerValid = await client.query(
+      `select public.esign_website_template_metadata_is_valid($1,$2,$3::jsonb) as valid`,
+      [
+        metadata.providerTemplateId,
+        "provider-account-1",
+        JSON.stringify(unsupportedSignerMetadata),
+      ],
+    );
+    assert(
+      unsupportedSignerValid.rows[0].valid === false,
+      "SQL accepted a required signature field for an unsupported signer role",
+    );
 
     const requestId = await createRequest(client);
     const reserved = await client.query(
@@ -808,6 +834,10 @@ try {
       `select public.mark_esign_request_send_outcome($1,$2,'failed',$3)`,
       [ids.org, requestId, "PROVIDER_PLAN_REQUIRED"],
     );
+    await client.query(
+      `select public.mark_esign_request_send_outcome($1,$2,'failed',$3)`,
+      [ids.org, requestId, "PROVIDER_PLAN_REQUIRED"],
+    );
     const released = await client.query(
       `select integration.live_send_monthly_used, request.live_send_reserved_at,
         request.provider_remaining_at_claim, request.delivery_state,
@@ -822,6 +852,36 @@ try {
     assert(released.rows[0].provider_remaining_at_claim === null, "provider-plan failure did not clear provider remaining snapshot");
     assert(released.rows[0].delivery_state === "failed", "provider-plan failure did not fail the request");
     assert(released.rows[0].error_message === "PROVIDER_PLAN_REQUIRED", "provider-plan failure did not preserve safe error");
+    const unknownRequestId = await createRequest(client);
+    await client.query(
+      `select public.reserve_esign_live_send($1,$2,11) as outcome`,
+      [ids.org, unknownRequestId],
+    );
+    await client.query(
+      `select public.mark_esign_request_send_outcome($1,$2,'send_unknown',null)`,
+      [ids.org, unknownRequestId],
+    );
+    await client.query(
+      `select public.resolve_esign_send_unknown_not_sent(
+        $1,$2,null,'automatic','PROVIDER_SEND_NOT_FOUND',
+        '{"positiveControl":"passed","source":"local-rehearsal"}'::jsonb
+      )`,
+      [ids.org, unknownRequestId],
+    );
+    const unknownReleased = await client.query(
+      `select integration.live_send_monthly_used, request.live_send_reserved_at,
+        request.provider_remaining_at_claim, request.delivery_state,
+        request.error_message
+       from public.org_esign_integrations integration
+       join public.esign_requests request on request.org_id = integration.org_id
+       where integration.org_id = $1 and request.id = $2`,
+      [ids.org, unknownRequestId],
+    );
+    assert(unknownReleased.rows[0].live_send_monthly_used === 0, "provider-not-found resolution did not release Sandra local live-send fuse");
+    assert(unknownReleased.rows[0].live_send_reserved_at === null, "provider-not-found resolution did not clear request reservation");
+    assert(unknownReleased.rows[0].provider_remaining_at_claim === null, "provider-not-found resolution did not clear provider remaining snapshot");
+    assert(unknownReleased.rows[0].delivery_state === "failed", "provider-not-found resolution did not fail the request");
+    assert(unknownReleased.rows[0].error_message === "PROVIDER_SEND_NOT_FOUND", "provider-not-found resolution did not preserve safe error");
 
     const lowQuotaRequestId = await createRequest(client);
     const blocked = await client.query(

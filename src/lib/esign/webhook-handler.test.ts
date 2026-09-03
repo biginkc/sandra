@@ -292,6 +292,37 @@ describe("injectable Dropbox Sign webhook handler", () => {
     expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
   });
 
+  it("uses Sandra-stored mode for an official callback without test_mode when the provider request is already attached", async () => {
+    const deps = dependencies();
+
+    const response = await handleDropboxSignWebhook({
+      request: callbackRequest({
+        signRequestId: "provider-request-1",
+      }),
+      pathSecret: PATH_SECRET,
+      dependencies: deps,
+    });
+
+    expect(response.status).toBe(200);
+    expect(deps.persistence.findRequest).toHaveBeenCalledWith({
+      orgId: ORG_ID,
+      signRequestId: "provider-request-1",
+      verifiedLocalRequestId: null,
+    });
+    expect(deps.metadataProvider.confirmProviderLocalRequestId).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptIgnored).not.toHaveBeenCalledWith(
+      CLAIM,
+      "REQUEST_MODE_MISMATCH",
+    );
+    expect(deps.persistence.applyStatusDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestId: REQUEST_ID,
+        decision: expect.objectContaining({ nextStatus: "viewed" }),
+      }),
+    );
+    expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
+  });
+
   it("rejects spoofed body metadata when provider-side metadata does not match", async () => {
     const deps = dependencies();
     vi.mocked(deps.persistence.findRequest).mockResolvedValue(null);

@@ -257,6 +257,39 @@ describe("SendForSignature", () => {
     expect(onFinished).toHaveBeenCalledWith("request-1");
   });
 
+  it("shows live-request billing copy and Sandra local quota counter", async () => {
+    const user = userEvent.setup();
+    const { preflightAction, sendAction } = actions({
+      ...preflight,
+      testMode: false,
+      liveSendLimit: {
+        monthlyLimit: 40,
+        usedThisMonth: 17,
+        remainingThisMonth: 23,
+      },
+      templates: [{ ...template, signerRoles: [{ name: "Seller", order: 0 }] }],
+    });
+
+    render(
+      <SendForSignature
+        propertyId="property-1"
+        initialBlockers={[]}
+        preflightAction={preflightAction}
+        sendAction={sendAction}
+      />,
+    );
+
+    await user.click(screen.getByTestId("send-for-signature-trigger"));
+
+    expect(await screen.findByTestId("esign-live-mode-notice")).toHaveTextContent(
+      "Dropbox Sign is in live mode. This live request is legally binding and counts against Dropbox Sign billing. Sandra's fuse covers Sandra-originated sends only.",
+    );
+    expect(screen.getByTestId("esign-live-mode-notice")).toHaveTextContent(
+      "Sandra local calendar-month ceiling: 17 of 40 live sends used.",
+    );
+    expect(sendAction).not.toHaveBeenCalled();
+  });
+
   it("keeps the dialog open and preserves the send intent after an action failure", async () => {
     const user = userEvent.setup();
     const { preflightAction, sendAction } = actions({

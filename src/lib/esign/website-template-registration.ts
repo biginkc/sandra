@@ -298,15 +298,28 @@ function isValidSenderMergeField(field: ProviderTemplateField): boolean {
 }
 
 function hasRequiredSignatureFields(fields: readonly ProviderTemplateField[]): boolean {
+  const requiredSignatureFields = fields.filter(
+    (field) => field.type === "signature" && field.required === true,
+  );
+  const acceptedRoles = new Set<string>(
+    ESIGN_TEMPLATE_SIGNER_ROLES.map((role) => role.name),
+  );
+  if (
+    requiredSignatureFields.some(
+      (field) =>
+        field.assignedTo !== "signer" ||
+        field.signerRoleName === null ||
+        !acceptedRoles.has(field.signerRoleName),
+    )
+  ) {
+    return false;
+  }
   const rolesWithRequiredSignature = new Set(
-    fields
-      .filter((field) =>
-        field.assignedTo === "signer" &&
-        field.type === "signature" &&
-        field.required === true &&
-        field.signerRoleName !== null &&
-        typeof field.apiId === "string" &&
-        field.apiId.trim().length > 0,
+    requiredSignatureFields
+      .filter(
+        (field) =>
+          typeof field.apiId === "string" &&
+          field.apiId.trim().length > 0,
       )
       .map((field) => field.signerRoleName),
   );

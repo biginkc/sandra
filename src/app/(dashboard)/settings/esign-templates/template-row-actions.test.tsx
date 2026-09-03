@@ -33,6 +33,7 @@ const actions: TemplateLibraryActions = {
   checkEditorReadiness: vi.fn(),
   abandonDraft: vi.fn(),
   retryCleanup: vi.fn(),
+  revalidateWebsiteTemplate: vi.fn(),
   deleteTemplate: vi.fn(),
 };
 
@@ -176,6 +177,39 @@ describe("versioned Edit", () => {
     render(<TemplateRowActions template={template} actions={actions} />);
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     await waitFor(() => expect(push).toHaveBeenCalledWith("/settings/esign-templates/revision-ready/edit"));
+  });
+});
+
+describe("website template Revalidate", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("checks the stored Dropbox website template and refreshes the library", async () => {
+    const revalidateWebsiteTemplate = vi.mocked(
+      actions.revalidateWebsiteTemplate!,
+    );
+    revalidateWebsiteTemplate.mockResolvedValue({
+      ok: true,
+      data: { status: "valid" },
+    });
+    render(
+      <TemplateRowActions
+        template={{ ...template, templateOrigin: "dropbox_website" }}
+        actions={actions}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Revalidate" }));
+
+    await waitFor(() =>
+      expect(revalidateWebsiteTemplate).toHaveBeenCalledWith(
+        "local-1",
+        "provider-1",
+      ),
+    );
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -64,6 +64,7 @@ vi.mock("@dropbox/sign", () => {
 
 import { createDropboxSignProvider } from "./dropbox-sign";
 import { EsignSecret } from "./secret";
+import { HttpError } from "@dropbox/sign";
 
 describe("Dropbox Sign provider", () => {
   beforeEach(() => {
@@ -318,6 +319,64 @@ describe("Dropbox Sign provider", () => {
     expect(sdk.accountGet).toHaveBeenCalledWith("provider-account-1");
     expect(sdk.interceptorOptions.at(-1)).toEqual({
       signal: controller.signal,
+    });
+  });
+
+  it("preserves bounded Dropbox rate-limit reset metadata on 429 failures", async () => {
+    const error = new HttpError(
+      { headers: { "X-Ratelimit-Reset": "1788054300" } } as never,
+      {
+        error: {
+          errorName: "rate_limited",
+          errorMsg: "Too many requests",
+        },
+      } as never,
+      429,
+    ) as Error & {
+      statusCode: number;
+      body: { error: { errorName: string; errorMsg: string } };
+      response: { headers: Record<string, string> };
+    };
+    error.statusCode = 429;
+    error.body = {
+      error: {
+        errorName: "rate_limited",
+        errorMsg: "Too many requests",
+      },
+    };
+    error.response = {
+      headers: {
+        "X-Ratelimit-Reset": "1788054300",
+      },
+    };
+    sdk.send.mockRejectedValueOnce(error);
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+    });
+
+    await expect(
+      provider.sendWithTemplate({
+        localRequestId: "local-uuid",
+        templateId: "provider-template",
+        testMode: true,
+        signers: [
+          {
+            role: "Seller",
+            name: "Seller",
+            emailAddress: "seller@example.com",
+          },
+        ],
+        mergeValues: {},
+      }),
+    ).rejects.toMatchObject({
+      provider: "dropbox_sign",
+      details: {
+        providerCode: "rate_limited",
+        statusCode: 429,
+        retryable: true,
+        rateLimitResetUnixSeconds: 1788054300,
+      },
     });
   });
 
