@@ -22,7 +22,10 @@ import { createClient } from "@/lib/supabase/server";
 import {
   getEsignConnectionStatus,
 } from "@/lib/esign/actions";
+import { callbackPathSecretForOrg } from "@/lib/esign/credentials";
 import type { EsignConnectionStatus } from "@/lib/esign/contracts";
+import { getSingleActiveMembership } from "@/lib/auth/memberships";
+import { webhookBaseUrl } from "@/app/(dashboard)/admin/webhooks/url";
 
 export interface IntegrationStatus {
   slack: { connected: boolean; enabled: boolean; teamName?: string | null };
@@ -32,6 +35,12 @@ export interface IntegrationStatus {
    *  when this is false, never just disabled. */
   sms: { available: boolean; enabled: boolean; phone: string | null };
   esign: EsignConnectionStatus;
+  /** Owner-only, connected-only. The URL to paste into Dropbox Sign's
+   *  Account callback settings. Computed server-side from the org's
+   *  deterministic path secret (see credentials.ts) and rendered directly
+   *  into this page for the owner — the only place Sandra reveals it,
+   *  since owners have no other way to find their org's callback path. */
+  esignCallbackUrl: string | null;
   timezone: string;
 }
 
@@ -49,6 +58,28 @@ function unavailableEsignStatus(): EsignConnectionStatus {
     liveSendLimit: null,
     statusUnavailable: true,
   };
+}
+
+/**
+ * The Dropbox Sign account callback URL, revealed only to the connected
+ * org's owner so they can paste it into Dropbox Sign's "Account callback"
+ * setting. `callbackPathSecretForOrg` is documented "never return this
+ * from an action" because the secret alone lets anyone forge callback
+ * signatures for the org — but the owner is the one person who is
+ * supposed to have it, and without this the owner has no way to find
+ * their org's callback path at all. Scoped to owner + connected so a
+ * non-owner or a disconnected org never sees it.
+ */
+async function resolveEsignCallbackUrl(
+  esign: Result<EsignConnectionStatus>,
+): Promise<string | null> {
+  if (!esign.ok || !esign.data.connected || !esign.data.canManage) {
+    return null;
+  }
+  const membership = await getSingleActiveMembership();
+  if (!membership.ok) return null;
+  const secret = callbackPathSecretForOrg(membership.membership.org_id);
+  return `${webhookBaseUrl()}/api/webhooks/esign/${secret.reveal()}`;
 }
 
 /** E.164 — mirrors the DB CHECK
@@ -94,6 +125,7 @@ export async function getIntegrationStatus(): Promise<
 
     const prefs = await loadIntegrationPrefs(supabase, user.id);
     const esign = await getEsignConnectionStatus();
+    const esignCallbackUrl = await resolveEsignCallbackUrl(esign);
     const slackRow = data?.find(
       (row) => row.provider === "slack" && row.token_type === "bot",
     );
@@ -118,6 +150,7 @@ export async function getIntegrationStatus(): Promise<
         phone: prefs.reminderPhone,
       },
       esign: esign.ok ? esign.data : unavailableEsignStatus(),
+      esignCallbackUrl,
       timezone: prefs.timezone,
     });
   } catch (error) {

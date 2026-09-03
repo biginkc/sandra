@@ -60,7 +60,22 @@ export async function updateSession(request: NextRequest) {
     process.env.E2E_AUTH_BYPASS === "1";
   const hugoRequired = process.env.NEXT_PUBLIC_HUGO_SSO === "1";
 
+  // A Server Action POST carries this header. Next's action client expects
+  // the action's own response back on this request (either normal Flight
+  // data or an internal `redirect()`/`notFound()` signal) — not a raw
+  // browser 307 to /login. Sending one here breaks the action fetch: the
+  // browser either surfaces "an unexpected response was received from the
+  // server" or, if it silently follows the redirect, lands on the login
+  // page's HTML where Flight data was expected. Route auth/membership
+  // failures on these requests through to the action instead, so it can
+  // return its own typed `{ ok: false, error }` result — every action here
+  // already re-derives membership via `currentMembership()` /
+  // `getSingleActiveMembership()` and fails closed with a real error when
+  // there is no authenticated, authorized user.
+  const isServerActionRequest = request.headers.has("next-action");
+
   const denyAndClear = (error: "access" | "domain" | "password_disabled") => {
+    if (isServerActionRequest) return supabaseResponse;
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.search = "";
@@ -73,6 +88,7 @@ export async function updateSession(request: NextRequest) {
   };
 
   if (!user && !isPublic) {
+    if (isServerActionRequest) return supabaseResponse;
     // Preserve the original path + query so the login flow can bounce the
     // user back to it after sign-in. Lets a teammate share /leads/<uuid>
     // links by email even when the recipient isn't already authed.

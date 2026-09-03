@@ -55,6 +55,40 @@ const TIMEZONES = [
   { value: "America/Phoenix", label: "Arizona (America/Phoenix)" },
 ] as const;
 
+function CallbackUrlRow({ url }: { url: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access can fail (permissions, insecure context); the URL
+      // is still selectable text, so this is a soft failure.
+    }
+  };
+  return (
+    <div className="flex flex-col gap-1 rounded-md border p-3 text-sm">
+      <span className="font-medium">Callback URL</span>
+      <span className="text-muted-foreground text-xs">
+        Paste this into Dropbox Sign under Account &rarr; API &rarr; Account
+        callback so Sandra receives signature status updates.
+      </span>
+      <div className="mt-1 flex items-center gap-2">
+        <code
+          data-testid="esign-callback-url"
+          className="bg-muted flex-1 overflow-x-auto rounded px-2 py-1 text-xs"
+        >
+          {url}
+        </code>
+        <Button type="button" variant="outline" size="sm" onClick={copy}>
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const [slackEnabled, setSlackEnabled] = useState(initial.slack.enabled);
   const [googleEnabled, setGoogleEnabled] = useState(initial.google.enabled);
@@ -393,6 +427,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
             )}
             {esign.connected ? (
               <>
+                {esign.canManage && initial.esignCallbackUrl && (
+                  <CallbackUrlRow url={initial.esignCallbackUrl} />
+                )}
                 <label className="flex items-center justify-between gap-4 rounded-md border p-3 text-sm">
                   <span className="flex flex-col gap-1">
                     <span className="font-medium">Enable contract sending</span>

@@ -282,6 +282,7 @@ function status(overrides: Partial<IntegrationStatus> = {}): IntegrationStatus {
       testMode: true,
       apiKeyLastFour: null,
     },
+    esignCallbackUrl: null,
     timezone: "America/Chicago",
     ...overrides,
   };
@@ -401,6 +402,51 @@ describe("<IntegrationsForm /> — Dropbox Sign", () => {
       "href",
       "/settings/esign-templates",
     );
+  });
+
+  it("shows the owner the callback URL to paste into Dropbox Sign when connected", () => {
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: true,
+            sendingEnabled: false,
+            disconnectPending: false,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+          esignCallbackUrl:
+            "https://sandra-sooty.vercel.app/api/webhooks/esign/secret-value",
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Callback URL")).toBeVisible();
+    expect(screen.getByTestId("esign-callback-url")).toHaveTextContent(
+      "https://sandra-sooty.vercel.app/api/webhooks/esign/secret-value",
+    );
+  });
+
+  it("hides the callback URL row for a non-owner even if one is somehow present", () => {
+    render(
+      <IntegrationsForm
+        initial={status({
+          esign: {
+            connected: true,
+            canManage: false,
+            sendingEnabled: false,
+            disconnectPending: false,
+            testMode: true,
+            apiKeyLastFour: "5678",
+          },
+          esignCallbackUrl:
+            "https://sandra-sooty.vercel.app/api/webhooks/esign/secret-value",
+        })}
+      />,
+    );
+
+    expect(screen.queryByText("Callback URL")).toBeNull();
   });
 
   it("cancels an enable with no action and returns focus to the switch", async () => {
