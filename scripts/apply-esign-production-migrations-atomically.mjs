@@ -15,7 +15,7 @@
 //   3. on an explicitly armed execution, repeats every preflight under one
 //      transaction, an advisory deployment lock, Switchboard's DNC barrier,
 //      and an ACCESS EXCLUSIVE consumer-table lock;
-//   4. executes 194500, 080000, 100000, 120100, and 143000 and inserts the exact
+//   4. executes 194500, 080000, 100000, 120100, and 20260902180000 and inserts the exact
 //      Supabase schema_migrations rows in that same transaction.
 //
 // This file is never invoked by application code or ordinary CI. It does not
@@ -43,6 +43,87 @@ const REQUIRED_SWITCHBOARD_TYPES = Object.freeze([
   "esign_provider",
   "switchboard_contact_preference",
 ]);
+const EXPECTED_WEBHOOK_REQUEST_COLUMNS = Object.freeze([
+  "id",
+  "org_id",
+  "property_id",
+  "status",
+  "signed_pdf_path",
+  "template_title",
+  "test_mode",
+]);
+const SERVICE_ROLE_ONLY_ESIGN_FUNCTIONS = Object.freeze([
+  "public.esign_website_template_metadata_is_valid(text,text,jsonb)",
+  "public.register_dropbox_website_esign_template(uuid,uuid,text,text,text,text,jsonb)",
+  "public.mark_dropbox_website_esign_template_unavailable(uuid,uuid,uuid,text)",
+  "public.set_org_esign_test_mode(uuid,uuid,boolean)",
+  "public.set_org_esign_sending_enabled(uuid,uuid,boolean)",
+  "public.create_esign_request(uuid,uuid,uuid,jsonb,jsonb,uuid,text,uuid,uuid)",
+  "public.reserve_esign_live_send(uuid,uuid,integer)",
+  "public.mark_esign_request_send_outcome(uuid,uuid,public.esign_delivery_state,text)",
+  "public.find_esign_webhook_request(uuid,text)",
+]);
+const AUTHENTICATED_ESIGN_FUNCTIONS = Object.freeze([
+  "public.esign_template_is_available(uuid,uuid)",
+  "public.get_latest_esign_requests_for_properties(uuid,uuid[])",
+]);
+const REQUIRED_ESIGN_COLUMNS = Object.freeze({
+  org_esign_integrations: [
+    "live_send_monthly_limit",
+    "live_send_monthly_used",
+    "live_send_monthly_period_key",
+    "live_send_monthly_period_started_at",
+    "provider_account_id",
+    "test_mode",
+    "sending_enabled",
+  ],
+  esign_requests: [
+    "test_mode",
+    "live_send_reserved_at",
+    "provider_remaining_at_claim",
+    "delivery_state",
+    "sign_request_id",
+  ],
+  esign_templates: [
+    "template_origin",
+    "provider_metadata",
+    "provider_metadata_attested_at",
+    "provider_metadata_unavailable_at",
+    "provider_metadata_unavailable_reason",
+    "provider_account_id",
+    "sign_template_id",
+  ],
+});
+const REQUIRED_ESIGN_RLS_TABLES = Object.freeze([
+  "org_esign_integrations",
+  "esign_templates",
+  "esign_requests",
+  "esign_request_signers",
+]);
+const REQUIRED_ESIGN_POLICIES = Object.freeze({
+  org_esign_integrations: [
+    "org_esign_integrations_org_select",
+    "org_esign_integrations_owner_insert",
+    "org_esign_integrations_owner_update",
+    "org_esign_integrations_owner_delete",
+  ],
+  esign_templates: ["esign_templates_org_select"],
+  esign_requests: ["esign_requests_org_select"],
+  esign_request_signers: ["esign_request_signers_org_select"],
+});
+const REQUIRED_ESIGN_CONSTRAINTS = Object.freeze({
+  org_esign_integrations: ["org_esign_integrations_live_send_monthly_limit_check"],
+  esign_requests: ["esign_requests_provider_remaining_at_claim_check"],
+  esign_templates: [
+    "esign_templates_template_origin_check",
+    "esign_templates_provider_metadata_check",
+    "esign_templates_source_snapshot_check",
+  ],
+});
+
+function assertPacket(condition, message) {
+  if (!condition) throw new Error(message);
+}
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -466,6 +547,220 @@ export async function recordProductionPreflight(client, plan, snapshotPath) {
   return snapshot;
 }
 
+async function assertFunctionPrivileges(client, signature, options = {}) {
+  const expectedAuthenticated = options.authenticated === true;
+  const result = await client.query(
+    `with routine as (select to_regprocedure($1) as oid)
+     select oid is not null as exists,
+       case when oid is null then false else has_function_privilege('service_role', oid, 'EXECUTE') end as service_role,
+       case when oid is null then false else has_function_privilege('authenticated', oid, 'EXECUTE') end as authenticated,
+       case when oid is null then false else has_function_privilege('anon', oid, 'EXECUTE') end as anon
+     from routine`,
+    [signature],
+  );
+  const row = result.rows[0] ?? {};
+  assertPacket(row.exists === true, `${signature} is missing`);
+  assertPacket(row.service_role === true, `${signature} is not executable by service_role`);
+  assertPacket(
+    row.authenticated === expectedAuthenticated,
+    `${signature} authenticated EXECUTE privilege is not ${expectedAuthenticated}`,
+  );
+  assertPacket(row.anon === false, `${signature} is executable by anon`);
+}
+
+function assertContainsAll(rows, key, expected, messagePrefix) {
+  const observed = new Set(rows.map((row) => row[key]));
+  for (const value of expected) {
+    assertPacket(observed.has(value), `${messagePrefix} ${value}`);
+  }
+}
+
+export async function assertPostApplyEsignEssentials(client) {
+  const webhookShape = await client.query(
+    `select * from public.find_esign_webhook_request($1::uuid,$2::text) limit 0`,
+    ["00000000-0000-4000-8000-000000000001", "shape-only"],
+  );
+  assertPacket(
+    webhookShape.fields.map((field) => field.name).join(",") === EXPECTED_WEBHOOK_REQUEST_COLUMNS.join(","),
+    "find_esign_webhook_request(uuid,text) does not expose the required seven-column return shape",
+  );
+
+  for (const signature of SERVICE_ROLE_ONLY_ESIGN_FUNCTIONS) {
+    await assertFunctionPrivileges(client, signature);
+  }
+  for (const signature of AUTHENTICATED_ESIGN_FUNCTIONS) {
+    await assertFunctionPrivileges(client, signature, { authenticated: true });
+  }
+
+  const tableNames = Object.keys(REQUIRED_ESIGN_COLUMNS);
+  const columnNames = [...new Set(Object.values(REQUIRED_ESIGN_COLUMNS).flat())];
+  const columns = await client.query(
+    `select table_name,column_name
+       from information_schema.columns
+      where table_schema='public'
+        and table_name=any($1::text[])
+        and column_name=any($2::text[])
+      order by table_name,column_name`,
+    [tableNames, columnNames],
+  );
+  for (const [tableName, requiredColumns] of Object.entries(REQUIRED_ESIGN_COLUMNS)) {
+    const tableRows = columns.rows.filter((row) => row.table_name === tableName);
+    assertContainsAll(tableRows, "column_name", requiredColumns, `missing ${tableName} column`);
+  }
+
+  const serviceRoleTableGrants = await client.query(
+    `select table_name,
+       has_table_privilege('service_role', format('public.%I', table_name), 'SELECT') as can_select,
+       has_table_privilege('service_role', format('public.%I', table_name), 'INSERT') as can_insert,
+       has_table_privilege('service_role', format('public.%I', table_name), 'UPDATE') as can_update,
+       has_table_privilege('service_role', format('public.%I', table_name), 'DELETE') as can_delete
+       from unnest($1::text[]) as required(table_name)
+      order by table_name`,
+    [REQUIRED_ESIGN_RLS_TABLES],
+  );
+  for (const row of serviceRoleTableGrants.rows) {
+    assertPacket(row.can_select === true, `service_role cannot SELECT ${row.table_name}`);
+    assertPacket(row.can_insert === true, `service_role cannot INSERT ${row.table_name}`);
+    assertPacket(row.can_update === true, `service_role cannot UPDATE ${row.table_name}`);
+    assertPacket(row.can_delete === true, `service_role cannot DELETE ${row.table_name}`);
+  }
+  assertPacket(
+    serviceRoleTableGrants.rows.length === REQUIRED_ESIGN_RLS_TABLES.length,
+    "service_role table grant assertion did not cover every required eSign table",
+  );
+
+  const authenticatedIntegrationColumns = await client.query(
+    `select column_name
+       from information_schema.column_privileges
+      where table_schema='public'
+        and table_name='org_esign_integrations'
+        and grantee='authenticated'
+        and privilege_type='SELECT'
+      order by column_name`,
+  );
+  const authenticatedColumns = new Set(
+    authenticatedIntegrationColumns.rows.map((row) => row.column_name),
+  );
+  for (const columnName of [
+    "live_send_monthly_limit",
+    "live_send_monthly_used",
+    "live_send_monthly_period_key",
+    "live_send_monthly_period_started_at",
+  ]) {
+    assertPacket(
+      authenticatedColumns.has(columnName),
+      `authenticated lacks safe org_esign_integrations.${columnName} read grant`,
+    );
+  }
+  assertPacket(
+    !authenticatedColumns.has("api_key_encrypted"),
+    "authenticated can read encrypted Dropbox Sign credentials",
+  );
+
+  const rls = await client.query(
+    `select rel.relname, rel.relrowsecurity
+       from pg_class rel
+       join pg_namespace ns on ns.oid = rel.relnamespace
+      where ns.nspname='public'
+        and rel.relname=any($1::text[])
+      order by rel.relname`,
+    [REQUIRED_ESIGN_RLS_TABLES],
+  );
+  for (const tableName of REQUIRED_ESIGN_RLS_TABLES) {
+    const row = rls.rows.find((candidate) => candidate.relname === tableName);
+    assertPacket(row?.relrowsecurity === true, `${tableName} RLS is not enabled`);
+  }
+
+  const policies = await client.query(
+    `select tablename,policyname
+       from pg_policies
+      where schemaname='public'
+        and tablename=any($1::text[])
+      order by tablename,policyname`,
+    [Object.keys(REQUIRED_ESIGN_POLICIES)],
+  );
+  for (const [tableName, policyNames] of Object.entries(REQUIRED_ESIGN_POLICIES)) {
+    const tableRows = policies.rows.filter((row) => row.tablename === tableName);
+    assertContainsAll(tableRows, "policyname", policyNames, `missing ${tableName} policy`);
+  }
+
+  const constraints = await client.query(
+    `select rel.relname as table_name, con.conname, con.convalidated,
+       pg_get_constraintdef(con.oid,true) as definition
+       from pg_constraint con
+       join pg_class rel on rel.oid = con.conrelid
+       join pg_namespace ns on ns.oid = rel.relnamespace
+      where ns.nspname='public'
+        and rel.relname=any($1::text[])
+        and con.conname=any($2::text[])
+      order by rel.relname, con.conname`,
+    [
+      Object.keys(REQUIRED_ESIGN_CONSTRAINTS),
+      Object.values(REQUIRED_ESIGN_CONSTRAINTS).flat(),
+    ],
+  );
+  for (const [tableName, constraintNames] of Object.entries(REQUIRED_ESIGN_CONSTRAINTS)) {
+    for (const constraintName of constraintNames) {
+      const row = constraints.rows.find(
+        (candidate) =>
+          candidate.table_name === tableName &&
+          candidate.conname === constraintName,
+      );
+      assertPacket(row, `${tableName}.${constraintName} is missing`);
+      assertPacket(row.convalidated === true, `${tableName}.${constraintName} is not validated`);
+      if (constraintName === "org_esign_integrations_live_send_monthly_limit_check") {
+        assertPacket(
+          row.definition.includes("live_send_monthly_limit") && row.definition.includes("40"),
+          "Sandra local live-send ceiling constraint does not prove the 40-request cap",
+        );
+      }
+      if (constraintName === "esign_templates_template_origin_check") {
+        assertPacket(
+          row.definition.includes("sandra_embedded") && row.definition.includes("dropbox_website"),
+          "template_origin constraint does not prove the approved origins",
+        );
+      }
+      if (constraintName === "esign_templates_provider_metadata_check") {
+        assertPacket(
+          row.definition.includes("provider_metadata_attested_at") &&
+            row.definition.includes("provider_metadata_unavailable_reason"),
+          "provider metadata constraint does not prove attestation/unavailable state",
+        );
+      }
+      if (constraintName === "esign_requests_provider_remaining_at_claim_check") {
+        assertPacket(
+          row.definition.includes("provider_remaining_at_claim"),
+          "provider remaining constraint does not reference the reservation snapshot",
+        );
+      }
+    }
+  }
+
+  const index = await client.query(
+    `select indexdef
+       from pg_indexes
+      where schemaname='public'
+        and indexname='idx_esign_templates_provider_id'`,
+  );
+  const indexDef = index.rows[0]?.indexdef ?? "";
+  assertPacket(
+    indexDef.includes("provider_account_id") &&
+      indexDef.includes("sign_template_id") &&
+      !/\(\s*org_id\s*,\s*sign_template_id\s*\)/iu.test(indexDef),
+    "idx_esign_templates_provider_id does not enforce global provider_account_id plus sign_template_id uniqueness",
+  );
+
+  const view = await client.query(
+    `select
+       to_regclass('public.available_esign_templates') is not null as exists,
+       has_table_privilege('authenticated','public.available_esign_templates','SELECT') as authenticated_select,
+       has_table_privilege('service_role','public.available_esign_templates','SELECT') as service_role_select`,
+  );
+  assertPacket(view.rows[0]?.exists === true, "available_esign_templates view is missing");
+  assertPacket(view.rows[0]?.authenticated_select === true, "authenticated cannot select available_esign_templates");
+  assertPacket(view.rows[0]?.service_role_select === true, "service_role cannot select available_esign_templates");
+}
+
 export async function applyProductionPacket(client, plan, snapshot, options = {}) {
   await client.query("begin");
   try {
@@ -527,6 +822,7 @@ export async function applyProductionPacket(client, plan, snapshot, options = {}
     ) {
       throw new Error("Protected Switchboard objects changed during the eSign transaction.");
     }
+    await assertPostApplyEsignEssentials(client);
     if (options.beforeCommit) await options.beforeCommit(client);
     await client.query("commit");
     return { outcome: historyOutcome === "pending" ? "applied" : "already_applied", constraints: finalConstraints.rows };

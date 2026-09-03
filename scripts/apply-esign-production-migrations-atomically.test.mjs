@@ -26,6 +26,15 @@ const requiredSwitchboardTypes = Object.freeze([
   "esign_provider",
   "switchboard_contact_preference",
 ]);
+const expectedWebhookRequestColumns = Object.freeze([
+  "id",
+  "org_id",
+  "property_id",
+  "status",
+  "signed_pdf_path",
+  "template_title",
+  "test_mode",
+]);
 
 function hash(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -75,6 +84,167 @@ function packetHarness(plan, options = {}) {
       if (/switchboard_consumers/u.test(sql)) return { rows: [counts] };
       if (/conrelid='public\.webhook_consumers'::regclass/u.test(sql)) {
         return { rows: constraints };
+      }
+      if (/select \* from public\.find_esign_webhook_request/u.test(sql)) {
+        const names = options.badWebhookColumns
+          ? expectedWebhookRequestColumns.slice(0, -1)
+          : expectedWebhookRequestColumns;
+        return { rows: [], fields: names.map((name) => ({ name })) };
+      }
+      if (/to_regprocedure\(\$1\)/u.test(sql)) {
+        const signature = params?.[0] ?? "";
+        const authenticated = /esign_template_is_available|get_latest_esign_requests_for_properties/u.test(
+          signature,
+        );
+        return {
+          rows: [
+            {
+              exists: options.missingFunction !== signature,
+              service_role: options.missingServiceRoleGrant !== signature,
+              authenticated,
+              anon: false,
+            },
+          ],
+        };
+      }
+      if (/from information_schema\.columns/u.test(sql)) {
+        return {
+          rows: [
+            ...[
+              "live_send_monthly_limit",
+              "live_send_monthly_used",
+              "live_send_monthly_period_key",
+              "live_send_monthly_period_started_at",
+              "provider_account_id",
+              "test_mode",
+              "sending_enabled",
+            ].map((column_name) => ({ table_name: "org_esign_integrations", column_name })),
+            ...[
+              "test_mode",
+              "live_send_reserved_at",
+              "provider_remaining_at_claim",
+              "delivery_state",
+              "sign_request_id",
+            ].map((column_name) => ({ table_name: "esign_requests", column_name })),
+            ...[
+              "template_origin",
+              "provider_metadata",
+              "provider_metadata_attested_at",
+              "provider_metadata_unavailable_at",
+              "provider_metadata_unavailable_reason",
+              "provider_account_id",
+              "sign_template_id",
+            ].map((column_name) => ({ table_name: "esign_templates", column_name })),
+          ],
+        };
+      }
+      if (/to_regclass\('public\.available_esign_templates'\)/u.test(sql)) {
+        return {
+          rows: [{ exists: true, authenticated_select: true, service_role_select: true }],
+        };
+      }
+      if (/from unnest\(\$1::text\[\]\) as required/u.test(sql)) {
+        return {
+          rows: [
+            "org_esign_integrations",
+            "esign_templates",
+            "esign_requests",
+            "esign_request_signers",
+          ].map((table_name) => ({
+            table_name,
+            can_select: true,
+            can_insert: true,
+            can_update: true,
+            can_delete: true,
+          })),
+        };
+      }
+      if (/from information_schema\.column_privileges/u.test(sql)) {
+        return {
+          rows: [
+            "id",
+            "org_id",
+            "provider",
+            "api_key_last_four",
+            "client_id",
+            "sending_enabled",
+            "test_mode",
+            "live_send_monthly_limit",
+            "live_send_monthly_used",
+            "live_send_monthly_period_key",
+            "live_send_monthly_period_started_at",
+          ].map((column_name) => ({ column_name })),
+        };
+      }
+      if (/from pg_class rel/u.test(sql)) {
+        return {
+          rows: [
+            "org_esign_integrations",
+            "esign_templates",
+            "esign_requests",
+            "esign_request_signers",
+          ].map((relname) => ({ relname, relrowsecurity: true })),
+        };
+      }
+      if (/from pg_policies/u.test(sql)) {
+        return {
+          rows: [
+            "org_esign_integrations_org_select",
+            "org_esign_integrations_owner_insert",
+            "org_esign_integrations_owner_update",
+            "org_esign_integrations_owner_delete",
+          ].map((policyname) => ({ tablename: "org_esign_integrations", policyname })).concat([
+            { tablename: "esign_templates", policyname: "esign_templates_org_select" },
+            { tablename: "esign_requests", policyname: "esign_requests_org_select" },
+            { tablename: "esign_request_signers", policyname: "esign_request_signers_org_select" },
+          ]),
+        };
+      }
+      if (/from pg_constraint con/u.test(sql)) {
+        return {
+          rows: [
+            {
+              table_name: "org_esign_integrations",
+              conname: "org_esign_integrations_live_send_monthly_limit_check",
+              convalidated: true,
+              definition: "CHECK (live_send_monthly_limit between 1 and 40)",
+            },
+            {
+              table_name: "esign_requests",
+              conname: "esign_requests_provider_remaining_at_claim_check",
+              convalidated: true,
+              definition: "CHECK (provider_remaining_at_claim is null or provider_remaining_at_claim >= 0)",
+            },
+            {
+              table_name: "esign_templates",
+              conname: "esign_templates_template_origin_check",
+              convalidated: true,
+              definition: "CHECK (template_origin in ('sandra_embedded','dropbox_website'))",
+            },
+            {
+              table_name: "esign_templates",
+              conname: "esign_templates_provider_metadata_check",
+              convalidated: true,
+              definition: "CHECK (provider_metadata_attested_at is not null and provider_metadata_unavailable_reason is null)",
+            },
+            {
+              table_name: "esign_templates",
+              conname: "esign_templates_source_snapshot_check",
+              convalidated: true,
+              definition: "CHECK (template_origin = 'sandra_embedded' or template_origin = 'dropbox_website')",
+            },
+          ],
+        };
+      }
+      if (/from pg_indexes/u.test(sql)) {
+        return {
+          rows: [
+            {
+              indexdef:
+                "CREATE UNIQUE INDEX idx_esign_templates_provider_id ON public.esign_templates USING btree (provider_account_id, sign_template_id) WHERE (sign_template_id IS NOT NULL)",
+            },
+          ],
+        };
       }
       return { rows: [] };
     },
@@ -211,6 +381,12 @@ test("applyProductionPacket executes the disconnect migration body from the revi
     ),
     "disconnect migration ledger row was not inserted",
   );
+  const postApplyIndex = calls.findIndex((call) =>
+    /select \* from public\.find_esign_webhook_request/u.test(call.sql),
+  );
+  const commitIndex = calls.findIndex((call) => call.sql === "commit");
+  assert.ok(postApplyIndex >= 0, "post-apply eSign assertions did not run");
+  assert.ok(postApplyIndex < commitIndex, "post-apply eSign assertions did not run before commit");
 });
 
 test("applyProductionPacket rolls back when packet execution fails before commit", async () => {
@@ -223,6 +399,17 @@ test("applyProductionPacket rolls back when packet execution fails before commit
       },
     }),
     /synthetic packet failure/u,
+  );
+  assert.ok(calls.some((call) => call.sql === "rollback"));
+  assert.equal(calls.some((call) => call.sql === "commit"), false);
+});
+
+test("applyProductionPacket rolls back when post-apply eSign assertions fail", async () => {
+  const plan = loadReviewedPlan(planPath);
+  const { calls, client, snapshot } = packetHarness(plan, { badWebhookColumns: true });
+  await assert.rejects(
+    applyProductionPacket(client, plan, snapshot),
+    /seven-column return shape/u,
   );
   assert.ok(calls.some((call) => call.sql === "rollback"));
   assert.equal(calls.some((call) => call.sql === "commit"), false);

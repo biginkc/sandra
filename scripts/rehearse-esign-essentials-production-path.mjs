@@ -3,13 +3,22 @@ import { readFileSync } from "node:fs";
 
 import pg from "pg";
 
+import {
+  assertPostApplyEsignEssentials,
+  splitSupabaseStatements,
+} from "./apply-esign-production-migrations-atomically.mjs";
+
 const { Client } = pg;
 
 const adminUrl =
-  process.env.LOCAL_REHEARSAL_DATABASE_URL ??
   process.env.SUPABASE_LOCAL_DB_URL ??
-  process.env.SUPABASE_DB_URL ??
+  process.env.LOCAL_REHEARSAL_DATABASE_URL ??
   null;
+if (!adminUrl) {
+  throw new Error(
+    "SUPABASE_LOCAL_DB_URL or LOCAL_REHEARSAL_DATABASE_URL is required; refusing to silently use localhost for eSign rehearsal.",
+  );
+}
 const parsedAdminUrl = adminUrl ? new URL(adminUrl) : null;
 if (parsedAdminUrl) {
   if (
@@ -39,7 +48,7 @@ function localClient(database = "postgres") {
     url.pathname = `/${database}`;
     return new Client({ connectionString: url.toString() });
   }
-  return new Client({ host: "localhost", port: 5432, database });
+  throw new Error("No explicit local rehearsal database URL is configured.");
 }
 
 const ids = {
@@ -50,6 +59,8 @@ const ids = {
   contact: "10000000-0000-4000-8000-000000000005",
   property: "10000000-0000-4000-8000-000000000006",
   template: "10000000-0000-4000-8000-000000000007",
+  otherOrg: "10000000-0000-4000-8000-000000000008",
+  otherOwner: "10000000-0000-4000-8000-000000000009",
 };
 
 const metadata = {
@@ -181,6 +192,12 @@ $$;
 create function auth.role() returns text language sql stable as $$
   select nullif(current_setting('request.jwt.claim.role', true), '')
 $$;
+create function auth.uid() returns uuid language sql stable as $$
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+$$;
+grant usage on schema auth to authenticated, service_role;
+grant execute on function auth.role() to authenticated, service_role;
+grant execute on function auth.uid() to authenticated, service_role;
 create table public.organizations(id uuid primary key, name text);
 create table public.memberships(
   org_id uuid not null,
@@ -191,8 +208,21 @@ create table public.memberships(
   access_expires_at timestamptz
 );
 create function public.hugo_has_active_org_access(p_org_id uuid)
-returns boolean language sql stable as $$
-  select true
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, auth, pg_temp
+as $$
+  select exists (
+    select 1
+    from public.memberships membership
+    where membership.org_id = p_org_id
+      and membership.user_id = auth.uid()
+      and membership.access_status = 'active'
+      and membership.deletion_prepared_at is null
+      and (membership.access_expires_at is null or membership.access_expires_at > now())
+  )
 $$;
 create function public.esign_require_active_owner(p_org_id uuid, p_actor_id uuid)
 returns void language plpgsql as $$
@@ -246,6 +276,16 @@ create table public.org_esign_integrations(
 alter table public.org_esign_integrations enable row level security;
 create policy org_esign_integrations_org_select
   on public.org_esign_integrations for select to authenticated
+  using (public.hugo_has_active_org_access(org_id));
+create policy org_esign_integrations_owner_insert
+  on public.org_esign_integrations for insert to authenticated
+  with check (public.hugo_has_active_org_access(org_id));
+create policy org_esign_integrations_owner_update
+  on public.org_esign_integrations for update to authenticated
+  using (public.hugo_has_active_org_access(org_id))
+  with check (public.hugo_has_active_org_access(org_id));
+create policy org_esign_integrations_owner_delete
+  on public.org_esign_integrations for delete to authenticated
   using (public.hugo_has_active_org_access(org_id));
 revoke all on table public.org_esign_integrations
   from public, anon, authenticated, service_role;
@@ -329,6 +369,24 @@ create table public.esign_request_signers(
   signer_name text not null,
   signer_email text not null
 );
+alter table public.esign_templates enable row level security;
+alter table public.esign_requests enable row level security;
+alter table public.esign_request_signers enable row level security;
+create policy esign_templates_org_select
+  on public.esign_templates for select to authenticated
+  using (public.hugo_has_active_org_access(org_id));
+create policy esign_requests_org_select
+  on public.esign_requests for select to authenticated
+  using (public.hugo_has_active_org_access(org_id));
+create policy esign_request_signers_org_select
+  on public.esign_request_signers for select to authenticated
+  using (public.hugo_has_active_org_access(org_id));
+grant select on public.esign_templates to authenticated;
+grant select on public.esign_requests to authenticated;
+grant select on public.esign_request_signers to authenticated;
+grant all on public.esign_templates to service_role;
+grant all on public.esign_requests to service_role;
+grant all on public.esign_request_signers to service_role;
 create table public.lead_events(
   org_id uuid not null,
   property_id uuid not null,
@@ -359,6 +417,39 @@ returns boolean language sql immutable as $$
       'property_address', 'seller_name'
     ]::text[];
 $$;
+create or replace function public.get_latest_esign_requests_for_properties(
+  p_org_id uuid,
+  p_property_ids uuid[]
+)
+returns table (
+  property_id uuid,
+  request_id uuid,
+  status public.esign_request_status,
+  delivery_state public.esign_delivery_state,
+  template_title text,
+  created_at timestamptz
+)
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select request.property_id, request.id, request.status,
+    request.delivery_state, template.name, request.created_at
+  from public.esign_requests request
+  join public.esign_templates template
+    on template.id = request.template_id and template.org_id = request.org_id
+  where request.org_id = p_org_id
+    and request.property_id = any(p_property_ids)
+    and (
+      coalesce(auth.role(), '') = 'service_role'
+      or public.hugo_has_active_org_access(p_org_id)
+    );
+$$;
+revoke all on function public.get_latest_esign_requests_for_properties(uuid, uuid[])
+  from public, anon, authenticated, service_role;
+grant execute on function public.get_latest_esign_requests_for_properties(uuid, uuid[])
+  to authenticated, service_role;
 create or replace function public.find_esign_webhook_request(
   p_org_id uuid,
   p_sign_request_id text
@@ -396,6 +487,13 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+function migrationBodyStatements() {
+  const statements = splitSupabaseStatements(migrationSql);
+  assert(/(?:^|\n)\s*begin\s*$/iu.test(statements[0]), "migration does not begin with an explicit transaction");
+  assert(/^commit\s*$/iu.test(statements.at(-1)), "migration does not end with an explicit commit");
+  return statements.slice(1, -1);
+}
+
 async function findWebhookRequestColumns(client) {
   const result = await client.query(
     `select * from public.find_esign_webhook_request($1,$2) limit 0`,
@@ -406,84 +504,6 @@ async function findWebhookRequestColumns(client) {
 
 async function setServiceRole(client) {
   await client.query("select set_config('request.jwt.claim.role','service_role',false)");
-}
-
-async function assertServiceRoleOnlyFunction(client, signature) {
-  const result = await client.query(
-    `select
-       has_function_privilege('service_role', $1::regprocedure, 'EXECUTE') as service_role,
-       has_function_privilege('authenticated', $1::regprocedure, 'EXECUTE') as authenticated,
-       has_function_privilege('anon', $1::regprocedure, 'EXECUTE') as anon`,
-    [signature],
-  );
-  assert(result.rows[0].service_role === true, `${signature} is not executable by service_role`);
-  assert(result.rows[0].authenticated === false, `${signature} is executable by authenticated`);
-  assert(result.rows[0].anon === false, `${signature} is executable by anon`);
-}
-
-async function assertPostApplyShape(client) {
-  for (const signature of [
-    "public.esign_website_template_metadata_is_valid(text,text,jsonb)",
-    "public.register_dropbox_website_esign_template(uuid,uuid,text,text,text,text,jsonb)",
-    "public.mark_dropbox_website_esign_template_unavailable(uuid,uuid,uuid,text)",
-    "public.set_org_esign_test_mode(uuid,uuid,boolean)",
-    "public.set_org_esign_sending_enabled(uuid,uuid,boolean)",
-    "public.create_esign_request(uuid,uuid,uuid,jsonb,jsonb,uuid,text,uuid,uuid)",
-    "public.reserve_esign_live_send(uuid,uuid,integer)",
-    "public.mark_esign_request_send_outcome(uuid,uuid,public.esign_delivery_state,text)",
-    "public.find_esign_webhook_request(uuid,text)",
-  ]) {
-    await assertServiceRoleOnlyFunction(client, signature);
-  }
-  const integrationColumns = await client.query(
-    `select column_name
-     from information_schema.columns
-     where table_schema = 'public'
-       and table_name = 'org_esign_integrations'
-       and column_name in (
-         'live_send_monthly_limit',
-         'live_send_monthly_used',
-         'live_send_monthly_period_key',
-         'live_send_monthly_period_started_at'
-       )`,
-  );
-  assert(integrationColumns.rowCount === 4, "missing live-send quota columns");
-  const requestColumns = await client.query(
-    `select column_name
-     from information_schema.columns
-     where table_schema = 'public'
-       and table_name = 'esign_requests'
-       and column_name in ('live_send_reserved_at', 'provider_remaining_at_claim')`,
-  );
-  assert(requestColumns.rowCount === 2, "missing request reservation columns");
-  const templateColumns = await client.query(
-    `select column_name
-     from information_schema.columns
-     where table_schema = 'public'
-       and table_name = 'esign_templates'
-       and column_name in (
-         'template_origin',
-         'provider_metadata',
-         'provider_metadata_attested_at',
-         'provider_metadata_unavailable_at',
-         'provider_metadata_unavailable_reason'
-       )`,
-  );
-  assert(templateColumns.rowCount === 5, "missing website template origin/attestation columns");
-  const rls = await client.query(
-    `select relrowsecurity
-     from pg_class
-     where oid = 'public.org_esign_integrations'::regclass`,
-  );
-  assert(rls.rows[0].relrowsecurity === true, "org_esign_integrations RLS is not enabled");
-  const policies = await client.query(
-    `select count(*)::int as count
-     from pg_policies
-     where schemaname = 'public'
-       and tablename = 'org_esign_integrations'
-       and policyname = 'org_esign_integrations_org_select'`,
-  );
-  assert(policies.rows[0].count === 1, "org_esign_integrations select policy missing");
 }
 
 async function createRequest(client, sendIntentId = randomUUID()) {
@@ -549,10 +569,53 @@ async function assertDuplicateProviderPairPreflight(adminClient) {
   }
 }
 
+async function assertRollbackAndReapply(adminClient) {
+  const rollbackDbName = `${dbName}_rollback_reapply`;
+  await adminClient.query(`create database ${q(rollbackDbName)}`);
+  const rollbackClient = localClient(rollbackDbName);
+  await rollbackClient.connect();
+  try {
+    await rollbackClient.query(baseSql);
+    await rollbackClient.query("begin");
+    try {
+      for (const statement of migrationBodyStatements()) {
+        await rollbackClient.query(statement);
+      }
+      await rollbackClient.query("rollback");
+    } catch (error) {
+      await rollbackClient.query("rollback").catch(() => {});
+      throw error;
+    }
+    assert(
+      (await findWebhookRequestColumns(rollbackClient)).join(",") ===
+        "id,org_id,property_id,status,signed_pdf_path,template_title",
+      "rolled-back migration body did not restore the base six-column webhook shape",
+    );
+    await rollbackClient.query(migrationSql);
+    await assertPostApplyEsignEssentials(rollbackClient);
+    await rollbackClient.query(migrationSql);
+    await assertPostApplyEsignEssentials(rollbackClient);
+  } finally {
+    await rollbackClient.end().catch(() => {});
+    await adminClient
+      .query(`drop database if exists ${q(rollbackDbName)} with (force)`)
+      .catch(() => {});
+  }
+}
+
+async function assertWebhookDeployOrderCompatibility(client) {
+  await client.query(
+    `select id,org_id,property_id,status,signed_pdf_path,template_title
+       from public.find_esign_webhook_request($1,$2)`,
+    [ids.org, "missing-signature-request"],
+  );
+}
+
 const admin = localClient();
 await admin.connect();
 try {
   await assertDuplicateProviderPairPreflight(admin);
+  await assertRollbackAndReapply(admin);
   await admin.query(`create database ${q(dbName)}`);
   const client = localClient(dbName);
   await client.connect();
@@ -563,6 +626,7 @@ try {
         "id,org_id,property_id,status,signed_pdf_path,template_title",
       "base webhook lookup fixture did not start with the six-column return shape",
     );
+    await assertWebhookDeployOrderCompatibility(client);
     await client.query(migrationSql);
     await client.query(migrationSql);
     assert(
@@ -570,7 +634,8 @@ try {
         "id,org_id,property_id,status,signed_pdf_path,template_title,test_mode",
       "migration did not safely replace webhook lookup with the seven-column return shape",
     );
-    await assertPostApplyShape(client);
+    await assertWebhookDeployOrderCompatibility(client);
+    await assertPostApplyEsignEssentials(client);
     await setServiceRole(client);
     let invalidOriginRejected = false;
     try {
@@ -591,13 +656,17 @@ try {
     assert(invalidOriginRejected, "invalid template_origin was accepted");
 
     await client.query(
-      `insert into auth.users(id) values ($1),($2),($3)`,
-      [ids.owner, ids.member, ids.contact],
+      `insert into auth.users(id) values ($1),($2),($3),($4)`,
+      [ids.owner, ids.member, ids.contact, ids.otherOwner],
     );
-    await client.query(`insert into public.organizations(id, name) values ($1, 'BMH')`, [ids.org]);
     await client.query(
-      `insert into public.memberships(org_id,user_id,role) values ($1,$2,'owner'),($1,$3,'member')`,
-      [ids.org, ids.owner, ids.member],
+      `insert into public.organizations(id, name) values ($1, 'BMH'),($2, 'Other')`,
+      [ids.org, ids.otherOrg],
+    );
+    await client.query(
+      `insert into public.memberships(org_id,user_id,role)
+       values ($1,$2,'owner'),($1,$3,'member'),($4,$5,'owner')`,
+      [ids.org, ids.owner, ids.member, ids.otherOrg, ids.otherOwner],
     );
     await client.query(
       `insert into public.webhook_consumers(id,org_id,consumer_type,enabled)
@@ -613,6 +682,15 @@ try {
       ) values ($1, convert_to('redacted','utf8'), '1234', 'client-1',
         $2, now(), true, false, $3, $3, 'provider-account-1', 40, '2026-08')`,
       [ids.org, ids.consumer, ids.owner],
+    );
+    await client.query(
+      `insert into public.org_esign_integrations(
+        org_id, api_key_encrypted, api_key_last_four, client_id,
+        sending_enabled, test_mode, connected_by, updated_by,
+        provider_account_id
+      ) values ($1, convert_to('redacted','utf8'), '5678', 'client-2',
+        false, true, $2, $2, 'provider-account-2')`,
+      [ids.otherOrg, ids.otherOwner],
     );
     await client.query(
       `insert into public.properties(id, org_id, homeowner_contact_id)
@@ -869,6 +947,39 @@ try {
     } finally {
       await Promise.all([c1.end(), c2.end()]);
     }
+    await client.query(
+      `update public.org_esign_integrations
+       set live_send_monthly_used = 38
+       where org_id = $1`,
+      [ids.org],
+    );
+    const requestC = await createRequest(client);
+    const requestD = await createRequest(client);
+    const requestE = await createRequest(client);
+    const c3 = localClient(dbName);
+    const c4 = localClient(dbName);
+    const c5 = localClient(dbName);
+    await Promise.all([c3.connect(), c4.connect(), c5.connect()]);
+    try {
+      await Promise.all([setServiceRole(c3), setServiceRole(c4), setServiceRole(c5)]);
+      const outcomes = await Promise.all([
+        c3.query(`select public.reserve_esign_live_send($1,$2,11) as outcome`, [ids.org, requestC]),
+        c4.query(`select public.reserve_esign_live_send($1,$2,11) as outcome`, [ids.org, requestD]),
+        c5.query(`select public.reserve_esign_live_send($1,$2,11) as outcome`, [ids.org, requestE]),
+      ]);
+      assert(
+        outcomes.map((result) => result.rows[0].outcome).sort().join(",") === "blocked,reserved,reserved",
+        "three-way concurrent live reservations did not saturate exactly at the 40-request cap",
+      );
+      const saturated = await client.query(
+        `select live_send_monthly_used
+         from public.org_esign_integrations where org_id = $1`,
+        [ids.org],
+      );
+      assert(saturated.rows[0].live_send_monthly_used === 40, "concurrency saturation did not stop exactly at 40");
+    } finally {
+      await Promise.all([c3.end(), c4.end(), c5.end()]);
+    }
 
     const grants = await client.query(
       `select column_name
@@ -884,6 +995,22 @@ try {
     assert(!granted.has("api_key_encrypted"), "authenticated can read encrypted Dropbox credentials");
     await client.query("set role authenticated");
     try {
+      await client.query(
+        "select set_config('request.jwt.claim.sub',$1,false), set_config('request.jwt.claim.role','authenticated',false)",
+        [ids.owner],
+      );
+      const ownRows = await client.query(
+        `select count(*)::int as count
+         from public.org_esign_integrations where org_id = $1`,
+        [ids.org],
+      );
+      assert(ownRows.rows[0].count === 1, "authenticated owner cannot read own eSign integration");
+      const otherRows = await client.query(
+        `select count(*)::int as count
+         from public.org_esign_integrations where org_id = $1`,
+        [ids.otherOrg],
+      );
+      assert(otherRows.rows[0].count === 0, "authenticated owner can read another org eSign integration");
       await client.query(
         `select live_send_monthly_used, live_send_monthly_period_key
          from public.org_esign_integrations where org_id = $1`,
