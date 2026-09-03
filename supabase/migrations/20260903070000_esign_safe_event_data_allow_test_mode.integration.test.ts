@@ -37,7 +37,9 @@ const foundationSql = readFileSync(
 const atomicDisconnectSql = readFileSync(
   "supabase/migrations/20260902120100_esign_atomic_disconnect_state.sql",
   "utf8",
-);
+)
+  .replace(/^\s*begin;\s*/i, "")
+  .replace(/\s*commit;\s*$/i, "");
 const allowTestModeSql = readFileSync(
   "supabase/migrations/20260903070000_esign_safe_event_data_allow_test_mode.sql",
   "utf8",
@@ -266,6 +268,30 @@ describe("esign_safe_event_data_is_valid allows test_mode", () => {
       testMode: false,
     });
     expect(claim.outcome).toBe("claimed");
+  });
+
+  it("after migration: claims a receipt whose safe event data carries test_mode: null", async () => {
+    await pg.query(allowTestModeSql);
+    await connectIntegration();
+    const consumer = await pg.query<{ id: string }>(
+      "select id from public.webhook_consumers where consumer_type = 'esign_provider'",
+    );
+    const claim = await claimWebhookReceipt({
+      consumerId: consumer.rows[0].id,
+      eventType: "signature_request_signed",
+      signRequestId: "req-testmode-null",
+      relatedSignatureId: "sig-testmode-null",
+      testMode: null,
+    });
+    expect(claim.outcome).toBe("claimed");
+    expect(
+      (
+        await pg.query(
+          "select safe_event_data from public.esign_webhook_receipts where id = $1",
+          [claim.receipt_id],
+        )
+      ).rows[0].safe_event_data,
+    ).toMatchObject({ test_mode: null });
   });
 
   it("after migration: still accepts the original five-key payload with no test_mode key", async () => {
