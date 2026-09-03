@@ -32,7 +32,8 @@ begin
           and export_sha256 is null
         )
         or (
-          document_storage_bucket = 'esign-documents'
+          document_storage_bucket is not null
+          and document_storage_bucket = 'esign-documents'
           and document_storage_path is not null
           and field_layout is not null
           and layout_exported_at is not null

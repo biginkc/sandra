@@ -72,6 +72,9 @@ describe("Migration 20260903100000 — eSign template export snapshots", () => {
     expect(constraints.rows[0].definition).toMatch(
       /document_storage_bucket[\s\S]+document_storage_path[\s\S]+field_layout[\s\S]+layout_exported_at[\s\S]+export_sha256/i,
     );
+    expect(constraints.rows[0].definition).toMatch(
+      /document_storage_bucket\s+IS\s+NOT\s+NULL/i,
+    );
 
     const bucket = await pg.query<{
       id: string;
