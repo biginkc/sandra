@@ -369,6 +369,19 @@ for (const mode of [
     assertAA("pressed hold control while hovered", await measureRenderedContrast(resume));
   });
 
+  test(`keeps keypad digits and letters readable in ${mode.label} mode`, async ({ page }) => {
+    await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: false });
+    await page.getByTestId("coach-keypad-toggle").click();
+    const key = page.getByRole("button", { name: "Keypad 2", exact: true });
+    assertAA("keypad digit", await measureRenderedContrast(key.locator("span").first()));
+    assertAA("keypad letters", await measureRenderedContrast(key.locator("span").last()));
+    await key.hover();
+    assertAA("hovered keypad digit and letters", await measureRenderedContrast(key));
+    await page.getByTestId("coach-hold").click();
+    await expect(key).toBeDisabled();
+    assertAA("disabled keypad digit and letters", await measureRenderedContrast(key));
+  });
+
   test(`meets WCAG AA for narrow interrupted Coach controls in ${mode.label} mode`, async ({ page }) => {
     await mountFullCoach(page, {
       darkMode: mode.darkMode,

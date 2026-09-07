@@ -38,3 +38,7 @@ P2 — The pinned Up next/navigation footer covered nearly the entire script whe
 ### CI countdown capture correction
 
 Final-head CI exposed a contrast-probe race: the live hold countdown changed glyphs between its four screenshot-mask passes. The held-call contrast test now fixes `Date` before mounting; browser timers and animations continue normally. The production HoldTimer is unchanged, and its separate acceptance test continues to prove ticking and expiry. Independent contract re-review approved this test-only correction; no contrast thresholds, pixel masks, or assertions were weakened.
+
+### Final visible-browser keypad finding
+
+Visible Chrome review caught inherited white digit text against PhoneKeypad's existing white keys. Scoped coach-only CSS now restores dark key text and letter labels while preserving the shared keypad component and layout. Disabled keys use the opaque card/muted palette. New rendered-pixel tests exercise normal, hover, and held/disabled keys in both themes: 14.44:1 normal, 13.13:1 hover, and 5.03:1 disabled. The responsive fixture now toggles its held prop via its existing Hold callback so the test reaches disabled keys through the UI; production session logic is unchanged.

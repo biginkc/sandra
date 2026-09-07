@@ -58,7 +58,8 @@ declare global {
   }
 }
 
-function Harness({ held = false, interrupted = false }: { held?: boolean; interrupted?: boolean }) {
+function Harness({ held: initialHeld = false, interrupted = false }: { held?: boolean; interrupted?: boolean }) {
+  const [held, setHeld] = useState(initialHeld);
   const [state, dispatch] = useReducer(coachReducer, undefined, harnessState);
   const [reconnectGap, setReconnectGap] = useState(true);
   const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(FIRST_COACH_SECTION_ID);
@@ -131,7 +132,7 @@ function Harness({ held = false, interrupted = false }: { held?: boolean; interr
       holdPending={false}
       onDigit={(digit) => digitsRef.current.push(digit)}
       onMute={() => {}}
-      onHold={() => {}}
+      onHold={() => setHeld((value) => !value)}
       onHangup={() => {}}
       onReconnectAudio={() => {}}
       onCollapse={() => {}}

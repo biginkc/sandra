@@ -79,6 +79,10 @@
   [data-slot="button"]:not(:disabled):not(.bg-primary):not([aria-pressed="true"]):not([aria-expanded="true"]):not([data-testid="coach-hangup"]):hover { background: var(--muted); color: var(--foreground); }
   [data-testid="coach-call-controls"] button[aria-pressed="true"], [data-testid="coach-keypad-toggle"][aria-expanded="true"] { background: var(--primary); color: var(--primary-foreground); }
   [data-testid="coach-hangup"]:not(:disabled):hover { background: var(--destructive); }
+  /* PhoneKeypad keeps its existing light keys inside this dark dialog. */
+  [data-testid="phone-keypad"] { color: var(--primary-foreground); }
+  [data-testid="phone-keypad"] button > span:last-child { color: inherit; }
+  [data-testid="phone-keypad"] button:disabled { background: var(--card); border-color: var(--border); color: var(--muted-foreground); }
   button:disabled { opacity: 1; }
   [data-testid^="coach-"]:disabled, [data-testid="follow-up-questions"]:disabled { color: var(--muted-foreground); background: var(--card); }
 }
