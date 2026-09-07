@@ -294,6 +294,7 @@ export type Database = {
       }
       call_activities: {
         Row: {
+          call_purpose: "customer" | "internal_training"
           contact_id: string | null
           created_at: string
           dialer_batch_item_id: string | null
@@ -325,6 +326,7 @@ export type Database = {
           wrap_token: string | null
         }
         Insert: {
+          call_purpose?: "customer" | "internal_training"
           contact_id: string | null
           created_at?: string
           dialer_batch_item_id?: string | null
@@ -356,6 +358,7 @@ export type Database = {
           wrap_token?: string | null
         }
         Update: {
+          call_purpose?: "customer" | "internal_training"
           contact_id?: string | null
           created_at?: string
           dialer_batch_item_id?: string | null

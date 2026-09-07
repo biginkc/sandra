@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   requestAudioHealth: vi.fn(),
   requestCallerIds: vi.fn(),
   coachCallIndexUpsert: vi.fn(),
+  trainingUpsert: vi.fn(),
+  trainingRead: vi.fn(),
   after: vi.fn(),
 }));
 
@@ -28,6 +30,10 @@ vi.mock("@/lib/supabase/server", () => ({
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: vi.fn(() => ({
     from: vi.fn((table: string) => {
+      if (table === "call_activities") {
+        const chain = { select: () => chain, eq: () => chain, single: mocks.trainingRead };
+        return { upsert: mocks.trainingUpsert, ...chain };
+      }
       if (table !== "coach_call_index") throw new Error(`unexpected admin table: ${table}`);
       return { upsert: mocks.coachCallIndexUpsert };
     }),
@@ -122,6 +128,9 @@ function callTarget(overrides: Record<string, unknown> = {}) {
 describe("authenticated Jitter softphone server boundary", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    vi.stubEnv("HOMEOWNER_TRAINING_ENABLED", "false");
+    vi.stubEnv("HOMEOWNER_TRAINING_NUMBER", "");
+    vi.stubEnv("HOMEOWNER_TRAINING_OPERATOR_IDS", "");
     vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", "test-service-token");
     vi.stubEnv("SOFTPHONE_CAPABILITY_KEY", OLD_CAPABILITY_KEY);
     vi.stubEnv("SOFTPHONE_CAPABILITY_KEY_PREVIOUS", "");
@@ -175,6 +184,43 @@ describe("authenticated Jitter softphone server boundary", () => {
     START_INTENT = minted.data.intentCapability;
     START_CALL_TOKEN = minted.data.callToken;
     vi.clearAllMocks();
+  });
+
+  async function trainingTarget() {
+    const operator = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    vi.stubEnv("HOMEOWNER_TRAINING_ENABLED", "true");
+    vi.stubEnv("HOMEOWNER_TRAINING_NUMBER", preparedTarget.phoneE164);
+    vi.stubEnv("HOMEOWNER_TRAINING_OPERATOR_IDS", operator);
+    mocks.getUser.mockResolvedValue({ data: { user: { id: operator } }, error: null });
+    mocks.getCallerMemberships.mockResolvedValue([{ user_id: operator, org_id: SANDRA_ORG_ID, role: "member" }]);
+    mocks.trainingUpsert.mockResolvedValue({ error: null });
+    mocks.trainingRead.mockResolvedValue({ data: { call_purpose: "internal_training", phone_e164: preparedTarget.phoneE164, org_id: SANDRA_ORG_ID, operator_user_id: operator }, error: null });
+    const intent = await mintStartIntent();
+    if (!intent.ok) throw new Error("intent");
+    return callTarget({ propertyId: undefined, contactId: undefined, callToken: intent.data.callToken, intentCapability: intent.data.intentCapability });
+  }
+  it("persists an unlinked training call before returning a signed connect capability", async () => {
+    const result = await startAuthenticatedJitterCall(await trainingTarget());
+    expect(result.ok).toBe(true);
+    expect(mocks.prepareLeadCall).not.toHaveBeenCalled();
+    expect(mocks.requestStart).toHaveBeenCalledWith(expect.objectContaining({ timezone: "America/Chicago", phone_e164: preparedTarget.phoneE164 }), expect.any(String));
+    expect(mocks.requestStart.mock.calls.at(-1)?.[0]).not.toHaveProperty("property_ref");
+    expect(mocks.trainingUpsert).toHaveBeenCalledWith(expect.objectContaining({ id: CALL_ID, call_purpose: "internal_training", property_id: null, contact_id: null }), expect.any(Object));
+    if (result.ok) {
+      const decoded = JSON.parse(Buffer.from(result.data.callId.split(".")[1], "base64url").toString());
+      expect(decoded).toMatchObject({ phoneE164: preparedTarget.phoneE164, callPurpose: "internal_training" });
+    }
+  });
+  it("refuses a forged linked training target before running lead preparation", async () => {
+    const target = await trainingTarget();
+    expect((await startAuthenticatedJitterCall({ ...target, propertyId: "property-1" })).ok).toBe(false);
+    expect(mocks.prepareLeadCall).not.toHaveBeenCalled(); expect(mocks.requestStart).not.toHaveBeenCalled();
+  });
+  it("withholds the capability and requests teardown if durable training logging fails", async () => {
+    const target = await trainingTarget();
+    mocks.trainingUpsert.mockResolvedValue({ error: { message: "database unavailable" } });
+    expect((await startAuthenticatedJitterCall(target)).ok).toBe(false);
+    expect(mocks.requestCancel).toHaveBeenCalledWith(CALL_ID, "failed");
   });
 
   it("authorizes active Sandra access and sends the selected caller ID", async () => {
