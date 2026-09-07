@@ -185,3 +185,54 @@ test("keeps up-next and section navigation visible while a long script scrolls",
   await page.getByTestId("coach-back").click();
   await expect(page.getByTestId("current-section-title")).toHaveText("Present the appropriate offer outcome");
 });
+
+
+test("keeps script text readable with the keypad in a short desktop panel", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 600 });
+  await mountFullCoach(page);
+  await page.getByTestId("phase-rail-offer").click();
+  await page.getByTestId("coach-keypad-toggle").click();
+  const panel = page.getByTestId("coach-script-panel");
+  await panel.evaluate((element) => { element.scrollTop = 0; });
+  const navigation = page.getByTestId("section-navigation");
+  await expect(page.getByTestId("coach-next")).toBeInViewport({ ratio: 1 });
+  const navBox = await navigation.boundingBox();
+  const panelBox = await panel.boundingBox();
+  expect(navBox!.y - panelBox!.y).toBeGreaterThanOrEqual(120);
+  // Scroll a spoken line above the pinned navigation, then prove it is not
+  // covered by the preview or dock. A bounding box alone misses occlusion.
+  const line = page.getByTestId("current-section-script").locator("p").first();
+  await line.evaluate((element) => element.scrollIntoView({ block: "start" }));
+  const readable = await line.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(box.left + 10, box.top + 20);
+    return hit !== null && element.contains(hit);
+  });
+  expect(readable).toBe(true);
+  await panel.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(page.getByTestId("next-section-preview-body")).toBeInViewport();
+  await expect(page.getByTestId("coach-next")).toBeInViewport({ ratio: 1 });
+});
+
+
+test("keeps keyboard-focused script controls above the pinned preview", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 650 });
+  await mountFullCoach(page);
+  await page.getByTestId("phase-rail-offer").click();
+  let checked = 0;
+  for (let step = 0; step < 16; step++) {
+    await page.keyboard.press("Tab");
+    const state = await page.evaluate(() => {
+      const active = document.activeElement as HTMLElement | null;
+      if (!active?.closest('[data-testid="current-script-card"]')) return null;
+      const rect = active.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return { visible: hit !== null && active.contains(hit), id: active.dataset.testid };
+    });
+    if (state) {
+      checked++;
+      expect(state.visible, state.id).toBe(true);
+    }
+  }
+  expect(checked).toBeGreaterThanOrEqual(4);
+});

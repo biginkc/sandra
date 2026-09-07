@@ -309,7 +309,11 @@ for (const mode of [
 
     assertAA("script body", await measureRenderedContrast(currentScript));
     assertAA("file number", await measureRenderedContrast(page.getByTestId("coach-file-number")));
-    assertAA("primary next action", await measureRenderedContrast(page.getByTestId("coach-next")));
+    const next = page.getByTestId("coach-next");
+    await next.hover();
+    await expect(next).toHaveCSS("background-color", "rgb(255, 255, 255)");
+    assertAA("primary next action while hovered", await measureRenderedContrast(next));
+    assertAA("disabled back action", await measureRenderedContrast(page.getByTestId("coach-back")));
     assertAA("hang up action", await measureRenderedContrast(page.getByTestId("coach-hangup")));
     const tone = currentScript.getByTestId("tone-chip").first();
     await expect(tone).toBeVisible();
@@ -350,6 +354,13 @@ for (const mode of [
     const timer = page.getByTestId("coach-call-timer");
     await expect(timer).toHaveText("On hold");
     assertAA("held-call timer", await measureRenderedContrast(timer));
+    const holdPill = page.getByTestId("hold-timer");
+    await expect(holdPill).toBeVisible();
+    assertAA("hold countdown pill", await measureRenderedContrast(holdPill));
+    const resume = page.getByTestId("coach-hold");
+    await resume.hover();
+    await expect(resume).toHaveCSS("background-color", "rgb(255, 255, 255)");
+    assertAA("pressed hold control while hovered", await measureRenderedContrast(resume));
   });
 
   test(`meets WCAG AA for narrow interrupted Coach controls in ${mode.label} mode`, async ({ page }) => {

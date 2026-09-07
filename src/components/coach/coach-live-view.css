@@ -29,6 +29,7 @@
 
 [data-testid="coach-live-view"] {
   .font-mono { font-family: var(--font-geist-mono, "Geist Mono"), monospace; }
+  [data-testid="coach-script-panel"] { scroll-padding-bottom: calc(var(--coach-sticky-height, 0px) + 16px); }
   .coach-top-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 24px; background: var(--coach-rail); }
   .coach-identity { display: flex; min-width: 0; align-items: baseline; gap: 10px; }
   [data-testid="coach-file-number"] { color: var(--coach-secondary); white-space: nowrap; }
@@ -74,11 +75,12 @@
   [data-testid="coach-call-controls"] button { height: auto; padding: 10px 20px; border-radius: 10px; font-size: 13px; }
   [data-testid="coach-collapse"] { height: auto; padding: 9px 16px; border-radius: 10px; border-color: transparent; background: transparent; color: var(--coach-secondary); font-size: 13px; }
   /* Neutralize shared dark-mode outline/expanded overrides, which use alpha. */
-  [data-slot="button"]:not(.bg-primary):not([data-testid="coach-hangup"]):not([data-testid="coach-collapse"]) { background: transparent; }
-  [data-slot="button"]:not(:disabled):hover { background: var(--muted); color: var(--foreground); }
+  [data-slot="button"]:not(:disabled):not(.bg-primary):not([data-testid="coach-hangup"]):not([data-testid="coach-collapse"]) { background: transparent; }
+  [data-slot="button"]:not(:disabled):not(.bg-primary):not([aria-pressed="true"]):not([aria-expanded="true"]):hover { background: var(--muted); color: var(--foreground); }
   [data-testid="coach-call-controls"] button[aria-pressed="true"], [data-testid="coach-keypad-toggle"][aria-expanded="true"] { background: var(--primary); color: var(--primary-foreground); }
   [data-testid="coach-hangup"]:not(:disabled):hover { background: var(--destructive); }
-  button:disabled { opacity: 1; color: var(--muted-foreground); background: var(--card); }
+  button:disabled { opacity: 1; }
+  [data-testid^="coach-"]:disabled, [data-testid="follow-up-questions"]:disabled { color: var(--muted-foreground); background: var(--card); }
 }
 
 @media (min-width: 1280px) {
@@ -87,5 +89,23 @@
     .coach-identity { min-width: 260px; flex: 0 1 auto; }
     .coach-status { order: 3; min-width: 260px; flex-wrap: nowrap; }
     [data-testid="coach-phase-scroller"] { flex: 1 1 auto; justify-content: safe center; }
+  }
+}
+
+/* The keypad can leave too little vertical room for a pinned preview. Keep
+   navigation available without covering the script in short desktop panels. */
+@media (min-width: 1280px) {
+  [data-testid="coach-script-panel"] { container: coach-script / size; }
+  @container coach-script (max-height: 380px) {
+    [data-testid="coach-live-view"] .coach-script-footer { display: contents; }
+    [data-testid="coach-live-view"] [data-testid="next-section-preview"] { margin-top: 28px; }
+    [data-testid="coach-live-view"] [data-testid="section-navigation"] {
+      position: sticky;
+      bottom: 0;
+      z-index: 10;
+      margin-top: auto;
+      flex-shrink: 0;
+      background: var(--background);
+    }
   }
 }

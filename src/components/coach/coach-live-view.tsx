@@ -380,7 +380,7 @@ function CoachTopBar({
   return (
     <div className="coach-top-bar shrink-0 border-b border-border">
       <div className="coach-identity">
-        <span className="truncate text-[15px] font-extrabold">{callName}</span>
+        <span className="min-w-0 truncate text-[15px] font-extrabold">{callName}</span>
         <span data-testid="coach-file-number" aria-label="File number" className="font-mono text-xs tabular-nums">
           {`File number: ${fileNumber.value}`}
         </span>
@@ -542,6 +542,27 @@ function ScriptPanel({
   onSelectVariant: (tag: string, key: string) => void;
   onSelectSectionBranch: (sectionId: CoachSectionScriptBlock["sectionId"], tag: string) => void;
 }) {
+  const panelRef = useRef<HTMLElement>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const panel = panelRef.current;
+    const footer = footerRef.current;
+    if (!panel || !footer || typeof ResizeObserver === "undefined") return;
+    const navigation = footer.querySelector<HTMLElement>('[data-testid="section-navigation"]');
+    const updateScrollPadding = () => {
+      // In a short panel the wrapper is display:contents and only navigation
+      // stays pinned. Keep keyboard-focused chips above the actual overlay.
+      const height = footer.getBoundingClientRect().height || navigation?.getBoundingClientRect().height || 0;
+      panel.style.setProperty("--coach-sticky-height", `${height}px`);
+    };
+    const observer = new ResizeObserver(updateScrollPadding);
+    observer.observe(panel);
+    observer.observe(footer);
+    if (navigation) observer.observe(navigation);
+    updateScrollPadding();
+    return () => observer.disconnect();
+  }, [block?.sectionId]);
+
   if (!block) {
     // Only reachable for a genuinely unknown/corrupt phase id slipping past
     // event validation — not for a load-in-progress or failed context,
@@ -561,6 +582,7 @@ function ScriptPanel({
   return (
     <main
       className="min-h-[28rem] min-w-0 flex-1 overflow-y-auto border-b border-border px-4 pt-7 md:px-8 xl:min-h-0 xl:border-b-0 xl:px-12"
+      ref={panelRef}
       data-testid="coach-script-panel"
     >
       <div className="mx-auto flex min-h-full max-w-[820px] flex-col">
@@ -631,7 +653,7 @@ function ScriptPanel({
             ))}
           </div>
         </section>
-        <div className="sticky bottom-0 z-10 mt-auto shrink-0 bg-background pt-7">
+        <div ref={footerRef} className="coach-script-footer sticky bottom-0 z-10 mt-auto shrink-0 bg-background pt-7">
           {nextBlock ? (
             <section className="border-t border-border pt-[18px] pb-5" data-testid="next-section-preview">
               <div className="text-[11px] font-black tracking-[0.14em] text-[var(--coach-sky)] uppercase">

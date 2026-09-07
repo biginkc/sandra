@@ -36,6 +36,7 @@ function harnessState(): CoachState {
   return {
     ...state,
     connected: true,
+    holdTimer: { timerId: "hold_timer", startedAt: new Date().toISOString(), durationS: 180 },
     transcript: [
       { id: "rep-1", speaker: "rep", text: "Walk me through what has you considering a move.", isFinal: true, ts: "t1" },
       // Finalized seller speech enables the manual follow-up control, while
