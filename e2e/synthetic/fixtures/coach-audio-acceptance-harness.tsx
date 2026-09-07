@@ -7,7 +7,7 @@ import type { JitterAudioHealthSample } from "@/lib/dialer/jitter-contract";
 import { JitterCallTransport, type JitterTransportDependencies } from "@/lib/dialer/jitter-transport";
 import type { CallTransportState } from "@/lib/dialer/transport";
 import { configureSyntheticCoachContext } from "./coach-context-actions-browser-stub";
-import { emitSyntheticCoachBroadcast } from "./coach-supabase-browser-stub";
+import { emitSyntheticCoachBroadcast, hasSyntheticCoachSubscriber } from "./coach-supabase-browser-stub";
 
 const CONTEXT: CoachCallContext = {
   sellerName: "Synthetic Homeowner", propertyAddress: "100 Test Avenue", propertyCounty: "Example",
@@ -15,7 +15,7 @@ const CONTEXT: CoachCallContext = {
   leadId: "synthetic-lead", sellerPhoneE164: "+18165550101", coldCallerName: "Test Caller",
   yearBuilt: "1990", leadSource: "cold_call", occupancy: "owner_occupied",
 };
-type AudioStimulus = "readyNoAttach" | "frozenRtp" | "advancingRtp" | "providerTerminalConfirmed" | "loseHoldAck" | "confirmHealth" | "heldReconnect" | "holdReapplyFailure" | "rejectMute" | "rejectUnmute" | "rejectHold" | "rejectResume" | "providerHeldUpdate" | "providerActiveUpdate";
+type AudioStimulus = "seedTranscript" | "readyNoAttach" | "frozenRtp" | "advancingRtp" | "providerTerminalConfirmed" | "loseHoldAck" | "confirmHealth" | "heldReconnect" | "holdReapplyFailure" | "rejectMute" | "rejectUnmute" | "rejectHold" | "rejectResume" | "providerHeldUpdate" | "providerActiveUpdate";
 
 class FakeRtcClient {
   handlers = new Map<string, Array<(...args: unknown[]) => void>>();
@@ -63,7 +63,7 @@ function attachPeer(call: FakeCall, advancing: boolean): void {
     },
   } as unknown as RTCPeerConnection };
 }
-declare global { interface Window { coachAudioAcceptanceHarness: Record<AudioStimulus, () => Promise<void>>; } }
+declare global { interface Window { coachAudioAcceptanceHarness: Record<AudioStimulus, () => Promise<void>> & { transcriptReady: () => boolean }; } }
 function AudioAcceptanceHarness() {
   const rtc = useRef(new FakeRtcClient());
   const call = useRef(new FakeCall("browser-leg-1"));
@@ -139,17 +139,17 @@ function AudioAcceptanceHarness() {
   }
 
   useEffect(() => {
-    const timer = setTimeout(() => emitSyntheticCoachBroadcast({
-      type: "transcript", speaker: "seller",
-      text: "This synthetic conversation contains no personal information.",
-      isFinal: true, ts: "synthetic-audio-transcript",
-      scriptVersion: "1.2.0", matcherVersion: "synthetic",
-    }), 100);
-    return () => clearTimeout(timer);
-  }, []);
-
-  useEffect(() => {
     window.coachAudioAcceptanceHarness = {
+      transcriptReady: hasSyntheticCoachSubscriber,
+      seedTranscript: async () => {
+        if (!hasSyntheticCoachSubscriber()) throw new Error("Transcript seeded before coach subscription");
+        emitSyntheticCoachBroadcast({
+          type: "transcript", speaker: "seller",
+          text: "This synthetic conversation contains no personal information.",
+          isFinal: true, ts: "synthetic-audio-transcript",
+          scriptVersion: "1.2.0", matcherVersion: "synthetic",
+        });
+      },
       readyNoAttach: async () => {
         if (!scheduledHealth.current) throw new Error("readyNoAttach stimulated before transport live readiness");
         remoteAudio.current?.dispatchEvent(new Event("stalled"));
