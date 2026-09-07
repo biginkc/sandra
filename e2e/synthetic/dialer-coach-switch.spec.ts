@@ -66,7 +66,7 @@ for (const width of [1440, 375]) {
   test(`coach switch layout and accessible script picker at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.route("http://synthetic.local/**", async (route) => {
-      if (route.request().url().endsWith("mascot-head.svg")) return route.fulfill({ contentType: "image/svg+xml", body: await readFile("public/brand/mascot-head.svg") });
+      if (route.request().url().endsWith("mascot-writing.png")) return route.fulfill({ contentType: "image/png", body: await readFile("public/brand/mascot-writing.png") });
       await route.fulfill({ contentType: "text/html", body: `<style>${compiledCss}</style><div id="root"></div>` });
     });
     await page.goto("http://synthetic.local/");
@@ -82,6 +82,14 @@ for (const width of [1440, 375]) {
     await expect(picker).toContainText("CLOSR Outbound Sales Script");
     await expect(picker).toContainText("v1.2.0");
     await expect.poll(async () => (await page.getByTestId("dialer-input").boundingBox())!.y - off!.y).toBeGreaterThan(25);
+    const mascot = (await page.getByTestId("dialer-coach-mascot").boundingBox())!;
+    const headline = (await page.getByText("Want some help? Enable live coach.", { exact: true }).boundingBox())!;
+    expect(mascot.y).toBeLessThanOrEqual(headline.y);
+    await expect.poll(async () => {
+      const imageBox = (await page.getByTestId("dialer-coach-mascot").boundingBox())!;
+      const pickerBox = (await picker.boundingBox())!;
+      return Math.abs(imageBox.y + imageBox.height - pickerBox.y - pickerBox.height);
+    }).toBeLessThan(1);
     await picker.click();
     const option = page.getByRole("option");
     await expect(option).toBeVisible();

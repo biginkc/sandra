@@ -1073,13 +1073,14 @@ function IdleView({ coachUiEnabled, coachPreference, onCoachPreferenceChange, di
 
 function CoachPreferenceControl({ preference, onChange }: { preference: CoachPreference; onChange: (preference: CoachPreference) => void }) {
   const selectedScript = COACH_SCRIPTS.find((script) => script.id === preference.scriptId) ?? COACH_SCRIPTS[0];
-  return <Collapsible.Root open={preference.enabled} className="mb-3 rounded-[12px] border-[1.5px] border-[rgba(120,176,255,0.55)] px-2.5 py-2 text-[#f3f6fb]" style={{ background: "radial-gradient(120% 140% at 50% 0%, #16203a 0%, #0c1426 45%, #070b16 100%)", boxShadow: "0 0 0 1px rgba(60,130,255,0.16), 0 0 18px rgba(46,128,255,0.35), inset 0 1px 0 rgba(160,200,255,0.18)" }}>
-    <div className="flex items-center gap-2.5">
-      <span className="flex size-9 shrink-0 overflow-hidden rounded-full border-[1.5px] border-[rgba(120,176,255,0.55)] bg-[#0c1426] shadow-[0_0_12px_rgba(46,128,255,0.35)]">
-        {/* Decorative brand artwork; SVG keeps the head crop sharp at any density. */}
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/brand/mascot-head.svg" alt="" aria-hidden="true" className="size-full" />
-      </span>
+  return <Collapsible.Root open={preference.enabled} className="mb-3 flex gap-2.5 rounded-[12px] border-[1.5px] border-[rgba(120,176,255,0.55)] px-2.5 py-2 text-[#f3f6fb]" style={{ background: "radial-gradient(120% 140% at 50% 0%, #16203a 0%, #0c1426 45%, #070b16 100%)", boxShadow: "0 0 0 1px rgba(60,130,255,0.16), 0 0 18px rgba(46,128,255,0.35), inset 0 1px 0 rgba(160,200,255,0.18)" }}>
+    <span data-testid="dialer-coach-mascot" className="relative w-14 shrink-0 self-stretch overflow-hidden rounded-md">
+      {/* Decorative full-body artwork spans the headline and script picker. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/brand/mascot-writing.png" alt="" aria-hidden="true" className="absolute inset-0 size-full object-cover" />
+    </span>
+    <div className="min-w-0 flex-1">
+    <div className="flex min-h-9 items-center gap-2.5">
       <div className="flex min-w-0 flex-1 flex-col gap-[3px]">
         <span title="Want some help? Enable live coach." className="truncate text-[13px] font-extrabold leading-tight">Want some help? Enable live coach.</span>
         <span className="truncate text-[11px] leading-tight text-[#a9b6cf]">Sandra listens, keeps the script on screen, and suggests what to say next.</span>
@@ -1089,7 +1090,7 @@ function CoachPreferenceControl({ preference, onChange }: { preference: CoachPre
       </button>
     </div>
     <Collapsible.Panel className="h-[var(--collapsible-panel-height)] overflow-hidden opacity-100 transition-[height,opacity] duration-150 ease-[ease] data-ending-style:h-0 data-ending-style:opacity-0 data-starting-style:h-0 data-starting-style:opacity-0">
-      <div className="ml-[46px] pt-1.5">
+      <div className="pt-1.5">
         <Select value={selectedScript.id} onValueChange={(id) => { if (id && COACH_SCRIPTS.some((script) => script.id === id)) onChange({ ...preference, scriptId: id }); }}>
           <SelectTrigger aria-label="Coach script" data-testid="dialer-coach-script" className="w-full rounded-[7px] border-[1.5px] border-[rgba(120,176,255,0.7)] px-2 py-1 text-[11px] font-bold text-[#f3f6fb] data-[size=default]:h-[26px] focus-visible:ring-[rgba(46,128,255,0.5)] [&_svg]:size-3 [&_svg]:text-[#7e889c]" style={{ background: "linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7))" }}>
             <SelectValue className="min-w-0"><span className="truncate">{selectedScript.title}</span></SelectValue>
@@ -1101,6 +1102,7 @@ function CoachPreferenceControl({ preference, onChange }: { preference: CoachPre
         </Select>
       </div>
     </Collapsible.Panel>
+    </div>
   </Collapsible.Root>;
 }
 
