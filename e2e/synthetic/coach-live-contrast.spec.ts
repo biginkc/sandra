@@ -353,6 +353,9 @@ for (const mode of [
   });
 
   test(`meets WCAG AA for the held-call timer in ${mode.label} mode`, async ({ page }) => {
+    // All four pixel-mask passes must see identical countdown glyphs. Keep
+    // Date fixed while leaving animations and browser timers running normally.
+    await page.clock.setFixedTime(new Date("2026-09-07T12:00:00Z"));
     await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: false, held: true });
     const timer = page.getByTestId("coach-call-timer");
     await expect(timer).toHaveText("On hold");

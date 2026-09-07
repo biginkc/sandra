@@ -34,3 +34,7 @@ P2 — The pinned Up next/navigation footer covered nearly the entire script whe
 - Full local npm run verify now passes against an isolated, run-owned PostgreSQL instance: database rehearsal, typecheck, 3,595 unit and 1,143 component tests. Full synthetic browser suite is running on the corrected source. PR: https://github.com/biginkc/sandra/pull/488.
 
 - Fable second pass found a concrete specificity issue in the refined generic hover rule: it could override Hang up red. Accepted and fixed by explicitly excluding Hang up from the neutral hover rule; the pixel suite now asserts its hovered red background and contrast. Fable confirmed the other source fixes and accepted deployed-artifact visual proof plus authenticated production smoke as sufficient for this visual-only release; no live robot call or quiet-hours bypass is required. HoldTimer's uniform amber styling follows the approved palette; its countdown behavior is unchanged.
+
+### CI countdown capture correction
+
+Final-head CI exposed a contrast-probe race: the live hold countdown changed glyphs between its four screenshot-mask passes. The held-call contrast test now fixes `Date` before mounting; browser timers and animations continue normally. The production HoldTimer is unchanged, and its separate acceptance test continues to prove ticking and expiry. Independent contract re-review approved this test-only correction; no contrast thresholds, pixel masks, or assertions were weakened.
