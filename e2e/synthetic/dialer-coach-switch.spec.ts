@@ -74,6 +74,9 @@ for (const width of [1440, 375]) {
     await page.getByTestId("header-dialer-button").click();
     const toggle = page.getByRole("switch", { name: "Enable live coach" });
     await expect(toggle).not.toBeChecked();
+    const artwork = page.getByTestId("dialer-coach-mascot").locator("img");
+    await expect.poll(() => artwork.evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true);
+    await expect(artwork).toHaveCSS("object-fit", "contain");
     await expect(page.getByTestId("dialer-coach-script")).toHaveCount(0);
     const off = await page.getByTestId("dialer-input").boundingBox();
     await toggle.press("Space");
@@ -93,7 +96,15 @@ for (const width of [1440, 375]) {
     await picker.click();
     const option = page.getByRole("option");
     await expect(option).toBeVisible();
+    await expect.poll(() => option.evaluate((row) => {
+      const title = row.querySelector('[data-testid="coach-script-option-title"]')!.getBoundingClientRect();
+      const version = row.querySelector('[data-testid="coach-script-option-version"]')!.getBoundingClientRect();
+      const indicator = row.querySelector('svg')!.getBoundingClientRect();
+      return title.right <= version.left && version.right <= indicator.left;
+    })).toBe(true);
+    await page.screenshot({ path: `tmp/dialer-switch-preview/menu-${width}.png` });
     await option.click(); // Must be above the dialer, not covered by its portal.
+    await expect(option).toHaveCount(0);
     const bounds = await page.getByTestId("softphone-popover").boundingBox();
     for (const element of [toggle, picker]) {
       const box = (await element.boundingBox())!;

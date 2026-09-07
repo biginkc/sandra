@@ -1073,11 +1073,11 @@ function IdleView({ coachUiEnabled, coachPreference, onCoachPreferenceChange, di
 
 function CoachPreferenceControl({ preference, onChange }: { preference: CoachPreference; onChange: (preference: CoachPreference) => void }) {
   const selectedScript = COACH_SCRIPTS.find((script) => script.id === preference.scriptId) ?? COACH_SCRIPTS[0];
-  return <Collapsible.Root open={preference.enabled} className="mb-3 flex gap-2.5 rounded-[12px] border-[1.5px] border-[rgba(120,176,255,0.55)] px-2.5 py-2 text-[#f3f6fb]" style={{ background: "radial-gradient(120% 140% at 50% 0%, #16203a 0%, #0c1426 45%, #070b16 100%)", boxShadow: "0 0 0 1px rgba(60,130,255,0.16), 0 0 18px rgba(46,128,255,0.35), inset 0 1px 0 rgba(160,200,255,0.18)" }}>
-    <span data-testid="dialer-coach-mascot" className="relative w-14 shrink-0 self-stretch overflow-hidden rounded-md">
+  return <Collapsible.Root open={preference.enabled} className="mb-3 flex gap-1.5 rounded-[12px] border-[1.5px] border-[rgba(120,176,255,0.55)] px-2.5 py-2 text-[#f3f6fb]" style={{ background: "radial-gradient(120% 140% at 50% 0%, #16203a 0%, #0c1426 45%, #070b16 100%)", boxShadow: "0 0 0 1px rgba(60,130,255,0.16), 0 0 18px rgba(46,128,255,0.35), inset 0 1px 0 rgba(160,200,255,0.18)" }}>
+    <span data-testid="dialer-coach-mascot" className="relative w-10 shrink-0 self-stretch overflow-hidden rounded-md">
       {/* Decorative full-body artwork spans the headline and script picker. */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src="/brand/mascot-writing.png" alt="" aria-hidden="true" className="absolute inset-0 size-full object-cover" />
+      <img src="/brand/mascot-writing.png" alt="" aria-hidden="true" className={`absolute inset-0 size-full ${preference.enabled ? "object-cover" : "object-contain"}`} />
     </span>
     <div className="min-w-0 flex-1">
     <div className="flex min-h-9 items-center gap-2.5">
@@ -1097,7 +1097,7 @@ function CoachPreferenceControl({ preference, onChange }: { preference: CoachPre
             <span className="shrink-0 font-mono text-[10px] text-[#7e889c]">v{selectedScript.version}</span>
           </SelectTrigger>
           <SelectContent positionerClassName="z-[70]" alignItemWithTrigger={false} className="border border-[rgba(120,176,255,0.7)] bg-[#0c1426] text-[#f3f6fb]">
-            {COACH_SCRIPTS.map((script) => <SelectItem key={script.id} value={script.id} className="text-[11px] font-bold"><span>{script.title}</span><span className="ml-2 font-mono text-[10px] text-[#7e889c]">v{script.version}</span></SelectItem>)}
+            {COACH_SCRIPTS.map((script) => <SelectItem key={script.id} value={script.id} className="text-[11px] font-bold [&>*:first-child]:min-w-0 [&>*:first-child]:shrink"><span data-testid="coach-script-option-title" className="min-w-0 flex-1 truncate">{script.title}</span><span data-testid="coach-script-option-version" className="shrink-0 font-mono text-[10px] text-[#7e889c]">v{script.version}</span></SelectItem>)}
           </SelectContent>
         </Select>
       </div>

@@ -500,7 +500,6 @@ export function assertValidCoachSectionManifest(
 ): asserts data is CoachSectionManifest {
   if (!isRecord(data)) throw new Error("coach-sections: root is not an object");
   if (data.schema_version !== 1) throw new Error("coach-sections: unsupported schema_version");
-  if (data.title !== undefined && (!isNonEmptyString(data.title) || !data.title.trim())) throw new Error("closr-script: invalid title");
   if (!isNonEmptyString(data.version)) throw new Error("coach-sections: missing version");
   if (data.script_version !== script.version) {
     throw new Error(`coach-sections: script_version '${String(data.script_version)}' does not match '${script.version}'`);
