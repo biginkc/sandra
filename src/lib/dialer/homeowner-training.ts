@@ -10,6 +10,7 @@ export function isHomeownerTrainingNumber(phone: string): boolean {
 export function canCallHomeownerTraining(phone: string, operatorId: string): boolean {
   const ids = (process.env.HOMEOWNER_TRAINING_OPERATOR_IDS ?? "").split(",").map((id) => id.trim());
   return process.env.HOMEOWNER_TRAINING_ENABLED === "true"
-    && isHomeownerTrainingNumber(phone) && ids.length > 0
-    && ids.every((id) => UUID.test(id)) && ids.includes(operatorId);
+    && isHomeownerTrainingNumber(phone) && UUID.test(operatorId)
+    && (process.env.HOMEOWNER_TRAINING_PUBLIC_ACCESS === "true"
+      || (ids.length > 0 && ids.every((id) => UUID.test(id)) && ids.includes(operatorId)));
 }
