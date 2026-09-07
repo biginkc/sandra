@@ -157,3 +157,25 @@ test("keeps intentional keyboard DTMF working when no editor is active", async (
   await page.keyboard.press("5");
   expect(await page.evaluate(() => window.coachHarness.digits)).toEqual(["5"]);
 });
+
+
+test("keeps section navigation visible while a long script scrolls", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 650 });
+  await mountFullCoach(page);
+  await page.getByTestId("phase-rail-offer").click();
+  const panel = page.getByTestId("coach-script-panel");
+  const navigation = page.getByTestId("section-navigation");
+  const hasOverflow = await panel.evaluate((element) => element.scrollHeight > element.clientHeight);
+  expect(hasOverflow).toBe(true);
+  const before = await navigation.boundingBox();
+  await expect(page.getByTestId("coach-next")).toBeInViewport({ ratio: 1 });
+  await expect(page.getByTestId("coach-back")).toBeInViewport({ ratio: 1 });
+  await panel.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  const after = await navigation.boundingBox();
+  expect(Math.abs(after!.y - before!.y)).toBeLessThanOrEqual(1);
+  await expect(page.getByTestId("coach-next")).toBeInViewport({ ratio: 1 });
+  await page.getByTestId("coach-next").click();
+  await expect(page.getByTestId("current-section-title")).toHaveText("Choose the closing path");
+  await page.getByTestId("coach-back").click();
+  await expect(page.getByTestId("current-section-title")).toHaveText("Present the appropriate offer outcome");
+});

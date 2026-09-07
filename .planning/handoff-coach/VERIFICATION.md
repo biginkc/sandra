@@ -31,3 +31,9 @@ No product-scope deviations from PROMPT.md. These compatibility and verification
 - The call timer retains its existing “On hold” state and the Live pill retains its existing held-call visibility. HoldTimer receives only scoped styling.
 - Scoped button rules neutralize the shared translucent destructive and dark outline styles, keeping the specified solid red action and opaque text surfaces. Disabled controls retain disabled behavior with readable opaque colors.
 - Two existing browser fixtures now compile the real globals.css, including the coach stylesheet, instead of generic Tailwind alone. This is necessary to verify the actual layout and palette.
+
+## Follow-up: persistent section navigation
+
+At Jarrad's request after sandbox review, Back/Next and the section counter now stick to the bottom of the script scroll area with an opaque field background. This supersedes PROMPT.md's instruction to remove the sticky wrapper; no backdrop blur was reintroduced. Long content can scroll behind the row and remains fully reachable at the end.
+
+Validation: 25 unchanged coach-live-view component tests and 21 contrast/responsive browser tests passed. A new overflowing-script browser check verifies both buttons stay fully in the viewport, the row stays at the same vertical position through scrolling, and Next/Back still navigate correctly. The local interactive sandbox was rebuilt with this change.

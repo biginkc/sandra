@@ -645,7 +645,7 @@ function ScriptPanel({
             ) : null}
           </section>
         ) : null}
-        <div className="mt-auto flex items-center justify-between gap-3 border-t border-border pt-4 pb-5" data-testid="section-navigation">
+        <div className="sticky bottom-0 z-10 mt-auto flex shrink-0 items-center justify-between gap-3 border-t border-border bg-background pt-4 pb-5" data-testid="section-navigation">
           <Button type="button" variant="outline" disabled={!canGoPrevious} onClick={onPrevious} data-testid="coach-back">
             <ChevronLeftIcon className="size-4" aria-hidden />
             Back
