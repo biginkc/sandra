@@ -1,0 +1,91 @@
+/* Deliberately local: the coach is always dark, independent of app theme. */
+[data-testid="coach-live-view"] {
+  --background: #1f2a3c;
+  --foreground: #ffffff;
+  --card: #2a3649;
+  --card-foreground: #ffffff;
+  --popover: #151d2b;
+  --popover-foreground: #ffffff;
+  --muted: #354258;
+  --muted-foreground: #a3aebf;
+  --border: #465569;
+  --input: #465569;
+  --primary: #ffffff;
+  --primary-foreground: #1f2a3c;
+  --secondary: #2a3649;
+  --secondary-foreground: #d1d8e3;
+  --accent: #354258;
+  --accent-foreground: #ffffff;
+  --destructive: #dc2626;
+  --ring: #7dd3fc;
+  --coach-rail: #151d2b;
+  --coach-secondary: #d1d8e3;
+  --coach-sky: #7dd3fc;
+  --coach-amber: #fcd34d;
+  --coach-amber-text: #fde68a;
+  font-family: var(--font-geist-sans, Inter), sans-serif;
+  color-scheme: dark;
+}
+
+[data-testid="coach-live-view"] {
+  .font-mono { font-family: var(--font-geist-mono, "Geist Mono"), monospace; }
+  .coach-top-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 24px; background: var(--coach-rail); }
+  .coach-identity { display: flex; min-width: 0; align-items: baseline; gap: 10px; }
+  [data-testid="coach-file-number"] { color: var(--coach-secondary); white-space: nowrap; }
+  .coach-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
+  [data-testid="coach-phase-scroller"] { flex: 1 0 100%; padding: 0; gap: 0; }
+  [data-testid^="phase-rail-"] { display: flex; align-items: center; gap: 6px; padding: 6px 12px; letter-spacing: .06em; }
+  [data-testid^="phase-rail-"][aria-current] { font-weight: 800; }
+  [data-testid^="phase-rail-"]:has(.coach-phase-tick) { color: var(--coach-sky); }
+  .coach-phase-tick { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; background: var(--coach-sky); color: var(--coach-rail); font-size: 10px; }
+  .coach-phase-connector { width: 20px; height: 2px; background: var(--border); }
+  .coach-phase-connector.is-complete { background: var(--coach-sky); }
+  [data-testid="coach-live-pill"] { height: auto; padding: 4px 10px; border-color: var(--coach-sky); color: var(--coach-sky); font-size: 11px; }
+  [data-testid="coach-live-pill"] > span { width: 7px; height: 7px; background: var(--coach-sky); }
+  [data-testid="hold-timer"] { height: auto; padding: 4px 10px; border: 1px solid var(--coach-amber); background: transparent; color: var(--coach-amber-text); font-size: 11px; }
+  [data-testid="call-status-pill"], [data-testid="coach-connecting-pill"] { border-color: var(--muted-foreground); }
+
+  [data-testid="coach-audio-reconnect-warning"], [data-testid="coach-reconnect-gap"], [data-testid="coach-context-error"], [data-testid="coach-degraded-note"] { background: var(--card); border-color: var(--coach-amber); color: var(--coach-amber-text); }
+  [data-testid="coach-reconnect-audio"] { background: var(--card); border-color: var(--coach-amber); }
+  [data-testid="coach-warning-hangup"], [data-testid="coach-hangup"] { background: var(--destructive); border-color: var(--destructive); color: var(--foreground); }
+
+  [data-testid="transcript-line"] { flex-shrink: 0; max-width: 90%; padding: 10px 13px; align-self: flex-start; border-radius: 14px 14px 14px 4px; background: var(--card); color: var(--foreground); font-size: 15px; line-height: 1.5; }
+  [data-testid="transcript-line"][data-speaker="rep"] { align-self: flex-end; border-radius: 14px 14px 4px 14px; background: var(--muted); }
+  [data-testid="transcript-speaker-label"] { display: block; margin: 0 0 3px; font-weight: 800; letter-spacing: .1em; color: var(--coach-amber); font-style: normal; }
+  [data-speaker="rep"] [data-testid="transcript-speaker-label"] { color: var(--coach-sky); }
+  [data-testid="transcript-line"][data-final="false"] { background: transparent; border: 1px dashed var(--border); color: var(--coach-secondary); font-style: italic; }
+  [data-final="false"] [data-testid="transcript-speaker-label"] { color: var(--coach-secondary); }
+
+  [data-testid="section-path-options"] > button, [data-testid^="variant-"] { white-space: normal; border: 1px solid var(--border); border-radius: 12px; background: transparent; padding: 10px 14px; color: var(--coach-secondary); font-size: 13px; font-weight: 700; }
+  [data-testid^="variant-"] { padding: 5px 10px; }
+  [role="tab"][aria-selected="true"] { border: 2px solid var(--primary); background: var(--primary); color: var(--primary-foreground); font-weight: 800; }
+  [data-testid="tone-chip"] { border: 0; background: var(--coach-amber); color: var(--coach-rail); font-weight: 700; }
+  [data-testid="token-resolved"] { color: var(--coach-sky); font-weight: 800; }
+  [data-testid="token-placeholder"] { border-color: var(--border); background: transparent; color: var(--muted-foreground); }
+  [data-testid^="entry-chip-"] { background: transparent; border-color: var(--coach-sky); color: var(--coach-sky); }
+  [data-coach-entry-editor] { border-color: var(--coach-sky); color: var(--coach-sky); }
+  [data-testid="script-branch"] > .text-center { background: var(--card); }
+  [data-testid="coach-back"] { height: auto; padding: 12px 20px; border-radius: 12px; color: var(--coach-secondary); }
+  [data-testid="coach-next"] { height: auto; padding: 14px 36px; border-radius: 12px; font-size: 16px; font-weight: 800; }
+
+  [data-testid="automatic-recommendations"], [data-testid="follow-up-question-options"] { margin-top: 12px; }
+  [data-testid="automatic-recommendations"] li, [data-testid="follow-up-question-options"] li { border-radius: 14px; padding: 12px 14px; font-size: 13px; line-height: 1.5; }
+  [data-testid="follow-up-questions"] { margin-top: 12px; height: auto; padding: 11px; border-radius: 10px; font-size: 13px; }
+  [data-testid="coach-call-controls"] button { height: auto; padding: 10px 20px; border-radius: 10px; font-size: 13px; }
+  [data-testid="coach-collapse"] { height: auto; padding: 9px 16px; border-radius: 10px; border-color: transparent; background: transparent; color: var(--coach-secondary); font-size: 13px; }
+  /* Neutralize shared dark-mode outline/expanded overrides, which use alpha. */
+  [data-slot="button"]:not(.bg-primary):not([data-testid="coach-hangup"]):not([data-testid="coach-collapse"]) { background: transparent; }
+  [data-slot="button"]:not(:disabled):hover { background: var(--muted); color: var(--foreground); }
+  [data-testid="coach-call-controls"] button[aria-pressed="true"], [data-testid="coach-keypad-toggle"][aria-expanded="true"] { background: var(--primary); color: var(--primary-foreground); }
+  [data-testid="coach-hangup"]:not(:disabled):hover { background: var(--destructive); }
+  button:disabled { opacity: 1; color: var(--muted-foreground); background: var(--card); }
+}
+
+@media (min-width: 1280px) {
+  [data-testid="coach-live-view"] {
+    .coach-top-bar { height: 60px; flex-wrap: nowrap; padding: 0 24px; gap: 12px; }
+    .coach-identity { min-width: 260px; flex: 0 1 auto; }
+    .coach-status { order: 3; min-width: 260px; flex-wrap: nowrap; }
+    [data-testid="coach-phase-scroller"] { flex: 1 1 auto; justify-content: safe center; }
+  }
+}

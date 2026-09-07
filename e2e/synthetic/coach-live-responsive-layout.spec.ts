@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import tailwindcss from "@tailwindcss/postcss";
 import * as esbuild from "esbuild";
@@ -8,7 +9,7 @@ let compiledCss = "";
 let harnessBundle = "";
 
 test.beforeAll(async () => {
-  const cssResult = await postcss([tailwindcss()]).process('@import "tailwindcss";', {
+  const cssResult = await postcss([tailwindcss()]).process(readFileSync(path.resolve(process.cwd(), "src/app/globals.css"), "utf8"), {
     from: path.resolve(process.cwd(), "src/app/globals.css"),
   });
   compiledCss = cssResult.css;
@@ -56,6 +57,8 @@ async function expectHorizontallyContained(page: Page, testId: string, viewportW
 for (const viewport of [
   { width: 375, height: 812, label: "mobile-tall" },
   { width: 375, height: 667, label: "mobile-short" },
+  { width: 1279, height: 900, label: "stacked-breakpoint" },
+  { width: 1280, height: 900, label: "desktop-breakpoint" },
   { width: 1440, height: 900, label: "desktop" },
 ]) {
   test(`keeps transcript, manual script, recommendations, and call controls usable at ${viewport.label}`, async ({ page }) => {
@@ -78,6 +81,10 @@ for (const viewport of [
     expect(script).not.toBeNull();
     expect(recommendations).not.toBeNull();
     if (viewport.width >= 1280) {
+      expect(transcript!.width).toBe(380);
+      expect(recommendations!.width).toBe(320);
+      const topBar = await page.locator(".coach-top-bar").boundingBox();
+      expect(topBar!.height).toBe(60);
       expect(transcript!.x + transcript!.width).toBeLessThanOrEqual(script!.x + 1);
       expect(script!.x + script!.width).toBeLessThanOrEqual(recommendations!.x + 1);
     } else {

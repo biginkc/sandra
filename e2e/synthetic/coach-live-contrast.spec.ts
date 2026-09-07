@@ -7,33 +7,10 @@ import * as esbuild from "esbuild";
 import postcss from "postcss";
 import sharp from "sharp";
 
-// Regression coverage for WCAG AA contrast failures found across two rounds
-// of the PR #414 merge-gate review: the focus-mode redesign introduced
-// emerald/amber foreground text and a dimmed "coming next" preview that read
-// fine against bare Tailwind swatches, but fell below 4.5:1 once measured
-// against Sandra's real composited theme — either because the background is
-// a custom token (--card, the amber-400/15 tint) or because an ancestor
-// `opacity` was scaling every descendant's effective alpha.
-//
-// A prior version of this file got both of those wrong:
-//   1. It compiled only the literal string `@import "tailwindcss";`, not
-//      globals.css's actual contents, so the Sandra tokens, `.bg-card`, and
-//      the `.dark` variant never made it into the generated CSS — light and
-//      "dark" produced identical, wrong colors.
-//   2. It rasterized bare color values (`getComputedStyle().color` /
-//      `.backgroundColor`) through a canvas swatch, which can never see an
-//      ancestor's `opacity` — that's exactly the CSS property behind the
-//      "coming next" preview's contrast failure.
-//
-// This version fixes both: it compiles the REAL globals.css file (so
-// `@import "./sandra-tokens.css"` and the local `.dark { ... }` block
-// actually resolve), and it measures each element's contrast from ACTUAL
-// RENDERED PIXELS — a real Playwright element screenshot, decoded with
-// `sharp` — rather than from computed-style color values. Sampling real
-// pixels means ancestor opacity, translucent tints, and stacking are
-// captured automatically, the same way a human eyeballing the browser would
-// see them, with no separate model of "what CSS properties matter" to keep
-// in sync with the component.
+// Steel-blue coach: compile the real application CSS, including the scoped
+// dialog tokens, and measure rendered pixels in both surrounding app themes.
+// Keep the probe's negative controls: computed swatches alone cannot catch
+// opacity, descendant colors, or text crossing multiple backgrounds.
 let compiledCss = "";
 let harnessBundle = "";
 
@@ -249,6 +226,46 @@ test.use({ deviceScaleFactor: 3 });
 
 const AA_NORMAL_TEXT_MIN = 4.5;
 
+const STEEL_BLUE = {
+  "--background": "#1f2a3c",
+  "--coach-rail": "#151d2b",
+  "--card": "#2a3649",
+  "--muted": "#354258",
+  "--border": "#465569",
+  "--foreground": "#ffffff",
+  "--coach-secondary": "#d1d8e3",
+  "--muted-foreground": "#a3aebf",
+  "--coach-sky": "#7dd3fc",
+  "--coach-amber": "#fcd34d",
+  "--coach-amber-text": "#fde68a",
+  "--primary": "#ffffff",
+  "--primary-foreground": "#1f2a3c",
+  "--destructive": "#dc2626",
+} as const;
+
+function rgb(hex: string): [number, number, number] {
+  return [1, 3, 5].map((start) => Number.parseInt(hex.slice(start, start + 2), 16)) as [number, number, number];
+}
+
+test("approved steel-blue text/surface pairs all meet AA", () => {
+  // Borders and progress tracks are not text foregrounds. Check every text
+  // tone on every dark surface on which it is used, plus inverse actions.
+  for (const surface of ["--background", "--coach-rail", "--card", "--muted"] as const) {
+    for (const text of ["--foreground", "--coach-secondary", "--muted-foreground", "--coach-sky", "--coach-amber", "--coach-amber-text"] as const) {
+      expect(contrastRatio(rgb(STEEL_BLUE[text]), rgb(STEEL_BLUE[surface])), `${text} on ${surface}`).toBeGreaterThanOrEqual(AA_NORMAL_TEXT_MIN);
+    }
+  }
+  for (const [foreground, background] of [
+    ["--primary-foreground", "--primary"],
+    ["--coach-rail", "--coach-amber"],
+    ["--coach-rail", "--coach-sky"],
+    ["--foreground", "--destructive"],
+  ] as const) {
+    expect(contrastRatio(rgb(STEEL_BLUE[foreground]), rgb(STEEL_BLUE[background]))).toBeGreaterThanOrEqual(AA_NORMAL_TEXT_MIN);
+  }
+});
+
+
 function assertAA(name: string, result: PixelMeasurement): void {
   const line = `${name}: fg=rgb(${result.fg}) bg=rgb(${result.bg}) ratio=${result.ratio.toFixed(2)}`;
   // Print every measurement regardless of pass/fail — this is the actual
@@ -263,6 +280,12 @@ for (const mode of [
 ] as const) {
   test(`meets WCAG AA for the manual coach surfaces in ${mode.label} mode`, async ({ page }) => {
     await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: false });
+
+    const palette = await page.getByTestId("coach-live-view").evaluate((element, names) => {
+      const style = getComputedStyle(element);
+      return Object.fromEntries(names.map((name) => [name, style.getPropertyValue(name).trim()]));
+    }, Object.keys(STEEL_BLUE));
+    expect(palette).toEqual(STEEL_BLUE);
 
     const repLabel = page.getByTestId("transcript-speaker-label").filter({ hasText: "Rep" }).first();
     const sellerLabel = page.getByTestId("transcript-speaker-label").filter({ hasText: "Seller" }).first();
@@ -283,6 +306,14 @@ for (const mode of [
     const tokenValue = currentScript.getByTestId("token-resolved").first();
     await expect(tokenValue).toBeVisible();
     assertAA("resolved script token", await measureRenderedContrast(tokenValue));
+
+    assertAA("script body", await measureRenderedContrast(currentScript));
+    assertAA("file number", await measureRenderedContrast(page.getByTestId("coach-file-number")));
+    assertAA("primary next action", await measureRenderedContrast(page.getByTestId("coach-next")));
+    assertAA("hang up action", await measureRenderedContrast(page.getByTestId("coach-hangup")));
+    const tone = currentScript.getByTestId("tone-chip").first();
+    await expect(tone).toBeVisible();
+    assertAA("tone chip", await measureRenderedContrast(tone));
 
     const nextPreview = page.getByTestId("next-section-preview");
     const nextBody = page.getByTestId("next-section-preview-body");

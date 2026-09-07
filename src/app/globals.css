@@ -2,6 +2,7 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "./sandra-tokens.css";
+@import "../components/coach/coach-live-view.css";
 
 @custom-variant dark (&:is(.dark *));
 

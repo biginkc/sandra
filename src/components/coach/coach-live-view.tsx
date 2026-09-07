@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { DtmfDigit } from "@/lib/dialer/transport";
+import { COACH_SECTIONS } from "@/lib/coach/section-manifest";
 import { requestCoachRecommendations } from "@/lib/coach/recommendation-action";
 import { useCoachRecommendations } from "@/lib/coach/recommendation-client";
 import type { CoachRecommendationRequestFn } from "@/lib/coach/recommendation-types";
@@ -262,6 +263,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       >
       <DialogTitle className="sr-only">Live call coach</DialogTitle>
       <CoachTopBar
+        callName={callName}
         activePhaseId={activePhaseId}
         onSelectPhase={goToPhase}
         degraded={degraded}
@@ -272,7 +274,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         fileNumber={tokens.file_number}
       />
       {callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required" ? (
-        <div role="alert" data-testid="coach-audio-reconnect-warning" className="flex shrink-0 items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-950">
+        <div role="alert" data-testid="coach-audio-reconnect-warning" className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--coach-amber)] bg-card px-4 py-2 text-xs font-semibold text-[var(--coach-amber-text)]">
           <span>{callStatus === "audio_reconnecting" ? "Call live · reconnecting browser audio…" : "Call live · audio interrupted"}</span>
           <div className="flex shrink-0 items-center gap-2">
             {onReconnectAudio ? (
@@ -281,7 +283,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
                 data-testid="coach-reconnect-audio"
                 onClick={onReconnectAudio}
                 disabled={callStatus === "audio_reconnecting"}
-                className="rounded-md border border-amber-300 bg-white px-3 py-1.5 font-bold disabled:cursor-wait disabled:opacity-60"
+                className="rounded-md border border-[var(--coach-amber)] bg-card px-3 py-1.5 font-bold disabled:cursor-wait disabled:opacity-60"
               >
                 Reconnect Audio
               </button>
@@ -290,7 +292,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
               type="button"
               data-testid="coach-warning-hangup"
               onClick={onHangup}
-              className="rounded-md border border-red-300 bg-white px-3 py-1.5 font-bold text-red-700"
+              className="rounded-md border border-destructive bg-destructive px-3 py-1.5 font-bold text-white"
             >
               Hang Up
             </button>
@@ -301,7 +303,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         <div
           role="status"
           data-testid="coach-reconnect-gap"
-          className="flex shrink-0 items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-4 py-1.5 text-xs text-amber-900"
+          className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--coach-amber)] bg-card px-4 py-1.5 text-xs text-[var(--coach-amber-text)]"
         >
           <span>Reconnected — some coach events may have been missed while disconnected.</span>
           <button type="button" data-testid="dismiss-reconnect-gap" onClick={dismissReconnectGap} className="font-bold underline">
@@ -309,8 +311,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           </button>
         </div>
       ) : null}
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto xl:grid xl:grid-cols-[minmax(250px,0.8fr)_minmax(500px,2fr)_minmax(280px,0.9fr)] xl:overflow-hidden">
-        <TranscriptFeed lines={state.transcript} />
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto xl:grid xl:grid-cols-[380px_minmax(0,1fr)_320px] xl:overflow-hidden">
+        <TranscriptFeed lines={state.transcript} degraded={degraded} />
         <ScriptPanel
           block={scriptBlock}
           nextBlock={nextBlock}
@@ -333,7 +335,6 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         />
       </div>
       <CallControlDock
-        callName={callName}
         callStatus={callStatus}
         muted={muted}
         held={held}
@@ -352,6 +353,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
 }
 
 function CoachTopBar({
+  callName,
   activePhaseId,
   onSelectPhase,
   degraded,
@@ -361,6 +363,7 @@ function CoachTopBar({
   holdTimer,
   fileNumber,
 }: {
+  callName: string;
   activePhaseId: CoachPhaseId;
   onSelectPhase: (phaseId: CoachPhaseId) => void;
   degraded: boolean;
@@ -375,44 +378,32 @@ function CoachTopBar({
   const currentPhaseIndex = COACH_PHASE_ORDER.indexOf(activePhaseId);
   const currentPhaseName = getScriptPhase(activePhaseId)?.name ?? activePhaseId;
   return (
-    <div className="shrink-0 border-b border-border bg-card">
-      <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs" data-testid="coach-status-strip">
-        <Badge variant="secondary" data-testid="coach-current-phase" className="h-5 text-[10px]">
-          {`Phase · ${currentPhaseName}`}
-        </Badge>
-        <span
-          data-testid="coach-file-number"
-          aria-label="File number"
-          className={cn(
-            "font-mono text-xs tabular-nums",
-            fileNumber.isPlaceholder ? "text-muted-foreground" : "font-semibold text-foreground",
-          )}
-        >
+    <div className="coach-top-bar shrink-0 border-b border-border">
+      <div className="coach-identity">
+        <span className="truncate text-[15px] font-extrabold">{callName}</span>
+        <span data-testid="coach-file-number" aria-label="File number" className="font-mono text-xs tabular-nums">
           {`File number: ${fileNumber.value}`}
         </span>
-        <span
-          className={cn("font-mono text-xs tabular-nums", held ? "font-semibold text-amber-700 dark:text-amber-400" : "text-muted-foreground")}
-          data-testid="coach-call-timer"
-        >
-          {timerLabel}
-        </span>
+      </div>
+      <div className="coach-status" data-testid="coach-status-strip">
+        <HoldTimer timer={holdTimer} />
         {preConnectLabel ? (
           <Badge variant="outline" data-testid="call-status-pill" className="h-5 text-[10px] text-muted-foreground">
             {preConnectLabel}
           </Badge>
         ) : null}
         {callStatus === "live" && !held ? (
-          <Badge variant="outline" data-testid="coach-live-pill" className="h-5 gap-1 border-emerald-200 text-[10px] text-emerald-700 dark:text-emerald-400">
-            <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" aria-hidden />
+          <Badge variant="outline" data-testid="coach-live-pill" className="h-5 gap-1 text-[11px]">
+            <span className="size-1.5 animate-pulse rounded-full bg-[var(--coach-sky)]" aria-hidden />
             Live
           </Badge>
         ) : null}
-        <HoldTimer timer={holdTimer} />
         {degraded ? (
           <Badge variant="outline" data-testid="coach-connecting-pill" className="h-5 text-[10px] text-muted-foreground">
             Transcript connecting…
           </Badge>
         ) : null}
+        <span className="font-mono text-base font-semibold tabular-nums" data-testid="coach-call-timer">{timerLabel}</span>
       </div>
       <ol className="flex min-w-0 items-center gap-1 overflow-x-auto px-4 pb-2" aria-label="Call phases" data-testid="coach-phase-scroller">
         {COACH_PHASE_ORDER.map((phaseId) => {
@@ -422,7 +413,8 @@ function CoachTopBar({
           const isComplete = COACH_PHASE_ORDER.indexOf(phaseId) < currentPhaseIndex;
           const suffix = isComplete ? " ✓" : "";
           return (
-            <li key={phaseId}>
+            <li key={phaseId} className="flex shrink-0 items-center">
+              {isCurrent ? <span className="sr-only" data-testid="coach-current-phase">{`Phase · ${currentPhaseName}`}</span> : null}
               <button
                 type="button"
                 data-testid={`phase-rail-${phaseId}`}
@@ -437,15 +429,14 @@ function CoachTopBar({
                   isCurrent
                     ? "bg-primary text-primary-foreground"
                     : isComplete
-                      ? "text-emerald-700 dark:text-emerald-400"
+                      ? "text-[var(--coach-sky)]"
                       : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
               >
-                <span>
-                  {RAIL_LABEL[phaseId] ?? fullName}
-                  {suffix}
-                </span>
+                {isComplete ? <span className="coach-phase-tick" aria-hidden>✓</span> : null}
+                <span>{RAIL_LABEL[phaseId] ?? fullName}</span>
               </button>
+              {phaseId !== COACH_PHASE_ORDER.at(-1) ? <span className={cn("coach-phase-connector", isComplete && "is-complete")} aria-hidden /> : null}
             </li>
           );
         })}
@@ -454,7 +445,7 @@ function CoachTopBar({
   );
 }
 
-function TranscriptFeed({ lines }: { lines: CoachTranscriptLine[] }) {
+function TranscriptFeed({ lines, degraded }: { lines: CoachTranscriptLine[]; degraded: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wasAtBottomRef = useRef(true);
 
@@ -481,12 +472,13 @@ function TranscriptFeed({ lines }: { lines: CoachTranscriptLine[] }) {
   return (
     <aside
       aria-label="Live transcript"
-      className="flex h-48 w-full shrink-0 flex-col overflow-hidden border-b border-border bg-muted/30 xl:h-auto xl:min-h-0 xl:border-r xl:border-b-0"
+      className="flex h-48 w-full shrink-0 flex-col overflow-hidden border-b border-border bg-[var(--coach-rail)] xl:h-auto xl:min-h-0 xl:border-r xl:border-b-0"
     >
-      <div className="border-b border-border px-4 py-2.5 text-xs font-bold tracking-wide text-muted-foreground uppercase">
+      <div className="flex items-center justify-between px-5 pt-4 pb-2.5 text-[11px] font-extrabold tracking-[0.12em] text-muted-foreground uppercase">
         Transcript
+        {!degraded ? <span className="text-[var(--coach-sky)] normal-case tracking-normal">● listening</span> : null}
       </div>
-      <div ref={containerRef} data-testid="coach-transcript" className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
+      <div ref={containerRef} data-testid="coach-transcript" className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 pt-1.5 pb-3.5">
         {visibleLines.length === 0 ? (
           <p className="text-xs text-muted-foreground">Waiting for the call to start talking…</p>
         ) : null}
@@ -495,9 +487,10 @@ function TranscriptFeed({ lines }: { lines: CoachTranscriptLine[] }) {
             key={line.id}
             data-testid="transcript-line"
             data-final={line.isFinal}
+            data-speaker={line.speaker}
             className={cn(
               "text-sm leading-snug",
-              line.speaker === "rep" ? "text-foreground" : "text-primary",
+              "text-foreground",
               !line.isFinal && "text-muted-foreground italic",
             )}
           >
@@ -505,16 +498,10 @@ function TranscriptFeed({ lines }: { lines: CoachTranscriptLine[] }) {
               data-testid="transcript-speaker-label"
               className={cn(
                 "mr-1.5 text-[10px] font-bold tracking-wide uppercase",
-                // Two-tone speaker labels (mock parity): rep in the same
-                // emerald accent used for resolved tokens/Live pill
-                // elsewhere in this view, seller in the amber already
-                // measured safe for coach-nudge-label. Reused, not invented
-                // — see coach-live-contrast.spec.ts for both measurements
-                // against this transcript's actual bg-muted/30 background.
-                line.speaker === "rep" ? "text-emerald-700 dark:text-emerald-400" : "text-amber-700 dark:text-amber-300",
+                line.speaker === "rep" ? "text-[var(--coach-sky)]" : "text-[var(--coach-amber)]",
               )}
             >
-              {line.speaker === "rep" ? "Rep" : "Seller"}
+              {line.speaker === "rep" ? "Rep" : "Seller"}{!line.isFinal ? " · speaking…" : ""}
             </span>
             {line.text}
           </p>
@@ -573,15 +560,15 @@ function ScriptPanel({
   const nextSpokenLine = nextBlock ? selectSpokenLine(nextBlock.branches[0] ?? null) : null;
   return (
     <main
-      className="min-h-[28rem] flex-1 overflow-y-auto border-b border-border px-4 py-5 md:px-8 xl:min-h-0 xl:border-r xl:border-b-0"
+      className="min-h-[28rem] min-w-0 flex-1 overflow-y-auto border-b border-border px-4 pt-7 md:px-8 xl:min-h-0 xl:border-b-0 xl:px-12"
       data-testid="coach-script-panel"
     >
-      <div className="mx-auto flex min-h-full max-w-4xl flex-col py-2">
+      <div className="mx-auto flex min-h-full max-w-[820px] flex-col">
         {contextLoad.status === "error" ? (
           <div
             role="alert"
             data-testid="coach-context-error"
-            className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-[var(--coach-amber)] bg-card px-3 py-2 text-xs text-[var(--coach-amber-text)]"
           >
             <span>Couldn&apos;t load lead details — showing the script with placeholders.</span>
             <Button type="button" variant="outline" size="xs" data-testid="coach-context-retry" onClick={onRetryContext}>
@@ -590,23 +577,22 @@ function ScriptPanel({
           </div>
         ) : null}
         {degraded ? (
-          <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900" data-testid="coach-degraded-note">
+          <p className="mb-4 rounded-lg border border-[var(--coach-amber)] bg-card px-3 py-2 text-xs text-[var(--coach-amber-text)]" data-testid="coach-degraded-note">
             Live transcript is reconnecting. Keep following the current script — your place is saved.
           </p>
         ) : null}
         <section
           aria-label={`Current script — ${block.title}`}
           data-testid="current-script-card"
-          className="rounded-2xl border border-border border-l-4 border-l-primary bg-card px-5 py-5 shadow-sm md:px-8 md:py-7"
+          className="min-w-0"
         >
-          <div className="mb-1 text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Current script</div>
-          <h2 className="text-xl font-bold" data-testid="current-section-title">{block.title}</h2>
-          <p className="mt-2 text-xs leading-relaxed text-muted-foreground" data-testid="current-phase-purpose">
+          <h2 className="text-[11px] font-black tracking-[0.16em] text-muted-foreground uppercase">{block.phaseName} · <span data-testid="current-section-title">{block.title}</span></h2>
+          <p className="sr-only" data-testid="current-phase-purpose">
             <span className="font-semibold text-foreground">Purpose:</span> {block.purpose}
           </p>
           {block.branchOptions.length > 1 ? (
             <div
-              className="mt-4 flex flex-wrap gap-1"
+              className="mt-3.5 grid grid-cols-4 gap-2"
               role="tablist"
               aria-label={`${block.title} spoken paths`}
               data-testid="section-path-options"
@@ -623,7 +609,7 @@ function ScriptPanel({
                   className={cn(
                     "rounded-full border px-2 py-0.5 text-[10px] font-bold",
                     tag === block.selectedBranchTag
-                      ? "border-primary bg-primary/10 text-primary"
+                      ? "border-primary bg-primary text-primary-foreground"
                       : "border-border text-muted-foreground hover:bg-muted",
                   )}
                 >
@@ -632,12 +618,11 @@ function ScriptPanel({
               ))}
             </div>
           ) : null}
-          <div className="mt-5 divide-y divide-border/70" data-testid="current-section-script">
+          <div className="mt-[26px] space-y-5" data-testid="current-section-script">
             {block.branches.map((branch) => (
               <BranchCard
                 key={branch.tag}
                 branch={branch}
-                compact
                 onEditEntry={onEditEntry}
                 isEntryTokenEditable={isEntryTokenEditable}
                 onBeginEntryEdit={onBeginEntryEdit}
@@ -647,25 +632,25 @@ function ScriptPanel({
           </div>
         </section>
         {nextBlock ? (
-          <section className="mx-2 mt-4 rounded-xl border border-dashed border-border bg-muted/30 px-4 py-3" data-testid="next-section-preview">
-            <div className="text-[10px] font-bold tracking-[0.12em] text-muted-foreground uppercase">
-              Up next · {nextBlock.phaseName}
+          <section className="mt-7 border-t border-border pt-[18px] pb-5" data-testid="next-section-preview">
+            <div className="text-[11px] font-black tracking-[0.14em] text-[var(--coach-sky)] uppercase">
+              Up next · {nextBlock.phaseName} — {nextBlock.title}
             </div>
-            <h3 className="mt-1 text-sm font-semibold">{nextBlock.title}</h3>
             {nextSpokenLine ? (
-              <p data-testid="next-section-preview-body" className="mt-1 line-clamp-2 text-sm leading-relaxed text-muted-foreground">
-                {nextSpokenLine.segments
+              <p data-testid="next-section-preview-body" className="mt-2 line-clamp-2 text-[17px] leading-[1.5] text-[var(--coach-secondary)]">
+                “{nextSpokenLine.segments
                   .map((segment) => (segment.kind === "tone" ? "" : segment.kind === "text" ? segment.value : segment.resolved.value))
-                  .join("")}
+                  .join("")}”
               </p>
             ) : null}
           </section>
         ) : null}
-        <div className="sticky bottom-0 mt-auto flex items-center justify-between gap-3 bg-background/95 pt-5 pb-1 backdrop-blur" data-testid="section-navigation">
+        <div className="mt-auto flex items-center justify-between gap-3 border-t border-border pt-4 pb-5" data-testid="section-navigation">
           <Button type="button" variant="outline" disabled={!canGoPrevious} onClick={onPrevious} data-testid="coach-back">
             <ChevronLeftIcon className="size-4" aria-hidden />
             Back
           </Button>
+          <span className="font-mono text-xs text-muted-foreground">Section {COACH_SECTIONS.findIndex((section) => section.id === block.sectionId) + 1} of {COACH_SECTIONS.length}</span>
           <Button type="button" disabled={!canGoNext} onClick={onNext} data-testid="coach-next">
             Next
             <ChevronRightIcon className="size-4" aria-hidden />
@@ -699,19 +684,20 @@ function RecommendationsPanel({
     <aside
       aria-label="Live recommendations"
       data-testid="coach-recommendations"
-      className="min-h-64 shrink-0 bg-muted/20 px-4 py-5 md:px-6 xl:min-h-0 xl:overflow-y-auto"
+      className="min-h-64 shrink-0 border-l border-border bg-[var(--coach-rail)] p-4 xl:min-h-0 xl:overflow-y-auto"
     >
-      <div className="text-[11px] font-extrabold tracking-[0.14em] text-primary uppercase">Recommendations</div>
-      <h2 className="mt-1 text-lg font-bold">Helpful ways to go deeper</h2>
-      <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-        Sandra is listening for a meaningful homeowner response. Suggestions will appear here without changing your place in the script.
-      </p>
+      <h2 className="text-[11px] font-extrabold tracking-[0.12em] text-muted-foreground uppercase">Coach</h2>
+      {recommendations.length === 0 && followUpQuestions.length === 0 ? (
+        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+          Sandra is listening for a meaningful homeowner response. Suggestions will appear here without changing your place in the script.
+        </p>
+      ) : null}
       {recommendations.length > 0 ? (
         <div className="mt-5" data-testid="automatic-recommendations">
-          <div className="text-[10px] font-bold tracking-wide text-muted-foreground uppercase">Consider saying</div>
           <ul className="mt-2 space-y-2">
             {recommendations.map((recommendation) => (
               <li key={recommendation} className="rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed">
+                <div className="mb-1 text-[10px] font-extrabold tracking-[0.1em] text-muted-foreground uppercase">Consider saying</div>
                 {recommendation}
               </li>
             ))}
@@ -761,14 +747,12 @@ function RecommendationsPanel({
 
 function BranchCard({
   branch,
-  compact = false,
   onEditEntry,
   isEntryTokenEditable,
   onBeginEntryEdit,
   onSelectVariant,
 }: {
   branch: ScriptBranchBlock;
-  compact?: boolean;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
   isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
@@ -777,21 +761,9 @@ function BranchCard({
   return (
     <div
       data-testid="script-branch"
-      className={cn(
-        "py-4 first:pt-0 last:pb-0",
-        branch.critical && "my-3 rounded-xl bg-primary/5 px-3 first:mt-0 last:mb-0",
-      )}
+      className="space-y-5"
     >
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-bold tracking-wide text-muted-foreground uppercase">{branch.tag}</span>
-          {branch.autoSelected ? (
-            <Badge variant="outline" className="text-[10px]">
-              auto
-            </Badge>
-          ) : null}
-        </div>
-        {branch.variantOptions.length > 1 ? (
+      {branch.variantOptions.length > 1 ? (
           <div className="flex flex-wrap gap-1" role="tablist" aria-label={`${branch.tag} variant`}>
             {branch.variantOptions.map((option) => (
               <button
@@ -805,7 +777,7 @@ function BranchCard({
                 className={cn(
                   "rounded-full border px-2 py-0.5 text-[10px] font-bold",
                   option.key === branch.selected.key
-                    ? "border-primary bg-primary/10 text-primary"
+                    ? "border-primary bg-primary text-primary-foreground"
                     : "border-border text-muted-foreground hover:bg-muted",
                 )}
               >
@@ -813,21 +785,21 @@ function BranchCard({
               </button>
             ))}
           </div>
-        ) : null}
-      </div>
+      ) : null}
       {branch.selected.tone ? (
         <div className="mb-2">
           <ToneChip text={branch.selected.tone} />
         </div>
       ) : null}
-      <div className="space-y-2">
+      <div className="space-y-5">
         {branch.selected.lines.map((line, index) => (
           <p
             key={index}
             className={cn(
               "whitespace-pre-line",
-              compact ? "text-[15px] leading-relaxed" : "text-2xl leading-relaxed font-medium md:text-[26px]",
-              line.type === "note" && "text-xs text-muted-foreground italic",
+              line.type === "note"
+                ? "text-[13px] text-[var(--coach-secondary)] italic"
+                : "text-[27px] leading-[1.5] font-medium",
             )}
           >
             <LineSegments
@@ -840,7 +812,7 @@ function BranchCard({
         ))}
       </div>
       {branch.trailingNote ? (
-        <p className="mt-2 text-xs text-muted-foreground italic">
+        <p className="mt-2 text-[13px] text-[var(--coach-secondary)] italic">
           {branch.trailingNote.map((segment, index) =>
             segment.kind === "text" ? (
               <span key={index}>{segment.value}</span>
@@ -908,7 +880,7 @@ function ToneChip({ text }: { text: string }) {
   return (
     <span
       data-testid="tone-chip"
-      className="inline-flex items-center rounded-full border border-amber-300/60 bg-amber-400/15 px-2.5 py-0.5 text-[11px] font-semibold text-amber-800 dark:text-amber-300"
+      className="inline-flex items-center rounded-full border-0 bg-[var(--coach-amber)] px-2.5 py-0.5 text-[11px] font-bold text-[var(--coach-rail)]"
     >
       {text}
     </span>
@@ -942,14 +914,14 @@ function TokenChip({
     return (
       <span
         data-testid="token-placeholder"
-        className="mx-0.5 inline-flex items-center rounded-full border border-dashed border-muted-foreground/40 bg-muted px-1.5 py-0 text-[11px] text-muted-foreground"
+        className="mx-0.5 inline-flex items-center rounded-full border border-dashed border-border bg-transparent px-1.5 py-0 text-[11px] text-muted-foreground"
       >
-        missing
+        missing<span className="sr-only">{resolved.value}</span>
       </span>
     );
   }
   return (
-    <span data-testid="token-resolved" className="font-bold text-emerald-700 dark:text-emerald-400">
+    <span data-testid="token-resolved" className="font-bold text-[var(--coach-sky)]">
       {resolved.value}
     </span>
   );
@@ -1010,8 +982,8 @@ function EntryTokenChip({
       className={cn(
         "mx-0.5 inline-flex items-center rounded-full border px-1.5 py-0 text-[11px] font-semibold",
         resolved.isPlaceholder
-          ? "border-dashed border-primary/50 text-primary"
-          : "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
+          ? "border-dashed border-[var(--coach-sky)] text-[var(--coach-sky)]"
+          : "border-[var(--coach-sky)] text-[var(--coach-sky)]",
       )}
     >
       {resolved.isPlaceholder ? `+ ${ENTRY_TOKEN_LABEL[token]}` : resolved.value}
@@ -1020,7 +992,6 @@ function EntryTokenChip({
 }
 
 function CallControlDock({
-  callName,
   callStatus,
   muted,
   held,
@@ -1033,7 +1004,6 @@ function CallControlDock({
   keypadOpen,
   onKeypadOpenChange,
 }: {
-  callName: string;
   callStatus: CoachCallStatus;
   muted: boolean;
   held: boolean;
@@ -1073,7 +1043,7 @@ function CallControlDock({
   }, [callStatus, held, keypadOpen, onDigit]);
 
   return (
-    <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-card px-4 py-3">
+    <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-[var(--coach-rail)] px-6 py-3">
       {keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={held || holdPending || !live} /> : null}
       <div
         data-testid="coach-call-dock-row"
@@ -1091,7 +1061,6 @@ function CallControlDock({
             <XIcon className="size-4" aria-hidden />
             Collapse
           </Button>
-          <div className="truncate text-sm font-bold">{callName}</div>
         </div>
         <div data-testid="coach-call-controls" className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
           <Button

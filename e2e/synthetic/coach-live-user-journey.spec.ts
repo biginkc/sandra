@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import tailwindcss from "@tailwindcss/postcss";
 import * as esbuild from "esbuild";
@@ -55,7 +56,7 @@ test.beforeAll(async () => {
   sections = JSON.parse(
     fs.readFileSync(path.resolve(process.cwd(), "src/lib/coach/closr-sections-v1.json"), "utf8"),
   ).sections as Section[];
-  const cssResult = await postcss([tailwindcss()]).process('@import "tailwindcss";', {
+  const cssResult = await postcss([tailwindcss()]).process(readFileSync(path.resolve(process.cwd(), "src/app/globals.css"), "utf8"), {
     from: path.resolve(process.cwd(), "src/app/globals.css"),
   });
   compiledCss = cssResult.css;
