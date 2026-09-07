@@ -631,30 +631,32 @@ function ScriptPanel({
             ))}
           </div>
         </section>
-        {nextBlock ? (
-          <section className="mt-7 border-t border-border pt-[18px] pb-5" data-testid="next-section-preview">
-            <div className="text-[11px] font-black tracking-[0.14em] text-[var(--coach-sky)] uppercase">
-              Up next · {nextBlock.phaseName} — {nextBlock.title}
-            </div>
-            {nextSpokenLine ? (
-              <p data-testid="next-section-preview-body" className="mt-2 line-clamp-2 text-[17px] leading-[1.5] text-[var(--coach-secondary)]">
-                “{nextSpokenLine.segments
-                  .map((segment) => (segment.kind === "tone" ? "" : segment.kind === "text" ? segment.value : segment.resolved.value))
-                  .join("")}”
-              </p>
-            ) : null}
-          </section>
-        ) : null}
-        <div className="sticky bottom-0 z-10 mt-auto flex shrink-0 items-center justify-between gap-3 border-t border-border bg-background pt-4 pb-5" data-testid="section-navigation">
-          <Button type="button" variant="outline" disabled={!canGoPrevious} onClick={onPrevious} data-testid="coach-back">
-            <ChevronLeftIcon className="size-4" aria-hidden />
-            Back
-          </Button>
-          <span className="font-mono text-xs text-muted-foreground">Section {COACH_SECTIONS.findIndex((section) => section.id === block.sectionId) + 1} of {COACH_SECTIONS.length}</span>
-          <Button type="button" disabled={!canGoNext} onClick={onNext} data-testid="coach-next">
-            Next
-            <ChevronRightIcon className="size-4" aria-hidden />
-          </Button>
+        <div className="sticky bottom-0 z-10 mt-auto shrink-0 bg-background pt-7">
+          {nextBlock ? (
+            <section className="border-t border-border pt-[18px] pb-5" data-testid="next-section-preview">
+              <div className="text-[11px] font-black tracking-[0.14em] text-[var(--coach-sky)] uppercase">
+                Up next · {nextBlock.phaseName} — {nextBlock.title}
+              </div>
+              {nextSpokenLine ? (
+                <p data-testid="next-section-preview-body" className="mt-2 line-clamp-2 text-[17px] leading-[1.5] text-[var(--coach-secondary)]">
+                  “{nextSpokenLine.segments
+                    .map((segment) => (segment.kind === "tone" ? "" : segment.kind === "text" ? segment.value : segment.resolved.value))
+                    .join("")}”
+                </p>
+              ) : null}
+            </section>
+          ) : null}
+          <div className="flex items-center justify-between gap-3 border-t border-border pt-4 pb-5" data-testid="section-navigation">
+            <Button type="button" variant="outline" disabled={!canGoPrevious} onClick={onPrevious} data-testid="coach-back">
+              <ChevronLeftIcon className="size-4" aria-hidden />
+              Back
+            </Button>
+            <span className="font-mono text-xs text-muted-foreground">Section {COACH_SECTIONS.findIndex((section) => section.id === block.sectionId) + 1} of {COACH_SECTIONS.length}</span>
+            <Button type="button" disabled={!canGoNext} onClick={onNext} data-testid="coach-next">
+              Next
+              <ChevronRightIcon className="size-4" aria-hidden />
+            </Button>
+          </div>
         </div>
       </div>
     </main>

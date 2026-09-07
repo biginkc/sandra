@@ -159,7 +159,7 @@ test("keeps intentional keyboard DTMF working when no editor is active", async (
 });
 
 
-test("keeps section navigation visible while a long script scrolls", async ({ page }) => {
+test("keeps up-next and section navigation visible while a long script scrolls", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 650 });
   await mountFullCoach(page);
   await page.getByTestId("phase-rail-offer").click();
@@ -167,11 +167,17 @@ test("keeps section navigation visible while a long script scrolls", async ({ pa
   const navigation = page.getByTestId("section-navigation");
   const hasOverflow = await panel.evaluate((element) => element.scrollHeight > element.clientHeight);
   expect(hasOverflow).toBe(true);
+  const preview = page.getByTestId("next-section-preview");
+  await expect(preview).toBeInViewport({ ratio: 1 });
+  const previewBefore = await preview.boundingBox();
   const before = await navigation.boundingBox();
   await expect(page.getByTestId("coach-next")).toBeInViewport({ ratio: 1 });
   await expect(page.getByTestId("coach-back")).toBeInViewport({ ratio: 1 });
   await panel.evaluate((element) => { element.scrollTop = element.scrollHeight; });
   const after = await navigation.boundingBox();
+  const previewAfter = await preview.boundingBox();
+  expect(Math.abs(previewAfter!.y - previewBefore!.y)).toBeLessThanOrEqual(1);
+  await expect(preview).toBeInViewport({ ratio: 1 });
   expect(Math.abs(after!.y - before!.y)).toBeLessThanOrEqual(1);
   await expect(page.getByTestId("coach-next")).toBeInViewport({ ratio: 1 });
   await page.getByTestId("coach-next").click();

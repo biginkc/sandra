@@ -37,3 +37,9 @@ No product-scope deviations from PROMPT.md. These compatibility and verification
 At Jarrad's request after sandbox review, Back/Next and the section counter now stick to the bottom of the script scroll area with an opaque field background. This supersedes PROMPT.md's instruction to remove the sticky wrapper; no backdrop blur was reintroduced. Long content can scroll behind the row and remains fully reachable at the end.
 
 Validation: 25 unchanged coach-live-view component tests and 21 contrast/responsive browser tests passed. A new overflowing-script browser check verifies both buttons stay fully in the viewport, the row stays at the same vertical position through scrolling, and Next/Back still navigate correctly. The local interactive sandbox was rebuilt with this change.
+
+## Follow-up: persistent up-next preview
+
+At Jarrad's further request, Up next and section navigation share one opaque sticky footer in the script scroll area. The preview stays directly above Back/Next without separate sticky offsets. This intentionally updates the original non-sticky up-next layout.
+
+Validation: all 25 coach-live-view component tests and 21 contrast/responsive browser tests passed. The scrolling regression now verifies the entire up-next preview and both navigation buttons remain visible and stationary while a long offer script scrolls. The interactive sandbox was rebuilt.
