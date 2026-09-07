@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <meta name="design_doc_mode" content="canvas">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Geist+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <style>
+    body { margin:0; background:#efedeb; font-family:'Inter',sans-serif; color:#1c1917; }
+    a { color:#1c1917; } a:hover { color:#047857; }
+  </style>
+</helmet>
+<section style="padding:48px 56px; display:flex; flex-direction:column; gap:28px;">
+  <div style="max-width:820px;">
+    <div style="font-family:'Geist Mono',monospace; font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:#78716c;">Sandra · Dialer popover — live coach switch</div>
+    <h1 style="margin:8px 0 0; font-size:26px; font-weight:800;">Choose the coach before the call</h1>
+    <p style="margin:8px 0 0; font-size:14px; line-height:1.6; color:#57534e;">A per-rep preference row sits directly under the company-number selector in the existing dialer popover. Off by default. Turning it on reveals a script picker (one script today, more later). The choice is remembered between calls, applies to every entry point including the one-click Call button on lead pages, and can still be flipped mid-call from the "Open live coach" pill.</p>
+  </div>
+
+  <div style="display:flex; gap:40px; flex-wrap:wrap; align-items:flex-start;">
+
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <div style="display:flex; align-items:center; gap:10px;"><span style="display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:9px; background:#111827; color:#fff; font-weight:800; font-size:13px;">1a</span><span style="font-weight:700; font-size:14px;">Default: coach off, no options shown</span></div>
+      <div style="width:480px; background:#fff; border:1px solid #e5e1df; border-radius:16px; box-shadow:0 20px 60px rgba(28,25,23,0.3); position:relative; padding:16px 16px 18px; display:flex; flex-direction:column; gap:10px;">
+        <span style="position:absolute; top:10px; right:10px; width:24px; height:24px; border-radius:6px; display:inline-flex; align-items:center; justify-content:center; color:#78716c; font-size:13px;">✕</span>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding-right:28px;">
+          <span style="font-size:10px; font-weight:800; letter-spacing:0.1em; text-transform:uppercase; color:#a8a29e; white-space:nowrap;">Calling from</span>
+          <span style="display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border:1px solid #e5e1df; border-radius:8px; font-size:12px; font-weight:700; white-space:nowrap;">(816) 555-0142 · KC main <span style="color:#78716c; font-size:10px;">▾</span></span>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px; padding:8px 10px; border:1.5px solid rgba(120,176,255,0.55); border-radius:12px; color:#f3f6fb; background:radial-gradient(120% 140% at 50% 0%, #16203a 0%, #0c1426 45%, #070b16 100%); box-shadow:0 0 0 1px rgba(60,130,255,0.16), 0 0 18px rgba(46,128,255,0.35), inset 0 1px 0 rgba(160,200,255,0.18);">
+          <span style="flex:0 0 auto; width:36px; height:36px; border-radius:50%; overflow:hidden; background:#0c1426; border:1.5px solid rgba(120,176,255,0.55); box-shadow:0 0 12px rgba(46,128,255,0.35); display:inline-flex;"><img src="public/brand/mascot-head.svg" alt="" style="width:100%; height:100%; display:block;"></span>
+          <div style="display:flex; flex-direction:column; gap:1px; min-width:0; flex:1;">
+            <span style="font-size:13px; font-weight:800; white-space:nowrap;">Want some help? Enable live coach.</span>
+            <span style="font-size:11px; color:#a9b6cf; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Sandra listens, keeps the script on screen, and suggests what to say next.</span>
+          </div>
+          <button aria-pressed="false" style="flex:0 0 auto; width:38px; height:20px; border-radius:999px; border:1.5px solid rgba(120,176,255,0.7); background:rgba(255,255,255,0.04); position:relative; cursor:pointer; padding:0; box-shadow:none;"><span style="position:absolute; top:1.5px; left:2px; width:14px; height:14px; border-radius:50%; background:#5b6479;"></span></button>
+        </div>
+        <div style="padding:10px 12px; border:1px solid #e5e1df; border-radius:10px; background:#fafaf9; font-size:15px; font-weight:600; color:#a8a29e;">Type a name or number…</div>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:2px;">
+          <span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">1</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">2</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">3</span>
+          <span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">4</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">5</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">6</span>
+          <span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">7</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">8</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">9</span>
+          <span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #f0eeec; font-size:16px; font-weight:700; color:#d6d1ce;">*</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">0</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #f0eeec; font-size:16px; font-weight:700; color:#d6d1ce;">#</span>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:2px;">
+          <span style="width:44px; display:inline-flex; align-items:center; justify-content:center; border-radius:10px; border:1px solid #e5e1df; color:#78716c; font-size:14px;">⌫</span>
+          <span style="flex:1; text-align:center; padding:10px; border-radius:10px; background:#f0eeec; color:#a8a29e; font-size:13px; font-weight:700;">Call</span>
+        </div>
+        <div style="border-top:1px solid #e5e1df; padding-top:12px; margin-top:4px;">
+          <div style="font-size:10px; font-weight:800; letter-spacing:0.1em; text-transform:uppercase; color:#a8a29e; margin-bottom:6px;">Recent calls</div>
+          <div style="display:flex; align-items:center; gap:10px; padding:6px 8px;"><span style="width:28px; height:28px; border-radius:50%; background:#f0eeec; display:inline-flex; align-items:center; justify-content:center; font-size:11px; font-weight:800; color:#57534e;">MC</span><span style="flex:1; min-width:0;"><span style="display:block; font-size:12px; font-weight:700;">Marlene Carter</span><span style="display:block; font-size:11px; color:#78716c;">2 hours ago · 23:41</span></span><span style="color:#059669; font-size:12px;">☏</span></div>
+          <div style="display:flex; align-items:center; gap:10px; padding:6px 8px;"><span style="width:28px; height:28px; border-radius:50%; background:#f0eeec; display:inline-flex; align-items:center; justify-content:center; font-size:11px; font-weight:800; color:#57534e;">DR</span><span style="flex:1; min-width:0;"><span style="display:block; font-size:12px; font-weight:700;">Dale Rutherford</span><span style="display:block; font-size:11px; color:#78716c;">Yesterday · no answer</span></span><span style="color:#059669; font-size:12px;">☏</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <div style="display:flex; align-items:center; gap:10px;"><span style="display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:9px; background:#111827; color:#fff; font-weight:800; font-size:13px;">1b</span><span style="font-weight:700; font-size:14px;">Toggled on: script dropdown appears on a new line</span></div>
+      <div style="width:480px; background:#fff; border:1px solid #e5e1df; border-radius:16px; box-shadow:0 20px 60px rgba(28,25,23,0.3); position:relative; padding:16px 16px 18px; display:flex; flex-direction:column; gap:10px;">
+        <span style="position:absolute; top:10px; right:10px; width:24px; height:24px; border-radius:6px; display:inline-flex; align-items:center; justify-content:center; color:#78716c; font-size:13px;">✕</span>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding-right:28px;">
+          <span style="font-size:10px; font-weight:800; letter-spacing:0.1em; text-transform:uppercase; color:#a8a29e; white-space:nowrap;">Calling from</span>
+          <span style="display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border:1px solid #e5e1df; border-radius:8px; font-size:12px; font-weight:700; white-space:nowrap;">(816) 555-0142 · KC main <span style="color:#78716c; font-size:10px;">▾</span></span>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:6px; padding:8px 10px; border:1.5px solid rgba(120,176,255,0.55); border-radius:12px; color:#f3f6fb; background:radial-gradient(120% 140% at 50% 0%, #16203a 0%, #0c1426 45%, #070b16 100%); box-shadow:0 0 0 1px rgba(60,130,255,0.16), 0 0 18px rgba(46,128,255,0.35), inset 0 1px 0 rgba(160,200,255,0.18);">
+          <div style="display:flex; align-items:center; gap:10px;">
+          <span style="flex:0 0 auto; width:36px; height:36px; border-radius:50%; overflow:hidden; background:#0c1426; border:1.5px solid rgba(120,176,255,0.55); box-shadow:0 0 12px rgba(46,128,255,0.35); display:inline-flex;"><img src="public/brand/mascot-head.svg" alt="" style="width:100%; height:100%; display:block;"></span>
+          <div style="display:flex; flex-direction:column; gap:1px; min-width:0; flex:1;">
+            <span style="font-size:13px; font-weight:800; white-space:nowrap;">Want some help? Enable live coach.</span>
+            <span style="font-size:11px; color:#a9b6cf; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Sandra listens, keeps the script on screen, and suggests what to say next.</span>
+          </div>
+                    <button aria-pressed="true" style="flex:0 0 auto; width:38px; height:20px; border-radius:999px; border:1.5px solid rgba(120,176,255,0.7); background:linear-gradient(180deg, rgba(28,46,82,0.9), rgba(14,24,46,0.95)); position:relative; cursor:pointer; padding:0; box-shadow:0 0 14px rgba(46,128,255,0.45);"><span style="position:absolute; top:1.5px; left:18px; width:14px; height:14px; border-radius:50%; background:#78b0ff;"></span></button>
+
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; padding-left:46px;"><span role="combobox" aria-label="Coach script" style="flex:1; min-width:0; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:4px 8px; border-radius:7px; border:1.5px solid rgba(120,176,255,0.7); background:linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7)); font-size:11px; font-weight:700; color:#f3f6fb; cursor:pointer;"><span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">CLOSR Outbound Sales Script</span><span style="display:inline-flex; align-items:center; gap:8px; flex:0 0 auto;"><span style="font-family:'Geist Mono',monospace; font-size:10px; color:#7e889c;">v1.2.0</span><span style="color:#7e889c; font-size:9px;">▾</span></span></span></div>
+        </div>
+
+        <div style="padding:10px 12px; border:1px solid #e5e1df; border-radius:10px; background:#fafaf9; font-size:15px; font-weight:600;">Marlene Carter</div>
+        <div style="display:flex; align-items:center; gap:10px; padding:8px; border-radius:8px; background:#ecfdf5;"><span style="width:28px; height:28px; border-radius:50%; background:#f0eeec; display:inline-flex; align-items:center; justify-content:center; font-size:11px; font-weight:800; color:#57534e;">MC</span><span style="flex:1; min-width:0;"><span style="display:block; font-size:12px; font-weight:700;">Marlene Carter</span><span style="display:block; font-size:11px; color:#78716c;">4127 Wornall Rd · Kansas City, MO</span></span><span style="color:#059669; font-size:12px;">☏</span></div>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:2px;">
+          <span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">1</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">2</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">3</span>
+          <span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">4</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">5</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">6</span>
+          <span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">7</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">8</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">9</span>
+          <span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #f0eeec; font-size:16px; font-weight:700; color:#d6d1ce;">*</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #e5e1df; font-size:16px; font-weight:700;">0</span><span style="padding:10px; text-align:center; border-radius:10px; border:1px solid #f0eeec; font-size:16px; font-weight:700; color:#d6d1ce;">#</span>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:2px;">
+          <span style="width:44px; display:inline-flex; align-items:center; justify-content:center; border-radius:10px; border:1px solid #e5e1df; color:#78716c; font-size:14px;">⌫</span>
+          <span style="flex:1; text-align:center; padding:10px; border-radius:10px; background:#f0eeec; color:#a8a29e; font-size:13px; font-weight:700;">Call</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex; flex-direction:column; gap:12px; max-width:360px;">
+      <div style="display:flex; align-items:center; gap:10px;"><span style="display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:9px; background:#111827; color:#fff; font-weight:800; font-size:13px;">1c</span><span style="font-weight:700; font-size:14px;">Behavior</span></div>
+      <div style="background:#fff; border:1px solid #e5e1df; border-radius:14px; padding:18px 20px; font-size:13px; line-height:1.6; color:#44403c; display:flex; flex-direction:column; gap:12px;">
+        <p style="margin:0;"><b>Off by default.</b> New reps see only the switch. Turning it on adds one compact dropdown line inside the same block; the selected script is what the coach loads at connect. With one script it is preselected.</p>
+        <p style="margin:0;"><b>Remembered.</b> Stored per rep alongside the caller-ID choice (<span style="font-family:'Geist Mono',monospace; font-size:12px;">sandra.softphone.coach.v1</span>: enabled + script id), so the switch stays where they left it across calls and reloads.</p>
+        <p style="margin:0;"><b>Covers one-click calls.</b> The Call button on lead pages bypasses this popover, so it reads the same preference — no extra prompt on the fast path.</p>
+        <p style="margin:0;"><b>Reversible mid-call.</b> With the coach off, the classic in-call popover keeps its existing “Open live coach” pill; opening it there flips the preference on for next time. Collapsing the coach does not flip it off.</p>
+        <p style="margin:0;"><b>Session still records.</b> The coach session (transcript, phase) runs either way when the feature flag is on; the switch only governs whether the full-screen view opens at connect.</p>
+        <p style="margin:0; color:#78716c;">Hidden entirely when <span style="font-family:'Geist Mono',monospace; font-size:12px;">NEXT_PUBLIC_COACH_UI_ENABLED</span> is unset.</p>
+      </div>
+    </div>
+
+  </div>
+</section>
+</x-dc>
+</body>
+</html>

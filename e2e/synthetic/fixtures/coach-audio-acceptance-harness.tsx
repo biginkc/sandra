@@ -223,6 +223,8 @@ function AudioAcceptanceHarness() {
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("Missing #root for coach audio acceptance harness");
 configureSyntheticCoachContext("immediate", CONTEXT);
+// These tests exercise the opted-in coach during active-call recovery.
+window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled: true, scriptId: "closr-outbound" }));
 window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({
   handle: { id: "synthetic-call" },
   target: { propertyId: CONTEXT.leadId, contactId: "synthetic-contact", phoneE164: CONTEXT.sellerPhoneE164, maskedPhone: "(816) 555-0101", name: CONTEXT.sellerName, address: CONTEXT.propertyAddress, state: "MO", startedAt: "2026-08-29T20:00:00.000Z", repName: CONTEXT.repName },
