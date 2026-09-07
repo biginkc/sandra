@@ -26,7 +26,11 @@ export function capabilityKey(value: string | undefined): string | null {
  * Opens a browser-held, caller-bound Jitter call capability without exposing
  * the provider call UUID to the client or accepting an unsealed reference.
  */
+export type CallIdentity = { callId: string; phoneE164?: string; callPurpose?: "customer" | "internal_training" };
 export function openCallCapability(value: unknown, userId: string): string | null {
+  return openCallIdentity(value, userId)?.callId ?? null;
+}
+export function openCallIdentity(value: unknown, userId: string): CallIdentity | null {
   if (!validRef(value, MAX_CAPABILITY_LENGTH)) return null;
   const currentKey = capabilityKey(process.env.SOFTPHONE_CAPABILITY_KEY);
   if (!currentKey) return null;
@@ -65,11 +69,16 @@ export function openCallCapability(value: unknown, userId: string): string | nul
       type?: unknown;
       callId?: unknown;
       userId?: unknown;
+      phoneE164?: unknown;
+      callPurpose?: unknown;
     };
     return candidate.type === "call" &&
       candidate.userId === userId &&
       validRef(candidate.callId)
-      ? candidate.callId
+      ? { callId: candidate.callId,
+          ...(typeof candidate.phoneE164 === "string" ? { phoneE164: candidate.phoneE164 } : {}),
+          ...(candidate.callPurpose === "internal_training" || candidate.callPurpose === "customer" ? { callPurpose: candidate.callPurpose } : {}),
+        }
       : null;
   } catch {
     return null;

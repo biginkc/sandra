@@ -36,6 +36,7 @@ import {
   type JitterTokenResponse,
   type JitterProviderStatusResponse,
 } from "./jitter-contract";
+import { isHomeownerTrainingNumber, canCallHomeownerTraining, HOMEOWNER_TRAINING_TIMEZONE, HOMEOWNER_TRAINING_LABEL } from "./homeowner-training";
 import type { CallTarget } from "./transport";
 
 export { openCallCapability } from "./call-capability";
@@ -106,7 +107,7 @@ function invalidInput(error: string): JitterProxyError {
 type CoachCallIndexAdminClient = {
   from(table: "coach_call_index"): {
     upsert(
-      values: { client_call_id: string; operator_user_id: string; property_id: string },
+      values: { client_call_id: string; operator_user_id: string; property_id: string | null },
       options: { onConflict: string },
     ): Promise<{ error: { message: string } | null }>;
   };
@@ -144,7 +145,7 @@ function timeout(ms: number): Promise<never> {
 async function indexCoachCall(input: {
   clientCallId: string;
   operatorUserId: string;
-  propertyId: string;
+  propertyId: string | null;
 }): Promise<void> {
   try {
     const admin = createAdminClient() as unknown as CoachCallIndexAdminClient;
@@ -227,6 +228,10 @@ export async function startAuthenticatedJitterCall(
     return startLocalError("Invalid Jitter start intent.");
   }
 
+  const training = isHomeownerTrainingNumber(target.phoneE164);
+  if (training && (!canCallHomeownerTraining(target.phoneE164, operator.userId) || target.propertyId || target.contactId)) {
+    return startLocalError("Internal training requires an authorized operator and an unlinked number.");
+  }
   // Re-run the unchanged Sandra eligibility path instead of trusting a
   // browser-prepared target.
   const prepared = target.propertyId
@@ -242,6 +247,7 @@ export async function startAuthenticatedJitterCall(
     });
   }
   if (
+    (training && (prepared.data.propertyId !== null || prepared.data.contactId !== null)) ||
     prepared.data.phoneE164 !== target.phoneE164 ||
     (target.contactId !== undefined &&
       prepared.data.contactId !== target.contactId)
@@ -258,7 +264,7 @@ export async function startAuthenticatedJitterCall(
   // prepareManualCall historically uses Missouri as a quiet-hours fallback
   // for an unlinked number. CONTRACT v2 requires the prospect's actual IANA
   // timezone, so that fallback must never cross the Jitter boundary.
-  if (!prepared.data.propertyId) {
+  if (!prepared.data.propertyId && !training) {
     return startLocalError("A verified lead timezone is required before calling this number.", {
       ok: false,
       status: 422,
@@ -268,7 +274,7 @@ export async function startAuthenticatedJitterCall(
     });
   }
 
-  const timezone = prepared.data.state
+  const timezone = training ? HOMEOWNER_TRAINING_TIMEZONE : prepared.data.state
     ? STATE_TO_TZ[prepared.data.state.trim().toUpperCase()]
     : undefined;
   if (!timezone) {
@@ -322,10 +328,35 @@ export async function startAuthenticatedJitterCall(
       ambiguous: started.ambiguous ?? (!deterministic && started.status >= 500),
     };
   }
+  if (training) {
+    // Persist before handing the browser a connect capability. This makes an
+    // abandoned call and a writeback arriving before wrap-up identifiable.
+    try {
+      const { error } = await createAdminClient().from("call_activities").upsert({
+        id: started.data.call_id, org_id: SANDRA_ORG_ID, provider: "sandra_softphone",
+        jitter_attempt_id: `sandra-${started.data.call_id}`,
+        operator_user_id: operator.userId, property_id: null, contact_id: null,
+        phone_e164: prepared.data.phoneE164, call_purpose: "internal_training",
+        direction: "outbound", notes: HOMEOWNER_TRAINING_LABEL, started_at: prepared.data.startedAt,
+      }, { onConflict: "id", ignoreDuplicates: true });
+      if (error) throw error;
+      const { data: recorded, error: readError } = await createAdminClient().from("call_activities")
+        .select("call_purpose, phone_e164, org_id, operator_user_id")
+        .eq("id", started.data.call_id).single();
+      if (readError || recorded?.call_purpose !== "internal_training" || recorded.phone_e164 !== prepared.data.phoneE164
+        || recorded.org_id !== SANDRA_ORG_ID || recorded.operator_user_id !== operator.userId) throw new Error("Training identity conflict");
+    } catch (error) {
+      await requestJitterCancel(started.data.call_id, "failed").catch(() => undefined);
+      reportError(error, { tags: { surface: "homeowner_training_call_record" } });
+      return startLocalError("Training call logging is unavailable. Call cleanup was requested.");
+    }
+  }
   const capability = sealCallCapability(
     started.data.call_id,
     operator.userId,
     capabilitySigningKey,
+    prepared.data.phoneE164,
+    training ? "internal_training" : "customer",
   );
   return {
     ok: true,
@@ -528,9 +559,11 @@ function sealCallCapability(
   callId: string,
   userId: string,
   key: string,
+  phoneE164: string,
+  callPurpose: "customer" | "internal_training",
 ): string {
   const payload = Buffer.from(
-    JSON.stringify({ type: "call", callId, userId }),
+    JSON.stringify({ type: "call", callId, userId, phoneE164, callPurpose }),
     "utf8",
   ).toString("base64url");
   const signature = createHmac("sha256", key)

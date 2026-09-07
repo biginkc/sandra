@@ -10,7 +10,10 @@ import { createClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/types";
 import { repDisplayName } from "@/lib/coach/rep-display-name";
 import { getMemberTimezone } from "@/components/appointments/book-appointment-action";
-import { openCallCapability } from "./call-capability";
+import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
+import { openCallCapability, openCallIdentity } from "./call-capability";
+
+import { isHomeownerTrainingNumber, canCallHomeownerTraining, HOMEOWNER_TRAINING_LABEL } from "./homeowner-training";
 
 type Contact = Pick<
   Database["public"]["Tables"]["contacts"]["Row"],
@@ -86,6 +89,7 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
     if (!lead) return { ok: false, error: "Lead not found." };
     const target = leadTarget(lead);
     if (!target || !lead.homeowner) return { ok: false, error: "This lead has no callable phone number." };
+    if (isHomeownerTrainingNumber(target.phoneE164)) return { ok: false, error: "Use the manual dialer for internal training." };
     const eligible = classifyItem({
       property: { id: lead.id, state: lead.state, is_dnc_locked: lead.is_dnc_locked },
       contact: {
@@ -137,6 +141,14 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
   if (!phoneE164) return { ok: false, error: "Enter a valid 10-digit number." };
   try {
     const supabase = await createClient();
+    if (isHomeownerTrainingNumber(phoneE164)) {
+      const { data: { user }, error } = await supabase.auth.getUser();
+      if (error || !user) return { ok: false, error: "Not signed in." };
+      if (!canCallHomeownerTraining(phoneE164, user.id)) return { ok: false, error: "Internal training is unavailable for this operator." };
+      return { ok: true, data: { propertyId: null, contactId: null, phoneE164,
+        maskedPhone: formatPhoneE164(phoneE164) ?? phoneE164, name: HOMEOWNER_TRAINING_LABEL,
+        address: null, state: "MO", startedAt: new Date().toISOString(), repName: repDisplayName(user) } };
+    }
     const contactSelect = "id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out";
     const contactResults = await Promise.all([
       supabase.from("contacts").select(contactSelect).eq("phone_1", phoneE164),
@@ -277,8 +289,10 @@ export type DialerRecent = {
 export async function loadDialerRecents(): Promise<SoftphoneActionResult<DialerRecent[]>> {
   try {
     const supabase = await createClient();
-    const { data: rows, error } = await supabase.from("call_activities").select("id, property_id, contact_id, phone_e164, started_at, outcome, property:properties(address, city, state, is_dnc_locked), contact:contacts(first_name, last_name, entity_name, do_not_contact)").eq("operator_user_id", (await supabase.auth.getUser()).data.user?.id ?? "").order("started_at", { ascending: false }).limit(10);
+    const { data: rows, error } = await supabase.from("call_activities").select("*, property:properties(address, city, state, is_dnc_locked), contact:contacts(first_name, last_name, entity_name, do_not_contact)").eq("operator_user_id", (await supabase.auth.getUser()).data.user?.id ?? "").order("started_at", { ascending: false }).limit(10);
     if (error) throw error;
+    // Select existing columns dynamically for additive-migration compatibility;
+    // only this explicit DTO leaves the server (never notes/provider metadata).
     const results: DialerRecent[] = [];
     for (const row of (rows ?? []) as unknown as Array<Record<string, unknown>>) {
       const property = row.property as { address?: string; city?: string; state?: string; is_dnc_locked?: boolean } | null;
@@ -292,8 +306,8 @@ export async function loadDialerRecents(): Promise<SoftphoneActionResult<DialerR
         id: String(row.id),
         propertyId: row.property_id ? String(row.property_id) : null,
         contactId: row.contact_id ? String(row.contact_id) : null,
-        name: property ? name : "Manual dial",
-        detail: property ? `${property.address ?? "Lead"} · ${formatPhoneE164(phone) ?? phone}` : `Manual dial · ${formatPhoneE164(phone) ?? phone}`,
+        name: row.call_purpose === "internal_training" ? HOMEOWNER_TRAINING_LABEL : property ? name : "Manual dial",
+        detail: row.call_purpose === "internal_training" ? HOMEOWNER_TRAINING_LABEL : property ? `${property.address ?? "Lead"} · ${formatPhoneE164(phone) ?? phone}` : `Manual dial · ${formatPhoneE164(phone) ?? phone}`,
         phoneE164: phone,
         when: row.started_at ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(String(row.started_at))) : "",
         missed: ["no_answer", "busy", "failed", "canceled"].includes(outcome),
@@ -330,8 +344,18 @@ export async function completeSoftphoneCall(input: {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return { ok: false, error: "Not signed in." };
-    const { data: membership, error: membershipError } = await supabase.from("memberships").select("org_id").eq("user_id", user.id).limit(1).maybeSingle();
+    const identity = openCallIdentity(input.callCapability, user.id);
+    const training = identity?.callPurpose === "internal_training";
+    const membershipQuery = supabase.from("memberships").select("org_id").eq("user_id", user.id);
+    const { data: membership, error: membershipError } = await (training ? membershipQuery.eq("org_id", SANDRA_ORG_ID) : membershipQuery).limit(1).maybeSingle();
     if (membershipError || !membership) return { ok: false, error: membershipError?.message ?? "No organization membership." };
+    if (training || isHomeownerTrainingNumber(input.target.phoneE164)) {
+      if (!training || identity?.phoneE164 !== input.target.phoneE164 || input.target.propertyId || input.target.contactId || input.callback) {
+        return { ok: false, error: "Training calls cannot be linked to a seller or schedule callbacks." };
+      }
+    }
+    // Bound targets prevent a customer call from being relabeled using browser data.
+    if (identity?.phoneE164 && identity.phoneE164 !== input.target.phoneE164) return { ok: false, error: "The call target does not match this call." };
     const rawJitterCallId = openCallCapability(input.callCapability, user.id);
     // Capability-less calls use the wrap token as their Sandra-side attempt
     // identity, while capability-backed calls use Jitter's call UUID. That
@@ -414,12 +438,12 @@ export async function completeSoftphoneCall(input: {
       ended_at: input.endedAt,
       duration_seconds: Math.max(0, Math.floor(input.durationSeconds)),
       outcome: input.outcome,
-      disposition: input.disposition,
+      disposition: training ? null : input.disposition,
       notes: input.notes.trim(),
       direction: "outbound",
       provider: "sandra_softphone",
       phone_e164: input.target.phoneE164,
-      do_not_call_requested: input.disposition === "dnc",
+      do_not_call_requested: !training && input.disposition === "dnc",
       wrap_token: input.wrapToken,
     };
     let callbackTaskId: string | undefined;
