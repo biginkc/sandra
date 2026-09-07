@@ -76,7 +76,7 @@
   [data-testid="coach-collapse"] { height: auto; padding: 9px 16px; border-radius: 10px; border-color: transparent; background: transparent; color: var(--coach-secondary); font-size: 13px; }
   /* Neutralize shared dark-mode outline/expanded overrides, which use alpha. */
   [data-slot="button"]:not(:disabled):not(.bg-primary):not([data-testid="coach-hangup"]):not([data-testid="coach-collapse"]) { background: transparent; }
-  [data-slot="button"]:not(:disabled):not(.bg-primary):not([aria-pressed="true"]):not([aria-expanded="true"]):hover { background: var(--muted); color: var(--foreground); }
+  [data-slot="button"]:not(:disabled):not(.bg-primary):not([aria-pressed="true"]):not([aria-expanded="true"]):not([data-testid="coach-hangup"]):hover { background: var(--muted); color: var(--foreground); }
   [data-testid="coach-call-controls"] button[aria-pressed="true"], [data-testid="coach-keypad-toggle"][aria-expanded="true"] { background: var(--primary); color: var(--primary-foreground); }
   [data-testid="coach-hangup"]:not(:disabled):hover { background: var(--destructive); }
   button:disabled { opacity: 1; }

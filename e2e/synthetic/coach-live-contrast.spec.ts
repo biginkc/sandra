@@ -314,7 +314,10 @@ for (const mode of [
     await expect(next).toHaveCSS("background-color", "rgb(255, 255, 255)");
     assertAA("primary next action while hovered", await measureRenderedContrast(next));
     assertAA("disabled back action", await measureRenderedContrast(page.getByTestId("coach-back")));
-    assertAA("hang up action", await measureRenderedContrast(page.getByTestId("coach-hangup")));
+    const hangup = page.getByTestId("coach-hangup");
+    await hangup.hover();
+    await expect(hangup).toHaveCSS("background-color", "rgb(220, 38, 38)");
+    assertAA("hang up action while hovered", await measureRenderedContrast(hangup));
     const tone = currentScript.getByTestId("tone-chip").first();
     await expect(tone).toBeVisible();
     assertAA("tone chip", await measureRenderedContrast(tone));
