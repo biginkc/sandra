@@ -63,6 +63,18 @@ function collectAllStrings(value: unknown, out: string[] = []): string[] {
 }
 
 describe("assertValidClosrScript", () => {
+  it("accepts an optional title and rejects malformed titles", () => {
+    const script = validScript();
+    delete script.title;
+    expect(() => assertValidClosrScript(script)).not.toThrow();
+    script.title = "CLOSR Outbound Sales Script";
+    expect(() => assertValidClosrScript(script)).not.toThrow();
+    for (const title of [null, 5, "", "   "]) {
+      script.title = title;
+      expect(() => assertValidClosrScript(script)).toThrow("invalid title");
+    }
+  });
+
   it("accepts the real closr-script-v0.json unmodified", () => {
     expect(() => assertValidClosrScript(scriptJson)).not.toThrow();
   });

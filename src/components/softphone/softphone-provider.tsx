@@ -10,6 +10,9 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { Collapsible } from "@base-ui/react/collapsible";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { COACH_SCRIPTS } from "@/lib/coach/script-registry";
 import { createPortal } from "react-dom";
 import { ArrowDownLeftIcon, ArrowUpRightIcon, DeleteIcon, PhoneIcon, XIcon } from "lucide-react";
 
@@ -84,6 +87,23 @@ type Props = {
 
 const TEARDOWN_WARNING = "Jitter could not confirm that the call ended. Do not start another call yet; automatic cleanup is still pending.";
 const AUDIO_RECONNECT_WARNING = "The homeowner call is still live, but browser audio needs to reconnect.";
+const COACH_STORAGE_KEY = "sandra.softphone.coach.v1";
+type CoachPreference = { enabled: boolean; scriptId: string };
+const DEFAULT_COACH_PREFERENCE: CoachPreference = { enabled: false, scriptId: COACH_SCRIPTS[0].id };
+
+function readCoachPreference(): CoachPreference {
+  if (typeof window === "undefined") return DEFAULT_COACH_PREFERENCE;
+  try {
+    const saved: unknown = JSON.parse(window.localStorage.getItem(COACH_STORAGE_KEY) ?? "null");
+    if (!saved || typeof saved !== "object" || !("enabled" in saved) || typeof saved.enabled !== "boolean") return DEFAULT_COACH_PREFERENCE;
+    return {
+      enabled: saved.enabled,
+      scriptId: "scriptId" in saved && COACH_SCRIPTS.some((script) => script.id === saved.scriptId)
+        ? saved.scriptId as string : DEFAULT_COACH_PREFERENCE.scriptId,
+    };
+  } catch { return DEFAULT_COACH_PREFERENCE; }
+}
+
 const CALLER_ID_STORAGE_KEY = "sandra.softphone.caller-id.v1";
 const ACTIVE_CALL_STORAGE_KEY = "sandra.softphone.active-call.v1";
 const E164 = /^\+[1-9]\d{7,14}$/;
@@ -184,7 +204,12 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   const [callerIdError, setCallerIdError] = useState<string | null>(null);
   const [callingEnabled] = useState(() => isSoftphoneTransportEnabled());
   const [coachUiEnabled] = useState(() => isCoachUiEnabled());
-  const [coachCollapsed, setCoachCollapsed] = useState(false);
+  const [coachPreference, setCoachPreference] = useState<CoachPreference>(readCoachPreference);
+  const updateCoachPreference = useCallback((preference: CoachPreference) => {
+    setCoachPreference(preference);
+    try { window.localStorage.setItem(COACH_STORAGE_KEY, JSON.stringify(preference)); } catch { /* Calling still works without persistence. */ }
+  }, []);
+  const [coachCollapsed, setCoachCollapsed] = useState(() => !coachPreference.enabled);
   // Owned independently of coachCollapsed and of whether CoachLiveView is
   // mounted at all: collapsing the coach view must never reset its
   // transcript, phase, gates, objection cards, or entered deal values —
@@ -539,7 +564,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     setLiveKeypadOpen(false);
     setMuted(false);
     setCallOutcome("connected_human");
-    setCoachCollapsed(false);
+    setCoachCollapsed(!coachPreference.enabled);
     // One stable call intent owns both Jitter start retries and Sandra wrap-up
     // retries, so neither side can duplicate work after a lost response.
     const callToken = startIntent?.callToken ?? crypto.randomUUID();
@@ -756,7 +781,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
         : "The call failed. Add a note to log the outcome.";
       if (!terminalHandledRef.current) await finishTerminal("failed");
     }
-  }, [callingEnabled, loadCallerIds, showToast, transition, transportFactory]);
+  }, [callingEnabled, coachPreference.enabled, loadCallerIds, showToast, transition, transportFactory]);
 
   const openLead = useCallback((lead: SoftphoneLead) => {
     if (!callingEnabled || startInFlightRef.current) return;
@@ -967,6 +992,9 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
             <button type="button" aria-label="Close dialer" className="absolute top-2.5 right-2.5 z-10 rounded-md p-1.5 text-[#78716c] hover:bg-[#f0eeec]" onClick={() => { if (phone === "idle") { resetIdle(); setPhone("closed"); } }}><XIcon className="size-3.5" /></button>
             {phone === "idle" ? (
               <IdleView
+                coachUiEnabled={coachUiEnabled}
+                coachPreference={coachPreference}
+                onCoachPreferenceChange={updateCoachPreference}
                 dialInput={dialInput}
                 setDialInput={(value) => { dialInputRef.current = value; setDialInput(value); }}
                 suggestions={visibleSuggestions}
@@ -992,7 +1020,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
             ) : phone === "preparing" ? (
               <PreparingView target={target} />
             ) : isOnCall ? (
-              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} holdPending={holdPending} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { void toggleMute(); }} onHold={() => { void toggleHold(); }} onReconnectAudio={() => { void reconnectAudio(); }} onHangup={hangup} coachAvailable={coachUiEnabled} onReopenCoach={() => setCoachCollapsed(false)} />
+              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} holdPending={holdPending} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { void toggleMute(); }} onHold={() => { void toggleHold(); }} onReconnectAudio={() => { void reconnectAudio(); }} onHangup={hangup} coachAvailable={coachUiEnabled} onReopenCoach={() => { updateCoachPreference({ ...coachPreference, enabled: true }); setCoachCollapsed(false); }} />
             ) : (
               <WrapView target={target} finalSeconds={finalSeconds} notes={notes} setNotes={setNotes} callbackOpen={callbackOpen} setCallbackOpen={setCallbackOpen} callbackTime={callbackTime} setCallbackTime={setCallbackTime} pending={pending} error={error} teardownUnconfirmed={teardownUnconfirmed} onRetryTeardown={() => { void retryTeardown(); }} onDisposition={(disposition) => {
                 const config = SOFTPHONE_DISPOSITIONS.find((item) => item.value === disposition);
@@ -1025,12 +1053,14 @@ function formatFull(digits: string): string {
   return digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : digits;
 }
 
-function IdleView({ dialInput, setDialInput, suggestions, recents, manualReady, manualDigits, pending, callingEnabled, callerIds, callerIdState, callerIdError, selectedCallerId, callerIdReady, onCallerIdChange, onRetryCallerIds, onLead, onRecent, onManual, onDigit, onBackspace, error }: {
+function IdleView({ coachUiEnabled, coachPreference, onCoachPreferenceChange, dialInput, setDialInput, suggestions, recents, manualReady, manualDigits, pending, callingEnabled, callerIds, callerIdState, callerIdError, selectedCallerId, callerIdReady, onCallerIdChange, onRetryCallerIds, onLead, onRecent, onManual, onDigit, onBackspace, error }: {
+  coachUiEnabled: boolean; coachPreference: CoachPreference; onCoachPreferenceChange: (preference: CoachPreference) => void;
   dialInput: string; setDialInput: (value: string) => void; suggestions: DialerSearchResult[]; recents: DialerRecent[]; manualReady: boolean; manualDigits: string; pending: boolean; callingEnabled: boolean; callerIds: JitterCallerId[]; callerIdState: CallerIdState; callerIdError: string | null; selectedCallerId: string | null; callerIdReady: boolean; onCallerIdChange: (phoneE164: string) => void; onRetryCallerIds: () => void; onLead: (suggestion: DialerSearchResult) => void; onRecent: (recent: DialerRecent) => void; onManual: () => void; onDigit: (digit: DtmfDigit) => void; onBackspace: () => void; error: string | null;
 }) {
   return <div className="p-4 pb-[18px]">
     {!callingEnabled ? <div role="status" className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">Calling not yet enabled</div> : null}
     {callingEnabled ? <CallerIdControl callerIds={callerIds} state={callerIdState} error={callerIdError} selected={selectedCallerId} onChange={onCallerIdChange} onRetry={onRetryCallerIds} /> : null}
+    {callingEnabled && coachUiEnabled ? <CoachPreferenceControl preference={coachPreference} onChange={onCoachPreferenceChange} /> : null}
     <input autoFocus data-testid="dialer-input" value={/^\d{10}$/.test(dialInput) ? formatFull(dialInput) : dialInput} onKeyDown={(event) => { if (/^[0-9]$/.test(event.key)) { event.preventDefault(); onDigit(event.key as DtmfDigit); } }} onChange={(event) => setDialInput(event.target.value)} placeholder="Type a name or number…" className="w-full rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-[15px] font-semibold outline-none" />
     {suggestions.length > 0 ? <div className="mt-2 flex max-h-42 flex-col gap-0.5 overflow-auto">{suggestions.map((suggestion) => <button type="button" disabled={!callingEnabled || !callerIdReady} title={!callingEnabled ? "Calling not yet enabled" : !callerIdReady ? "Choose an available company number" : undefined} data-testid="dialer-suggestion" key={suggestion.propertyId} onClick={() => onLead(suggestion)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-2 text-left hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#f0eeec] text-[11px] font-extrabold text-[#57534e]">{initials(suggestion.name)}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold">{suggestion.name}</span><span className="block truncate text-[11px] text-[#78716c]">{suggestion.detail}</span></span><PhoneIcon className="size-3.5 shrink-0 text-emerald-600" /></button>)}</div> : null}
     {dialInput.trim().length >= 2 && suggestions.length === 0 && !manualReady ? <div className="px-1 pt-2.5 text-[11.5px] text-[#78716c]">No matching lead — DNC-locked leads never appear here.</div> : null}
@@ -1039,6 +1069,41 @@ function IdleView({ dialInput, setDialInput, suggestions, recents, manualReady, 
     <div className="mt-3 flex gap-2"><button type="button" aria-label="Delete digit" onClick={onBackspace} className="flex w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#e5e1df] bg-white text-[#78716c] hover:bg-[#f5f4f2]"><DeleteIcon className="size-[17px]" /></button><button type="button" data-testid="dialer-call-manual" title={!callingEnabled ? "Calling not yet enabled" : !callerIdReady ? "Choose an available company number" : undefined} disabled={!manualReady || pending || !callingEnabled || !callerIdReady} onClick={onManual} className={`flex-1 rounded-[10px] border-0 py-2.5 text-[13px] font-bold ${manualReady && callingEnabled && callerIdReady ? "bg-emerald-600 text-white hover:bg-emerald-700" : "cursor-default bg-[#f0eeec] text-[#a8a29e]"}`}>{callingEnabled && manualReady ? `Call ${formatFull(manualDigits)}` : "Call"}</button></div>
     {dialInput.trim() === "" ? <div className="mt-3.5 border-t border-[#e5e1df] pt-3"><div className="mb-1.5 text-[10px] font-extrabold uppercase tracking-[0.1em] text-[#a8a29e]">Recent calls</div>{recents.map((recent) => <button type="button" disabled={!callingEnabled || !callerIdReady} title={!callingEnabled ? "Calling not yet enabled" : !callerIdReady ? "Choose an available company number" : undefined} data-testid="dialer-recent" key={recent.id} onClick={() => onRecent(recent)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-1.5 text-left hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><span className={`flex size-6 shrink-0 items-center justify-center rounded-full ${recent.missed ? "bg-red-50 text-red-600" : "bg-[#f0eeec] text-[#78716c]"}`}>{recent.missed ? <ArrowDownLeftIcon className="size-3 -scale-y-100" /> : <ArrowUpRightIcon className="size-3" />}</span><span className="min-w-0 flex-1"><span className={`block truncate text-xs font-bold ${recent.missed ? "text-red-700" : "text-[#1c1917]"}`}>{recent.name}</span><span className="block truncate text-[11px] text-[#78716c]">{recent.detail}</span></span><span className="shrink-0 text-[11px] font-semibold text-[#a8a29e]">{recent.when}</span></button>)}</div> : null}
   </div>;
+}
+
+function CoachPreferenceControl({ preference, onChange }: { preference: CoachPreference; onChange: (preference: CoachPreference) => void }) {
+  const selectedScript = COACH_SCRIPTS.find((script) => script.id === preference.scriptId) ?? COACH_SCRIPTS[0];
+  return <Collapsible.Root open={preference.enabled} className="mb-3 flex gap-1.5 rounded-[12px] border-[1.5px] border-[rgba(120,176,255,0.55)] px-2.5 py-2 text-[#f3f6fb]" style={{ background: "radial-gradient(120% 140% at 50% 0%, #16203a 0%, #0c1426 45%, #070b16 100%)", boxShadow: "0 0 0 1px rgba(60,130,255,0.16), 0 0 18px rgba(46,128,255,0.35), inset 0 1px 0 rgba(160,200,255,0.18)" }}>
+    <span data-testid="dialer-coach-mascot" className="relative w-10 shrink-0 self-stretch overflow-hidden rounded-md">
+      {/* Decorative full-body artwork spans the headline and script picker. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/brand/mascot-writing.png" alt="" aria-hidden="true" className={`absolute inset-0 size-full ${preference.enabled ? "object-cover" : "object-contain"}`} />
+    </span>
+    <div className="min-w-0 flex-1">
+    <div className="flex min-h-9 items-center gap-2.5">
+      <div className="flex min-w-0 flex-1 flex-col gap-[3px]">
+        <span title="Want some help? Enable live coach." className="truncate text-[13px] font-extrabold leading-tight">Want some help? Enable live coach.</span>
+        <span className="truncate text-[11px] leading-tight text-[#a9b6cf]">Sandra listens, keeps the script on screen, and suggests what to say next.</span>
+      </div>
+      <button type="button" role="switch" aria-checked={preference.enabled} aria-label="Enable live coach" data-testid="dialer-coach-toggle" onClick={() => onChange({ ...preference, enabled: !preference.enabled })} className="relative h-5 w-[38px] shrink-0 rounded-full border-[1.5px] border-[rgba(120,176,255,0.7)] p-0 outline-none focus-visible:ring-2 focus-visible:ring-[rgba(46,128,255,0.5)]" style={{ background: preference.enabled ? "linear-gradient(180deg, rgba(28,46,82,0.9), rgba(14,24,46,0.95))" : "rgba(255,255,255,0.04)", boxShadow: preference.enabled ? "0 0 14px rgba(46,128,255,0.45)" : "none" }}>
+        <span className="absolute top-[1.5px] size-3.5 rounded-full transition-[left,background-color] duration-150 ease-[ease]" style={{ left: preference.enabled ? 18 : 2, backgroundColor: preference.enabled ? "#78b0ff" : "#5b6479" }} />
+      </button>
+    </div>
+    <Collapsible.Panel className="h-[var(--collapsible-panel-height)] overflow-hidden opacity-100 transition-[height,opacity] duration-150 ease-[ease] data-ending-style:h-0 data-ending-style:opacity-0 data-starting-style:h-0 data-starting-style:opacity-0">
+      <div className="pt-1.5">
+        <Select value={selectedScript.id} onValueChange={(id) => { if (id && COACH_SCRIPTS.some((script) => script.id === id)) onChange({ ...preference, scriptId: id }); }}>
+          <SelectTrigger aria-label="Coach script" data-testid="dialer-coach-script" className="w-full rounded-[7px] border-[1.5px] border-[rgba(120,176,255,0.7)] px-2 py-1 text-[11px] font-bold text-[#f3f6fb] data-[size=default]:h-[26px] focus-visible:ring-[rgba(46,128,255,0.5)] [&_svg]:size-3 [&_svg]:text-[#7e889c]" style={{ background: "linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7))" }}>
+            <SelectValue className="min-w-0"><span className="truncate">{selectedScript.title}</span></SelectValue>
+            <span className="shrink-0 font-mono text-[10px] text-[#7e889c]">v{selectedScript.version}</span>
+          </SelectTrigger>
+          <SelectContent positionerClassName="z-[70]" alignItemWithTrigger={false} className="border border-[rgba(120,176,255,0.7)] bg-[#0c1426] text-[#f3f6fb]">
+            {COACH_SCRIPTS.map((script) => <SelectItem key={script.id} value={script.id} className="text-[11px] font-bold [&>*:first-child]:min-w-0 [&>*:first-child]:shrink"><span data-testid="coach-script-option-title" className="min-w-0 flex-1 truncate">{script.title}</span><span data-testid="coach-script-option-version" className="shrink-0 font-mono text-[10px] text-[#7e889c]">v{script.version}</span></SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
+    </Collapsible.Panel>
+    </div>
+  </Collapsible.Root>;
 }
 
 function CallerIdControl({ callerIds, state, error, selected, onChange, onRetry }: { callerIds: JitterCallerId[]; state: CallerIdState; error: string | null; selected: string | null; onChange: (phoneE164: string) => void; onRetry: () => void }) {

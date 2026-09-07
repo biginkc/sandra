@@ -4,6 +4,10 @@ type StatusCallback = (status: string) => void;
 const broadcastCallbacks = new Set<BroadcastCallback>();
 const statusCallbacks = new Set<StatusCallback>();
 
+export function hasSyntheticCoachSubscriber(): boolean {
+  return broadcastCallbacks.size > 0;
+}
+
 export function emitSyntheticCoachStatus(status: string): void {
   for (const callback of statusCallbacks) callback(status);
 }

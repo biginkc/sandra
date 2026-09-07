@@ -1,16 +1,17 @@
+import type { DialerRecent, DialerSearchResult } from "@/lib/dialer/actions";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { completeSoftphoneCall, loadCallerIds, loadDialerRecents, mintStartIntent, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, searchDialerLeads, createTransport, jitterEnabled, transportEnabled, playDtmfTone } = vi.hoisted(() => ({
   completeSoftphoneCall: vi.fn(),
-  loadDialerRecents: vi.fn(async () => ({ ok: true, data: [] })),
+  loadDialerRecents: vi.fn(async () => ({ ok: true, data: [] as DialerRecent[] })),
   prepareLeadCall: vi.fn(),
   prepareManualCall: vi.fn(),
   resumeFailedSoftphoneCall: vi.fn(),
   createTransport: vi.fn(),
   transportEnabled: vi.fn(),
-  searchDialerLeads: vi.fn(async () => ({ ok: true, data: [] })),
+  searchDialerLeads: vi.fn(async () => ({ ok: true, data: [] as DialerSearchResult[] })),
   playDtmfTone: vi.fn(),
   loadCallerIds: vi.fn(),
   mintStartIntent: vi.fn(),
@@ -1092,6 +1093,8 @@ describe("SoftphoneProvider coach UI flag", () => {
       occupancy: null,
     });
     window.localStorage.clear();
+    // Existing coach lifecycle tests explicitly opt in; new reps default off.
+    window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled: true, scriptId: "closr-outbound" }));
     prepareLeadCall.mockResolvedValue({
       ok: true,
       data: {
@@ -1106,6 +1109,159 @@ describe("SoftphoneProvider coach UI flag", () => {
         startedAt: "2026-08-21T15:00:00.000Z",
       },
     });
+  });
+
+  it("defaults off, reveals the script picker with the keyboard, and persists both values across remount", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    window.localStorage.clear();
+    const user = userEvent.setup();
+    const first = render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+    const toggle = screen.getByRole("switch", { name: "Enable live coach" });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(screen.queryByTestId("dialer-coach-script")).not.toBeInTheDocument();
+    toggle.focus();
+    await user.keyboard(" ");
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    const picker = await screen.findByRole("combobox", { name: "Coach script" });
+    expect(picker).toHaveTextContent("CLOSR Outbound Sales Script");
+    expect(picker).toHaveTextContent("v1.2.0");
+    await user.click(picker);
+    await user.click(await screen.findByRole("option"));
+    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)).toEqual({ enabled: true, scriptId: "closr-outbound" });
+    first.unmount();
+    const second = render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByTestId("dialer-coach-toggle"));
+    await waitFor(() => expect(screen.queryByTestId("dialer-coach-script")).not.toBeInTheDocument());
+    second.unmount();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "false");
+  });
+
+  it.each([undefined, "0", "true"])("hides the preference when coach flag is %s", async (flag) => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", flag);
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await userEvent.setup().click(screen.getByTestId("header-dialer-button"));
+    expect(screen.queryByTestId("dialer-coach-toggle")).not.toBeInTheDocument();
+  });
+
+  it("hides the preference when calling is disabled", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "disabled");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await userEvent.setup().click(screen.getByTestId("header-dialer-button"));
+    expect(screen.queryByTestId("dialer-coach-toggle")).not.toBeInTheDocument();
+  });
+
+  it.each(["broken-json", "null", "1", "0", '{"enabled":"true"}'])("defaults safely off for malformed or legacy storage: %s", async (saved) => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    window.localStorage.setItem("sandra.softphone.coach.v1", saved);
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await userEvent.setup().click(screen.getByTestId("header-dialer-button"));
+    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("falls back to the registered script for an unknown saved id", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled: true, scriptId: "removed" }));
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await userEvent.setup().click(screen.getByTestId("header-dialer-button"));
+    expect(screen.getByTestId("dialer-coach-script")).toHaveTextContent("CLOSR Outbound Sales Script");
+  });
+
+  it("keeps the in-memory switch working when storage reads and writes throw", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const read = vi.spyOn(window.localStorage, "getItem").mockImplementation(() => { throw new Error("blocked"); });
+    const write = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => { throw new Error("blocked"); });
+    try {
+      render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+      const user = userEvent.setup();
+      await user.click(screen.getByTestId("header-dialer-button"));
+      expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "false");
+      await user.click(screen.getByTestId("dialer-coach-toggle"));
+      expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "true");
+    } finally { read.mockRestore(); write.mockRestore(); }
+  });
+
+  it.each(["lead", "manual", "suggestion", "recent"])("keeps coaching hidden but running for the %s entry point, then reopens and opts in", async (entry) => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled: false, scriptId: "closr-outbound" }));
+    prepareManualCall.mockImplementation(() => prepareLeadCall());
+    searchDialerLeads.mockResolvedValue({ ok: true, data: [{ propertyId: "property-1", name: "Softphone Lead", detail: "1 Main St", contactId: "contact-1", phoneE164: "+18165550123", address: "1 Main St", state: "MO" }] });
+    loadDialerRecents.mockResolvedValue({ ok: true, data: [{ id: "recent-1", propertyId: "property-1", phoneE164: "+18165550123", name: "Softphone Lead", detail: "1 Main St", when: "Today", contactId: "contact-1", missed: false }] });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /><SoftphoneLeadButton lead={COACH_LEAD} /></SoftphoneProvider>);
+    if (entry === "lead") await user.click(screen.getByTestId("call-lead-button"));
+    else {
+      await user.click(screen.getByTestId("header-dialer-button"));
+      await screen.findByTestId("caller-id-readonly");
+      if (entry === "manual") {
+        await user.type(screen.getByTestId("dialer-input"), "8165550123");
+        await user.click(screen.getByTestId("dialer-call-manual"));
+      } else if (entry === "suggestion") {
+        await user.type(screen.getByTestId("dialer-input"), "Soft");
+        await user.click(await screen.findByTestId("dialer-suggestion"));
+      } else await user.click(await screen.findByTestId("dialer-recent"));
+    }
+    await screen.findByTestId("reopen-coach");
+    expect(screen.getByTestId("softphone-popover")).toBeInTheDocument();
+    expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
+    await waitFor(() => expect(coachChannels).toHaveLength(1));
+    act(() => latestCoachChannel()._broadcastHandler?.({ payload: { type: "transcript", speaker: "seller", text: "heard while hidden", isFinal: true, ts: "t2", scriptVersion: "1.2.0", matcherVersion: "3" } }));
+    await user.click(screen.getByTestId("reopen-coach"));
+    await screen.findByTestId("coach-live-view");
+    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("heard while hidden");
+    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)).toEqual({ enabled: true, scriptId: "closr-outbound" });
+    await user.click(screen.getByTestId("coach-collapse"));
+    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!).enabled).toBe(true);
+    expect(coachChannels).toHaveLength(1);
+  });
+
+  it.each([false, true])("preserves preference %s after wrap-up and applies it to the next call", async (enabled) => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled, scriptId: "closr-outbound" }));
+    completeSoftphoneCall.mockResolvedValue({ ok: true, data: {} });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /><SoftphoneLeadButton lead={COACH_LEAD} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await user.click(await screen.findByTestId(enabled ? "coach-hangup" : "call-hangup"));
+    await user.type(await screen.findByTestId("dispo-notes"), "Synthetic test call");
+    await user.click(screen.getByTestId("dispo-not-interested"));
+    await waitFor(() => expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument());
+    await user.click(screen.getByTestId("header-dialer-button"));
+    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", String(enabled));
+    await user.click(screen.getByLabelText("Close dialer"));
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId(enabled ? "coach-live-view" : "reopen-coach");
+    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!).enabled).toBe(enabled);
+  });
+
+  it("keeps a recovered active call collapsed when the saved preference is off", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
+    transportEnabled.mockReturnValue(true);
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    window.localStorage.clear();
+    const prepared = await prepareLeadCall();
+    window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({ handle: { id: "retained" }, target: prepared.data, startedAt: new Date().toISOString(), wrapToken: "retained-token" }));
+    const recover = vi.fn(async () => undefined);
+    const transport = { ...createTransport(), recover };
+    try {
+      render(<SoftphoneProvider transportFactory={() => transport}><SoftphoneHeaderButton /></SoftphoneProvider>);
+      await screen.findByTestId("reopen-coach");
+      expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
+      expect(recover).toHaveBeenCalled();
+      await waitFor(() => expect(coachChannels).toHaveLength(1));
+    } finally { window.sessionStorage.clear(); }
   });
 
   it("shows the full-screen coach view instead of the classic popover when the flag is on and the call goes live", async () => {

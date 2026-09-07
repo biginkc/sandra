@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import postcss from "postcss";
 
-type AudioStimulus = "readyNoAttach" | "frozenRtp" | "advancingRtp" | "providerTerminalConfirmed" | "loseHoldAck" | "confirmHealth" | "heldReconnect" | "holdReapplyFailure" | "rejectMute" | "rejectUnmute" | "rejectHold" | "rejectResume" | "providerHeldUpdate" | "providerActiveUpdate";
+type AudioStimulus = "seedTranscript" | "readyNoAttach" | "frozenRtp" | "advancingRtp" | "providerTerminalConfirmed" | "loseHoldAck" | "confirmHealth" | "heldReconnect" | "holdReapplyFailure" | "rejectMute" | "rejectUnmute" | "rejectHold" | "rejectResume" | "providerHeldUpdate" | "providerActiveUpdate";
 type BrowserErrorEvidence = { consoleErrors: string[]; pageErrors: string[] };
 
 let compiledCss = "";
@@ -73,13 +73,12 @@ async function mountCoach(page: Page): Promise<BrowserErrorEvidence> {
   }));
   await page.goto("http://synthetic.local/");
   await page.addScriptTag({ content: harnessBundle });
-  await page.waitForTimeout(100);
-  if (await page.getByTestId("coach-live-view").count() === 0) {
-    throw new Error(`Provider harness did not mount Coach: ${JSON.stringify(evidence)} body=${(await page.locator("body").innerText()).slice(0, 500)}`);
-  }
   await expect(page.getByTestId("coach-live-view")).toBeVisible();
   await expect(page.getByTestId("transport-state-history")).toContainText("audio_reconnect_required|live");
   await expect(page.getByTestId("transport-ready")).toHaveText("ready");
+  // Seed only after the consumer exists; a wall-clock delay can drop the event on CI.
+  await expect.poll(() => page.evaluate(() => window.coachAudioAcceptanceHarness.transcriptReady())).toBe(true);
+  await stimulate(page, "seedTranscript");
   return evidence;
 }
 
