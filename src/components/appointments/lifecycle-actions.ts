@@ -1,5 +1,6 @@
 "use server";
 
+import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 
@@ -54,11 +55,12 @@ async function loadTaskForNotification(
   supabase: Awaited<ReturnType<typeof createClient>>,
   taskId: string,
 ): Promise<TaskLookupRow | null> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("tasks")
     .select("org_id, title, due_at, related_property_id, contact_id")
     .eq("id", taskId)
     .maybeSingle();
+  if (error) throw error;
   return data ?? null;
 }
 
@@ -184,6 +186,8 @@ export async function completeAppointmentAction(
       taskId,
     );
     if (!unlocked.ok) return unlocked;
+    const trainingTask = await loadTaskForNotification(supabase, taskId);
+    await assertNotTrainingTarget(supabase, { propertyId: trainingTask?.related_property_id, contactId: trainingTask?.contact_id });
 
     const result = await completeAppointment(supabase, taskId, outcome);
     if (!result.ok) return result;
@@ -247,7 +251,9 @@ export async function cancelAppointmentAction(
       taskId,
     );
     if (!unlocked.ok) return unlocked;
-    const task = await loadTaskForNotification(supabase, taskId);
+    const trainingTask = await loadTaskForNotification(supabase, taskId);
+    await assertNotTrainingTarget(supabase, { propertyId: trainingTask?.related_property_id, contactId: trainingTask?.contact_id });
+    const task = trainingTask;
 
     const result = await cancelAppointment(supabase, taskId);
     if (!result.ok) return result;
@@ -350,7 +356,9 @@ export async function rescheduleAppointmentAction(
       input.taskId,
     );
     if (!unlocked.ok) return unlocked;
-    const task = await loadTaskForNotification(supabase, input.taskId);
+    const trainingTask = await loadTaskForNotification(supabase, input.taskId);
+    await assertNotTrainingTarget(supabase, { propertyId: trainingTask?.related_property_id, contactId: trainingTask?.contact_id });
+    const task = trainingTask;
 
     const result = await rescheduleAppointment(supabase, {
       taskId: input.taskId,
@@ -417,6 +425,8 @@ export async function reassignAppointmentAction(
       taskId,
     );
     if (!unlocked.ok) return unlocked;
+    const trainingTask = await loadTaskForNotification(supabase, taskId);
+    await assertNotTrainingTarget(supabase, { propertyId: trainingTask?.related_property_id, contactId: trainingTask?.contact_id });
 
     const result = await reassignAppointment(
       supabase,

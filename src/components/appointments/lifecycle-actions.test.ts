@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));
+
 const {
   afterCallbacks,
   afterMock,
@@ -310,7 +312,8 @@ describe("completeAppointmentAction", () => {
       data: { taskId: "task-1", status: "completed", outcome: "held" },
     });
     const supabase = await createClient();
-    (supabase.from as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+    const originalFrom = (supabase.from as ReturnType<typeof vi.fn>).getMockImplementation()!;
+    (supabase.from as ReturnType<typeof vi.fn>).mockImplementationOnce(originalFrom).mockImplementationOnce(() => {
       throw new Error("transient read failure");
     });
 
@@ -898,7 +901,8 @@ describe("reassignAppointmentAction", () => {
       },
     });
     const supabase = await createClient();
-    (supabase.from as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+    const originalFrom = (supabase.from as ReturnType<typeof vi.fn>).getMockImplementation()!;
+    (supabase.from as ReturnType<typeof vi.fn>).mockImplementationOnce(originalFrom).mockImplementationOnce(() => {
       throw new Error("transient read failure");
     });
 

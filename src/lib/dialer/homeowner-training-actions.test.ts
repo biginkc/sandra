@@ -5,7 +5,7 @@ vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.client }));
 vi.mock("@/lib/sequences/enrollment", () => ({ pausePropertyEnrollments: mocks.pause, resumeByProperty: mocks.resume }));
 vi.mock("@/app/(dashboard)/messages/dispo-actions", () => ({ setOutreachDispo: mocks.disposition }));
 vi.mock("@/components/appointments/book-appointment-action", () => ({ bookAppointment: mocks.appointment, getMemberTimezone: vi.fn() }));
-import { prepareManualCall, completeSoftphoneCall, loadDialerRecents } from "./actions";
+import { prepareLeadCall, prepareManualCall, completeSoftphoneCall, loadDialerRecents } from "./actions";
 const operator = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const phone = "+18165550199";
 const callId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -25,12 +25,28 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 function auth() { return { getUser: async () => ({ data: { user: { id: operator } }, error: null }) }; }
 describe("real training server actions", () => {
-  it("starts an unlinked training target at 1am without consulting CRM or pausing enrollments", async () => {
+  it("starts an unlinked training target at 1am with only a protected profile lookup", async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-07T06:00:00Z"));
-    const from = vi.fn(() => { throw new Error("Must not consult CRM"); });
+    const query = { select: () => query, eq: () => query, limit: async () => ({data: [], error: null}) };
+    const from = vi.fn(() => query);
     mocks.client.mockResolvedValue({ auth: auth(), from });
     expect(await prepareManualCall(phone)).toMatchObject({ ok: true, data: { propertyId: null, contactId: null, name: "Internal training — AI homeowner" } });
-    expect(from).not.toHaveBeenCalled(); expect(mocks.pause).not.toHaveBeenCalled();
+    expect(from).toHaveBeenCalledExactlyOnceWith("properties"); expect(mocks.pause).not.toHaveBeenCalled();
+  });
+  it("uses the existing lead Call with Jordan display fields and null customer references", async () => {
+    const lead = {id: "training-property", is_training: true, address: "Fictional lane", state: "MO", homeowner_contact_id: "training-contact", homeowner: {id: "training-contact", first_name: "Jordan", last_name: "Ellis", phone_1: phone}};
+    const query = { select: () => query, eq: () => query, maybeSingle: async () => ({data: lead, error: null}) };
+    mocks.client.mockResolvedValue({auth: auth(), from: () => query});
+    expect(await prepareLeadCall(lead.id)).toMatchObject({ok: true, data: {name: "Jordan Ellis", address: "Fictional lane", phoneE164: phone, propertyId: null, contactId: null}});
+    expect(mocks.pause).not.toHaveBeenCalled(); expect(mocks.resume).not.toHaveBeenCalled();
+  });
+  it.each(["marked-wrong-number", "unmarked-reserved-number", "disabled"])("refuses lead Call %s without customer side effects", async (kind) => {
+    if(kind === "disabled") vi.stubEnv("HOMEOWNER_TRAINING_ENABLED", "false");
+    const lead = {id: "training-property", is_training: kind !== "unmarked-reserved-number", address: "Fictional lane", state: "MO", homeowner_contact_id: "training-contact", homeowner: {first_name: "Jordan", last_name: "Ellis", phone_1: kind === "marked-wrong-number" ? "+12025550198" : phone}};
+    const query = {select: () => query, eq: () => query, maybeSingle: async () => ({data: lead,error: null})};
+    mocks.client.mockResolvedValue({auth: auth(),from: () => query});
+    expect((await prepareLeadCall(lead.id)).ok).toBe(false);
+    expect(mocks.pause).not.toHaveBeenCalled(); expect(mocks.resume).not.toHaveBeenCalled();
   });
   it("a disabled reserved DID never falls back to CRM matching", async () => {
     vi.stubEnv("HOMEOWNER_TRAINING_ENABLED", "false");

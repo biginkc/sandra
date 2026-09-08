@@ -1,5 +1,6 @@
 "use server";
 
+import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { revalidatePath } from "next/cache";
 
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
@@ -88,6 +89,7 @@ export async function setSkipTraceDisabled(
         error: { code: "UNAUTHENTICATED", message: "Not signed in" },
       };
     }
+    await assertNotTrainingTarget(supabase, { propertyId });
     const { data: updated, error } = await supabase
       .from("properties")
       .update({
@@ -145,6 +147,7 @@ export async function setAiResponderDisabled(
         error: { code: "UNAUTHENTICATED", message: "Not signed in" },
       };
     }
+    await assertNotTrainingTarget(supabase, { propertyId });
     const { data: updated, error } = await supabase
       .from("properties")
       .update({

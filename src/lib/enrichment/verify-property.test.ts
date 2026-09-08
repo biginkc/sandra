@@ -20,6 +20,7 @@ import { verifyPropertyAddress } from "./verify-property";
 
 function makeClient(options?: {
   locked?: boolean;
+  training?: boolean;
   claim?: boolean;
   updateError?: string;
   orgId?: string;
@@ -34,6 +35,7 @@ function makeClient(options?: {
     state: "MO",
     zip: "64101",
     is_dnc_locked: options?.locked ?? false,
+    is_training: options?.training ?? false,
   };
   return {
     rpc: vi.fn((fn: string) => {
@@ -264,4 +266,15 @@ describe("verifyPropertyAddress paid boundary", () => {
     expect(mocks.lookupCassCache).not.toHaveBeenCalled();
     expect(mocks.verify).not.toHaveBeenCalled();
   });
+});
+
+
+it("rejects training before cache lookup, claim, or provider call", async () => {
+  const client = makeClient({ training: true, claim: true });
+  const result = await verifyPropertyAddress(client as never, "property-1", "org-1");
+  expect(result).toMatchObject({ status: "failed", error: "Customer actions are unavailable for an internal training lead." });
+  expect(mocks.lookupCassCache).not.toHaveBeenCalled();
+  expect(mocks.writeCassCache).not.toHaveBeenCalled();
+  expect(mocks.verify).not.toHaveBeenCalled();
+  expect(client.rpc).not.toHaveBeenCalled();
 });

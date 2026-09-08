@@ -1,4 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { assertNotTrainingTarget } from "@/lib/leads/training";
+
+vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));
 
 // Mock every side-dependency sendSmsToContact touches *before* the fresh
 // automated-suppression re-check, so the test can drive the pipeline up to
@@ -242,3 +245,13 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
     expect(outcome).toMatchObject({ status: "sent", messageId: "msg-2" });
   });
 });
+
+ it("refuses training before queue creation or provider resolution", async () => {
+  vi.mocked(assertNotTrainingTarget).mockRejectedValueOnce(new Error("Internal training"));
+  vi.mocked(getMessagingProvider).mockClear();
+  const client = fakeSupabase({});
+  const fromSpy = vi.spyOn(client, "from");
+  await expect(sendSmsToContact(client, { origin: "manual", contactId: CONTACT_ID, propertyId: PROPERTY_ID, body: "Practice", queueOnly: true })).rejects.toThrow("Internal training");
+  expect(getMessagingProvider).not.toHaveBeenCalled();
+  expect(fromSpy).not.toHaveBeenCalled();
+ });

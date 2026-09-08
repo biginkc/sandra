@@ -8,6 +8,7 @@ import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { formatPhoneE164, toPhoneE164 } from "@/lib/phone-format";
 import { createClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/types";
+import { loadHomeownerTrainingProfile } from "@/lib/leads/homeowner-training-profile";
 import { repDisplayName } from "@/lib/coach/rep-display-name";
 import { getMemberTimezone } from "@/components/appointments/book-appointment-action";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
@@ -26,6 +27,7 @@ type LeadRow = {
   city: string;
   state: string;
   is_dnc_locked: boolean;
+  is_training: boolean;
   homeowner_contact_id: string | null;
   homeowner: Contact | null;
 };
@@ -75,7 +77,7 @@ function leadTarget(lead: LeadRow, preferredPhone?: string): SoftphoneTarget | n
 async function getLead(supabase: Awaited<ReturnType<typeof createClient>>, propertyId: string): Promise<LeadRow | null> {
   const { data, error } = await supabase
     .from("properties")
-    .select("id, address, city, state, is_dnc_locked, homeowner_contact_id, homeowner:contacts!properties_homeowner_contact_id_fkey(id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)")
+    .select("id, address, city, state, is_dnc_locked, is_training, homeowner_contact_id, homeowner:contacts!properties_homeowner_contact_id_fkey(id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)")
     .eq("id", propertyId)
     .maybeSingle();
   if (error) throw new Error(error.message);
@@ -89,7 +91,14 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
     if (!lead) return { ok: false, error: "Lead not found." };
     const target = leadTarget(lead);
     if (!target || !lead.homeowner) return { ok: false, error: "This lead has no callable phone number." };
-    if (isHomeownerTrainingNumber(target.phoneE164)) return { ok: false, error: "Use the manual dialer for internal training." };
+    if (lead.is_training) {
+      if (!isHomeownerTrainingNumber(target.phoneE164)) return { ok: false, error: "The training lead phone does not match the dedicated training number." };
+      const { data: { user }, error } = await supabase.auth.getUser();
+      if (error || !user) return { ok: false, error: "Not signed in." };
+      if (!canCallHomeownerTraining(target.phoneE164, user.id)) return { ok: false, error: "Internal training is unavailable for this operator." };
+      return { ok: true, data: { ...target, propertyId: null, contactId: null, repName: repDisplayName(user) } };
+    }
+    if (isHomeownerTrainingNumber(target.phoneE164)) return { ok: false, error: "This number is reserved for the internal training lead." };
     const eligible = classifyItem({
       property: { id: lead.id, state: lead.state, is_dnc_locked: lead.is_dnc_locked },
       contact: {
@@ -145,9 +154,13 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
       const { data: { user }, error } = await supabase.auth.getUser();
       if (error || !user) return { ok: false, error: "Not signed in." };
       if (!canCallHomeownerTraining(phoneE164, user.id)) return { ok: false, error: "Internal training is unavailable for this operator." };
+      const profile = await loadHomeownerTrainingProfile(supabase, phoneE164);
+      const name = profile?.homeowner?.entity_name?.trim()
+        || [profile?.homeowner?.first_name, profile?.homeowner?.last_name].filter(Boolean).join(" ")
+        || HOMEOWNER_TRAINING_LABEL;
       return { ok: true, data: { propertyId: null, contactId: null, phoneE164,
-        maskedPhone: formatPhoneE164(phoneE164) ?? phoneE164, name: HOMEOWNER_TRAINING_LABEL,
-        address: null, state: "MO", startedAt: new Date().toISOString(), repName: repDisplayName(user) } };
+        maskedPhone: formatPhoneE164(phoneE164) ?? phoneE164, name,
+        address: profile?.address ?? null, state: profile?.state ?? "MO", startedAt: new Date().toISOString(), repName: repDisplayName(user) } };
     }
     const contactSelect = "id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out";
     const contactResults = await Promise.all([
@@ -170,7 +183,7 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
     const propertyRows = contactIds.length
       ? await supabase
         .from("properties")
-        .select("id, address, city, state, is_dnc_locked, homeowner_contact_id, homeowner:contacts!properties_homeowner_contact_id_fkey(id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)")
+        .select("id, address, city, state, is_dnc_locked, is_training, homeowner_contact_id, homeowner:contacts!properties_homeowner_contact_id_fkey(id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)")
         .in("homeowner_contact_id", contactIds)
       : { data: [], error: null };
     if (propertyRows.error) throw new Error(propertyRows.error.message);
@@ -178,6 +191,7 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
       .map((row) => row as unknown as LeadRow)
       .filter((lead) => phones(lead.homeowner).some((value) => toPhoneE164(value) === phoneE164));
 
+    if (matchingLeads.some((lead) => lead.is_training)) return { ok: false, error: "The training lead phone does not match the dedicated training number." };
     const hasBlockedMatch = [...contacts.values()].some((contact) => contact.do_not_contact)
       || matchingLeads.some((lead) => lead.is_dnc_locked || lead.homeowner?.do_not_contact);
     if (hasBlockedMatch) {
@@ -241,14 +255,14 @@ export async function searchDialerLeads(query: string): Promise<SoftphoneActionR
     const digits = normalized.replace(/\D/g, "");
     const escaped = normalized.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
     const [propertiesResult, contactsResult] = await Promise.all([
-      supabase.from("properties").select("id, address, city, state, is_dnc_locked, homeowner_contact_id, homeowner:contacts!properties_homeowner_contact_id_fkey(id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)").eq("is_dnc_locked", false).or(`address.ilike.%${escaped}%,city.ilike.%${escaped}%,state.ilike.%${escaped}%`).limit(12),
+      supabase.from("properties").select("id, address, city, state, is_dnc_locked, is_training, homeowner_contact_id, homeowner:contacts!properties_homeowner_contact_id_fkey(id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)").eq("is_dnc_locked", false).or(`address.ilike.%${escaped}%,city.ilike.%${escaped}%,state.ilike.%${escaped}%`).limit(12),
       supabase.from("contacts").select("id").or(`first_name.ilike.%${escaped}%,last_name.ilike.%${escaped}%,entity_name.ilike.%${escaped}%${digits.length >= 3 ? `,phone_1.ilike.%${digits}%,phone_2.ilike.%${digits}%,phone_3.ilike.%${digits}%` : ""}`).limit(12),
     ]);
     if (propertiesResult.error) throw propertiesResult.error;
     if (contactsResult.error) throw contactsResult.error;
     const contactIds = (contactsResult.data ?? []).map((row) => row.id);
     const byContact = contactIds.length
-      ? await supabase.from("properties").select("id, address, city, state, is_dnc_locked, homeowner_contact_id, homeowner:contacts!properties_homeowner_contact_id_fkey(id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)").eq("is_dnc_locked", false).in("homeowner_contact_id", contactIds).limit(12)
+      ? await supabase.from("properties").select("id, address, city, state, is_dnc_locked, is_training, homeowner_contact_id, homeowner:contacts!properties_homeowner_contact_id_fkey(id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)").eq("is_dnc_locked", false).in("homeowner_contact_id", contactIds).limit(12)
       : { data: [], error: null };
     if (byContact.error) throw byContact.error;
     const rows = new Map<string, LeadRow>();

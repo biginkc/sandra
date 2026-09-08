@@ -1,5 +1,7 @@
 "use server";
 
+import { loadHomeownerTrainingProfile, JORDAN_MOTIVATION } from "@/lib/leads/homeowner-training-profile";
+import { isHomeownerTrainingNumber, canCallHomeownerTraining } from "@/lib/dialer/homeowner-training";
 import { reportError } from "@/lib/errors/report";
 import { createClient } from "@/lib/supabase/server";
 import { repDisplayName, repFileNumberIdentity } from "./rep-display-name";
@@ -85,7 +87,12 @@ export async function loadCoachCallContext(input: {
     throw new Error(`Could not load lead details for the coach: ${leadResult.error.message}`);
   }
 
-  const lead = leadResult.data as unknown as CoachLeadRow | null;
+  const training = input.sellerPhoneE164 != null && isHomeownerTrainingNumber(input.sellerPhoneE164);
+  if (training && (!user || !canCallHomeownerTraining(input.sellerPhoneE164!, user.id))) {
+    throw new Error("Internal training is unavailable for this operator.");
+  }
+  const trainingProfile = training ? await loadHomeownerTrainingProfile(supabase, input.sellerPhoneE164!) : null;
+  const lead = (training ? trainingProfile : leadResult.data) as unknown as CoachLeadRow | null;
   const authenticatedRepName = repFileNumberIdentity(user);
 
   return {
@@ -100,8 +107,8 @@ export async function loadCoachCallContext(input: {
     // {motivation} would put "warm" into a sentence expecting "downsizing" or
     // "job relocation". Until a real motivation/reason text column exists,
     // this always renders as a placeholder chip rather than the wrong value.
-    motivation: null,
-    leadId: lead ? input.propertyId : null,
+    motivation: trainingProfile ? JORDAN_MOTIVATION : null,
+    leadId: training ? null : lead ? input.propertyId : null,
     sellerPhoneE164: input.sellerPhoneE164,
     // No cold-caller field exists in Sandra's schema yet — always a
     // placeholder chip until one is added.

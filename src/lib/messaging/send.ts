@@ -1,3 +1,4 @@
+import { assertNotTrainingTarget } from "@/lib/leads/training";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizePhone } from "@/lib/csv/normalize";
@@ -206,6 +207,7 @@ export async function sendSmsToContact(
   supabase: SupabaseClient<Database>,
   input: SendSmsInput,
 ): Promise<SendSmsOutcome> {
+  await assertNotTrainingTarget(supabase, { propertyId: input.propertyId, contactId: input.contactId });
   // 1. Resolve provider.
   let provider;
   try {
@@ -705,6 +707,7 @@ export async function releaseQueuedMessage(
     return { status: "db_error", error: fetchError.message };
   }
   if (!msg) return { status: "contact_not_found" };
+  await assertNotTrainingTarget(supabase, { propertyId: msg.property_id, contactId: msg.contact_id });
   // Only queued rows can be released. Anything else is likely a
   // double-click or a stale auto-send tick — treat as a no-op by
   // returning the terminal state instead of re-sending.

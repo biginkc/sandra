@@ -105,7 +105,7 @@ export async function verifyPropertyAddress(
 ): Promise<VerifyPropertyOutcome> {
   const { data: property, error: fetchError } = await supabase
     .from("properties")
-    .select("id, org_id, address, city, state, zip, is_dnc_locked")
+    .select("id, org_id, address, city, state, zip, is_dnc_locked, is_training")
     .eq("id", propertyId)
     .eq("org_id", expectedOrgId)
     .maybeSingle();
@@ -115,6 +115,9 @@ export async function verifyPropertyAddress(
   }
   if (!property || property.org_id !== expectedOrgId) {
     return { status: "not_found", propertyId };
+  }
+  if (property.is_training) {
+    return { status: "failed", propertyId, error: "Customer actions are unavailable for an internal training lead." };
   }
   if (property.is_dnc_locked) return { status: "dnc_skipped", propertyId };
 

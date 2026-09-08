@@ -1,5 +1,6 @@
 "use server";
 
+import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
@@ -400,6 +401,7 @@ async function qualifyLead(
 ): Promise<Result<{ alreadyQualified: boolean }>> {
   try {
     const supabase = await createClient();
+    await assertNotTrainingTarget(supabase, { propertyId });
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
     if (!unlocked.ok) return unlocked;
 
@@ -495,6 +497,7 @@ export async function revertToProspect(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
+    await assertNotTrainingTarget(supabase, { propertyId });
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
     if (!unlocked.ok) return unlocked;
     const { data: current, error: lookupErr } = await supabase
@@ -1760,6 +1763,7 @@ export async function updatePropertyStatus(
 
   try {
     const supabase = await createClient();
+    await assertNotTrainingTarget(supabase, { propertyId });
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
     if (!unlocked.ok) return unlocked;
     const { data, error } = await supabase
@@ -1889,6 +1893,7 @@ export async function createLeadTaskAction(
 
   try {
     const supabase = await createClient();
+    await assertNotTrainingTarget(supabase, { propertyId });
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
     if (!unlocked.ok) return unlocked;
     const {
@@ -2115,6 +2120,7 @@ export async function sendSmsFromLead(
 
   try {
     const supabase = await createClient();
+    await assertNotTrainingTarget(supabase, { propertyId });
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
     if (!unlocked.ok) return unlocked;
 
