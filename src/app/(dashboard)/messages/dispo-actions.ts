@@ -1,5 +1,6 @@
 "use server";
 
+import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { revalidatePath } from "next/cache";
 
 import { recordConsentEvent } from "@/lib/messaging/consent";
@@ -117,6 +118,12 @@ export async function setOutreachDispo(
 
   if (propErr || !prop) {
     return { ok: false, error: propErr?.message ?? "Property not found" };
+  }
+
+  try {
+    await assertNotTrainingTarget(supabase, { propertyId });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Training eligibility could not be verified." };
   }
 
   const now = new Date();
@@ -275,6 +282,7 @@ export async function moveMessageThreadToLead(
   }
 
   try {
+    await assertNotTrainingTarget(supabase, { propertyId });
     const outcome = await qualifyProperty(supabase, propertyId, user.id);
     switch (outcome.status) {
       case "qualified":

@@ -2267,6 +2267,7 @@ export type Database = {
           homeowner_contact_id: string | null
           id: string
           is_dnc_locked: boolean
+          is_training: boolean
           is_residential: boolean | null
           is_seasonal: boolean | null
           is_vacant: boolean | null
@@ -2330,6 +2331,7 @@ export type Database = {
           homeowner_contact_id?: string | null
           id?: string
           is_dnc_locked?: boolean
+          is_training?: boolean
           is_residential?: boolean | null
           is_seasonal?: boolean | null
           is_vacant?: boolean | null
@@ -2393,6 +2395,7 @@ export type Database = {
           homeowner_contact_id?: string | null
           id?: string
           is_dnc_locked?: boolean
+          is_training?: boolean
           is_residential?: boolean | null
           is_seasonal?: boolean | null
           is_vacant?: boolean | null

@@ -1,3 +1,4 @@
+import { assertNotTrainingTarget } from "@/lib/leads/training";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { getConsentState } from "@/lib/messaging/consent";
@@ -43,6 +44,7 @@ export async function enrollLead(
     deferEvent?: boolean;
   },
 ): Promise<EnrollmentOutcome> {
+  await assertNotTrainingTarget(client, { propertyId: params.propertyId });
   // Load sequence + first step (one round-trip via nested select).
   const { data: seq, error: seqErr } = await client
     .from("sequences")
@@ -235,6 +237,7 @@ export async function resumeByProperty(
   client: SupabaseClient<Database>,
   params: { propertyId: string; actor?: SequenceEventActor },
 ): Promise<{ resumed: number }> {
+  await assertNotTrainingTarget(client, { propertyId: params.propertyId });
   const { data: resumedRows, error } = await client
     .from("sequence_enrollments")
     .update({
@@ -357,6 +360,7 @@ export async function resumeEnrollment(
     .maybeSingle();
   if (loadErr) return { status: "failed", message: loadErr.message };
   if (!enrollment) return { status: "failed", message: "Enrollment not found" };
+  await assertNotTrainingTarget(client, { propertyId: enrollment.property_id });
   if (enrollment.status !== "paused") return { status: "not_paused" };
 
   const { data: currentStep, error: stepErr } = await client

@@ -1,4 +1,7 @@
+import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));
 
 import { ProviderError } from "@/lib/errors/classes";
 import { classifyProviderFailure } from "@/lib/esign/provider-failure";
@@ -389,4 +392,15 @@ describe("shared provider failure classification", () => {
       });
     },
   );
+});
+
+it("rejects training before looking up signer or provider configuration", async () => {
+  vi.mocked(assertNotTrainingTarget).mockRejectedValueOnce(new Error("Internal training"));
+  const builder = { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn().mockResolvedValue({ data: { id: "training" }, error: null }) };
+  builder.select.mockReturnValue(builder);
+  builder.eq.mockReturnValue(builder);
+  const from = vi.fn().mockReturnValue(builder);
+  supabaseMocks.createAdminClient.mockReturnValueOnce({ from });
+  await expect(createLeadEsignRepository().loadLeadSendContext({ actor: { orgId: "org-1", userId: "user-1", role: "owner" }, propertyId: "training" })).rejects.toThrow("Internal training");
+  expect(from.mock.calls).toEqual([["properties"]]);
 });

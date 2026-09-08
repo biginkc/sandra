@@ -152,3 +152,6 @@ describe("lead AI actions ledger", () => {
     });
   }
 });
+
+// Ordinary-record unit fixtures isolate the independently tested training lookup.
+vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));

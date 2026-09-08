@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { assertNotTrainingTarget } from "@/lib/leads/training";
+
+vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));
 
 const {
   afterCallbacks,
@@ -1253,3 +1256,11 @@ describe("listBookingAssignees", () => {
     if (!result.ok) expect(result.error.code).toBe("AMBIGUOUS_ORG");
   });
 });
+
+ it("refuses a training appointment before booking or notifications", async () => {
+  vi.mocked(assertNotTrainingTarget).mockRejectedValueOnce(new Error("Internal training"));
+  const result = await bookAppointment(VALID_INPUT);
+  expect(result.ok).toBe(false);
+  expect(pausePropertyEnrollments).not.toHaveBeenCalled();
+  expect(dispatchTaskAssigned).not.toHaveBeenCalled();
+ });

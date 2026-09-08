@@ -187,7 +187,10 @@ export default async function LeadDetailPage({
       />
     );
   }
-  const esign = await loadLeadEsignPageModel(lead.id);
+  const training = lead.is_training;
+  const esign: Awaited<ReturnType<typeof loadLeadEsignPageModel>> = training
+    ? { blockers: ["sending_disabled"], contracts: [], files: [], contractsError: null, filesError: null }
+    : await loadLeadEsignPageModel(lead.id);
   const homeownerSmsChoice = selectBestSmsPhone(lead.homeowner);
   const homeownerSmsPhone = homeownerSmsChoice?.phone ?? null;
   const homeownerContactId = lead.homeowner?.id ?? null;
@@ -616,22 +619,22 @@ export default async function LeadDetailPage({
         restrictionLabel={smsPresentation.consentLabel}
         restrictionDetail={smsPresentation.consentDetail}
       >
-        <SmsComposer
+        <fieldset disabled={training} inert={training || undefined} className="contents"><SmsComposer
           propertyId={lead.id}
           homeownerContactId={lead.homeowner?.id ?? null}
           homeownerPhone={homeownerSmsPhone}
           homeownerName={homeownerName}
           preferredFromNumber={preferredFromNumber}
           templates={templateOptions}
-        />
+        /></fieldset>
       </SmsEntryPointGate>
-      <BookAppointmentPopover
+      <fieldset disabled={training} inert={training || undefined} className="contents"><BookAppointmentPopover
         propertyId={lead.id}
         contactId={lead.homeowner?.id ?? undefined}
         subjectLabel={lead.address}
         currentUserId={sessionUser?.id ?? null}
         triggerLabel="Book appt"
-      />
+      /></fieldset>
       {zillowHref ? (
         <a
           href={zillowHref}
@@ -650,14 +653,14 @@ export default async function LeadDetailPage({
           <ExternalLink className="ml-1 h-4 w-4" />
         </a>
       ) : null}
-      <SendForSignature
+      <fieldset disabled={training} inert={training || undefined} className="contents"><SendForSignature
         propertyId={lead.id}
         initialBlockers={esign.blockers}
         preflightAction={loadLeadEsignPreflightAction}
         sendAction={sendContractAction}
-      />
+      /></fieldset>
       {!lead.homeowner || !lead.homeowner.phone_1 ? (
-        <SkipTraceButton propertyId={lead.id} />
+        <fieldset disabled={training} inert={training || undefined} className="contents"><SkipTraceButton propertyId={lead.id} /></fieldset>
       ) : null}
       <span className="border-border inline-flex overflow-hidden rounded-full border [&_[data-slot=button]]:rounded-none [&_[data-slot=button]]:border-0">
         {prevId ? (
@@ -719,27 +722,28 @@ export default async function LeadDetailPage({
         actions={heroActions}
       />
       <DealSnapshotStrip lead={lead} />
+      {training ? <Badge variant="secondary">Internal training · Fictional homeowner</Badge> : null}
 
       <LeadIdentityActions
         workingState={
           <>
-            <LeadStatusWidget
+            <fieldset disabled={training} inert={training || undefined} className="contents"><LeadStatusWidget
               propertyId={lead.id}
               initialStatus={lead.status as PropertyStatus}
               address={lead.address}
-            />
-            <LeadMotivationWidget
+            /></fieldset>
+            <fieldset disabled={training} inert={training || undefined} className="contents"><LeadMotivationWidget
               propertyId={lead.id}
               address={lead.address}
               initial={lead.motivation_level as MotivationLevel | null}
-            />
-            <LeadAssigneeWidget
+            /></fieldset>
+            <fieldset disabled={training} inert={training || undefined} className="contents"><LeadAssigneeWidget
               propertyId={lead.id}
               address={lead.address}
               initialAssigneeId={lead.assigned_user_id}
               initialAssigneeEmail={assigneeEmail}
               currentUserId={sessionUser?.id ?? null}
-            />
+            /></fieldset>
           </>
         }
         nextAction={
@@ -850,7 +854,7 @@ export default async function LeadDetailPage({
                 restrictionLabel={inlineSmsPresentation.consentLabel}
                 restrictionDetail={inlineSmsPresentation.consentDetail}
               >
-                <InlineReply
+                <fieldset disabled={training} inert={training || undefined} className="contents"><InlineReply
                   propertyId={lead.id}
                   homeownerContactId={lead.homeowner?.id ?? null}
                   homeownerPhone={inlineReplyPhone}
@@ -863,7 +867,7 @@ export default async function LeadDetailPage({
                       <AddNoteComposer propertyId={lead.id} compact />
                     ) : null
                   }
-                />
+                /></fieldset>
               </SmsEntryPointGate>
               {inlineSmsPresentation.smsRestricted || inlineReplyUnavailable ? (
                 <div className="mt-2 flex justify-end">
@@ -933,13 +937,13 @@ export default async function LeadDetailPage({
 
             <Section title="Tasks & appointments" id="set-next-action" compact>
               <div className="flex justify-end border-b border-border/60 p-3">
-                <BookAppointmentPopover
+                <fieldset disabled={training} inert={training || undefined} className="contents"><BookAppointmentPopover
                   propertyId={lead.id}
                   contactId={lead.homeowner?.id ?? undefined}
                   subjectLabel={lead.address}
                   currentUserId={sessionUser?.id ?? null}
                   triggerLabel="Book appointment"
-                />
+                /></fieldset>
               </div>
               <div id="lead-appointments" className="border-b border-border/60">
                 {openWorkError ? (
@@ -958,12 +962,12 @@ export default async function LeadDetailPage({
                   />
                 )}
               </div>
-              <LeadTaskWidget
+              <fieldset disabled={training} inert={training || undefined} className="contents"><LeadTaskWidget
                 propertyId={lead.id}
                 address={lead.address}
                 currentUserId={sessionUser?.id ?? null}
                 initialAssigneeId={lead.assigned_user_id}
-              />
+              /></fieldset>
             </Section>
 
             <Section title="Tags" compact>
@@ -982,25 +986,25 @@ export default async function LeadDetailPage({
 
             <Section title="Automation & enrichment" compact>
               <div className="flex flex-col items-stretch gap-2 text-xs [&_label]:min-h-9 [&_label]:justify-between [&_label]:border-0 [&_label]:px-0 sm:[&_label]:min-h-0 [&_button]:w-auto [&_button]:self-start">
-                <AiResponderToggle
+                <fieldset disabled={training} inert={training || undefined} className="contents"><AiResponderToggle
                   propertyId={lead.id}
                   initialDisabled={lead.ai_responder_disabled}
-                />
-                <SkipTraceToggle
+                /></fieldset>
+                <fieldset disabled={training} inert={training || undefined} className="contents"><SkipTraceToggle
                   propertyId={lead.id}
                   initialDisabled={lead.skip_trace_disabled}
-                />
+                /></fieldset>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-muted-foreground">
                     Address (CASS: {cassStatusLabel})
                   </span>
-                  <CassWidget
+                  <fieldset disabled={training} inert={training || undefined} className="contents"><CassWidget
                     propertyId={lead.id}
                     cassStatus={lead.cass_status}
-                  />
+                  /></fieldset>
                 </div>
                 <div className="bg-border/60 h-px" />
-                <EnrollInSequenceWidget propertyId={lead.id} />
+                <fieldset disabled={training} inert={training || undefined} className="contents"><EnrollInSequenceWidget propertyId={lead.id} /></fieldset>
               </div>
             </Section>
 
@@ -1150,10 +1154,10 @@ export default async function LeadDetailPage({
                     Destructive record actions are kept separate from daily lead
                     work.
                   </p>
-                  <DeleteLeadButton
+                  <fieldset disabled={training} inert={training || undefined} className="contents"><DeleteLeadButton
                     propertyId={lead.id}
                     address={lead.address}
-                  />
+                  /></fieldset>
                 </div>
               </div>
             </details>

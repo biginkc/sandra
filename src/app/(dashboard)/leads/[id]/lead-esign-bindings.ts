@@ -1,3 +1,4 @@
+import { assertNotTrainingTarget } from "@/lib/leads/training";
 import "server-only";
 
 import { randomUUID } from "node:crypto";
@@ -412,6 +413,7 @@ async function loadLeadSendContext({
     .maybeSingle();
   if (error) throw error;
   if (!property) return null;
+  await assertNotTrainingTarget(admin, { propertyId });
   const [contactResult, integrationResult, templatesResult] = await Promise.all(
     [
       property.homeowner_contact_id
@@ -634,6 +636,7 @@ async function loadRequest(
     .maybeSingle();
   if (error) throw error;
   if (!row) return null;
+  await assertNotTrainingTarget(admin, { propertyId: row.property_id });
   const [
     { data: templateRow, error: templateError },
     { data: signerRows, error: signerError },

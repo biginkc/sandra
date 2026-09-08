@@ -1258,3 +1258,6 @@ async function flushAfterCallbacks() {
   afterCallbacks.length = 0;
   await Promise.all(callbacks.map((callback) => callback()));
 }
+
+// Ordinary-record unit fixtures isolate the independently tested training lookup.
+vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));

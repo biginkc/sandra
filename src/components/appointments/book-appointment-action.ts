@@ -1,5 +1,6 @@
 "use server";
 
+import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 
@@ -320,6 +321,7 @@ export async function bookAppointment(
 
   try {
     const supabase = await createClient();
+    await assertNotTrainingTarget(supabase, { propertyId: input.propertyId, contactId: input.contactId });
     const {
       data: { user },
     } = await supabase.auth.getUser();
