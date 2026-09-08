@@ -133,7 +133,7 @@ describe("buildCoachSectionScriptBlock", () => {
       { leadSource: "cold_call", occupancy: null },
     );
     expect(opener?.branches[0].selected.key).toBe("cold_call");
-    expect(opener?.branches[0].selected.lines).toHaveLength(2);
+    expect(opener?.branches[0].selected.lines).toHaveLength(3);
 
     const offer = buildCoachSectionScriptBlock("offer.outcome-tracks", tokens);
     expect(offer?.branchOptions).toEqual([

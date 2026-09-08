@@ -577,3 +577,14 @@ test("mute, hold, keypad, hangup, and desktop/mobile surface ordering work throu
   expect(transcript!.y + transcript!.height).toBeLessThanOrEqual(script!.y + 1);
   expect(script!.y + script!.height).toBeLessThanOrEqual(recommendations!.y + 1);
 });
+
+test("includes the requested file-assignment passage in every opening path", async ({ page }) => {
+  await mountCoach(page);
+  const passage = page.getByTestId("current-section-script").getByText("So good news, it looks like I was assigned to your file", { exact: false });
+  for (const key of ["default", "cold_call", "fsbo", "sms", "d4d"]) {
+    await page.getByTestId(`variant-Opener-${key}`).click();
+    await passage.scrollIntoViewIfNeeded();
+    await expect(passage).toBeVisible();
+    await expect(page.getByTestId("current-section-script")).toContainText("to see if I can even do anything good to help ya!");
+  }
+});

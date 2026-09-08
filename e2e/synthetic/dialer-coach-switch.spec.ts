@@ -83,7 +83,7 @@ for (const width of [1440, 375]) {
     await expect(toggle).toBeChecked();
     const picker = page.getByRole("combobox", { name: "Coach script" });
     await expect(picker).toContainText("CLOSR Outbound Sales Script");
-    await expect(picker).toContainText("v1.2.1");
+    await expect(picker).toContainText("v1.2.2");
     await expect.poll(async () => (await page.getByTestId("dialer-input").boundingBox())!.y - off!.y).toBeGreaterThan(25);
     const mascot = (await page.getByTestId("dialer-coach-mascot").boundingBox())!;
     const headline = (await page.getByText("Want some help? Enable live coach.", { exact: true }).boundingBox())!;

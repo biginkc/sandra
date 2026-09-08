@@ -1,8 +1,8 @@
 {
   "title": "CLOSR Outbound Sales Script",
   "schema_version": 2,
-  "version": "1.2.1",
-  "source": "Outbound Script - Official CLOSR Sales Process (Google Doc 1ab9k0VIUQ4kkSTmdR5XV7qeuiRe2-czgmKGouM-lCag, tab t.0). Spoken wording follows the document verbatim, with approved Sandra substitutions for dynamic placeholders plus BMH Group, bmhgroupkc.com, and the session file-number rule.",
+  "version": "1.2.2",
+  "source": "Outbound Script - Official CLOSR Sales Process (Google Doc 1ab9k0VIUQ4kkSTmdR5XV7qeuiRe2-czgmKGouM-lCag, tab t.0). The file-assignment opening is added verbatim from Inbound Script - Official CLOSR Sales Process (Google Drive 1re2SHPehbVSxJDaLfso2gmxcvUH4JYk3), as requested. Other spoken wording follows the document verbatim, with approved Sandra substitutions for dynamic placeholders plus BMH Group, bmhgroupkc.com, and the session file-number rule.",
   "brand": { "company": "BMH Group", "website": "bmhgroupkc.com" },
   "tokens": ["seller_name", "rep_name", "property_address", "motivation", "dream_outcome", "rep_phone", "file_number", "cold_caller_name", "year_built", "closing_date", "offer_price", "net_to_seller"],
   "entry_tokens": ["motivation", "dream_outcome", "cold_caller_name", "closing_date", "offer_price", "net_to_seller"],
@@ -30,23 +30,28 @@
                 {"id": "introduction.opener.default.label-3", "type": "note", "text": "SMS reply:"},
                 {"id": "introduction.opener.default.04", "type": "say", "text": "I see you just responded to our teams text about getting an offer on {property_address}, is this something you want to sell immediately or just looking at possible options while you have some free time?"},
                 {"id": "introduction.opener.default.label-4", "type": "note", "text": "Driving for dollars:"},
-                {"id": "introduction.opener.default.05", "type": "say", "text": "I’m holding a copy of your tax records here for the property at {property_address}, and my team just wanted me to ask, would you be open to a cash offer, or are you planning to hold onto it for now?"}
+                {"id": "introduction.opener.default.05", "type": "say", "text": "I’m holding a copy of your tax records here for the property at {property_address}, and my team just wanted me to ask, would you be open to a cash offer, or are you planning to hold onto it for now?"},
+                {"id": "introduction.opener.default.file-assignment", "type": "say", "text": "So good news, it looks like I was assigned to your file because they thought I would be the best fit to try and figure out a solution to help you… and really this first call is pretty basic, It’s more for us to find out a little bit more about the property and your situation, to see if I can even do anything good to help ya!"}
               ] },
               { "key": "cold_call", "label": "Cold call", "lines": [
                 { "id": "introduction.opener.cold_call.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
-                { "id": "introduction.opener.cold_call.02", "type": "say", "text": "It looks like you spoke to one of my assistants {cold_caller_name} a little bit ago about your property on {property_address}, they said you may need help with {motivation}?" }
+                { "id": "introduction.opener.cold_call.02", "type": "say", "text": "It looks like you spoke to one of my assistants {cold_caller_name} a little bit ago about your property on {property_address}, they said you may need help with {motivation}?" },
+                {"id": "introduction.opener.cold_call.file-assignment", "type": "say", "text": "So good news, it looks like I was assigned to your file because they thought I would be the best fit to try and figure out a solution to help you… and really this first call is pretty basic, It’s more for us to find out a little bit more about the property and your situation, to see if I can even do anything good to help ya!"}
               ] },
               { "key": "fsbo", "label": "FSBO", "lines": [
                 { "id": "introduction.opener.fsbo.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
-                { "id": "introduction.opener.fsbo.02", "type": "say", "text": "I saw your place at {property_address} was listed For Sale by Owner. Were you looking to sell to someone planning to live there, or would you want me to check if our team can get you approved for an all-cash offer?" }
+                { "id": "introduction.opener.fsbo.02", "type": "say", "text": "I saw your place at {property_address} was listed For Sale by Owner. Were you looking to sell to someone planning to live there, or would you want me to check if our team can get you approved for an all-cash offer?" },
+                {"id": "introduction.opener.fsbo.file-assignment", "type": "say", "text": "So good news, it looks like I was assigned to your file because they thought I would be the best fit to try and figure out a solution to help you… and really this first call is pretty basic, It’s more for us to find out a little bit more about the property and your situation, to see if I can even do anything good to help ya!"}
               ] },
               { "key": "sms", "label": "SMS reply", "lines": [
                 { "id": "introduction.opener.sms.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
-                { "id": "introduction.opener.sms.02", "type": "say", "text": "I see you just responded to our teams text about getting an offer on {property_address}, is this something you want to sell immediately or just looking at possible options while you have some free time?" }
+                { "id": "introduction.opener.sms.02", "type": "say", "text": "I see you just responded to our teams text about getting an offer on {property_address}, is this something you want to sell immediately or just looking at possible options while you have some free time?" },
+                {"id": "introduction.opener.sms.file-assignment", "type": "say", "text": "So good news, it looks like I was assigned to your file because they thought I would be the best fit to try and figure out a solution to help you… and really this first call is pretty basic, It’s more for us to find out a little bit more about the property and your situation, to see if I can even do anything good to help ya!"}
               ] },
               { "key": "d4d", "label": "Driving for dollars", "lines": [
                 { "id": "introduction.opener.d4d.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
-                { "id": "introduction.opener.d4d.02", "type": "say", "text": "I’m holding a copy of your tax records here for the property at {property_address}, and my team just wanted me to ask, would you be open to a cash offer, or are you planning to hold onto it for now?" }
+                { "id": "introduction.opener.d4d.02", "type": "say", "text": "I’m holding a copy of your tax records here for the property at {property_address}, and my team just wanted me to ask, would you be open to a cash offer, or are you planning to hold onto it for now?" },
+                {"id": "introduction.opener.d4d.file-assignment", "type": "say", "text": "So good news, it looks like I was assigned to your file because they thought I would be the best fit to try and figure out a solution to help you… and really this first call is pretty basic, It’s more for us to find out a little bit more about the property and your situation, to see if I can even do anything good to help ya!"}
               ] }
             ],
             "trailing_note": "If you do not no motivation just say the address with a {{tone:question inflection}}."
