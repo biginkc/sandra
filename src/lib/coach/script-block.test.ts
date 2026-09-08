@@ -295,10 +295,10 @@ describe("resolveObjectionOvercome", () => {
 });
 
 describe("coach_notes fidelity — every phase carries its full rule set from the approved script", () => {
-  it("Introduction has all 6 coach rules, including the two previously omitted", () => {
+  it("Introduction retains decision-maker guidance without instructing script condensation", () => {
     const notes = getScriptPhase("introduction")!.coach_notes.map((note) => note.text);
     expect(notes.some((text) => text.includes("someone else must sign"))).toBe(true);
-    expect(notes.some((text) => text.includes("Inbound leads get the full intro"))).toBe(true);
+    expect(notes.some((text) => text.includes("condensed"))).toBe(false);
   });
 
   it("Reveal has the 'four tools' and 'kill shot' rules", () => {

@@ -81,8 +81,8 @@ describe("assertValidClosrScript", () => {
 
   it("identifies the authoritative Google Doc and keeps the approved BMH substitutions", () => {
     const script = scriptJson as unknown as ClosrScript;
-    expect(script.version).toBe("1.2.0");
-    expect(sectionsJson).toMatchObject({ version: "1.2.0", script_version: "1.2.0" });
+    expect(script.version).toBe("1.2.1");
+    expect(sectionsJson).toMatchObject({ version: "1.2.1", script_version: "1.2.1" });
     expect(script.source).toContain("1ab9k0VIUQ4kkSTmdR5XV7qeuiRe2-czgmKGouM-lCag");
     expect(script.brand).toEqual({ company: "BMH Group", website: "bmhgroupkc.com" });
     expect(script.tokens).toContain("dream_outcome");
@@ -164,7 +164,7 @@ describe("assertValidClosrScript", () => {
       .map((line) => line.text)
       .join("\u0000");
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "892ada1497695a760e96463d41417cb0def8872b644a0f2c88015fa66aeb5293",
+      "ab7794d10c1827fd25a686b12a49e8008dcbb9962503dec1f359ccbc5f7759c8",
     );
   });
 

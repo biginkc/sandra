@@ -1126,7 +1126,7 @@ describe("SoftphoneProvider coach UI flag", () => {
     expect(toggle).toHaveAttribute("aria-checked", "true");
     const picker = await screen.findByRole("combobox", { name: "Coach script" });
     expect(picker).toHaveTextContent("CLOSR Outbound Sales Script");
-    expect(picker).toHaveTextContent("v1.2.0");
+    expect(picker).toHaveTextContent("v1.2.1");
     await user.click(picker);
     await user.click(await screen.findByRole("option"));
     expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)).toEqual({ enabled: true, scriptId: "closr-outbound" });
