@@ -1,7 +1,7 @@
 {
   "title": "CLOSR Outbound Sales Script",
   "schema_version": 2,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "source": "Outbound Script - Official CLOSR Sales Process (Google Doc 1ab9k0VIUQ4kkSTmdR5XV7qeuiRe2-czgmKGouM-lCag, tab t.0). Spoken wording follows the document verbatim, with approved Sandra substitutions for dynamic placeholders plus BMH Group, bmhgroupkc.com, and the session file-number rule.",
   "brand": { "company": "BMH Group", "website": "bmhgroupkc.com" },
   "tokens": ["seller_name", "rep_name", "property_address", "motivation", "dream_outcome", "rep_phone", "file_number", "cold_caller_name", "year_built", "closing_date", "offer_price", "net_to_seller"],
@@ -21,8 +21,16 @@
             "tag": "Opener",
             "auto_select_by": "lead_source",
             "variants": [
-              { "key": "default", "label": null, "lines": [
-                { "id": "introduction.opener.default.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" }
+              { "key": "default", "label": "All openers", "lines": [
+                {"id": "introduction.opener.default.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!"},
+                {"id": "introduction.opener.default.label-1", "type": "note", "text": "Cold call:"},
+                {"id": "introduction.opener.default.02", "type": "say", "text": "It looks like you spoke to one of my assistants {cold_caller_name} a little bit ago about your property on {property_address}, they said you may need help with {motivation}?"},
+                {"id": "introduction.opener.default.label-2", "type": "note", "text": "FSBO:"},
+                {"id": "introduction.opener.default.03", "type": "say", "text": "I saw your place at {property_address} was listed For Sale by Owner. Were you looking to sell to someone planning to live there, or would you want me to check if our team can get you approved for an all-cash offer?"},
+                {"id": "introduction.opener.default.label-3", "type": "note", "text": "SMS reply:"},
+                {"id": "introduction.opener.default.04", "type": "say", "text": "I see you just responded to our teams text about getting an offer on {property_address}, is this something you want to sell immediately or just looking at possible options while you have some free time?"},
+                {"id": "introduction.opener.default.label-4", "type": "note", "text": "Driving for dollars:"},
+                {"id": "introduction.opener.default.05", "type": "say", "text": "I’m holding a copy of your tax records here for the property at {property_address}, and my team just wanted me to ask, would you be open to a cash offer, or are you planning to hold onto it for now?"}
               ] },
               { "key": "cold_call", "label": "Cold call", "lines": [
                 { "id": "introduction.opener.cold_call.01", "type": "say", "text": "Hey {seller_name}? Hey {seller_name}, this is {rep_name}!" },
@@ -91,8 +99,7 @@
         { "trigger": "phase_enter", "text": "Never open with 'How are you doing today?' — you'll sound like a call center." },
         { "trigger": "seller_busy", "seller_phrases": ["busy", "bad time", "in the middle of"], "text": "Don't ask 'Is now a good time?' — if there's real background noise, use 'Did I catch you at a bad time?'" },
         { "trigger": "landmark:position_check", "text": "If they can't move forward once a solution is found — cut the call." },
-        { "trigger": "phase_enter", "text": "If someone else must sign, get them present before the real conversation starts." },
-        { "trigger": "phase_enter", "text": "Inbound leads get the full intro; outbound gets it condensed — you called them." }
+        { "trigger": "phase_enter", "text": "If someone else must sign, get them present before the real conversation starts." }
       ]
     },
     {

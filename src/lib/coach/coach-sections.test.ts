@@ -112,13 +112,13 @@ describe("coach section manifest", () => {
     const openerVariant = sections[0].content[0].variants[0];
     expect(openerVariant.variant_key).toBe("default");
     const scriptWithNoteOnlyVariant = JSON.parse(JSON.stringify(script)) as ClosrScript;
-    const noteOnlyLine = scriptWithNoteOnlyVariant.phases
+    const noteOnlyLines = scriptWithNoteOnlyVariant.phases
       .flatMap((phase) => phase.display.branches)
       .flatMap((branch) => branch.variants)
       .flatMap((variant) => variant.lines)
-      .find((line) => line.id === "introduction.opener.default.01");
-    if (!noteOnlyLine) throw new Error("test fixture line missing");
-    noteOnlyLine.type = "note";
+      .filter((line) => openerVariant.line_ids.includes(line.id));
+    if (!noteOnlyLines.length) throw new Error("test fixture lines missing");
+    noteOnlyLines.forEach((line) => { line.type = "note"; });
 
     expect(() => assertValidCoachSectionManifest(manifest, scriptWithNoteOnlyVariant)).toThrow(/has no spoken line/);
   });

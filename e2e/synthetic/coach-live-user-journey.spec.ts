@@ -11,7 +11,7 @@ type ContextStartupMode = "immediate" | "deferred" | "failure";
 
 const spokenForkInventory: Record<string, string[]> = {
   "introduction.opener": [
-    "Use default spoken fork for Opener",
+    "Use All openers spoken fork for Opener",
     "Use Cold call spoken fork for Opener",
     "Use FSBO spoken fork for Opener",
     "Use SMS reply spoken fork for Opener",
