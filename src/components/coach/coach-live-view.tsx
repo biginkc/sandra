@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronLeftIcon, ChevronRightIcon, Loader2Icon, MicIcon, MicOffIcon, PauseIcon, PhoneOffIcon, PlayIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { PhoneKeypad } from "@/components/softphone/phone-keypad";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { DtmfDigit } from "@/lib/dialer/transport";
 import { COACH_SECTIONS } from "@/lib/coach/section-manifest";
+import { splitDisplaySentences } from "@/lib/coach/display-sentences";
 import { requestCoachRecommendations } from "@/lib/coach/recommendation-action";
 import { useCoachRecommendations } from "@/lib/coach/recommendation-client";
 import type { CoachRecommendationRequestFn } from "@/lib/coach/recommendation-types";
@@ -544,6 +545,9 @@ function ScriptPanel({
 }) {
   const panelRef = useRef<HTMLElement>(null);
   const footerRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (panelRef.current) panelRef.current.scrollTop = 0;
+  }, [block?.sectionId]);
   useEffect(() => {
     const panel = panelRef.current;
     const footer = footerRef.current;
@@ -816,11 +820,11 @@ function BranchCard({
         </div>
       ) : null}
       <div className="space-y-5">
-        {branch.selected.lines.map((line, index) => (
+        {branch.selected.lines.flatMap(splitDisplaySentences).map((line, index) => (
           <p
             key={index}
             className={cn(
-              "whitespace-pre-line",
+              "whitespace-normal",
               line.type === "note"
                 ? "text-[13px] text-[var(--coach-secondary)] italic"
                 : "text-[27px] leading-[1.5] font-medium",
