@@ -358,3 +358,45 @@ describe("coach recommendation server boundary", () => {
     });
   });
 });
+
+
+describe("bounded provider failure diagnostics", () => {
+  it.each([
+    ["billing", 400, "credit balance too low", "billing_indicated"],
+    ["auth", 401, "invalid x-api-key", "auth_indicated"],
+    ["unknown", 400, "invalid request", "unclassified"],
+    ["invalid status", "401", "invalid request", "unclassified"],
+    ["out-of-range status", 900, "invalid request", "unclassified"],
+    ["fractional status", 400.5, "invalid request", "unclassified"],
+  ])("reports only safe metadata for %s", async (_label, status, message, reason) => {
+    const secret = "SECRET_DIAGNOSTIC_CANARY";
+    const transcript = "TRANSCRIPT_DIAGNOSTIC_CANARY";
+    const error = Object.assign(new Error(`${message} ${secret} ${transcript}`), {
+      status,
+      error: { type: secret, message: transcript },
+      request_id: secret,
+      headers: { authorization: secret },
+    });
+    error.stack = `${secret} ${transcript}`;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const dependencies = deps({ anthropic: {
+        messages: { create: vi.fn().mockRejectedValue(error) },
+      } as unknown as CoachRecommendationAnthropic });
+      const result = await requestCoachRecommendationsWithDeps(request(), dependencies);
+      expect(result).toMatchObject({ ok: false, code: "provider_error" });
+      expect(logged).toHaveBeenCalledTimes(1);
+      const payload = logged.mock.calls[0]?.[1];
+      const expectedTags = typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
+        ? { surface: "coach_recommendation_generate", reason, httpStatus: status }
+        : { surface: "coach_recommendation_generate", reason };
+      expect(payload).toMatchObject({ message: "Coach recommendation generation failed", tags: expectedTags });
+      expect(payload.tags).toEqual(expectedTags);
+      const serialized = JSON.stringify(logged.mock.calls);
+      expect(serialized).not.toContain(secret);
+      expect(serialized).not.toContain(transcript);
+      expect(serialized).not.toContain("request-1");
+      expect(serialized).not.toContain("call-1");
+    } finally { logged.mockRestore(); }
+  });
+});
