@@ -1,4 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import { classifyProviderFailure } from "@/lib/ai-responder/generate";
+import { reportError } from "@/lib/errors/report";
 
 import { getCoachSectionById } from "./coach-sections";
 import { CLOSR_SCRIPT } from "./script-block";
@@ -488,9 +490,20 @@ export async function requestCoachRecommendationsWithDeps(
       mode: input.mode,
       ...output,
     };
-  } catch {
-    // Deliberately do not log the error here: provider SDK errors may echo
-    // request content, and live transcript text must never reach logs.
+  } catch (error) {
+    // SDK messages can echo transcripts or credentials. Classify in memory,
+    // then report a fresh generic error and bounded metadata only.
+    const classification = classifyProviderFailure(error);
+    const reason = classification === "billing" ? "billing_indicated"
+      : classification === "auth" ? "auth_indicated" : "unclassified";
+    const status = isRecord(error) ? error.status : undefined;
+    const tags: Record<string, string | number | boolean> = {
+      surface: "coach_recommendation_generate", reason,
+    };
+    if (typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599) {
+      tags.httpStatus = status;
+    }
+    reportError(new Error("Coach recommendation generation failed"), { tags });
     return failure(input, "provider_error");
   }
 }
