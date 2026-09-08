@@ -149,6 +149,43 @@ test("walks every PDF-aligned section forward and backward with correct boundari
   await expect(page.getByTestId("coach-back")).toBeDisabled();
 });
 
+test("starts each navigated section at the top without resetting scroll for live updates", async ({ page }) => {
+  await mountCoach(page, { width: 1440, height: 520 });
+  await page.getByTestId("variant-Opener-default").click();
+  const panel = page.getByTestId("coach-script-panel");
+  await panel.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect.poll(() => panel.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await emitStimulus(page, "legacyBatch");
+  await expect.poll(() => panel.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await page.getByTestId("coach-next").click();
+  await expect(page.getByTestId("current-section-title")).toHaveText(sections[1].title);
+  await expect.poll(() => panel.evaluate((element) => element.scrollTop)).toBe(0);
+  await panel.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect.poll(() => panel.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await page.getByTestId("coach-back").click();
+  await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title);
+  await expect.poll(() => panel.evaluate((element) => element.scrollTop)).toBe(0);
+});
+
+test("gives each spoken sentence its own spaced line and keeps the speed question verbatim", async ({ page }) => {
+  await mountCoach(page);
+  await page.getByTestId("coach-next").click();
+  await page.getByTestId("coach-next").click();
+  const paragraphs = page.getByTestId("script-branch").locator("p");
+  await expect(paragraphs).toHaveCount(4);
+  await expect(paragraphs.nth(0)).toHaveText("Cool, so uh how we work is very simple.");
+  await expect(paragraphs.nth(1)).toHaveText("We buy properties for a couple reasons:");
+  await expect(paragraphs.nth(2)).toContainText("To add some sort of value");
+  await expect(paragraphs.nth(3)).toContainText("Buy the property to rent it");
+  const first = await paragraphs.nth(0).boundingBox();
+  const second = await paragraphs.nth(1).boundingBox();
+  expect(second!.y - first!.y - first!.height).toBeGreaterThanOrEqual(19);
+  await page.getByTestId("coach-next").click();
+  const speed = paragraphs.filter({ hasText: "I’m sure speed is important" });
+  await expect(speed).toHaveText("I’m sure speed is important to you right?");
+  await expect(speed).toHaveCSS("white-space", "normal");
+});
+
 test("renders the seller email-address request once in underwriting and nowhere in the named excluded paths", async ({ page }) => {
   await mountCoach(page);
   const requestPattern = /\b(?:what(?:'s| is)|which|can i get|could we have)[\s\S]{0,80}\bemail(?: address)?\b/i;
@@ -223,22 +260,23 @@ test("selects every approved spoken fork and path without changing navigation or
   }
 });
 
-test("preserves the official multiline outcomes and visibly renders only the approved e-sign handoff", async ({ page }) => {
+test("preserves the official numbered outcomes and visibly renders only the approved e-sign handoff", async ({ page }) => {
   await mountCoach(page);
 
   for (let step = 0; step < 3; step += 1) await page.getByTestId("coach-next").click();
-  const outcomes = page.getByTestId("current-section-script").locator("p").filter({ hasText: "only 1 of 2 things" });
-  await expect(outcomes).toHaveCSS("white-space", "pre-line");
-  expect(await outcomes.innerText()).toContain("\n1. We can’t get you approved");
-  expect(await outcomes.innerText()).toContain("\n2. We’ll get you approved");
+  const outcomes = page.getByTestId("current-section-script").locator("p");
+  await expect(outcomes.filter({ hasText: "only 1 of 2 things" })).toBeVisible();
+  await expect(outcomes.filter({ hasText: "1. We can’t get you approved" })).toHaveCount(1);
+  await expect(outcomes.filter({ hasText: "2. We’ll get you approved" })).toHaveCount(1);
 
   await page.getByTestId("phase-rail-close").click();
   await page.getByTestId("coach-next").click();
   await page.getByTestId("coach-next").click();
   const scriptText = page.getByTestId("current-section-script");
   await expect(
-    scriptText.getByText("Awesome, I just sent it to your email. Please pull it up for me.", { exact: true }),
+    scriptText.getByText("Awesome, I just sent it to your email.", { exact: true }),
   ).toBeVisible();
+  await expect(scriptText.getByText("Please pull it up for me.", { exact: true })).toBeVisible();
   await expect(scriptText).toContainText("72 hours to schedule the initial walkthrough");
   await expect(scriptText).not.toContainText(
     /share your screen|share[\s_/-]?screen|screen[\s_/-]?share|click the link|walk you through signing|walk through signing|view[\s_/-]?documents|press[\s_/-]?sign|adopt[\s_&/-]?(?:and)?[\s_/-]?sign|red flashing box|second red box|second novation box|share[\s_/-]?back/i,
