@@ -359,6 +359,14 @@ export async function runSkipTraceEnrichment(
     },
   );
   if (claimError) {
+    if (claimError.code === "PGRST202" || claimError.code === "42883") {
+      // Deploy can precede migration/schema-cache visibility. Keep the prepared
+      // job queued so the existing sweeper can retry once the RPC is available.
+      console.warn(
+        `skip-trace submission deferred for ${params.jobId}: missing function claim_skip_trace_submission (${claimError.code}): ${claimError.message}`,
+      );
+      return { claimed: false };
+    }
     throw new Error(
       `skip-trace submission claim failed for ${params.jobId}: ${claimError.message}`,
     );

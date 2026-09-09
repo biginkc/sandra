@@ -13,7 +13,7 @@ import { skipTraceSubmitWorkflow } from "./skip-trace-submit";
 
 // Real runner and PostgREST serialization; only the transport and eligibility
 // inputs are simulated. Never contacts Supabase or a paid provider.
-function fixture(count: number, failRead = false, fault?: "claim" | "persist") {
+function fixture(count: number, failRead = false, fault?: "claim" | "persist" | "PGRST202" | "42883") {
   const ids = Array.from({ length: count }, () => crypto.randomUUID());
   const job: {
     id: string; org_id: string; status: string;
@@ -28,7 +28,8 @@ function fixture(count: number, failRead = false, fault?: "claim" | "persist") {
     // A generous 32 KiB gateway limit still rejects the 3,206-ID CAS URL.
     if (url.href.length > 32768) return reply({ message: "414 Request-URI Too Large" }, 414);
     if (init?.method === "POST" && url.pathname.endsWith("/rpc/claim_skip_trace_submission")) {
-      if (fault === "claim") return reply({ message: "injected claim failure" }, 400);
+      if (fault === "PGRST202" || fault === "42883") return reply({ code: fault, message: "function claim_skip_trace_submission does not exist" }, 404);
+      if (fault === "claim") return reply({ code: "42501", message: "injected claim failure" }, 403);
       const p = JSON.parse(String(init.body));
       Object.assign(job, { status: "running", started_at: p.p_claim_time, total_items: p.p_property_ids.length, input_params: p.p_input_params, worker_heartbeat_at: p.p_claim_time });
       return reply([{ id: job.id, title: null, description: null }]);
@@ -50,7 +51,7 @@ function fixture(count: number, failRead = false, fault?: "claim" | "persist") {
   mocks.admin.mockReturnValue(createClient<Database>("https://local.invalid", "test-key", { global: { fetch: transport }, auth: { persistSession: false } }));
   // Stop after the real inner claim, before any provider work.
   mocks.provider.mockReturnValue(null);
-  return { job, maxUrl: () => maxUrl };
+  return { job, transport, maxUrl: () => maxUrl };
 }
 
 describe("skip-trace submit claim gap", () => {
@@ -75,6 +76,17 @@ describe("skip-trace submit claim gap", () => {
     expect(job.status).toBe("failed");
     expect(job.error_message).toContain("injected token failure");
   });
+  it.each(["PGRST202", "42883"] as const)("defers missing-function %s without failing the queued job", async (code) => {
+    const { job, transport } = fixture(2, false, code);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await expect(skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id })).resolves.toEqual({ status: "claim_lost", jobId: job.id });
+    expect(job.status).toBe("queued");
+    expect(job.error_message).toBeUndefined();
+    expect(job.input_params.submission_attempt_token).toBeUndefined();
+    expect(mocks.provider).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining(`missing function claim_skip_trace_submission (${code})`));
+    expect(transport.mock.calls.some(([, init]) => init?.method === "PATCH" && JSON.parse(String(init.body)).status === "failed")).toBe(false);
+  });
   it("surfaces an RPC error as failed, while retaining its message", async () => {
     const { job } = fixture(3206, false, "claim");
     await expect(skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id })).rejects.toThrow("injected claim failure");
@@ -83,13 +95,17 @@ describe("skip-trace submit claim gap", () => {
     expect(job.input_params.submission_attempt_token).toBeUndefined();
   });
   it("does not overwrite a newer prepared owner on a stale step failure", async () => {
-    const { job } = fixture(2);
+    const { job, transport } = fixture(2);
     vi.spyOn(crypto, "randomUUID").mockImplementationOnce(() => {
       job.worker_heartbeat_at = "2099-01-01T00:00:00.000Z";
       throw new Error("stale step failure");
     });
     await expect(skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id })).rejects.toThrow("stale step failure");
+    // Prove the failure handler ran: old code that simply rethrows must not pass.
+    const failureWrites = transport.mock.calls.filter(([, init]) => init?.method === "PATCH" && JSON.parse(String(init.body)).status === "failed");
+    expect(failureWrites).toHaveLength(1);
     expect(job.status).toBe("queued");
+    expect(job.worker_heartbeat_at).toBe("2099-01-01T00:00:00.000Z");
     expect(job.error_message).toBeUndefined();
   });
   it("throws both errors if persisting the failure also fails", async () => {
