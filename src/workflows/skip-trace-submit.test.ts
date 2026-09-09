@@ -1,0 +1,101 @@
+import { createClient } from "@supabase/supabase-js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Database } from "@/lib/supabase/types";
+
+const mocks = vi.hoisted(() => ({ admin: vi.fn(), provider: vi.fn() }));
+vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: mocks.admin }));
+vi.mock("@/lib/skip-trace/registry", () => ({ getSkipTraceProvider: mocks.provider }));
+vi.mock("@/lib/skip-trace/eligibility", async (original) => ({
+  ...await original<typeof import("@/lib/skip-trace/eligibility")>(),
+  resolveSkipTraceEligibility: vi.fn(async (_client, params) => ({ eligibleIds: params.propertyIds, exclusions: [] })),
+}));
+import { skipTraceSubmitWorkflow } from "./skip-trace-submit";
+
+// Real runner and PostgREST serialization; only the transport and eligibility
+// inputs are simulated. Never contacts Supabase or a paid provider.
+function fixture(count: number, failRead = false, fault?: "claim" | "persist") {
+  const ids = Array.from({ length: count }, () => crypto.randomUUID());
+  const job: {
+    id: string; org_id: string; status: string;
+    input_params: Record<string, unknown>; result_summary: Record<string, unknown>;
+    error_message?: string; [key: string]: unknown;
+  } = { id: crypto.randomUUID(), org_id: crypto.randomUUID(), type: "skip_trace", status: "queued", total_items: count, input_params: { property_ids: ids }, provider_run_id: null, worker_heartbeat_at: null, result_summary: {} };
+  let maxUrl = 0;
+  const transport = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input));
+    maxUrl = Math.max(maxUrl, url.href.length);
+    const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    // A generous 32 KiB gateway limit still rejects the 3,206-ID CAS URL.
+    if (url.href.length > 32768) return reply({ message: "414 Request-URI Too Large" }, 414);
+    if (init?.method === "POST" && url.pathname.endsWith("/rpc/claim_skip_trace_submission")) {
+      if (fault === "claim") return reply({ message: "injected claim failure" }, 400);
+      const p = JSON.parse(String(init.body));
+      Object.assign(job, { status: "running", started_at: p.p_claim_time, total_items: p.p_property_ids.length, input_params: p.p_input_params, worker_heartbeat_at: p.p_claim_time });
+      return reply([{ id: job.id, title: null, description: null }]);
+    }
+    if (init?.method === "PATCH") {
+      const patch = JSON.parse(String(init.body));
+      if (fault === "persist" && patch.status === "failed") return reply({ message: "injected failure-write error" }, 400);
+      const matches = [...url.searchParams].every(([key, value]) => {
+        if (value.startsWith("eq.")) return String(job[key]) === value.slice(3);
+        if (value === "is.null") return job[key] == null;
+        return true;
+      });
+      if (matches) Object.assign(job, patch);
+      return reply(matches ? [{ id: job.id, title: null, description: null }] : []);
+    }
+    if (failRead && job.result_summary.submit_phase === "prepared") return reply({ message: "injected authorization read failure" }, 400);
+    return reply(job);
+  });
+  mocks.admin.mockReturnValue(createClient<Database>("https://local.invalid", "test-key", { global: { fetch: transport }, auth: { persistSession: false } }));
+  // Stop after the real inner claim, before any provider work.
+  mocks.provider.mockReturnValue(null);
+  return { job, maxUrl: () => maxUrl };
+}
+
+describe("skip-trace submit claim gap", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+  afterEach(() => { vi.restoreAllMocks(); });
+  it("writes the inner submission token for 3,206 IDs without an oversized URL", async () => {
+    const { job, maxUrl } = fixture(3206);
+    await skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id });
+    expect(job.input_params.submission_attempt_token).toEqual(expect.any(String));
+    expect(maxUrl()).toBeLessThan(32768);
+  });
+  it("persists an authorization-read failure instead of leaving the prepared job queued", async () => {
+    const { job } = fixture(2, true);
+    await skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id }).catch(() => undefined);
+    expect(job.status).toBe("failed");
+    expect(job.error_message).toContain("injected authorization read failure");
+  });
+  it("marks a throw before the inner claim failed with its error text", async () => {
+    const { job } = fixture(2);
+    vi.spyOn(crypto, "randomUUID").mockImplementationOnce(() => { throw new Error("injected token failure"); });
+    await skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id }).catch(() => undefined);
+    expect(job.status).toBe("failed");
+    expect(job.error_message).toContain("injected token failure");
+  });
+  it("surfaces an RPC error as failed, while retaining its message", async () => {
+    const { job } = fixture(3206, false, "claim");
+    await expect(skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id })).rejects.toThrow("injected claim failure");
+    expect(job.status).toBe("failed");
+    expect(job.error_message).toContain("injected claim failure");
+    expect(job.input_params.submission_attempt_token).toBeUndefined();
+  });
+  it("does not overwrite a newer prepared owner on a stale step failure", async () => {
+    const { job } = fixture(2);
+    vi.spyOn(crypto, "randomUUID").mockImplementationOnce(() => {
+      job.worker_heartbeat_at = "2099-01-01T00:00:00.000Z";
+      throw new Error("stale step failure");
+    });
+    await expect(skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id })).rejects.toThrow("stale step failure");
+    expect(job.status).toBe("queued");
+    expect(job.error_message).toBeUndefined();
+  });
+  it("throws both errors if persisting the failure also fails", async () => {
+    const { job } = fixture(2, true, "persist");
+    await expect(skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id })).rejects.toThrow(
+      /injected authorization read failure; failed to persist job failure: injected failure-write error/,
+    );
+  });
+});

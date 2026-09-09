@@ -4729,6 +4729,17 @@ export type Database = {
       }
     }
     Functions: {
+      claim_skip_trace_submission: {
+        Args: {
+          p_job_id: string
+          p_org_id: string
+          p_property_ids: string[]
+          p_input_params: Json
+          p_claim_time: string
+          p_expected_heartbeat: string | null
+        }
+        Returns: { id: string; title: string | null; description: string | null }[]
+      }
       search_global: {
         Args: { per_type?: number; q: string }
         Returns: {
