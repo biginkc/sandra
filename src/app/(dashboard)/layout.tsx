@@ -1,4 +1,5 @@
 import Image from "next/image";
+import { GlobalSearch } from "@/components/global-search";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
@@ -54,6 +55,7 @@ export default async function DashboardLayout({
         </div>
         <div className="flex shrink-0 items-center gap-[14px] text-sm">
           {/* The provider keeps this client control mounted across route changes. */}
+          <GlobalSearch />
           <SoftphoneHeaderButton />
           <NotificationsBell userId={user.id} />
           <form action="/auth/signout" method="post" className="border-l border-white/10">
