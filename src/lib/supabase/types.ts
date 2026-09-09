@@ -5680,6 +5680,7 @@ export type Database = {
           p_include_thread_id?: string | null
           p_limit?: number
           p_offset?: number
+          p_search?: string | null
         }
         Returns: Json
       }
