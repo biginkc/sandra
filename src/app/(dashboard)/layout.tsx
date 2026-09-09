@@ -1,5 +1,6 @@
 import Image from "next/image";
-import { GlobalSearch } from "@/components/global-search";
+import { GlobalSearchProvider } from "@/components/search/global-search-provider";
+import { GlobalSearchTrigger } from "@/components/search/global-search-trigger";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
@@ -31,6 +32,7 @@ export default async function DashboardLayout({
 
   return (
     <SoftphoneProvider>
+    <GlobalSearchProvider>
     <div className="bg-background min-h-screen">
       <ConnectionBanner />
       <JobFailureNotifier />
@@ -53,9 +55,9 @@ export default async function DashboardLayout({
           </Link>
           <DashboardAdminNav showAdmin={showAdmin} />
         </div>
-        <div className="flex shrink-0 items-center gap-[14px] text-sm">
+        <div className="flex min-w-0 items-center gap-[14px] text-sm [&>*:not(:first-child)]:shrink-0">
           {/* The provider keeps this client control mounted across route changes. */}
-          <GlobalSearch />
+          <GlobalSearchTrigger />
           <SoftphoneHeaderButton />
           <NotificationsBell userId={user.id} />
           <form action="/auth/signout" method="post" className="border-l border-white/10">
@@ -104,6 +106,7 @@ export default async function DashboardLayout({
         </main>
       </div>
     </div>
+    </GlobalSearchProvider>
     </SoftphoneProvider>
   );
 }
