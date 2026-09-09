@@ -323,7 +323,7 @@ export async function runSkipTraceEnrichment(
   // callers from accidentally erasing the cap when they omit inputParams.
   const { data: persistedJob, error: persistedJobError } = await supabase
     .from("jobs")
-    .select("input_params")
+    .select("input_params, created_at")
     .eq("id", params.jobId)
     .eq("org_id", params.orgId)
     .eq("type", "skip_trace")
@@ -360,12 +360,21 @@ export async function runSkipTraceEnrichment(
   );
   if (claimError) {
     if (claimError.code === "PGRST202" || claimError.code === "42883") {
-      // Deploy can precede migration/schema-cache visibility. Keep the prepared
-      // job queued so the existing sweeper can retry once the RPC is available.
-      console.warn(
-        `skip-trace submission deferred for ${params.jobId}: missing function claim_skip_trace_submission (${claimError.code}): ${claimError.message}`,
+      // created_at survives sweeper re-preparation; a prepared timestamp would
+      // restart the window on every retry. Allow 15 minutes for rollout/cache lag.
+      const deferWindowMs = 15 * 60 * 1000;
+      const jobAgeMs = Date.now() - Date.parse(persistedJob.created_at);
+      const withinDeferWindow = jobAgeMs >= 0 && jobAgeMs <= deferWindowMs;
+      const error = new Error(
+        `skip-trace submission ${withinDeferWindow ? "deferred" : "failed after 15-minute defer window"} for ${params.jobId}: missing function claim_skip_trace_submission (${claimError.code}): ${claimError.message}`,
       );
-      return { claimed: false };
+      reportError(error, {
+        tags: { surface: "skip_trace_claim_rpc_missing", deferred: withinDeferWindow },
+        extra: { jobId: params.jobId, code: claimError.code, jobAgeMs },
+      });
+      if (withinDeferWindow) return { claimed: false };
+      // The workflow persists this failure under its prepared-heartbeat fence.
+      throw error;
     }
     throw new Error(
       `skip-trace submission claim failed for ${params.jobId}: ${claimError.message}`,

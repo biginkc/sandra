@@ -2,7 +2,8 @@ import { createClient } from "@supabase/supabase-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "@/lib/supabase/types";
 
-const mocks = vi.hoisted(() => ({ admin: vi.fn(), provider: vi.fn() }));
+const mocks = vi.hoisted(() => ({ admin: vi.fn(), provider: vi.fn(), report: vi.fn() }));
+vi.mock("@/lib/errors/report", () => ({ reportError: mocks.report }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: mocks.admin }));
 vi.mock("@/lib/skip-trace/registry", () => ({ getSkipTraceProvider: mocks.provider }));
 vi.mock("@/lib/skip-trace/eligibility", async (original) => ({
@@ -19,7 +20,7 @@ function fixture(count: number, failRead = false, fault?: "claim" | "persist" | 
     id: string; org_id: string; status: string;
     input_params: Record<string, unknown>; result_summary: Record<string, unknown>;
     error_message?: string; [key: string]: unknown;
-  } = { id: crypto.randomUUID(), org_id: crypto.randomUUID(), type: "skip_trace", status: "queued", total_items: count, input_params: { property_ids: ids }, provider_run_id: null, worker_heartbeat_at: null, result_summary: {} };
+  } = { id: crypto.randomUUID(), org_id: crypto.randomUUID(), type: "skip_trace", created_at: new Date().toISOString(), status: "queued", total_items: count, input_params: { property_ids: ids }, provider_run_id: null, worker_heartbeat_at: null, result_summary: {} };
   let maxUrl = 0;
   const transport = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -78,14 +79,28 @@ describe("skip-trace submit claim gap", () => {
   });
   it.each(["PGRST202", "42883"] as const)("defers missing-function %s without failing the queued job", async (code) => {
     const { job, transport } = fixture(2, false, code);
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    job.created_at = new Date(Date.now() - 14 * 60 * 1000).toISOString();
     await expect(skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id })).resolves.toEqual({ status: "claim_lost", jobId: job.id });
     expect(job.status).toBe("queued");
     expect(job.error_message).toBeUndefined();
     expect(job.input_params.submission_attempt_token).toBeUndefined();
     expect(mocks.provider).not.toHaveBeenCalled();
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining(`missing function claim_skip_trace_submission (${code})`));
+    expect(mocks.report).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining(`missing function claim_skip_trace_submission (${code})`) }), expect.objectContaining({ tags: { surface: "skip_trace_claim_rpc_missing", deferred: true } }));
     expect(transport.mock.calls.some(([, init]) => init?.method === "PATCH" && JSON.parse(String(init.body)).status === "failed")).toBe(false);
+  });
+  it.each(["PGRST202", "42883"] as const)("fails missing-function %s beyond the defer bound", async (code) => {
+    const { job, transport } = fixture(2, false, code);
+    job.created_at = new Date(Date.now() - 16 * 60 * 1000).toISOString();
+    const message = `missing function claim_skip_trace_submission (${code}): function claim_skip_trace_submission does not exist`;
+    await expect(skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id })).rejects.toThrow(message);
+    expect(job.status).toBe("failed");
+    expect(job.error_message).toContain(message);
+    expect(job.error_message).toContain("15-minute defer window");
+    expect(mocks.provider).not.toHaveBeenCalled();
+    expect(mocks.report).toHaveBeenCalledWith(expect.any(Error), expect.objectContaining({ tags: { surface: "skip_trace_claim_rpc_missing", deferred: false } }));
+    const failureWrites = transport.mock.calls.filter(([, init]) => init?.method === "PATCH" && JSON.parse(String(init.body)).status === "failed");
+    expect(failureWrites).toHaveLength(1);
+    expect(new URL(String(failureWrites[0][0])).searchParams.get("worker_heartbeat_at")).toBe(`eq.${job.worker_heartbeat_at}`);
   });
   it("surfaces an RPC error as failed, while retaining its message", async () => {
     const { job } = fixture(3206, false, "claim");
