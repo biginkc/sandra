@@ -7,7 +7,8 @@ import { BMH_ORG_ID, TEST_ORG_B_ID, clientForUser, createOrgUser, seedTwoOrgs } 
 import { resetTenantTables } from "@tests/integration/reset";
 
 const service = createTestClient();
-const sql = readFileSync(new URL("./20260909000000_global_search.sql", import.meta.url), "utf8");
+const originalSql = readFileSync(new URL("./20260909000000_global_search.sql", import.meta.url), "utf8");
+const sql = readFileSync(new URL("./20260909080600_search_relevance_fixes.sql", import.meta.url), "utf8");
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const users: string[] = [];
 let a: ReturnType<typeof clientForUser>;
@@ -22,10 +23,17 @@ const capMessages = Array.from({ length: 12 }, () => randomUUID()).sort();
 const tieMessages = [randomUUID(), randomUUID()].sort();
 const tieConversation = randomUUID();
 let reachable: string;
+let originalPrivileges: { proname: string; proacl: string[] | null }[];
 
 // Deliberately broken SQL is opt-in; teardown always restores the source SQL.
 function mutationSql() {
   switch (process.env.SEARCH_MUTATION) {
+    case "structured-gate": return sql.replaceAll("not i.is_structured and ", "");
+    case "email-equality": return sql.replace("c.search_text ilike '%' || i.q_like || '%'", "lower(c.email) like i.q_like");
+    case "no-similarity": return sql.replaceAll("not i.is_structured and ", "false and ");
+    case "weak-prefix": return sql.replace("bool_or(length(token) >= 3)", "true");
+    case "drop-short": return sql.replace("where token <> ''", "where length(token) >= 3");
+    case "boundary": return sql.replace("10 * length(qd) >= 7 * length(q)", "10 * length(qd) > 7 * length(q)");
     case "orphan": return sql.replace("from contact_candidates c", `from (select * from contact_candidates
       order by extensions.similarity(search_text,lower(q)) desc, created_at desc, id desc
       limit (select per_type from bounds)) c`);
@@ -66,6 +74,12 @@ describe("global search RPC", () => {
     // The integration global setup holds the shared session advisory mutex.
     await db.query("begin");
     try {
+      await db.query(originalSql);
+      originalPrivileges = (await db.query(`select proname, proacl from pg_proc p
+        join pg_namespace n on n.oid=p.pronamespace
+        where n.nspname='public' and proname in ('search_global','search_prefix_tsquery') order by proname`)).rows;
+      await db.query(sql);
+      await db.query(sql);
       await db.query(process.env.SEARCH_MUTATE_PHONE === "1"
         ? sql.replace("or (length(i.qd) >= 3 and c.phone_digits ilike '%' || i.qd || '%')", "or false /* mutation: phone branch removed */")
         : mutationSql());
@@ -84,7 +98,7 @@ describe("global search RPC", () => {
     threadOnly = await contact("Threadonly");
     await property(threadOnly, "903 Deleted Sunflower Avenue", true);
     const { error } = await service.from("messages").insert([
-      { org_id: BMH_ORG_ID, contact_id: threadOnly, conversation_id: conversation, channel: "sms", direction: "inbound", body: "Appointment foo@example.com costs 45.5 dollars", from_address: "+18165551234", to_address: "+18165559999", created_at: "2026-09-01T12:00:00Z" },
+      { org_id: BMH_ORG_ID, contact_id: threadOnly, conversation_id: conversation, channel: "sms", direction: "inbound", body: "Appointment foo@example.com costs 45.5 dollars 45.50 total alpha beta 811 total 8111 N Stoddard", from_address: "+18165551234", to_address: "+18165559999", created_at: "2026-09-01T12:00:00Z" },
       { org_id: BMH_ORG_ID, contact_id: threadOnly, conversation_id: conversation, channel: "sms", direction: "inbound", body: "Appointment reminder", from_address: "+18165551234", to_address: "+18165559999", created_at: "2026-09-02T12:00:00Z" },
       { org_id: BMH_ORG_ID, contact_id: owner, conversation_id: randomUUID(), channel: "email", direction: "inbound", body: "Appointment email only", created_at: "2026-09-02T12:00:00Z", from_address: "a@example.test", to_address: "b@example.test" },
     ]);
@@ -117,7 +131,7 @@ describe("global search RPC", () => {
     try {
       if (process.env.SEARCH_MUTATE_PHONE === "1" || process.env.SEARCH_MUTATION) {
         await db.query("begin");
-        try { await db.query(sql); await db.query("commit"); }
+        try { await db.query(originalSql); await db.query(sql); await db.query("commit"); }
         catch (error) { await db.query("rollback"); throw error; }
       }
       for (const id of users) await service.auth.admin.deleteUser(id);
@@ -133,11 +147,55 @@ describe("global search RPC", () => {
   it.each(["816555", "(816) 555", "816-555", "937888"])("finds formatted phone and slot 3 by %s", async (q) => {
     expect((await search(q)).filter(r => r.entity_type === "owner" && r.matched_field === "phone").map(r => r.entity_id)).toContain(owner);
   });
-  it.each(["appoin", "example.com", "45.5"])("finds normalized SMS prefix %s", async (q) => {
+  it.each(["appoin", "example.com", "45.50 total", "811 total", "8111 N Stoddard"])("finds normalized SMS prefix %s", async (q) => {
     const threads = (await search(q)).filter(r => r.entity_type === "thread");
     expect(threads).toHaveLength(1);
     expect(threads[0].conversation_id).toBe(conversation);
     if (q === "appoin") expect(threads[0].subtitle).toBe("Appointment reminder");
+  });
+  it.each(["a\\b", "45.5"])("rejects weak body-only RPC query %s", async q => {
+    expect((await search(q)).filter(r => r.entity_type === "thread")).toEqual([]);
+  });
+  it.each([
+    ["a\\b", null], ["ab", null], ["1.2", null], ["45.5", null],
+    ["appoin", "'appoin':*"], ["8111 N Stoddard", "'8111':* & 'n':* & 'stoddard':*"],
+    ["foo@example.com", "'foo':* & 'example':* & 'com':*"], ["100%%", "'100':*"],
+    ["a b c d e f seventh", null],
+    ["one b c d e f seventh", "'one':* & 'b':* & 'c':* & 'd':* & 'e':* & 'f':*"],
+  ])("normalizes selected tokens for %s", async (q, expected) => {
+    const { rows } = await db.query("select public.search_prefix_tsquery($1)::text as query", [q]);
+    expect(rows[0].query).toBe(expected);
+  });
+  it("gates similar emails while preserving partial-email substrings", async () => {
+    const id = await contact("Emailfixture");
+    await db.query("update contacts set first_name=null,last_name=null,entity_name=null,email='bhaggard91@gmail.com' where id=$1", [id]);
+    await property(id, "Reachable Email Lane");
+    const { rows } = await db.query("select search_text OPERATOR(extensions.%) 'bhaggard90@gmail.com' as fuzzy, search_text like '%bhaggard90@gmail.com%' as substring from contacts where id=$1", [id]);
+    expect(rows[0]).toEqual({ fuzzy: true, substring: false });
+    expect((await search("bhaggard90@gmail.com")).filter(r => r.entity_type === "owner")).toEqual([]);
+    expect((await search("bhaggard91@gma")).filter(r => r.entity_type === "owner").map(r => r.entity_id)).toEqual([id]);
+  });
+  it("keeps misspelled surnames fuzzy eligible", async () => {
+    const id = await contact("Surnamefixture");
+    await db.query("update contacts set first_name=null,last_name='Vanderplanken',entity_name=null,email=null where id=$1", [id]);
+    await property(id, "Reachable Surname Lane");
+    const { rows } = await db.query("select search_text OPERATOR(extensions.%) 'vanderplankin' as fuzzy, search_text like '%vanderplankin%' as substring from contacts where id=$1", [id]);
+    expect(rows[0]).toEqual({ fuzzy: true, substring: false });
+    expect((await search("Vanderplankin")).filter(r => r.entity_type === "owner").map(r => r.entity_id)).toEqual([id]);
+  });
+  it.each([
+    ["bhaggard91@gmail.com", "bhaggard90@gmail.com", false],
+    ["1234568abc", "1234567abc", false], // exactly 70% digits
+    ["123457abcd", "123456abcd", true], // 60% digits
+    ["8111 N Stoddard", "8111 N Stodard", true],
+  ])("gates property similarity for %s / %s", async (address, q, expected) => {
+    const id = await property(null, address);
+    await db.query("update properties set city='',state='',zip='',market=null,apn=null,mls_number=null where id=$1", [id]);
+    const { rows } = await db.query("select search_text OPERATOR(extensions.%) lower($2) as fuzzy, search_text like '%' || lower($2) || '%' as substring from properties where id=$1", [id, q]);
+    expect(rows[0]).toEqual({ fuzzy: true, substring: false });
+    const ids = (await search(q, a, 10)).filter(r => r.entity_type === "property").map(r => r.entity_id);
+    if (expected) expect(ids).toContain(id);
+    else expect(ids).toEqual([]);
   });
   it("keeps live destinations, uses a thread for deleted-only owners, and excludes orphans before limiting", async () => {
     const rows = await search("Zephyrson", a, 10);
@@ -181,6 +239,22 @@ describe("global search RPC", () => {
     const rows = await search("%%%", a, 10);
     expect(rows).toEqual([]);
     expect((await search("Literal%Place")).some(r => r.title === "100 Literal%Place")).toBe(true);
+  });
+  it("preserves helper and RPC signatures, volatility, invoker rights, search path and grants", async () => {
+    const { rows } = await db.query(`select proname, pronargs, provolatile, prosecdef, proconfig,
+      has_function_privilege('anon', p.oid, 'execute') as anon,
+      has_function_privilege('authenticated', p.oid, 'execute') as authenticated,
+      has_function_privilege('service_role', p.oid, 'execute') as service
+      from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+      where n.nspname='public' and p.proname in ('search_global','search_prefix_tsquery') order by proname`);
+    const privileges = await db.query(`select proname, proacl from pg_proc p
+      join pg_namespace n on n.oid=p.pronamespace
+      where n.nspname='public' and proname in ('search_global','search_prefix_tsquery') order by proname`);
+    expect(privileges.rows).toEqual(originalPrivileges);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ proname: "search_global", pronargs: 2, provolatile: "s", prosecdef: false, authenticated: true, service: true });
+    expect(rows[1]).toMatchObject({ proname: "search_prefix_tsquery", pronargs: 1, provolatile: "i", prosecdef: false });
+    for (const row of rows) expect(row.proconfig).toContain("search_path=public, pg_temp");
   });
   it("normalizes punctuation and truncates the query to six original-order tokens", async () => {
     const { rows } = await db.query("select public.search_prefix_tsquery('!!!') is null as empty, public.search_prefix_tsquery('one two three four five six seven')::text as tokens");
