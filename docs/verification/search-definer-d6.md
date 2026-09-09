@@ -56,6 +56,29 @@ RPC for null/empty/short/100-char/punctuation-only/broad queries and limit edges
 The existing six D1/D4 mutations remain available via SEARCH_MUTATION and now
 edit the installed final definitions, including the shared prefix helper.
 
+## Completed verification
+
+`npm run verify` and both implementation pre-commit hooks passed: the PostgreSQL
+17 e-sign rehearsal, typecheck, 330 unit files / 3,667 tests, and 110 component
+files / 1,178 tests. Focused ESLint and git diff --check passed.
+
+The five required integration files passed together: **110 passed, 1 skipped**
+(the separately executed opt-in performance gate). The run includes all twelve
+D6 mutation RED → GREEN proofs. Six D1/D4 global mutations (`structured-gate`,
+`email-equality`, `no-similarity`, `weak-prefix`, `drop-short`, `boundary`) each
+exited 1 with assertion failures on the final definition, followed by the green
+five-file run. Messages `weak-prefix` separately failed its two intended tests, followed by
+a clean 16-test Messages run.
+
+```sh
+NODE_OPTIONS=--max-http-header-size=65536 SEARCH_D6_MUTATIONS=1 npm run test:integration -- \
+  supabase/migrations/20260909000000_global_search.integration.test.ts \
+  supabase/migrations/20260909080000_messages_search.integration.test.ts \
+  supabase/migrations/20260909020000_dnc_guard_ignore_generated_columns.integration.test.ts \
+  src/lib/messages/list-threads.integration.test.ts \
+  'src/app/(dashboard)/messages/actions.search.integration.test.ts'
+```
+
 ## Representative performance
 
 ```sh
@@ -80,6 +103,20 @@ CTEs hide the digit gate. A word query's phone bitmap index lookup visits all
 contacts for `%%`, then rejects them. The property branch scans the dominant
 tenant via the org index. SECURITY DEFINER alone does not establish the <500ms gate.
 
+The final definition-checked run recorded:
+
+| Query | Real-JWT p95 (ms) | Owner EXPLAIN (ms) |
+| --- | ---: | ---: |
+| Sunflower | 4795.05 | 6176.095 |
+| Vanderplanken | 5201.85 | 4833.989 |
+| 8165551234 | 67.16 | 7.694 |
+| appoin | 4751.51 | 4536.876 |
+
+Three of four queries fail the 500ms gate. All synthetic rows were cleaned up
+and zero remaining rows verified. No function-definition changes occurred during
+this final measured run. An earlier run was discarded after a concurrent session
+restored SECURITY INVOKER despite our held integration mutex.
+
 A read-only NOT MATERIALIZED experiment (not shipped) reduced owner EXPLAIN to
 1.320ms (Sunflower), 16.380ms (Vanderplanken), 9.348ms (8165551234), and 4.698ms
 (appoin). This does not prove real-RPC performance and requires a scope extension
@@ -87,7 +124,7 @@ from the literal approved plan.
 
 ## Production acceptance
 
-After dependency and D6 deployment through the established migration workflow:
+After D6 passes its performance gate and deploys through the established migration workflow:
 
 ```sh
 node scripts/verify-search-global-production.mjs
@@ -99,5 +136,10 @@ no production writes. It validates all five defect queries against the D1/D4
 oracle under authenticated RLS, with only intentional same-org/deleted-reference
 corrections, and gates 20-sample warm real-JWT p95 below 500ms.
 
-Production acceptance has not run. #503 remains an external dependency; do not
-merge this child into its parent branch or release it ahead of that dependency.
+Production acceptance has not run. #503 merged during this session as
+`4521898ae3447b45dd0efb1b636bab8702aa8720`; its production migration workflow
+succeeded. PR #504 remains draft because the D6 performance gate fails. Its base
+remains the requested dependency branch (the parent branch was retained); before
+any eventual release, retarget to main and re-verify the deployed preconditions.
+The next engineering step requires extending the literal plan to address the
+remaining CTE/planner barrier, then rerunning the same mutation/performance gates.
