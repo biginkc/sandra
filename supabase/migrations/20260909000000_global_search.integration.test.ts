@@ -17,6 +17,26 @@ let owner: string;
 let orphan: string;
 let threadOnly: string;
 const conversation = randomUUID();
+const capOwners = Array.from({ length: 12 }, () => randomUUID()).sort();
+const capMessages = Array.from({ length: 12 }, () => randomUUID()).sort();
+const tieMessages = [randomUUID(), randomUUID()].sort();
+const tieConversation = randomUUID();
+let reachable: string;
+
+// Deliberately broken SQL is opt-in; teardown always restores the source SQL.
+function mutationSql() {
+  switch (process.env.SEARCH_MUTATION) {
+    case "orphan": return sql.replace("from contact_candidates c", `from (select * from contact_candidates
+      order by extensions.similarity(search_text,lower(q)) desc, created_at desc, id desc
+      limit (select per_type from bounds)) c`);
+    case "owner-tie": return sql.replace("c.created_at desc, c.id desc", "c.created_at desc, c.id asc");
+    case "message-tie": return sql.replace("m.conversation_id, m.created_at desc, m.id desc", "m.conversation_id, m.created_at desc, m.id asc");
+    case "thread-tie": return sql.replace("m.rank desc, m.created_at desc, m.id desc", "m.rank desc, m.created_at desc, m.id asc");
+    case "owner-cap": return sql.replace("limit (select per_type from bounds)\n  ), matching_messages", "limit 999\n  ), matching_messages");
+    case "thread-cap": return sql.replace("limit (select per_type from bounds)\n  )\n  select", "limit 999\n  )\n  select");
+    default: return sql;
+  }
+}
 
 async function property(contact: string | null, address: string, deleted = false) {
   const { data, error } = await service.from("properties").insert({
@@ -48,7 +68,7 @@ describe("global search RPC", () => {
     try {
       await db.query(process.env.SEARCH_MUTATE_PHONE === "1"
         ? sql.replace("or (length(i.qd) >= 3 and c.phone_digits ilike '%' || i.qd || '%')", "or false /* mutation: phone branch removed */")
-        : sql);
+        : mutationSql());
       await db.query("commit");
     } catch (error) { await db.query("rollback"); throw error; }
     await resetTenantTables(service);
@@ -71,11 +91,31 @@ describe("global search RPC", () => {
     if (error) throw new Error(error.message);
     await property(null, "100 Literal%Place");
     for (let i = 0; i < 12; i++) await property(null, `${i} Clampville Avenue`);
+    // Exact-match orphans outrank the reachable contact and exhaust a limit of two.
+    for (let i = 0; i < 4; i++) {
+      await db.query(`insert into contacts (org_id, first_name, phone_1_type)
+        values ($1, 'Orphanguard', 'unknown')`, [BMH_ORG_ID]);
+    }
+    reachable = await contact("Orphanguard reachable with deliberately longer text");
+    await property(reachable, "810 Reachable Lane");
+    for (let i = 0; i < 12; i++) {
+      await db.query(`insert into contacts (id, org_id, first_name, phone_1_type, created_at)
+        values ($1,$2,'Capowner','unknown','2026-09-01T12:00:00Z')`, [capOwners[i], BMH_ORG_ID]);
+      await property(capOwners[i], `${i} Reachable Cap Lane`);
+      await db.query(`insert into messages (id,org_id,contact_id,conversation_id,channel,direction,body,from_address,to_address,created_at)
+        values ($1,$2,$3,$4,'sms','inbound','Capthread','+18165551234','+18165559999','2026-09-01T12:00:00Z')`,
+        [capMessages[i], BMH_ORG_ID, capOwners[i], randomUUID()]);
+    }
+    for (const id of tieMessages) {
+      await db.query(`insert into messages (id,org_id,contact_id,conversation_id,channel,direction,body,from_address,to_address,created_at)
+        values ($1,$2,$3,$4,'sms','inbound','Tiemessage','+18165551234','+18165559999','2026-09-01T12:00:00Z')`,
+        [id, BMH_ORG_ID, owner, tieConversation]);
+    }
   }, 60000);
 
   afterAll(async () => {
     try {
-      if (process.env.SEARCH_MUTATE_PHONE === "1") {
+      if (process.env.SEARCH_MUTATE_PHONE === "1" || process.env.SEARCH_MUTATION) {
         await db.query("begin");
         try { await db.query(sql); await db.query("commit"); }
         catch (error) { await db.query("rollback"); throw error; }
@@ -105,6 +145,30 @@ describe("global search RPC", () => {
     expect(rows.find(r => r.entity_id === threadOnly)).toMatchObject({ property_id: null, conversation_id: conversation });
     expect(rows.some(r => r.entity_id === orphan)).toBe(false);
     expect((await search("Sunflower", a, 10)).filter(r => r.entity_type === "property")).toHaveLength(1);
+  });
+  it("filters higher-ranked orphans before the owner limit", async () => {
+    const { rows } = await db.query(`select id from contacts where first_name like 'Orphanguard%'
+      order by extensions.similarity(search_text,'orphanguard') desc, created_at desc, id desc limit 2`);
+    expect(rows).toHaveLength(2);
+    expect(rows.map(r => r.id)).not.toContain(reachable);
+    expect((await search("Orphanguard", a, 2)).filter(r => r.entity_type === "owner").map(r => r.entity_id)).toEqual([reachable]);
+  });
+  it("breaks equal-rank equal-timestamp owner ties by descending ID", async () => {
+    expect((await search("Capowner", a, 5)).filter(r => r.entity_type === "owner").map(r => r.entity_id))
+      .toEqual([...capOwners].reverse().slice(0, 5));
+  });
+  it("breaks equal-timestamp messages within a conversation by descending ID", async () => {
+    expect((await search("Tiemessage")).filter(r => r.entity_type === "thread").map(r => r.entity_id)).toEqual([tieMessages[1]]);
+  });
+  it("breaks equal-rank equal-timestamp thread ties by descending ID", async () => {
+    expect((await search("Capthread", a, 5)).filter(r => r.entity_type === "thread").map(r => r.entity_id))
+      .toEqual([...capMessages].reverse().slice(0, 5));
+  });
+  it("caps more than ten reachable owners", async () => {
+    expect((await search("Capowner", a, 999)).filter(r => r.entity_type === "owner")).toHaveLength(10);
+  });
+  it("caps more than ten distinct reachable threads", async () => {
+    expect((await search("Capthread", a, 999)).filter(r => r.entity_type === "thread")).toHaveLength(10);
   });
   it.each(["Sunflower", "Zephyrson", "816555", "appoin"])("org B cannot see org A results for %s", async q => {
     expect(await search(q, b)).toEqual([]);
