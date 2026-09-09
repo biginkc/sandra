@@ -9,22 +9,22 @@ export function InboxSearch({ degraded = false }: { degraded?: boolean }) {
   const params = useSearchParams();
   const query = params.toString();
   const search = params.get("search") ?? "";
-  const lastDispatchedSearch = useRef<string | null>(null);
+  const localNavigations = useRef(0);
   const [value, setValue] = useState(search);
   const [pending, startTransition] = useTransition();
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    // A local replace may finish after a newer edit scheduled its debounce.
-    // Consume the dispatch marker so later Back/Forward or filter changes
-    // remain external navigation, even when they reuse this search value.
-    if (search !== lastDispatchedSearch.current) {
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = null;
-      // URL navigation is an external source; local completions must not sync.
+    // React batches overlapping navigations into one transition. Once it
+    // settles, every dispatch in that batch has completed or been superseded.
+    if (!pending) localNavigations.current = 0;
+  }, [pending]);
+  useEffect(() => {
+    // The URL owns the draft only while idle. An older completion must never
+    // overwrite typing or cancel its debounce, regardless of dispatch order.
+    if (timer.current === null && localNavigations.current === 0 && !pending) {
       setValue(search);
     }
-    lastDispatchedSearch.current = null;
-  }, [query, search]);
+  }, [query, search, pending]);
   useEffect(() => {
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, []);
@@ -44,11 +44,13 @@ export function InboxSearch({ degraded = false }: { degraded?: boolean }) {
             const url = new URLSearchParams(query);
             const normalized = next.trim();
             timer.current = null;
-            lastDispatchedSearch.current = normalized;
             if (normalized) url.set("search", normalized);
             else url.delete("search");
             url.delete("inboxPage");
-            startTransition(() => router.replace(`/messages?${url.toString()}`, { scroll: false }));
+            startTransition(() => {
+              localNavigations.current += 1;
+              router.replace(`/messages?${url.toString()}`, { scroll: false });
+            });
           }, 200);
         }}
       />
