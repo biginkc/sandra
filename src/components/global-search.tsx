@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { SearchIcon } from "lucide-react";
+import { SearchIcon, XIcon } from "lucide-react";
 import { Command, CommandDialog, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem, CommandShortcut } from "@/components/ui/command";
 
 type SearchResult = {
@@ -77,12 +77,12 @@ export function GlobalSearch() {
     <button ref={trigger} type="button" aria-label="Search" onClick={() => changeOpen(true)} className="flex items-center gap-2 rounded-full border border-white/20 px-3 py-1.5 text-sm text-white/80 hover:bg-white/10">
       <SearchIcon className="size-4" /><span className="hidden sm:inline">Search…</span><span className="hidden sm:inline">⌘K</span>
     </button>
-    <CommandDialog open={open} onOpenChange={changeOpen} title="Search Sandra" description="Search properties, owners, and SMS messages">
-      <Command shouldFilter={false} value={selected} onValueChange={setSelected} loop>
+    <CommandDialog open={open} onOpenChange={changeOpen} title="Search Sandra" description="Search properties, owners, and SMS messages" className="fixed inset-0 top-0 left-0 h-dvh w-screen max-w-none translate-x-0 translate-y-0 rounded-none! sm:max-w-none">
+      <Command className="min-h-0 rounded-none! [&_[data-slot=command-input-wrapper]]:shrink-0 [&_[data-slot=command-input-wrapper]]:pr-12" shouldFilter={false} value={selected} onValueChange={setSelected} loop>
         <CommandInput placeholder="Search properties, owners, messages…" value={query} maxLength={100} onValueChange={value => {
           invalidate(); setQuery(value); setResults([]); setSelected(""); setStatus(value.trim().length >= 3 ? "loading" : "idle");
         }} />
-        <CommandList>
+        <CommandList className="h-[calc(100dvh-2.75rem)] min-h-0 max-h-none flex-1 overflow-y-auto">
           {status === "idle" && <div className="p-6 text-center text-sm text-muted-foreground">Type at least 3 characters</div>}
           {status === "loading" && <div role="status" className="p-6 text-center text-sm">Searching…</div>}
           {status === "error" && <div role="alert" className="p-6 text-center text-sm">Search unavailable</div>}
@@ -98,6 +98,9 @@ export function GlobalSearch() {
           })}
         </CommandList>
       </Command>
+      <button type="button" aria-label="Close search" onClick={() => changeOpen(false)} className="absolute top-1 right-2 flex size-9 items-center justify-center rounded-md hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring">
+        <XIcon className="size-4" />
+      </button>
     </CommandDialog>
   </>;
 }

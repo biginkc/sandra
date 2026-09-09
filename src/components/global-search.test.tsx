@@ -17,6 +17,29 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 describe("global search", () => {
+  it("fills the viewport and renders all fifteen results in ordered groups", async () => {
+    const results = ["property", "owner", "thread"].flatMap(kind =>
+      Array.from({ length: 5 }, (_, i) => row(`${kind} ${i + 1}`, kind)));
+    vi.mocked(fetch).mockResolvedValue(response(results) as unknown as Response);
+    open(); type("query");
+    await screen.findByText("thread 5");
+    expect(screen.getByRole("dialog")).toHaveClass(
+      "fixed", "inset-0", "h-dvh", "w-screen", "max-w-none", "sm:max-w-none",
+      "rounded-none!", "translate-x-0", "translate-y-0", "top-0", "left-0");
+    expect(screen.getByRole("listbox")).toHaveClass("max-h-none", "flex-1", "min-h-0", "overflow-y-auto");
+    expect(screen.getAllByRole("option")).toHaveLength(15);
+    const headings = Array.from(screen.getByRole("dialog").querySelectorAll("[cmdk-group-heading]"));
+    expect(headings.map(heading => heading.textContent)).toEqual(["Properties", "Owners", "Messages"]);
+    for (const label of ["Properties", "Owners", "Messages"]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+  });
+  it("closes with the visible close button and restores trigger focus", async () => {
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "Close search" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Search" })).toHaveFocus());
+  });
   it("opens with Cmd-K, renders ordered groups and navigates with Enter", async () => {
     vi.mocked(fetch).mockResolvedValue(response([row("Home"), row("Ada", "owner"), row("SMS", "thread")]) as unknown as Response);
     open(); type("query");
