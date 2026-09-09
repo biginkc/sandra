@@ -14,6 +14,7 @@ describe("system value labels", () => {
     expect(systemLabel(PROPERTY_STATUS_LABELS, "under_contract")).toBe(
       "Under contract",
     );
+    expect(systemLabel(LEAD_SOURCE_LABELS, "zillow")).toBe("Zillow");
     expect(systemLabel(LEAD_SOURCE_LABELS, "cold_call")).toBe("Cold call");
     expect(systemLabel(MEMBERSHIP_ROLE_LABELS, "owner")).toBe("Owner");
   });
