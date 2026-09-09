@@ -12,7 +12,16 @@ export async function GET(request: Request) {
   if (q.length < 3) return Response.json({ results: [] }, { headers });
   const { data, error } = await supabase.rpc("search_global", { q, per_type: 5 });
   if (error) {
-    reportError(error, { tags: { surface: "global_search" } });
+    // Avoid logging query values, quoted literals, URLs, or control characters.
+    const message = (error.message ?? "Database search failed")
+      .replace(/https?:\/\/\S+/g, "[url]")
+      .replace(/'[^']*'|"[^"]*"/g, "[redacted]")
+      .replaceAll(q, "[query]")
+      .replace(/[\r\n\t]/g, " ").slice(0, 500);
+    reportError(new Error(message), {
+      tags: { surface: "global_search" },
+      extra: { code: error.code, message },
+    });
     if (error.code === "PGRST202") return Response.json({ results: [], degraded: true }, { headers });
     return Response.json(err({ code: "SEARCH_FAILED", message: "Search unavailable" }), { status: 500, headers });
   }

@@ -11,6 +11,17 @@ describe("global search route", () => {
   it("trims and caps the query", async () => { await GET(request(`  ${"a".repeat(110)}  `)); expect(rpc).toHaveBeenCalledWith("search_global", { q: "a".repeat(100), per_type: 5 }); });
   it("reports a missing RPC once and degrades", async () => { rpc.mockResolvedValue({ error: { code: "PGRST202" } }); const response = await GET(request()); expect(response.status).toBe(200); expect(await response.json()).toEqual({ results: [], degraded: true }); expect(reportError).toHaveBeenCalledTimes(1); });
   it("surfaces other database errors", async () => { rpc.mockResolvedValue({ error: { code: "42883" } }); const response = await GET(request()); expect(response.status).toBe(500); expect(await response.json()).toEqual({ ok: false, error: { code: "SEARCH_FAILED", message: "Search unavailable" } }); });
+  it("retains sanitized database diagnostics without exposing query values", async () => {
+    rpc.mockResolvedValue({ error: { code: "42883", message: 'function "private_fn" failed for sunflower\nhttps://secret.example/path' } });
+    await GET(request());
+    expect(reportError).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { surface: "global_search" },
+      extra: { code: "42883", message: "function [redacted] failed for [query] [url]" },
+    });
+    const logged = JSON.stringify(reportError.mock.calls);
+    expect(logged).not.toContain("sunflower");
+    expect(logged).not.toContain("secret.example");
+  });
   it("maps every destination including owners without a property", async () => {
     rpc.mockResolvedValue({ data: [
       { entity_type: "property", entity_id: "p" },
