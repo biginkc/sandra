@@ -70,19 +70,25 @@ export async function partitionPropertyDncLocks(
     return { ok: true, data: { unlocked: [], locked: [], missing: [] } };
   }
 
-  const { data, error } = await supabase
-    .from("properties")
-    .select("id, is_dnc_locked")
-    .in("id", uniqueIds)
-    .is("deleted_at", null);
-  if (error) {
-    return {
-      ok: false,
-      error: { code: "PROPERTY_LOCK_CHECK_FAILED", message: error.message },
-    };
+  // 500 UUIDs serialize to ~19.6 KB, below the 32 KiB URI budget.
+  // Keep every lookup bounded, including the recheck after Prospects eligibility.
+  const state = new Map<string, boolean>();
+  const chunkSize = 500;
+  for (let offset = 0; offset < uniqueIds.length; offset += chunkSize) {
+    const { data, error } = await supabase
+      .from("properties")
+      .select("id, is_dnc_locked")
+      .in("id", uniqueIds.slice(offset, offset + chunkSize))
+      .is("deleted_at", null);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "PROPERTY_LOCK_CHECK_FAILED", message: error.message },
+      };
+    }
+    for (const row of data ?? []) state.set(row.id, row.is_dnc_locked);
   }
 
-  const state = new Map((data ?? []).map((row) => [row.id, row.is_dnc_locked]));
   return {
     ok: true,
     data: {

@@ -1658,15 +1658,21 @@ export async function verifyPropertiesBulk(
       };
     }
 
-    const { data: ownedRows, error: ownershipError } = await supabase
-      .from("properties")
-      .select("id, org_id")
-      .in("id", verifyIds);
-    if (ownershipError) {
-      return {
-        ok: false,
-        error: { code: "VERIFY_SCOPE_FAILED", message: ownershipError.message },
-      };
+    const ownedRows: Array<{ id: string; org_id: string }> = [];
+    // Match the bounded DNC recheck: 500 UUIDs serialize to <20 KB of URL.
+    const chunkSize = 500;
+    for (let offset = 0; offset < verifyIds.length; offset += chunkSize) {
+      const { data, error: ownershipError } = await supabase
+        .from("properties")
+        .select("id, org_id")
+        .in("id", verifyIds.slice(offset, offset + chunkSize));
+      if (ownershipError) {
+        return {
+          ok: false,
+          error: { code: "VERIFY_SCOPE_FAILED", message: ownershipError.message },
+        };
+      }
+      ownedRows.push(...(data ?? []));
     }
     const orgIds = new Set((ownedRows ?? []).map((row) => row.org_id));
     if (
