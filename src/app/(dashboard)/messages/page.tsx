@@ -61,6 +61,7 @@ export default async function MessagesPage({
   const requestNowMs = Date.now();
   const sp = await searchParams;
   const rawFilter = firstSearchParam(sp.filter);
+  const search = (firstSearchParam(sp.search) ?? "").trim().slice(0, 100);
   if (rawFilter === "handled") {
     const canonical = searchParamsToUrlParams(sp);
     canonical.set("filter", "dispo");
@@ -104,6 +105,7 @@ export default async function MessagesPage({
   const [threadPage, queuedResult, threadDetail, unknownAll, queueStatsResult] =
     await Promise.all([
       listThreadPage(supabase, {
+        search,
         filter: pageFilter,
         currentUserId,
         includeThreadId: canonicalThreadId,
@@ -189,6 +191,7 @@ export default async function MessagesPage({
 
   return (
     <CockpitView
+      searchDegraded={threadPage.degraded}
       activeTab={activeTab}
       filter={effectiveFilter}
       threads={visibleThreads}

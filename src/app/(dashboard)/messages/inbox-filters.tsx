@@ -1,5 +1,7 @@
 "use client";
 
+import { InboxSearch } from "./inbox-search";
+
 export type InboxFilter =
   | "all"
   | "mine"
@@ -18,6 +20,7 @@ export type PendingInboxChange =
   | { kind: "hideDnc"; value: boolean };
 
 type Props = {
+  searchDegraded?: boolean;
   active: InboxFilter;
   filterCounts: InboxFilterCounts;
   /** Hide Mine + Unassigned chips when no auth user is on the request. */
@@ -53,6 +56,7 @@ const FILTER_LABELS: Record<InboxFilter, string> = {
  * assignment workflow.
  */
 export function InboxFilters({
+  searchDegraded = false,
   active,
   filterCounts,
   showAssignmentChips,
@@ -81,6 +85,9 @@ export function InboxFilters({
       className="flex flex-wrap items-center gap-2"
       data-testid="inbox-filters"
     >
+      {displayedActive !== "unknown" && displayedActive !== "dismissed" ? (
+        <InboxSearch degraded={searchDegraded} />
+      ) : null}
       {/* Priority order: immediacy, outcome work, assignment, Sandra state,
          then the broader catch-all buckets. */}
       <FilterChip

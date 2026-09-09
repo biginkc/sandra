@@ -144,6 +144,7 @@ export type ThreadPageFilter =
 export type ThreadPageCounts = Record<ThreadPageFilter, number>;
 
 export type ThreadPage = {
+  degraded?: boolean;
   threads: Thread[];
   counts: ThreadPageCounts;
   total: number;
@@ -153,6 +154,7 @@ export type ThreadPage = {
 };
 
 export type ListThreadPageOpts = {
+  search?: string | null;
   filter: ThreadPageFilter;
   currentUserId: string | null;
   includeThreadId: string | null;
@@ -463,7 +465,7 @@ export async function listThreadPage(
     Date.now() - sinceDays * 24 * 60 * 60 * 1000,
   ).toISOString();
 
-  const { data, error } = await supabase.rpc("sms_inbox_thread_page_snapshot", {
+  const args = {
     p_cutoff: cutoff,
     p_filter: opts.filter,
     p_assignee_id: opts.currentUserId,
@@ -471,7 +473,17 @@ export async function listThreadPage(
     p_hide_noise: opts.hideNoise,
     p_limit: pageSize,
     p_offset: (requestedPage - 1) * pageSize,
+  };
+  const search = opts.search?.trim().slice(0, 100) ?? "";
+  let { data, error } = await supabase.rpc("sms_inbox_thread_page_snapshot", {
+    ...args,
+    p_search: search.length >= 3 ? search : null,
   });
+  let degraded = false;
+  if (error?.code === "PGRST202" || error?.code === "PGRST203") {
+    degraded = true;
+    ({ data, error } = await supabase.rpc("sms_inbox_thread_page_snapshot", args));
+  }
   if (error) {
     throw new Error(`sms_inbox_thread_page_snapshot: ${error.message}`);
   }
@@ -485,6 +497,7 @@ export async function listThreadPage(
   }
 
   return {
+    degraded,
     threads: mapThreadSnapshot(data.rows, {}),
     counts: data.counts,
     total: data.total,

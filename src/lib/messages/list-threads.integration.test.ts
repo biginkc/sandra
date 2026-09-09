@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, onTestFinished } from "vitest";
 import { Client } from "pg";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { createTestClient } from "@tests/integration/client";
 import { loadTestEnv } from "@tests/integration/env";
@@ -82,6 +83,70 @@ async function readScaleSnapshotUnderStatementTimeout(
   } finally {
     await client.query("rollback").catch(() => {});
     await client.end();
+  }
+}
+
+/** Opt-in scale evidence, under the integration suite's shared DB mutex. */
+async function measureScaleSearch(viewer: { userId: string; jwt: string }) {
+  const db = new Client({ connectionString: loadTestEnv().TEST_SUPABASE_DB_URL });
+  await db.connect();
+  const results: { search: string; expected: number; timesMs: number[]; p95Ms: number }[] = [];
+  const cases = [
+    { search: "Zephyrson", expected: 5 },
+    { search: "501999", expected: 10 },
+    { search: "quartzpref", expected: 201 },
+  ];
+  mkdirSync("tmp/messages-search-scale", { recursive: true });
+  try {
+    // Replay the checked-in candidate, rather than measure a stale test RPC.
+    await db.query("begin");
+    await db.query(readFileSync("supabase/migrations/20260909010000_messages_search.sql", "utf8"));
+    await db.query("commit");
+    await db.query("analyze public.contacts");
+    await db.query("analyze public.messages");
+    await db.query("analyze public.properties");
+    const definition = await db.query<{ prosrc: string }>(
+      "select prosrc from pg_proc where oid = 'public.sms_inbox_thread_page_snapshot(timestamptz,text,uuid,uuid,boolean,integer,integer,text)'::regprocedure",
+    );
+    const args = ["p_cutoff", "p_filter", "p_assignee_id", "p_include_thread_id", "p_hide_noise", "p_limit", "p_offset", "p_search"];
+    const types = ["timestamptz", "text", "uuid", "uuid", "boolean", "integer", "integer", "text"];
+    const body = definition.rows[0]!.prosrc.replace(/\bp_[a-z_]+\b/g, name => {
+      const index = args.indexOf(name);
+      if (index < 0) throw new Error(`Unknown RPC parameter ${name}`);
+      return `($${index + 1}::${types[index]})`;
+    });
+    const cutoff = new Date(Date.now() - 90 * 86_400_000).toISOString();
+    const authenticated = clientForUser(viewer.jwt);
+    await db.query("begin");
+    await db.query("set local role authenticated");
+    await db.query("set local search_path = ''");
+    await db.query("set local statement_timeout = '15s'");
+    await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: viewer.userId, role: "authenticated" })]);
+    for (const { search, expected } of cases) {
+      const plan = await db.query("explain (analyze, buffers) " + body,
+        [cutoff, "all", viewer.userId, null, false, 200, 0, search]);
+      writeFileSync(`tmp/messages-search-scale/${search}.plan.txt`, plan.rows.map(row => row["QUERY PLAN"]).join("\n") + "\n");
+      const timesMs: number[] = [];
+      for (let run = 0; run < 10; run++) {
+        const start = performance.now();
+        const { data, error } = await authenticated.rpc("sms_inbox_thread_page_snapshot", {
+          p_cutoff: cutoff, p_filter: "all", p_assignee_id: viewer.userId,
+          p_hide_noise: false, p_limit: 200, p_offset: 0, p_search: search,
+        });
+        timesMs.push(performance.now() - start);
+        if (error) throw error;
+        expect((data as { total: number }).total).toBe(expected);
+      }
+      // Nearest-rank p95 of ten samples is the maximum (ceil(.95 * 10)).
+      const p95Ms = [...timesMs].sort((a, b) => a - b)[9]!;
+      results.push({ search, expected, timesMs, p95Ms });
+      writeFileSync("tmp/messages-search-scale/timings.json", JSON.stringify(results, null, 2) + "\n");
+      console.log("MESSAGES_SEARCH_SCALE", JSON.stringify(results.at(-1)));
+    }
+    for (const result of results) expect(result.p95Ms, result.search).toBeLessThan(2_000);
+  } finally {
+    await db.query("rollback").catch(() => {});
+    await db.end();
   }
 }
 
@@ -208,7 +273,7 @@ describe("listThreads (integration)", () => {
     const contacts = Array.from({ length: total }, (_, index) => ({
       id: crypto.randomUUID(),
       first_name: `Scale ${index}`,
-      last_name: "Thread",
+      last_name: index < 5 ? "Zephyrson" : "Thread",
       phone_1: `+1816${String(5_000_000 + index).padStart(7, "0")}`,
       phone_1_type: "mobile",
     }));
@@ -230,7 +295,7 @@ describe("listThreads (integration)", () => {
       conversation_id: crypto.randomUUID(),
       from_address: contact.phone_1,
       to_address: "+18162804181",
-      body: `scale message ${index} ${"x".repeat(256 + (index % 8) * 137)}`,
+      body: `${index % 100 === 0 ? "quartzprefix " : ""}scale message ${index} ${"x".repeat(256 + (index % 8) * 137)}`,
       created_at: new Date(base + index * 1_000).toISOString(),
       read_at: index % 2 === 0 ? null : new Date().toISOString(),
     }));
@@ -344,6 +409,8 @@ describe("listThreads (integration)", () => {
     } finally {
       await scaleDb.end();
     }
+
+    if (process.env.MESSAGES_SEARCH_MEASURE === "1") await measureScaleSearch(viewer);
 
     const timedSnapshot = await readScaleSnapshotUnderStatementTimeout(
       "all",
@@ -519,7 +586,7 @@ describe("listThreads (integration)", () => {
         (thread) => thread.threadId === selectedOnSecondPage,
       ),
     ).toBe(true);
-  }, 180_000);
+  }, process.env.MESSAGES_SEARCH_MEASURE === "1" ? 300_000 : 180_000);
 
   it("keeps full-window counts, active filters, assignment, and hidden DNC in parity", async () => {
     const viewerId = await mintTestUser(

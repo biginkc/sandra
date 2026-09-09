@@ -48,6 +48,7 @@ type Props = {
   /** Count of DNC threads under the current filter that the toggle is hiding. */
   hiddenDncCount: number;
   /** Server-filtered Inbox page metadata. */
+  searchDegraded?: boolean;
   inboxPage?: number;
   inboxPageSize?: number;
   inboxTotal?: number;
@@ -86,6 +87,7 @@ export function CockpitView({
   queueStats,
   hideDnc,
   hiddenDncCount,
+  searchDegraded = false,
   inboxPage = 1,
   inboxPageSize = 200,
   inboxTotal = threads.length,
@@ -450,6 +452,7 @@ export function CockpitView({
           className="flex flex-col gap-4"
         >
           <InboxFilters
+            searchDegraded={searchDegraded}
             active={filter}
             filterCounts={filterCounts}
             showAssignmentChips={currentUserId !== null}
