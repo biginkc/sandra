@@ -9,6 +9,8 @@ import { resetTenantTables } from "@tests/integration/reset";
 
 const service = createTestClient();
 const sql = readFileSync(new URL("./20260909080000_messages_search.sql", import.meta.url), "utf8");
+const originalGlobalSql = readFileSync(new URL("./20260909000000_global_search.sql", import.meta.url), "utf8");
+const fixSql = readFileSync(new URL("./20260909080600_search_relevance_fixes.sql", import.meta.url), "utf8");
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const users: string[] = [];
 let a: ReturnType<typeof clientForUser>;
@@ -40,8 +42,11 @@ describe("Messages page search RPC", () => {
         .replace("or (length(search.digits)", "or false and (length(search.digits)")
         .replace("or exists (\n        select 1 from public.messages matching_message", "or false and exists (\n        select 1 from public.messages matching_message")
       : sql;
-    await apply(source);
-    await apply(source);
+    await apply(originalGlobalSql + source + fixSql);
+    await apply(originalGlobalSql + source + fixSql);
+    if (process.env.SEARCH_MUTATION === "weak-prefix") {
+      await apply(fixSql.replace("bool_or(length(token) >= 3)", "true"));
+    }
     await resetTenantTables(service);
     await seedTwoOrgs(service);
     for (const [orgId, assign] of [[BMH_ORG_ID, (c: typeof a) => { a = c; }], [TEST_ORG_B_ID, (c: typeof a) => { b = c; }]] as const) {
@@ -56,14 +61,14 @@ describe("Messages page search RPC", () => {
       if (contactError) throw contactError;
       const { error } = await service.from("messages").insert({ org_id: BMH_ORG_ID, contact_id: id,
         conversation_id: threads[i], channel: "sms", direction: "inbound", status: "received",
-        body: i === 0 ? "Name only matches" : i < 4 ? "Zephyrson appointment foo@example.com" : "Unrelated message",
+        body: i === 0 ? "Name only matches" : i < 4 ? "Zephyrson appointment foo@example.com" : "Unrelated message alpha beta 45.5 dollars 45.50 total 811 total 8111 N Stoddard",
         from_address: "+18165551234", to_address: "+18165559999", created_at: new Date(Date.now() - i * 1000).toISOString() });
       if (error) throw error;
     }
   }, 60000);
   afterAll(async () => {
     try {
-      if (process.env.MESSAGES_SEARCH_MUTATION === "1") await apply(sql);
+      if (process.env.MESSAGES_SEARCH_MUTATION || process.env.SEARCH_MUTATION) await apply(originalGlobalSql + sql + fixSql);
       for (const id of users) await service.auth.admin.deleteUser(id);
     } finally { await db.end(); }
   });
@@ -82,6 +87,14 @@ describe("Messages page search RPC", () => {
   });
   it.each(["appoin", "example.com"])("searches normalized SMS prefix %s", async (query) => {
     expect((await page(query)).total).toBe(3);
+  });
+  it.each(["a\\b", "45.5"])("rejects weak body-only RPC query %s", async q => {
+    expect((await page(q)).total).toBe(0);
+  });
+  it.each(["45.50 total", "811 total", "8111 N Stoddard"])("finds strong body-only query %s", async q => {
+    const result = await page(q);
+    expect(result.total).toBe(1);
+    expect(result.rows.map(r => r.thread_id)).toEqual([threads[4]]);
   });
   it("accepts authenticated calls with omitted, null, and short search", async () => {
     for (const search of [undefined, null, "ab", "  a  "]) expect((await page(search)).total).toBe(5);
