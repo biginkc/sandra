@@ -7,6 +7,7 @@
  * written.
  */
 
+import { runSkipTraceEnrichment } from "@/lib/skip-trace/skip-trace-job";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types";
 import {
@@ -229,18 +230,39 @@ async function submitSkipTraceJob(
     return { status: "claim_lost", jobId };
   }
 
-  const { runSkipTraceEnrichment } =
-    await import("@/lib/skip-trace/skip-trace-job");
-  const runnerOutcome = await runSkipTraceEnrichment(supabase, {
-    jobId,
-    orgId: job.org_id,
-    propertyIds: eligibility.eligibleIds,
-    inputParams: nextInputParams,
-    eligibilityExclusions: eligibilityAudit as unknown as Json,
-    expectedHeartbeat: now,
-  });
-  if ("claimed" in runnerOutcome && runnerOutcome.claimed === false) {
-    return { status: "claim_lost", jobId };
+  try {
+    const runnerOutcome = await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: job.org_id,
+      propertyIds: eligibility.eligibleIds,
+      inputParams: nextInputParams,
+      eligibilityExclusions: eligibilityAudit as unknown as Json,
+      expectedHeartbeat: now,
+    });
+    if ("claimed" in runnerOutcome && runnerOutcome.claimed === false) {
+      return { status: "claim_lost", jobId };
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Only fail the prepared row we still own. A newer claimant or an
+    // already-running/provider-submitted attempt must never be overwritten.
+    const { error: failureError } = await supabase
+      .from("jobs")
+      .update({
+        status: "failed",
+        error_message: message || "Skip-trace submission failed before running.",
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", jobId)
+      .eq("org_id", job.org_id)
+      .eq("type", "skip_trace")
+      .eq("status", "queued")
+      .eq("worker_heartbeat_at", now)
+      .is("provider_run_id", null);
+    if (failureError) {
+      throw new Error(`${message}; failed to persist job failure: ${failureError.message}`);
+    }
+    throw error;
   }
 
   return { status: "submitted", jobId };

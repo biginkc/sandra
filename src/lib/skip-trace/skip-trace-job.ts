@@ -323,18 +323,16 @@ export async function runSkipTraceEnrichment(
   // callers from accidentally erasing the cap when they omit inputParams.
   const { data: persistedJob, error: persistedJobError } = await supabase
     .from("jobs")
-    .select("input_params")
+    .select("input_params, created_at")
     .eq("id", params.jobId)
     .eq("org_id", params.orgId)
     .eq("type", "skip_trace")
     .eq("status", "queued")
     .maybeSingle();
   if (persistedJobError) {
-    reportError(persistedJobError, {
-      tags: { surface: "skip_trace_runner_authorization_read" },
-      extra: { jobId: params.jobId, orgId: params.orgId },
-    });
-    return { claimed: false };
+    throw new Error(
+      `skip-trace authorization read failed for ${params.jobId}: ${persistedJobError.message}`,
+    );
   }
   if (!persistedJob) return { claimed: false };
   const persistedInputParams = jsonRecord(persistedJob.input_params);
@@ -347,36 +345,40 @@ export async function runSkipTraceEnrichment(
     submission_attempt_token: attemptToken,
   } as unknown as Json;
   const claimTime = new Date().toISOString();
-  let claim = supabase
-    .from("jobs")
-    .update({
-      status: "running",
-      started_at: claimTime,
-      total_items: propertyIds.length,
-      input_params: claimedInputParams,
-      worker_heartbeat_at: claimTime,
-    })
-    .eq("id", params.jobId)
-    .eq("org_id", params.orgId)
-    .eq("type", "skip_trace")
-    .eq("status", "queued")
-    .eq("total_items", propertyIds.length)
-    .contains("input_params", {
-      property_ids: propertyIds,
-    })
-    .is("provider_run_id", null);
-  claim = params.expectedHeartbeat
-    ? claim.eq("worker_heartbeat_at", params.expectedHeartbeat)
-    : claim.is("worker_heartbeat_at", null);
-  const { data: claimedJobs, error: claimError } = await claim.select(
-    "id, title, description",
+  // Keep the full audience CAS in SQL: putting 3,206 UUIDs in a
+  // PostgREST contains() filter exceeds gateway URL limits before SQL runs.
+  const { data: claimedJobs, error: claimError } = await supabase.rpc(
+    "claim_skip_trace_submission",
+    {
+      p_job_id: params.jobId,
+      p_org_id: params.orgId,
+      p_property_ids: propertyIds,
+      p_input_params: claimedInputParams,
+      p_claim_time: claimTime,
+      p_expected_heartbeat: params.expectedHeartbeat || null,
+    },
   );
   if (claimError) {
-    reportError(claimError, {
-      tags: { surface: "skip_trace_runner_claim" },
-      extra: { jobId: params.jobId, orgId: params.orgId },
-    });
-    return { claimed: false };
+    if (claimError.code === "PGRST202" || claimError.code === "42883") {
+      // created_at survives sweeper re-preparation; a prepared timestamp would
+      // restart the window on every retry. Allow 15 minutes for rollout/cache lag.
+      const deferWindowMs = 15 * 60 * 1000;
+      const jobAgeMs = Date.now() - Date.parse(persistedJob.created_at);
+      const withinDeferWindow = jobAgeMs >= 0 && jobAgeMs <= deferWindowMs;
+      const error = new Error(
+        `skip-trace submission ${withinDeferWindow ? "deferred" : "failed after 15-minute defer window"} for ${params.jobId}: missing function claim_skip_trace_submission (${claimError.code}): ${claimError.message}`,
+      );
+      reportError(error, {
+        tags: { surface: "skip_trace_claim_rpc_missing", deferred: withinDeferWindow },
+        extra: { jobId: params.jobId, code: claimError.code, jobAgeMs },
+      });
+      if (withinDeferWindow) return { claimed: false };
+      // The workflow persists this failure under its prepared-heartbeat fence.
+      throw error;
+    }
+    throw new Error(
+      `skip-trace submission claim failed for ${params.jobId}: ${claimError.message}`,
+    );
   }
   const claimedJob = claimedJobs?.[0];
   if (!claimedJob) return { claimed: false };
