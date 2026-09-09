@@ -10,7 +10,8 @@ import { resetTenantTables } from "@tests/integration/reset";
 const service = createTestClient();
 const sql = readFileSync(new URL("./20260909080000_messages_search.sql", import.meta.url), "utf8");
 const originalGlobalSql = readFileSync(new URL("./20260909000000_global_search.sql", import.meta.url), "utf8");
-const fixSql = readFileSync(new URL("./20260909080600_search_relevance_fixes.sql", import.meta.url), "utf8");
+const relevanceSql = readFileSync(new URL("./20260909080600_search_relevance_fixes.sql", import.meta.url), "utf8");
+const fixSql = relevanceSql + readFileSync(new URL("./20260909084500_search_global_definer_scoping.sql", import.meta.url), "utf8");
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const users: string[] = [];
 let a: ReturnType<typeof clientForUser>;
@@ -45,7 +46,10 @@ describe("Messages page search RPC", () => {
     await apply(originalGlobalSql + source + fixSql);
     await apply(originalGlobalSql + source + fixSql);
     if (process.env.SEARCH_MUTATION === "weak-prefix") {
-      await apply(fixSql.replace("bool_or(length(token) >= 3)", "true"));
+      const installed = (await db.query("select pg_get_functiondef('public.search_prefix_tsquery(text)'::regprocedure) as body")).rows[0].body;
+      const mutated = installed.replace("bool_or(length(token) >= 3)", "true");
+      expect(mutated).not.toBe(installed);
+      await apply(mutated);
     }
     await resetTenantTables(service);
     await seedTwoOrgs(service);
@@ -68,7 +72,7 @@ describe("Messages page search RPC", () => {
   }, 60000);
   afterAll(async () => {
     try {
-      if (process.env.MESSAGES_SEARCH_MUTATION || process.env.SEARCH_MUTATION) await apply(originalGlobalSql + sql + fixSql);
+      await apply(originalGlobalSql + sql + fixSql);
       for (const id of users) await service.auth.admin.deleteUser(id);
     } finally { await db.end(); }
   });
