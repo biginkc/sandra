@@ -900,6 +900,8 @@ export type Database = {
       }
       contacts: {
         Row: {
+          search_text: string | null
+          phone_digits: string | null
           contact_type: string
           created_at: string
           do_not_contact: boolean
@@ -922,6 +924,8 @@ export type Database = {
           sms_opted_out_at: string | null
         }
         Insert: {
+          search_text?: string | null
+          phone_digits?: string | null
           contact_type?: string
           created_at?: string
           do_not_contact?: boolean
@@ -944,6 +948,8 @@ export type Database = {
           sms_opted_out_at?: string | null
         }
         Update: {
+          search_text?: string | null
+          phone_digits?: string | null
           contact_type?: string
           created_at?: string
           do_not_contact?: boolean
@@ -1943,6 +1949,7 @@ export type Database = {
       }
       messages: {
         Row: {
+          fts: unknown
           attributed_outbound_message_id: string | null
           body: string
           campaign_id: string | null
@@ -1971,6 +1978,7 @@ export type Database = {
           to_address: string | null
         }
         Insert: {
+          fts?: unknown
           attributed_outbound_message_id?: string | null
           body: string
           campaign_id?: string | null
@@ -1999,6 +2007,7 @@ export type Database = {
           to_address?: string | null
         }
         Update: {
+          fts?: unknown
           attributed_outbound_message_id?: string | null
           body?: string
           campaign_id?: string | null
@@ -2240,6 +2249,7 @@ export type Database = {
       }
       properties: {
         Row: {
+          search_text: string | null
           absentee_flag: boolean | null
           address: string
           address_normalized: string | null
@@ -2304,6 +2314,7 @@ export type Database = {
           zpid: string | null
         }
         Insert: {
+          search_text?: string | null
           absentee_flag?: boolean | null
           address: string
           address_normalized?: string | null
@@ -2368,6 +2379,7 @@ export type Database = {
           zpid?: string | null
         }
         Update: {
+          search_text?: string | null
           absentee_flag?: boolean | null
           address?: string
           address_normalized?: string | null
@@ -4717,6 +4729,20 @@ export type Database = {
       }
     }
     Functions: {
+      search_global: {
+        Args: { per_type?: number; q: string }
+        Returns: {
+          conversation_id: string
+          entity_id: string
+          entity_type: string
+          matched_field: string
+          property_id: string
+          rank: number
+          subtitle: string
+          title: string
+        }[]
+      }
+      search_prefix_tsquery: { Args: { q: string }; Returns: unknown }
       abandon_esign_template_draft: {
         Args: { p_actor_id: string; p_org_id: string; p_template_id: string }
         Returns: string
