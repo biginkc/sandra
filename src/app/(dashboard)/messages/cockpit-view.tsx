@@ -22,6 +22,7 @@ import { InboxThreadList } from "./inbox-thread-list";
 import { QueuePanel, type QueuedRow } from "./queue-panel";
 import { QueueStatsBanner } from "./queue-stats-banner";
 import { UnknownSenderList } from "./unknown-sender-list";
+import { useConversationSelection } from "./use-conversation-selection";
 import { useQueueStats } from "./use-queue-stats";
 
 type Props = {
@@ -78,8 +79,8 @@ export function CockpitView({
   threads,
   queued,
   queuedHasMore = false,
-  selectedThreadId = null,
-  threadDetail,
+  selectedThreadId: serverThreadId = null,
+  threadDetail: serverThreadDetail,
   unknownSenders,
   filterCounts,
   assigneeEmails,
@@ -97,6 +98,10 @@ export function CockpitView({
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { select: selectConversation, reset: resetConversation, ...conversation } =
+    useConversationSelection(serverThreadId, serverThreadDetail);
+  const selectedThreadId = conversation.selectedId;
+  const threadDetail = conversation.detail;
   const liveNowMs = useLiveNow(nowMs);
   const inboxTotalPages = Math.max(Math.ceil(inboxTotal / inboxPageSize), 1);
   const [pendingInboxChange, setPendingInboxChange] =
@@ -147,6 +152,7 @@ export function CockpitView({
       sp.set("tab", next);
     }
     const qs = sp.toString();
+    resetConversation();
     router.replace(qs ? `/messages?${qs}` : "/messages");
   };
   const setInboxPage = useCallback(
@@ -158,10 +164,11 @@ export function CockpitView({
       if (nextPage <= 1) sp.delete("inboxPage");
       else sp.set("inboxPage", String(nextPage));
       sp.delete("thread");
+      resetConversation();
       const qs = sp.toString();
       router.push(qs ? `/messages?${qs}` : "/messages");
     },
-    [router, searchParams],
+    [router, searchParams, resetConversation],
   );
   const handleTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const tabs = Array.from(
@@ -211,9 +218,10 @@ export function CockpitView({
       setFocusReturnThreadId(null);
       const sp = new URLSearchParams(searchParams.toString());
       sp.set("thread", threadId);
-      router.replace(`/messages?${sp.toString()}`, { scroll: false });
+      window.history.replaceState(null, "", `/messages?${sp.toString()}`);
+      void selectConversation(threadId);
     },
-    [searchParams, router],
+    [searchParams, selectConversation],
   );
 
   useEffect(() => {
@@ -234,11 +242,11 @@ export function CockpitView({
     const sp = new URLSearchParams(searchParams.toString());
     sp.delete("thread");
     const qs = sp.toString();
-    router.replace(qs ? `/messages?${qs}` : "/messages", { scroll: false });
-    router.refresh();
+    window.history.replaceState(null, "", qs ? `/messages?${qs}` : "/messages");
+    void selectConversation(null);
   }, [
     pendingThreadId,
-    router,
+    selectConversation,
     searchParams,
     selectedThreadId,
     threadDetail?.threadId,
@@ -299,8 +307,8 @@ export function CockpitView({
   // Skeleton shows when the user has clicked a thread that the server
   // hasn't returned yet. Same-thread re-clicks: pendingContactId
   // matches threadDetail.contactId already → no skeleton.
-  const isLoadingThread =
-    pendingThreadId !== null && selectedThreadId !== pendingThreadId;
+  const isLoadingThread = conversation.loading ||
+    (pendingThreadId !== null && selectedThreadId !== pendingThreadId);
 
   const handleInboxFilterChange = useCallback(
     (next: InboxFilter) => {
@@ -328,10 +336,11 @@ export function CockpitView({
       else sp.set("filter", next);
       sp.delete("thread");
       sp.delete("inboxPage");
+      resetConversation();
       const qs = sp.toString();
       router.push(qs ? `/messages?${qs}` : "/messages");
     },
-    [filter, pendingInboxChange, router, searchParams],
+    [filter, pendingInboxChange, router, searchParams, resetConversation],
   );
 
   const handleHideDncChange = useCallback(
@@ -350,10 +359,11 @@ export function CockpitView({
       else sp.set("hideDnc", "0");
       sp.delete("thread");
       sp.delete("inboxPage");
+      resetConversation();
       const qs = sp.toString();
       router.push(qs ? `/messages?${qs}` : "/messages");
     },
-    [hideDnc, pendingInboxChange, router, searchParams],
+    [hideDnc, pendingInboxChange, router, searchParams, resetConversation],
   );
 
   useEffect(() => {
@@ -530,14 +540,22 @@ export function CockpitView({
                   className={`${mobileShowsDetail ? "block" : "hidden"} min-h-0 md:block`}
                   data-testid="inbox-detail-view"
                 >
-                  <InboxDetail
+                  {conversation.error ? (
+                    <div role="alert" className="rounded-md border p-4">
+                      <p>{conversation.error}</p>
+                      <button type="button" className="min-h-11 underline"
+                        onClick={() => { void selectConversation(selectedThreadId); }}>Retry conversation</button>
+                      <button type="button" className="ml-4 min-h-11 underline"
+                        onClick={handleBackToList}>All conversations</button>
+                    </div>
+                  ) : <InboxDetail
                     data={threadDetail}
                     isLoading={isLoadingThread}
                     assigneeEmails={assigneeEmails}
                     currentUserId={currentUserId}
                     onBackToList={handleBackToList}
                     nowMs={liveNowMs}
-                  />
+                  />}
                 </div>
               </div>
             )}

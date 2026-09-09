@@ -193,6 +193,15 @@ describe("MessagesPage filter-count boundary", () => {
     mocks.canonicalizeThreadId.mockResolvedValue(null);
   });
 
+  it("does not load Outbox rows while browsing the Inbox", async () => {
+    mocks.listThreads.mockResolvedValue([]);
+    await MessagesPage({ searchParams: Promise.resolve({}) });
+    expect(mocks.listQueuedPage).not.toHaveBeenCalled();
+    expect(mocks.getQueueStats).toHaveBeenCalled();
+    await MessagesPage({ searchParams: Promise.resolve({ tab: "outbox" }) });
+    expect(mocks.listQueuedPage).toHaveBeenCalledTimes(1);
+  });
+
   it("passes counts and threads from the same visible non-noise inbox set", async () => {
     mocks.listThreads.mockResolvedValue([
       makeThread({

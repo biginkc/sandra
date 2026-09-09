@@ -6,7 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./cockpit-view";
 import type { InboxFilterCounts } from "./inbox-filters";
@@ -57,6 +57,7 @@ vi.mock("./actions", () => ({
 }));
 
 vi.mock("../leads/actions", () => ({
+  markMessagesReadForThread: vi.fn(async () => ({ ok: true })),
   listFromNumbers: vi.fn(async () => ({ ok: true, data: [] })),
   sendSmsFromLead: vi.fn(),
   loadLeadVars: vi.fn(async () => ({ ok: true, data: {} })),
@@ -222,7 +223,10 @@ const baseProps = {
 };
 
 describe("<CockpitView /> URL deep-linking", () => {
+  afterEach(() => vi.unstubAllGlobals());
   beforeEach(() => {
+    window.history.replaceState(null, "", "/messages");
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     navigationMocks.push.mockClear();
     navigationMocks.replace.mockClear();
     navigationMocks.refresh.mockClear();
@@ -602,9 +606,8 @@ describe("<CockpitView /> URL deep-linking", () => {
 
     expect(screen.getByTestId("inbox-list-view")).toHaveClass("hidden");
     expect(screen.getByTestId("inbox-detail-view")).toHaveClass("block");
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(window.location.pathname + window.location.search).toBe(
       `/messages?filter=mine&hideDnc=0&thread=${thread.threadId}`,
-      { scroll: false },
     );
   });
 
@@ -633,11 +636,10 @@ describe("<CockpitView /> URL deep-linking", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "All conversations" }));
 
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(window.location.pathname + window.location.search).toBe(
       "/messages?tab=inbox&filter=unread&hideDnc=0",
-      { scroll: false },
     );
-    expect(navigationMocks.refresh).toHaveBeenCalled();
+    expect(navigationMocks.refresh).not.toHaveBeenCalled();
     await waitFor(() => {
       expect(screen.getByTestId(threadBTestId(thread.threadId))).toHaveFocus();
     });
@@ -664,9 +666,8 @@ describe("<CockpitView /> URL deep-linking", () => {
     fireEvent.click(screen.getByRole("button", { name: "All conversations" }));
 
     expect(screen.getByTestId("inbox-list-view")).toHaveClass("block");
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(window.location.pathname + window.location.search).toBe(
       "/messages?tab=inbox&filter=unread&hideDnc=0",
-      { scroll: false },
     );
     await waitFor(() => {
       expect(screen.getByTestId(threadBTestId(thread.threadId))).toHaveFocus();
@@ -691,9 +692,8 @@ describe("<CockpitView /> URL deep-linking", () => {
     await waitFor(() => {
       expect(screen.getByTestId("inbox-empty")).toHaveFocus();
     });
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(window.location.pathname + window.location.search).toBe(
       "/messages?filter=escalated",
-      { scroll: false },
     );
   });
 

@@ -190,26 +190,24 @@ export async function fetchInboxDetail(
   let smsConsentState: ConsentState | null = null;
   let phoneSuppressed: boolean | null = null;
   if (c) {
-    const consentResult = await supabase
+    const [consentResult, suppressionResult] = await Promise.all([
+      supabase
       .from("consent_events")
       .select("event_type, occurred_at")
       .eq("contact_id", contactId)
       .eq("org_id", conversationOrgId)
       .eq("channel", "sms")
       .order("occurred_at", { ascending: false })
-      .limit(20);
+      .limit(20),
+      parties.customerPhone
+        ? isSmsPhoneSuppressed(supabase, parties.customerPhone, conversationOrgId)
+            .catch(() => null)
+        : Promise.resolve(false),
+    ]);
     smsConsentState = consentResult.error
       ? null
       : computeConsentState(consentResult.data ?? []);
-    phoneSuppressed = parties.customerPhone
-      ? await isSmsPhoneSuppressed(
-          supabase,
-          parties.customerPhone,
-          conversationOrgId,
-        )
-          .then((value) => value)
-          .catch(() => null)
-      : false;
+    phoneSuppressed = suppressionResult;
   }
 
   return {

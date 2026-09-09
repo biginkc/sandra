@@ -327,12 +327,26 @@ export async function fetchLeadBoardData(
   statuses: readonly PropertyStatus[] = STATUS_ORDER,
   pipelineSignalLoader?: PipelineSignalLoader,
 ): Promise<LeadBoardData> {
-  const pages = await Promise.all(
-    statuses.map(async (status) => ({
-      status,
-      page: await fetchStage(supabase, status, filters, context, cursors[status] ?? null),
-    })),
-  );
+  const includeFacets = statuses.length === STATUS_ORDER.length;
+  const resolvedPipelineSignalLoader =
+    pipelineSignalLoader ?? createPipelineSignalLoader(supabase);
+  const pagesPromise = Promise.all(statuses.map(async (status) => ({
+    status,
+    page: await fetchStage(supabase, status, filters, context, cursors[status] ?? null),
+  })));
+  // Facets are independent of cards. Decorations need page ids, but should
+  // not wait for the counts either.
+  const [pages, decorations, urgencyCounts, baselineTotals] = await Promise.all([
+    pagesPromise,
+    pagesPromise.then((pages) => fetchCardDecorations(
+      supabase,
+      pages.flatMap(({ page }) => page.rows),
+      context.orgIds ?? [],
+      resolvedPipelineSignalLoader,
+    )),
+    includeFacets ? fetchUrgencyCounts(supabase, filters, context) : Promise.resolve(null),
+    includeFacets ? fetchBaselineStageTotals(supabase) : Promise.resolve(null),
+  ]);
   const leads = pages.flatMap(({ page }) => page.rows);
   const totals = Object.fromEntries(STATUS_ORDER.map((status) => [status, 0])) as Record<PropertyStatus, number>;
   const nextCursors: Partial<Record<PropertyStatus, LeadBoardCursor>> = {};
@@ -344,19 +358,6 @@ export async function fetchLeadBoardData(
     if (page.snapshotGeneration) snapshotGenerations[status] = page.snapshotGeneration;
     if (page.nextCursor) nextCursors[status] = page.nextCursor;
   }
-  const includeFacets = statuses.length === STATUS_ORDER.length;
-  const resolvedPipelineSignalLoader =
-    pipelineSignalLoader ?? createPipelineSignalLoader(supabase);
-  const [decorations, urgencyCounts, baselineTotals] = await Promise.all([
-    fetchCardDecorations(
-      supabase,
-      leads,
-      context.orgIds ?? [],
-      resolvedPipelineSignalLoader,
-    ),
-    includeFacets ? fetchUrgencyCounts(supabase, filters, context) : Promise.resolve(null),
-    includeFacets ? fetchBaselineStageTotals(supabase) : Promise.resolve(null),
-  ]);
   return {
     leads: leads.map((lead) => ({
       ...lead,
