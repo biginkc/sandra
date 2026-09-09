@@ -1,0 +1,40 @@
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { InboxSearch } from "./inbox-search";
+const state = vi.hoisted(() => ({ query: "filter=unread&inboxPage=3&hideDnc=0", replace: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: state.replace }), useSearchParams: () => new URLSearchParams(state.query) }));
+beforeEach(() => { vi.useFakeTimers(); state.replace.mockReset(); state.query = "filter=unread&inboxPage=3&hideDnc=0"; });
+afterEach(() => vi.useRealTimers());
+describe("inbox search URL", () => {
+  it("debounces input, writes search, resets page, and preserves filters", () => {
+    render(<InboxSearch />);
+    const input = screen.getByRole("textbox", { name: "Search messages" });
+    fireEvent.change(input, { target: { value: "Zeph" } });
+    act(() => vi.advanceTimersByTime(100));
+    fireEvent.change(input, { target: { value: "Zephyrson" } });
+    act(() => vi.advanceTimersByTime(199)); expect(state.replace).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
+    expect(state.replace).toHaveBeenCalledTimes(1);
+    const url = new URL(state.replace.mock.calls[0][0], "http://localhost");
+    expect(url.searchParams.get("search")).toBe("Zephyrson");
+    expect(url.searchParams.has("inboxPage")).toBe(false);
+    expect(url.searchParams.get("filter")).toBe("unread");
+    expect(url.searchParams.get("hideDnc")).toBe("0");
+    expect(state.replace.mock.calls[0][1]).toEqual({ scroll: false });
+  });
+  it("clears search and cancels pending edits on navigation and unmount", () => {
+    state.query += "&search=Zephyrson";
+    const view = render(<InboxSearch degraded />);
+    const input = screen.getByRole("textbox");
+    expect(input).toHaveValue("Zephyrson"); expect(screen.getByText("Search unavailable")).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "" } });
+    act(() => vi.advanceTimersByTime(200));
+    expect(state.replace.mock.calls[0][0]).not.toContain("search=");
+    fireEvent.change(input, { target: { value: "stale" } });
+    state.query = "search=Backvalue"; view.rerender(<InboxSearch />);
+    expect(input).toHaveValue("Backvalue");
+    act(() => vi.advanceTimersByTime(200)); expect(state.replace).toHaveBeenCalledTimes(1);
+    fireEvent.change(input, { target: { value: "unmounted" } }); view.unmount();
+    act(() => vi.advanceTimersByTime(200)); expect(state.replace).toHaveBeenCalledTimes(1);
+  });
+});
