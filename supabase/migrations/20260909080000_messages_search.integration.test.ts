@@ -8,7 +8,7 @@ import { BMH_ORG_ID, TEST_ORG_B_ID, clientForUser, createOrgUser, seedTwoOrgs } 
 import { resetTenantTables } from "@tests/integration/reset";
 
 const service = createTestClient();
-const sql = readFileSync(new URL("./20260909010000_messages_search.sql", import.meta.url), "utf8");
+const sql = readFileSync(new URL("./20260909080000_messages_search.sql", import.meta.url), "utf8");
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const users: string[] = [];
 let a: ReturnType<typeof clientForUser>;

@@ -100,7 +100,7 @@ async function measureScaleSearch(viewer: { userId: string; jwt: string }) {
   try {
     // Replay the checked-in candidate, rather than measure a stale test RPC.
     await db.query("begin");
-    await db.query(readFileSync("supabase/migrations/20260909010000_messages_search.sql", "utf8"));
+    await db.query(readFileSync("supabase/migrations/20260909080000_messages_search.sql", "utf8"));
     await db.query("commit");
     await db.query("analyze public.contacts");
     await db.query("analyze public.messages");
