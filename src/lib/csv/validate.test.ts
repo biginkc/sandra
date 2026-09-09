@@ -27,6 +27,17 @@ const FULL_MAPPING: Mapping = {
 };
 
 describe("validateRow", () => {
+  it("preserves Zillow attribution for an FSBO import", () => {
+    const result = validateRow(
+      { Address: "123 Main St", State: "MO", Source: "zillow", "Zillow ID": "123456" },
+      { ...PROPERTY_MAPPING, source: "Source", zpid: "Zillow ID" },
+      0,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.normalized.source).toBe("zillow");
+    expect(result.normalized.zpid).toBe("123456");
+  });
+
   it("marks a fully-valid row as ok", () => {
     const row: RowData = {
       Address: "123 Main St",

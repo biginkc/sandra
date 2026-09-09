@@ -1,6 +1,7 @@
 /** Canonical `properties.source` vocabulary shared by server and client code. */
 export const LEAD_SOURCES = [
   "dealmachine",
+  "zillow",
   "propstream",
   "titlepro",
   "reisift",

@@ -45,6 +45,7 @@ import type {
 
 const SOURCE_LABELS: Record<WizardSource, string> = {
   dealmachine: "DealMachine",
+  zillow: "Zillow",
   propstream: "PropStream",
   titlepro: "TitlePro / DataTree",
   reisift: "REISift / DealMachine Skipped",
