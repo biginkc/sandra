@@ -94,21 +94,16 @@ test("clicking a thread surfaces the loading skeleton during navigation", async 
   await page.waitForSelector('[data-testid="inbox-detail-panel"]');
   await page.waitForLoadState("networkidle");
 
-  // Throttle the FIRST /messages document round-trip so the skeleton is
-  // observable — the live env is fast enough that we'd race otherwise.
-  // After we've seen the skeleton, drop the throttle so the rest of the
-  // test isn't gated on additional 1s waits (Vercel/Next can issue
-  // pre-fetches that would otherwise stack).
-  let throttledOnce = false;
-  await page.route("**/messages*", async (route) => {
-    if (
-      route.request().resourceType() === "document" &&
-      !throttledOnce
-    ) {
-      throttledOnce = true;
-      await new Promise((r) => setTimeout(r, 1500));
-    }
+  // Delay only the selected conversation. The inbox page must not be the
+  // transport for a click; this also makes its loading state deterministic.
+  await page.route("**/api/messages/thread-detail?*", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
     await route.continue();
+  });
+  const detailResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/api/messages/thread-detail" &&
+      url.searchParams.get("thread") === threadB.threadId && response.ok();
   });
 
   // Click thread B — the real test.
@@ -120,11 +115,9 @@ test("clicking a thread surfaces the loading skeleton during navigation", async 
     timeout: 2000,
   });
 
-  // After the round-trip lands, skeleton disappears and the real panel
-  // mounts with thread B's content. The handler throttles only once, so keep
-  // it installed until navigation settles instead of tearing down a route
-  // while its delayed document request may still be in flight.
+  // Detail comes from the bounded endpoint, with the list left in place.
   await clickPromise;
+  await detailResponse;
   const detailPanel = page.getByTestId("inbox-detail-panel");
   await expect(detailPanel).toBeVisible({ timeout: 20_000 });
   await expect(detailPanel).toContainText("body for Bob", { timeout: 20_000 });
