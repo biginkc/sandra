@@ -9,15 +9,25 @@ export function InboxSearch({ degraded = false }: { degraded?: boolean }) {
   const params = useSearchParams();
   const query = params.toString();
   const search = params.get("search") ?? "";
-  const [draft, setDraft] = useState({ query, value: search });
-  if (draft.query !== query) setDraft({ query, value: search });
-  const value = draft.query === query ? draft.value : search;
+  const lastDispatchedSearch = useRef<string | null>(null);
+  const [value, setValue] = useState(search);
   const [pending, startTransition] = useTransition();
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Navigation (including Back/Forward and filter changes) cancels old edits.
+  useEffect(() => {
+    // A local replace may finish after a newer edit scheduled its debounce.
+    // Consume the dispatch marker so later Back/Forward or filter changes
+    // remain external navigation, even when they reuse this search value.
+    if (search !== lastDispatchedSearch.current) {
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = null;
+      // URL navigation is an external source; local completions must not sync.
+      setValue(search);
+    }
+    lastDispatchedSearch.current = null;
+  }, [query, search]);
   useEffect(() => {
     return () => { if (timer.current) clearTimeout(timer.current); };
-  }, [query, search]);
+  }, []);
 
   return (
     <div className="w-full" aria-busy={pending}>
@@ -28,11 +38,13 @@ export function InboxSearch({ degraded = false }: { degraded?: boolean }) {
         value={value}
         onChange={(event) => {
           const next = event.target.value;
-          setDraft({ query, value: next });
+          setValue(next);
           if (timer.current) clearTimeout(timer.current);
           timer.current = setTimeout(() => {
             const url = new URLSearchParams(query);
             const normalized = next.trim();
+            timer.current = null;
+            lastDispatchedSearch.current = normalized;
             if (normalized) url.set("search", normalized);
             else url.delete("search");
             url.delete("inboxPage");

@@ -22,7 +22,35 @@ describe("inbox search URL", () => {
     expect(url.searchParams.get("hideDnc")).toBe("0");
     expect(state.replace.mock.calls[0][1]).toEqual({ scroll: false });
   });
-  it("clears search and cancels pending edits on navigation and unmount", () => {
+  it("preserves newer typing when an earlier local navigation completes", () => {
+    const view = render(<InboxSearch />);
+    const input = screen.getByRole("textbox", { name: "Search messages" });
+    fireEvent.change(input, { target: { value: "Zeph" } });
+    act(() => vi.advanceTimersByTime(200));
+    expect(state.replace).toHaveBeenCalledTimes(1);
+    fireEvent.change(input, { target: { value: "Zephyrson" } });
+    state.query = new URL(state.replace.mock.calls[0][0], "http://localhost").search.slice(1);
+    view.rerender(<InboxSearch />);
+    expect(input).toHaveValue("Zephyrson");
+    act(() => vi.advanceTimersByTime(200));
+    expect(state.replace).toHaveBeenCalledTimes(2);
+    expect(new URL(state.replace.mock.calls[1][0], "http://localhost").searchParams.get("search")).toBe("Zephyrson");
+  });
+  it("cancels a pending edit on an external filter change after local completion", () => {
+    const view = render(<InboxSearch />);
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "Zeph" } });
+    act(() => vi.advanceTimersByTime(200));
+    state.query = "filter=unread&search=Zeph";
+    view.rerender(<InboxSearch />);
+    fireEvent.change(input, { target: { value: "Zephyrson" } });
+    state.query = "filter=all&search=Zeph";
+    view.rerender(<InboxSearch />);
+    expect(input).toHaveValue("Zeph");
+    act(() => vi.advanceTimersByTime(200));
+    expect(state.replace).toHaveBeenCalledTimes(1);
+  });
+  it("clears search and cancels pending edits on external navigation and unmount", () => {
     state.query += "&search=Zephyrson";
     const view = render(<InboxSearch degraded />);
     const input = screen.getByRole("textbox");
