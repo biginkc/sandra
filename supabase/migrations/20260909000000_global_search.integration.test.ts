@@ -4,11 +4,15 @@ import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestClient } from "@tests/integration/client";
 import { BMH_ORG_ID, TEST_ORG_B_ID, clientForUser, createOrgUser, seedTwoOrgs } from "@tests/integration/fixtures/multi-user";
+import { registerDefinerPerformance } from "@tests/integration/search-definer-performance";
+import { registerDefinerTests } from "@tests/integration/search-definer";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const service = createTestClient();
 const originalSql = readFileSync(new URL("./20260909000000_global_search.sql", import.meta.url), "utf8");
-const sql = readFileSync(new URL("./20260909080600_search_relevance_fixes.sql", import.meta.url), "utf8");
+const relevanceSql = readFileSync(new URL("./20260909080600_search_relevance_fixes.sql", import.meta.url), "utf8");
+const definerSql = readFileSync(new URL("./20260909084500_search_global_definer_scoping.sql", import.meta.url), "utf8");
+const sql = relevanceSql + definerSql;
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 const users: string[] = [];
 let a: ReturnType<typeof clientForUser>;
@@ -26,7 +30,7 @@ let reachable: string;
 let originalPrivileges: { proname: string; proacl: string[] | null }[];
 
 // Deliberately broken SQL is opt-in; teardown always restores the source SQL.
-function mutationSql() {
+function mutationSql(sql: string) {
   switch (process.env.SEARCH_MUTATION) {
     case "structured-gate": return sql.replaceAll("not i.is_structured and ", "");
     case "email-equality": return sql.replace("c.search_text ilike '%' || i.q_like || '%'", "lower(c.email) like i.q_like");
@@ -80,9 +84,14 @@ describe("global search RPC", () => {
         where n.nspname='public' and proname in ('search_global','search_prefix_tsquery') order by proname`)).rows;
       await db.query(sql);
       await db.query(sql);
-      await db.query(process.env.SEARCH_MUTATE_PHONE === "1"
-        ? sql.replace("or (length(i.qd) >= 3 and c.phone_digits ilike '%' || i.qd || '%')", "or false /* mutation: phone branch removed */")
-        : mutationSql());
+      const installed = (await db.query("select pg_get_functiondef('public.search_global(text,integer)'::regprocedure) as body")).rows[0].body;
+      const helper = (await db.query("select pg_get_functiondef('public.search_prefix_tsquery(text)'::regprocedure) as body")).rows[0].body;
+      const finalDefinition = helper + ";\n" + installed;
+      const mutated = process.env.SEARCH_MUTATE_PHONE === "1"
+        ? finalDefinition.replace("or (length(i.qd) >= 3 and c.phone_digits ilike '%' || i.qd || '%')", "or false /* mutation: phone branch removed */")
+        : mutationSql(finalDefinition);
+      if (process.env.SEARCH_MUTATION || process.env.SEARCH_MUTATE_PHONE === "1") expect(mutated).not.toBe(finalDefinition);
+      await db.query(mutated);
       await db.query("commit");
     } catch (error) { await db.query("rollback"); throw error; }
     await resetTenantTables(service);
@@ -129,11 +138,9 @@ describe("global search RPC", () => {
 
   afterAll(async () => {
     try {
-      if (process.env.SEARCH_MUTATE_PHONE === "1" || process.env.SEARCH_MUTATION) {
-        await db.query("begin");
-        try { await db.query(originalSql); await db.query(sql); await db.query("commit"); }
-        catch (error) { await db.query("rollback"); throw error; }
-      }
+      await db.query("begin");
+      try { await db.query(originalSql); await db.query(sql); await db.query("commit"); }
+      catch (error) { await db.query("rollback"); throw error; }
       for (const id of users) await service.auth.admin.deleteUser(id);
     } finally { await db.end(); }
   });
@@ -240,7 +247,7 @@ describe("global search RPC", () => {
     expect(rows).toEqual([]);
     expect((await search("Literal%Place")).some(r => r.title === "100 Literal%Place")).toBe(true);
   });
-  it("preserves helper and RPC signatures, volatility, invoker rights, search path and grants", async () => {
+  it("preserves helper and RPC signatures, volatility, definer rights, search path and grants", async () => {
     const { rows } = await db.query(`select proname, pronargs, provolatile, prosecdef, proconfig,
       has_function_privilege('anon', p.oid, 'execute') as anon,
       has_function_privilege('authenticated', p.oid, 'execute') as authenticated,
@@ -250,9 +257,9 @@ describe("global search RPC", () => {
     const privileges = await db.query(`select proname, proacl from pg_proc p
       join pg_namespace n on n.oid=p.pronamespace
       where n.nspname='public' and proname in ('search_global','search_prefix_tsquery') order by proname`);
-    expect(privileges.rows).toEqual(originalPrivileges);
+    expect(privileges.rows[1]).toEqual(originalPrivileges[1]);
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatchObject({ proname: "search_global", pronargs: 2, provolatile: "s", prosecdef: false, authenticated: true, service: true });
+    expect(rows[0]).toMatchObject({ proname: "search_global", pronargs: 2, provolatile: "s", prosecdef: true, anon: false, authenticated: true, service: true });
     expect(rows[1]).toMatchObject({ proname: "search_prefix_tsquery", pronargs: 1, provolatile: "i", prosecdef: false });
     for (const row of rows) expect(row.proconfig).toContain("search_path=public, pg_temp");
   });
@@ -261,27 +268,8 @@ describe("global search RPC", () => {
     expect(rows[0].empty).toBe(true);
     expect(rows[0].tokens).toBe("'one':* & 'two':* & 'three':* & 'four':* & 'five':* & 'six':*");
   });
-  it.skipIf(process.env.SEARCH_MEASURE !== "1")("records authenticated branch plans and whole-RPC p95", async () => {
-    const body = sql.split("as $$\n  with bounds as (")[1].split("\n$$;")[0];
-    const ctes = "with bounds as (" + body.split("  select * from property_hits")[0];
-    await db.query("begin");
-    try {
-      await db.query("set local role authenticated");
-      await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: users[0], role: "authenticated" })]);
-      for (const q of ["Sun", "901 Sunf", "(816) 555", "Ada@exam", "foo@example.com!!!"]) {
-        for (const branch of ["property_hits", "owner_hits", "thread_hits"]) {
-          const plan = await db.query("explain (analyze, buffers, format json) " + ctes + "select * from " + branch, [q, 5]);
-          console.log("SEARCH_EXPLAIN", JSON.stringify({ q, branch, plan: plan.rows[0]["QUERY PLAN"] }));
-        }
-        const times: number[] = [];
-        for (let i = 0; i < 20; i++) {
-          const start = performance.now(); await search(q); times.push(performance.now() - start);
-        }
-        times.sort((x, y) => x - y);
-        console.log("SEARCH_P95", JSON.stringify({ q, runs: 20, p95Ms: times[18], maxMs: times[19] }));
-        expect(times[18]).toBeLessThan(300);
-      }
-    } finally { await db.query("rollback"); }
-  }, 120000);
+  registerDefinerTests(db, service, () => ({ a, b, userId: users[0], owner, live, conversation }));
+
+  registerDefinerPerformance(db, service);
 
 });
