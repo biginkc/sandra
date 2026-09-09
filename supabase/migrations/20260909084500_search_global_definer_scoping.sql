@@ -5,24 +5,29 @@ set statement_timeout = '120s';
 
 create or replace function public.search_global(q text, per_type int default 5)
 returns table (entity_type text, entity_id uuid, property_id uuid, conversation_id uuid, title text, subtitle text, matched_field text, rank real)
-language sql stable security definer
+language plpgsql stable security definer
 set search_path = public, pg_temp
 as $$
+begin
+  -- Plan for each query: SQL-function generic plans cannot simplify these gates.
+  -- Values remain bound parameters, never interpolated into SQL.
+  return query execute $search$
+  -- Inline query inputs so index conditions retain the digit/structured guards.
   with visible_orgs as (
     select m.org_id from public.memberships m
     where m.user_id = auth.uid() and m.access_status = 'active'
       and m.deletion_prepared_at is null
       and (m.access_expires_at is null or m.access_expires_at > now())
-  ), bounds as (
+  ), bounds as not materialized (
     select left(btrim(coalesce($1,'')),100) as q,
       least(greatest(coalesce($2,5),1),10) as per_type
-  ), normalized as (
+  ), normalized as not materialized (
     select bounds.*,
       regexp_replace(q,'[^0-9]','','g') as qd,
       replace(replace(replace(lower(q), E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') as q_like,
       public.search_prefix_tsquery(q) as tsq
     from bounds where length(q) >= 3
-  ), input as (
+  ), input as not materialized (
     select normalized.*,
       position('@' in q) > 0
         or (length(qd) >= 3 and 10 * length(qd) >= 7 * length(q)) as is_structured
@@ -89,6 +94,8 @@ as $$
   select * from property_hits
   union all select * from owner_hits
   union all select * from thread_hits;
+  $search$ using q, per_type;
+end;
 $$;
 
 alter function public.search_global(text, int) owner to postgres;

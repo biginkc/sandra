@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Client } from "pg";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -54,8 +55,11 @@ export function registerDefinerPerformance(db: Client, service: SupabaseClient<D
         pg_get_userbyid(proowner) as owner from pg_proc where oid='public.search_global(text,integer)'::regprocedure`)).rows[0];
       expect(installed.owner).toBe("postgres");
       expect(installed.definition).toContain("SECURITY DEFINER");
-      const body = installed.prosrc as string;
-      const visible = body.slice(body.indexOf("with visible_orgs"),body.indexOf("), bounds as ("))+ ") select count(*)::int as n from visible_orgs";
+      const source = readFileSync("supabase/migrations/20260909084500_search_global_definer_scoping.sql", "utf8");
+      const expectedBody = source.split("as $$")[1].split("$$;")[0];
+      expect(installed.prosrc, "installed body must equal this branch's migration").toBe(expectedBody);
+      const body = (installed.prosrc as string).split("$search$")[1];
+      const visible = body.slice(body.indexOf("with visible_orgs"),body.indexOf("), bounds as not materialized ("))+ ") select count(*)::int as n from visible_orgs";
       const measurements: { q: string; p95Ms: number }[] = [];
       for (const [q, expectedType] of [["Sunflower","property"],["Vanderplanken","owner"],["8165551234","owner"],["appoin","thread"]]) {
         // ONE explicit transaction and connection: local claims remain installed
@@ -80,6 +84,8 @@ export function registerDefinerPerformance(db: Client, service: SupabaseClient<D
           const start=performance.now();
           const {data,error}=await client.rpc("search_global",{q,per_type:5});
           const elapsed=performance.now()-start;
+          expect((await db.query("select pg_get_functiondef('public.search_global(text,integer)'::regprocedure) as definition")).rows[0].definition,
+            "another session changed search_global during the measured call").toBe(installed.definition);
           expect(error).toBeNull();
           expect(data?.some(r=>r.entity_type===expectedType)).toBe(true);
           if(i>=3) times.push(elapsed);
