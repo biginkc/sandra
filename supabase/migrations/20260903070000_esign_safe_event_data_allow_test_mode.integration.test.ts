@@ -40,6 +40,15 @@ if (historicalValidators?.length !== 1) {
   throw new Error("Expected exactly one historical eSign safe-event validator");
 }
 const historicalValidatorSql = historicalValidators[0];
+// The shared test database may retain the Switchboard-only consumer checks.
+// Keep the compatibility setup inside this suite's rollback boundary.
+const consumerUnionSql = readFileSync(
+  "supabase/migrations/20260830100000_esign_switchboard_webhook_constraint_union.sql",
+  "utf8",
+)
+  .replace(/^[\s\S]*?\nbegin;\s*/iu, "")
+  .replace(/\s*commit;\s*$/iu, "");
+
 const allowTestModeSql = readFileSync(
   "supabase/migrations/20260903070000_esign_safe_event_data_allow_test_mode.sql",
   "utf8",
@@ -186,6 +195,7 @@ beforeAll(async () => {
   pg = new Client({ connectionString: testDbUrl() });
   await pg.connect();
   await pg.query("begin");
+  await pg.query(consumerUnionSql);
   await pg.query(historicalValidatorSql);
 });
 
