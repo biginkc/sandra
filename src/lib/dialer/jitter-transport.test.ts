@@ -9,6 +9,7 @@ import type {
   JitterAudioHealthResponse,
   JitterAudioHealthSample,
   JitterProxyResult,
+  JitterProviderStatusResponse,
 } from "./jitter-contract";
 
 const CALL_TOKEN = "11111111-1111-4111-8111-111111111111";
@@ -211,6 +212,106 @@ function deferred<T>() {
 }
 
 describe("JitterCallTransport", () => {
+  it("ends a fresh live call from exact provider proof without an SDK terminal notification", async () => {
+    vi.useFakeTimers();
+    const getProviderStatus = vi.fn(async () => ({ ok: true as const, data: { state: "terminal" as const, outcome: "ended" as const } }));
+    const harness = transportHarness({ getProviderStatus });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    try {
+      await harness.transport.start(target());
+      const call = new FakeCall();
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      call.state = "active";
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(states.at(-1)).toBe("ended");
+      expect(harness.transport.terminalIsAuthoritative()).toBe(true);
+      expect(harness.rtc.serverDisconnect).toHaveBeenCalledTimes(1);
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(getProviderStatus).toHaveBeenCalledTimes(1);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it("preserves healthy live audio on active, unknown, and failed periodic proof requests", async () => {
+    vi.useFakeTimers();
+    const getProviderStatus = vi.fn()
+      .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
+      .mockResolvedValueOnce({ ok: true, data: { state: "unknown" } })
+      .mockRejectedValueOnce(new Error("network lost"))
+      .mockResolvedValue({ ok: false, error: { code: "unavailable", message: "unavailable" } });
+    const harness = transportHarness({ getProviderStatus });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    try {
+      await harness.transport.start(target());
+      const call = new FakeCall();
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      call.state = "active";
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(getProviderStatus).toHaveBeenCalledTimes(4);
+      expect(states.at(-1)).toBe("live");
+      expect(harness.rtc.serverDisconnect).not.toHaveBeenCalled();
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it("fences a late periodic response when SDK terminal proof wins the race", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<JitterProxyResult<JitterProviderStatusResponse>>();
+    const getProviderStatus = vi.fn()
+      .mockImplementationOnce(() => pending.promise)
+      .mockResolvedValue({ ok: true, data: { state: "terminal", outcome: "ended" } });
+    const harness = transportHarness({ getProviderStatus });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    try {
+      await harness.transport.start(target());
+      const call = new FakeCall();
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      call.state = "active";
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      await vi.advanceTimersByTimeAsync(10_000);
+      call.state = "destroy";
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(states.at(-1)).toBe("ended");
+      pending.resolve({ ok: true, data: { state: "terminal", outcome: "failed" } });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(states.filter((state) => state === "ended")).toHaveLength(1);
+      expect(states).not.toContain("failed");
+      expect(harness.rtc.serverDisconnect).toHaveBeenCalledTimes(1);
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it("ignores a periodic proof response after manual teardown wins", async () => {
+    vi.useFakeTimers();
+    let resolveProof!: (value: JitterProxyResult<JitterProviderStatusResponse>) => void;
+    const getProviderStatus = vi.fn(() => new Promise<JitterProxyResult<JitterProviderStatusResponse>>((resolve) => { resolveProof = resolve; }));
+    const harness = transportHarness({ getProviderStatus });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    try {
+      await harness.transport.start(target());
+      const call = new FakeCall();
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      call.state = "active";
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(getProviderStatus).toHaveBeenCalledTimes(1);
+      await harness.transport.hangup();
+      const afterHangup = [...states];
+      resolveProof({ ok: true, data: { state: "terminal", outcome: "failed" } });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(states).toEqual(afterHangup);
+      expect(getProviderStatus).toHaveBeenCalledTimes(1);
+      expect(harness.dependencies.cancel).toHaveBeenCalledTimes(1);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
   it("reports durable inbound RTP counters while the browser leg is live and stops on teardown", async () => {
     let scheduled: (() => void) | undefined;
     const stop = vi.fn();
@@ -637,7 +738,8 @@ describe("JitterCallTransport", () => {
       current.state = "active";
       attachConnectedPeer(current);
       harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: current });
-      await vi.runAllTimersAsync();
+      // Terminal-proof polling is intentionally persistent while live.
+      await vi.advanceTimersByTimeAsync(1_000);
       await vi.waitFor(() => expect(states.at(-1)).toBe("live"));
 
       const liveCount = states.filter((state) => state === "live").length;
