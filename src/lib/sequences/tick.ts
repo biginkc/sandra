@@ -77,7 +77,7 @@ export async function processEnrollmentTick(
   }
   if (!step) {
     // No step at this index — enrollment has effectively completed. Mark it.
-    await client
+    const { error: completionError } = await client
       .from("sequence_enrollments")
       .update({
         status: "completed",
@@ -86,6 +86,9 @@ export async function processEnrollmentTick(
         updated_at: new Date().toISOString(),
       })
       .eq("id", enrollment.id);
+    if (completionError) {
+      return { status: "failed", enrollmentId: enrollment.id, message: completionError.message };
+    }
     return { status: "completed", enrollmentId: enrollment.id };
   }
 
@@ -330,12 +333,20 @@ export async function processEnrollmentTick(
     switch (outcome.status) {
       case "sent":
       case "queued": {
-        const messageId = outcome.status === "sent" ? outcome.messageId : outcome.messageId;
-        await client
+        const messageId = outcome.messageId;
+        const { error: runError } = await client
           .from("sequence_step_runs")
           .update({ run_at: new Date().toISOString(), message_id: messageId })
           .eq("id", claim.id);
-        await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
+        // The message has already been accepted. Keep the unique claim even
+        // on bookkeeping failure: releasing it could send the same SMS twice.
+        if (runError) {
+          return { status: "failed", enrollmentId: enrollment.id, message: `Message ${messageId} accepted; run write failed: ${runError.message}` };
+        }
+        const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
+        if (advanceError) {
+          return { status: "failed", enrollmentId: enrollment.id, message: `Message ${messageId} accepted; ${advanceError}` };
+        }
         return {
           status: "sent",
           enrollmentId: enrollment.id,
@@ -495,11 +506,17 @@ export async function processEnrollmentTick(
       }
       return { status: "paused", enrollmentId: enrollment.id, reason: "dnc" };
     }
-    await client
+    const { error: runError } = await client
       .from("sequence_step_runs")
       .update({ run_at: new Date().toISOString() })
       .eq("id", claim.id);
-    await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
+    if (runError) {
+      return { status: "failed", enrollmentId: enrollment.id, message: `Property status changed; run write failed: ${runError.message}` };
+    }
+    const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
+    if (advanceError) {
+      return { status: "failed", enrollmentId: enrollment.id, message: `Property status changed; ${advanceError}` };
+    }
     return {
       status: "status_changed",
       enrollmentId: enrollment.id,
@@ -526,16 +543,17 @@ async function advanceEnrollment(
   enrollmentId: string,
   sequenceId: string,
   currentStepIndex: number,
-): Promise<void> {
-  const { data: nextStep } = await client
+): Promise<string | null> {
+  const { data: nextStep, error: nextStepError } = await client
     .from("sequence_steps")
     .select("delay_after_previous_minutes")
     .eq("sequence_id", sequenceId)
     .eq("step_index", currentStepIndex + 1)
     .maybeSingle();
+  if (nextStepError) return `next step lookup failed: ${nextStepError.message}`;
 
   if (!nextStep) {
-    await client
+    const { error } = await client
       .from("sequence_enrollments")
       .update({
         status: "completed",
@@ -544,14 +562,14 @@ async function advanceEnrollment(
         updated_at: new Date().toISOString(),
       })
       .eq("id", enrollmentId);
-    return;
+    return error ? `completion write failed: ${error.message}` : null;
   }
 
   const nextRunAt = delayToDate(
     nextStep.delay_after_previous_minutes,
     new Date(),
   ).toISOString();
-  await client
+  const { error } = await client
     .from("sequence_enrollments")
     .update({
       current_step_index: currentStepIndex + 1,
@@ -559,6 +577,7 @@ async function advanceEnrollment(
       updated_at: new Date().toISOString(),
     })
     .eq("id", enrollmentId);
+  return error ? `advancement write failed: ${error.message}` : null;
 }
 
 async function markRunSkipped(
