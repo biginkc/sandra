@@ -291,6 +291,23 @@ describe("<CockpitView /> URL deep-linking", () => {
     expect(screen.queryByTestId("inbox-detail-skeleton")).not.toBeInTheDocument();
   });
 
+  it("opens destination detail immediately while a soft navigation still shows the origin browser address", async () => {
+    const thread = makeThread({ contactId: "b" });
+    navigationMocks.search = `thread=${thread.threadId}`;
+    window.history.replaceState(null, "", "/leads/prop-b");
+    render(<CockpitView {...baseProps} activeTab="inbox" threads={[thread]}
+      selectedThreadId={thread.threadId} threadDetail={makeDetail("b", "Destination thread B")} />);
+    expect(screen.getByTestId("inbox-detail-panel")).toHaveTextContent("Destination thread B");
+    expect(screen.queryByTestId("inbox-detail-empty")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("inbox-detail-loading")).not.toBeInTheDocument();
+    expect(screen.getByTestId("inbox-list-view")).toHaveClass("hidden");
+    expect(screen.getByTestId("inbox-detail-view")).toHaveClass("block");
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    expect(screen.getByTestId("inbox-detail-panel")).toHaveTextContent("Destination thread B");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("clears local detail during pagination instead of showing the previous server conversation", async () => {
     const threadA = makeThread({ contactId: "a" });
     const threadB = makeThread({ contactId: "b" });

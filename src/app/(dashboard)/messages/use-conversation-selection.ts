@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import type { InboxDetail } from "./inbox-detail-data";
 import { markMessagesReadForThread } from "../leads/actions";
 
@@ -14,11 +15,13 @@ type Selection = {
 /** Local selection is deliberately not a cache. Every different thread reads fresh
  * authorized detail; an older response can never replace a newer selection. */
 export function useConversationSelection(serverId: string | null, serverDetail: InboxDetail | null) {
+  const searchParams = useSearchParams();
   // Back/forward can remount cached server props after the popstate event has
   // already fired. Native history changes preserve that older server snapshot.
   const [restoredId] = useState(() => {
-    if (typeof window === "undefined") return undefined;
-    const urlId = new URLSearchParams(window.location.search).get("thread");
+    // Router context already describes the destination during rendering;
+    // window.location is updated later by Next's history insertion effect.
+    const urlId = searchParams.get("thread");
     return urlId !== serverId ? urlId : undefined;
   });
   const [selection, setSelection] = useState<Selection | null>(() =>

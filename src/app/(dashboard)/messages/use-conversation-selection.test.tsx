@@ -2,12 +2,17 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import type { InboxDetail } from "./inbox-detail-data";
 const markRead = vi.hoisted(() => vi.fn(async (_id: string) => ({ ok: true })));
+const navigation = vi.hoisted(() => ({ destinationSearch: undefined as string | undefined }));
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => new URLSearchParams(navigation.destinationSearch ?? window.location.search),
+}));
 vi.mock("../leads/actions", () => ({ markMessagesReadForThread: markRead }));
 import { useConversationSelection } from "./use-conversation-selection";
 const detail = (id: string) => ({ threadId: id }) as InboxDetail;
 const response = (id: string | null) => ({ ok: true, json: async () => ({ detail: id ? detail(id) : null }) });
 const fetchMock = vi.fn();
 beforeEach(() => {
+  navigation.destinationSearch = undefined;
   window.history.replaceState(null, "", "/messages");
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockReset();
@@ -15,6 +20,20 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe("conversation selection", () => {
+  it("uses destination router params before the browser address changes during a soft navigation", async () => {
+    window.history.replaceState(null, "", "/leads/property-b");
+    navigation.destinationSearch = "thread=b";
+    const serverDetail = detail("b");
+    const { result } = renderHook(() => useConversationSelection("b", serverDetail));
+    expect(result.current.selectedId).toBe("b");
+    expect(result.current.detail).toBe(serverDetail);
+    expect(result.current.loading).toBe(false);
+    window.history.replaceState(null, "", "/messages?thread=b");
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    expect(result.current.detail).toBe(serverDetail);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("restores the URL conversation when cached server props remount after popstate", async () => {
     window.history.replaceState(null, "", "/messages?thread=b");
     fetchMock.mockResolvedValue(response("b"));

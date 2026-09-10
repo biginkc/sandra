@@ -134,4 +134,16 @@ test("clicking a thread surfaces the loading skeleton during navigation", async 
   await expect(detailPanel).toContainText("body for Bob", { timeout: 20_000 });
   await expect(detailPanel).not.toContainText("body for Alice");
   await expect(page.getByTestId("inbox-detail-empty")).toHaveCount(0);
+
+  // A real search-result navigation enters Messages with destination props
+  // before Next commits the address bar. Exercise that path from Leads too.
+  await page.getByRole("link", { name: "Leads", exact: true }).click();
+  await expect(page).toHaveURL(/\/leads(?:\?|$)/);
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search", exact: true }).fill("body for Bob");
+  await page.getByRole("group", { name: "Messages", exact: true })
+    .getByRole("option").filter({ hasText: "body for Bob" }).click();
+  await expect(page).toHaveURL(new RegExp(`thread=${threadB.threadId}`));
+  await expect(detailPanel).toContainText("body for Bob", { timeout: 20_000 });
+  await expect(detailPanel).not.toContainText("body for Alice");
 });
