@@ -11,6 +11,11 @@ export const prepareSetupCall = async (input: { operatorId: string | null; prope
   const result = input.propertyId ? await prepareLeadCall(input.propertyId) : await prepareManualCall(input.phoneE164);
   return result.ok ? { ...result, operatorId: input.operatorId ?? "fixture-operator" } : result;
 };
+export const createClient = () => ({
+  auth: {
+    onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
+  },
+});
 export const loadPrecallContext = async () => ({ operatorId: "fixture-operator", context: { sellerName: "Fixture caller", propertyAddress: "1 Fixture Street", propertyCounty: null, repName: "Fixture rep", authenticatedRepName: "FR", repPhoneE164: "+18165550100", motivation: null, leadId: "fixture", sellerPhoneE164: "+18165550123", coldCallerName: null, yearBuilt: null, leadSource: null, occupancy: null }, error: null });
 export const completeSoftphoneCall = async () => ({ ok: true, data: {} });
 export const resumeFailedSoftphoneCall = completeSoftphoneCall;
