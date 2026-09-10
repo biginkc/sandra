@@ -173,19 +173,24 @@ export async function resetTenantTables(
   );
   if (knownUserIds.length === 0) return;
 
-  const { data: memberships, error: membershipsError } = await (
-    client as unknown as MembershipByUsersReader
-  )
-    .from("memberships")
-    .select("user_id, org_id, role")
-    .in("user_id", knownUserIds);
-  if (membershipsError) {
-    if (membershipsError.message.includes("public.memberships")) {
-      return;
+  // Bound PostgREST URL size as suites accumulate authenticated test users.
+  const memberships: Array<{ user_id: string; org_id: string; role: string }> = [];
+  for (let offset = 0; offset < knownUserIds.length; offset += 100) {
+    const { data, error: membershipsError } = await (
+      client as unknown as MembershipByUsersReader
+    )
+      .from("memberships")
+      .select("user_id, org_id, role")
+      .in("user_id", knownUserIds.slice(offset, offset + 100));
+    if (membershipsError) {
+      if (membershipsError.message.includes("public.memberships")) {
+        return;
+      }
+      throw new Error(
+        `memberships check failed after reset: ${membershipsError.message}`,
+      );
     }
-    throw new Error(
-      `memberships check failed after reset: ${membershipsError.message}`,
-    );
+    memberships.push(...(data ?? []));
   }
 
   const preservedMembershipKeys = new Set(
