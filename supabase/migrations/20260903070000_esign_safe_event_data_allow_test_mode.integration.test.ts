@@ -28,18 +28,18 @@ import {
 import { resetTenantTables } from "@tests/integration/reset";
 
 const serviceClient = createTestClient();
-const foundationSql = readFileSync(
+// Reproduce only the historical validator under this suite's transaction.
+// Replaying foundation DDL collides with the already-migrated test database.
+const historicalValidators = readFileSync(
   "supabase/migrations/20260829194500_esign_foundation.sql",
   "utf8",
-)
-  .replace(/\nbegin;\s*/i, "\n")
-  .replace(/\s*commit;\s*$/i, "");
-const atomicDisconnectSql = readFileSync(
-  "supabase/migrations/20260902120100_esign_atomic_disconnect_state.sql",
-  "utf8",
-)
-  .replace(/^\s*begin;\s*/i, "")
-  .replace(/\s*commit;\s*$/i, "");
+).match(
+  /create or replace function public\.esign_safe_event_data_is_valid\(p_data jsonb\)[\s\S]*?\$\$;/g,
+);
+if (historicalValidators?.length !== 1) {
+  throw new Error("Expected exactly one historical eSign safe-event validator");
+}
+const historicalValidatorSql = historicalValidators[0];
 const allowTestModeSql = readFileSync(
   "supabase/migrations/20260903070000_esign_safe_event_data_allow_test_mode.sql",
   "utf8",
@@ -186,9 +186,7 @@ beforeAll(async () => {
   pg = new Client({ connectionString: testDbUrl() });
   await pg.connect();
   await pg.query("begin");
-  await pg.query(foundationSql);
-  await pg.query(atomicDisconnectSql);
-  await pg.query(atomicDisconnectSql);
+  await pg.query(historicalValidatorSql);
 });
 
 beforeEach(async () => {
