@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -19,6 +19,10 @@ import {
 
 describe("updatePropertyStatus (integration)", () => {
   beforeEach(async () => {
+    await resetTenantTables(testClient);
+  });
+
+  afterAll(async () => {
     await resetTenantTables(testClient);
   });
 
@@ -93,9 +97,11 @@ describe("updatePropertyStatus (integration)", () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // A missing row cannot be proven unlocked, so the permanent-DNC
-      // preflight correctly fails closed before compare-and-set reconciliation.
-      expect(result.error.code).toBe("PROPERTY_LOCK_CHECK_FAILED");
+      // The training identity check rejects the missing row before DNC/CAS.
+      expect(result.error).toEqual({
+        code: "UNKNOWN",
+        message: "Lead not found.",
+      });
     }
   });
 
