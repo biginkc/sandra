@@ -1,0 +1,50 @@
+
+> sandra@0.1.0 test:e2e:synthetic
+> playwright test --config playwright.synthetic.config.ts precall-matrix.spec.ts --grep profile 0: --max-failures=1
+
+
+Running 1 test using 1 worker
+
+  ✘  1 e2e/synthetic/precall-matrix.spec.ts:371:7 › profile 0: all selectors and 26 live sections forward/back (7.2s)
+[31mTesting stopped early after 1 maximum allowed failures.[39m
+
+
+  1) e2e/synthetic/precall-matrix.spec.ts:371:7 › profile 0: all selectors and 26 live sections forward/back 
+
+    Error: [2mexpect([22m[31mlocator[39m[2m).[22mtoHaveCount[2m([22m[32mexpected[39m[2m)[22m failed
+
+    Locator:  getByTestId('current-section-script').locator('p').filter({ hasText: /^Hey Prepared0\?\s*$/ })
+    Expected: [32m1[39m
+    Received: [31m0[39m
+    Timeout:  5000ms
+
+    Call log:
+    [2m  - Expect "toHaveCount" with timeout 5000ms[22m
+    [2m  - waiting for getByTestId('current-section-script').locator('p').filter({ hasText: /^Hey Prepared0\?\s*$/ })[22m
+    [2m    9 × locator resolved to 0 elements[22m
+    [2m      - unexpected value "0"[22m
+
+
+      440 |     const greeting = page.getByTestId("current-section-script").locator("p").filter({hasText:new RegExp(`^Hey Prepared${profile}\\?\\s*$`)});
+      441 |     const introduction = page.getByTestId("current-section-script").locator("p").filter({hasText:new RegExp(`^Hey Prepared${profile}, this is Spoken Representative!\\s*$`)});
+    > 442 |     await expect(greeting).toHaveCount(1);
+          |                            ^
+      443 |     await expect(introduction).toHaveCount(1);
+      444 |     const greetingBox=await greeting.boundingBox(), introBox=await introduction.boundingBox();
+      445 |     expect(introBox!.y).toBeGreaterThanOrEqual(greetingBox!.y+greetingBox!.height);
+        at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/e2e/synthetic/precall-matrix.spec.ts:442:28
+
+    [31mTest timeout of 30000ms exceeded.[39m
+
+    Error Context: test-results/precall-matrix-profile-0-a-156ec--live-sections-forward-back/error-context.md
+
+  1 failed
+    e2e/synthetic/precall-matrix.spec.ts:371:7 › profile 0: all selectors and 26 live sections forward/back 
+  1 error was not a part of any test, see above for details
+(node:15791) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:15825) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:15825) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(node:15825) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)

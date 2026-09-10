@@ -34,6 +34,9 @@ test.beforeAll(async () => {
         build.onResolve({ filter: /coach-context-actions$/ }, () => ({
           path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-context-actions-browser-stub.ts"),
         }));
+        build.onResolve({ filter: /precall-context-actions$/ }, () => ({
+          path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-context-actions-browser-stub.ts"),
+        }));
         build.onResolve({ filter: /supabase\/client$/ }, () => ({
           path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-supabase-browser-stub.ts"),
         }));

@@ -70,6 +70,7 @@ type SoftphoneContextValue = {
   openLead: (lead: SoftphoneLead) => void;
   toggleOpen: () => void;
   callingEnabled: boolean;
+  coachingEnabled: boolean;
   onCall: boolean;
   timer: string;
 };
@@ -573,7 +574,13 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       return;
     }
     if (preparedSetup && (preparedSetup.propertyId !== result.data.propertyId || preparedSetup.phoneE164 !== result.data.phoneE164)) {
-      if (result.data.propertyId) await resumeFailedSoftphoneCall(result.data.propertyId);
+      if (result.data.propertyId) {
+        try {
+          await resumeFailedSoftphoneCall(result.data.propertyId);
+        } catch {
+          // Cleanup failure must not strand this refused attempt.
+        }
+      }
       setCallSetup(null);
       abortStart("The selected call target changed. Select the homeowner again.");
       return;
@@ -807,10 +814,10 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   }, [callingEnabled, coachPreference.enabled, loadCallerIds, showToast, transition, transportFactory]);
 
   const selectForSetup = useCallback(async (inspect: () => Promise<{ok:true;data:SoftphoneTarget}|{ok:false;error:string}>) => {
-    if (startInFlightRef.current) return;
+    if (startInFlightRef.current || (phone !== "idle" && phone !== "closed")) return;
     const generation = ++selectionGeneration.current;
     setSelectionPending(true);
-    setPhone("idle"); setError(null);
+    transition({type: "open"}); setError(null);
     try {
       const result = await inspect();
       if (generation !== selectionGeneration.current) return;
@@ -821,10 +828,10 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       await loadSetup(result.data);
     } catch { if (generation === selectionGeneration.current) setError("Could not select homeowner. Try again."); }
     finally { if (generation === selectionGeneration.current) setSelectionPending(false); }
-  }, [loadSetup]);
+  }, [loadSetup, phone, transition]);
 
   const openLead = useCallback((lead: SoftphoneLead) => {
-    if (!callingEnabled || startInFlightRef.current) return;
+    if (!callingEnabled || startInFlightRef.current || (phone !== "idle" && phone !== "closed")) return;
     if (coachUiEnabled && coachPreference.enabled) { void selectForSetup(() => inspectLeadCall(lead.id)); return; }
     const phoneE164 = lead.phones[0] ?? "";
     void startTarget(() => prepareLeadCall(lead.id), {
@@ -837,7 +844,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       state: lead.state,
       startedAt: new Date().toISOString(),
     });
-  }, [callingEnabled, startTarget, coachUiEnabled, coachPreference.enabled, selectForSetup]);
+  }, [callingEnabled, startTarget, coachUiEnabled, coachPreference.enabled, selectForSetup, phone]);
 
   const openIdle = useCallback(() => {
     if (phone === "closed") {
@@ -913,7 +920,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     if (!coachUiEnabled || !coachPreference.enabled || phone !== "idle" || !manualReady) return;
     if (setup.target?.phoneE164.replace(/^\+1/, "") === manualDigits) return;
     const timer = setTimeout(() => { void selectForSetup(() => inspectManualCall(manualDigits)); }, 350);
-    return () => { clearTimeout(timer); selectionGeneration.current += 1; };
+    return () => { clearTimeout(timer); selectionGeneration.current += 1; setSelectionPending(false); };
   }, [manualDigits, manualReady, coachUiEnabled, coachPreference.enabled, phone, setup.target?.phoneE164, selectForSetup]);
   const callName = target?.name ?? "";
   const isOnCall = phone === "live" || phone === "held";
@@ -1006,9 +1013,10 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     openLead,
     toggleOpen: openIdle,
     callingEnabled,
+    coachingEnabled: coachUiEnabled && coachPreference.enabled,
     onCall: isOnCall,
     timer: timerText(seconds),
-  }), [callingEnabled, isOnCall, openIdle, openLead, seconds]);
+  }), [callingEnabled, isOnCall, openIdle, openLead, seconds, coachUiEnabled, coachPreference.enabled]);
 
   return (
     <SoftphoneContext.Provider value={contextValue}>

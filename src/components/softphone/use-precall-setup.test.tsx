@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CoachCallContext } from "@/lib/coach/types";
 import type { SoftphoneTarget } from "@/lib/dialer/actions";
@@ -219,4 +219,24 @@ it("successful disposition invalidates a pending retry so it cannot resurrect th
   await act(async () => finish({ operatorId: "rep1", context, error: null }));
   expect(result.current.target).toBeNull();
   expect(localStorage.getItem("sandra.coach.setup.v1:rep1:lead:A")).toBeNull();
+});
+it('clears the signed-in rep drafts after refresh even if coach was never opened',()=>{
+ localStorage.setItem('sandra.coach.setup.v1:rep1:lead:A','private');
+ localStorage.setItem('sandra.coach.setup.v1:rep2:lead:B','other rep');
+ renderHook(()=>usePrecallSetup(false,null));
+ act(()=>onAuth.mock.calls[0][0]('INITIAL_SESSION',{user:{id:'rep1'}}));
+ act(()=>onAuth.mock.calls[0][0]('SIGNED_OUT',null));
+ expect(localStorage.getItem('sandra.coach.setup.v1:rep1:lead:A')).toBeNull();
+ expect(localStorage.getItem('sandra.coach.setup.v1:rep2:lead:B')).toBe('other rep');
+});
+it('new sign-in invalidates edits and requests even before the first authenticated read resolves',async()=>{
+ let finish:(value:unknown)=>void=()=>undefined;
+ load.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+ const {result}=renderHook(()=>usePrecallSetup(false,null));
+ act(()=>{void result.current.load(target('A'));});
+ act(()=>result.current.onField('seller_name','Unconfirmed owner'));
+ act(()=>onAuth.mock.calls[0][0]('SIGNED_IN',{user:{id:'rep2'}}));
+ await act(async()=>finish({operatorId:'rep1',context,error:null}));
+ expect(result.current.target).toBeNull();
+ expect(result.current.draft.edits).toEqual({});
 });

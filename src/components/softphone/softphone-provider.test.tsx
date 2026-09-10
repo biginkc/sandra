@@ -1282,6 +1282,115 @@ describe("SoftphoneProvider coach UI flag", () => {
     } finally { window.sessionStorage.clear(); }
   });
 
+  it("does not replace a recovered active coached call when another lead is selected", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
+    transportEnabled.mockReturnValue(true);
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const prepared = await prepareLeadCall();
+    window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({handle:{id:"retained"},target:prepared.data,startedAt:new Date().toISOString(),wrapToken:"retained-token"}));
+    const transport={...createTransport(),recover:vi.fn(async()=>undefined)};
+    try {
+      const user=userEvent.setup();
+      render(<SoftphoneProvider transportFactory={()=>transport}><SoftphoneLeadButton lead={COACH_LEAD}/></SoftphoneProvider>);
+      await screen.findByTestId("coach-live-view");
+      inspectLeadCall.mockClear();
+      await user.click(screen.getByTestId("call-lead-button"));
+      expect(inspectLeadCall).not.toHaveBeenCalled();
+      expect(screen.getByTestId("coach-hangup")).toBeVisible();
+      expect(screen.queryByTestId("precall-setup")).not.toBeInTheDocument();
+    } finally {window.sessionStorage.clear();}
+  });
+
+  it("clears pending manual inspection when backspace invalidates the number", async()=>{
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT","simulated");vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED","1");
+    let finish:(value:unknown)=>void=()=>undefined;
+    inspectManualCall.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+    const user=userEvent.setup();render(<SoftphoneProvider><SoftphoneHeaderButton/></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+    await user.type(screen.getByTestId("dialer-input"),"8165550123");
+    await screen.findByText("Loading selected homeowner…");
+    await user.click(screen.getByRole("button",{name:"Delete digit"}));
+    await waitFor(()=>expect(screen.queryByText("Loading selected homeowner…")).not.toBeInTheDocument());
+    const prepared=await prepareLeadCall();
+    await act(async()=>finish(prepared));
+    expect(screen.getByTestId("dialer-input")).toHaveValue("816555012");
+    expect(screen.getByTestId("dialer-call-manual")).toBeDisabled();
+  });
+
+  it("shows setup only when coaching is enabled and permits missing basics", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    loadCoachCallContext.mockResolvedValue({ sellerName: null, propertyAddress: null, propertyCounty: null, repName: null, authenticatedRepName: null, repPhoneE164: null, motivation: null, leadId: null, sellerPhoneE164: "+18165550123", coldCallerName: null, leadSource: null, occupancy: null });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={COACH_LEAD} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("precall-setup");
+    const call = screen.getByTestId("dialer-call-manual");
+    await waitFor(() => expect(call).toBeEnabled());
+    expect(screen.getByTestId("setup-file-number").tagName).toBe("OUTPUT");
+    expect(screen.getByTestId("setup-file-number")).toHaveTextContent("Not available yet");
+    await user.click(screen.getByTestId("dialer-coach-toggle"));
+    expect(screen.queryByTestId("precall-setup")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("dialer-coach-toggle"));
+    await screen.findByTestId("precall-setup");
+    const restoredCall = screen.getByTestId("dialer-call-manual");
+    await waitFor(() => expect(restoredCall).toBeEnabled());
+    await user.click(restoredCall);
+    await screen.findByTestId("coach-live-view");
+    expect(screen.queryByTestId("precall-setup")).not.toBeInTheDocument();
+  });
+
+  it("keeps spoken setup edits out of dialing and disposition identity", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    completeSoftphoneCall.mockResolvedValue({ ok: true, data: {} });
+    const transport = createTransport();
+    const user = userEvent.setup();
+    render(<SoftphoneProvider transportFactory={() => transport}><SoftphoneLeadButton lead={COACH_LEAD} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    const call = await screen.findByTestId("dialer-call-manual");
+    await waitFor(() => expect(call).toBeEnabled());
+    const basics = screen.getByRole("button", { name: /^Call basics/ });
+    if (basics.getAttribute("aria-expanded") !== "true") await user.click(basics);
+    for (const [key, value] of [["property_address", "999 Spoken Only Avenue"], ["rep_phone", "+18165550999"]]) {
+      const field = screen.getByTestId(`setup-field-${key}`);
+      await user.clear(field);
+      await user.type(field, value);
+    }
+    await user.click(call);
+    await screen.findByTestId("coach-live-view");
+    expect(screen.queryByTestId("precall-setup")).not.toBeInTheDocument();
+    expect(transport.start).toHaveBeenCalledOnce();
+    expect(transport.start.mock.calls[0][0]).toEqual({ phoneE164: "+18165550123", propertyId: "property-1", contactId: "contact-1", callToken: expect.any(String), callerIdE164: "+18165550100" });
+    await user.click(screen.getByTestId("coach-hangup"));
+    await user.type(await screen.findByTestId("dispo-notes"), "Synthetic identity verification");
+    await user.click(screen.getByTestId("dispo-not-interested"));
+    await waitFor(() => expect(completeSoftphoneCall).toHaveBeenCalledOnce());
+    const payload = completeSoftphoneCall.mock.calls[0][0];
+    expect(payload.target).toMatchObject({ propertyId: "property-1", phoneE164: "+18165550123", address: "1 Main St" });
+    expect(JSON.stringify(payload)).not.toContain("999 Spoken Only Avenue");
+    expect(JSON.stringify(payload)).not.toContain("18165550999");
+    expect(payload).not.toHaveProperty("setup");
+  });
+
+  it("allows retry after target mismatch cleanup rejects", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const original = await prepareLeadCall();
+    prepareLeadCall.mockResolvedValueOnce({ ...original, data: { ...original.data, propertyId: "wrong-property" } });
+    resumeFailedSoftphoneCall.mockRejectedValueOnce(new Error("cleanup unavailable"));
+    const transport = createTransport();
+    const user = userEvent.setup();
+    render(<SoftphoneProvider transportFactory={() => transport}><SoftphoneLeadButton lead={COACH_LEAD} /></SoftphoneProvider>);
+    await startCoachLead(user);
+    await screen.findByText("The selected call target changed. Select the homeowner again.");
+    expect(transport.start).not.toHaveBeenCalled();
+    await user.click(screen.getByLabelText("Close dialer"));
+    await startCoachLead(user);
+    await screen.findByTestId("coach-live-view");
+    expect(transport.start).toHaveBeenCalledOnce();
+  });
+
   it("shows the full-screen coach view instead of the classic popover when the flag is on and the call goes live", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");

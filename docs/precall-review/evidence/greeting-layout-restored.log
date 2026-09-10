@@ -1,0 +1,17 @@
+
+> sandra@0.1.0 test:e2e:synthetic
+> playwright test --config playwright.synthetic.config.ts precall-matrix.spec.ts --grep profile 0: --max-failures=1
+
+
+Running 1 test using 1 worker
+
+  ✓  1 e2e/synthetic/precall-matrix.spec.ts:371:7 › profile 0: all selectors and 26 live sections forward/back (4.3s)
+
+  1 passed (5.3s)
+(node:16537) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:16539) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:16539) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(node:16539) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)

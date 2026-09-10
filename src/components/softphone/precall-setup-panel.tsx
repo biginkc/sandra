@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Accordion } from "@base-ui/react/accordion";
 import {
   Select,
@@ -51,6 +51,7 @@ export function PrecallSetupPanel({
   onRetry,
 }: Props) {
   const values = setupValues(context, draft.edits);
+  const triggers = useRef<Record<string, HTMLElement | null>>({});
   const file = context ? resolveFileNumber(context) : null;
   const missing = (group: string) =>
     SETUP_FIELDS.filter(
@@ -113,11 +114,12 @@ export function PrecallSetupPanel({
         </button>
       </div>
       {collapsed ? (
-        <p className="px-3 py-2 text-xs">
+        <div className="px-3 py-2 text-xs">
+        <p>
           {[
             values.seller_name,
             values.property_address,
-            draft.branches.Opener,
+            setupOptions("Opener").find(option => option.value === draft.branches.Opener)?.label,
             file && !file.isPlaceholder
               ? file.value
               : "File number not available yet",
@@ -125,6 +127,8 @@ export function PrecallSetupPanel({
             .filter(Boolean)
             .join(" · ")}
         </p>
+        {!loading && needed > 0 && <p className="mt-1 text-[#78350f]">Still needed: {[...SETUP_FIELDS.filter(([key,,group]) => group !== "offer" && !values[key].trim()).map(([,label])=>label), ...(!file || file.isPlaceholder ? ["File number"] : [])].join(", ")}</p>}
+        </div>
       ) : (
         <>
           {error && (
@@ -140,6 +144,7 @@ export function PrecallSetupPanel({
               if (!selection.initialized)
                 setSelection({ ...selection, initialized: true });
             }}
+            multiple={false}
             value={open}
             onValueChange={setOpen}
             className="min-w-0"
@@ -147,7 +152,9 @@ export function PrecallSetupPanel({
             {groups.map(([group, title]) => (
               <Accordion.Item key={group} value={group}>
                 <Accordion.Header>
-                  <Accordion.Trigger className="flex min-h-10 w-full items-center justify-between border-t border-[#e5e1df] px-3 py-2 text-left text-xs font-bold focus-visible:ring-2">
+                  <Accordion.Trigger ref={(element) => {
+                    triggers.current[group] = element;
+                  }} className="flex min-h-10 w-full items-center justify-between border-t border-[#e5e1df] px-3 py-2 text-left text-xs font-bold focus-visible:ring-2">
                     <span>{title}</span>
                     <span className="text-[11px] font-normal">
                       {loading
@@ -165,17 +172,6 @@ export function PrecallSetupPanel({
                 </Accordion.Header>
                 <Accordion.Panel
                   className="px-3 pb-3"
-                  onBlur={(event) => {
-                    // Do not interrupt typing or keyboard navigation to another control.
-                    if (
-                      event.relatedTarget ||
-                      loading ||
-                      (group !== "basics" && group !== "situation") ||
-                      missing(group)
-                    )
-                      return;
-                    setOpen([group === "basics" ? "situation" : "offer"]);
-                  }}
                 >
                   {group === "branches" ? (
                     <div className="grid grid-cols-2 gap-2">
@@ -313,6 +309,7 @@ export function PrecallSetupPanel({
                       Leave unknown details for the call.
                     </p>
                   )}
+                  {!loading && (group === "basics" || group === "situation") && missing(group) === 0 && <button type="button" className="mt-3 rounded px-2 py-1 text-xs font-bold text-[#1c1917] focus-visible:ring-2 focus-visible:ring-blue-700" onClick={() => { const next = group === "basics" ? "situation" : "offer"; setOpen([next]); triggers.current[next]?.focus(); }}>Continue to {group === "basics" ? "seller’s situation" : "offer details"}</button>}
                 </Accordion.Panel>
               </Accordion.Item>
             ))}

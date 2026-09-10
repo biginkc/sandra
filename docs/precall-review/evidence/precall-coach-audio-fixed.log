@@ -1,0 +1,29 @@
+(node:4520) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+Running 13 tests using 1 worker
+
+[1A[2K(node:4524) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:4524) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+
+[1A[2K(node:4524) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K[1/13] e2e/synthetic/coach-audio-acceptance.spec.ts:120:5 › ready without media attachment stays nonterminal and does not claim restored audio
+[1A[2K[2/13] e2e/synthetic/coach-audio-acceptance.spec.ts:142:5 › frozen RTP status proof remains nonterminal with recovery and hangup available
+[1A[2K[3/13] e2e/synthetic/coach-audio-acceptance.spec.ts:160:5 › advancing inbound RTP plus audible playout restores live audio
+[1A[2K[4/13] e2e/synthetic/coach-audio-acceptance.spec.ts:201:5 › confirmed provider terminal is distinct from explicit manual hangup
+[1A[2K[5/13] e2e/synthetic/coach-audio-acceptance.spec.ts:224:5 › Hang Up uses the explicit user teardown path and never provider proof
+[1A[2K[6/13] e2e/synthetic/coach-audio-acceptance.spec.ts:245:5 › Mute and unmute update Coach only after SDK acknowledgement
+[1A[2K[7/13] e2e/synthetic/coach-audio-acceptance.spec.ts:260:5 › Rejected mute stays truthful and never tears down the call
+[1A[2K[8/13] e2e/synthetic/coach-audio-acceptance.spec.ts:274:5 › Rejected unmute preserves muted truth and never tears down the call
+[1A[2K[9/13] e2e/synthetic/coach-audio-acceptance.spec.ts:290:5 › Hold warns while durable acknowledgement is unknown without blocking controls
+[1A[2K[10/13] e2e/synthetic/coach-audio-acceptance.spec.ts:313:5 › Direct Hold and Resume failures preserve truth until exact provider updates
+[1A[2K[11/13] e2e/synthetic/coach-audio-acceptance.spec.ts:340:5 › Hold reapply failure remains live and visible without duplicate teardown
+[1A[2K[12/13] e2e/synthetic/coach-audio-acceptance.spec.ts:361:7 › keeps interrupted and reconnecting controls accessible at 375x667
+[1A[2K[13/13] e2e/synthetic/coach-audio-acceptance.spec.ts:361:7 › keeps interrupted and reconnecting controls accessible at 375x812
+[1A[2K  13 passed (9.9s)

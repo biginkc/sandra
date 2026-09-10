@@ -12,16 +12,17 @@ type Props = {
 export function SoftphoneLeadButton({ lead, compact = false }: Props) {
   const context = useOptionalSoftphone();
   if (!context) return null;
-  const { openLead, callingEnabled } = context;
+  const { openLead, callingEnabled, coachingEnabled } = context;
+  const label = coachingEnabled ? `Set up call with ${lead.firstName}` : `Call ${lead.firstName} now — 1 click`;
   if (!lead.callable) return null;
   return (
     <button
       type="button"
       data-testid="call-lead-button"
-      aria-label={`Call ${lead.firstName}`}
+      aria-label={label}
       title={
         callingEnabled
-          ? `Call ${lead.firstName}`
+          ? label
           : "Calling not yet enabled"
       }
       disabled={!callingEnabled}

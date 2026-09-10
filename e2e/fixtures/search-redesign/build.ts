@@ -10,6 +10,7 @@ export async function buildSearchOverlayFixture() {
   const aliases = Object.fromEntries([
     "@/lib/dialer/actions", "@/lib/dialer/jitter-actions", "@/lib/dialer/transport-selection", "@/lib/dialer/dtmf-tone", "@/lib/coach/use-coach-session", "@/lib/coach/flags", "@/components/coach/keyed-coach-live-view",
   ].map(name => [name, stub]));
+  aliases["@/lib/coach/precall-context-actions"] = stub;
   const bundle = await esbuild.build({ entryPoints: [path.join(root, "e2e/fixtures/search-redesign/harness.tsx")], bundle: true, platform: "browser", format: "iife", target: "chrome120", jsx: "automatic", write: false, outdir: "out", alias: { ...aliases, "@": path.join(root, "src"), "next/navigation": path.join(root, "e2e/fixtures/search-redesign/navigation.ts") }, define: { "process.env.NODE_ENV": '"test"' } });
   const globalPath = path.join(root, "src/app/globals.css");
   const css = await postcss([tailwindcss()]).process(readFileSync(globalPath, "utf8"), { from: globalPath });

@@ -1,0 +1,1096 @@
+
+> sandra@0.1.0 verify
+> npm run verify:esign-atomic-packet && npm run verify:esign-essentials-rehearsal && npm run typecheck && npm run test && npm run test:rtl
+
+
+> sandra@0.1.0 verify:esign-atomic-packet
+> node --test scripts/apply-esign-production-migrations-atomically.test.mjs
+
+✔ Supabase 2.109.1-compatible parser preserves transaction and quoted bodies (1.246708ms)
+✔ reviewed packet pins exact file and statement-array identities (10.672333ms)
+✔ applyProductionPacket upgrades the already-applied four-row ledger by applying only the new migration (7.222417ms)
+✔ reviewed packet includes the disconnect state migration (0.144084ms)
+✔ applyProductionPacket executes the disconnect migration body from the reviewed packet (5.852625ms)
+✔ applyProductionPacket rolls back when packet execution fails before commit (5.465917ms)
+✔ applyProductionPacket rolls back when post-apply eSign assertions fail (5.231167ms)
+✔ applyProductionPacket rolls back when immutable request-mode trigger is missing (4.803959ms)
+✔ applyProductionPacket requires service-role grant for send-unknown resolution RPC (5.351833ms)
+✔ the manual packet refuses before reading credentials when arguments are incomplete (42.746292ms)
+✔ official CLI tag remains pinned for ledger compatibility evidence (0.133833ms)
+✔ CI verify job uses ankane/setup-postgres runner account without a password (0.19ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 143.49825
+
+> sandra@0.1.0 verify:esign-essentials-rehearsal
+> node scripts/rehearse-esign-essentials-production-path.mjs
+
+eSign Essentials local rehearsal passed
+
+> sandra@0.1.0 typecheck
+> tsc --noEmit
+
+
+> sandra@0.1.0 test
+> vitest run
+
+
+ RUN  v4.1.5 /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup
+
+(node:3414) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+ ✓ src/lib/testing/e2e-fixtures.test.ts (5 tests) 70ms
+ ✓ src/app/(dashboard)/calendar/range.test.ts (6 tests) 70ms
+ ✓ src/components/appointments/book-appointment-action.test.ts (41 tests) 46ms
+ ✓ src/app/(dashboard)/settings/esign-templates/client-actions.test.ts (8 tests) 61ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-esign-action-core.test.ts (78 tests) 54ms
+ ✓ src/lib/enrichment/verify-property.test.ts (10 tests) 62ms
+ ✓ src/lib/esign/template-orchestrator.test.ts (69 tests) 208ms
+ ✓ src/app/api/leads/calls/[callActivityId]/recording-url/route.test.ts (16 tests) 21ms
+stderr | src/app/(dashboard)/leads/[id]/lead-media.test.ts > resolveLeadMediaPresentation > classifies metadata failures before using signed aerial imagery
+[lead-media] Street View metadata unavailable { status: 'REQUEST_DENIED' }
+
+stderr | src/app/(dashboard)/leads/[id]/lead-media.test.ts > resolveLeadMediaPresentation > classifies an HTTP metadata failure before using aerial imagery
+[lead-media] Street View metadata request failed { status: 'HTTP_403' }
+
+ ✓ src/app/(dashboard)/leads/[id]/lead-media.test.ts (14 tests) 32ms
+ ✓ src/lib/time/zoned.test.ts (18 tests) 21ms
+ ✓ src/lib/dialer/actions.test.ts (16 tests) 40ms
+ ✓ src/workflows/skip-trace-submit.test.ts (10 tests) 61ms
+ ✓ src/lib/integrations/slack/dispatch.test.ts (26 tests) 29ms
+ ✓ src/lib/messaging/providers/sendillo.test.ts (40 tests) 37ms
+ ✓ src/components/appointments/lifecycle-actions.test.ts (31 tests) 34ms
+ ✓ src/lib/testing/e2e-identity-contract.test.ts (9 tests) 40ms
+ ✓ src/app/(dashboard)/settings/esign-templates/staged-pdf-upload.test.ts (14 tests) 578ms
+ ✓ src/lib/esign/webhook-handler.test.ts (24 tests) 44ms
+ ✓ src/lib/notifications/reminders.test.ts (40 tests) 641ms
+     ✓ reports (but does not throw on) a markDelivery update error  602ms
+ ✓ src/lib/appointments/inline-sync-kick.test.ts (5 tests) 34ms
+ ✓ src/lib/integrations/hugo/access-provisioner.test.ts (23 tests) 15ms
+ ✓ src/lib/csv/ingest.test.ts (27 tests) 25ms
+ ✓ src/app/auth/callback/route.test.ts (36 tests) 30ms
+ ✓ src/lib/integrations/prefs.test.ts (8 tests) 31ms
+ ✓ src/lib/dialer/jitter-contract.test.ts (10 tests) 37ms
+ ✓ src/lib/messaging/providers/twilio.test.ts (18 tests) 38ms
+ ✓ src/lib/messages/list-threads.test.ts (32 tests) 21ms
+stderr | src/app/(dashboard)/calendar/queries.test.ts > fetchCalendarAppointments > returns ok:false (never a bare empty array) on a query error — distinguishable from a genuinely empty week
+[calendar] fetchCalendarAppointmentsForWindows failed { message: 'boom', code: undefined }
+
+ ✓ src/lib/skip-trace/providers/tracerfy.test.ts (31 tests) 19ms
+stderr | src/app/(dashboard)/calendar/queries.test.ts > fetchCalendarAppointments > single-statement read (Codex round 6 — replaces keyset pagination) > fails closed (ok:false) when the (CAP+1)th row comes back, rather than silently truncating the week
+[calendar] fetchCalendarAppointmentsForWindows failed { message: 'calendar month volume exceeds cap', code: 'P0001' }
+
+stderr | src/app/(dashboard)/calendar/queries.test.ts > fetchAssigneeEmails > returns an empty map on a listUsers error
+[calendar] fetchAssigneeEmails failed { message: 'boom' }
+
+stderr | src/app/(dashboard)/calendar/queries.test.ts > fetchOrgRoster > returns ok:false (identity failure) on a memberships query error, distinguishable from an org with no members
+[calendar] fetchOrgRoster failed { error: { message: 'boom' } }
+
+stderr | src/app/(dashboard)/calendar/queries.test.ts > fetchOrgRoster > fails closed when auth labels cannot distinguish roster identities
+[calendar] fetchOrgRoster failed {
+  error: Error: network boom
+      at Object.<anonymous> (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/app/(dashboard)/calendar/queries.test.ts:674:13)
+      at Object.Mock [as listUsers] (file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/spy/dist/index.js:332:34)
+      at listNeededAuthUsers (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/auth/team-roster.ts:39:41)
+      at loadOrgTeamMembers (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/auth/team-roster.ts:144:27)
+      at processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at Module.fetchOrgRoster (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/app/(dashboard)/calendar/queries.ts:99:15)
+      at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/app/(dashboard)/calendar/queries.test.ts:677:20
+}
+
+stderr | src/app/(dashboard)/calendar/queries.test.ts > fetchOrgRoster > fails closed on a partial auth-label inventory
+[calendar] fetchOrgRoster failed { error: { message: 'boom' } }
+
+stderr | src/app/(dashboard)/calendar/queries.test.ts > fetchOrgRoster > fails closed when an auth identity has neither an authoritative name nor an email
+[calendar] fetchOrgRoster failed {
+  error: Error: An organization member has no verified identity label.
+      at loadOrgTeamMembers (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/auth/team-roster.ts:164:11)
+      at processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at Module.fetchOrgRoster (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/app/(dashboard)/calendar/queries.ts:99:15)
+      at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/app/(dashboard)/calendar/queries.test.ts:710:20
+      at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20
+}
+
+stderr | src/app/(dashboard)/calendar/queries.test.ts > fetchOrgRoster > single-statement read (Codex round 6 — replaces keyset pagination) > orders by user_id for a deterministic row order, in exactly ONE round trip
+[calendar] fetchOrgRoster failed {
+  error: Error: Auth user inventory returned no response.
+      at listNeededAuthUsers (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/auth/team-roster.ts:49:13)
+      at processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at loadOrgTeamMembers (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/auth/team-roster.ts:144:21)
+      at Module.fetchOrgRoster (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/app/(dashboard)/calendar/queries.ts:99:15)
+      at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/app/(dashboard)/calendar/queries.test.ts:720:7
+      at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20
+}
+
+stderr | src/app/(dashboard)/calendar/queries.test.ts > fetchOrgRoster > single-statement read (Codex round 6 — replaces keyset pagination) > fails closed (ok:false) when the (CAP+1)th membership comes back, rather than silently truncating the roster
+[calendar] fetchOrgRoster failed {
+  error: Error: Organization roster exceeded the supported member limit.
+      at loadOrgTeamMembers (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/auth/team-roster.ts:125:11)
+      at processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at Module.fetchOrgRoster (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/app/(dashboard)/calendar/queries.ts:99:15)
+      at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/app/(dashboard)/calendar/queries.test.ts:761:22
+}
+
+stderr | src/app/(dashboard)/calendar/queries.test.ts > fetchCalendarAppointmentsForWindows (month view) > fails closed when the RPC errors (volume-cap RAISE included)
+[calendar] fetchCalendarAppointmentsForWindows failed { message: 'calendar month volume exceeds cap', code: 'P0001' }
+
+ ✓ src/app/(dashboard)/calendar/queries.test.ts (32 tests) 38ms
+ ✓ src/app/api/cron/appointment-reminder-sweep/route.test.ts (23 tests) 24ms
+ ✓ src/app/(dashboard)/leads/board-actions.test.ts (6 tests) 22ms
+ ✓ src/lib/supabase/middleware.test.ts (25 tests) 21ms
+stderr | src/lib/ai-responder/dispatch.test.ts > dispatchAiResponse debounce > fails closed before generation or send when the AI claim cannot be stored
+[reportError] {
+  message: 'relation ai_response_claims does not exist',
+  name: 'Error',
+  stack: 'Error: relation ai_response_claims does not exist\n' +
+    '    at claimAiResponse (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/claims.ts:58:17)\n' +
+    '    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n' +
+    '    at Module.dispatchAiResponse (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:250:25)\n' +
+    '    at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.test.ts:796:21\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20',
+  errorClass: undefined,
+  tags: { surface: 'ai_response_claim_insert' },
+  user: undefined,
+  extra: { inboundMessageId: 'inbound-claim-error' }
+}
+
+stderr | src/lib/ai-responder/dispatch.test.ts > dispatchAiResponse debounce > fails closed to human attention when an AI disposition lacks exact inbound identity
+[reportError] {
+  message: 'ai_disposition_missing_thread_identity',
+  name: 'Error',
+  stack: 'Error: ai_disposition_missing_thread_identity\n' +
+    '    at setResponderDispo (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:821:17)\n' +
+    '    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n' +
+    '    at applyWrongNumber (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:1015:18)\n' +
+    '    at Module.dispatchAiResponse (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:464:33)\n' +
+    '    at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.test.ts:1064:21\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20',
+  errorClass: undefined,
+  tags: { surface: 'ai_responder_set_dispo' },
+  user: undefined,
+  extra: { propertyId: 'property-1', dispo: 'wrong_number' }
+}
+
+stderr | src/lib/ai-responder/dispatch.test.ts > dispatchAiResponse debounce > leaves a persistent disposition failure visible and retryable
+[reportError] {
+  message: 'transient disposition RPC failure',
+  name: 'Error',
+  stack: 'Error: transient disposition RPC failure\n' +
+    '    at setResponderDispo (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:882:15)\n' +
+    '    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n' +
+    '    at Module.dispatchAiResponse (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:482:31)\n' +
+    '    at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.test.ts:1128:21\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20',
+  errorClass: undefined,
+  tags: { surface: 'ai_responder_set_dispo' },
+  user: undefined,
+  extra: {
+    propertyId: 'property-1',
+    dispo: 'not_interested',
+    reason: 'model:not_interested',
+    attempts: 2
+  }
+}
+
+stderr | src/lib/ai-responder/dispatch.test.ts > dispatchAiResponse debounce > keeps opt-out suppression while surfacing a persistent review-write failure
+[reportError] {
+  message: 'transient disposition RPC failure',
+  name: 'Error',
+  stack: 'Error: transient disposition RPC failure\n' +
+    '    at setResponderDispo (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:882:15)\n' +
+    '    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n' +
+    '    at applyResponderOptOut (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:953:18)\n' +
+    '    at Module.dispatchAiResponse (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:423:28)\n' +
+    '    at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.test.ts:1163:21\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20',
+  errorClass: undefined,
+  tags: { surface: 'ai_responder_set_dispo' },
+  user: undefined,
+  extra: {
+    propertyId: 'property-1',
+    dispo: 'opted_out',
+    reason: 'model:opt_out',
+    attempts: 2
+  }
+}
+
+stderr | src/lib/ai-responder/dispatch.test.ts > dispatchAiResponse debounce > keeps DNC suppression while surfacing a persistent review-write failure
+[reportError] {
+  message: 'transient disposition RPC failure',
+  name: 'Error',
+  stack: 'Error: transient disposition RPC failure\n' +
+    '    at setResponderDispo (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:882:15)\n' +
+    '    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n' +
+    '    at applyResponderDnc (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:992:18)\n' +
+    '    at Module.dispatchAiResponse (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.ts:447:25)\n' +
+    '    at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/ai-responder/dispatch.test.ts:1196:21\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20',
+  errorClass: undefined,
+  tags: { surface: 'ai_responder_set_dispo' },
+  user: undefined,
+  extra: {
+    propertyId: 'property-1',
+    dispo: 'dnc',
+    reason: 'model:threat_dnc',
+    attempts: 2
+  }
+}
+
+ ✓ src/lib/ai-responder/dispatch.test.ts (24 tests) 34ms
+ ✓ src/lib/line-type-lookup/telnyx.test.ts (13 tests) 31ms
+ ✓ src/workflows/csv-import.enroll.test.ts (2 tests) 25ms
+stderr | src/lib/coach/recommendation-server.test.ts > coach recommendation server boundary > returns exactly three distinct follow-up questions and rejects malformed tool output
+[reportError] {
+  message: 'Coach recommendation generation failed',
+  name: 'Error',
+  stack: 'Error: Coach recommendation generation failed\n' +
+    '    at requestCoachRecommendationsWithDeps (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/coach/recommendation-server.ts:506:17)\n' +
+    '    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n' +
+    '    at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/coach/recommendation-server.test.ts:300:12\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20',
+  errorClass: undefined,
+  tags: { surface: 'coach_recommendation_generate', reason: 'unclassified' },
+  user: undefined,
+  extra: undefined
+}
+
+stderr | src/lib/coach/recommendation-server.test.ts > coach recommendation server boundary > separates seller grounding from script context and rejects script-only or falsely attributed premises
+[reportError] {
+  message: 'Coach recommendation generation failed',
+  name: 'Error',
+  stack: 'Error: Coach recommendation generation failed\n' +
+    '    at requestCoachRecommendationsWithDeps (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/coach/recommendation-server.ts:506:17)\n' +
+    '    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n' +
+    '    at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/coach/recommendation-server.test.ts:337:12\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20',
+  errorClass: undefined,
+  tags: { surface: 'coach_recommendation_generate', reason: 'unclassified' },
+  user: undefined,
+  extra: undefined
+}
+
+stderr | src/lib/coach/recommendation-server.test.ts > coach recommendation server boundary > separates seller grounding from script context and rejects script-only or falsely attributed premises
+[reportError] {
+  message: 'Coach recommendation generation failed',
+  name: 'Error',
+  stack: 'Error: Coach recommendation generation failed\n' +
+    '    at requestCoachRecommendationsWithDeps (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/coach/recommendation-server.ts:506:17)\n' +
+    '    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n' +
+    '    at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/coach/recommendation-server.test.ts:355:12\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20',
+  errorClass: undefined,
+  tags: { surface: 'coach_recommendation_generate', reason: 'unclassified' },
+  user: undefined,
+  extra: undefined
+}
+
+ ✓ src/lib/coach/recommendation-server.test.ts (19 tests) 17ms
+ ✓ src/app/api/softphone/jitter/cancel/route.test.ts (4 tests) 22ms
+ ✓ src/app/api/cron/sweep-stuck-call-in-progress/route.test.ts (1 test) 8ms
+ ✓ src/lib/coach/script-schema.test.ts (56 tests) 29ms
+ ✓ src/lib/messages/sendillo-health.test.ts (4 tests) 28ms
+ ✓ src/app/api/internal/jitter/_lib/auth.test.ts (21 tests) 32ms
+ ✓ src/lib/coach/recommendation-client.test.ts (14 tests) 24ms
+ ✓ src/lib/skip-trace/balance.test.ts (11 tests) 21ms
+ ✓ src/lib/messaging/quiet-hours.test.ts (18 tests) 27ms
+ ✓ src/app/api/internal/jitter/call-activities/by-jitter-attempt/[attemptId]/route.test.ts (11 tests) 14ms
+ ✓ src/lib/integrations/google/create-worker.test.ts (58 tests) 41ms
+ ✓ src/lib/cleanup/export-sandra-cleanup-packet.test.ts (6 tests) 96ms
+ ✓ src/lib/messaging/providers/dialpad.test.ts (11 tests) 27ms
+ ✓ src/app/api/webhooks/esign/[secret]/route.test.ts (1 test) 22ms
+ ✓ src/app/(dashboard)/settings/esign-templates/dropbox-chooser.test.ts (2 tests) 24ms
+ ✓ src/app/(dashboard)/leads/new/actions.test.ts (7 tests) 24ms
+ ✓ src/lib/notifications/format.test.ts (24 tests) 28ms
+ ✓ src/app/(dashboard)/properties/actions.select-all.test.ts (4 tests) 20ms
+ ✓ src/app/(dashboard)/leads/actions.test.ts (27 tests) 20ms
+ ✓ src/app/(dashboard)/leads/urgency.test.ts (3 tests) 22ms
+ ✓ src/app/(auth)/login/actions.test.ts (13 tests) 25ms
+ ✓ src/lib/dialer/eligibility.test.ts (15 tests) 22ms
+ ✓ src/lib/csv/xlsx-to-csv-file.test.ts (3 tests) 31ms
+ ✓ src/app/api/cron/esign-send-reconciliation/route.test.ts (6 tests) 18ms
+ ✓ src/lib/prospects/bulk-lookup.test.ts (5 tests) 421ms
+ ✓ src/lib/messaging/consent.test.ts (11 tests) 22ms
+ ✓ src/lib/esign/dropbox-callback.test.ts (5 tests) 20ms
+ ✓ src/lib/esign/template-foundation-adapter.test.ts (11 tests) 19ms
+ ✓ src/app/(dashboard)/campaigns/actions.cadence.test.ts (8 tests) 12ms
+ ✓ src/lib/messages/list-unknown-senders.test.ts (2 tests) 21ms
+ ✓ src/lib/coach/event-reducer.test.ts (40 tests) 28ms
+ ✓ src/app/(dashboard)/calendar/_components/calendar-shared.test.ts (8 tests) 18ms
+ ✓ src/app/(dashboard)/messages/inbox-detail-data.test.ts (20 tests) 19ms
+ ✓ src/app/(dashboard)/sequences/actions.test.ts (21 tests) 17ms
+ ✓ src/lib/messages/sendillo-health-snapshot.test.ts (6 tests) 28ms
+ ✓ src/app/api/search/route.test.ts (7 tests) 22ms
+ ✓ src/app/api/webhooks/slack/actions/route.test.ts (6 tests) 8ms
+ ✓ src/lib/prospects/filter-to-supabase.test.ts (91 tests) 22ms
+ ✓ src/app/(dashboard)/admin/users/membership-inventory.test.ts (7 tests) 13ms
+ ✓ src/lib/messages/message-metrics.test.ts (3 tests) 29ms
+stderr | src/lib/messages/threading.test.ts > ensureConversationIdForThread — fallback (RPC / registry migration absent) > fails closed when the RPC rejects the contact/property pair instead of falling back
+[reportError] {
+  message: 'contact/property thread scope not found',
+  name: 'Error',
+  stack: 'Error: contact/property thread scope not found\n' +
+    '    at ensureConversationIdForThread (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/messages/threading.ts:199:17)\n' +
+    '    at processTicksAndRejections (node:internal/process/task_queues:104:5)',
+  errorClass: undefined,
+  tags: { surface: 'ensure_conversation_id_rpc' },
+  user: undefined,
+  extra: {
+    contactId: '11111111-1111-4111-8111-111111111111',
+    propertyId: '22222222-2222-4222-8222-222222222222',
+    code: '42501'
+  }
+}
+
+stderr | src/lib/messages/threading.test.ts > ensureConversationIdForThread — fallback (RPC / registry migration absent) > fails closed on permission-style schema cache errors instead of silently falling back
+[reportError] {
+  message: 'permission denied for function ensure_sms_conversation_id while loading schema cache',
+  name: 'Error',
+  stack: 'Error: permission denied for function ensure_sms_conversation_id while loading schema cache\n' +
+    '    at ensureConversationIdForThread (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/messages/threading.ts:199:17)\n' +
+    '    at processTicksAndRejections (node:internal/process/task_queues:104:5)',
+  errorClass: undefined,
+  tags: { surface: 'ensure_conversation_id_rpc' },
+  user: undefined,
+  extra: {
+    contactId: '11111111-1111-4111-8111-111111111111',
+    propertyId: '22222222-2222-4222-8222-222222222222',
+    code: '42501'
+  }
+}
+
+ ✓ src/lib/messages/threading.test.ts (16 tests) 17ms
+ ✓ src/app/api/internal/switchboard/_lib/auth.test.ts (14 tests) 18ms
+ ✓ src/lib/dialer/homeowner-training-actions.test.ts (13 tests) 11ms
+ ✓ src/lib/esign/database-adapter.test.ts (32 tests) 12ms
+ ✓ src/lib/esign/actions.test.ts (26 tests) 7ms
+ ✓ src/lib/esign/website-template-registration.test.ts (16 tests) 14ms
+ ✓ src/app/(dashboard)/properties/prospects-query.test.ts (47 tests) 9ms
+ ✓ src/lib/csv/dataset.test.ts (3 tests) 21ms
+ ✓ src/lib/esign/template-initial-runtime.test.ts (34 tests) 29ms
+ ✓ src/app/api/cron/calendar-mutation-sweep/route.test.ts (13 tests) 15ms
+ ✓ src/lib/esign/initial-template-provider-create.test.ts (21 tests) 11ms
+ ✓ src/lib/ai-responder/delay.test.ts (7 tests) 26ms
+ ✓ src/lib/testing/e2e-identity-guard.test.ts (14 tests) 24ms
+stderr | src/lib/dialer/jitter-server.test.ts > authenticated Jitter softphone server boundary > withholds the capability and requests teardown if durable training logging fails
+[reportError] {
+  message: '[object Object]',
+  name: 'Unknown',
+  stack: undefined,
+  errorClass: undefined,
+  tags: { surface: 'homeowner_training_call_record' },
+  user: undefined,
+  extra: undefined
+}
+
+stderr | src/lib/dialer/jitter-server.test.ts > authenticated Jitter softphone server boundary > never blocks the call when the coach_call_index write fails
+[reportError] {
+  message: '[object Object]',
+  name: 'Unknown',
+  stack: undefined,
+  errorClass: undefined,
+  tags: { surface: 'coach_call_index_write' },
+  user: undefined,
+  extra: { clientCallId: 'a5b886a1-85e8-4b16-bcc0-4af0fdb4e925' }
+}
+
+stderr | src/lib/dialer/jitter-server.test.ts > authenticated Jitter softphone server boundary > never blocks the call when the coach_call_index write throws
+[reportError] {
+  message: 'network error',
+  name: 'Error',
+  stack: 'Error: network error\n' +
+    '    at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/dialer/jitter-server.test.ts:304:54\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20\n' +
+    '    at new Promise (<anonymous>)\n' +
+    '    at runWithCancel (file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20\n' +
+    '    at new Promise (<anonymous>)\n' +
+    '    at runWithTimeout (file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:2955:64',
+  errorClass: undefined,
+  tags: { surface: 'coach_call_index_write' },
+  user: undefined,
+  extra: { clientCallId: 'ead91546-e71d-4d50-800f-6a7c22aef6a7' }
+}
+
+ ✓ src/app/api/internal/bmh-institute/course-outcomes/by-course-completion/[completionId]/route.test.ts (3 tests) 13ms
+ ✓ src/app/(dashboard)/leads/[id]/ai-actions.test.ts (12 tests) 13ms
+ ✓ src/lib/dialer/jitter-server.test.ts (30 tests) 25ms
+ ✓ src/lib/sequences/tick.test.ts (10 tests) 10ms
+ ✓ src/workflows/csv-import.line-type.test.ts (6 tests) 5ms
+ ✓ src/lib/coach/precall-matrix.test.ts (517 tests) 2368ms
+ ✓ src/lib/tasks/index.test.ts (29 tests) 16ms
+ ✓ src/lib/csv/update-bulk.events.test.ts (3 tests) 7ms
+ ✓ src/lib/integrations/slack/oauth.test.ts (4 tests) 9ms
+stderr | src/lib/prospects/filter-schema.test.ts > encodeFilters/decodeFilters > round-trips a stack with one of every kind via deep equality
+[filter-schema] encoded URL filter payload exceeds 1500 chars; consider splitting block stack
+
+stderr | src/lib/prospects/filter-schema.test.ts > URL length budget > worst-case stack (23 blocks × 5 UUID values) encodes to under 8000 chars
+[filter-schema] encoded URL filter payload exceeds 1500 chars; consider splitting block stack
+
+ ✓ src/app/api/cron/sendillo-health-snapshot/route.test.ts (4 tests) 12ms
+ ✓ src/lib/prospects/filter-schema.test.ts (18 tests) 13ms
+stderr | src/lib/testing/e2e-global-setup.test.ts > e2e/global-setup.ts fail-closed behavior > missing E2E_CI_SUPABASE_DB_URL > warns and proceeds unlocked outside CI
+[e2e-lock] WARNING: E2E_CI_SUPABASE_DB_URL is not set — the E2E suite would have no cross-run advisory lock protecting the dedicated CI project. Proceeding WITHOUT the lock — a local run without the secret isn't the concurrent-CI-run race this guards against.
+
+stderr | src/lib/testing/e2e-global-setup.test.ts > e2e/global-setup.ts fail-closed behavior > refused connection > warns and proceeds unlocked outside CI
+[e2e-lock] WARNING: could not acquire the DB advisory lock (connect ECONNREFUSED 127.0.0.1:1). Proceeding WITHOUT the lock rather than failing the run.
+
+ ✓ src/lib/testing/e2e-global-setup.test.ts (16 tests) 9ms
+ ✓ src/lib/auth/require-org-membership.test.ts (3 tests) 5ms
+ ✓ src/lib/dialer/transport.test.ts (2 tests) 12ms
+ ✓ src/app/api/webhooks/sendillo/capture/route.test.ts (11 tests) 16ms
+ ✓ src/workflows/cass-bulk.test.ts (4 tests) 10ms
+ ✓ src/app/(dashboard)/admin/users/actions.test.ts (13 tests) 18ms
+ ✓ src/app/(dashboard)/leads/assignment-safety.test.ts (4 tests) 9ms
+ ✓ src/lib/messaging/providers/mock.simulation.test.ts (16 tests) 13ms
+ ✓ src/lib/integrations/google/dispatch.test.ts (15 tests) 12ms
+stderr | src/app/(dashboard)/dashboard/queries.test.ts > fetchMyTasks > returns an explicit failure on a query error instead of empty buckets
+[dashboard] fetchMyTasks failed { message: 'boom', code: undefined }
+
+stderr | src/app/(dashboard)/dashboard/queries.test.ts > fetchMyTasks > fails closed on a pre-schema 42703 instead of retrying without DNC safety fields
+[dashboard] fetchMyTasks failed { message: 'column tasks.contact_id does not exist', code: '42703' }
+
+stderr | src/app/(dashboard)/dashboard/queries.test.ts > fetchMyTasks > does not retry and returns failure when the first select fails with a non-42703 error
+[dashboard] fetchMyTasks failed { message: 'connection reset', code: '57P01' }
+
+stderr | src/app/(dashboard)/dashboard/queries.test.ts > fetchMyTasks > fails closed instead of dropping contact safety when the relationship cannot resolve
+[dashboard] fetchMyTasks failed {
+  message: 'Could not find a relationship for tasks_contact_org_fkey',
+  code: 'PGRST200'
+}
+
+ ✓ src/app/(dashboard)/dashboard/queries.test.ts (12 tests) 13ms
+ ✓ src/lib/leads/promote-leads-migration.test.ts (8 tests) 5ms
+ ✓ src/lib/esign/stuck-send-reconciliation.test.ts (8 tests) 8ms
+ ✓ src/lib/events/index.test.ts (9 tests) 9ms
+ ✓ src/lib/esign/finish-sync-deadline-migration.test.ts (3 tests) 3ms
+ ✓ src/lib/skip-trace/cache.test.ts (13 tests) 8ms
+ ✓ src/lib/integrations/slack/blocks.test.ts (9 tests) 7ms
+ ✓ src/lib/messaging/send.test.ts (5 tests) 6ms
+ ✓ src/app/(dashboard)/settings/esign-templates/actions.test.ts (19 tests) 7ms
+ ✓ src/lib/notifications/rep-sms.test.ts (20 tests) 9ms
+ ✓ src/lib/coach/homeowner-training-context.test.ts (3 tests) 6ms
+ ✓ src/lib/enrichment/cass-job.test.ts (19 tests) 10ms
+ ✓ src/app/(dashboard)/import/actions.test.ts (9 tests) 15ms
+ ✓ src/app/api/oauth/slack/callback/route.test.ts (6 tests) 10ms
+stderr | src/lib/leads/create.test.ts > createLead — phase 02 D-04 county_id pass-through > returns repair-needed when new-contact cleanup cannot be verified
+[reportError] {
+  message: 'lead create contact cleanup failed: contact delete failed',
+  name: 'Error',
+  stack: 'Error: lead create contact cleanup failed: contact delete failed\n' +
+    '    at cleanupNewContactIfUnreferenced (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/leads/create.ts:413:17)\n' +
+    '    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n' +
+    '    at Module.createLead (/Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/leads/create.ts:308:23)\n' +
+    '    at /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup/src/lib/leads/create.test.ts:393:20\n' +
+    '    at file:///Users/jarradhenry/Sites/BMH%20apps/Sandra-coach-precall-setup/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20',
+  errorClass: undefined,
+  tags: { surface: 'lead_create_cleanup' },
+  user: undefined,
+  extra: { contactId: 'contact-repair' }
+}
+
+ ✓ src/lib/leads/create.test.ts (9 tests) 11ms
+ ✓ src/lib/sequences/opt-out.test.ts (10 tests) 7ms
+ ✓ src/lib/csv/normalize.test.ts (55 tests) 8ms
+ ✓ src/lib/esign/send-contract.test.ts (15 tests) 9ms
+ ✓ src/lib/templates/seed-builder.test.ts (9 tests) 5ms
+ ✓ src/app/api/softphone/resume/route.test.ts (1 test) 5ms
+ ✓ src/app/(dashboard)/messages/actions.queued-delete.test.ts (10 tests) 8ms
+ ✓ src/workflows/ai-reply-delay.test.ts (2 tests) 5ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-detail-state.test.ts (12 tests) 3ms
+ ✓ src/app/api/oauth/google/callback/route.test.ts (6 tests) 6ms
+ ✓ src/app/(dashboard)/settings/esign-templates/template-option.test.ts (4 tests) 3ms
+ ✓ src/lib/coach/precall-context-actions.test.ts (6 tests) 8ms
+ ✓ src/workflows/bulk-sms.test.ts (4 tests) 7ms
+ ✓ src/app/(dashboard)/messages/page.test.ts (11 tests) 13ms
+ ✓ src/lib/messages/sms-inbox-thread-pagination-migration.test.ts (5 tests) 3ms
+ ✓ src/lib/integrations/tokens/store.test.ts (7 tests) 4ms
+ ✓ src/lib/ai-responder/safety.test.ts (15 tests) 7ms
+ ✓ src/lib/leads/qualify.test.ts (3 tests) 4ms
+ ✓ src/lib/esign/dropbox-sign-template.test.ts (4 tests) 9ms
+stderr | src/lib/coach/coach-context-actions.test.ts > loadCoachCallContext — lead fields > throws (never silently returns an empty context) when the property query itself errors
+[reportError] {
+  message: '[object Object]',
+  name: 'Unknown',
+  stack: undefined,
+  errorClass: undefined,
+  tags: { surface: 'coach_context_load' },
+  user: undefined,
+  extra: { propertyId: 'p1' }
+}
+
+stderr | src/lib/coach/coach-context-actions.test.ts > loadCoachCallContext — lead fields > throws (never silently blanks the rep context) when auth.getUser() itself errors
+[reportError] {
+  message: '[object Object]',
+  name: 'Unknown',
+  stack: undefined,
+  errorClass: undefined,
+  tags: { surface: 'coach_context_load' },
+  user: undefined,
+  extra: { propertyId: 'p1', stage: 'auth_get_user' }
+}
+
+ ✓ src/lib/coach/coach-context-actions.test.ts (23 tests) 9ms
+ ✓ src/lib/coach/script-block.test.ts (57 tests) 8ms
+ ✓ src/lib/csv/row-issues.test.ts (23 tests) 8ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-esign-provider.test.ts (9 tests) 7ms
+ ✓ src/lib/csv/trim-rows.test.ts (6 tests) 4ms
+ ✓ src/app/api/internal/jitter/_lib/artifact-writeback-payload.test.ts (3 tests) 5ms
+ ✓ src/lib/messaging/status-events.test.ts (2 tests) 5ms
+ ✓ src/lib/ai-responder/identity.test.ts (17 tests) 3ms
+ ✓ src/lib/esign/unattached-source-cleanup.test.ts (7 tests) 8ms
+ ✓ src/lib/ai-responder/format-reason.test.ts (17 tests) 5ms
+ ✓ src/lib/messages/ai-responder-thread-state.test.ts (6 tests) 4ms
+ ✓ src/lib/esign/webhook-server.test.ts (10 tests) 10ms
+ ✓ src/lib/cleanup/run-sandra-cleanup-packet.test.ts (4 tests) 8ms
+ ✓ src/lib/csv/import-recovery-migration.test.ts (4 tests) 3ms
+ ✓ src/lib/leads/homeowner-training-profile.test.ts (3 tests) 5ms
+ ✓ src/lib/ai-responder/system-prompt-v2.test.ts (20 tests) 3ms
+ ✓ src/lib/dialer/snapshot-identity.test.ts (9 tests) 3ms
+ ✓ src/lib/esign/credentials.test.ts (7 tests) 7ms
+ ✓ src/lib/integrations/google/oauth.test.ts (9 tests) 10ms
+ ✓ src/lib/coach/coach-sections.test.ts (12 tests) 12ms
+ ✓ src/lib/notifications/dispatch.test.ts (4 tests) 11ms
+ ✓ src/app/(dashboard)/properties/promote-leads-actions.test.ts (8 tests) 10ms
+ ✓ src/lib/auth/hugo-proof.test.ts (9 tests) 5ms
+ ✓ src/lib/appointments/lifecycle.test.ts (12 tests) 8ms
+ ✓ src/lib/ai-responder/generate.test.ts (16 tests) 6ms
+ ✓ src/lib/dnc/property-lock-migration.test.ts (4 tests) 4ms
+ ✓ src/app/auth/set-password/actions.test.ts (2 tests) 5ms
+ ✓ src/lib/skip-trace/persist-result.test.ts (11 tests) 11ms
+ ✓ src/app/api/cron/skip-trace-balance/route.test.ts (6 tests) 7ms
+ ✓ src/lib/csv/presets/integration.test.ts (6 tests) 15ms
+ ✓ src/lib/prod-canary/env.test.ts (5 tests) 6ms
+ ✓ src/lib/ai-responder/dispatch.events.test.ts (2 tests) 10ms
+ ✓ src/app/(dashboard)/tasks/actions.test.ts (4 tests) 5ms
+ ✓ src/lib/dialer/jitter-transport.test.ts (105 tests) 3012ms
+ ✓ src/lib/templates/pool.test.ts (8 tests) 7ms
+ ✓ src/lib/enrichment/cass-job.recovery.test.ts (4 tests) 15ms
+stderr | src/workflows/csv-import.test.ts > csvImportWorkflow — defensive recovery (params.countyId null) > re-reads csv_imports.county_id when params.countyId is null
+CSV parse warnings (1); first: Unable to auto-detect delimiting character; defaulted to ','
+
+stderr | src/workflows/csv-import.test.ts > csvImportWorkflow — defensive recovery (params.countyId null) > still validates authoritative import identity when params.countyId is non-null
+CSV parse warnings (1); first: Unable to auto-detect delimiting character; defaulted to ','
+
+stderr | src/workflows/csv-import.test.ts > csvImportWorkflow — defensive recovery (params.countyId null) > checkpoints an exhausted failure in a row chunk
+CSV parse warnings (1); first: Unable to auto-detect delimiting character; defaulted to ','
+
+stderr | src/workflows/csv-import.test.ts > csvImportWorkflow — defensive recovery (params.countyId null) > checkpoints an exhausted failure during finalization
+CSV parse warnings (1); first: Unable to auto-detect delimiting character; defaulted to ','
+
+ ✓ src/app/(dashboard)/import/list-combobox-helpers.test.ts (7 tests) 5ms
+stderr | src/workflows/csv-import.test.ts > csvImportWorkflow — defensive recovery (params.countyId null) > records written consent through the job-scoped idempotent RPC
+CSV parse warnings (1); first: Unable to auto-detect delimiting character; defaulted to ','
+
+ ✓ src/workflows/csv-import.test.ts (6 tests) 12ms
+ ✓ src/lib/esign/dropbox-sign.test.ts (10 tests) 15ms
+ ✓ src/app/(dashboard)/leads/[id]/esign-action-contracts.test.ts (3 tests) 6ms
+ ✓ src/lib/esign/signed-pdf.test.ts (4 tests) 3ms
+ ✓ src/lib/leads/training.test.ts (5 tests) 5ms
+ ✓ src/app/(dashboard)/leads/board-query.test.ts (6 tests) 11ms
+ ✓ src/lib/testing/reset-tenant-tables.test.ts (3 tests) 4ms
+ ✓ src/lib/enrichment/cass-cache.test.ts (8 tests) 6ms
+ ✓ src/lib/csv/precheck.test.ts (12 tests) 6ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-esign-bindings.test.ts (29 tests) 8ms
+stdout | src/lib/dialer/telnyx-sdk-contract.test.ts > pinned Telnyx SDK recovery contract > serverDisconnect purges local calls without sending BYE or preserving auto-reconnect
+2026-09-10 14:53:13.371 - [serverDisconnect] Server-initiated disconnect — setting Purge without BYE on all active calls.
+
+ ✓ src/lib/dialer/telnyx-sdk-contract.test.ts (2 tests) 12ms
+ ✓ src/lib/messages/list-threads-search.test.ts (6 tests) 7ms
+ ✓ src/lib/ai-responder/keywords.test.ts (25 tests) 5ms
+ ✓ src/lib/leads/promote-job.test.ts (3 tests) 9ms
+ ✓ src/lib/coach/display-sentences.test.ts (3 tests) 6ms
+ ✓ src/lib/ai-responder/route.test.ts (17 tests) 5ms
+ ✓ src/lib/coach/recommendation-runtime-limiter.test.ts (4 tests) 5ms
+ ✓ src/app/(dashboard)/leads/filter.test.ts (14 tests) 8ms
+ ✓ src/lib/csv/validate.test.ts (27 tests) 8ms
+ ✓ src/lib/esign/pipeline-signal.test.ts (9 tests) 5ms
+ ✓ src/lib/sequences/delays.test.ts (5 tests) 4ms
+ ✓ src/lib/ai-responder/humanize.test.ts (23 tests) 5ms
+ ✓ src/lib/csv/presets/titlepro.test.ts (10 tests) 4ms
+ ✓ src/lib/dnc/property-lock.test.ts (4 tests) 7ms
+ ✓ src/lib/sequences/render.test.ts (10 tests) 3ms
+ ✓ src/lib/csv/presets/propstream.test.ts (16 tests) 5ms
+ ✓ src/workflows/recovery-script.contract.test.ts (1 test) 3ms
+ ✓ src/lib/csv/presets/cnam.test.ts (6 tests) 5ms
+ ✓ src/lib/auth/team-roster.test.ts (3 tests) 19ms
+ ✓ src/lib/coach/coach-ci-contract.test.ts (15 tests) 22ms
+ ✓ src/app/auth/hugo/route.test.ts (2 tests) 6ms
+ ✓ src/lib/integrations/slack/signature.test.ts (5 tests) 3ms
+ ✓ src/lib/messaging/line-type.test.ts (9 tests) 2ms
+ ✓ src/lib/leads/classify-reply-intent.test.ts (6 tests) 3ms
+ ✓ src/lib/dialer/jitter-actions.test.ts (2 tests) 5ms
+ ✓ src/lib/campaigns/kpi-bands.test.ts (16 tests) 2ms
+ ✓ src/lib/messaging/suppression.test.ts (22 tests) 5ms
+ ✓ src/lib/messaging/sender-persona.test.ts (4 tests) 7ms
+ ✓ src/lib/coach/opener-source-fidelity.test.ts (12 tests) 8ms
+ ✓ src/components/table/use-table-url-state.test.ts (12 tests) 4ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-activity.test.ts (13 tests) 9ms
+ ✓ src/lib/esign/material-events.test.ts (4 tests) 5ms
+ ✓ src/app/(dashboard)/calendar/scoping.test.ts (12 tests) 4ms
+ ✓ src/lib/messaging/opt-out-phone.test.ts (3 tests) 6ms
+ ✓ src/lib/csv/import-job-status.test.ts (4 tests) 4ms
+ ✓ src/lib/messaging/providers/twilio-receiver.test.ts (10 tests) 3ms
+ ✓ src/lib/csv/presets/index.test.ts (12 tests) 7ms
+ ✓ src/lib/auth/allowlist.test.ts (5 tests) 2ms
+ ✓ src/app/(dashboard)/settings/esign-templates/[templateId]/edit/embedded-template-client.test.ts (3 tests) 6ms
+ ✓ src/app/(dashboard)/leads/leads-safety-migration.test.ts (3 tests) 6ms
+ ✓ src/lib/esign/status.test.ts (12 tests) 6ms
+ ✓ src/lib/auth/sync-hugo-display-names.test.ts (6 tests) 4ms
+ ✓ src/lib/sequences/pause-rules.test.ts (8 tests) 2ms
+ ✓ src/lib/dialer/dispositions.test.ts (1 test) 3ms
+ ✓ src/lib/integrations/hugo/access-provisioner.contract.test.ts (16 tests) 5ms
+ ✓ src/lib/csv/invalid-rows-csv.test.ts (7 tests) 4ms
+ ✓ src/app/(dashboard)/dashboard/credit-actions.test.ts (4 tests) 7ms
+ ✓ src/app/api/internal/jitter/_lib/jitter-writeback-rpc-contract.test.ts (7 tests) 5ms
+ ✓ src/lib/cleanup/cleanup-packet-sql-contract.test.ts (5 tests) 5ms
+ ✓ src/lib/ai-responder/classify.test.ts (10 tests) 10ms
+ ✓ src/app/(dashboard)/messages/actions.queue-stats.test.ts (2 tests) 3ms
+ ✓ src/lib/skip-trace/credit-snapshot-migration.test.ts (2 tests) 3ms
+ ✓ src/lib/coach/token-resolver.test.ts (22 tests) 9ms
+ ✓ src/lib/dialer/state-machine.test.ts (3 tests) 2ms
+ ✓ src/lib/messages/sms-inbox-thread-snapshot-migration.test.ts (5 tests) 5ms
+ ✓ src/lib/errors/result.test.ts (10 tests) 4ms
+ ✓ src/lib/prospects/back-compat-url-translator.test.ts (13 tests) 15ms
+ ✓ src/lib/csv/line-type-classify.test.ts (5 tests) 19ms
+ ✓ src/lib/paid-job-authorization-safety-migration.test.ts (9 tests) 8ms
+ ✓ src/lib/esign/contract-status.test.ts (9 tests) 11ms
+ ✓ src/lib/coach/event-validation.test.ts (28 tests) 8ms
+ ✓ src/lib/prospects/effective-audience.test.ts (3 tests) 2ms
+ ✓ src/app/(dashboard)/import/wizard-dataset-contract.test.ts (1 test) 2ms
+ ✓ src/lib/auth/memberships.test.ts (7 tests) 6ms
+ ✓ src/lib/csv/import-truthfulness-migration.test.ts (4 tests) 2ms
+ ✓ src/lib/prospects/eligibility.test.ts (3 tests) 3ms
+ ✓ src/lib/csv/aliases.test.ts (21 tests) 5ms
+ ✓ src/app/(dashboard)/properties/dnc-safe-actions.test.ts (4 tests) 7ms
+ ✓ src/app/(dashboard)/leads/tags-actions.test.ts (4 tests) 8ms
+ ✓ src/app/(dashboard)/messages/inbox-filter-resolve.test.ts (8 tests) 3ms
+ ✓ src/lib/templates/render.test.ts (17 tests) 3ms
+ ✓ src/lib/ai-responder/prompt-v2.test.ts (18 tests) 10ms
+ ✓ src/lib/csv/update-operations/update-property-status.test.ts (2 tests) 3ms
+ ✓ src/lib/esign/provider-failure.test.ts (2 tests) 2ms
+ ✓ src/lib/errors/classify.test.ts (12 tests) 3ms
+ ✓ src/lib/workflow-recovery-safety-migration.test.ts (4 tests) 2ms
+ ✓ src/lib/csv/error-labels.test.ts (6 tests) 4ms
+ ✓ src/app/(dashboard)/leads/[id]/page.lead-redesign-contract.test.ts (8 tests) 5ms
+ ✓ src/lib/supabase/e2e-target-safety.test.ts (11 tests) 7ms
+ ✓ src/lib/messages/triage.tenant.test.ts (2 tests) 2ms
+ ✓ src/lib/coach/precall-setup.test.ts (12 tests) 7ms
+ ✓ src/lib/messages/sms-inbox-assignment-leads-only-migration.test.ts (4 tests) 4ms
+ ✓ src/lib/messaging/sms-phone.test.ts (5 tests) 5ms
+ ✓ src/lib/dialer/homeowner-training.test.ts (3 tests) 2ms
+ ✓ src/lib/esign/email-bounce-recovery-migration.test.ts (4 tests) 3ms
+ ✓ src/lib/coach/coach-integration-retry.test.ts (2 tests) 3ms
+ ✓ src/lib/csv/reshape-d4d.test.ts (14 tests) 4ms
+ ✓ src/app/(dashboard)/admin/users/hugo-url.test.ts (16 tests) 2ms
+ ✓ src/lib/csv/property-contact-org-guard-migration.test.ts (2 tests) 4ms
+ ✓ src/lib/csv/update-operations/phones-shared.test.ts (4 tests) 5ms
+ ✓ src/app/(dashboard)/leads/inbound-filters.test.ts (2 tests) 2ms
+ ✓ src/lib/csv/presets/bmh-agent-outreach.test.ts (11 tests) 16ms
+ ✓ src/lib/csv/update-operations/emails-shared.test.ts (1 test) 7ms
+ ✓ src/workflows/promote-leads.contract.test.ts (2 tests) 2ms
+ ✓ src/app/(dashboard)/leads/[id]/page.dnc-lock-contract.test.ts (5 tests) 4ms
+ ✓ src/app/(dashboard)/calendar/calendar-contact-dnc-projection-migration.test.ts (2 tests) 4ms
+ ✓ src/app/(dashboard)/_actions/notifications.test.ts (4 tests) 7ms
+ ✓ src/lib/csv/presets/reisift.test.ts (9 tests) 3ms
+ ✓ src/lib/esign/provider-mutation-reconciliation-migration.test.ts (3 tests) 2ms
+ ✓ src/app/(dashboard)/properties/actions.dialer-dnc.test.ts (2 tests) 4ms
+ ✓ src/lib/coach/transcript-scroll.test.ts (4 tests) 5ms
+ ✓ src/lib/auth/access-state.test.ts (6 tests) 4ms
+ ✓ src/lib/auth/safe-next.test.ts (9 tests) 3ms
+ ✓ src/app/(dashboard)/leads/urgency-migration.test.ts (6 tests) 4ms
+ ✓ src/lib/esign/dropbox-files.test.ts (3 tests) 3ms
+ ✓ src/lib/messages/sms-inbox-ai-disposition-review-migration.test.ts (6 tests) 4ms
+ ✓ src/lib/enrichment/providers/smartystreets.test.ts (13 tests) 4ms
+ ✓ src/lib/supabase/fresh-install-grants-migration.test.ts (3 tests) 4ms
+ ✓ src/app/(dashboard)/properties/page.dnc-org-contract.test.ts (2 tests) 4ms
+ ✓ src/app/(dashboard)/leads/[id]/page.layout-contract.test.ts (5 tests) 4ms
+ ✓ src/app/(dashboard)/messages/queued-cursor.test.ts (7 tests) 7ms
+ ✓ src/lib/auth/active-assignee-deletion-guard-migration.test.ts (1 test) 4ms
+ ✓ src/app/(dashboard)/leads/contact-detail-relation-contract.test.ts (2 tests) 4ms
+ ✓ src/app/(dashboard)/import/actions.retry-contract.test.ts (6 tests) 6ms
+ ✓ src/lib/sequences/enrollment.training.test.ts (2 tests) 5ms
+ ✓ src/lib/utils/zillow-url.test.ts (8 tests) 3ms
+ ✓ src/lib/integrations/slack/state.test.ts (6 tests) 3ms
+ ✓ src/lib/backend-paid-safety-migration.test.ts (5 tests) 6ms
+ ✓ src/lib/messaging/inbound.test.ts (5 tests) 3ms
+ ✓ src/lib/notifications/recipients.test.ts (8 tests) 6ms
+ ✓ src/app/api/internal/jitter/_lib/artifact-call-activity.test.ts (6 tests) 2ms
+ ✓ src/lib/esign/pending-dialog.test.ts (4 tests) 2ms
+ ✓ src/lib/esign/template-contract.test.ts (3 tests) 3ms
+ ✓ src/lib/esign/email.test.ts (11 tests) 5ms
+ ✓ src/lib/integrations/tokens/oauth-secret.test.ts (5 tests) 6ms
+ ✓ src/lib/esign/definitive-provider-failure-migration.test.ts (3 tests) 6ms
+ ✓ src/workflows/csv-import-org-contract.test.ts (4 tests) 5ms
+ ✓ src/lib/messages/sms-inbox-filter-timeout-hotfix-migration.test.ts (4 tests) 3ms
+ ✓ src/lib/supabase/server.test.ts (1 test) 5ms
+ ✓ src/lib/csv/presets/permits.test.ts (5 tests) 4ms
+ ✓ src/lib/csv/import-pricing.test.ts (2 tests) 5ms
+ ✓ src/lib/auth/team-member.test.ts (3 tests) 3ms
+ ✓ src/lib/presentation/system-labels.test.ts (2 tests) 2ms
+ ✓ src/app/(dashboard)/leads/sms-suppression-migration.test.ts (1 test) 2ms
+ ✓ src/lib/messages/sendillo-health-snapshot-migration.test.ts (4 tests) 2ms
+ ✓ src/app/(dashboard)/settings/integrations/actions.test.ts (3 tests) 4ms
+ ✓ src/lib/esign/contracts-compatibility.test.ts (2 tests) 6ms
+ ✓ src/lib/esign/retry-reminder-callback-migration.test.ts (3 tests) 3ms
+ ✓ src/lib/esign/authorized-popup.test.ts (3 tests) 6ms
+ ✓ src/app/(dashboard)/admin/webhooks/url.test.ts (3 tests) 3ms
+ ✓ src/lib/messages/sms-conversation-org-guard-migration.test.ts (2 tests) 3ms
+ ✓ src/lib/esign/secret.test.ts (1 test) 3ms
+ ✓ src/lib/coach/script-registry.test.ts (1 test) 2ms
+ ✓ src/app/(dashboard)/properties/actions.dialer-source-meta.test.ts (1 test) 1ms
+ ✓ src/lib/leads/notices.test.ts (2 tests) 1ms
+ ✓ src/app/(dashboard)/import/wizard-step-display.test.ts (6 tests) 3ms
+ ✓ src/lib/dialer/transport-selection.test.ts (2 tests) 2ms
+
+ Test Files  335 passed (335)
+      Tests  4218 passed (4218)
+   Start at  09:53:08
+   Duration  7.31s (transform 11.02s, setup 0ms, import 25.55s, tests 11.08s, environment 815ms)
+
+
+> sandra@0.1.0 test:rtl
+> vitest run --config vitest.rtl.config.ts
+
+
+ RUN  v4.1.5 /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup
+
+(node:3814) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+ ✓ src/components/appointments/book-appointment-popover.test.tsx (10 tests) 1109ms
+     ✓ shows a non-blocking double-book warning without disabling submit  347ms
+ ✓ src/app/(dashboard)/messages/queue-panel.test.tsx (33 tests) 1214ms
+ ✓ src/app/(dashboard)/settings/esign-templates/add-template-dialog.test.tsx (11 tests) 1615ms
+stderr | src/app/(dashboard)/properties/prospects-table.test.tsx > <ProspectsTable /> > offers only teammates active in every selected workspace
+An update to MenuRoot inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+An update to MenuSubmenuTrigger inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+
+ ✓ src/app/(dashboard)/leads/add-lead-dialog.test.tsx (8 tests) 2275ms
+     ✓ scopes assignees to the explicitly selected workspace  345ms
+     ✓ warns rather than blocks when no phone or email is supplied  305ms
+     ✓ locks every close/save action and submits only once while creation is pending  454ms
+stderr | src/app/(dashboard)/properties/prospects-table.test.tsx > <ProspectsTable /> > bulk add-to-list calls the action with the selected ids and chosen list
+An update to MenuRoot inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+An update to MenuSubmenuTrigger inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+
+stderr | src/app/(dashboard)/properties/prospects-table.test.tsx > <ProspectsTable /> > bulk apply existing tag calls the action with selected ids and the chosen tag
+An update to MenuRoot inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+An update to MenuSubmenuTrigger inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+
+stderr | src/components/search/global-search-layer.test.tsx > redesign interaction contracts > §12/2 reopen resets populated input; a pending focus return cannot steal focus
+An update to DialogRoot inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+
+stderr | src/components/search/global-search-layer.test.tsx > redesign interaction contracts > §12/2 reopen resets populated input; a pending focus return cannot steal focus
+An update to DialogBackdrop inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+An update to DialogPopup inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+
+ ✓ src/app/(dashboard)/settings/esign-templates/template-row-actions.test.tsx (13 tests) 610ms
+ ✓ src/components/coach/coach-live-view.test.tsx (26 tests) 3592ms
+     ✓ keeps the authorized file number visible while the rep advances through the script  759ms
+     ✓ shows exactly one rep-selected Offer or Close spoken path and preserves it across collapse  379ms
+     ✓ lets the rep fill motivation and cold-caller placeholders when context cannot  308ms
+ ✓ src/app/(dashboard)/properties/_components/filter-drawer.test.tsx (14 tests) 2012ms
+     ✓ encodes Vacancy + CASS selections into URL filter state immediately  782ms
+     ✓ encodes zero-result-prone Engagement buckets without waiting on server count  381ms
+     ✓ encodes Equity percent ranges into URL filter state  405ms
+ ✓ src/app/(dashboard)/messages/inbox-detail.test.tsx (44 tests) 3816ms
+     ✓ unlocks a live pending gate from an explicit terminal server snapshot  360ms
+     ✓ copies record, conversation, and active thread phone from the More menu  407ms
+ ✓ src/app/(dashboard)/leads/kanban.test.tsx (39 tests) 3266ms
+     ✓ uses a fresh idempotency key for a later Set cycle on the same mounted card  316ms
+ ✓ src/app/(dashboard)/leads/[id]/send-for-signature.test.tsx (19 tests) 2620ms
+     ✓ lets a dialog-entered valid seller email clear the missing reason and enable Send  371ms
+     ✓ prefills the stored seller email, requires every provider role, and sends the edited five-field snapshot  488ms
+ ✓ src/app/(dashboard)/properties/bulk-sms-modal.test.tsx (32 tests) 5924ms
+     ✓ Selecting 'minutes' and entering 5 submits paceSeconds=300  470ms
+     ✓ Pacing of 5 seconds shows inline validation error and submit does not call bulkQueueSms  344ms
+     ✓ Pacing of 11 minutes shows inline validation error and submit does not call bulkQueueSms  371ms
+     ✓ Submit passes paceSeconds AND skipIfContacted to bulkQueueSms  357ms
+     ✓ Push preset submits paceSeconds=4 with no dailyCap  359ms
+     ✓ Custom mode forwards the raw pace with no dailyCap  316ms
+     ✓ Custom message submit forwards trimmed campaignName and body  418ms
+ ✓ src/app/(dashboard)/campaigns/create-campaign-form.test.tsx (7 tests) 2775ms
+     ✓ shows a name validation error instead of submitting an unnamed campaign  787ms
+     ✓ captures the saved audience plus body, pacing, and skip-contacted fields  597ms
+     ✓ blocks invalid pacing before the server action runs  358ms
+     ✓ passes the selected sender and provider campaign to createCampaign  396ms
+ ✓ src/app/(dashboard)/properties/batch-create-modal.test.tsx (14 tests) 849ms
+ ✓ src/app/(dashboard)/templates/templates-list.test.tsx (9 tests) 832ms
+     ✓ typing in search calls router.replace with /templates?search=… after the 250ms debounce  387ms
+ ✓ src/components/skip-trace-preflight-dialog.test.tsx (11 tests) 751ms
+ ✓ src/app/(dashboard)/leads/[id]/contracts-card.test.tsx (31 tests) 1447ms
+     ✓ offers owner-gated signer email correction instead of retry for a bounced provider request  303ms
+ ✓ src/components/search/use-global-search.test.tsx (25 tests) 1920ms
+ ✓ src/app/(dashboard)/settings/integrations/form.test.tsx (27 tests) 1882ms
+ ✓ src/app/(dashboard)/settings/esign-templates/pending-template-copies.test.tsx (16 tests) 648ms
+ ✓ src/components/notifications-bell.test.tsx (6 tests) 698ms
+ ✓ src/app/(dashboard)/leads/[id]/inline-reply.test.tsx (9 tests) 896ms
+ ✓ src/lib/coach/use-coach-session.test.tsx (19 tests) 1062ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-call-summary.test.tsx (13 tests) 694ms
+ ✓ src/app/(dashboard)/sequences/[id]/edit/editor.test.tsx (5 tests) 708ms
+     ✓ 2. add-step modal validates required fields + persists on save  462ms
+ ✓ src/app/(dashboard)/properties/prospects-table.test.tsx (40 tests) 6767ms
+     ✓ bulk add-to-list calls the action with the selected ids and chosen list  369ms
+     ✓ bulk apply existing tag calls the action with selected ids and the chosen tag  438ms
+     ✓ creates a new tag from the prospects page and applies it to selected ids  362ms
+     ✓ clears a typed tag name when the create/apply modal is canceled  448ms
+     ✓ keeps filter skeleton rows visible until the server block stack catches up  405ms
+     ✓ debounces typing and pushes the trimmed search to the URL with page reset  317ms
+     ✓ create/apply tag after select-all-matching sends filters instead of every id  454ms
+     ✓ create/apply tag partial failure after select-all-matching clears all-matching mode  338ms
+ ✓ src/components/softphone/softphone-provider.test.tsx (67 tests) 8048ms
+     ✓ defaults off, reveals the script picker with the keyboard, and persists both values across remount  580ms
+     ✓ keeps coaching hidden but running for the suggestion entry point, then reopens and opts in  360ms
+     ✓ preserves preference true after wrap-up and applies it to the next call  390ms
+     ✓ clears pending manual inspection when backspace invalidates the number  562ms
+     ✓ keeps spoken setup edits out of dialing and disposition identity  674ms
+ ✓ src/app/(dashboard)/jobs/jobs-list.test.tsx (10 tests) 1085ms
+     ✓ typing in the search input calls router.replace after the 250ms debounce with /jobs?search=...  379ms
+     ✓ typing search renders the realtime jobs initially, then debounces + fires router.replace with /jobs?search=...  301ms
+ ✓ src/components/search/global-search-layer.test.tsx (38 tests) 8785ms
+     ✓ fills the viewport and renders all fifteen results in ordered groups  363ms
+     ✓ keeps newer content when an earlier request resolves last  440ms
+     ✓ §12/12 property destination /leads/property-id passes through on click and Enter  470ms
+     ✓ §12/12 owner destination /leads/linked-property passes through on click and Enter  458ms
+     ✓ §12/12 owner destination /messages?thread=owner-thread passes through on click and Enter  451ms
+     ✓ §12/12 thread destination /messages?thread=message-thread passes through on click and Enter  455ms
+     ✓ §12/12 arrows clamp across groups, hover preserves focus, and committed results reset selection  469ms
+ ✓ src/app/(auth)/login/page.test.tsx (5 tests) 438ms
+stderr | src/app/(dashboard)/import/steps/dnc-conservation.test.tsx > DNC count conservation across the import UI > shows the same locked count in Preflight, Review, and Confirm
+An update to StepConfirm inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+
+ ✓ src/app/(dashboard)/properties/_components/blocks/blocks.test.tsx (74 tests) 898ms
+ ✓ src/app/(dashboard)/lists/lists-table.test.tsx (7 tests) 665ms
+     ✓ typing in the search input calls router.replace with the trimmed search URL after the 250ms debounce  420ms
+ ✓ src/app/(dashboard)/calendar/_components/calendar-view.test.tsx (19 tests) 524ms
+ ✓ src/app/(dashboard)/properties/promote-leads-dialog.test.tsx (6 tests) 714ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-task-widget.test.tsx (4 tests) 591ms
+     ✓ creates a follow-up task with due date and assignee  343ms
+ ✓ src/app/(dashboard)/import/steps/dnc-conservation.test.tsx (4 tests) 897ms
+     ✓ renders the generated DNC mapping as non-editable  608ms
+ ✓ src/app/(dashboard)/settings/esign-templates/[templateId]/edit/embedded-template-editor.test.tsx (8 tests) 787ms
+     ✓ mounts full-width at 520px and enables Save only after provider Finish syncs  354ms
+ ✓ src/app/(dashboard)/leads/[id]/sandra-recording-player.test.tsx (12 tests) 371ms
+ ✓ src/components/appointments/appointment-outcome-row.test.tsx (13 tests) 478ms
+ ✓ src/app/(dashboard)/campaigns/[id]/campaign-cadence-control.test.tsx (5 tests) 414ms
+ ✓ src/app/(dashboard)/calendar/page.test.tsx (15 tests) 438ms
+ ✓ src/app/(dashboard)/messages/cockpit-view.test.tsx (20 tests) 932ms
+ ✓ src/app/(dashboard)/properties/_components/active-filters-chips.test.tsx (8 tests) 460ms
+ ✓ src/app/(dashboard)/calendar/_components/agenda-list.test.tsx (5 tests) 361ms
+ ✓ src/components/table/table-toolbar.test.tsx (11 tests) 523ms
+     ✓ debounces typing then calls router.replace with the trimmed search after 250ms  316ms
+ ✓ src/app/(dashboard)/leads/[id]/messages-thread.test.tsx (26 tests) 322ms
+ ✓ src/app/(dashboard)/leads/[id]/next-action-card.test.tsx (8 tests) 530ms
+ ✓ src/app/(dashboard)/jobs/retry-skip-trace-button.test.tsx (3 tests) 469ms
+     ✓ renders the retry button and opens skip-trace preflight before retrying  353ms
+ ✓ src/app/(dashboard)/properties/_components/add-block-picker.test.tsx (7 tests) 370ms
+ ✓ src/components/coach/coach-live-view-hold-timer.test.tsx (1 test) 308ms
+     ✓ renders the countdown without changing script or telephony controls  305ms
+ ✓ src/app/(dashboard)/sequences/new/form.test.tsx (2 tests) 608ms
+     ✓ disables Create until a name is entered, then submits with the form payload and routes to the new editor  412ms
+ ✓ src/app/(dashboard)/jobs/[id]/job-detail.test.tsx (9 tests) 410ms
+ ✓ src/app/(dashboard)/templates/template-dialog.test.tsx (2 tests) 312ms
+ ✓ src/app/(dashboard)/settings/esign-templates/template-library.test.tsx (4 tests) 260ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-files-card.test.tsx (5 tests) 324ms
+ ✓ src/app/(dashboard)/messages/cockpit-shell.test.tsx (10 tests) 576ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-media-hero.test.tsx (10 tests) 281ms
+ ✓ src/app/(dashboard)/import/steps/step-progress.test.tsx (7 tests) 313ms
+ ✓ src/app/(dashboard)/properties/bulk-tag-modal.test.tsx (1 test) 291ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-events.test.tsx (37 tests) 318ms
+ ✓ src/app/(dashboard)/messages/inbox-filters.test.tsx (27 tests) 556ms
+ ✓ src/app/(dashboard)/properties/_components/quick-filters-bar.test.tsx (5 tests) 251ms
+ ✓ src/app/(dashboard)/messages/error.test.tsx (1 test) 152ms
+ ✓ src/app/(dashboard)/settings/esign-templates/signer-role-editor.test.tsx (1 test) 268ms
+ ✓ src/components/softphone/precall-setup-panel.test.tsx (4 tests) 776ms
+     ✓ keeps exactly one group open and only advances after explicit completion  368ms
+ ✓ src/app/(dashboard)/dashboard/_components/tasks-panel.test.tsx (15 tests) 315ms
+ ✓ src/app/(dashboard)/dashboard/_components/sendillo-health-card.test.tsx (3 tests) 197ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-identity-actions.test.tsx (1 test) 175ms
+ ✓ src/app/(dashboard)/jobs/retry-promote-leads-button.test.tsx (3 tests) 243ms
+ ✓ src/app/(dashboard)/messages/inbox-thread-list.test.tsx (18 tests) 263ms
+ ✓ src/app/(dashboard)/admin/users/invite-panel.test.tsx (9 tests) 286ms
+ ✓ src/app/(dashboard)/leads/[id]/ai-attention-banner.test.tsx (3 tests) 278ms
+ ✓ src/app/(dashboard)/settings/esign-templates/initial-editor-session.test.tsx (3 tests) 218ms
+ ✓ src/app/(dashboard)/properties/_components/preset-dropdown.test.tsx (6 tests) 208ms
+ ✓ src/app/(dashboard)/dashboard/_components/skip-trace-credits.test.tsx (4 tests) 179ms
+ ✓ src/app/(dashboard)/calendar/_components/month-grid.test.tsx (8 tests) 216ms
+ ✓ src/app/(dashboard)/messages/assign-dropdown.test.tsx (4 tests) 240ms
+ ✓ src/app/(dashboard)/dashboard/page.test.tsx (4 tests) 273ms
+ ✓ src/components/table/sortable-header.test.tsx (6 tests) 198ms
+ ✓ src/app/(dashboard)/jobs/retry-csv-import-button.test.tsx (5 tests) 261ms
+ ✓ src/app/(dashboard)/messages/unknown-thread-dialog.test.tsx (1 test) 279ms
+ ✓ src/app/(dashboard)/calendar/_components/week-grid.test.tsx (9 tests) 242ms
+ ✓ src/app/(dashboard)/messages/queue-stats-banner.test.tsx (6 tests) 274ms
+stderr | src/lib/coach/use-coach-channel.test.tsx > useCoachChannel > does NOT let malformed traffic re-arm liveness — a stream of garbage must surface as degraded, not keep the feed looking healthy
+[coach] dropped malformed event phase {
+  type: 'phase',
+  phaseId: 'not_a_real_phase',
+  ts: 't1',
+  scriptVersion: '1.2.3',
+  matcherVersion: '3'
+}
+
+stderr | src/lib/coach/use-coach-channel.test.tsx > useCoachChannel > does not clear degraded on a malformed event either
+[coach] dropped malformed event phase {
+  type: 'phase',
+  phaseId: 'not_a_real_phase',
+  ts: 't1',
+  scriptVersion: '1.2.3',
+  matcherVersion: '3'
+}
+
+stderr | src/lib/coach/use-coach-channel.test.tsx > useCoachChannel > resets transcript/degraded/reconnectGap/malformedEventCount/scriptOutOfSync when callId changes — a new call must never inherit the previous call's state
+[coach] dropped malformed event phase {
+  type: 'phase',
+  phaseId: 'not_a_real_phase',
+  ts: 't2',
+  scriptVersion: '1.2.3',
+  matcherVersion: '3'
+}
+
+stderr | src/lib/coach/use-coach-channel.test.tsx > useCoachChannel > drops a malformed event, counts it, and never dispatches it into state
+[coach] dropped malformed event phase {
+  type: 'phase',
+  phaseId: 'not_a_real_phase',
+  ts: 't1',
+  scriptVersion: '1.2.3',
+  matcherVersion: '3'
+}
+
+stderr | src/lib/coach/use-coach-channel.test.tsx > useCoachChannel > an event missing scriptVersion is dropped as malformed and leaves scriptOutOfSync unchanged
+[coach] dropped malformed event counter { type: 'counter', probeCount: 2, ts: 't2', matcherVersion: '3' }
+
+ ✓ src/lib/coach/use-coach-channel.test.tsx (28 tests) 216ms
+ ✓ src/app/(dashboard)/messages/inbox-search.test.tsx (5 tests) 212ms
+ ✓ src/app/(dashboard)/leads/[id]/sms-channel-restriction.test.tsx (3 tests) 188ms
+ ✓ src/app/(dashboard)/campaigns/campaigns-table.test.tsx (3 tests) 151ms
+ ✓ src/app/(dashboard)/dashboard/_components/refresh-credits-button.test.tsx (2 tests) 262ms
+ ✓ src/app/(dashboard)/dashboard/_components/threads-needing-attention.test.tsx (1 test) 170ms
+ ✓ src/app/(dashboard)/campaigns/[id]/campaign-operations-panel.test.tsx (2 tests) 88ms
+ ✓ src/app/(dashboard)/campaigns/[id]/campaign-scoreboard.test.tsx (2 tests) 92ms
+ ✓ src/app/(dashboard)/dashboard/_components/quick-actions.test.tsx (2 tests) 229ms
+ ✓ src/app/(dashboard)/dashboard/_components/needs-attention-strip.test.tsx (1 test) 239ms
+ ✓ src/components/dashboard-sidebar.test.tsx (1 test) 259ms
+ ✓ src/components/esign/contract-status-badge.test.tsx (9 tests) 101ms
+ ✓ src/app/(dashboard)/settings/esign-templates/test-mode-banner.test.tsx (2 tests) 149ms
+ ✓ src/components/coach/hold-timer.test.tsx (4 tests) 55ms
+ ✓ src/app/(dashboard)/campaigns/[id]/campaign-delivery-card.test.tsx (2 tests) 113ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-appointments-section.test.tsx (6 tests) 106ms
+ ✓ src/app/(dashboard)/dashboard/loading.test.tsx (1 test) 83ms
+ ✓ src/components/job-failure-notifier.test.tsx (4 tests) 123ms
+ ✓ src/app/(dashboard)/messages/use-queue-stats.test.tsx (12 tests) 54ms
+ ✓ src/app/(dashboard)/properties/_components/use-filter-state.test.tsx (10 tests) 107ms
+ ✓ src/components/table/use-table-url-state.hook.test.tsx (11 tests) 101ms
+ ✓ src/app/(dashboard)/properties/_components/use-debounced-filters.test.tsx (5 tests) 44ms
+ ✓ src/components/escalation-badge.test.tsx (15 tests) 102ms
+ ✓ src/app/(dashboard)/messages/use-throttled-refresh.test.tsx (11 tests) 38ms
+ ✓ src/components/coach/keyed-coach-live-view.test.tsx (1 test) 21ms
+ ✓ src/app/(dashboard)/calendar/_components/new-block-button.test.tsx (1 test) 17ms
+ ✓ src/components/softphone/use-precall-setup.test.tsx (11 tests) 23ms
+ ✓ src/components/softphone/softphone-lead-button.test.tsx (1 test) 16ms
+ ✓ src/app/(dashboard)/leads/[id]/notes-feed.test.tsx (2 tests) 77ms
+ ✓ src/app/(dashboard)/leads/[id]/lead-activity.ui.test.tsx (3 tests) 36ms
+ ✓ src/app/(dashboard)/leads/page.test.tsx (2 tests) 8ms
+
+ Test Files  113 passed (113)
+      Tests  1253 passed (1253)
+   Start at  09:53:16
+   Duration  20.61s (transform 9.02s, setup 13.53s, import 42.89s, tests 92.91s, environment 54.99s)
+

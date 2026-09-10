@@ -18,9 +18,35 @@
   "paidAttempts": 0,
   "paidSpend": 0,
   "limitations": [
-    "Latest combined browser refresh running after manual-number waiter correction and sticky-footer change.",
-    "Expanded browser fault injection and full200percent zoom validation not complete.",
-    "No independent exact-head manual/code-Fable approval yet.",
-    "No paid calls; rate ceiling and independent300-second cutoff proof missing."
-  ]
+    "Working-tree full native and synthetic verification is complete; the frozen exact-head review and CI are still pending.",
+    "Full requested browser fault coverage and 200% zoom validation remain incomplete.",
+    "Independent exact-head manual review is pending.",
+    "No paid calls: all-service rate ceiling and independent 300-second cutoff proof missing.",
+    "No production release or verification."
+  ],
+  "verifiedCommit": "9c96379e999a6d2e02d87f460e169a3826783c67 (pre-freeze evidence; working-tree candidate verified separately)",
+  "fullVerification": {
+    "atomicTests": 12,
+    "postgresRehearsal": "PASS",
+    "typecheck": "PASS",
+    "unitTests": 4218,
+    "rtlTests": 1242,
+    "workingTreeRtlTests": 1253,
+    "workingTreeSyntheticTests": 89,
+    "workingTreeCoachAudioTests": 13
+  },
+  "postReviewWorkingTreeFocusedTests": {
+    "provider": 67,
+    "draftAuth": 11,
+    "panel": 4,
+    "total": 82,
+    "typecheck": "PASS"
+  },
+  "codeReview": {
+    "requests": 1,
+    "substantiveVerdicts": 1,
+    "approvals": 0,
+    "verdict": "CHANGES_REQUIRED",
+    "reviewedCommit": "9c96379e999a6d2e02d87f460e169a3826783c67"
+  }
 }

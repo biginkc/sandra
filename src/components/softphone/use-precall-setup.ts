@@ -154,9 +154,9 @@ export function usePrecallSetup(enabled: boolean, callerId: string | null) {
     const { data } = client.auth.onAuthStateChange((event, session) => {
       if (
         event === "SIGNED_OUT" ||
-        (operator.current &&
-          session?.user.id &&
-          session.user.id !== operator.current)
+        (session?.user.id &&
+          session.user.id !== operator.current &&
+          (operator.current !== null || event === "SIGNED_IN"))
       ) {
         ++request.current;
         if (event === "SIGNED_OUT" && operator.current) {
@@ -168,6 +168,9 @@ export function usePrecallSetup(enabled: boolean, callerId: string | null) {
         operator.current = null;
         setState(initial());
       }
+      // Remember the local draft owner even when coaching has not loaded yet.
+      // Server actions still independently verify this identity before dialing.
+      if (session?.user.id) operator.current = session.user.id;
     });
     return () => {
       // Invalidate all pending requests rather than a captured generation.

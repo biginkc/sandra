@@ -1,0 +1,84 @@
+
+> sandra@0.1.0 test:e2e:synthetic
+> playwright test --config playwright.synthetic.config.ts coach-live-contrast.spec.ts --output=tmp/precall-contrast-results
+
+(node:19929) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+Running 14 tests using 1 worker
+
+(node:19935) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:19935) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(node:19935) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/synthetic/coach-live-contrast.spec.ts:250:5 › approved steel-blue text/surface pairs all meet AA (6ms)
+[contrast] transcript rep speaker label: fg=rgb(123,207,248) bg=rgb(53,66,88) ratio=5.85
+[contrast] transcript seller speaker label: fg=rgb(246,206,76) bg=rgb(42,54,73) ratio=8.04
+[contrast] live status badge: fg=rgb(115,195,234) bg=rgb(21,29,43) ratio=8.63
+[contrast] current section title: fg=rgb(154,164,182) bg=rgb(31,42,60) ratio=5.75
+[contrast] resolved script token: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+[contrast] script body: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+[contrast] file number: fg=rgb(199,206,217) bg=rgb(21,29,43) ratio=10.67
+[contrast] primary next action while hovered: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+[contrast] disabled back action: fg=rgb(157,167,185) bg=rgb(42,54,73) ratio=5.03
+[contrast] hang up action while hovered: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+[contrast] tone chip: fg=rgb(21,29,43) bg=rgb(252,211,77) ratio=11.72
+[contrast] next section preview: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+[contrast] next section preview body: fg=rgb(201,207,219) bg=rgb(31,42,60) ratio=9.23
+[contrast] resolved entry token: fg=rgb(118,199,239) bg=rgb(31,42,60) ratio=7.69
+[contrast] completed phase label: fg=rgb(115,195,234) bg=rgb(21,29,43) ratio=8.63
+[contrast] active manual phase label: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+[contrast] inactive phase label while hovered: fg=rgb(251,251,252) bg=rgb(53,66,88) ratio=9.80
+  ✓   2 e2e/synthetic/coach-live-contrast.spec.ts:281:7 › meets WCAG AA for the manual coach surfaces in light mode (7.2s)
+[contrast] held-call timer: fg=rgb(243,243,244) bg=rgb(21,29,43) ratio=15.24
+[contrast] hold countdown pill: fg=rgb(241,219,132) bg=rgb(21,29,43) ratio=12.24
+[contrast] pressed hold control while hovered: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+  ✓   3 e2e/synthetic/coach-live-contrast.spec.ts:355:7 › meets WCAG AA for the held-call timer in light mode (1.7s)
+[contrast] keypad digit: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+[contrast] keypad letters: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+[contrast] hovered keypad digit and letters: fg=rgb(31,42,60) bg=rgb(245,244,242) ratio=13.13
+[contrast] disabled keypad digit and letters: fg=rgb(157,167,185) bg=rgb(42,54,73) ratio=5.03
+  ✓   4 e2e/synthetic/coach-live-contrast.spec.ts:372:7 › keeps keypad digits and letters readable in light mode (2.2s)
+[contrast] interrupted warning: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+[contrast] reconnect audio control: fg=rgb(247,224,136) bg=rgb(42,54,73) ratio=9.27
+[contrast] warning hangup control: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+  ✓   5 e2e/synthetic/coach-live-contrast.spec.ts:385:7 › meets WCAG AA for narrow interrupted Coach controls in light mode (1.2s)
+[contrast] transcript rep speaker label: fg=rgb(123,207,248) bg=rgb(53,66,88) ratio=5.85
+[contrast] transcript seller speaker label: fg=rgb(246,206,76) bg=rgb(42,54,73) ratio=8.04
+[contrast] live status badge: fg=rgb(115,195,234) bg=rgb(21,29,43) ratio=8.63
+[contrast] current section title: fg=rgb(154,164,182) bg=rgb(31,42,60) ratio=5.75
+[contrast] resolved script token: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+[contrast] script body: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+[contrast] file number: fg=rgb(199,206,217) bg=rgb(21,29,43) ratio=10.67
+[contrast] primary next action while hovered: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+[contrast] disabled back action: fg=rgb(157,167,185) bg=rgb(42,54,73) ratio=5.03
+[contrast] hang up action while hovered: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+[contrast] tone chip: fg=rgb(21,29,43) bg=rgb(252,211,77) ratio=11.72
+[contrast] next section preview: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+[contrast] next section preview body: fg=rgb(201,207,219) bg=rgb(31,42,60) ratio=9.23
+[contrast] resolved entry token: fg=rgb(118,199,239) bg=rgb(31,42,60) ratio=7.69
+[contrast] completed phase label: fg=rgb(115,195,234) bg=rgb(21,29,43) ratio=8.63
+[contrast] active manual phase label: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+[contrast] inactive phase label while hovered: fg=rgb(251,251,252) bg=rgb(53,66,88) ratio=9.80
+  ✓   6 e2e/synthetic/coach-live-contrast.spec.ts:281:7 › meets WCAG AA for the manual coach surfaces in dark mode (6.8s)
+[contrast] held-call timer: fg=rgb(243,243,244) bg=rgb(21,29,43) ratio=15.24
+[contrast] hold countdown pill: fg=rgb(241,219,132) bg=rgb(21,29,43) ratio=12.24
+[contrast] pressed hold control while hovered: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+  ✓   7 e2e/synthetic/coach-live-contrast.spec.ts:355:7 › meets WCAG AA for the held-call timer in dark mode (1.6s)
+[contrast] keypad digit: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+[contrast] keypad letters: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+[contrast] hovered keypad digit and letters: fg=rgb(31,42,60) bg=rgb(245,244,242) ratio=13.13
+[contrast] disabled keypad digit and letters: fg=rgb(157,167,185) bg=rgb(42,54,73) ratio=5.03
+  ✓   8 e2e/synthetic/coach-live-contrast.spec.ts:372:7 › keeps keypad digits and letters readable in dark mode (2.1s)
+[contrast] interrupted warning: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+[contrast] reconnect audio control: fg=rgb(247,224,136) bg=rgb(42,54,73) ratio=9.27
+[contrast] warning hangup control: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+  ✓   9 e2e/synthetic/coach-live-contrast.spec.ts:385:7 › meets WCAG AA for narrow interrupted Coach controls in dark mode (1.1s)
+  ✓  10 e2e/synthetic/coach-live-contrast.spec.ts:427:7 › contrast probe negative controls › detects text that is invisible against its own background (226ms)
+  ✓  11 e2e/synthetic/coach-live-contrast.spec.ts:436:7 › contrast probe negative controls › detects the unreadable half of a split background (219ms)
+  ✓  12 e2e/synthetic/coach-live-contrast.spec.ts:475:7 › contrast probe negative controls › detects low-contrast text whose colour is set on a descendant (230ms)
+  ✓  13 e2e/synthetic/coach-live-contrast.spec.ts:487:7 › contrast probe negative controls › is not fooled by a high-contrast decorative pseudo-element (231ms)
+  ✓  14 e2e/synthetic/coach-live-contrast.spec.ts:500:7 › contrast probe negative controls › passes genuinely readable text (guards against always-fail) (218ms)
+
+  14 passed (26.8s)
