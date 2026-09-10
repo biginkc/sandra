@@ -20,13 +20,23 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: npm
       - run: npm ci
       - run: npx tsx scripts/e2e-identity-lifecycle.ts emit
+      - name: Verify entrypoint loads before giving it database credentials
+        run: |
+          node --input-type=module - <<'NODE'
+          import { spawnSync } from 'node:child_process';
+          const result = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/repair-514/run.mjs'], { encoding: 'utf8' });
+          if (result.status !== 1 || !result.stderr.includes('R514_EXECUTION_NOT_ARMED') || result.stderr.includes('SyntaxError')) {
+            throw new Error('Repair entrypoint smoke check failed before database access.');
+          }
+          console.log('Repair entrypoint imports successfully and refuses unarmed execution.');
+          NODE
       - id: preflight
         env:
           TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
