@@ -23,6 +23,42 @@ import { assertSafeE2ESupabaseTargetFromEnvironment } from "../src/lib/supabase/
 
 const MAX_USER_PAGES = 50;
 const USERS_PER_PAGE = 1000;
+const SAFE_AUTH_ERROR_NAMES = new Set([
+  "AuthApiError",
+  "AuthRetryableFetchError",
+  "AuthUnknownError",
+]);
+const SAFE_AUTH_ERROR_CODES = new Set([
+  "bad_jwt",
+  "no_authorization",
+  "not_admin",
+  "over_request_rate_limit",
+  "request_timeout",
+  "unexpected_failure",
+]);
+
+function describeAdminInventoryError(error: unknown, page: number): string {
+  const fields = ["kind=auth-admin-inventory", `page=${page}`];
+  if (!error || typeof error !== "object") return fields.join(" ");
+
+  const record = error as Record<string, unknown>;
+  if (typeof record.status === "number" && Number.isFinite(record.status)) {
+    fields.push(`status=${record.status}`);
+  }
+  if (
+    typeof record.name === "string" &&
+    SAFE_AUTH_ERROR_NAMES.has(record.name)
+  ) {
+    fields.push(`name=${record.name}`);
+  }
+  if (
+    typeof record.code === "string" &&
+    SAFE_AUTH_ERROR_CODES.has(record.code)
+  ) {
+    fields.push(`code=${record.code}`);
+  }
+  return fields.join(" ");
+}
 
 function appendGitHubEnvironment(name: string, value: string): void {
   const githubEnv = process.env.GITHUB_ENV;
@@ -64,7 +100,9 @@ async function listAllUsers(client: SupabaseClient<Database>): Promise<User[]> {
       perPage: USERS_PER_PAGE,
     });
     if (error) {
-      throw new Error(`E2E identity user inventory failed: ${error.message}`);
+      throw new Error(
+        `E2E identity user inventory failed: ${describeAdminInventoryError(error, page)}`,
+      );
     }
     const pageUsers = data?.users ?? [];
     users.push(...pageUsers);
