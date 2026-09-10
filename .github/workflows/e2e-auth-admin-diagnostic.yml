@@ -1,6 +1,8 @@
 name: E2E Auth Admin inventory diagnostic
 
 on:
+  push:
+    branches: [codex/e2e-authadmin-telemetry]
   workflow_dispatch: {}
 
 # Use the same static group as the full E2E workflow. This diagnostic touches no
