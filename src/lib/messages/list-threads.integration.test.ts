@@ -92,7 +92,7 @@ async function measureScaleSearch(viewer: { userId: string; jwt: string }) {
   await db.connect();
   const results: { search: string; expected: number; timesMs: number[]; p95Ms: number }[] = [];
   const cases = [
-    { search: "Zephyrson", expected: 5 },
+    { search: "Zephyrson", expected: 6 },
     { search: "501999", expected: 10 },
     { search: "quartzpref", expected: 201 },
   ];
@@ -274,7 +274,7 @@ describe("listThreads (integration)", () => {
     const contacts = Array.from({ length: total }, (_, index) => ({
       id: crypto.randomUUID(),
       first_name: `Scale ${index}`,
-      last_name: index < 5 ? "Zephyrson" : "Thread",
+      last_name: index < 6 ? "Zephyrson" : "Thread",
       phone_1: `+1816${String(5_000_000 + index).padStart(7, "0")}`,
       phone_1_type: "mobile",
     }));
@@ -543,9 +543,9 @@ describe("listThreads (integration)", () => {
       expect(page.total).toBe(expectedFilterTotals[filter]);
       expect(page.counts[filter]).toBe(expectedFilterTotals[filter]);
       if (filter === "mine" || filter === "unassigned") {
-        // The first five contacts share this surname, including both Mine
-        // fixtures and the unassigned lead. Search must preserve assignment
-        // scope while continuing to exclude the other user's lead.
+        // The first six contacts share this surname, including both Mine
+        // fixtures, the unassigned lead, and the other user's lead. Mine
+        // must exclude that other user's matching lead even when searching.
         const searched = await listThreadPage(authenticatedClient, {
           filter,
           currentUserId: viewerId,
@@ -557,7 +557,7 @@ describe("listThreads (integration)", () => {
         expect(searched.threads.map((thread) => thread.threadId).sort()).toEqual(
           [...exactThreadByFilter[filter]].sort(),
         );
-        expect(searched.counts.all).toBe(5);
+        expect(searched.counts.all).toBe(6);
         expect(searched.total).toBe(expectedFilterTotals[filter]);
         expect(searched.counts[filter]).toBe(expectedFilterTotals[filter]);
       }

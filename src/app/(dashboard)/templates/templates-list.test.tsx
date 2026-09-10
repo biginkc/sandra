@@ -171,7 +171,13 @@ describe("<TemplatesList />", () => {
 
     await user.click(screen.getByTestId("templates-category-select"));
     const allOpt = await screen.findByTestId("templates-category-option-all");
-    await user.click(allOpt);
+    // Wait for the popup's selected-item focus before keyboard navigation.
+    await waitFor(() =>
+      expect(screen.getByTestId("templates-category-option-Probate")).toHaveFocus(),
+    );
+    await user.keyboard("{Home}");
+    await waitFor(() => expect(allOpt).toHaveFocus());
+    await user.keyboard("{Enter}");
 
     await waitFor(() => expect(routerReplace).toHaveBeenCalledTimes(1));
     // category → null collapses out of the URL; sort=updated_at + dir=desc
