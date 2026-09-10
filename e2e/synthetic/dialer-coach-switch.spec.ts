@@ -28,6 +28,7 @@ test.beforeAll(async () => {
     plugins: [{
       name: "synthetic-coach-browser-boundaries",
       setup(build) {
+        build.onResolve({ filter: /precall-context-actions$/ }, () => ({path:path.resolve(process.cwd(), "e2e/synthetic/fixtures/precall-context-browser-stub.ts")}));
         build.onResolve({ filter: /coach-context-actions$/ }, () => ({
           path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-context-actions-browser-stub.ts"),
         }));

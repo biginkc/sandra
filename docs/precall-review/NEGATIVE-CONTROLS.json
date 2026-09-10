@@ -1,0 +1,26 @@
+[
+  {
+    "name": "edit-precedence",
+    "baseline": "PASS",
+    "mutated": "DETECTED",
+    "sourceRestored": true
+  },
+  {
+    "name": "target-isolation",
+    "baseline": "PASS",
+    "mutated": "DETECTED",
+    "sourceRestored": true
+  },
+  {
+    "name": "branch-handoff",
+    "baseline": "PASS",
+    "mutated": "DETECTED",
+    "sourceRestored": true
+  },
+  {
+    "name": "greeting-layout",
+    "baseline": "PASS",
+    "mutated": "DETECTED",
+    "sourceRestored": true
+  }
+]

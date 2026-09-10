@@ -18,10 +18,10 @@ export function SoftphoneLeadButton({ lead, compact = false }: Props) {
     <button
       type="button"
       data-testid="call-lead-button"
-      aria-label={`Call ${lead.firstName} now — 1 click`}
+      aria-label={`Call ${lead.firstName}`}
       title={
         callingEnabled
-          ? `Call ${lead.firstName} now — 1 click`
+          ? `Call ${lead.firstName}`
           : "Calling not yet enabled"
       }
       disabled={!callingEnabled}

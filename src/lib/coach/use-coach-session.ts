@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import type { PreparedCoachSetup, SetupEdits } from "./precall-setup";
+import { setupValues } from "./precall-setup";
 import { loadCoachCallContext } from "./coach-context-actions";
 import { createCoachRecommendationContinuity } from "./recommendation-client";
 import {
@@ -21,6 +23,7 @@ export type ContextLoadState =
   | { status: "error"; context: CoachCallContext };
 
 export type PreparedCoachTarget = {
+  setup?: PreparedCoachSetup | null;
   repName?: string | null;
   sellerName: string | null;
   propertyAddress: string | null;
@@ -109,8 +112,12 @@ export function useCoachSession(
     ),
   }));
   const [contextAttempt, setContextAttempt] = useState(0);
-  const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>({});
-  const [sectionBranchSelections, setSectionBranchSelections] = useState<Record<string, string>>({});
+  const initialSetup = preparedTarget?.setup;
+  const initialVariants = () => Object.fromEntries(Object.entries(initialSetup?.branches ?? {}).filter(([key]) => !key.includes('.')));
+  const initialPaths = () => Object.fromEntries(Object.entries(initialSetup?.branches ?? {}).filter(([key]) => key.includes('.')));
+  const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>(initialVariants);
+  const [liveEdits, setLiveEdits] = useState<SetupEdits>({});
+  const [sectionBranchSelections, setSectionBranchSelections] = useState<Record<string, string>>(initialPaths);
   const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(FIRST_COACH_SECTION_ID);
   const [recommendationContinuity, setRecommendationContinuity] = useState(
     () => createCoachRecommendationContinuity(sessionKey),
@@ -136,8 +143,9 @@ export function useCoachSession(
       ),
     });
     setContextAttempt(0);
-    setBranchOverrides({});
-    setSectionBranchSelections({});
+    setBranchOverrides(initialVariants());
+    setSectionBranchSelections(initialPaths());
+    setLiveEdits({});
     setActiveSectionId(FIRST_COACH_SECTION_ID);
     setRecommendationContinuity(createCoachRecommendationContinuity(sessionKey));
   }
@@ -187,7 +195,10 @@ export function useCoachSession(
     }
   }, []);
   const setEntryField = useCallback(
-    (field: CoachEntryToken, value: string) => dispatch({ type: "set_entry_field", field, value }),
+    (field: CoachEntryToken, value: string) => {
+      setLiveEdits(previous => ({...previous, [field]: value}));
+      dispatch({ type: "set_entry_field", field, value });
+    },
     [dispatch],
   );
   const goToSection = useCallback((sectionId: CoachSectionId) => {
@@ -211,7 +222,11 @@ export function useCoachSession(
     recommendationContinuity,
     ...channel,
     dispatch,
-    contextLoad,
+    contextLoad: initialSetup ? {
+      ...contextLoad,
+      context: { ...contextLoad.context, authenticatedRepName: initialSetup.context.authenticatedRepName, leadId: initialSetup.context.leadId },
+    } : contextLoad,
+    tokenOverrides: initialSetup ? { ...setupValues(contextLoad.status === "ready" ? { ...initialSetup.context, ...Object.fromEntries(Object.entries(contextLoad.context).filter(([, value]) => value !== null && value !== undefined)) } : initialSetup.context, initialSetup.edits), ...liveEdits } : undefined,
     retryContext,
     branchOverrides,
     selectVariant,
@@ -230,4 +245,4 @@ export function useCoachSession(
   };
 }
 
-export type CoachSession = ReturnType<typeof useCoachSession>;
+export type CoachSession = Omit<ReturnType<typeof useCoachSession>, "tokenOverrides"> & { tokenOverrides?: SetupEdits };

@@ -1,0 +1,26 @@
+{
+  "baseline": "8c7053e7024433f46791eac1b186c1b7a7cf10ec",
+  "profiles": 8,
+  "individualChoiceCases": 160,
+  "openerOccupancyCases": 128,
+  "offerClosingCases": 64,
+  "pairwiseValuePairs": 165,
+  "pairwiseProfilesPerPair": 8,
+  "sectionAssertions": 86944,
+  "unitMatrixTestsPassed": 517,
+  "browserProfileWalkthroughsPassed": 8,
+  "ordinaryBrowserCyclesPassed": 200,
+  "seeds": [
+    515,
+    20260910
+  ],
+  "negativeControlsDetected": 4,
+  "paidAttempts": 0,
+  "paidSpend": 0,
+  "limitations": [
+    "Latest combined browser refresh running after manual-number waiter correction and sticky-footer change.",
+    "Expanded browser fault injection and full200percent zoom validation not complete.",
+    "No independent exact-head manual/code-Fable approval yet.",
+    "No paid calls; rate ceiling and independent300-second cutoff proof missing."
+  ]
+}

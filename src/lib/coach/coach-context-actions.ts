@@ -18,19 +18,14 @@ type CoachLeadRow = {
 };
 
 /**
- * Drives the Reveal phase's Entry branch auto-selection. `is_vacant` must
- * be explicitly `false` (positively confirmed, not merely absent/unscored)
- * before `absentee_flag` is trusted to distinguish owner vs tenant —
- * `absentee_flag` only means the mailing address differs from the property
- * address, which is equally consistent with "has tenants" or "sits vacant
- * and we just haven't scored it yet". Trusting absentee_flag alone
- * previously mislabeled an unscored-vacancy lead as tenant-occupied.
+ * Vacancy evidence can select Vacant, and a confirmed matching owner address
+ * can select Owner-occupied. Absentee ownership does not establish tenancy;
+ * leave it Unknown until the rep explicitly selects the occupancy branch.
  */
 function occupancy(lead: CoachLeadRow | null): CoachOccupancy | null {
   if (!lead) return null;
   if (lead.is_vacant === true) return "vacant";
   if (lead.is_vacant === false && lead.absentee_flag === false) return "owner_occupied";
-  if (lead.is_vacant === false && lead.absentee_flag === true) return "tenant_occupied";
   return "unknown";
 }
 

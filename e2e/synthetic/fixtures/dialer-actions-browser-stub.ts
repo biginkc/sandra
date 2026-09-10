@@ -16,3 +16,6 @@ export const prepareLeadCall = async () => ({ ok: true as const, data: target })
 export const prepareManualCall = prepareLeadCall;
 export const completeSoftphoneCall = async () => ({ ok: true as const, data: {} });
 export const resumeFailedSoftphoneCall = async () => ({ ok: true as const, data: {} });
+
+export const inspectLeadCall = prepareLeadCall;
+export const inspectManualCall = prepareManualCall;
