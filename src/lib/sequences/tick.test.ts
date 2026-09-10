@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { sendSmsToContact } from "@/lib/messaging/send";
 
@@ -7,6 +7,8 @@ import { processEnrollmentTick } from "./tick";
 vi.mock("@/lib/messaging/send", () => ({
   sendSmsToContact: vi.fn(),
 }));
+
+beforeEach(() => vi.clearAllMocks());
 
 /**
  * Minimal chainable/thenable query-builder stub — every chain method
@@ -240,6 +242,137 @@ describe("processEnrollmentTick — outbound suppression boundary", () => {
     const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
 
     expect(outcome.status).not.toBe("paused");
+  });
+});
+
+describe("processEnrollmentTick — advancement persistence", () => {
+  // In-memory persistence boundary. Claims remain unique across repeated
+  // invocations; injected errors leave stored state unchanged, like PostgREST.
+  function fixture(opts: {
+    action?: "send_sms" | "change_status";
+    noCurrentStep?: boolean;
+    nextStep?: boolean;
+    nextStepError?: boolean;
+    runWriteError?: boolean;
+    enrollmentWriteError?: boolean;
+  } = {}) {
+    const enrollment: Record<string, unknown> = { ...BASE_ENROLLMENT };
+    let claimed = false;
+    const from = vi.fn((table: string) => {
+      let operation = "select";
+      let payload: Record<string, unknown> = {};
+      const filters: Record<string, unknown> = {};
+      const result = () => {
+        const ok = (data: unknown) => ({ data, error: null });
+        const fail = (message: string) => ({ data: null, error: { message } });
+        if (table === "sequence_steps") {
+          if (filters.step_index === 0) {
+            return ok(opts.noCurrentStep ? null : {
+              ...STEP_ROW,
+              action_type: opts.action ?? "send_sms",
+              target_status: "contacted",
+            });
+          }
+          if (opts.nextStepError) return fail("next step lookup failed");
+          return ok(opts.nextStep ? { delay_after_previous_minutes: 60 } : null);
+        }
+        if (table === "properties") return ok({
+          id: "property-1", status: "new_lead", state: "MO",
+          address: "123 Test St", outreach_dispo: null, is_dnc_locked: false,
+        });
+        if (table === "contacts") return ok({ first_name: "Test" });
+        if (table === "sequences") return ok({ append_opt_out: true });
+        if (table === "sequence_step_runs") {
+          if (operation === "insert") {
+            if (claimed) return { data: null, error: { code: "23505", message: "duplicate claim" } };
+            claimed = true;
+            return ok({ id: "run-1" });
+          }
+          if (opts.runWriteError) return fail("run write failed");
+          return ok(null);
+        }
+        if (table === "sequence_enrollments") {
+          if (opts.enrollmentWriteError) return fail("enrollment write failed");
+          Object.assign(enrollment, payload);
+          return ok(null);
+        }
+        throw new Error(`Unexpected table: ${table}`);
+      };
+      const builder = makeQueryResult(null);
+      builder.eq = (key: string, value: unknown) => { filters[key] = value; return builder; };
+      builder.insert = (value: Record<string, unknown>) => { operation = "insert"; payload = value; return builder; };
+      builder.update = (value: Record<string, unknown>) => { operation = "update"; payload = value; return builder; };
+      builder.maybeSingle = builder.single = () => Promise.resolve(result());
+      builder.then = (resolve: (value: ReturnType<typeof result>) => unknown) => resolve(result());
+      return builder;
+    });
+    return { client: { from } as never, enrollment, from };
+  }
+
+  beforeEach(() => {
+    vi.mocked(sendSmsToContact).mockResolvedValue({ status: "sent", messageId: "msg-1", externalId: "provider-1" });
+  });
+
+  it.each(["send_sms", "change_status"] as const)(
+    "%s: a failed next-step lookup must not complete the enrollment",
+    async (action) => {
+      const { client, enrollment } = fixture({ action, nextStepError: true });
+      expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({
+        status: "failed", message: expect.stringContaining("next step lookup failed"),
+      });
+      expect(enrollment.status).toBe("active");
+      expect(enrollment.completed_at).toBeUndefined();
+      expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({ status: "skipped_already_claimed" });
+      expect(sendSmsToContact).toHaveBeenCalledTimes(action === "send_sms" ? 1 : 0);
+    },
+  );
+
+  it.each(["send_sms", "change_status"] as const)(
+    "%s: a failed run write must not advance the enrollment",
+    async (action) => {
+      const { client, enrollment } = fixture({ action, runWriteError: true, nextStep: true });
+      expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({
+        status: "failed", message: expect.stringContaining("run write failed"),
+      });
+      expect(enrollment.current_step_index).toBe(0);
+      expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({ status: "skipped_already_claimed" });
+      expect(sendSmsToContact).toHaveBeenCalledTimes(action === "send_sms" ? 1 : 0);
+    },
+  );
+
+  it.each([true, false])("reports an enrollment write failure with nextStep=%s", async (nextStep) => {
+    const { client, enrollment } = fixture({ enrollmentWriteError: true, nextStep });
+    expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({
+      status: "failed", message: expect.stringContaining("enrollment write failed"),
+    });
+    expect(enrollment.status).toBe("active");
+    expect(enrollment.current_step_index).toBe(0);
+  });
+
+  it("reports a failed completion write when the current step is absent", async () => {
+    const { client } = fixture({ noCurrentStep: true, enrollmentWriteError: true });
+    expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({
+      status: "failed", message: expect.stringContaining("enrollment write failed"),
+    });
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  it.each(["sent", "queued"] as const)("advances an accepted %s message once and retains its duplicate guard", async (status) => {
+    vi.mocked(sendSmsToContact).mockResolvedValue(status === "sent"
+      ? { status, messageId: "msg-1", externalId: "provider-1" }
+      : { status, messageId: "msg-1" });
+    const { client, enrollment } = fixture({ nextStep: true });
+    expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({ status: "sent", messageId: "msg-1" });
+    expect(enrollment.current_step_index).toBe(1);
+    expect(enrollment.next_run_at).toEqual(expect.any(String));
+    expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({ status: "skipped_already_claimed" });
+    expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+  });
+
+  it("completes after the final successful step", async () => {
+    const { client, enrollment } = fixture();
+    expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({ status: "sent" });
+    expect(enrollment).toMatchObject({ status: "completed", next_run_at: null });
   });
 });
 
