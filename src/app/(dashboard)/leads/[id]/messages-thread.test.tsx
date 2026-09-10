@@ -1,11 +1,13 @@
 import {
   act,
+  fireEvent,
   render,
   renderHook,
   screen,
   waitFor,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createRef } from "react";
 
 import type { Database } from "@/lib/supabase/types";
 
@@ -83,6 +85,21 @@ function makeMessage(
     metadata: overrides.metadata ?? null,
   } as MessageRow;
 }
+
+it("keeps the operator's pane position when new messages arrive while reading history", async () => {
+  const container = createRef<HTMLDivElement>();
+  const first = makeMessage({ id: "scroll-first", body: "Earlier owned message" });
+  const renderThread = (initial: MessageRow[]) => <div ref={container}><MessagesThread initial={initial} contactId="contact-1" propertyId="property-1" scrollContainerRef={container} /></div>;
+  const view = render(renderThread([first]));
+  Object.defineProperty(container.current, "scrollHeight", { value: 1200, configurable: true });
+  Object.defineProperty(container.current, "clientHeight", { value: 400, configurable: true });
+  container.current!.scrollTop = 300;
+  fireEvent.scroll(container.current!);
+  view.rerender(renderThread([first, makeMessage({ id: "scroll-next", body: "New owned message" })]));
+  await screen.findByText("New owned message");
+  await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
+  expect(container.current!.scrollTop).toBe(300);
+});
 
 describe("messageBelongsToThread", () => {
   it("uses conversation id as the only match key when the thread has one", () => {

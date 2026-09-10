@@ -29,6 +29,7 @@ type Props = {
   suspended?: boolean;
   /** Compact adjacent action rendered with the send-safety explanation. */
   footerAction?: React.ReactNode;
+  onSent?: (messageId: string) => void;
 };
 
 /**
@@ -48,6 +49,7 @@ export function InlineReply({
   routeRefreshPending = false,
   suspended = false,
   footerAction,
+  onSent,
 }: Props) {
   const router = useRouter();
   const [body, setBody] = useState("");
@@ -57,6 +59,7 @@ export function InlineReply({
   // just picked (WR-04). Hooks must run before the early-return for the
   // disabled state, so this lives at the top of the component body.
   const templateRequestToken = useRef(0);
+  const sendInFlight = useRef(false);
   const fromNumber = preferredFromNumber;
 
   const disabled = !homeownerContactId || !homeownerPhone;
@@ -74,9 +77,11 @@ export function InlineReply({
   const effectiveToPhone = replyToPhone ?? homeownerPhone;
 
   const send = () => {
-    if (!canSend) return;
+    if (!canSend || sendInFlight.current) return;
+    sendInFlight.current = true;
     const submittedBody = body;
     startTransition(async () => {
+      try {
       const result = await callAction(
         sendSmsFromLead(
           propertyId,
@@ -99,8 +104,9 @@ export function InlineReply({
           toast.success("Message sent", {
             description: `Sent to ${effectiveToPhone}.`,
           });
-          setBody("");
-          router.refresh();
+          setBody(current => current === submittedBody ? "" : current);
+          if (onSent) onSent(outcome.messageId);
+          else router.refresh();
           break;
         case "queued":
           // queueOnly=false makes this an invalid action contract. Preserve
@@ -145,6 +151,9 @@ export function InlineReply({
             description: `${outcome.error} Check the thread before retrying to avoid a duplicate message.`,
           });
           break;
+      }
+      } finally {
+        sendInFlight.current = false;
       }
     });
   };
