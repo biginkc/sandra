@@ -1,0 +1,48 @@
+name: E2E Auth Admin inventory diagnostic
+
+on:
+  workflow_dispatch: {}
+
+# Use the same static group as the full E2E workflow. This diagnostic touches no
+# fixtures, but serializing its Auth inventory avoids reading a transient state
+# while a full run is creating or deleting its job-scoped identities.
+concurrency:
+  group: e2e-shared-test-project
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  auth-admin-inventory:
+    name: Read-only Auth Admin inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: e2e-ci
+    permissions:
+      contents: read
+
+    env:
+      E2E_CI_SUPABASE_PROJECT_REF: ${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
+      CI: "1"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # emit writes only runner-local environment variables. preflight lists
+      # Auth users and writes a runner-local snapshot before any identity
+      # mutation; this workflow intentionally has no create/delete/test step.
+      - name: Emit diagnostic run identity
+        run: npx tsx scripts/e2e-identity-lifecycle.ts emit
+
+      - name: Read-only Auth Admin inventory
+        run: npx tsx scripts/e2e-identity-lifecycle.ts preflight
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
