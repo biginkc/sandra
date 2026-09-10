@@ -193,7 +193,6 @@ export default async function MessagesPage({
 
   return (
     <CockpitView
-      key={JSON.stringify([activeTab, effectiveFilter, search, hideDnc, threadPage.page])}
       searchDegraded={threadPage.degraded}
       activeTab={activeTab}
       filter={effectiveFilter}

@@ -14,7 +14,17 @@ type Selection = {
 /** Local selection is deliberately not a cache. Every different thread reads fresh
  * authorized detail; an older response can never replace a newer selection. */
 export function useConversationSelection(serverId: string | null, serverDetail: InboxDetail | null) {
-  const [selection, setSelection] = useState<Selection | null>(null);
+  // Back/forward can remount cached server props after the popstate event has
+  // already fired. Native history changes preserve that older server snapshot.
+  const [restoredId] = useState(() => {
+    if (typeof window === "undefined") return undefined;
+    const urlId = new URLSearchParams(window.location.search).get("thread");
+    return urlId !== serverId ? urlId : undefined;
+  });
+  const [selection, setSelection] = useState<Selection | null>(() =>
+    restoredId === undefined ? null : {
+      id: restoredId, detail: null, loading: restoredId !== null, error: null,
+    });
   const requestRef = useRef<AbortController | null>(null);
   const generation = useRef(0);
 
@@ -29,12 +39,7 @@ export function useConversationSelection(serverId: string | null, serverDetail: 
     setSelection({ id: null, detail: null, loading: false, error: null });
   }, [cancel]);
 
-  const select = useCallback(async (id: string | null) => {
-    const currentId = selection ? selection.id : serverId;
-    const currentDetail = selection ? selection.detail : serverDetail;
-    // Keep the composer mounted when the operator re-clicks its loaded row.
-    // Failed/empty selections still allow a fresh request on retry.
-    if (id && id === currentId && currentDetail && !selection?.loading) return;
+  const loadSelection = useCallback(async (id: string | null) => {
     const currentGeneration = ++generation.current;
     requestRef.current?.abort();
     if (!id) {
@@ -63,7 +68,25 @@ export function useConversationSelection(serverId: string | null, serverDetail: 
       setSelection({ id, detail: null, loading: false,
         error: error instanceof Error ? error.message : "Conversation did not load. Please retry." });
     }
-  }, [selection, serverId, serverDetail]);
+  }, []);
+
+  const select = useCallback(async (id: string | null) => {
+    const currentId = selection ? selection.id : serverId;
+    const currentDetail = selection ? selection.detail : serverDetail;
+    // Keep the composer mounted when the operator re-clicks its loaded row.
+    // Failed/empty selections still allow a fresh request on retry.
+    if (id && id === currentId && currentDetail && !selection?.loading) return;
+    await loadSelection(id);
+  }, [selection, serverId, serverDetail, loadSelection]);
+
+  useEffect(() => {
+    if (restoredId === undefined) return;
+    const expectedGeneration = generation.current;
+    const timer = window.setTimeout(() => {
+      if (generation.current === expectedGeneration) void loadSelection(restoredId);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [restoredId, loadSelection]);
 
   useEffect(() => {
     // A refresh/filter navigation supplies authoritative new props. Ignore an

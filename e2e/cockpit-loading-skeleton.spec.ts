@@ -124,4 +124,14 @@ test("clicking a thread surfaces the loading skeleton during navigation", async 
   await expect(page.getByTestId("inbox-detail-loading")).toHaveCount(0, {
     timeout: 20_000,
   });
+
+  // Native selection updates retain A's cached server snapshot. Leave the
+  // route through a real client navigation, then restore its URL from history.
+  await page.getByRole("link", { name: "Leads", exact: true }).click();
+  await expect(page).toHaveURL(/\/leads(?:\?|$)/);
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`thread=${threadB.threadId}`));
+  await expect(detailPanel).toContainText("body for Bob", { timeout: 20_000 });
+  await expect(detailPanel).not.toContainText("body for Alice");
+  await expect(page.getByTestId("inbox-detail-empty")).toHaveCount(0);
 });

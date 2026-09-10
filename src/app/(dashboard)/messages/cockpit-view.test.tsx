@@ -309,6 +309,28 @@ describe("<CockpitView /> URL deep-linking", () => {
     await waitFor(() => expect(screen.getByTestId("inbox-list-view")).toHaveClass("block"));
   });
 
+  it.each(["page", "tab"] as const)("cancels a thread skeleton when %s navigation interrupts the click", async (destination) => {
+    const thread = makeThread({ contactId: "pending" });
+    const props = { ...baseProps, activeTab: "inbox" as const, threads: [thread], inboxPageSize: 1, inboxTotal: 2 };
+    const view = render(<CockpitView {...props} />);
+    // Keep both interactions in the same event turn, before the deferred
+    // pending-thread cleanup gets a chance to run.
+    act(() => {
+      fireEvent.click(screen.getByTestId(`inbox-thread-${thread.threadId}`));
+      fireEvent.click(destination === "page" ? screen.getByRole("button", { name: "Next" }) : screen.getByTestId("tab-outbox"));
+    });
+    navigationMocks.search = destination === "page" ? "inboxPage=2" : "tab=outbox";
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
+    view.rerender(<CockpitView {...props} activeTab={destination === "page" ? "inbox" : "outbox"} inboxPage={2} />);
+    if (destination === "tab") {
+      fireEvent.click(screen.getByTestId("tab-inbox"));
+      window.history.replaceState(null, "", "/messages");
+      view.rerender(<CockpitView {...props} />);
+    }
+    await waitFor(() => expect(screen.getByTestId("inbox-detail-empty")).toBeInTheDocument());
+    expect(screen.queryByTestId("inbox-detail-loading")).not.toBeInTheDocument();
+  });
+
   it("activeTab='inbox' renders the Inbox tab as aria-selected (baseline for test 32)", () => {
     render(<CockpitView {...baseProps} activeTab="inbox" />);
 
@@ -317,6 +339,33 @@ describe("<CockpitView /> URL deep-linking", () => {
 
     expect(inbox).toHaveAttribute("aria-selected", "true");
     expect(outbox).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("announces filter completion and releases results after new server props arrive", async () => {
+    const threadA = makeThread({ contactId: "a" });
+    const threadB = makeThread({ contactId: "b", unreadCount: 1 });
+    const view = render(<CockpitView {...baseProps} activeTab="inbox" threads={[threadA, threadB]} />);
+    fireEvent.click(screen.getByTestId("filter-unread"));
+    expect(screen.getByRole("status")).toHaveTextContent("Loading Unread messages");
+    expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute("inert");
+    navigationMocks.search = "filter=unread";
+    window.history.replaceState(null, "", "/messages?filter=unread");
+    view.rerender(<CockpitView {...baseProps} activeTab="inbox" filter="unread" threads={[threadB]} />);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Unread messages loaded"));
+    expect(screen.getByTestId("inbox-filter-results")).not.toHaveAttribute("inert");
+    expect(screen.queryByTestId(`inbox-thread-${threadA.threadId}`)).not.toBeInTheDocument();
+    expect(screen.getByTestId(`inbox-thread-${threadB.threadId}`)).toBeInTheDocument();
+  });
+
+  it("announces DNC visibility completion after its server props arrive", async () => {
+    const view = render(<CockpitView {...baseProps} activeTab="inbox" />);
+    fireEvent.click(screen.getByTestId("dnc-toggle"));
+    expect(screen.getByRole("status")).toHaveTextContent("Updating DNC visibility");
+    navigationMocks.search = "hideDnc=0";
+    window.history.replaceState(null, "", "/messages?hideDnc=0");
+    view.rerender(<CockpitView {...baseProps} activeTab="inbox" hideDnc={false} />);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("DNC visibility updated"));
+    expect(screen.getByTestId("inbox-filter-results")).not.toHaveAttribute("inert");
   });
 
   it("implements roving tab focus and arrow-key activation", () => {
@@ -649,6 +698,7 @@ describe("<CockpitView /> URL deep-linking", () => {
   it("Back preserves URL context and returns focus to the selected row", async () => {
     navigationMocks.search =
       "tab=inbox&filter=unread&hideDnc=0&thread=conv-focus-thread";
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
     const thread = makeThread({
       contactId: "focus-thread",
       threadId: "conv-focus-thread",
@@ -683,6 +733,7 @@ describe("<CockpitView /> URL deep-linking", () => {
   it("lets a narrow stale thread URL return focus to the preserved conversation list", async () => {
     navigationMocks.search =
       "tab=inbox&filter=unread&hideDnc=0&thread=missing-thread";
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
     const thread = makeThread({ contactId: "still-visible" });
 
     render(
@@ -711,6 +762,7 @@ describe("<CockpitView /> URL deep-linking", () => {
 
   it("returns stale-thread focus to a filtered empty-list status", async () => {
     navigationMocks.search = "filter=escalated&thread=missing-thread";
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
 
     render(
       <CockpitView

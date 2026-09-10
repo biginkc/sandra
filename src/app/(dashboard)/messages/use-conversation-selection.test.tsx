@@ -15,6 +15,44 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe("conversation selection", () => {
+  it("restores the URL conversation when cached server props remount after popstate", async () => {
+    window.history.replaceState(null, "", "/messages?thread=b");
+    fetchMock.mockResolvedValue(response("b"));
+    const { result, rerender } = renderHook(({ data }) => useConversationSelection("a", data), {
+      initialProps: { data: detail("a") },
+    });
+    // The first render must not expose A or its action targets, even briefly.
+    expect(result.current.selectedId).toBe("b");
+    expect(result.current.detail).toBeNull();
+    expect(result.current.loading).toBe(true);
+    await waitFor(() => expect(result.current.detail?.threadId).toBe("b"));
+    rerender({ data: detail("a") });
+    expect(result.current.detail?.threadId).toBe("b");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the list when its URL remounts cached selected-thread props", async () => {
+    const { result } = renderHook(() => useConversationSelection("a", detail("a")));
+    expect(result.current.selectedId).toBeNull();
+    expect(result.current.detail).toBeNull();
+    expect(result.current.loading).toBe(false);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    expect(result.current.detail).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not let mount restoration overwrite a newer user selection", async () => {
+    window.history.replaceState(null, "", "/messages?thread=b");
+    const initial = detail("a");
+    fetchMock.mockResolvedValue(response("c"));
+    const { result } = renderHook(() => useConversationSelection("a", initial));
+    window.history.replaceState(null, "", "/messages?thread=c");
+    await act(async () => { await result.current.select("c"); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    expect(result.current.detail?.threadId).toBe("c");
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual(["/api/messages/thread-detail?thread=c"]);
+  });
+
   it("reads only the selected thread and ignores a late response after a faster click", async () => {
     let resolveA!: (value: unknown) => void;
     fetchMock.mockImplementationOnce(() => new Promise(resolve => { resolveA = resolve; }));
@@ -34,9 +72,11 @@ describe("conversation selection", () => {
     ]);
   });
   it("shows failure without stale detail and allows a fresh retry", async () => {
+    window.history.replaceState(null, "", "/messages?thread=a");
     fetchMock.mockResolvedValueOnce({ ok: false });
     fetchMock.mockResolvedValueOnce(response("b"));
     const { result } = renderHook(() => useConversationSelection("a", detail("a")));
+    window.history.replaceState(null, "", "/messages?thread=b");
     await act(async () => { await result.current.select("b"); });
     expect(result.current.detail).toBeNull();
     expect(result.current.error).toMatch(/retry/i);

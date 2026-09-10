@@ -141,7 +141,19 @@ export function CockpitView({
     onRefreshFailure: handleQueueStatsRefreshFailure,
   });
 
+  const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
+  const serverSelectedThreadId =
+    selectedThreadId ?? threadDetail?.threadId ?? null;
+  const previousServerSelection = useRef(serverSelectedThreadId);
+  const [mobileShowsDetail, setMobileShowsDetail] = useState(
+    serverSelectedThreadId !== null,
+  );
+  const [focusReturnThreadId, setFocusReturnThreadId] = useState<string | null>(
+    null,
+  );
+
   const setTab = (next: string) => {
+    setPendingThreadId(null);
     setPendingInboxChange(null);
     setCompletedInboxChange(null);
     setInboxChangeError(null);
@@ -157,6 +169,8 @@ export function CockpitView({
   };
   const setInboxPage = useCallback(
     (nextPage: number) => {
+      setPendingThreadId(null);
+      setMobileShowsDetail(false);
       setPendingInboxChange(null);
       setCompletedInboxChange(null);
       setInboxChangeError(null);
@@ -189,24 +203,6 @@ export function CockpitView({
   };
 
   const showThreadList = THREAD_FILTERS.has(filter);
-  // Track which contactId the user is currently navigating *to*. The
-  // setState here is a synchronous high-priority update so the next
-  // render commits BEFORE the RSC round-trip completes — which is what
-  // lets the detail panel show a skeleton instead of stale bubbles
-  // from the previous selection. Using useTransition would be cleaner
-  // semantically, but React's concurrent mode keeps the old tree
-  // visible during transitions, so isPending never flips in the tree
-  // the user is looking at.
-  const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
-  const serverSelectedThreadId =
-    selectedThreadId ?? threadDetail?.threadId ?? null;
-  const previousServerSelection = useRef(serverSelectedThreadId);
-  const [mobileShowsDetail, setMobileShowsDetail] = useState(
-    serverSelectedThreadId !== null,
-  );
-  const [focusReturnThreadId, setFocusReturnThreadId] = useState<string | null>(
-    null,
-  );
 
   const handleSelectThread = useCallback(
     (threadId: string) => {
