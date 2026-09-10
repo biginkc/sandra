@@ -132,7 +132,12 @@ export async function fetchInboxDetail(
       )
     : null;
 
-  const [contactRes, propertyRes, sourceMessageRes] = await Promise.all([
+  const authoritativeRoute = findLatestAuthoritativeSmsRoute(messages);
+  const parties = authoritativeRoute?.parties ?? {
+    customerPhone: null,
+    businessPhone: null,
+  };
+  const [contactRes, propertyRes, sourceMessageRes, consentResult, suppressionResult] = await Promise.all([
     supabase
       .from("contacts")
       .select(
@@ -162,6 +167,18 @@ export async function fetchInboxDetail(
           .eq("direction", "inbound")
           .maybeSingle()
       : Promise.resolve({ data: null, error: null }),
+    supabase
+      .from("consent_events")
+      .select("event_type, occurred_at")
+      .eq("contact_id", contactId)
+      .eq("org_id", conversationOrgId)
+      .eq("channel", "sms")
+      .order("occurred_at", { ascending: false })
+      .limit(20),
+    parties.customerPhone
+      ? isSmsPhoneSuppressed(supabase, parties.customerPhone, conversationOrgId)
+          .catch(() => null)
+      : Promise.resolve(false),
   ]);
 
   if (contactRes.error) {
@@ -177,38 +194,17 @@ export async function fetchInboxDetail(
   }
   const c = contactRes.data;
   const p = propertyRes.data;
-  const authoritativeRoute = findLatestAuthoritativeSmsRoute(messages);
-  const parties = authoritativeRoute?.parties ?? {
-    customerPhone: null,
-    businessPhone: null,
-  };
   const replyPhoneChoice = selectSmsPhoneByNumber(c, parties.customerPhone);
   const replyToPhone =
     replyPhoneChoice?.lineType === "landline"
       ? null
       : (replyPhoneChoice?.phone ?? null);
-  let smsConsentState: ConsentState | null = null;
-  let phoneSuppressed: boolean | null = null;
-  if (c) {
-    const [consentResult, suppressionResult] = await Promise.all([
-      supabase
-      .from("consent_events")
-      .select("event_type, occurred_at")
-      .eq("contact_id", contactId)
-      .eq("org_id", conversationOrgId)
-      .eq("channel", "sms")
-      .order("occurred_at", { ascending: false })
-      .limit(20),
-      parties.customerPhone
-        ? isSmsPhoneSuppressed(supabase, parties.customerPhone, conversationOrgId)
-            .catch(() => null)
-        : Promise.resolve(false),
-    ]);
-    smsConsentState = consentResult.error
-      ? null
-      : computeConsentState(consentResult.data ?? []);
-    phoneSuppressed = suppressionResult;
-  }
+  // The authorized message supplies the contact/route identifiers, so safety
+  // reads can start alongside metadata. Missing contact remains fail-closed.
+  const smsConsentState: ConsentState | null = c && !consentResult.error
+    ? computeConsentState(consentResult.data ?? [])
+    : null;
+  const phoneSuppressed = c ? suppressionResult : null;
 
   return {
     threadId: conversationId,

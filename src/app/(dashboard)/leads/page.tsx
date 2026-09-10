@@ -7,11 +7,8 @@ import { LEAD_SOURCES } from "@/lib/leads/sources";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { createClient } from "@/lib/supabase/server";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
-import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
-import {
-  loadOrgTeamMembers,
-  loadTeamMembersForOrgs,
-} from "@/lib/auth/team-roster";
+import { sortTeamMembers, teamMemberPrimaryLabel, type TeamMember } from "@/lib/auth/team-member";
+import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
 
 import {
   AddLeadDialog,
@@ -53,17 +50,15 @@ export default async function LeadsPage({
   // rather than selecting an arbitrary first membership.
   const orgIds = memberships.map((membership) => membership.org_id);
   let rosterLoadError = false;
-  let filterTeamMembers: Awaited<ReturnType<typeof loadTeamMembersForOrgs>> =
-    [];
+  let filterTeamMembers: TeamMember[] = [];
   let leadWorkspaces: LeadWorkspaceOption[] = [];
   try {
-    const [historicalMembers, workspaceRosters, orgResult] =
+    const [workspaceRosters, orgResult] =
       await Promise.all([
-        loadTeamMembersForOrgs(orgIds, { includeInactiveMembers: true }),
         Promise.all(
           orgIds.map(async (orgId) => ({
             orgId,
-            teamMembers: await loadOrgTeamMembers(orgId),
+            teamMembers: await loadOrgTeamMembers(orgId, { includeInactiveMembers: true }),
           })),
         ),
         orgIds.length
@@ -80,11 +75,18 @@ export default async function LeadsPage({
     if (orgIds.some((orgId) => !orgNames.has(orgId))) {
       throw new Error("A workspace name could not be resolved.");
     }
-    filterTeamMembers = historicalMembers;
+    const membersById = new Map<string, TeamMember>();
+    for (const member of workspaceRosters.flatMap((roster) => roster.teamMembers)) {
+      const previous = membersById.get(member.id);
+      if (!previous || (previous.isActive === false && member.isActive !== false)) {
+        membersById.set(member.id, member);
+      }
+    }
+    filterTeamMembers = sortTeamMembers([...membersById.values()]);
     leadWorkspaces = workspaceRosters.map(({ orgId, teamMembers }) => ({
       id: orgId,
       name: orgNames.get(orgId)!,
-      teamMembers,
+      teamMembers: teamMembers.filter((member) => member.isActive !== false),
     }));
   } catch {
     rosterLoadError = true;

@@ -106,3 +106,25 @@ describe("LeadsPage organization context", () => {
     );
   });
 });
+
+
+it("reads each roster once and excludes former members from assignment options", async () => {
+  getCallerMemberships.mockResolvedValue([{ user_id: "user-1", org_id: "org-1", role: "member" }]);
+  const active = { id: "user-1", email: "active@example.test", isActive: true };
+  const former = { id: "former-1", email: "former@example.test", isActive: false };
+  loadOrgTeamMembers.mockResolvedValue([active, former]);
+  createClient.mockResolvedValue({
+    auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) },
+    from: vi.fn((table) => ({ select: vi.fn(() => table === "organizations"
+      ? { in: vi.fn().mockResolvedValue({ data: [{ id: "org-1", name: "Workspace" }], error: null }) }
+      : { order: vi.fn(() => ({ order: vi.fn().mockResolvedValue({ data: [] }) })) }),
+    })),
+  });
+  const page = await LeadsPage({ searchParams: Promise.resolve({ assignee: "former-1" }) });
+  expect(loadOrgTeamMembers).toHaveBeenCalledExactlyOnceWith("org-1", { includeInactiveMembers: true });
+  expect(loadTeamMembersForOrgs).not.toHaveBeenCalled();
+  const header = page.props.children[0];
+  expect(header.props.actions.props.workspaces[0].teamMembers).toEqual([active]);
+  expect(fetchLeadBoardData).toHaveBeenCalledWith(expect.anything(), expect.anything(),
+    expect.objectContaining({ assigneeId: "former-1" }));
+});

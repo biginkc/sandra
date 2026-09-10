@@ -1,5 +1,6 @@
 import "server-only";
 
+import { cache } from "react";
 import type { User } from "@supabase/supabase-js";
 
 import {
@@ -21,54 +22,45 @@ type MembershipRow = {
   deletion_prepared_at: string | null;
 };
 
-const AUTH_PAGE_SIZE = 200;
-const MAX_AUTH_PAGES = 25;
+const IDENTITY_CONCURRENCY = 4;
 const TEAM_ROSTER_CAP = 400;
+
+// React cache shares identities only within a Server Component request. It
+// neither persists labels across requests nor caches membership eligibility.
+const loadAuthIdentity = cache(async (id: string) => {
+  const response = await createAdminClient().auth.admin.getUserById(id);
+  if (!response) throw new Error("Auth identity returned no response.");
+  if (response.error) throw response.error;
+  return response.data?.user ?? null;
+});
 
 async function listNeededAuthUsers(
   neededIds: ReadonlySet<string>,
   allowPartial: boolean,
 ): Promise<Map<string, User>> {
   const usersById = new Map<string, User>();
-  if (neededIds.size === 0) return usersById;
-
-  const admin = createAdminClient();
-  for (let page = 1; page <= MAX_AUTH_PAGES; page += 1) {
-    let response;
-    try {
-      response = await admin.auth.admin.listUsers({
-        page,
-        perPage: AUTH_PAGE_SIZE,
-      });
-    } catch (error) {
-      if (allowPartial) return usersById;
-      throw error;
-    }
-    if (!response) {
-      if (allowPartial) return usersById;
-      throw new Error("Auth user inventory returned no response.");
-    }
-    const { data, error } = response;
-    if (error) {
-      if (allowPartial) return usersById;
-      throw error;
-    }
-
-    const users = data?.users ?? [];
-    for (const user of users) {
-      if (neededIds.has(user.id)) usersById.set(user.id, user);
-    }
-    const nextPage = data?.nextPage;
-    const exhausted =
-      nextPage === null ||
-      (nextPage === undefined && users.length < AUTH_PAGE_SIZE);
-    if (usersById.size === neededIds.size || exhausted) {
-      return usersById;
-    }
+  const ids = [...neededIds];
+  if (ids.length > TEAM_ROSTER_CAP) {
+    throw new Error("Organization identities exceeded the supported member limit.");
   }
-
-  if (allowPartial) return usersById;
-  throw new Error("Auth user inventory exceeded the supported page limit.");
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(IDENTITY_CONCURRENCY, ids.length) }, async () => {
+      while (cursor < ids.length) {
+        const id = ids[cursor++];
+        try {
+          const user = await loadAuthIdentity(id);
+          // Never accept an identity for a different member, even if the
+          // upstream response is malformed.
+          if (user && user.id !== id) throw new Error("Auth identity mismatch.");
+          if (user) usersById.set(id, user);
+        } catch (error) {
+          if (!allowPartial) throw error;
+        }
+      }
+    }),
+  );
+  return usersById;
 }
 
 /**

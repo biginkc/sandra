@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { createReadScheduler } from "@/lib/performance/read-scheduler";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
@@ -237,17 +238,19 @@ export default async function LeadDetailPage({
     }),
   };
 
+  const read = createReadScheduler(6);
+
   // Consent and phone-level suppression are separate existing read models.
   // Load both so the page does not infer "OK to text" from the mere presence
   // of a phone number or conflate a channel opt-out with permanent DNC.
   const smsConsentEventsPromise = homeownerContactId
-    ? supabase
+    ? read(() => supabase
         .from("consent_events")
         .select("event_type, occurred_at")
         .eq("contact_id", homeownerContactId)
         .eq("channel", "sms")
         .order("occurred_at", { ascending: false })
-        .limit(20)
+        .limit(20))
     : null;
   const smsPhoneSuppressionPromise = homeownerSmsPhone
     ? isSmsPhoneSuppressed(supabase, homeownerSmsPhone, lead.org_id)
@@ -258,12 +261,72 @@ export default async function LeadDetailPage({
   // One source for both the nearest dated commitment and the Appointments
   // section. Querying only appointments made a lead with an existing callback
   // look as though it had no next action.
-  const openWorkPromise = supabase
+  const openWorkPromise = read(() => supabase
     .from("tasks")
     .select("id, title, due_at, end_at, assignee_id, type")
     .eq("related_property_id", lead.id)
     .eq("status", "open")
-    .order("due_at", { ascending: true });
+    .order("due_at", { ascending: true }));
+
+  // Notes — newest first for the feed component.
+  const notesResult = read(() => supabase
+    .from("lead_notes")
+    .select("*")
+    .eq("property_id", lead.id)
+    .order("created_at", { ascending: false })
+    .limit(200));
+  // Append-only lead activity — newest bounded window, merged client-side
+  // with canonical messages, notes, and calls.
+  const eventsResult = read(() => supabase
+    .from("lead_events")
+    .select(
+      "id, property_id, actor_type, actor_id, event_type, payload, created_at",
+    )
+    .eq("property_id", lead.id)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(200));
+  const usersPromise = read(() => loadOrgTeamMembers(lead.org_id, {
+    includeInactiveMembers: true,
+    historicalAssigneeIds: lead.assigned_user_id
+      ? [lead.assigned_user_id]
+      : [],
+    allowMissingIdentityLabels: true,
+  })).catch(() => []);
+
+  // PostgREST cannot order by COALESCE(started_at, created_at). Fetch the top
+  // 20 from each disjoint subgroup, then deterministically merge to the
+  // logical top 20. A row below rank 20 in either subgroup cannot enter the
+  // combined top 20, so this remains exact without an unbounded read.
+  const callSelection =
+    "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)";
+  const callsResult = Promise.all([
+    read(() =>
+    supabase
+      .from("call_activities")
+      .select(callSelection)
+      .eq("property_id", lead.id)
+      .not("started_at", "is", null)
+      .order("started_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(20)),
+    read(() => supabase
+      .from("call_activities")
+      .select(callSelection)
+      .eq("property_id", lead.id)
+      .is("started_at", null)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(20)),
+  ]);
+  void callsResult.catch(() => undefined);
+  // Tags attached to this property, with the tag row joined inline.
+  const tagsResult = read(() => supabase
+    .from("property_tags")
+    .select(
+      "tags!property_tags_tag_id_fkey(id, name, color, category, system_managed)",
+    )
+    .eq("property_id", lead.id));
 
   // Viewer's own saved timezone (same user_integration_prefs.timezone
   // source TasksPanel's fetchMyTasks reads) — LeadAppointmentsSection
@@ -389,60 +452,13 @@ export default async function LeadDetailPage({
       : smsPhoneSuppressionPromise
     : Promise.resolve({ ok: true as const, value: false });
 
-  // Notes — newest first for the feed component.
-  const { data: notesRaw, error: notesError } = await supabase
-    .from("lead_notes")
-    .select("*")
-    .eq("property_id", lead.id)
-    .order("created_at", { ascending: false })
-    .limit(200);
+  const { data: notesRaw, error: notesError } = await notesResult;
   const initialNotes = (notesRaw ?? []) as LeadNoteRow[];
 
-  // Append-only lead activity — newest bounded window, merged client-side
-  // with canonical messages, notes, and calls.
-  const { data: leadEventsRaw, error: leadEventsError } = await supabase
-    .from("lead_events")
-    .select(
-      "id, property_id, actor_type, actor_id, event_type, payload, created_at",
-    )
-    .eq("property_id", lead.id)
-    .order("created_at", { ascending: false })
-    .order("id", { ascending: false })
-    .limit(200);
+  const { data: leadEventsRaw, error: leadEventsError } = await eventsResult;
   const initialLeadEvents = (leadEventsRaw ?? []) as LeadEvent[];
 
-  const usersPromise = loadOrgTeamMembers(lead.org_id, {
-    includeInactiveMembers: true,
-    historicalAssigneeIds: lead.assigned_user_id
-      ? [lead.assigned_user_id]
-      : [],
-    allowMissingIdentityLabels: true,
-  }).catch(() => []);
-
-  // PostgREST cannot order by COALESCE(started_at, created_at). Fetch the top
-  // 20 from each disjoint subgroup, then deterministically merge to the
-  // logical top 20. A row below rank 20 in either subgroup cannot enter the
-  // combined top 20, so this remains exact without an unbounded read.
-  const callSelection =
-    "id, created_at, started_at, outcome, disposition, recording_status, transcript_status, summary_status, jitter_attempt_id, jitter_session_id, call_recordings(*), call_transcripts(*)";
-  const [startedCallsResult, unstartedCallsResult] = await Promise.all([
-    supabase
-      .from("call_activities")
-      .select(callSelection)
-      .eq("property_id", lead.id)
-      .not("started_at", "is", null)
-      .order("started_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(20),
-    supabase
-      .from("call_activities")
-      .select(callSelection)
-      .eq("property_id", lead.id)
-      .is("started_at", null)
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(20),
-  ]);
+  const [startedCallsResult, unstartedCallsResult] = await callsResult;
   const callRollupError =
     startedCallsResult.error ?? unstartedCallsResult.error;
   const initialCallRows = callRollupError
@@ -520,13 +536,7 @@ export default async function LeadDetailPage({
       })
     : smsPresentation;
 
-  // Tags attached to this property, with the tag row joined inline.
-  const { data: tagRowsRaw, error: tagRowsError } = await supabase
-    .from("property_tags")
-    .select(
-      "tags!property_tags_tag_id_fkey(id, name, color, category, system_managed)",
-    )
-    .eq("property_id", lead.id);
+  const { data: tagRowsRaw, error: tagRowsError } = await tagsResult;
   const initialTags: TagRow[] = [];
   for (const r of tagRowsRaw ?? []) {
     const t = (r as { tags: TagRow | null }).tags;
