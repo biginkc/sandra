@@ -4,8 +4,8 @@
  *
  * Proves the pipe end-to-end in prod:
  *   1. Seeds a throwaway sequence (1 step, 0 delay, send_sms) in prod Supabase.
- *   2. Seeds a contact with phone_1 = +18148097074 (our Twilio test
- *      receiver, wired up during Tier 1).
+ *   2. Seeds a contact using the explicitly configured owned test receiver
+ *      and verified mobile line type. Receiver must feed `test_sms_log`.
  *   3. Seeds a consent_events opt_in + a property linked to the contact.
  *   4. Creates an active enrollment with next_run_at = now.
  *   5. Waits up to 6 minutes for the Vercel sequence-tick cron to fire
@@ -25,6 +25,13 @@
  * Required env (from `.env.local` or the shell):
  *   SUPABASE_SERVICE_ROLE_KEY   — prod service-role key
  *   NEXT_PUBLIC_SUPABASE_URL    — prod URL
+ *   SEQUENCE_SMOKE_RECIPIENT_E164 — authorized owned receiver; no fallback
+ *   SEQUENCE_SMOKE_RECIPIENT_OWNED — true after confirming ownership/authorization
+ *   SEQUENCE_SMOKE_RECIPIENT_LINE_TYPE — mobile after verifying the line type
+ *
+ * Configuration is not permission to run: live execution still requires an
+ * authorized recipient and sending budget. Missing recipient configuration
+ * fails before creating a database client or seeding any rows.
  *
  * Safe tags the script writes so you can find stragglers manually:
  *   sequences.name      = "SMOKE TEST — safe to delete ${ts}"
@@ -37,6 +44,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { Database } from "../src/lib/supabase/types";
+import { buildSequenceSmokeContact } from "./sequence-smoke-config";
 
 // ---------- env bootstrap ---------------------------------------------------
 
@@ -61,6 +69,7 @@ function loadLocalEnv(file: string): Record<string, string> {
 }
 
 const env = { ...loadLocalEnv(".env.local"), ...process.env };
+const smokeContact = buildSequenceSmokeContact(env);
 const URL = env.NEXT_PUBLIC_SUPABASE_URL;
 const KEY = env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -83,7 +92,6 @@ const supabase = createClient<Database>(URL, KEY, {
 
 // ---------- run ------------------------------------------------------------
 
-const TWILIO_NUMBER = "+18148097074";
 const TS = new Date().toISOString().replace(/[:.]/g, "-");
 const UNIQUE_BODY = `PROD-SMOKE ${TS}`;
 
@@ -130,11 +138,7 @@ async function main() {
   // Seed contact + consent
   const { data: contact, error: contactErr } = await supabase
     .from("contacts")
-    .insert({
-      first_name: "Smoke",
-      last_name: "Prod",
-      phone_1: TWILIO_NUMBER,
-    })
+    .insert(smokeContact)
     .select("id")
     .single();
   if (contactErr || !contact) throw contactErr ?? new Error("contact insert failed");
