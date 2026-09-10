@@ -313,6 +313,18 @@ const branchLabels = [
   ],
   ["close.decision-tracks", ["If far apart — program pivot", "They accept"]],
 ] as const;
+// The final option selected for each setup selector must reach the first
+// section that consumes it. These markers are independently specified from
+// the production implementation so a test cannot pass by only echoing the
+// dropdown label.
+const selectedBranchMarkers: Record<number, (profile: number) => string> = {
+  1: () => "I’m holding a copy of your tax records here",
+  7: () => "I know its been vacant for a little bit",
+  8: () => "How long has it been vacant?",
+  9: () => "It sounds like things are going fairly well for you here",
+  23: () => "Man i apologize our offer was lower than what you and I were hoping for",
+  24: (profile) => `Congratulations, Prepared${profile}!`,
+};
 for (let profile = 0; profile < 8; profile++)
   test(`profile ${profile}: all selectors and 26 live sections forward/back`, async ({
     page,
@@ -399,6 +411,11 @@ for (let profile = 0; profile < 8; profile++)
       await expect(
         page.getByText(`Section ${section + 1} of 26`, { exact: true }),
       ).toBeVisible();
+      const selectedMarker = selectedBranchMarkers[section + 1];
+      if (selectedMarker)
+        await expect(page.getByTestId("current-section-script")).toContainText(
+          selectedMarker(profile),
+        );
       if (section < 25) await page.getByTestId("coach-next").click();
     }
     await expect(page.getByTestId("coach-next")).toBeDisabled();
@@ -534,7 +551,11 @@ test("delayed A-B-A reads and failed retry cannot overwrite explicit edits", asy
     "data-target-key",
     "lead:00000000-0000-4000-8000-00000000A100",
   );
-  await expect(page.getByTestId("dialer-call-manual")).toBeEnabled();
+  await expect(page.getByTestId("dialer-call-manual")).toBeDisabled();
+  await expect(page.getByTestId("dialer-call-manual")).toHaveAttribute(
+    "title",
+    "Loading call details…",
+  );
   await page.evaluate(() =>
     (
       window as unknown as {
@@ -546,6 +567,7 @@ test("delayed A-B-A reads and failed retry cannot overwrite explicit edits", asy
     "aria-busy",
     "false",
   );
+  await expect(page.getByTestId("dialer-call-manual")).toBeEnabled();
   const basics = page.getByRole("button", { name: /^Call basics/ });
   if ((await basics.getAttribute("aria-expanded")) === "false")
     await basics.click();

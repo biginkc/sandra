@@ -224,7 +224,18 @@ export function useCoachSession(
     dispatch,
     contextLoad: initialSetup ? {
       ...contextLoad,
-      context: { ...contextLoad.context, authenticatedRepName: initialSetup.context.authenticatedRepName, leadId: initialSetup.context.leadId },
+      context: {
+        ...contextLoad.context,
+        // Pre-call setup can begin with only a prepared target while its
+        // display read is still pending. Preserve a known identity, but let
+        // the authorized live context fill any value that was unavailable.
+        ...(initialSetup.context.authenticatedRepName
+          ? { authenticatedRepName: initialSetup.context.authenticatedRepName }
+          : {}),
+        ...(initialSetup.context.leadId
+          ? { leadId: initialSetup.context.leadId }
+          : {}),
+      },
     } : contextLoad,
     tokenOverrides: initialSetup ? { ...setupValues(contextLoad.status === "ready" ? { ...initialSetup.context, ...Object.fromEntries(Object.entries(contextLoad.context).filter(([, value]) => value !== null && value !== undefined)) } : initialSetup.context, initialSetup.edits), ...liveEdits } : undefined,
     retryContext,

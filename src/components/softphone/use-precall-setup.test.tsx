@@ -159,7 +159,7 @@ it("freezes explicit edits and branches even if the initial context never resolv
     propertyId: "A",
     edits: { seller_name: "Early edit" },
     branches: { Opener: "fsbo" },
-    context: { leadId: null, authenticatedRepName: null },
+    context: { leadId: "A", authenticatedRepName: null },
   });
   act(() => result.current.onField("seller_name", "Later edit"));
   expect(snapshot?.edits.seller_name).toBe("Early edit");

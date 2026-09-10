@@ -12,8 +12,8 @@ const target = {
 
 export const loadDialerRecents = async () => ({ ok: true as const, data: [] });
 export const searchDialerLeads = async () => ({ ok: true as const, data: [] });
-export const prepareLeadCall = async () => ({ ok: true as const, data: target });
-export const prepareManualCall = prepareLeadCall;
+export const prepareLeadCall = async (_propertyId?: string) => ({ ok: true as const, data: target });
+export const prepareManualCall = async (_phone?: string) => prepareLeadCall();
 export const completeSoftphoneCall = async () => ({ ok: true as const, data: {} });
 export const resumeFailedSoftphoneCall = async () => ({ ok: true as const, data: {} });
 

@@ -27,10 +27,14 @@ export async function loadPrecallContext(input: {
       propertyAddress: null,
       propertyCounty: null,
       repName: repDisplayName(user),
+      // Authenticated identity and the selected property identity remain
+      // available even when the display context read is temporarily down.
+      // The property was selected through the authorized inspect path and is
+      // revalidated again by prepareSetupCall before dialing.
       authenticatedRepName: repFileNumberIdentity(user),
       repPhoneE164: input.repPhoneE164,
       motivation: null,
-      leadId: null,
+      leadId: input.propertyId,
       sellerPhoneE164: input.sellerPhoneE164,
       coldCallerName: null,
       yearBuilt: null,

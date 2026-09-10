@@ -215,7 +215,10 @@ export function usePrecallSetup(enabled: boolean, callerId: string | null) {
       authenticatedRepName: null,
       repPhoneE164: callerId,
       motivation: null,
-      leadId: null,
+      // The selected property identity is already authorized by inspection
+      // and is revalidated again at the start boundary. Keep it available so
+      // a temporary context-read failure cannot erase the file number.
+      leadId: s.target.propertyId,
       sellerPhoneE164: s.target.phoneE164,
       coldCallerName: null,
       yearBuilt: null,

@@ -509,6 +509,33 @@ describe('pre-call snapshot handoff', () => {
     await waitFor(()=>expect(loadCoachCallContext).toHaveBeenCalledTimes(2));
     expect(result.current.tokenOverrides?.offer_price).toBe('');
   });
+  it('lets the live read restore file identity when pre-call identity was unavailable', async () => {
+    loadCoachCallContext.mockResolvedValue(sampleContext);
+    const unresolvedSetup = {
+      ...setup,
+      context: { ...setup.context, authenticatedRepName: null, leadId: null },
+    };
+    const { result } = renderHook(() => useCoachSession(
+      null,
+      sampleContext.leadId,
+      sampleContext.sellerPhoneE164,
+      sampleContext.repPhoneE164,
+      true,
+      {
+        sellerName: 'Prepared Seller',
+        propertyAddress: sampleContext.propertyAddress,
+        sellerPhoneE164: sampleContext.sellerPhoneE164,
+        maskedSellerPhone: null,
+        setup: unresolvedSetup,
+      },
+      'precall-identity-retry',
+    ));
+    await waitFor(() => expect(result.current.contextLoad.status).toBe('ready'));
+    expect(result.current.contextLoad.context.authenticatedRepName).toBe(
+      sampleContext.authenticatedRepName,
+    );
+    expect(result.current.contextLoad.context.leadId).toBe(sampleContext.leadId);
+  });
   it('replaces all prepared values and branches for a new session before effects run',()=>{
     loadCoachCallContext.mockReturnValue(new Promise(()=>{}));
     const {result,rerender}=renderHook(({key,prepared})=>useCoachSession(null,sampleContext.leadId,sampleContext.sellerPhoneE164,sampleContext.repPhoneE164,true,{sellerName:null,propertyAddress:null,sellerPhoneE164:null,maskedSellerPhone:null,setup:prepared},key),{initialProps:{key:'A',prepared:setup}});

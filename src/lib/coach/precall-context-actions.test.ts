@@ -69,7 +69,7 @@ describe("precall authorization and start boundary", () => {
     ).rejects.toThrow("Sign in");
     expect(m.context).toHaveBeenCalledOnce();
   });
-  it("returns a genuine unavailable identity on context failure without fabricated lead suffix", async () => {
+  it("keeps the selected property identity on context failure without fabricating a suffix", async () => {
     m.context.mockRejectedValue(Error("offline"));
     const result = await loadPrecallContext({
       propertyId: "lead1",
@@ -77,7 +77,7 @@ describe("precall authorization and start boundary", () => {
       repPhoneE164: null,
     });
     expect(result.context).toMatchObject({
-      leadId: null,
+      leadId: "lead1",
       authenticatedRepName: "Alex Rep",
     });
     expect(result.error).toContain("still call");

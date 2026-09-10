@@ -6,9 +6,9 @@ import {PrecallSetupPanel} from './precall-setup-panel';
 import type {SetupDraft} from '@/lib/coach/precall-setup';
 import type {CoachCallContext} from '@/lib/coach/types';
 const context:CoachCallContext={sellerName:'Casey Seller',propertyAddress:'1 Fictional Lane',propertyCounty:null,repName:'Alex Rep',authenticatedRepName:'Alex Rep',repPhoneE164:'+18165550100',motivation:null,leadId:'lead-ABC123',sellerPhoneE164:'+18165550101',coldCallerName:null,yearBuilt:'1962',leadSource:'cold_call',occupancy:'owner_occupied'};
-function Panel({leadContext=context,retry=()=>undefined}:{leadContext?:CoachCallContext;retry?:()=>void}){
+function Panel({leadContext=context,retry=()=>undefined,targetKey='lead:A'}:{leadContext?:CoachCallContext;retry?:()=>void;targetKey?:string}){
  const [draft,setDraft]=useState<SetupDraft>({version:1,edits:{},branches:{Opener:'d4d'}}),[collapsed,setCollapsed]=useState(false);
- return <PrecallSetupPanel targetKey="lead:A" context={leadContext} draft={draft} collapsed={collapsed} onCollapsed={setCollapsed} loading={false} error={null} onRetry={retry} onField={(key,value)=>setDraft(d=>({...d,edits:{...d.edits,[key]:value}}))} onBranch={(key,value)=>setDraft(d=>({...d,branches:{...d.branches,[key]:value}}))}/>;
+ return <PrecallSetupPanel targetKey={targetKey} context={leadContext} draft={draft} collapsed={collapsed} onCollapsed={setCollapsed} loading={false} error={null} onRetry={retry} onField={(key,value)=>setDraft(d=>({...d,edits:{...d.edits,[key]:value}}))} onBranch={(key,value)=>setDraft(d=>({...d,branches:{...d.branches,[key]:value}}))}/>;
 }
 describe('precall panel interaction contract',()=>{
  it('keeps exactly one group open and only advances after explicit completion',async()=>{
@@ -33,6 +33,11 @@ describe('precall panel interaction contract',()=>{
   expect(screen.getByTestId('setup-file-number')).toHaveTextContent('Not available yet');
   await user.click(screen.getByRole('button',{name:'Retry'}));expect(retry).toHaveBeenCalledOnce();
   expect(screen.queryByRole('textbox',{name:/file number/i})).not.toBeInTheDocument();
+ });
+ it('does not count an unavailable file number for an unmatched target',async()=>{
+  const user=userEvent.setup();render(<Panel targetKey="phone:+18165550101" leadContext={{...context,leadId:null}}/>);
+  await user.click(screen.getByRole('button',{name:'Collapse'}));
+  expect(screen.getByText(/Still needed:/)).not.toHaveTextContent('File number');
  });
  it('offers only the four approved opener choices',async()=>{
   const user=userEvent.setup();render(<Panel/>);await user.click(screen.getByRole('button',{name:/^Script branches/}));

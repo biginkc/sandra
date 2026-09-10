@@ -53,10 +53,17 @@ export function PrecallSetupPanel({
   const values = setupValues(context, draft.edits);
   const triggers = useRef<Record<string, HTMLElement | null>>({});
   const file = context ? resolveFileNumber(context) : null;
+  // Unmatched and training numbers intentionally have no lead identity. The
+  // file number is unavailable for those calls, but that unavailable value is
+  // not a missing field the rep could ever complete.
+  const fileExpected = targetKey.startsWith("lead:") || Boolean(context?.leadId);
   const missing = (group: string) =>
     SETUP_FIELDS.filter(
       ([key, , section]) => section === group && !values[key].trim(),
-    ).length + (group === "basics" && (!file || file.isPlaceholder) ? 1 : 0);
+    ).length +
+    (group === "basics" && fileExpected && (!file || file.isPlaceholder)
+      ? 1
+      : 0);
   const needed = missing("basics") + missing("situation");
   const firstIncomplete = missing("basics")
     ? "basics"
@@ -127,7 +134,7 @@ export function PrecallSetupPanel({
             .filter(Boolean)
             .join(" · ")}
         </p>
-        {!loading && needed > 0 && <p className="mt-1 text-[#78350f]">Still needed: {[...SETUP_FIELDS.filter(([key,,group]) => group !== "offer" && !values[key].trim()).map(([,label])=>label), ...(!file || file.isPlaceholder ? ["File number"] : [])].join(", ")}</p>}
+        {!loading && needed > 0 && <p className="mt-1 text-[#78350f]">Still needed: {[...SETUP_FIELDS.filter(([key,,group]) => group !== "offer" && !values[key].trim()).map(([,label])=>label), ...(fileExpected && (!file || file.isPlaceholder) ? ["File number"] : [])].join(", ")}</p>}
         </div>
       ) : (
         <>

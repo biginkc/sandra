@@ -1317,6 +1317,25 @@ describe("SoftphoneProvider coach UI flag", () => {
     expect(screen.getByTestId("dialer-call-manual")).toBeDisabled();
   });
 
+  it("cancels the manual inspection debounce when a lead is selected", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /><SoftphoneLeadButton lead={COACH_LEAD} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+    await user.type(screen.getByTestId("dialer-input"), "8165550123");
+    await user.click(screen.getByTestId("call-lead-button"));
+    await expect(screen.getByTestId("precall-setup")).toHaveAttribute(
+      "data-target-key",
+      "lead:property-1",
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    expect(inspectManualCall).not.toHaveBeenCalled();
+    expect(inspectLeadCall).toHaveBeenCalledOnce();
+  });
+
   it("shows setup only when coaching is enabled and permits missing basics", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
@@ -1338,6 +1357,20 @@ describe("SoftphoneProvider coach UI flag", () => {
     await user.click(restoredCall);
     await screen.findByTestId("coach-live-view");
     expect(screen.queryByTestId("precall-setup")).not.toBeInTheDocument();
+  });
+
+  it("keeps Call disabled while pre-call context is still loading", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    loadCoachCallContext.mockReturnValue(new Promise(() => undefined));
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={COACH_LEAD} /></SoftphoneProvider>);
+
+    await user.click(screen.getByTestId("call-lead-button"));
+    const call = await screen.findByTestId("dialer-call-manual");
+    await expect(call).toBeDisabled();
+    expect(call).toHaveAttribute("title", "Loading call details…");
+    expect(prepareLeadCall).not.toHaveBeenCalled();
   });
 
   it("keeps spoken setup edits out of dialing and disposition identity", async () => {
@@ -1426,7 +1459,36 @@ describe("SoftphoneProvider coach UI flag", () => {
   it("shows the prepared homeowner and address on the first live paint while context is still loading", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    loadCoachCallContext.mockReturnValue(new Promise(() => {}));
+    // The two pre-call reads must finish before Call is enabled; only the
+    // in-call context read remains pending in this first-paint test.
+    loadCoachCallContext
+      .mockResolvedValueOnce({
+        sellerName: "Softphone Lead",
+        propertyAddress: "1 Main St",
+        propertyCounty: null,
+        repName: "Alex Rep",
+        repPhoneE164: "+18165550100",
+        motivation: null,
+        leadId: "property-1",
+        sellerPhoneE164: "+18165550123",
+        coldCallerName: null,
+        leadSource: null,
+        occupancy: null,
+      })
+      .mockResolvedValueOnce({
+        sellerName: "Softphone Lead",
+        propertyAddress: "1 Main St",
+        propertyCounty: null,
+        repName: "Alex Rep",
+        repPhoneE164: "+18165550100",
+        motivation: null,
+        leadId: "property-1",
+        sellerPhoneE164: "+18165550123",
+        coldCallerName: null,
+        leadSource: null,
+        occupancy: null,
+      })
+      .mockReturnValue(new Promise(() => {}));
     const user = userEvent.setup();
     render(
       <SoftphoneProvider>
@@ -1446,7 +1508,34 @@ describe("SoftphoneProvider coach UI flag", () => {
   it("shows every known script token while transport is still connecting", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    loadCoachCallContext.mockReturnValue(new Promise(() => undefined));
+    loadCoachCallContext
+      .mockResolvedValueOnce({
+        sellerName: "Softphone Lead",
+        propertyAddress: "1 Main St",
+        propertyCounty: null,
+        repName: "Alex Rep",
+        repPhoneE164: "+18165550100",
+        motivation: null,
+        leadId: "property-1",
+        sellerPhoneE164: "+18165550123",
+        coldCallerName: null,
+        leadSource: null,
+        occupancy: null,
+      })
+      .mockResolvedValueOnce({
+        sellerName: "Softphone Lead",
+        propertyAddress: "1 Main St",
+        propertyCounty: null,
+        repName: "Alex Rep",
+        repPhoneE164: "+18165550100",
+        motivation: null,
+        leadId: "property-1",
+        sellerPhoneE164: "+18165550123",
+        coldCallerName: null,
+        leadSource: null,
+        occupancy: null,
+      })
+      .mockReturnValue(new Promise(() => undefined));
     createTransport.mockImplementation(() => {
       let listener: ((state: "connecting" | "live") => void) | null = null;
       return {
@@ -1472,7 +1561,7 @@ describe("SoftphoneProvider coach UI flag", () => {
     await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeVisible());
     const script = screen.getByTestId("current-section-script");
     expect(script).toHaveTextContent("Hey Softphone?");
-    expect(script).toHaveTextContent("this is Mel");
+    expect(script).toHaveTextContent("this is Alex Rep");
     await user.click(screen.getByTestId("variant-Opener-cold_call"));
     expect(script).toHaveTextContent("1 Main St");
     expect(script.querySelectorAll('[data-testid="token-placeholder"]')).toHaveLength(0);

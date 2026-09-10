@@ -252,11 +252,23 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   const teardownWarningRef = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dialInputRef = useRef("");
+  const manualInspectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heldRef = useRef(false);
   const holdPendingRef = useRef(false);
   const callerIdsRef = useRef<JitterCallerId[]>([]);
   const selectedCallerIdRef = useRef<string | null>(null);
   const callerIdLoadRef = useRef<Promise<string | null> | null>(null);
+  const manualInspectionTokenRef = useRef(0);
+  const invalidateManualInspection = useCallback(() => {
+    const hadTimer = manualInspectionTimerRef.current !== null;
+    const hadInspection = manualInspectionTokenRef.current !== 0;
+    if (!hadTimer && !hadInspection) return;
+    if (hadTimer) clearTimeout(manualInspectionTimerRef.current!);
+    manualInspectionTimerRef.current = null;
+    manualInspectionTokenRef.current = 0;
+    selectionGeneration.current += 1;
+    setSelectionPending(false);
+  }, []);
   // Bumped by resetIdle() and hangup() — anything that terminates the call
   // this session is tracking. transport.start() is awaited, so the call
   // can be reset/hung-up while it's still resolving; without this, the
@@ -814,6 +826,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   }, [callingEnabled, coachPreference.enabled, loadCallerIds, showToast, transition, transportFactory]);
 
   const selectForSetup = useCallback(async (inspect: () => Promise<{ok:true;data:SoftphoneTarget}|{ok:false;error:string}>) => {
+    invalidateManualInspection();
     if (startInFlightRef.current || (phone !== "idle" && phone !== "closed")) return;
     const generation = ++selectionGeneration.current;
     setSelectionPending(true);
@@ -828,7 +841,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       await loadSetup(result.data);
     } catch { if (generation === selectionGeneration.current) setError("Could not select homeowner. Try again."); }
     finally { if (generation === selectionGeneration.current) setSelectionPending(false); }
-  }, [loadSetup, phone, transition]);
+  }, [invalidateManualInspection, loadSetup, phone, transition]);
 
   const openLead = useCallback((lead: SoftphoneLead) => {
     if (!callingEnabled || startInFlightRef.current || (phone !== "idle" && phone !== "closed")) return;
@@ -919,9 +932,19 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   useEffect(() => {
     if (!coachUiEnabled || !coachPreference.enabled || phone !== "idle" || !manualReady) return;
     if (setup.target?.phoneE164.replace(/^\+1/, "") === manualDigits) return;
-    const timer = setTimeout(() => { void selectForSetup(() => inspectManualCall(manualDigits)); }, 350);
-    return () => { clearTimeout(timer); selectionGeneration.current += 1; setSelectionPending(false); };
-  }, [manualDigits, manualReady, coachUiEnabled, coachPreference.enabled, phone, setup.target?.phoneE164, selectForSetup]);
+    invalidateManualInspection();
+    manualInspectionTimerRef.current = setTimeout(() => {
+      manualInspectionTimerRef.current = null;
+      const token = manualInspectionTokenRef.current + 1;
+      const selection = selectForSetup(() => inspectManualCall(manualDigits));
+      manualInspectionTokenRef.current = token;
+      void selection.finally(() => {
+        if (manualInspectionTokenRef.current === token)
+          manualInspectionTokenRef.current = 0;
+      });
+    }, 350);
+    return invalidateManualInspection;
+  }, [manualDigits, manualReady, coachUiEnabled, coachPreference.enabled, phone, setup.target?.phoneE164, selectForSetup, invalidateManualInspection]);
   const callName = target?.name ?? "";
   const isOnCall = phone === "live" || phone === "held";
   const callerIdReady = callerIdState === "ready" && Boolean(selectedCallerId);
@@ -1050,6 +1073,8 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
             {phone === "idle" ? (
               <IdleView
                 setupPanel={coachUiEnabled && coachPreference.enabled ? selectionPending ? <p role="status">Loading selected homeowner…</p> : <PrecallSetupPanel collapsed={setup.collapsed} onCollapsed={setup.onCollapsed} targetKey={setup.key} context={setup.context} draft={setup.draft} loading={setup.loading} error={setup.error} onField={setup.onField} onBranch={setup.onBranch} onRetry={setup.onRetry} /> : null}
+                selectionPending={selectionPending}
+                setupLoading={setup.loading}
                 coachUiEnabled={coachUiEnabled}
                 coachPreference={coachPreference}
                 onCoachPreferenceChange={updateCoachPreference}
@@ -1072,8 +1097,8 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
                 onRecent={(recent) => { if (coachUiEnabled && coachPreference.enabled) void selectForSetup(() => recent.propertyId ? inspectLeadCall(recent.propertyId) : inspectManualCall(recent.phoneE164)); else void startTarget(() => recent.propertyId ? prepareLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164)); }}
                 onManual={() => {
                   if (coachUiEnabled && coachPreference.enabled) {
+                    if (selectionPending || setup.loading) return;
                     if (!setup.target || setup.target.phoneE164.replace(/^\+1/, "") !== manualDigits) { void selectForSetup(() => inspectManualCall(manualDigits)); return; }
-                    if (selectionPending) return;
                     const snapshot = setup.snapshot();
                     void startTarget(() => snapshot ? prepareSetupCall({operatorId: snapshot.operatorId, propertyId: snapshot.propertyId, phoneE164: snapshot.phoneE164}) : setup.target!.propertyId ? prepareLeadCall(setup.target!.propertyId) : prepareManualCall(setup.target!.phoneE164), setup.target, snapshot);
                   } else void startTarget(() => prepareManualCall(manualDigits));
@@ -1118,13 +1143,15 @@ function formatFull(digits: string): string {
   return digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : digits;
 }
 
-function IdleView({ setupPanel, coachUiEnabled, coachPreference, onCoachPreferenceChange, dialInput, setDialInput, suggestions, recents, manualReady, manualDigits, pending, callingEnabled, callerIds, callerIdState, callerIdError, selectedCallerId, callerIdReady, onCallerIdChange, onRetryCallerIds, onLead, onRecent, onManual, onDigit, onBackspace, error }: {
+function IdleView({ setupPanel, selectionPending, setupLoading, coachUiEnabled, coachPreference, onCoachPreferenceChange, dialInput, setDialInput, suggestions, recents, manualReady, manualDigits, pending, callingEnabled, callerIds, callerIdState, callerIdError, selectedCallerId, callerIdReady, onCallerIdChange, onRetryCallerIds, onLead, onRecent, onManual, onDigit, onBackspace, error }: {
   setupPanel: ReactNode;
+  selectionPending: boolean; setupLoading: boolean;
   coachUiEnabled: boolean; coachPreference: CoachPreference; onCoachPreferenceChange: (preference: CoachPreference) => void;
   dialInput: string; setDialInput: (value: string) => void; suggestions: DialerSearchResult[]; recents: DialerRecent[]; manualReady: boolean; manualDigits: string; pending: boolean; callingEnabled: boolean; callerIds: JitterCallerId[]; callerIdState: CallerIdState; callerIdError: string | null; selectedCallerId: string | null; callerIdReady: boolean; onCallerIdChange: (phoneE164: string) => void; onRetryCallerIds: () => void; onLead: (suggestion: DialerSearchResult) => void; onRecent: (recent: DialerRecent) => void; onManual: () => void; onDigit: (digit: DtmfDigit) => void; onBackspace: () => void; error: string | null;
 }) {
   const preparingCoach = Boolean(setupPanel);
-  const callControls = <div className={preparingCoach ? "flex gap-2" : "mt-3 flex gap-2"}><button type="button" aria-label="Delete digit" onClick={onBackspace} className="flex w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#e5e1df] bg-white text-[#78716c] hover:bg-[#f5f4f2]"><DeleteIcon className="size-[17px]" /></button><button type="button" data-testid="dialer-call-manual" title={!callingEnabled ? "Calling not yet enabled" : !callerIdReady ? "Choose an available company number" : undefined} disabled={!manualReady || pending || !callingEnabled || !callerIdReady} onClick={onManual} className={`flex-1 rounded-[10px] border-0 py-2.5 text-[13px] font-bold ${manualReady && callingEnabled && callerIdReady ? "bg-emerald-600 text-white hover:bg-emerald-700" : "cursor-default bg-[#f0eeec] text-[#a8a29e]"}`}>{callingEnabled && manualReady ? `Call ${formatFull(manualDigits)}` : "Call"}</button></div>;
+  const setupBusy = preparingCoach && (selectionPending || setupLoading);
+  const callControls = <div className={preparingCoach ? "flex gap-2" : "mt-3 flex gap-2"}><button type="button" aria-label="Delete digit" onClick={onBackspace} className="flex w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#e5e1df] bg-white text-[#78716c] hover:bg-[#f5f4f2]"><DeleteIcon className="size-[17px]" /></button><button type="button" data-testid="dialer-call-manual" title={!callingEnabled ? "Calling not yet enabled" : setupBusy ? "Loading call details…" : !callerIdReady ? "Choose an available company number" : undefined} disabled={!manualReady || pending || !callingEnabled || !callerIdReady || setupBusy} onClick={onManual} className={`flex-1 rounded-[10px] border-0 py-2.5 text-[13px] font-bold ${manualReady && callingEnabled && callerIdReady && !setupBusy ? "bg-emerald-600 text-white hover:bg-emerald-700" : "cursor-default bg-[#f0eeec] text-[#a8a29e]"}`}>{callingEnabled && manualReady ? `Call ${formatFull(manualDigits)}` : "Call"}</button></div>;
   return <div className={preparingCoach ? "flex max-h-[calc(100dvh-96px)] flex-col" : "p-4 pb-[18px]"}>
     <div className={preparingCoach ? "min-h-0 overflow-y-auto p-4 pb-3" : undefined}>
     {!callingEnabled ? <div role="status" className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">Calling not yet enabled</div> : null}

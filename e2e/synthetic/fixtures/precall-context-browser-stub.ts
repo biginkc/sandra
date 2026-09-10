@@ -1,4 +1,5 @@
 import type { CoachCallContext } from "@/lib/coach/types";
+import { prepareLeadCall, prepareManualCall } from "./dialer-actions-browser-stub";
 const context: CoachCallContext = {
   sellerName: "Synthetic Homeowner",
   repName: "Synthetic Coach",
@@ -18,4 +19,13 @@ export async function loadPrecallContext() {
   return { operatorId: "synthetic-rep", context, error: null };
 }
 
-export { prepareLeadCall as prepareSetupCall } from "./dialer-actions-browser-stub";
+export async function prepareSetupCall(input: {
+  operatorId: string | null;
+  propertyId: string | null;
+  phoneE164: string;
+}) {
+  const result = input.propertyId
+    ? await prepareLeadCall(input.propertyId)
+    : await prepareManualCall(input.phoneE164);
+  return result.ok ? { ...result, operatorId: input.operatorId ?? "synthetic-rep" } : result;
+}
