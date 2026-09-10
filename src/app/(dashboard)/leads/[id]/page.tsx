@@ -1,4 +1,4 @@
-import { Suspense, type ComponentProps } from "react";
+import { Suspense } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
@@ -70,7 +70,7 @@ import { TagsSection } from "./tags-section";
 import type { MotivationLevel } from "../actions";
 import type { TagRow } from "../tags-actions";
 import type { Database } from "@/lib/supabase/types";
-import { LeadMediaHero } from "./lead-media-hero";
+import { LeadMediaHero, LeadMediaLoading, LeadMediaVisual } from "./lead-media-hero";
 import { resolveLeadMediaPresentation } from "./lead-media";
 import { LeadActivityTimeline } from "./lead-activity";
 import type { LeadEvent } from "./lead-events";
@@ -702,25 +702,21 @@ export default async function LeadDetailPage({
 
   return (
     <Page className="gap-0 p-0">
-      <Suspense key={lead.id} fallback={
-        <LeadMediaHero
-          media={{ kind: "flat", reason: "loading" }}
-          address={lead.address}
-          locationLine={locationLine}
-          homeownerName={homeownerName}
-          actions={heroActions}
-        />
-      }>
-        <LeadMediaSection
-          key={lead.id}
-          location={{ lat: lead.lat, lon: lead.lon, address: lead.address,
-            city: lead.city, state: lead.state, zip: lead.zip }}
-          address={lead.address}
-          locationLine={locationLine}
-          homeownerName={homeownerName}
-          actions={heroActions}
-        />
-      </Suspense>
+      <LeadMediaHero
+        key={lead.id}
+        address={lead.address}
+        locationLine={locationLine}
+        homeownerName={homeownerName}
+        actions={heroActions}
+      >
+        <Suspense fallback={<LeadMediaLoading />}>
+          <LeadMediaSection
+            location={{ lat: lead.lat, lon: lead.lon, address: lead.address,
+              city: lead.city, state: lead.state, zip: lead.zip }}
+            address={lead.address}
+          />
+        </Suspense>
+      </LeadMediaHero>
       <DealSnapshotStrip lead={lead} />
       {training ? <Badge variant="secondary">Internal training · Fictional homeowner</Badge> : null}
 
@@ -1503,9 +1499,10 @@ function formatBool(v: boolean | null | undefined): string | null {
   return v ? "Yes" : "No";
 }
 
-async function LeadMediaSection({ location, ...props }: Omit<ComponentProps<typeof LeadMediaHero>, "media"> & {
+async function LeadMediaSection({ location, address }: {
   location: Parameters<typeof resolveLeadMediaPresentation>[0];
+  address: string;
 }) {
   const media = await resolveLeadMediaPresentation(location);
-  return <LeadMediaHero {...props} media={media} />;
+  return <LeadMediaVisual media={media} address={address} />;
 }

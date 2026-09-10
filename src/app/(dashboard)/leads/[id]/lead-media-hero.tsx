@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
 import type { LeadMediaPresentation } from "./lead-media";
@@ -8,20 +8,74 @@ import type { LeadMediaPresentation } from "./lead-media";
 const actionFocusClasses =
   "[&_button]:focus-visible:ring-white [&_button]:focus-visible:ring-offset-2 [&_button]:focus-visible:ring-offset-slate-950 [&_a]:rounded-md [&_a]:outline-none [&_a]:focus-visible:ring-2 [&_a]:focus-visible:ring-white [&_a]:focus-visible:ring-offset-2 [&_a]:focus-visible:ring-offset-slate-950 [&>span]:focus-within:overflow-visible";
 
+type MediaKind = "loading" | "flat" | "streetView" | "aerial";
+type MediaState = { kind: MediaKind; fallbackReason?: string };
+const MediaKindContext = createContext<((state: MediaState) => void) | null>(null);
+const imageFrameClasses = "relative h-[210px] overflow-hidden bg-slate-900 sm:h-[230px] lg:h-[250px]";
+
+export function LeadMediaLoading() {
+  return <div className={imageFrameClasses} data-testid="lead-media-image-frame" aria-label="Loading property imagery" aria-busy="true" />;
+}
+
 export function LeadMediaHero({
-  media,
-  address,
-  locationLine,
-  homeownerName,
-  actions,
+  media, children, address, locationLine, homeownerName, actions,
 }: {
-  media: LeadMediaPresentation;
+  media?: LeadMediaPresentation;
+  children?: React.ReactNode;
   address: string;
   locationLine: string;
   homeownerName: string | null;
   actions: React.ReactNode;
 }) {
+  const [resolvedMedia, setResolvedMedia] = useState<MediaState | null>(null);
+  const kind = resolvedMedia?.kind ?? media?.kind ?? "loading";
+  const flat = kind === "flat";
   const description = [locationLine, homeownerName].filter(Boolean).join(" · ");
+
+  // Keep this header and every action mounted while the imagery slot streams
+  // or falls back. Drafts and open dialogs must survive a media transition.
+  return (
+    <MediaKindContext.Provider value={setResolvedMedia}>
+      <section
+        className={flat ? "border-border bg-card border-b" : "relative isolate overflow-hidden border-b border-white/10 bg-slate-900"}
+        data-testid={`lead-media-${kind === "streetView" ? "street-view" : kind}`}
+        data-media-fallback-reason={resolvedMedia?.fallbackReason ?? (media?.kind === "aerial" ? media.fallbackReason : undefined)}
+      >
+        {media ? <LeadMediaVisual media={media} address={address} /> : children}
+        <div
+          className={flat
+            ? "relative z-10 flex flex-col gap-3 px-4 py-3.5 md:px-6 lg:flex-row lg:items-end lg:justify-between"
+            : "relative z-10 flex flex-col gap-3 bg-gradient-to-b from-slate-900 to-slate-950 px-4 py-3.5 text-white sm:px-6 lg:flex-row lg:items-end lg:justify-between"}
+          data-testid="lead-media-overlay"
+        >
+          <div className="min-w-0 max-w-3xl">
+            <nav aria-label="Breadcrumb" className={`mb-2 flex flex-wrap items-center gap-2 text-[10px] font-bold tracking-widest uppercase ${flat ? "text-muted-foreground" : "text-white/75"}`}>
+              <span>Workspace</span><span aria-hidden>/</span>
+              <Link href="/leads" className={flat ? "hover:text-foreground" : "transition-colors hover:text-white"}>Leads</Link>
+              <span aria-hidden>/</span>
+              <span className={`break-words ${flat ? "text-foreground" : "text-white"}`}>{address}</span>
+            </nav>
+            <h1 className={flat
+              ? "text-2xl leading-tight font-bold tracking-[-0.02em] break-words"
+              : "text-2xl leading-tight font-black tracking-[-0.03em] break-words text-white sm:text-3xl"}>{address}</h1>
+            <p className={flat ? "text-muted-foreground mt-1 text-[13px] break-words" : "mt-1 text-sm break-words text-white/80"}>
+              {description || "—"}{flat ? " · Street View unavailable" : null}
+            </p>
+          </div>
+          <div
+            className={`flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9 ${flat
+              ? "[&_[data-testid=call-lead-button]]:border-slate-900 [&_[data-testid=call-lead-button]]:bg-slate-900 [&_[data-testid=call-lead-button]]:text-white"
+              : "[&_button]:border-white/80 [&_button]:bg-white/95 [&_button]:text-slate-950 [&_button]:shadow-sm [&_button]:hover:bg-white"} ${actionFocusClasses}`}
+            data-testid="lead-media-actions"
+          >{actions}</div>
+        </div>
+      </section>
+    </MediaKindContext.Provider>
+  );
+}
+
+export function LeadMediaVisual({ media, address }: { media: LeadMediaPresentation; address: string }) {
+  const reportKind = useContext(MediaKindContext);
   const mediaIdentity =
     media.kind === "flat" ? `flat:${media.reason}` : media.images.small;
   const [failureState, setFailureState] = useState<{
@@ -68,43 +122,14 @@ export function LeadMediaHero({
     }
   }, [mediaIdentity, reconcileImageFailure, renderedKind]);
 
-  if (renderedKind === "flat") {
-    return (
-      <section
-        className="border-border bg-card border-b px-4 py-3.5 md:px-6"
-        data-testid="lead-media-flat"
-      >
-        <nav
-          aria-label="Breadcrumb"
-          className="text-muted-foreground mb-2 flex flex-wrap items-center gap-2 text-[10px] font-bold tracking-[0.16em] uppercase"
-        >
-          <span>Workspace</span>
-          <span aria-hidden>/</span>
-          <Link href="/leads" className="hover:text-foreground">
-            Leads
-          </Link>
-          <span aria-hidden>/</span>
-          <span className="text-foreground break-words">{address}</span>
-        </nav>
-        <div className="flex min-w-0 flex-wrap items-end justify-between gap-3.5">
-          <div className="min-w-0">
-            <h1 className="text-2xl leading-tight font-bold tracking-[-0.02em] break-words">
-              {address}
-            </h1>
-            <p className="text-muted-foreground mt-1 text-[13px] break-words">
-              {description || "—"} · Street View unavailable
-            </p>
-          </div>
-          <div
-            className={`flex min-w-0 flex-wrap items-center gap-2 [&_[data-testid=call-lead-button]]:border-slate-900 [&_[data-testid=call-lead-button]]:bg-slate-900 [&_[data-testid=call-lead-button]]:text-white [&_button]:min-h-9 ${actionFocusClasses}`}
-            data-testid="lead-media-actions"
-          >
-            {actions}
-          </div>
-        </div>
-      </section>
-    );
-  }
+  const fallbackReason = renderedKind === "aerial"
+    ? media.kind === "aerial" ? media.fallbackReason : "street-image-error"
+    : undefined;
+  useEffect(() => {
+    reportKind?.({ kind: renderedKind, fallbackReason });
+  }, [reportKind, renderedKind, fallbackReason]);
+
+  if (renderedKind === "flat") return null;
 
   const renderedImages =
     renderedKind === "streetView"
@@ -125,8 +150,7 @@ export function LeadMediaHero({
 
   return (
     <section
-      className="relative isolate overflow-hidden border-b border-white/10 bg-slate-900"
-      data-testid={`lead-media-${renderedKind === "streetView" ? "street-view" : "aerial"}`}
+      className="relative"
       data-media-fallback-reason={
         renderedKind === "aerial"
           ? media.kind === "aerial"
@@ -137,7 +161,7 @@ export function LeadMediaHero({
       aria-label={mediaLabel}
     >
       <div
-        className="relative h-[210px] overflow-hidden bg-slate-900 sm:h-[230px] lg:h-[250px]"
+        className={imageFrameClasses}
         data-testid="lead-media-image-frame"
       >
         <picture className="block h-full bg-slate-900" data-testid="lead-media-picture">
@@ -183,40 +207,6 @@ export function LeadMediaHero({
           Street View metadata unavailable — check preview configuration.
         </p>
       ) : null}
-      <div
-        className="relative z-10 flex flex-col gap-3 bg-gradient-to-b from-slate-900 to-slate-950 px-4 py-3.5 text-white sm:px-6 lg:flex-row lg:items-end lg:justify-between"
-        data-testid="lead-media-overlay"
-      >
-        <div className="min-w-0 max-w-3xl">
-          <nav
-            aria-label="Breadcrumb"
-            className="mb-2 flex flex-wrap items-center gap-2 text-[10px] font-bold tracking-widest text-white/75 uppercase"
-          >
-            <span>Workspace</span>
-            <span aria-hidden>/</span>
-            <Link
-              href="/leads"
-              className="transition-colors hover:text-white"
-            >
-              Leads
-            </Link>
-            <span aria-hidden>/</span>
-            <span className="break-words text-white">{address}</span>
-          </nav>
-          <h1 className="text-2xl leading-tight font-black tracking-[-0.03em] break-words text-white sm:text-3xl">
-            {address}
-          </h1>
-          <p className="mt-1 text-sm break-words text-white/80">
-            {description || "—"}
-          </p>
-        </div>
-        <div
-          className={`flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9 [&_button]:border-white/80 [&_button]:bg-white/95 [&_button]:text-slate-950 [&_button]:shadow-sm [&_button]:hover:bg-white ${actionFocusClasses}`}
-          data-testid="lead-media-actions"
-        >
-          {actions}
-        </div>
-      </div>
     </section>
   );
 }
