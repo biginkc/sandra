@@ -76,4 +76,42 @@ describe("conversation selection", () => {
     act(() => { window.dispatchEvent(new PopStateEvent("popstate")); });
     await waitFor(() => expect(result.current.detail?.threadId).toBe("b"));
   });
+
+  it("clears for navigation until matching server props arrive", async () => {
+    window.history.replaceState(null, "", "/messages?thread=a");
+    fetchMock.mockResolvedValue(response("b"));
+    const { result, rerender } = renderHook(({ id, data }) => useConversationSelection(id, data), {
+      initialProps: { id: "a" as string | null, data: detail("a") as InboxDetail | null },
+    });
+    window.history.replaceState(null, "", "/messages?thread=b");
+    await act(async () => { await result.current.select("b"); });
+    act(() => { result.current.reset(); });
+    expect(result.current.selectedId).toBeNull();
+    expect(result.current.detail).toBeNull();
+    window.history.replaceState(null, "", "/messages?inboxPage=2");
+    rerender({ id: "a", data: detail("a") });
+    expect(result.current.detail).toBeNull();
+    rerender({ id: null, data: null });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    expect(result.current.selectedId).toBeNull();
+    const fresh = detail("c");
+    window.history.replaceState(null, "", "/messages?thread=c");
+    rerender({ id: "c", data: fresh });
+    await waitFor(() => expect(result.current.detail).toBe(fresh));
+  });
+
+  it("does not reload an already loaded local selection but refetches after leaving it", async () => {
+    fetchMock.mockResolvedValue(response("b"));
+    const { result } = renderHook(() => useConversationSelection(null, null));
+    window.history.replaceState(null, "", "/messages?thread=b");
+    await act(async () => { await result.current.select("b"); });
+    const loaded = result.current.detail;
+    await act(async () => { await result.current.select("b"); });
+    expect(result.current.detail).toBe(loaded);
+    expect(result.current.loading).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { await result.current.select(null); });
+    await act(async () => { await result.current.select("b"); });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

@@ -11,7 +11,7 @@ type Selection = {
   error: string | null;
 };
 
-/** Local selection is deliberately not a cache. Every new click reads fresh
+/** Local selection is deliberately not a cache. Every different thread reads fresh
  * authorized detail; an older response can never replace a newer selection. */
 export function useConversationSelection(serverId: string | null, serverDetail: InboxDetail | null) {
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -24,10 +24,17 @@ export function useConversationSelection(serverId: string | null, serverDetail: 
   }, []);
   const reset = useCallback(() => {
     cancel();
-    setSelection(null);
+    // Navigation must clear the panel without reviving the previous server
+    // selection while its destination is still loading.
+    setSelection({ id: null, detail: null, loading: false, error: null });
   }, [cancel]);
 
   const select = useCallback(async (id: string | null) => {
+    const currentId = selection ? selection.id : serverId;
+    const currentDetail = selection ? selection.detail : serverDetail;
+    // Keep the composer mounted when the operator re-clicks its loaded row.
+    // Failed/empty selections still allow a fresh request on retry.
+    if (id && id === currentId && currentDetail && !selection?.loading) return;
     const currentGeneration = ++generation.current;
     requestRef.current?.abort();
     if (!id) {
@@ -56,7 +63,7 @@ export function useConversationSelection(serverId: string | null, serverDetail: 
       setSelection({ id, detail: null, loading: false,
         error: error instanceof Error ? error.message : "Conversation did not load. Please retry." });
     }
-  }, []);
+  }, [selection, serverId, serverDetail]);
 
   useEffect(() => {
     // A refresh/filter navigation supplies authoritative new props. Ignore an
@@ -65,19 +72,23 @@ export function useConversationSelection(serverId: string | null, serverDetail: 
     if (urlId !== serverId) return;
     const expectedGeneration = generation.current;
     const timer = window.setTimeout(() => {
-      if (generation.current === expectedGeneration) reset();
+      if (generation.current === expectedGeneration) {
+        cancel();
+        setSelection(null);
+      }
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [serverId, serverDetail, reset]);
+  }, [serverId, serverDetail, cancel]);
 
   useEffect(() => {
     const onPopState = () => { void select(new URLSearchParams(window.location.search).get("thread")); };
     window.addEventListener("popstate", onPopState);
     return () => {
       window.removeEventListener("popstate", onPopState);
-      cancel();
     };
-  }, [select, cancel]);
+  }, [select]);
+
+  useEffect(() => cancel, [cancel]);
 
   return {
     selectedId: selection ? selection.id : serverId,

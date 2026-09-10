@@ -274,6 +274,41 @@ describe("<CockpitView /> URL deep-linking", () => {
     );
   });
 
+  it("keeps an unsent draft mounted when its loaded conversation is clicked again", async () => {
+    const thread = makeThread({ contactId: "a" });
+    navigationMocks.search = `thread=${thread.threadId}`;
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
+    render(<CockpitView {...baseProps} activeTab="inbox" threads={[thread]}
+      selectedThreadId={thread.threadId} threadDetail={makeDetail("a", "Message A")} />);
+    const composer = screen.getByRole("textbox", { name: "Reply to this lead" });
+    fireEvent.change(composer, { target: { value: "Please keep this unsent draft" } });
+    fireEvent.click(screen.getByTestId(`inbox-thread-${thread.threadId}`));
+    await waitFor(() => {
+      expect(screen.getByRole("textbox", { name: "Reply to this lead" })).toBe(composer);
+      expect(composer).toHaveValue("Please keep this unsent draft");
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("inbox-detail-skeleton")).not.toBeInTheDocument();
+  });
+
+  it("clears local detail during pagination instead of showing the previous server conversation", async () => {
+    const threadA = makeThread({ contactId: "a" });
+    const threadB = makeThread({ contactId: "b" });
+    navigationMocks.search = `thread=${threadA.threadId}`;
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
+    vi.mocked(fetch).mockResolvedValue({ ok: true, json: async () => ({ detail: makeDetail("b", "Message B") }) } as Response);
+    render(<CockpitView {...baseProps} activeTab="inbox" threads={[threadA, threadB]}
+      selectedThreadId={threadA.threadId} threadDetail={makeDetail("a", "Message A")}
+      inboxPageSize={2} inboxTotal={4} />);
+    fireEvent.click(screen.getByTestId(`inbox-thread-${threadB.threadId}`));
+    await waitFor(() => expect(screen.getByTestId("inbox-detail-panel")).toHaveTextContent("Message B"));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByTestId("inbox-detail-empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("inbox-detail-panel")).not.toBeInTheDocument();
+    expect(navigationMocks.push).toHaveBeenCalledWith("/messages?inboxPage=2");
+    await waitFor(() => expect(screen.getByTestId("inbox-list-view")).toHaveClass("block"));
+  });
+
   it("activeTab='inbox' renders the Inbox tab as aria-selected (baseline for test 32)", () => {
     render(<CockpitView {...baseProps} activeTab="inbox" />);
 
