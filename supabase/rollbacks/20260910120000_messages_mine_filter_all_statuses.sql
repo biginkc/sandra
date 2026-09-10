@@ -1,23 +1,23 @@
--- Rollback for 20260910120000: restore the 20260828053000 leads-only
--- boundary on the `mine` filter (prospects excluded again). Re-applies the
--- 20260828170000 statement_timeout, since CREATE OR REPLACE drops it.
+-- Restore the pre-Mine-change eight-argument search RPC verbatim.
+-- Search and No owner behavior remain available after rollback.
 
-create or replace function public.sms_inbox_thread_page_snapshot(
-  p_cutoff timestamptz,
-  p_filter text default 'all',
-  p_assignee_id uuid default null,
-  p_include_thread_id uuid default null,
-  p_hide_noise boolean default true,
-  p_limit integer default 200,
-  p_offset integer default 0
-)
-returns jsonb
-language sql
-stable
-security invoker
-set search_path = ''
-as $$
-  with bounds as (
+CREATE OR REPLACE FUNCTION public.sms_inbox_thread_page_snapshot(p_cutoff timestamp with time zone, p_filter text DEFAULT 'all'::text, p_assignee_id uuid DEFAULT NULL::uuid, p_include_thread_id uuid DEFAULT NULL::uuid, p_hide_noise boolean DEFAULT true, p_limit integer DEFAULT 200, p_offset integer DEFAULT 0, p_search text DEFAULT NULL::text)
+ RETURNS jsonb
+ LANGUAGE sql
+ STABLE SECURITY INVOKER
+ SET search_path TO ''
+ SET statement_timeout TO '15s'
+AS $function$
+  with search_input as (
+    select case when length(btrim(p_search)) >= 3
+      then left(btrim(p_search), 100) else null end as q
+  ), search_bounds as (
+    select q,
+      replace(replace(replace(lower(q), E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') as q_like,
+      regexp_replace(q, '[^0-9]', '', 'g') as digits,
+      public.search_prefix_tsquery(q) as tsq
+    from search_input
+  ), bounds as (
     select
       greatest(
         coalesce(p_cutoff, statement_timestamp() - interval '365 days'),
@@ -61,7 +61,7 @@ as $$
         or review.org_id in (select visible.org_id from visible_orgs visible)
       )
   ),
-  recent_eligible as materialized (
+  recent_eligible as not materialized (
     select
       m.id,
       m.org_id,
@@ -92,8 +92,8 @@ as $$
     select
       e.org_id,
       e.conversation_id,
-      (array_agg(e.id order by e.created_at desc, e.id desc))[1] as last_message_id,
-      (array_agg(e.contact_id order by e.created_at desc, e.id desc))[1] as contact_id,
+      (array_agg(e.id) filter (where e.latest_rank = 1))[1] as last_message_id,
+      (array_agg(e.contact_id) filter (where e.latest_rank = 1))[1] as contact_id,
       coalesce(
         (array_agg(e.property_id order by e.created_at desc, e.id desc)
           filter (where e.property_id is not null))[1],
@@ -274,6 +274,19 @@ as $$
       on suppression.org_id = g.org_id
       and suppression.channel = 'sms'
       and suppression.phone_e164 = normalized_phone.phone_e164
+    cross join search_bounds search
+    where (
+      search.q is null
+      or c.search_text ilike '%' || search.q_like || '%' escape E'\\'
+      or (length(search.digits) >= 3 and c.phone_digits ilike '%' || search.digits || '%')
+      or exists (
+        select 1 from public.messages matching_message
+        where matching_message.org_id = g.org_id
+          and matching_message.conversation_id = g.conversation_id
+          and matching_message.channel = 'sms'
+          and matching_message.fts @@ search.tsq
+      )
+    ) -- messages_search_predicate
   ),
   ready as materialized (
     select
@@ -443,24 +456,10 @@ as $$
   cross join page_meta meta
   cross join effective_page page
   cross join document;
-$$;
+$function$
+;
 
-revoke all on function public.sms_inbox_thread_page_snapshot(timestamptz, text, uuid, uuid, boolean, integer, integer) from public;
-revoke all on function public.sms_inbox_thread_page_snapshot(timestamptz, text, uuid, uuid, boolean, integer, integer) from anon;
-grant execute on function public.sms_inbox_thread_page_snapshot(timestamptz, text, uuid, uuid, boolean, integer, integer) to authenticated;
-grant execute on function public.sms_inbox_thread_page_snapshot(timestamptz, text, uuid, uuid, boolean, integer, integer) to service_role;
-
-comment on function public.sms_inbox_thread_page_snapshot(timestamptz, text, uuid, uuid, boolean, integer, integer) is
-  'RLS-scoped SMS inbox: recent-thread filters plus a cutoff-independent pending AI disposition review queue.';
-
--- Re-assert the 20260828170000 statement_timeout safety net that CREATE OR
--- REPLACE above dropped. This is a safety cap, not the performance gate.
-alter function public.sms_inbox_thread_page_snapshot(
-  timestamptz,
-  text,
-  uuid,
-  uuid,
-  boolean,
-  integer,
-  integer
-) set statement_timeout = '15s';
+alter function public.sms_inbox_thread_page_snapshot(timestamptz, text, uuid, uuid, boolean, integer, integer, text) set statement_timeout = '15s';
+revoke all on function public.sms_inbox_thread_page_snapshot(timestamptz, text, uuid, uuid, boolean, integer, integer, text) from public, anon;
+grant execute on function public.sms_inbox_thread_page_snapshot(timestamptz, text, uuid, uuid, boolean, integer, integer, text) to authenticated, service_role;
+notify pgrst, 'reload schema';

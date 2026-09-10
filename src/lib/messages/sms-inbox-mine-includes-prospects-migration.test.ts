@@ -9,9 +9,9 @@ const sql = readFileSync(
   ),
   "utf8",
 );
-const leadsOnlySql = readFileSync(
+const searchSql = readFileSync(
   new URL(
-    "../../../supabase/migrations/20260828053000_messages_assignment_filters_leads_only.sql",
+    "../../../supabase/migrations/20260909080000_messages_search.sql",
     import.meta.url,
   ),
   "utf8",
@@ -46,31 +46,38 @@ describe("Messages Mine filter includes every assigned status", () => {
     expect(sql.match(/c\.assigned_user_id is null/g)).toHaveLength(2);
   });
 
-  it("re-applies the statement_timeout the hotfix set (CREATE OR REPLACE drops it)", () => {
-    expect(sql).toContain("alter function public.sms_inbox_thread_page_snapshot(");
+  it("preserves the current search signature and function timeout", () => {
+    expect(sql).toContain("p_search text DEFAULT NULL::text");
+    expect(sql).toContain("SET statement_timeout TO '15s'");
+    expect(sql).toContain(
+      "alter function public.sms_inbox_thread_page_snapshot(timestamptz, text, uuid, uuid, boolean, integer, integer, text)",
+    );
     expect(sql).toContain("set statement_timeout = '15s';");
   });
 
   it("preserves the optimized query and access boundaries", () => {
     expect(sql).toContain("recent_grouped as materialized");
     expect(sql).toContain("old_review_conversations as materialized");
-    expect(sql).toContain("security invoker");
+    expect(sql).toContain("SECURITY INVOKER");
     expect(sql).toContain("membership.access_status = 'active'");
     expect(sql).toContain("having count(distinct m.org_id) > 1");
   });
 
-  it("rolls back to the exact leads-only function body", () => {
-    const functionStart = "create or replace function";
-    // The rollback restores the leads-only body verbatim, then re-applies the
-    // statement_timeout the hotfix set. Compare the function-definition block
-    // (everything before that appended `alter function`) to the leads-only
-    // migration's function block.
-    const leadsOnlyFn = leadsOnlySql
-      .slice(leadsOnlySql.indexOf(functionStart))
-      .trimEnd();
-    // The rollback embeds the leads-only function body verbatim, then appends
-    // the statement_timeout re-assertion.
-    expect(rollbackSql).toContain(leadsOnlyFn);
-    expect(rollbackSql).toContain("\nalter function");
+  it("changes only the two Mine predicates in the current search definition", () => {
+    const functionStart = "CREATE OR REPLACE FUNCTION";
+    const currentDefinition = searchSql.slice(searchSql.indexOf(functionStart));
+    const oldMinePredicate =
+      "c.property_status is not null and c.property_status <> 'prospect' and p_assignee_id is not null and c.assigned_user_id = p_assignee_id";
+    expect(currentDefinition.split(oldMinePredicate)).toHaveLength(3);
+    expect(sql.slice(sql.indexOf(functionStart))).toBe(
+      currentDefinition.replaceAll(
+        oldMinePredicate,
+        "p_assignee_id is not null and c.assigned_user_id = p_assignee_id",
+      ),
+    );
+    // Rollback must preserve search, optimizations, tenant access, and grants.
+    expect(rollbackSql.slice(rollbackSql.indexOf(functionStart))).toBe(
+      currentDefinition,
+    );
   });
 });

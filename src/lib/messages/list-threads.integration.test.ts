@@ -101,6 +101,7 @@ async function measureScaleSearch(viewer: { userId: string; jwt: string }) {
     // Replay the checked-in candidate, rather than measure a stale test RPC.
     await db.query("begin");
     await db.query(readFileSync("supabase/migrations/20260909080000_messages_search.sql", "utf8"));
+    await db.query(readFileSync("supabase/migrations/20260910120000_messages_mine_filter_all_statuses.sql", "utf8"));
     await db.query("commit");
     await db.query("analyze public.contacts");
     await db.query("analyze public.messages");
@@ -429,31 +430,44 @@ describe("listThreads (integration)", () => {
       all: total,
       unread: Math.ceil(total / 2),
       needs_outcome: total - 1,
-      mine: 1,
+      mine: 2,
       unassigned: 1,
       escalated: 1,
       dispo: 1,
     };
     const exactScaleRows = {
-      mine: {
-        thread_id: messages[0]!.conversation_id,
-        property_status: "new_lead",
-        assignee_id: viewerId,
-      },
-      unassigned: {
-        thread_id: messages[1]!.conversation_id,
-        property_status: "contacted",
-        assignee_id: null,
-      },
-      escalated: {
-        thread_id: messages[2]!.conversation_id,
-        ai_responder_status: "escalated",
-      },
-      dispo: {
-        thread_id: messages[3]!.conversation_id,
-        needs_outcome: false,
-        ai_disposition_review_id: expect.any(String),
-      },
+      mine: [
+        {
+          thread_id: messages[0]!.conversation_id,
+          property_status: "new_lead",
+          assignee_id: viewerId,
+        },
+        {
+          thread_id: messages[4]!.conversation_id,
+          property_status: "prospect",
+          assignee_id: viewerId,
+        },
+      ],
+      unassigned: [
+        {
+          thread_id: messages[1]!.conversation_id,
+          property_status: "contacted",
+          assignee_id: null,
+        },
+      ],
+      escalated: [
+        {
+          thread_id: messages[2]!.conversation_id,
+          ai_responder_status: "escalated",
+        },
+      ],
+      dispo: [
+        {
+          thread_id: messages[3]!.conversation_id,
+          needs_outcome: false,
+          ai_disposition_review_id: expect.any(String),
+        },
+      ],
     };
     for (const filter of [
       "unread",
@@ -490,11 +504,13 @@ describe("listThreads (integration)", () => {
         ).toBe(true);
       }
       if (filter in exactScaleRows) {
-        expect(filteredSnapshot.snapshot.rows).toEqual([
-          expect.objectContaining(
-            exactScaleRows[filter as keyof typeof exactScaleRows],
+        expect(filteredSnapshot.snapshot.rows).toEqual(
+          expect.arrayContaining(
+            exactScaleRows[filter as keyof typeof exactScaleRows].map((row) =>
+              expect.objectContaining(row),
+            ),
           ),
-        ]);
+        );
       }
     }
 
@@ -514,22 +530,50 @@ describe("listThreads (integration)", () => {
       });
       const exactThreadByFilter: Record<
         "mine" | "unassigned" | "escalated" | "dispo",
-        string
+        string[]
       > = {
-        mine: messages[0]!.conversation_id,
-        unassigned: messages[1]!.conversation_id,
-        escalated: messages[2]!.conversation_id,
-        dispo: messages[3]!.conversation_id,
+        mine: [messages[0]!.conversation_id, messages[4]!.conversation_id],
+        unassigned: [messages[1]!.conversation_id],
+        escalated: [messages[2]!.conversation_id],
+        dispo: [messages[3]!.conversation_id],
       };
-      expect(page.threads.map((thread) => thread.threadId)).toEqual([
-        exactThreadByFilter[filter],
-      ]);
-      expect(page.counts[filter]).toBe(1);
-      if (filter === "mine") {
-        expect(page.threads[0]).toMatchObject({
-          propertyStatus: "new_lead",
-          assigneeId: viewerId,
+      expect(page.threads.map((thread) => thread.threadId).sort()).toEqual(
+        [...exactThreadByFilter[filter]].sort(),
+      );
+      expect(page.total).toBe(expectedFilterTotals[filter]);
+      expect(page.counts[filter]).toBe(expectedFilterTotals[filter]);
+      if (filter === "mine" || filter === "unassigned") {
+        // The first five contacts share this surname, including both Mine
+        // fixtures and the unassigned lead. Search must preserve assignment
+        // scope while continuing to exclude the other user's lead.
+        const searched = await listThreadPage(authenticatedClient, {
+          filter,
+          currentUserId: viewerId,
+          includeThreadId: null,
+          hideNoise: false,
+          page: 1,
+          search: "Zephyrson",
         });
+        expect(searched.threads.map((thread) => thread.threadId).sort()).toEqual(
+          [...exactThreadByFilter[filter]].sort(),
+        );
+        expect(searched.counts.all).toBe(5);
+        expect(searched.total).toBe(expectedFilterTotals[filter]);
+        expect(searched.counts[filter]).toBe(expectedFilterTotals[filter]);
+      }
+      if (filter === "mine") {
+        expect(page.threads).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            threadId: messages[0]!.conversation_id,
+            propertyStatus: "new_lead",
+            assigneeId: viewerId,
+          }),
+          expect.objectContaining({
+            threadId: messages[4]!.conversation_id,
+            propertyStatus: "prospect",
+            assigneeId: viewerId,
+          }),
+        ]));
       }
       if (filter === "unassigned") {
         expect(page.threads[0]).toMatchObject({
@@ -654,6 +698,7 @@ describe("listThreads (integration)", () => {
     });
     expect(all.counts).toMatchObject({
       all: 3,
+      // Only Escalated is assigned; all four fixtures default to new_lead.
       mine: 1,
       unassigned: 2,
       unread: 2,
