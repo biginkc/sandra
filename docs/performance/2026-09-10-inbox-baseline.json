@@ -1,0 +1,137 @@
+{
+  "tables": [
+    {
+      "relname": "contacts",
+      "n_dead_tup": 1598,
+      "n_live_tup": 304875,
+      "last_vacuum": null,
+      "last_analyze": null,
+      "last_autovacuum": "2026-09-04T23:25:16.190209+00:00",
+      "last_autoanalyze": "2026-09-04T20:48:09.321071+00:00",
+      "n_mod_since_analyze": 20420
+    },
+    {
+      "relname": "properties",
+      "n_dead_tup": 17131,
+      "n_live_tup": 183776,
+      "last_vacuum": null,
+      "last_analyze": null,
+      "last_autovacuum": "2026-09-04T22:28:16.982575+00:00",
+      "last_autoanalyze": "2026-09-09T21:51:49.601071+00:00",
+      "n_mod_since_analyze": 222
+    },
+    {
+      "relname": "messages",
+      "n_dead_tup": 9648,
+      "n_live_tup": 79169,
+      "last_vacuum": null,
+      "last_analyze": null,
+      "last_autovacuum": "2026-08-28T18:38:39.177628+00:00",
+      "last_autoanalyze": "2026-09-09T21:26:42.683947+00:00",
+      "n_mod_since_analyze": 3799
+    },
+    {
+      "relname": "consent_events",
+      "n_dead_tup": 2,
+      "n_live_tup": 60564,
+      "last_vacuum": null,
+      "last_analyze": null,
+      "last_autovacuum": "2026-09-05T00:26:19.015423+00:00",
+      "last_autoanalyze": "2026-09-05T00:26:19.253975+00:00",
+      "n_mod_since_analyze": 8
+    },
+    {
+      "relname": "message_threads",
+      "n_dead_tup": 833,
+      "n_live_tup": 58143,
+      "last_vacuum": null,
+      "last_analyze": null,
+      "last_autovacuum": "2026-07-02T20:45:01.371885+00:00",
+      "last_autoanalyze": "2026-09-09T22:14:44.558406+00:00",
+      "n_mod_since_analyze": 510
+    },
+    {
+      "relname": "sms_phone_suppressions",
+      "n_dead_tup": 35,
+      "n_live_tup": 1492,
+      "last_vacuum": null,
+      "last_analyze": null,
+      "last_autovacuum": null,
+      "last_autoanalyze": "2026-08-26T18:22:17.098306+00:00",
+      "n_mod_since_analyze": 130
+    }
+  ],
+  "work_mem": "5MB",
+  "captured_at": "2026-09-10T11:58:06.754921+00:00",
+  "server_version": "17.6",
+  "inbox_statements": [
+    {
+      "dbid": "5",
+      "calls": 1329,
+      "userid": "16485",
+      "queryid": "-3759176610558812174",
+      "toplevel": true,
+      "stats_since": "2026-09-09T08:02:11.856965+00:00",
+      "max_exec_time": 14880.478107,
+      "mean_exec_time": 3800.10171555832,
+      "temp_blks_read": 8237644,
+      "shared_blks_hit": 917210704,
+      "total_exec_time": 5050335.179977,
+      "shared_blks_read": 13508,
+      "temp_blks_written": 13314529
+    },
+    {
+      "dbid": "5",
+      "calls": 13975,
+      "userid": "16485",
+      "queryid": "8221624778419996038",
+      "toplevel": true,
+      "stats_since": "2026-08-17T11:38:37.707547+00:00",
+      "max_exec_time": 14463.522644,
+      "mean_exec_time": 2576.92921846603,
+      "temp_blks_read": 83045543,
+      "shared_blks_hit": 3274968018,
+      "total_exec_time": 36012585.828063,
+      "shared_blks_read": 13126,
+      "temp_blks_written": 152447552
+    },
+    {
+      "dbid": "5",
+      "calls": 6,
+      "userid": "16486",
+      "queryid": "8221624778419996038",
+      "toplevel": true,
+      "stats_since": "2026-08-25T21:28:48.744018+00:00",
+      "max_exec_time": 5134.887702,
+      "mean_exec_time": 3373.72138616667,
+      "temp_blks_read": 54595,
+      "shared_blks_hit": 4282629,
+      "total_exec_time": 20242.328317,
+      "shared_blks_read": 25,
+      "temp_blks_written": 81717
+    }
+  ],
+  "connection_states": [
+    {
+      "state": "active",
+      "connections": 1,
+      "wait_event_type": "Client"
+    },
+    {
+      "state": "active",
+      "connections": 1,
+      "wait_event_type": null
+    },
+    {
+      "state": "idle",
+      "connections": 23,
+      "wait_event_type": "Client"
+    },
+    {
+      "state": null,
+      "connections": 2,
+      "wait_event_type": "Extension"
+    }
+  ],
+  "io_timing_enabled": "off"
+}

@@ -44,8 +44,8 @@ function adminStub(options: {
     })),
     auth: {
       admin: {
-        listUsers: vi.fn(async () => ({
-          data: { users: options.users, nextPage: null },
+        getUserById: vi.fn(async (id: string) => ({
+          data: { user: options.users.find((user) => user.id === id) ?? null },
           error: null,
         })),
       },
@@ -137,5 +137,72 @@ describe("loadOrgTeamMembers", () => {
     await expect(loadOrgTeamMembers("org-1")).rejects.toMatchObject({
       code: "PGRST204",
     });
+  });
+});
+
+
+describe("targeted roster identities", () => {
+  it("looks up only scoped unique members and never enumerates Auth", async () => {
+    const admin = adminStub({
+      memberships: [
+        { user_id: "active", access_status: "active" },
+        { user_id: "expired", access_status: "active", access_expires_at: "2000-01-01" },
+      ],
+      users: ["active", "expired", "former", "unrelated"].map((id) => ({
+        id, email: `${id}@example.test`, user_metadata: {},
+      })),
+    });
+    createAdminClient.mockReturnValue(admin);
+    const members = await loadOrgTeamMembers("org-1", {
+      historicalAssigneeIds: ["former", "former"],
+      includeInactiveMembers: true,
+    });
+    expect(admin.auth.admin.getUserById.mock.calls.map(([id]) => id).sort())
+      .toEqual(["active", "expired", "former"]);
+    expect(members.find((member) => member.id === "expired")?.isActive).toBe(false);
+    expect(members.find((member) => member.id === "former")?.isActive).toBe(false);
+  });
+
+  it("bounds outstanding identity reads to four", async () => {
+    const ids = Array.from({ length: 11 }, (_, i) => `member-${i}`);
+    const admin = adminStub({
+      memberships: ids.map((id) => ({ user_id: id, access_status: "active" })),
+      users: [],
+    });
+    let outstanding = 0;
+    let maximum = 0;
+    admin.auth.admin.getUserById.mockImplementation(async (id) => {
+      outstanding++;
+      maximum = Math.max(maximum, outstanding);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      outstanding--;
+      return { data: { user: { id, email: `${id}@example.test`, user_metadata: {} } }, error: null };
+    });
+    createAdminClient.mockReturnValue(admin);
+    expect(await loadOrgTeamMembers("org-1")).toHaveLength(11);
+    expect(maximum).toBe(4);
+    expect(outstanding).toBe(0);
+  });
+
+  it("preserves fail-closed labels while allowing explicit display-only fallback", async () => {
+    const admin = adminStub({
+      memberships: [{ user_id: "missing", access_status: "active" }], users: [],
+    });
+    admin.auth.admin.getUserById.mockRejectedValue(new Error("Auth unavailable"));
+    createAdminClient.mockReturnValue(admin);
+    await expect(loadOrgTeamMembers("org-1")).rejects.toThrow("Auth unavailable");
+    await expect(loadOrgTeamMembers("org-1", { allowMissingIdentityLabels: true }))
+      .resolves.toEqual([{ id: "missing", email: null, displayName: null, isActive: true }]);
+  });
+
+  it("never substitutes a mismatched upstream identity", async () => {
+    const admin = adminStub({
+      memberships: [{ user_id: "needed", access_status: "active" }], users: [],
+    });
+    admin.auth.admin.getUserById.mockResolvedValue({
+      data: { user: { id: "foreign", email: "foreign@example.test", user_metadata: {} } }, error: null,
+    });
+    createAdminClient.mockReturnValue(admin);
+    await expect(loadOrgTeamMembers("org-1")).rejects.toThrow("Auth identity mismatch");
   });
 });

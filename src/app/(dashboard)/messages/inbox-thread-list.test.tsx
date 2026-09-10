@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Thread } from "@/lib/messages/list-threads";
@@ -13,7 +13,7 @@ const supabaseMock = vi.hoisted(() => {
   const subscriptions: Array<{
     type: string;
     filter: Record<string, unknown>;
-    callback: () => void;
+    callback: (payload?: unknown) => void;
   }> = [];
   const channel = {
     on: vi.fn(
@@ -154,6 +154,23 @@ describe("applyThreadUpdates — recency-only ordering", () => {
 });
 
 describe("<InboxThreadList /> realtime subscriptions", () => {
+  it("replaces optimistic unread deltas with the authoritative snapshot", async () => {
+    const props = { selectedThreadId: null, currentUserId: null, onSelectThread: vi.fn(), onRefresh: vi.fn() };
+    const initial = [makeThread({ threadId: "t-event", unreadCount: 1 })];
+    const { rerender } = render(<InboxThreadList {...props} initial={initial} />);
+    await waitFor(() => expect(supabaseMock.subscriptions.length).toBeGreaterThan(0));
+    const inserted = supabaseMock.subscriptions.find(s => s.filter.table === "messages" && s.filter.event === "INSERT")!;
+    act(() => inserted.callback({ new: {
+      contact_id: "contact-t-event", conversation_id: "t-event", channel: "sms", status: "received",
+      body: "new message", direction: "inbound", created_at: "2026-06-13T00:00:00Z", read_at: null,
+    } }));
+    expect(screen.getByTestId("inbox-thread-t-event-unread")).toHaveTextContent("2");
+    rerender(<InboxThreadList {...props} initial={[makeThread({ threadId: "t-event", unreadCount: 2, lastMessageBody: "authoritative message" })]} />);
+    expect(screen.getByTestId("inbox-thread-t-event-unread")).toHaveTextContent("2");
+    expect(screen.getByText("authoritative message")).toBeVisible();
+    expect(screen.queryByText("new message")).not.toBeInTheDocument();
+  });
+
   it("shows the active thread phone in the row before the thread is opened", () => {
     render(
       <InboxThreadList

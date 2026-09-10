@@ -1130,10 +1130,10 @@ describe("listBookingAssignees", () => {
       }),
       auth: {
         admin: {
-          listUsers: vi.fn().mockResolvedValue({
-            data: { users: opts.users ?? [], nextPage: null },
+          getUserById: vi.fn(async (id: string) => ({
+            data: { user: opts.users?.find((user) => user.id === id) ?? null },
             error: null,
-          }),
+          })),
         },
       },
       __membershipsBuilder: membershipsBuilder,

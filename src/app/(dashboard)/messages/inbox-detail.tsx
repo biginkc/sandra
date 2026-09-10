@@ -58,6 +58,8 @@ type Props = {
   /** Narrow list/detail navigation. The parent owns focus restoration. */
   onBackToList?: () => void;
   nowMs?: number;
+  onRevalidate?: () => void;
+  revalidationPending?: boolean;
 };
 
 const DISPO_LABELS: Record<string, string> = {
@@ -386,6 +388,8 @@ export function InboxDetail({
   currentUserId,
   onBackToList,
   nowMs,
+  onRevalidate,
+  revalidationPending = false,
 }: Props) {
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = nowMs ?? fallbackNowMs;
@@ -536,6 +540,7 @@ export function InboxDetail({
         )
       : null;
   const replyRefreshPending =
+    revalidationPending ||
     initialPendingOutboundMessageIds.size > 0 ||
     (replyRefreshGate?.threadId === data.threadId &&
       (replyRefreshGate.initialMessages === null
@@ -583,7 +588,8 @@ export function InboxDetail({
         messageId: message.id,
         initialMessages: data.initialMessages,
       });
-      router.refresh();
+      if (onRevalidate) onRevalidate();
+      else router.refresh();
       return;
     }
 
@@ -601,7 +607,8 @@ export function InboxDetail({
         messageId: message.id,
         initialMessages: data.initialMessages,
       });
-      router.refresh();
+      if (onRevalidate) onRevalidate();
+      else router.refresh();
       return;
     }
 
@@ -616,7 +623,8 @@ export function InboxDetail({
         messageId: message.id,
         initialMessages: data.initialMessages,
       });
-      router.refresh();
+      if (onRevalidate) onRevalidate();
+      else router.refresh();
       return;
     }
 
@@ -630,7 +638,8 @@ export function InboxDetail({
       messageId: message.id,
       initialMessages: data.initialMessages,
     });
-    router.refresh();
+    if (onRevalidate) onRevalidate();
+      else router.refresh();
   };
 
   const replyPhoneUnavailableMessage =

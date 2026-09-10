@@ -70,24 +70,40 @@ export function useQueueStats(
   // if no later-started refresh has already applied.
   const requestSeqRef = useRef(0);
   const appliedSeqRef = useRef(0);
+  const flight = useRef<{ pending: boolean; dirty: boolean; refresh: (() => void) | null }>({ pending: false, dirty: false, refresh: null });
 
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
+    const flightState = flight.current;
 
     async function refresh() {
-      const seq = ++requestSeqRef.current;
-      const result = await getQueueStats();
       if (cancelled) return;
-      if (seq <= appliedSeqRef.current) return;
-      if (result.ok) {
-        appliedSeqRef.current = seq;
-        setStats(result.data);
-        onRefreshSuccess?.(new Date().toISOString());
-      } else {
-        onRefreshFailure?.();
+      if (document.visibilityState !== "visible" || flightState.pending) {
+        flightState.dirty = true;
+        return;
+      }
+      flightState.pending = true;
+      flightState.dirty = false;
+      const seq = ++requestSeqRef.current;
+      try {
+        const result = await getQueueStats();
+        if (cancelled || seq <= appliedSeqRef.current) return;
+        if (result.ok) {
+          appliedSeqRef.current = seq;
+          setStats(result.data);
+          onRefreshSuccess?.(new Date().toISOString());
+        } else {
+          onRefreshFailure?.();
+        }
+      } catch {
+        if (!cancelled) onRefreshFailure?.();
+      } finally {
+        flightState.pending = false;
+        if (flightState.dirty) flightState.refresh?.();
       }
     }
+    flightState.refresh = () => { void refresh(); };
 
     if (refreshSignal > 0) void refresh();
 
@@ -109,6 +125,7 @@ export function useQueueStats(
 
     return () => {
       cancelled = true;
+      flightState.refresh = null;
       clearInterval(intervalId);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };

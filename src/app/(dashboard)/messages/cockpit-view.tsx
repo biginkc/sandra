@@ -1,12 +1,13 @@
 "use client";
+import { NavigationReady } from "@/lib/performance/navigation-ready";
 
 import { MessageSquarePlusIcon, PlusIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
-import type { Thread } from "@/lib/messages/list-threads";
+import type { Thread, ThreadPage } from "@/lib/messages/list-threads";
 import type { UnknownSender } from "@/lib/messages/list-unknown-senders";
 
 import type { QueueStats } from "./actions";
@@ -23,6 +24,8 @@ import { QueuePanel, type QueuedRow } from "./queue-panel";
 import { QueueStatsBanner } from "./queue-stats-banner";
 import { UnknownSenderList } from "./unknown-sender-list";
 import { useConversationSelection } from "./use-conversation-selection";
+import { useInboxSnapshot } from "./use-inbox-snapshot";
+import { useDetailReconciliation } from "./use-detail-reconciliation";
 import { useQueueStats } from "./use-queue-stats";
 
 type Props = {
@@ -76,32 +79,42 @@ const INBOX_CHANGE_TIMEOUT_MS = 10_000;
 export function CockpitView({
   activeTab,
   filter,
-  threads,
+  threads: initialThreads,
   queued,
   queuedHasMore = false,
   selectedThreadId: serverThreadId = null,
   threadDetail: serverThreadDetail,
   unknownSenders,
-  filterCounts,
+  filterCounts: initialFilterCounts,
   assigneeEmails,
   currentUserId,
   queueStats,
   hideDnc,
-  hiddenDncCount,
-  searchDegraded = false,
-  inboxPage = 1,
-  inboxPageSize = 200,
-  inboxTotal = threads.length,
+  hiddenDncCount: initialHiddenDncCount,
+  searchDegraded: initialSearchDegraded = false,
+  inboxPage: initialInboxPage = 1,
+  inboxPageSize: initialInboxPageSize = 200,
+  inboxTotal: initialInboxTotal = initialThreads.length,
   queueLoadFailed = false,
   queueStatsFailed = false,
   nowMs,
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const initialSnapshot = useMemo<ThreadPage>(() => ({
+    threads: initialThreads, counts: initialFilterCounts, hiddenCount: initialHiddenDncCount,
+    degraded: initialSearchDegraded, page: initialInboxPage, pageSize: initialInboxPageSize,
+    total: initialInboxTotal,
+  }), [initialThreads, initialFilterCounts, initialHiddenDncCount, initialSearchDegraded, initialInboxPage, initialInboxPageSize, initialInboxTotal]);
+  const resourceQuery = new URLSearchParams({ filter, hideDnc: hideDnc ? "1" : "0", inboxPage: String(initialInboxPage), search: searchParams.get("search") ?? "" }).toString();
+  const inbox = useInboxSnapshot(initialSnapshot, resourceQuery, activeTab === "inbox" && THREAD_FILTERS.has(filter));
+  const { threads, hiddenCount: hiddenDncCount, degraded: searchDegraded, page: inboxPage, pageSize: inboxPageSize, total: inboxTotal } = inbox.page;
+  const filterCounts = { ...initialFilterCounts, ...inbox.page.counts };
   const { select: selectConversation, reset: resetConversation, ...conversation } =
     useConversationSelection(serverThreadId, serverThreadDetail);
   const selectedThreadId = conversation.selectedId;
   const threadDetail = conversation.detail;
+  useDetailReconciliation(threadDetail, currentUserId, conversation.revalidateSelectedDetail);
   const liveNowMs = useLiveNow(nowMs);
   const inboxTotalPages = Math.max(Math.ceil(inboxTotal / inboxPageSize), 1);
   const [pendingInboxChange, setPendingInboxChange] =
@@ -405,6 +418,7 @@ export function CockpitView({
 
   return (
     <Page className="pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-8">
+      <NavigationReady />
       <PageHeader
         breadcrumb={[{ label: "Workspace" }, { label: "Messages" }]}
         title="Messages"
@@ -488,8 +502,10 @@ export function CockpitView({
                 >
                   <div className="flex h-full min-h-0 flex-col gap-2">
                     <div className="min-h-0 flex-1">
-                      <InboxThreadList
+                      {inbox.failed && <div role="alert" className="border p-3">Inbox updates did not load. <button type="button" className="min-h-11 underline" onClick={() => { void inbox.refresh(); }}>Retry updates</button></div>}
+                  <InboxThreadList
                         initial={threads}
+                    onRefresh={inbox.refresh}
                         selectedThreadId={
                           pendingThreadId ??
                           threadDetail?.threadId ??
@@ -544,14 +560,21 @@ export function CockpitView({
                       <button type="button" className="ml-4 min-h-11 underline"
                         onClick={handleBackToList}>All conversations</button>
                     </div>
-                  ) : <InboxDetail
+                  ) : <>
+                    {conversation.refreshError && <div role="alert" className="rounded-md border p-3">
+                      {conversation.refreshError}
+                      <button type="button" className="ml-3 min-h-11 underline" onClick={() => { void conversation.revalidateSelectedDetail(); }}>Retry updates</button>
+                    </div>}
+                    <InboxDetail
                     data={threadDetail}
+                    onRevalidate={conversation.revalidateSelectedDetail}
+                    revalidationPending={conversation.revalidating || Boolean(conversation.refreshError)}
                     isLoading={isLoadingThread}
                     assigneeEmails={assigneeEmails}
                     currentUserId={currentUserId}
                     onBackToList={handleBackToList}
                     nowMs={liveNowMs}
-                  />}
+                  /></>}
                 </div>
               </div>
             )}

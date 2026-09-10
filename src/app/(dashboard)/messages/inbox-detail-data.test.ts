@@ -158,7 +158,7 @@ type SeedData = {
   }>;
 };
 
-function makeSupabaseStub(seed: SeedData) {
+function makeSupabaseStub(seed: SeedData, beforeRead?: (table: keyof SeedData) => Promise<void>) {
   function makeBuilder(table: keyof SeedData) {
     const filters: Array<{ kind: "eq" | "is"; key: string; value: unknown }> =
       [];
@@ -220,7 +220,7 @@ function makeSupabaseStub(seed: SeedData) {
         onrejected?:
           ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
       ) {
-        return Promise.resolve(execute()).then(onfulfilled, onrejected);
+        return Promise.resolve(beforeRead?.(table)).then(execute).then(onfulfilled, onrejected);
       },
     };
 
@@ -948,5 +948,34 @@ describe("fetchInboxDetail", () => {
     expect(detail?.threadCustomerPhone).toBe("+15550000004");
     expect(detail?.threadBusinessPhone).toBe("+18162804181");
     expect(detail?.replyToPhone).toBe("+15550000004");
+  });
+});
+
+
+it("starts safety reads while the authorized contact lookup is still pending", async () => {
+  let releaseContact!: () => void;
+  const contactPending = new Promise<void>((resolve) => { releaseContact = resolve; });
+  const started: string[] = [];
+  const client = makeSupabaseStub({
+    messages: [makeMessage({ id: "message-1", contact_id: CONTACT_ID, property_id: null, conversation_id: CONVERSATION_ID })],
+    contacts: [makeContact({ id: CONTACT_ID })], properties: [],
+  }, async (table) => {
+    started.push(table);
+    if (table === "contacts") await contactPending;
+  });
+  const result = fetchInboxDetail(client as never, CONVERSATION_ID);
+  await vi.waitFor(() => expect(started).toContain("consent_events"));
+  expect(started).toContain("contacts");
+  releaseContact();
+  expect((await result)?.contactId).toBe(CONTACT_ID);
+});
+
+it("keeps safety unresolved when the authorized contact no longer exists", async () => {
+  const client = makeSupabaseStub({
+    messages: [makeMessage({ id: "message-1", contact_id: CONTACT_ID, property_id: null, conversation_id: CONVERSATION_ID })],
+    contacts: [], properties: [],
+  });
+  expect(await fetchInboxDetail(client as never, CONVERSATION_ID)).toMatchObject({
+    smsConsentState: null, phoneSuppressed: null, smsSafetyReadFailed: true, replyToPhone: null,
   });
 });
