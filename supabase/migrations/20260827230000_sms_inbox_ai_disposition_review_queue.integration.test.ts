@@ -227,6 +227,11 @@ beforeAll(async () => {
   pg = new Client({ connectionString: testDbUrl() });
   await pg.connect();
   await pg.query("begin");
+  // Rehearse the historical seven-argument RPC without today's defaulted
+  // search overload. afterAll rolls this drop back with the fixture DDL.
+  await pg.query(
+    "drop function if exists public.sms_inbox_thread_page_snapshot(timestamptz, text, uuid, uuid, boolean, integer, integer, text)",
+  );
   const schema = await pg.query<{ exists: boolean }>(
     "select to_regclass('public.ai_disposition_reviews') is not null as exists",
   );
