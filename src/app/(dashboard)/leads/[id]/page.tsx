@@ -1,3 +1,4 @@
+import { NavigationReady } from "@/lib/performance/navigation-ready";
 import { withPerformanceSpan } from "@/lib/performance/server-timing";
 import { Suspense } from "react";
 import { createReadScheduler } from "@/lib/performance/read-scheduler";
@@ -723,6 +724,7 @@ async function loadLeadDetailPage({
 
   return (
     <Page className="gap-0 p-0">
+      <NavigationReady />
       <LeadMediaHero
         key={lead.id}
         media={flatMedia ?? undefined}

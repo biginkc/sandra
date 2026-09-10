@@ -123,7 +123,7 @@ it("reads each roster once and excludes former members from assignment options",
   const page = await LeadsPage({ searchParams: Promise.resolve({ assignee: "former-1" }) });
   expect(loadOrgTeamMembers).toHaveBeenCalledExactlyOnceWith("org-1", { includeInactiveMembers: true });
   expect(loadTeamMembersForOrgs).not.toHaveBeenCalled();
-  const header = page.props.children[0];
+  const header = page.props.children.find((child: unknown) => Boolean(child && typeof child === "object" && "props" in child && (child.props as { actions?: unknown }).actions));
   expect(header.props.actions.props.workspaces[0].teamMembers).toEqual([active]);
   expect(fetchLeadBoardData).toHaveBeenCalledWith(expect.anything(), expect.anything(),
     expect.objectContaining({ assigneeId: "former-1" }));

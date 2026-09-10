@@ -1,5 +1,5 @@
 import "server-only";
-import { SpanStatusCode, trace } from "@opentelemetry/api";
+import { context, createContextKey, SpanStatusCode, trace } from "@opentelemetry/api";
 
 export const PERFORMANCE_OPERATIONS = [
   "messages.page", "messages.detail", "messages.detail.api", "messages.inbox.api",
@@ -7,8 +7,10 @@ export const PERFORMANCE_OPERATIONS = [
 ] as const;
 export type PerformanceOperation = typeof PERFORMANCE_OPERATIONS[number];
 
+const scope = createContextKey("sandra.performance.scope");
+
 export async function withPerformanceSpan<T>(name: PerformanceOperation, task: () => T | PromiseLike<T>): Promise<T> {
-  return trace.getTracer("sandra.performance").startActiveSpan(name, async (span) => {
+  return context.with(context.active().setValue(scope, true), () => trace.getTracer("sandra.performance").startActiveSpan(name, async (span) => {
     try {
       return await task();
     } catch (error) {
@@ -18,7 +20,7 @@ export async function withPerformanceSpan<T>(name: PerformanceOperation, task: (
     } finally {
       span.end();
     }
-  });
+  }));
 }
 
 const RESOURCES = new Set([
@@ -44,7 +46,7 @@ export function classifySupabaseRequest(input: RequestInfo | URL): string {
 /** Instrument only an explicitly measured request scope, not all app/provider
  * traffic. fetch's result measures response headers; outer spans include parse. */
 export const performanceFetch: typeof fetch = async (input, init) => {
-  if (!trace.getActiveSpan() || process.env.SANDRA_PERFORMANCE_TELEMETRY !== "1") {
+  if (!context.active().getValue(scope) || process.env.SANDRA_PERFORMANCE_TELEMETRY !== "1") {
     return fetch(input, init);
   }
   return withPerformanceSpan("supabase.request", async () => {

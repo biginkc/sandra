@@ -1,3 +1,4 @@
+import { NavigationReady } from "@/lib/performance/navigation-ready";
 import { withPerformanceSpan } from "@/lib/performance/server-timing";
 import Image from "next/image";
 import Link from "next/link";
@@ -164,6 +165,7 @@ async function loadLeadsPage({
 
   return (
     <Page>
+      <NavigationReady />
       <PageHeader
         breadcrumb={[{ label: "Workspace" }, { label: "Leads" }]}
         title="Leads"
