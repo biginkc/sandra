@@ -6,7 +6,7 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { LeadMediaHero, LeadMediaLoading, LeadMediaVisual } from "./lead-media-hero";
-import type { LeadMediaPresentation } from "./lead-media";
+import { getLeadMediaFlatFallback, type LeadMediaPresentation } from "./lead-media";
 
 const shared = {
   address: "123 Main St",
@@ -507,6 +507,35 @@ describe("streaming lead imagery", () => {
         expect(draft).toHaveValue("Please call me tomorrow");
         expect(draft).toHaveFocus();
       }
+    },
+  );
+});
+
+
+describe("immediately unavailable lead imagery", () => {
+  it.each(["missing-static-key", "missing-signing-secret", "missing-location"] as const)(
+    "renders the compact flat header in the initial server HTML for %s",
+    (reason) => {
+      const media = getLeadMediaFlatFallback({
+        lat: null, lon: null,
+        address: reason === "missing-location" ? null : "123 Main St",
+        city: "Kansas City", state: "MO", zip: "64111",
+      }, {
+        staticKey: reason === "missing-static-key" ? "" : "test-key",
+        signingSecret: reason === "missing-signing-secret" ? "" : "test-secret",
+      });
+      expect(media).toEqual({ kind: "flat", reason });
+      // renderToString runs no effects: this catches a shell that only
+      // becomes flat after hydration, which an ordinary RTL render misses.
+      const html = renderToString(<LeadMediaHero {...shared} media={media ?? undefined} />);
+      const container = document.createElement("div");
+      container.innerHTML = html;
+      const initial = within(container);
+      expect(initial.getByTestId("lead-media-flat")).toHaveClass("bg-card");
+      expect(initial.queryByTestId("lead-media-image-frame")).toBeNull();
+      expect(initial.queryByTestId("lead-media-loading")).toBeNull();
+      expect(initial.getByText(/Street View unavailable/)).not.toBeNull();
+      expect(initial.getByRole("button", { name: "Book appointment" })).not.toBeNull();
     },
   );
 });

@@ -93,10 +93,17 @@ const metadataCache = new Map<
   { expiresAt: number; result: StreetViewMetadataResult }
 >();
 
-export async function resolveLeadMediaPresentation(
+function prepareLeadMedia(
   location: LeadMediaLocation,
   options: LeadMediaResolverOptions = {},
-): Promise<LeadMediaPresentation> {
+): Extract<LeadMediaPresentation, { kind: "flat" }> | {
+  kind: "ready";
+  staticKey: string;
+  coordinates: ReturnType<typeof normalizeCoordinates>;
+  completeAddress: string | null;
+  metadataKey: string | undefined;
+  signingSecret: string;
+} {
   const staticKey = options.staticKey ?? process.env.GOOGLE_MAPS_STATIC_KEY;
   if (!staticKey) return { kind: "flat", reason: "missing-static-key" };
 
@@ -115,6 +122,28 @@ export async function resolveLeadMediaPresentation(
   if (!signingSecret) {
     return { kind: "flat", reason: "missing-signing-secret" };
   }
+
+  return { kind: "ready", staticKey, coordinates, completeAddress, metadataKey, signingSecret };
+}
+
+// Resolve missing configuration/location before rendering a loading frame.
+// Both paths use the same preparation so the page cannot disagree with the
+// asynchronous resolver about whether imagery is possible.
+export function getLeadMediaFlatFallback(
+  location: LeadMediaLocation,
+  options: LeadMediaResolverOptions = {},
+): Extract<LeadMediaPresentation, { kind: "flat" }> | null {
+  const prepared = prepareLeadMedia(location, options);
+  return prepared.kind === "flat" ? prepared : null;
+}
+
+export async function resolveLeadMediaPresentation(
+  location: LeadMediaLocation,
+  options: LeadMediaResolverOptions = {},
+): Promise<LeadMediaPresentation> {
+  const prepared = prepareLeadMedia(location, options);
+  if (prepared.kind === "flat") return prepared;
+  const { staticKey, coordinates, completeAddress, metadataKey, signingSecret } = prepared;
 
   let aerialFallbackReason: Extract<
     LeadMediaPresentation,

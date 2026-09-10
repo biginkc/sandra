@@ -71,7 +71,7 @@ import type { MotivationLevel } from "../actions";
 import type { TagRow } from "../tags-actions";
 import type { Database } from "@/lib/supabase/types";
 import { LeadMediaHero, LeadMediaLoading, LeadMediaVisual } from "./lead-media-hero";
-import { resolveLeadMediaPresentation } from "./lead-media";
+import { getLeadMediaFlatFallback, resolveLeadMediaPresentation } from "./lead-media";
 import { LeadActivityTimeline } from "./lead-activity";
 import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
@@ -569,6 +569,12 @@ export default async function LeadDetailPage({
     zip: lead.zip,
   });
 
+  const mediaLocation = {
+    lat: lead.lat, lon: lead.lon, address: lead.address,
+    city: lead.city, state: lead.state, zip: lead.zip,
+  };
+  const flatMedia = getLeadMediaFlatFallback(mediaLocation);
+
   const homeownerName = lead.homeowner
     ? lead.homeowner.contact_type === "entity"
       ? lead.homeowner.entity_name
@@ -704,18 +710,17 @@ export default async function LeadDetailPage({
     <Page className="gap-0 p-0">
       <LeadMediaHero
         key={lead.id}
+        media={flatMedia ?? undefined}
         address={lead.address}
         locationLine={locationLine}
         homeownerName={homeownerName}
         actions={heroActions}
       >
-        <Suspense fallback={<LeadMediaLoading />}>
-          <LeadMediaSection
-            location={{ lat: lead.lat, lon: lead.lon, address: lead.address,
-              city: lead.city, state: lead.state, zip: lead.zip }}
-            address={lead.address}
-          />
-        </Suspense>
+        {flatMedia ? null : (
+          <Suspense fallback={<LeadMediaLoading />}>
+            <LeadMediaSection location={mediaLocation} address={lead.address} />
+          </Suspense>
+        )}
       </LeadMediaHero>
       <DealSnapshotStrip lead={lead} />
       {training ? <Badge variant="secondary">Internal training · Fictional homeowner</Badge> : null}
