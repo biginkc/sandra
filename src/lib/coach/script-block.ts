@@ -38,7 +38,7 @@ export function nextPhaseId(phaseId: CoachPhaseId): CoachPhaseId | null {
 
 /** properties.source values that map cleanly onto a scripted opener variant.
  * Sandra's source enum has no direct "fsbo" value yet, so FSBO leads fall
- * through to the complete, labeled set of source openers. */
+ * through to the first individual opener, which the rep can change. */
 const LEAD_SOURCE_TO_VARIANT: Record<string, string> = {
   cold_call: "cold_call",
   sms: "sms",

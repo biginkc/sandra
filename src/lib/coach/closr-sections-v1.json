@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "version": "1.2.2",
-  "script_version": "1.2.2",
+  "version": "1.2.3",
+  "script_version": "1.2.3",
   "source": "Outbound Script - Official CLOSR Sales Process — conversational word-track transitions; content references closr-script-v0.json without duplication.",
   "sections": [
     {
@@ -13,50 +13,31 @@
           "branch_tag": "Opener",
           "variants": [
             {
-              "variant_key": "default",
-              "line_ids": [
-                "introduction.opener.default.01",
-                "introduction.opener.default.label-1",
-                "introduction.opener.default.02",
-                "introduction.opener.default.label-2",
-                "introduction.opener.default.03",
-                "introduction.opener.default.label-3",
-                "introduction.opener.default.04",
-                "introduction.opener.default.label-4",
-                "introduction.opener.default.05",
-                "introduction.opener.default.file-assignment"
-              ]
-            },
-            {
               "variant_key": "cold_call",
               "line_ids": [
                 "introduction.opener.cold_call.01",
-                "introduction.opener.cold_call.02",
-                "introduction.opener.cold_call.file-assignment"
+                "introduction.opener.cold_call.02"
               ]
             },
             {
               "variant_key": "fsbo",
               "line_ids": [
                 "introduction.opener.fsbo.01",
-                "introduction.opener.fsbo.02",
-                "introduction.opener.fsbo.file-assignment"
+                "introduction.opener.fsbo.02"
               ]
             },
             {
               "variant_key": "sms",
               "line_ids": [
                 "introduction.opener.sms.01",
-                "introduction.opener.sms.02",
-                "introduction.opener.sms.file-assignment"
+                "introduction.opener.sms.02"
               ]
             },
             {
               "variant_key": "d4d",
               "line_ids": [
                 "introduction.opener.d4d.01",
-                "introduction.opener.d4d.02",
-                "introduction.opener.d4d.file-assignment"
+                "introduction.opener.d4d.02"
               ]
             }
           ]

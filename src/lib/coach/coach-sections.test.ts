@@ -65,7 +65,7 @@ describe("coach section manifest", () => {
   });
 
   it("keeps conditional paths inside their conversational section", () => {
-    expect(getCoachSectionById("introduction.opener")?.content[0].variants).toHaveLength(5);
+    expect(getCoachSectionById("introduction.opener")?.content[0].variants).toHaveLength(4);
     expect(getCoachSectionById("offer.outcome-tracks")?.content.map((item) => item.branch_tag)).toEqual([
       "Good news",
       "Bad news",
@@ -110,7 +110,7 @@ describe("coach section manifest", () => {
       content: { variants: { variant_key: string; line_ids: string[] }[] }[];
     }[];
     const openerVariant = sections[0].content[0].variants[0];
-    expect(openerVariant.variant_key).toBe("default");
+    expect(openerVariant.variant_key).toBe("cold_call");
     const scriptWithNoteOnlyVariant = JSON.parse(JSON.stringify(script)) as ClosrScript;
     const noteOnlyLines = scriptWithNoteOnlyVariant.phases
       .flatMap((phase) => phase.display.branches)
