@@ -1,7 +1,9 @@
 import { updateSession } from "@/lib/supabase/middleware";
-import { type NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 
 export async function middleware(request: NextRequest) {
+  // This exact route owns its development gate; production must reach its 404.
+  if (request.nextUrl.pathname === "/dev/coach-playground") return NextResponse.next();
   return await updateSession(request);
 }
 
