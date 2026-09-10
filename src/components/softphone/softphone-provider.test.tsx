@@ -862,6 +862,109 @@ describe("SoftphoneProvider transport gate", () => {
     expect(screen.getByTestId("dispo-not-interested")).toBeEnabled();
   });
 
+  it.each([false, true])("retains failed cleanup across reload and blocks recovered wrap (RTC setup failure: %s)", async (setupFails) => {
+    transportEnabled.mockReturnValue(true);
+    jitterEnabled.mockReturnValue(true);
+    const target = { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: new Date().toISOString() };
+    prepareLeadCall.mockResolvedValue({ ok: true, data: target });
+    type State = "connecting" | "live" | "failed" | "teardown_unconfirmed" | "teardown_confirmed";
+    let listener: ((state: State) => void) | undefined;
+    let confirmed = false;
+    let releaseCleanup: (() => void) | undefined;
+    const hangup = vi.fn(async () => {
+      if (setupFails && !confirmed) await new Promise<void>((resolve) => { releaseCleanup = resolve; });
+      listener?.(confirmed ? "teardown_confirmed" : "teardown_unconfirmed");
+      return { durationSeconds: 2, outcome: "failed" as const };
+    });
+    const transport = {
+      onStateChange: vi.fn((cb: (state: State) => void) => { listener = cb; }),
+      start: vi.fn(async () => {
+        listener?.("connecting");
+        if (setupFails) throw new Error("RTC registration failed after provisioning");
+        listener?.("live");
+        return { id: "retained-call" };
+      }),
+      callHandle: () => ({ id: "retained-call" }),
+      terminalIsAuthoritative: () => confirmed,
+      hangup,
+      recover: vi.fn(async () => ({ id: "retained-call" })),
+      mute: vi.fn(), hold: vi.fn(),
+    };
+    createTransport.mockReturnValue(transport);
+    const user = userEvent.setup();
+    const first = render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    if (setupFails) {
+      await waitFor(() => expect(hangup).toHaveBeenCalled());
+      expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toContain("retained-call");
+      await act(async () => releaseCleanup?.());
+    } else {
+      await waitFor(() => expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"));
+      act(() => listener?.("failed"));
+    }
+    await screen.findByTestId("dispo-notes");
+    expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toContain("retained-call");
+    first.unmount();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await waitFor(() => expect(transport.recover).toHaveBeenCalledWith({ id: "retained-call" }, target.startedAt));
+    act(() => { listener?.("teardown_unconfirmed"); listener?.("failed"); });
+    await user.type(screen.getByTestId("dispo-notes"), "Call disconnected");
+    expect(screen.getByTestId("dispo-not-interested")).toBeDisabled();
+    expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toContain("retained-call");
+    confirmed = true;
+    await user.click(screen.getByTestId("retry-jitter-teardown"));
+    await waitFor(() => expect(screen.getByTestId("dispo-not-interested")).toBeEnabled());
+    expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toBeNull();
+  });
+
+  it("clears confirmed manual hangup retention before wrap is saved", async () => {
+    transportEnabled.mockReturnValue(true);
+    jitterEnabled.mockReturnValue(true);
+    window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({
+      handle: { id: "retained-call" },
+      target: { propertyId: "property-1", phoneE164: "+18165550123", name: "Softphone Lead" },
+      startedAt: new Date().toISOString(), wrapToken: "retained-token",
+    }));
+    let confirmed = false;
+    const recover = vi.fn(async () => ({ id: "retained-call" }));
+    createTransport.mockReturnValue({
+      onStateChange: vi.fn(), recover,
+      terminalIsAuthoritative: () => confirmed,
+      hangup: vi.fn(async () => { confirmed = true; return { durationSeconds: 2, outcome: "connected_human" as const }; }),
+    });
+    const user = userEvent.setup();
+    const first = render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await user.click(await screen.findByTestId("call-hangup"));
+    expect(await screen.findByTestId("dispo-notes")).toBeVisible();
+    expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toBeNull();
+    first.unmount();
+    await act(async () => {
+      render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    });
+    expect(recover).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["ended", "failed"] as const)("clears recovered retention on authoritative %s", async (status) => {
+    transportEnabled.mockReturnValue(true);
+    jitterEnabled.mockReturnValue(true);
+    window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({
+      handle: { id: "retained-call" },
+      target: { propertyId: "property-1", phoneE164: "+18165550123", name: "Softphone Lead" },
+      startedAt: new Date().toISOString(), wrapToken: "retained-token",
+    }));
+    let listener: ((state: "ended" | "failed") => void) | undefined;
+    createTransport.mockReturnValue({
+      onStateChange: (cb: typeof listener) => { listener = cb; },
+      recover: vi.fn(async () => ({ id: "retained-call" })),
+      terminalIsAuthoritative: () => true,
+    });
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    act(() => listener?.(status));
+    expect(await screen.findByTestId("dispo-notes")).toBeVisible();
+    expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toBeNull();
+    expect(screen.queryByTestId("retry-jitter-teardown")).not.toBeInTheDocument();
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
   });

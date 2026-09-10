@@ -392,6 +392,23 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     setPhone("idle");
   }, []);
 
+  const handleTeardownState = useCallback((status: string): status is "teardown_unconfirmed" | "teardown_confirmed" => {
+    if (status === "teardown_unconfirmed") {
+      teardownWarningRef.current = true;
+      setTeardownUnconfirmed(true);
+      setError(TEARDOWN_WARNING);
+      return true;
+    }
+    if (status === "teardown_confirmed") {
+      forgetRetainedActiveCall();
+      teardownWarningRef.current = false;
+      setTeardownUnconfirmed(false);
+      setError((value) => value === TEARDOWN_WARNING ? null : value);
+      return true;
+    }
+    return false;
+  }, []);
+
   useEffect(() => {
     if (!callingEnabled || !isJitterTransportEnabled() || transportRef.current) return;
     const retained = readRetainedActiveCall();
@@ -411,6 +428,8 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     setPhone("live");
     setCallStatus("audio_reconnect_required");
     transport.onStateChange((status) => {
+      if (transportRef.current !== transport) return;
+      if (handleTeardownState(status)) return;
       if (status === "hold_restored") {
         heldRef.current = true;
         setHeld(true);
@@ -457,7 +476,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
         return;
       }
       if (status === "ended" || status === "failed") {
-        forgetRetainedActiveCall();
+        if (transport.terminalIsAuthoritative?.()) forgetRetainedActiveCall();
         setCallStatus(status);
         setCallOutcome(status === "failed" ? "failed" : "connected_human");
         setFinalSeconds(Math.max(0, Math.floor((Date.now() - Date.parse(retained.startedAt)) / 1000)));
@@ -465,7 +484,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       }
     });
     void transport.recover(retained.handle, retained.startedAt);
-  }, [callingEnabled, showToast, transition, transportFactory]);
+  }, [callingEnabled, handleTeardownState, showToast, transition, transportFactory]);
 
   const startTarget = useCallback(async (
     prepare: () => Promise<{ ok: true; data: SoftphoneTarget } | { ok: false; error: string }>,
@@ -596,10 +615,21 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       attemptGenerationRef.current += 1;
       setCoachCallId(null);
       terminalPromise = (async () => {
-        forgetRetainedActiveCall();
+        // RTC setup can fail after provisioning but before ringing/live.
+        // Retain the known handle before awaiting cleanup so reload can retry.
+        const handle = transport.callHandle?.();
+        if (handle && transportRef.current === transport) {
+          retainActiveCall({ handle, target: result.data, startedAt: result.data.startedAt, wrapToken: callToken });
+        }
         const terminalResult = transport.terminalIsAuthoritative?.()
           ? { durationSeconds: Math.max(0, Math.floor((Date.now() - Date.parse(result.data.startedAt)) / 1000)), outcome: kind === "ended" ? "connected_human" as const : "failed" as const }
           : await transport.hangup();
+        // A terminal browser event alone does not prove provider cleanup.
+        if (transportRef.current === transport) {
+          if (transport.terminalIsAuthoritative?.() ?? !teardownWarningRef.current) {
+            forgetRetainedActiveCall();
+          }
+        }
         setCallOutcome(kind === "failed" ? "failed" : terminalResult.outcome);
         setFinalSeconds(terminalResult.durationSeconds);
         setWrapToken((value) => value ?? crypto.randomUUID());
@@ -619,19 +649,9 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       return terminalPromise;
     };
     transport.onStateChange((status) => {
+      if (transportRef.current !== transport) return;
       if (status === "ringing" || status === "live") persistCurrentHandle();
-      if (status === "teardown_unconfirmed") {
-        teardownWarningRef.current = true;
-        setTeardownUnconfirmed(true);
-        setError(TEARDOWN_WARNING);
-        return;
-      }
-      if (status === "teardown_confirmed") {
-        teardownWarningRef.current = false;
-        setTeardownUnconfirmed(false);
-        setError((value) => value === TEARDOWN_WARNING ? null : value);
-        return;
-      }
+      if (handleTeardownState(status)) return;
       if (
         status === "operator_busy" ||
         status === "not_callable" ||
@@ -781,7 +801,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
         : "The call failed. Add a note to log the outcome.";
       if (!terminalHandledRef.current) await finishTerminal("failed");
     }
-  }, [callingEnabled, coachPreference.enabled, loadCallerIds, showToast, transition, transportFactory]);
+  }, [callingEnabled, coachPreference.enabled, handleTeardownState, loadCallerIds, showToast, transition, transportFactory]);
 
   const openLead = useCallback((lead: SoftphoneLead) => {
     if (!callingEnabled || startInFlightRef.current) return;
@@ -821,6 +841,9 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     terminalHandledRef.current = true;
     try {
       const result = await transport.hangup();
+      if (transportRef.current === transport && transport.terminalIsAuthoritative?.()) {
+        forgetRetainedActiveCall();
+      }
       setCallOutcome(result.outcome);
       setFinalSeconds(result.durationSeconds);
       setCallStatus("ended");
