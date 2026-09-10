@@ -1,3 +1,4 @@
+import { withPerformanceSpan } from "@/lib/performance/server-timing";
 import { Suspense } from "react";
 import { createReadScheduler } from "@/lib/performance/read-scheduler";
 import Link from "next/link";
@@ -119,7 +120,11 @@ export async function generateMetadata({
   return { title };
 }
 
-export default async function LeadDetailPage({
+export default function LeadDetailPage(props: Parameters<typeof loadLeadDetailPage>[0]) {
+  return withPerformanceSpan("leads.detail", () => loadLeadDetailPage(props));
+}
+
+async function loadLeadDetailPage({
   params,
   searchParams,
 }: {

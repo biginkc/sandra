@@ -1,3 +1,4 @@
+import { withPerformanceSpan } from "@/lib/performance/server-timing";
 import "server-only";
 
 import { cache } from "react";
@@ -133,10 +134,10 @@ export async function loadOrgTeamMembers(
     // deletion must not erase the readable audit label for that row.
     ...historicalIds.filter(Boolean),
   ]);
-  const usersById = await listNeededAuthUsers(
+  const usersById = await withPerformanceSpan("roster.identities", () => listNeededAuthUsers(
     neededIds,
     options.allowMissingIdentityLabels ?? false,
-  );
+  ));
 
   const members = [...neededIds].map((id) => {
     const user = usersById.get(id);

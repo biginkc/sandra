@@ -1,3 +1,4 @@
+import { withPerformanceSpan } from "@/lib/performance/server-timing";
 import { createClient } from "@/lib/supabase/server";
 import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
@@ -52,7 +53,11 @@ export const metadata = {
  * State (active tab, filter, selected thread) lives in the URL query
  * string so cockpit URLs are shareable.
  */
-export default async function MessagesPage({
+export default function MessagesPage(props: Parameters<typeof loadMessagesPage>[0]) {
+  return withPerformanceSpan("messages.page", () => loadMessagesPage(props));
+}
+
+async function loadMessagesPage({
   searchParams,
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;

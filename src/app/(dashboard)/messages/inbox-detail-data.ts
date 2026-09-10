@@ -1,3 +1,4 @@
+import { withPerformanceSpan } from "@/lib/performance/server-timing";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
@@ -67,7 +68,11 @@ export type InboxDetail = {
  * translated upstream by `canonicalizeThreadId`. Returns null when the
  * conversation has no messages (stale URL pointing at nothing).
  */
-export async function fetchInboxDetail(
+export function fetchInboxDetail(...args: Parameters<typeof loadInboxDetail>) {
+  return withPerformanceSpan("messages.detail", () => loadInboxDetail(...args));
+}
+
+async function loadInboxDetail(
   supabase: SupabaseClient<Database>,
   conversationId: string,
 ): Promise<InboxDetail | null> {

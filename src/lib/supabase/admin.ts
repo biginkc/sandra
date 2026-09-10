@@ -1,3 +1,4 @@
+import { performanceFetch } from "@/lib/performance/server-timing";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "./types";
@@ -28,6 +29,7 @@ export function createAdminClient(): SupabaseClient<Database> {
     );
   }
   return createClient<Database>(url, key, {
+    global: { fetch: performanceFetch },
     auth: { persistSession: false, autoRefreshToken: false },
   });
 }

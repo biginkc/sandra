@@ -1,3 +1,4 @@
+import { withPerformanceSpan } from "@/lib/performance/server-timing";
 import Image from "next/image";
 import Link from "next/link";
 
@@ -31,7 +32,11 @@ type LeadsSearchParams = {
   sequence_ended?: string;
 };
 
-export default async function LeadsPage({
+export default function LeadsPage(props: Parameters<typeof loadLeadsPage>[0]) {
+  return withPerformanceSpan("leads.page", () => loadLeadsPage(props));
+}
+
+async function loadLeadsPage({
   searchParams,
 }: {
   searchParams: Promise<LeadsSearchParams>;
