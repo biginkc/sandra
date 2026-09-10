@@ -1,0 +1,48 @@
+name: PR 514 dedicated test repair
+on:
+  push:
+    branches: [codex/pr514-dedicated-test-repair]
+permissions:
+  contents: read
+concurrency:
+  group: e2e-shared-test-project
+  cancel-in-progress: false
+  queue: max
+jobs:
+  repair:
+    if: github.repository == 'biginkc/sandra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: e2e-ci
+    env:
+      CI: '1'
+      E2E_CI_SUPABASE_PROJECT_REF: bnkipfoqggwyttbykjfn
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx tsx scripts/e2e-identity-lifecycle.ts emit
+      - id: preflight
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx tsx scripts/e2e-identity-lifecycle.ts preflight
+      - name: Atomic repair and scoped verification
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
+          TEST_SUPABASE_ANON_KEY: ${{ secrets.E2E_CI_SUPABASE_ANON_KEY }}
+          E2E_CI_SUPABASE_DB_URL: ${{ secrets.E2E_CI_SUPABASE_DB_URL }}
+          REPAIR_514_EXECUTE: APPLY_PR514_BNKIP_SEARCH_PACKET
+        run: npx tsx scripts/repair-514/run.mjs
+      - name: Clean up only this run's test identity
+        if: always() && steps.preflight.outcome == 'success'
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx tsx scripts/e2e-identity-lifecycle.ts cleanup
