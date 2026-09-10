@@ -99,20 +99,20 @@ export function CockpitView({
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { select: selectConversation, reset: resetConversation, ...conversation } =
+    useConversationSelection(serverThreadId, serverThreadDetail);
+  const selectedThreadId = conversation.selectedId;
+  const threadDetail = conversation.detail;
   const initialInbox = useMemo<InboxRefreshSnapshot>(() => ({
     page: { threads: initialThreads, counts: initialCounts, hiddenCount: initialHiddenCount, degraded: initialDegraded,
       page: initialPage, pageSize: initialPageSize, total: initialTotal },
     unknown: initialCounts.unknown, dismissed: initialCounts.dismissed,
   }), [initialThreads, initialCounts, initialHiddenCount, initialDegraded, initialPage, initialPageSize, initialTotal]);
   const query = new URLSearchParams({ filter, hideDnc: hideDnc ? "1" : "0", inboxPage: String(initialPage), search: searchParams.get("search") ?? "" }).toString();
-  const inbox = useInboxRefresh(initialInbox, query, activeTab === "inbox" && THREAD_FILTERS.has(filter));
+  const inbox = useInboxRefresh(initialInbox, query, activeTab === "inbox" && THREAD_FILTERS.has(filter), selectedThreadId, serverThreadId);
   const { threads, hiddenCount: hiddenDncCount, degraded: searchDegraded, page: inboxPage, pageSize: inboxPageSize, total: inboxTotal } = inbox.snapshot.page;
   const filterCounts = { ...initialCounts, ...inbox.snapshot.page.counts, unknown: inbox.snapshot.unknown, dismissed: inbox.snapshot.dismissed };
 
-  const { select: selectConversation, reset: resetConversation, ...conversation } =
-    useConversationSelection(serverThreadId, serverThreadDetail);
-  const selectedThreadId = conversation.selectedId;
-  const threadDetail = conversation.detail;
   const liveNowMs = useLiveNow(nowMs);
   const inboxTotalPages = Math.max(Math.ceil(inboxTotal / inboxPageSize), 1);
   const [pendingInboxChange, setPendingInboxChange] =

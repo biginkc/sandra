@@ -21,8 +21,9 @@ it("rejects a late old-filter response and its queued follow-up", async () => {
   fetchMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
   const { result, rerender } = renderHook(({ query }) => useInboxRefresh(initial, query, true), { initialProps: { query: "filter=all" } });
   act(() => { result.current.refresh(); result.current.refresh(); });
+  const oldRefresh = result.current.refresh;
   rerender({ query: "filter=unread" });
-  await act(async () => finish(response(999)));
+  await act(async () => { finish(response(999)); oldRefresh(); });
   expect(fetchMock.mock.calls[0][1].signal.aborted).toBe(true);
   expect(result.current.snapshot).toBe(initial); expect(fetchMock).toHaveBeenCalledTimes(1);
 });
@@ -33,4 +34,25 @@ it("preserves the snapshot and exposes retry on failure", async () => {
   expect(result.current.snapshot).toBe(initial);
   act(() => result.current.refresh()); await waitFor(() => expect(result.current.failed).toBe(false));
   expect(result.current.snapshot.unknown).toBe(4);
+});
+
+it("rejects an A-pinned unread response after B is selected and reads B's snapshot", async () => {
+  window.history.replaceState(null,"","/messages?filter=unread&thread=a");
+  let finishA!: (value: unknown) => void;
+  let finishB!: (value: unknown) => void;
+  fetchMock.mockImplementationOnce(() => new Promise(resolve => { finishA = resolve; }))
+    .mockImplementationOnce(() => new Promise(resolve => { finishB = resolve; }));
+  const { result, rerender } = renderHook(({ selected }) => useInboxRefresh(initial,"filter=unread",true,selected,"a"), {initialProps:{selected:"a"}});
+  act(() => result.current.refresh());
+  const lateARefresh = result.current.refresh;
+  window.history.replaceState(null,"","/messages?filter=unread&thread=b");
+  rerender({selected:"b"});
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(fetchMock.mock.calls[0][1].signal.aborted).toBe(true);
+  expect(fetchMock.mock.calls[1][0]).toContain("thread=b");
+  await act(async () => { finishA(response(999)); lateARefresh(); });
+  expect(result.current.snapshot).toBe(initial);
+  await act(async () => finishB(response(2)));
+  expect(result.current.snapshot.page.counts.all).toBe(2);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
 });
