@@ -38,11 +38,13 @@ import {
 type Response = { data?: unknown; error?: { message: string } | null };
 
 let responseQueue: Response[] = [];
+let trainingTarget = false;
 let updatePayloads: Array<{ table: string; payload: unknown }> = [];
 const CONSENT_EVENT_ID = "11111111-1111-4111-8111-111111111111";
 
 beforeEach(() => {
   responseQueue = [];
+  trainingTarget = false;
   updatePayloads = [];
   createClient.mockResolvedValue(makeSupabase("actor-1"));
   qualifyProperty.mockResolvedValue({ status: "qualified" });
@@ -93,6 +95,19 @@ describe("confirmAiDispositionReview", () => {
 });
 
 describe("setOutreachDispo", () => {
+  it("rejects an internal training property before attempting the update", async () => {
+    trainingTarget = true;
+    responseQueue = [{ data: property(), error: null }];
+
+    const result = await setOutreachDispo("property-1", "not_interested");
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Customer actions are unavailable for an internal training lead.",
+    });
+    expect(updatePayloads).toEqual([]);
+  });
+
   it("writes only message outcomes and clears follow_up_at", async () => {
     responseQueue = [
       { data: property(), error: null },
@@ -358,8 +373,12 @@ function makeSupabase(userId: string) {
       return { data: response?.data ?? null, error: response?.error ?? null };
     }),
     from: vi.fn((table: string) => {
+      let selectedColumns = "";
       const builder = {
-        select: vi.fn(() => builder),
+        select: vi.fn((columns: string) => {
+          selectedColumns = columns;
+          return builder;
+        }),
         update: vi.fn((payload: unknown) => {
           updatePayloads.push({ table, payload });
           return builder;
@@ -367,6 +386,9 @@ function makeSupabase(userId: string) {
         eq: vi.fn(() => builder),
         is: vi.fn(() => builder),
         maybeSingle: vi.fn(async () => {
+          if (table === "properties" && selectedColumns === "is_training") {
+            return { data: { is_training: trainingTarget }, error: null };
+          }
           const response = responseQueue.shift();
           return { data: response?.data ?? null, error: response?.error ?? null };
         }),
