@@ -39,6 +39,7 @@ type Props = {
   /** Truthful copy for an empty all-inbox vs an empty filtered view. */
   emptyMessage?: string;
   nowMs?: number;
+  onRefresh?: () => void;
 };
 
 const THREAD_DISPO_LABELS: Record<string, string> = {
@@ -76,13 +77,22 @@ export function InboxThreadList({
   onSelectThread,
   emptyMessage = "No conversations yet. Inbound messages will appear here.",
   nowMs,
+  onRefresh,
 }: Props) {
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = nowMs ?? fallbackNowMs;
-  const requestRefresh = useThrottledRefresh();
+  const requestRefresh = useThrottledRefresh(undefined, onRefresh);
   const [threadUpdates, setThreadUpdates] = useState<
     Record<string, ThreadUpdate>
   >({});
+  const [lastInitial, setLastInitial] = useState(initial);
+  if (lastInitial !== initial) {
+    // A new authoritative snapshot already includes acknowledged events.
+    // Reapplying the previous optimistic delta would double unread counts
+    // and could replace newer message text with an older event payload.
+    setLastInitial(initial);
+    setThreadUpdates({});
+  }
   const threads = applyThreadUpdates(initial, threadUpdates);
 
   useEffect(() => {
@@ -122,6 +132,10 @@ export function InboxThreadList({
           { event: "*", schema: "public", table: "ai_disposition_reviews" },
           () => requestRefresh(),
         )
+        .on("postgres_changes", { event: "*", schema: "public", table: "contacts" }, requestRefresh)
+        .on("postgres_changes", { event: "*", schema: "public", table: "properties" }, requestRefresh)
+        .on("postgres_changes", { event: "*", schema: "public", table: "consent_events" }, requestRefresh)
+        .on("postgres_changes", { event: "*", schema: "public", table: "sms_phone_suppressions" }, requestRefresh)
         .subscribe();
     })();
 

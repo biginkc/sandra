@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   listUsers: vi.fn(),
+  getUserById: vi.fn(),
 }));
 
 let queuedData: unknown[] | null = [];
@@ -107,7 +108,7 @@ vi.mock("@/lib/supabase/server", () => ({
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: vi.fn(() => ({
-    auth: { admin: { listUsers: mocks.listUsers } },
+    auth: { admin: { listUsers: mocks.listUsers, getUserById: mocks.getUserById } },
     from: vi.fn((table: string) => {
       if (table === "memberships") return makeMembershipsBuilder();
       throw new Error(`Unexpected admin table in test: ${table}`);
@@ -128,6 +129,7 @@ beforeEach(() => {
   // queues — early-exit code paths consume fewer responses than tests
   // enqueue, and leftovers must never leak into the next test.
   mocks.listUsers.mockReset();
+  mocks.getUserById.mockReset();
   queuedData = [];
   queuedError = null;
   queuedResponses = [];
@@ -553,12 +555,18 @@ describe("fetchAssigneeEmails", () => {
   });
 });
 
+function mockIdentityUsers(response: { data: { users: Array<Record<string, unknown>>; nextPage: null }; error: null }) {
+  mocks.getUserById.mockImplementation(async (id: string) => ({
+    data: { user: response.data.users.find((user) => user.id === id) ?? null }, error: null,
+  }));
+}
+
 describe("fetchOrgRoster", () => {
   it("returns the full roster with real labels for every active org membership, independent of any appointment rows (Codex round 1)", async () => {
     // A teammate with zero appointments this week still appears — this
     // query never touches `tasks`/`appointments`, only `memberships`.
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
-    mocks.listUsers.mockResolvedValueOnce({
+    mockIdentityUsers({
       data: {
         users: [
           {
@@ -593,7 +601,7 @@ describe("fetchOrgRoster", () => {
       { user_id: "active-1" },
       { user_id: "former-1", access_status: "revoked" },
     ];
-    mocks.listUsers.mockResolvedValueOnce({
+    mockIdentityUsers({
       data: {
         users: [
           {
@@ -631,7 +639,7 @@ describe("fetchOrgRoster", () => {
   it("keeps the full roster available even when the current week's appointments are empty (decoupled from `fetchCalendarAppointments`)", async () => {
     queuedData = [];
     membershipRows = [{ user_id: "rep-2" }];
-    mocks.listUsers.mockResolvedValueOnce({
+    mockIdentityUsers({
       data: {
         users: [
           {
@@ -665,12 +673,12 @@ describe("fetchOrgRoster", () => {
 
     const result = await fetchOrgRoster("org-1");
     expect(result).toEqual({ ok: false });
-    expect(mocks.listUsers).not.toHaveBeenCalled();
+    expect(mocks.getUserById).not.toHaveBeenCalled();
   });
 
   it("fails closed when auth labels cannot distinguish roster identities", async () => {
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
-    mocks.listUsers.mockImplementationOnce(() => {
+    mocks.getUserById.mockImplementationOnce(() => {
       throw new Error("network boom");
     });
 
@@ -680,15 +688,9 @@ describe("fetchOrgRoster", () => {
 
   it("fails closed on a partial auth-label inventory", async () => {
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
-    mocks.listUsers
-      .mockResolvedValueOnce({
-        data: {
-          users: [{ id: "user-1", email: "owner@bmh.com" }],
-          nextPage: 2,
-        },
-        error: null,
-      })
-      .mockResolvedValueOnce({ data: null, error: { message: "boom" } });
+    mocks.getUserById.mockImplementation(async (id: string) => id === "user-1"
+      ? { data: { user: { id, email: "owner@bmh.com" } }, error: null }
+      : { data: null, error: { message: "boom" } });
 
     const result = await fetchOrgRoster("org-1");
     expect(result).toEqual({ ok: false });
@@ -696,7 +698,7 @@ describe("fetchOrgRoster", () => {
 
   it("fails closed when an auth identity has neither an authoritative name nor an email", async () => {
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
-    mocks.listUsers.mockResolvedValueOnce({
+    mockIdentityUsers({
       data: {
         users: [
           { id: "user-1", email: "owner@bmh.com" },
@@ -726,27 +728,9 @@ describe("fetchOrgRoster", () => {
       membershipRows = Array.from({ length: CAP }, (_, i) => ({
         user_id: userId(i),
       }));
-      mocks.listUsers
-        .mockResolvedValueOnce({
-          data: {
-            users: Array.from({ length: 200 }, (_, i) => ({
-              id: userId(i),
-              email: `${userId(i)}@example.test`,
-            })),
-            nextPage: 2,
-          },
-          error: null,
-        })
-        .mockResolvedValueOnce({
-          data: {
-            users: Array.from({ length: 200 }, (_, i) => ({
-              id: userId(i + 200),
-              email: `${userId(i + 200)}@example.test`,
-            })),
-            nextPage: null,
-          },
-          error: null,
-        });
+      mocks.getUserById.mockImplementation(async (id: string) => ({
+        data: { user: { id, email: `${id}@example.test` } }, error: null,
+      }));
 
       const result = await fetchOrgRoster("org-1");
       if (!result.ok) throw new Error("expected ok:true");
@@ -762,7 +746,7 @@ describe("fetchOrgRoster", () => {
       expect(result).toEqual({ ok: false });
       expect(membershipLimitCalls).toEqual([CAP + 1]);
       // A capped-out identity load never falls through to resolving labels.
-      expect(mocks.listUsers).not.toHaveBeenCalled();
+      expect(mocks.getUserById).not.toHaveBeenCalled();
     });
   });
 });

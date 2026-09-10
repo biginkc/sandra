@@ -174,3 +174,70 @@ describe("conversation selection", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+
+it("coalesces event bursts into one read plus one trailing read without acknowledging again", async () => {
+  window.history.replaceState(null, "", "/messages?thread=a");
+  const initial = detail("a");
+  let finish!: (value: unknown) => void;
+  fetchMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  fetchMock.mockResolvedValueOnce(response("a"));
+  const { result } = renderHook(() => useConversationSelection("a", initial));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  act(() => {
+    void result.current.revalidateSelectedDetail();
+    for (let i = 0; i < 20; i++) void result.current.revalidateSelectedDetail();
+  });
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(result.current.detail).toBe(initial);
+  expect(result.current.loading).toBe(false);
+  expect(result.current.revalidating).toBe(true);
+  await act(async () => finish(response("a")));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(result.current.revalidating).toBe(false));
+  expect(markRead).not.toHaveBeenCalled();
+});
+
+it("preserves loaded detail on refresh failure and keeps safety gated until retry succeeds", async () => {
+  window.history.replaceState(null, "", "/messages?thread=a");
+  const initial = detail("a");
+  fetchMock.mockResolvedValueOnce({ ok: false }).mockResolvedValueOnce(response("a"));
+  const { result } = renderHook(() => useConversationSelection("a", initial));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  await act(async () => { await result.current.revalidateSelectedDetail(); });
+  expect(result.current.detail).toBe(initial);
+  expect(result.current.error).toBeNull();
+  expect(result.current.refreshError).toMatch(/before replying/);
+  await act(async () => { await result.current.revalidateSelectedDetail(); });
+  expect(result.current.refreshError).toBeNull();
+  expect(result.current.detail?.threadId).toBe("a");
+});
+
+it("ignores a late refresh and its dirty follow-up after selecting another conversation", async () => {
+  window.history.replaceState(null, "", "/messages?thread=a");
+  const initial = detail("a");
+  let finish!: (value: unknown) => void;
+  fetchMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  fetchMock.mockResolvedValueOnce(response("b"));
+  const { result } = renderHook(() => useConversationSelection("a", initial));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  act(() => { void result.current.revalidateSelectedDetail(); void result.current.revalidateSelectedDetail(); });
+  window.history.replaceState(null, "", "/messages?thread=b");
+  await act(async () => { await result.current.select("b"); finish(response("a")); });
+  expect(result.current.detail?.threadId).toBe("b");
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+it("ignores a callback retained by the old conversation after a new selection starts", async () => {
+  window.history.replaceState(null, "", "/messages?thread=a");
+  const initial = detail("a");
+  const { result } = renderHook(() => useConversationSelection("a", initial));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  const oldRefresh = result.current.revalidateSelectedDetail;
+  let finish!: (value: unknown) => void;
+  fetchMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  act(() => { void result.current.select("b"); void oldRefresh(); });
+  expect(fetchMock.mock.calls.map(call => call[0])).toEqual(["/api/messages/thread-detail?thread=b"]);
+  await act(async () => finish(response("b")));
+  expect(result.current.detail?.threadId).toBe("b");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
