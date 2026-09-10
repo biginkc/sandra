@@ -11,7 +11,6 @@ type ContextStartupMode = "immediate" | "deferred" | "failure";
 
 const spokenForkInventory: Record<string, string[]> = {
   "introduction.opener": [
-    "Use All openers spoken fork for Opener",
     "Use Cold call spoken fork for Opener",
     "Use FSBO spoken fork for Opener",
     "Use SMS reply spoken fork for Opener",
@@ -151,7 +150,7 @@ test("walks every PDF-aligned section forward and backward with correct boundari
 
 test("starts each navigated section at the top without resetting scroll for live updates", async ({ page }) => {
   await mountCoach(page, { width: 1440, height: 520 });
-  await page.getByTestId("variant-Opener-default").click();
+  await page.getByTestId("variant-Opener-cold_call").click();
   const panel = page.getByTestId("coach-script-panel");
   await panel.evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await expect.poll(() => panel.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
@@ -578,13 +577,27 @@ test("mute, hold, keypad, hangup, and desktop/mobile surface ordering work throu
   expect(script!.y + script!.height).toBeLessThanOrEqual(recommendations!.y + 1);
 });
 
-test("includes the requested file-assignment passage in every opening path", async ({ page }) => {
+test("preserves the two-part greeting and goes straight to the qualification frame", async ({ page }) => {
   await mountCoach(page);
-  const passage = page.getByTestId("current-section-script").getByText("So good news, it looks like I was assigned to your file", { exact: false });
-  for (const key of ["default", "cold_call", "fsbo", "sms", "d4d"]) {
+  await expect(page.getByTestId("variant-Opener-default")).toHaveCount(0);
+  for (const key of ["cold_call", "fsbo", "sms", "d4d"]) {
     await page.getByTestId(`variant-Opener-${key}`).click();
-    await passage.scrollIntoViewIfNeeded();
-    await expect(passage).toBeVisible();
-    await expect(page.getByTestId("current-section-script")).toContainText("to see if I can even do anything good to help ya!");
+    const script = page.getByTestId("current-section-script");
+    const greeting = script.locator("p").filter({ hasText: /^Hey Jane\?\s*$/ });
+    const introduction = script.locator("p").filter({ hasText: /^Hey Jane, this is Jarrad Henry!$/ });
+    await expect(greeting).toHaveCount(1);
+    await expect(introduction).toHaveCount(1);
+    const first = await greeting.boundingBox();
+    const second = await introduction.boundingBox();
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(second!.y).toBeGreaterThanOrEqual(first!.y + first!.height);
+    await expect(script).not.toContainText("I was assigned to your file");
+    await expect(script).not.toContainText("The reason for my call today");
+    await page.getByTestId("coach-next").click();
+    await expect(script).toContainText("The reason for my call today");
+    await expect(script).toContainText("Sound fair?");
+    await page.getByTestId("coach-back").click();
+    await expect(page.getByTestId(`variant-Opener-${key}`)).toHaveAttribute("aria-selected", "true");
   }
 });

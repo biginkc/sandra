@@ -24,8 +24,7 @@ const context: CoachCallContext = {
 // Only the approved name, address, assistant and motivation placeholders
 // are substituted here. Expectations must not be derived from script JSON.
 const greeting = "Hey Jordan? Hey Jordan, this is Alex Rep!";
-// Requested verbatim addition from the official Inbound source (read 2026-09-08).
-const fileAssignment = "So good news, it looks like I was assigned to your file because they thought I would be the best fit to try and figure out a solution to help you… and really this first call is pretty basic, It’s more for us to find out a little bit more about the property and your situation, to see if I can even do anything good to help ya!";
+// User-approved deletions on 2026-09-10 remove only the inbound addition; the two-part greeting stays verbatim.
 const sourceOpeners = {
   cold_call: "It looks like you spoke to one of my assistants Rose a little bit ago about your property on 1842 Lantern Finch Lane, they said you may need help with moving closer to an adult daughter?",
   fsbo: "I saw your place at 1842 Lantern Finch Lane was listed For Sale by Owner. Were you looking to sell to someone planning to live there, or would you want me to check if our team can get you approved for an all-cash offer?",
@@ -60,22 +59,12 @@ function spokenLines(branch: ReturnType<typeof opener>): string[] {
 
 describe("official source opener fidelity through the section builder", () => {
   it.each([null, "manual", "import", "unknown-source"])(
-    "keeps every source opener visible in source order when source is %s",
+    "falls back to a single opener when source is %s",
     (source) => {
       const branch = opener(source);
-      expect(branch.selected.key).toBe("default");
-      expect(spokenLines(branch)).toEqual([
-        greeting,
-        sourceOpeners.cold_call,
-        sourceOpeners.fsbo,
-        sourceOpeners.sms,
-        sourceOpeners.d4d,
-        fileAssignment,
-      ]);
-      expect(branch.selected.lines.filter((line) => line.type === "note")
-        .map((line) => displayedText(line.segments))).toEqual([
-        "Cold call:", "FSBO:", "SMS reply:", "Driving for dollars:",
-      ]);
+      expect(branch.selected.key).toBe("cold_call");
+      expect(spokenLines(branch)).toEqual([greeting, sourceOpeners.cold_call]);
+      expect(branch.variantOptions.map((option) => option.key)).toEqual(["cold_call", "fsbo", "sms", "d4d"]);
     },
   );
 
@@ -86,7 +75,7 @@ describe("official source opener fidelity through the section builder", () => {
   ] as const)("keeps the mapped %s source on its complete specific opener", (source, key) => {
     const branch = opener(source);
     expect(branch.selected.key).toBe(key);
-    expect(spokenLines(branch)).toEqual([greeting, sourceOpeners[key], fileAssignment]);
+    expect(spokenLines(branch)).toEqual([greeting, sourceOpeners[key]]);
   });
 
   it.each(["cold_call", "fsbo", "sms", "d4d"] as const)(
@@ -94,13 +83,11 @@ describe("official source opener fidelity through the section builder", () => {
     (key) => {
       const branch = opener("sms", key);
       expect(branch.selected.key).toBe(key);
-      expect(spokenLines(branch)).toEqual([greeting, sourceOpeners[key], fileAssignment]);
+      expect(spokenLines(branch)).toEqual([greeting, sourceOpeners[key]]);
     },
   );
 
-  it("allows the rep to restore all openers even with a mapped source", () => {
-    expect(spokenLines(opener("sms", "default"))).toEqual([
-      greeting, sourceOpeners.cold_call, sourceOpeners.fsbo, sourceOpeners.sms, sourceOpeners.d4d, fileAssignment,
-    ]);
+  it("ignores a stale combined-opener override and keeps the mapped individual path", () => {
+    expect(spokenLines(opener("sms", "default"))).toEqual([greeting, sourceOpeners.sms]);
   });
 });

@@ -525,17 +525,18 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getAllByTestId("token-placeholder").length).toBeGreaterThan(0);
   });
 
-  it("shows every original opener before qualification when lead source is unknown", async () => {
+  it("shows only one opener with four individual choices when lead source is unknown", async () => {
     loadCoachCallContext.mockResolvedValue({ ...sampleContext, leadSource: null });
     render(<Harness {...baseProps()} />);
     await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
     const opener = screen.getByTestId("current-section-script");
     expect(opener).toHaveTextContent("It looks like you spoke to one of my assistants");
-    expect(opener).toHaveTextContent("was listed For Sale by Owner.");
-    expect(opener).toHaveTextContent("I see you just responded to our teams text");
-    expect(opener).toHaveTextContent("I’m holding a copy of your tax records here");
+    expect(opener).not.toHaveTextContent("was listed For Sale by Owner.");
+    expect(opener).not.toHaveTextContent("I see you just responded to our teams text");
+    expect(opener).not.toHaveTextContent("I’m holding a copy of your tax records here");
     expect(opener).not.toHaveTextContent("The reason for my call today");
-    expect(screen.getByTestId("variant-Opener-default")).toHaveAccessibleName("Use All openers spoken fork for Opener");
+    expect(screen.queryByTestId("variant-Opener-default")).not.toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "Opener variant" }).querySelectorAll("button")).toHaveLength(4);
   });
 
   it("keeps conditional variants inside the visible section", async () => {

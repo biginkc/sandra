@@ -133,7 +133,7 @@ describe("buildCoachSectionScriptBlock", () => {
       { leadSource: "cold_call", occupancy: null },
     );
     expect(opener?.branches[0].selected.key).toBe("cold_call");
-    expect(opener?.branches[0].selected.lines).toHaveLength(3);
+    expect(opener?.branches[0].selected.lines).toHaveLength(2);
 
     const offer = buildCoachSectionScriptBlock("offer.outcome-tracks", tokens);
     expect(offer?.branchOptions).toEqual([
@@ -194,7 +194,8 @@ describe("branch variant selection", () => {
     const block = buildPhaseScriptBlock("introduction", tokens, { leadSource: "cold_call", occupancy: null });
     const opener = block?.branches.find((branch) => branch.tag === "Opener");
     expect(opener?.selected.key).toBe("cold_call");
-    expect(opener?.autoSelected).toBe(true);
+    // Cold call is now also the fallback; autoSelected marks a departure from that fallback.
+    expect(opener?.autoSelected).toBe(false);
     // Every opener variant must lead with the greeting — it's not a
     // mutually-exclusive "default" variant that disappears once a
     // lead-source variant auto-selects.
@@ -205,7 +206,7 @@ describe("branch variant selection", () => {
   it("falls back to the default opener variant for a source with no mapped branch (e.g. FSBO-less sources)", () => {
     const block = buildPhaseScriptBlock("introduction", tokens, { leadSource: "web_form", occupancy: null });
     const opener = block?.branches.find((branch) => branch.tag === "Opener");
-    expect(opener?.selected.key).toBe("default");
+    expect(opener?.selected.key).toBe("cold_call");
   });
 
   it("auto-selects the reveal entry variant from occupancy", () => {
