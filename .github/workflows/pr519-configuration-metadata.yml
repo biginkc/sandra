@@ -1,0 +1,32 @@
+name: PR519 configuration metadata
+
+on:
+  push:
+    branches:
+      - codex/pr519-config-metadata-only
+
+permissions:
+  contents: read
+
+jobs:
+  parse-configured-metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    environment: e2e-ci
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 24.0.0
+          check-latest: false
+      - name: Emit redacted configuration metadata
+        env:
+          E2E_CI_SUPABASE_PROJECT_REF: ${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
+          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
+          E2E_CI_SUPABASE_DB_URL: ${{ secrets.E2E_CI_SUPABASE_DB_URL }}
+          E2E_CI_SUPABASE_DB_HOST: ${{ vars.E2E_CI_SUPABASE_DB_HOST }}
+        run: node scripts/pr519-configuration-metadata-parser.mjs --head "$GITHUB_SHA" --workflow pr519-configuration-metadata --run "$GITHUB_RUN_ID" --environment e2e-ci

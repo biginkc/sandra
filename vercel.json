@@ -1,4 +1,9 @@
 {
+  "git": {
+    "deploymentEnabled": {
+      "codex/pr519-config-metadata-only": false
+    }
+  },
   "crons": [
     {
       "path": "/api/cron/notification-cleanup",
