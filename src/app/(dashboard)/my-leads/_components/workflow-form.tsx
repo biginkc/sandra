@@ -51,9 +51,9 @@ export function WorkflowDialogFooter({
   )
 }
 
-export function FieldError({ message }: { message?: string }) {
+export function FieldError({ message, id }: { message?: string; id?: string }) {
   if (!message) return null
-  return <p className="text-xs text-destructive">{message}</p>
+  return <p id={id} className="text-xs text-destructive">{message}</p>
 }
 
 export function WorkflowFormError({ message }: { message: string | null }) {
@@ -81,6 +81,7 @@ export function DateTimeField({
   error?: string
   required?: boolean
 }) {
+  const errorId = `${id}-error`
   return (
     <div className="flex flex-col gap-1.5">
       <Label htmlFor={id}>{label}</Label>
@@ -91,9 +92,10 @@ export function DateTimeField({
         aria-required={required}
         onChange={(event) => onChange(event.target.value)}
         aria-invalid={Boolean(error)}
+        aria-describedby={error ? errorId : undefined}
         className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
       />
-      <FieldError message={error} />
+      <FieldError id={errorId} message={error} />
       <p className="text-xs text-muted-foreground">Central time ({ACQUISITION_TIME_ZONE})</p>
     </div>
   )

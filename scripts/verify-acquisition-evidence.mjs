@@ -187,6 +187,42 @@ try {
     const current=(await client.query('select id,assignee_user_id from acquisition_assignment_episodes where property_id=$1 and ended_at is null',[lead])).rows[0];
     assert.equal(bound.assignmentEpisodeId,current.id);assert.equal(current.assignee_user_id,rep);
   } finally {await client.query('rollback');await peer.end();}
+  // Independent aggregate oracle: raw stored facts reduced in JS, not the KPI
+  // projection or its SQL aggregates. Give the current rep one known stale lead.
+  await client.query("insert into acquisition_queue_states(property_id,org_id,stage,stage_entered_at) values($1,$2,'contacted',now()) on conflict(property_id,org_id) do update set stage='contacted',archived_at=null",[lead,org]);
+  const start=new Date(Date.now()-86400000),end=new Date(Date.now()+86400000);
+  const inRange=at=>at && new Date(at)>=start && new Date(at)<end;
+  const attempts=(await client.query('select * from acquisition_attempts')).rows;
+  const assignmentFacts=(await client.query('select * from acquisition_assignment_episodes')).rows;
+  const offers=(await client.query('select * from acquisition_offers')).rows;
+  const tasks=(await client.query('select * from tasks')).rows;
+  const attribution=(await client.query('select * from acquisition_appointment_attribution')).rows;
+  for(const member of [rep,owner]) {
+    const a=attempts.filter(r=>r.org_id===org&&r.actor_user_id===member&&inRange(r.occurred_at));
+    const e=assignmentFacts.filter(r=>r.org_id===org&&r.assignee_user_id===member&&r.eligible&&r.episode_kind==='live'&&inRange(r.assigned_at));
+    const completed=e.filter(r=>r.first_call_started_at);
+    const due=tasks.filter(t=>t.org_id===org&&t.type==='appointment'&&t.related_property_id&&t.status!=='cancelled'&&t.outcome!=='rescheduled'&&inRange(t.due_at));
+    const credited=due.filter(t=>attribution.some(a=>a.task_id===t.id&&a.org_id===org&&a.accountable_user_id===member));
+    const expected={attempts:a.length,reached:a.filter(r=>r.outcome==='reached').length,pendingOutcomes:a.filter(r=>r.outcome===null).length,
+      firstCallSamples:completed.length,firstCallPending:e.length-completed.length,
+      appointmentsDue:credited.length,appointmentsHeld:credited.filter(t=>t.outcome==='held').length,
+      orgAppointmentsUnattributed:due.filter(t=>!attribution.some(a=>a.task_id===t.id&&a.org_id===org)).length,
+      offersSent:offers.filter(r=>r.org_id===org&&r.actor_user_id===member&&inRange(r.sent_at)).length,
+      staleLeads:member===rep?1:0};
+    const seconds=completed.length?completed.reduce((sum,r)=>sum+(new Date(r.first_call_started_at)-new Date(r.assigned_at))/1000,0)/completed.length:null;
+    await client.query("select set_config('request.jwt.claim.sub',$1,false)",[owner]);await client.query('set role authenticated');
+    const viewed=(await client.query('select fn_get_acquisition_kpis($1,$2,$3,$4) fact',[org,member,start,end])).rows[0].fact;
+    for(const [key,value] of Object.entries(expected))assert.equal(viewed[key],value,`independent ${member} ${key}`);
+    if(seconds===null)assert.equal(viewed.firstCallElapsedSeconds,null);
+    else assert.ok(Math.abs(viewed.firstCallElapsedSeconds-seconds)<0.002,'elapsed mean matches raw timestamps');
+    await client.query("select set_config('request.jwt.claim.sub',$1,false)",[member]);
+    const self=(await client.query('select fn_get_acquisition_kpis($1,$2,$3,$4) fact',[org,member,start,end])).rows[0].fact;
+    assert.deepEqual(self,viewed,'owner and member get identical KPIs for the same rep and range');
+    const historical=(await client.query("select fn_get_acquisition_kpis($1,$2,'2000-01-01','2000-01-02') fact",[org,member])).rows[0].fact;
+    assert.equal(historical.attempts,0);assert.equal(historical.staleLeads,expected.staleLeads,'current distinct stale count ignores reporting period');
+    await client.query('reset role');
+  }
+  console.log('PASS: independent raw-fact KPI aggregate, owner/self equality, period-independent distinct stale count');
   console.log('PASS: call reconciliation in both arrival orders, immutable performer, retry, no duplicate attempts');
   console.log('PASS: isolated PG17 fixture; migrations; bind without attempt; late-call attribution; replay; new-owner clock/stage preserved; service-only grant; five-stage read; cursor continuation/filter/viewer binding; member scope; original-rep appointment and call KPIs; manual outreach/call clock separation; optional recording');
 

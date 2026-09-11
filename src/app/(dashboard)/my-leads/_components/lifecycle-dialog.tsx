@@ -223,7 +223,7 @@ export function AcquisitionLifecycleDialog({
                     {pendingOfferId || "No pending offer is available."}
                   </p>
                 </div>
-                <FieldError message={fieldError("pendingOfferId")} />
+                <FieldError id="acquisition-offer-pending-id-error" message={fieldError("pendingOfferId")} />
                 <DateTimeField
                   id="acquisition-offer-declined-at"
                   label="Declined at"
@@ -243,13 +243,14 @@ export function AcquisitionLifecycleDialog({
                     value={reason}
                     onChange={(event) => setReason(event.target.value as typeof reason)}
                     aria-invalid={Boolean(fieldError("reason"))}
+                    aria-describedby={fieldError("reason") ? "acquisition-handoff-reason-error" : undefined}
                     className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
                   >
                     <option value="">Choose reason</option>
                     <option value="not_interested">Not interested</option>
                     <option value="needs_nurture">Needs nurture</option>
                   </select>
-                  <FieldError message={fieldError("reason")} />
+                  <FieldError id="acquisition-handoff-reason-error" message={fieldError("reason")} />
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <Label htmlFor="acquisition-handoff-recipient">Reassign to</Label>
@@ -258,6 +259,7 @@ export function AcquisitionLifecycleDialog({
                     value={recipientUserId}
                     onChange={(event) => setRecipientUserId(event.target.value)}
                     aria-invalid={Boolean(fieldError("recipientUserId"))}
+                    aria-describedby={fieldError("recipientUserId") ? "acquisition-handoff-recipient-error" : undefined}
                     className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
                   >
                     <option value="">Choose configured recipient</option>
@@ -267,7 +269,7 @@ export function AcquisitionLifecycleDialog({
                       </option>
                     ))}
                   </select>
-                  <FieldError message={fieldError("recipientUserId")} />
+                  <FieldError id="acquisition-handoff-recipient-error" message={fieldError("recipientUserId")} />
                   <p className="text-xs text-muted-foreground">The parent action supplies the authorized same-org recipient list.</p>
                 </div>
               </>
@@ -279,12 +281,14 @@ export function AcquisitionLifecycleDialog({
                   type="checkbox"
                   checked={confirmed}
                   onChange={(event) => setConfirmed(event.target.checked)}
+                  aria-invalid={Boolean(fieldError("confirmed"))}
+                  aria-describedby={fieldError("confirmed") ? "acquisition-archive-confirmed-error" : undefined}
                   className="mt-0.5"
                 />
                 <span>I understand this archives the queue entry and preserves its Under Contract history.</span>
               </label>
             )}
-            <FieldError message={fieldError("confirmed")} />
+            <FieldError id="acquisition-archive-confirmed-error" message={fieldError("confirmed")} />
           </div>
           <WorkflowDialogFooter
             submitting={submitState.submitting}

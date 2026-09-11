@@ -35,4 +35,15 @@ describe("MyLeadsNavBadge", () => {
     await waitFor(() => expect(onRefresh).toHaveBeenCalledOnce());
     expect(screen.getByTestId("my-leads-badge")).toHaveTextContent("4");
   });
+
+  it("adopts a refreshed initial count from the dashboard layout", async () => {
+    const { rerender } = render(<MyLeadsNavBadge initialCount={4} />);
+    expect(screen.getByTestId("my-leads-badge")).toHaveTextContent("4");
+
+    rerender(<MyLeadsNavBadge initialCount={0} />);
+    await waitFor(() => expect(screen.queryByTestId("my-leads-badge")).not.toBeInTheDocument());
+
+    rerender(<MyLeadsNavBadge initialCount={7} />);
+    expect(screen.getByTestId("my-leads-badge")).toHaveTextContent("7");
+  });
 });

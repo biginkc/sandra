@@ -151,10 +151,11 @@ export function AcquisitionReadinessDialog({
                     value={motivationText}
                     onChange={(event) => setMotivationText(event.target.value)}
                     aria-invalid={Boolean(clientFieldErrors.motivationText || submitState.fieldErrors.motivationText)}
+                    aria-describedby={clientFieldErrors.motivationText || submitState.fieldErrors.motivationText ? "acquisition-motivation-text-error" : undefined}
                     placeholder="What is driving the seller?"
                     rows={4}
                   />
-                  <FieldError message={clientFieldErrors.motivationText || submitState.fieldErrors.motivationText} />
+                  <FieldError id="acquisition-motivation-text-error" message={clientFieldErrors.motivationText || submitState.fieldErrors.motivationText} />
                 </div>
               )}
             </fieldset>

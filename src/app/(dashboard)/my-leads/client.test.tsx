@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react"
+import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as React from "react"
 
 const mocks = vi.hoisted(() => ({
@@ -33,14 +33,56 @@ vi.mock("./actions", () => ({
 vi.mock("./_components/queue", () => ({
   MyLeadsQueue: ({
     stages,
+    selectedPeriod,
+    selectedDateRange,
+    onPeriodChange,
+    onDateRangeChange,
   }: {
     stages: { not_contacted?: { rows: Array<{ address: string }> } }
+    selectedPeriod: string
+    selectedDateRange: { startDate: string; endDate: string } | null
+    onPeriodChange: (period: string) => void
+    onDateRangeChange: (range: { startDate: string; endDate: string }) => void
   }) => {
     const [expanded, setExpanded] = React.useState(false)
     const row = stages.not_contacted?.rows[0]
     return (
       <section aria-label="Mock My Leads queue">
         <span data-testid="queue-address">{row?.address}</span>
+        <select
+          aria-label="KPI period"
+          value={selectedPeriod}
+          onChange={(event) => onPeriodChange(event.target.value)}
+        >
+          <option value="today">Today</option>
+          <option value="custom">Custom range</option>
+        </select>
+        {selectedPeriod === "custom" && (
+          <>
+            <input
+              aria-label="KPI start date"
+              type="date"
+              value={selectedDateRange?.startDate || ""}
+              onChange={(event) =>
+                onDateRangeChange({
+                  startDate: event.target.value,
+                  endDate: selectedDateRange?.endDate || "",
+                })
+              }
+            />
+            <input
+              aria-label="KPI end date"
+              type="date"
+              value={selectedDateRange?.endDate || ""}
+              onChange={(event) =>
+                onDateRangeChange({
+                  startDate: selectedDateRange?.startDate || "",
+                  endDate: event.target.value,
+                })
+              }
+            />
+          </>
+        )}
         <button type="button" onClick={() => setExpanded(true)}>
           Expand details
         </button>
@@ -161,6 +203,10 @@ function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis) {
 }
 
 describe("MyLeadsClient", () => {
+  beforeEach(() => {
+    mocks.loadMyLeads.mockReset()
+  })
+
   it("preserves expanded queue details when router refresh supplies new initial props", async () => {
     const user = userEvent.setup()
     const initialSnapshot = snapshot("106 Fixture Lane")
@@ -182,5 +228,36 @@ describe("MyLeadsClient", () => {
     expect(screen.getByTestId("queue-address")).toHaveTextContent("106 Fixture Lane")
     expect(screen.getByTestId("mounted-detail")).toHaveTextContent("Details remain mounted")
     expect(mocks.loadMyLeads).not.toHaveBeenCalled()
+  })
+
+  it("keeps the queue and date controls mounted until a custom range is complete", async () => {
+    const user = userEvent.setup()
+    const initialSnapshot = snapshot("106 Fixture Lane")
+    mocks.loadMyLeads.mockResolvedValue({
+      ok: true as const,
+      snapshot: initialSnapshot,
+      kpis,
+    })
+    renderClient(initialSnapshot)
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "KPI period" }), "custom")
+    expect(screen.getByTestId("queue-address")).toHaveTextContent("106 Fixture Lane")
+    expect(screen.getByLabelText("KPI start date")).toBeInTheDocument()
+    expect(mocks.loadMyLeads).not.toHaveBeenCalled()
+    window.dispatchEvent(new Event("focus"))
+    expect(mocks.loadMyLeads).not.toHaveBeenCalled()
+
+    await user.type(screen.getByLabelText("KPI start date"), "2026-09-01")
+    expect(mocks.loadMyLeads).not.toHaveBeenCalled()
+
+    await user.type(screen.getByLabelText("KPI end date"), "2026-09-11")
+    await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalledOnce())
+    expect(mocks.loadMyLeads).toHaveBeenCalledWith({
+      memberId: "rep-1",
+      search: "",
+      period: "custom",
+      startDate: "2026-09-01",
+      endDate: "2026-09-11",
+    })
   })
 })

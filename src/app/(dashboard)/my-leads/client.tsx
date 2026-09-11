@@ -16,6 +16,20 @@ import { detailView,kpiTiles,stagePages } from './adapter';
 import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,submitMyLeadCommand,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
 
 type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null};
+
+type CustomRangeStatus = 'incomplete'|'invalid'|'ready';
+
+function customRangeStatus(range:MyLeadDateRange|null):CustomRangeStatus {
+  if(!range?.startDate||!range.endDate)return 'incomplete';
+  const isDate=(value:string)=>{
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(value))return false;
+    const parsed=new Date(`${value}T00:00:00.000Z`);
+    return !Number.isNaN(parsed.getTime())&&parsed.toISOString().slice(0,10)===value;
+  };
+  if(!isDate(range.startDate)||!isDate(range.endDate)||range.startDate>range.endDate)return 'invalid';
+  return 'ready';
+}
+
 export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis}:Props) {
   const router=useRouter();const softphone=useOptionalSoftphone();
   const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState('');
@@ -26,19 +40,25 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow}|null>(null);
   const [recipient,setRecipient]=useState(roster.settings.recipientId??'');const [settingsBusy,setSettingsBusy]=useState(false);
   const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<{hash:string;key:string}|null>(null);
+  const selectedRangeStatus=period==='custom'?customRangeStatus(range):'ready';
   const refresh=useCallback(async()=>{
-    if(!roster.settings.enabled) return;
+    if(!roster.settings.enabled||selectedRangeStatus!=='ready') return;
     const id=++request.current;
     const result=await loadMyLeads({memberId:member,search,period,startDate:range?.startDate,endDate:range?.endDate});
     if(id!==request.current)return;
     if(result.ok){setSnapshot(result.snapshot);setKpis(result.kpis);setError(null);}else setError(result.message);
-  },[member,search,period,range,roster.settings.enabled]);
+  },[member,search,period,range,roster.settings.enabled,selectedRangeStatus]);
   useEffect(()=>{
     if(initialEffect.current){initialEffect.current=false;return;}
+    if(selectedRangeStatus!=='ready'){
+      ++request.current;
+      setError(selectedRangeStatus==='invalid'?'Choose a valid date range with the start date on or before the end date.':null);
+      return;
+    }
     ++request.current;setSnapshot(null);setKpis(null);
     const timer=setTimeout(()=>void refresh(),250);
     return()=>{clearTimeout(timer);};
-  },[refresh]);
+  },[refresh,selectedRangeStatus]);
   useEffect(()=>{
     if(!roster.settings.enabled)return;
     const delay=Math.min(60_000,Math.max(1000,snapshot?.nextWarningAt?Date.parse(snapshot.nextWarningAt)-Date.now():60_000));

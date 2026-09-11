@@ -178,6 +178,7 @@ export function AcquisitionAttemptDialog({
                     value={callActivityId}
                     onChange={(event) => setCallActivityId(event.target.value)}
                     aria-invalid={Boolean(clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId)}
+                    aria-describedby={clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId ? "acquisition-attempt-call-reference-error" : undefined}
                     aria-required="true"
                     className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
                   >
@@ -193,7 +194,7 @@ export function AcquisitionAttemptDialog({
                     A verified Sandra call reference must be supplied by the call flow.
                   </p>
                 )}
-                <FieldError message={clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId} />
+                <FieldError id="acquisition-attempt-call-reference-error" message={clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId} />
               </div>
             )}
 
@@ -204,6 +205,7 @@ export function AcquisitionAttemptDialog({
                 value={outcome}
                 onChange={(event) => setOutcome(event.target.value as AcquisitionAttemptFormPayload["outcome"])}
                 aria-invalid={Boolean(clientFieldErrors.outcome || submitState.fieldErrors.outcome)}
+                aria-describedby={clientFieldErrors.outcome || submitState.fieldErrors.outcome ? "acquisition-attempt-outcome-error" : undefined}
                 aria-required="true"
                 className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
               >
@@ -212,7 +214,7 @@ export function AcquisitionAttemptDialog({
                 <option value="reached">Reached</option>
                 <option value="wrong_number">Wrong number</option>
               </select>
-              <FieldError message={clientFieldErrors.outcome || submitState.fieldErrors.outcome} />
+              <FieldError id="acquisition-attempt-outcome-error" message={clientFieldErrors.outcome || submitState.fieldErrors.outcome} />
             </div>
 
             <DateTimeField

@@ -19,6 +19,10 @@ export function MyLeadsNavBadge({
   const [count, setCount] = useState(normalizeCount(initialCount));
   const lastRefreshAt = useRef(0);
 
+  useEffect(() => {
+    setCount(normalizeCount(initialCount));
+  }, [initialCount]);
+
   const refresh = useCallback(async () => {
     if (!onRefresh) return;
     const now = Date.now();

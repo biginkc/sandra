@@ -2,6 +2,7 @@ import { createBrowserClient } from "@supabase/ssr"
 import { expect, test, type Browser, type Page } from "@playwright/test"
 import fs from "node:fs"
 import path from "node:path"
+import pg from "pg"
 
 import type { Database } from "../src/lib/supabase/types"
 
@@ -216,6 +217,15 @@ test.describe.serial("My Leads local acceptance", () => {
       await ownerPage.locator("#my-leads-rep").selectOption(REP_ID)
       await expect(ownerPage.locator("#my-leads-rep")).toHaveValue(REP_ID)
       await expect(ownerPage.getByText(ADDRESS_106, { exact: true })).toBeVisible()
+      const ownerKpis = await ownerPage.locator('[data-testid^="kpi-"]').allTextContents()
+      const { context: repContext, page: repPage } = await newFixturePage(browser)
+      try {
+        await openMyLeads(repPage, "rep")
+        await expect(repPage.locator('[data-testid^="kpi-"]')).toHaveCount(6)
+        expect(await repPage.locator('[data-testid^="kpi-"]').allTextContents()).toEqual(ownerKpis)
+      } finally {
+        await repContext.close()
+      }
     } finally {
       await ownerContext.close()
     }
@@ -274,6 +284,55 @@ test.describe.serial("My Leads local acceptance", () => {
     await page.locator("#my-leads-period").selectOption("month")
     await expect(page.locator("#my-leads-period")).toHaveValue("month")
     await expect(row).toContainText("Under Contract")
+  })
+
+  test("custom reporting dates remain editable until a complete range is entered", async ({ page }) => {
+    await openMyLeads(page, "rep")
+    await page.locator("#my-leads-period").selectOption("custom")
+    const from = page.getByLabel("KPI start date")
+    const to = page.getByLabel("KPI end date")
+    await expect(from).toBeVisible()
+    await expect(to).toBeVisible()
+    await from.fill("2026-09-01")
+    await expect(to).toBeVisible()
+    const refreshed = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === "/my-leads" && response.ok())
+    await to.fill("2026-09-30")
+    await refreshed
+    await expect(page.locator('[data-testid^="kpi-"]')).toHaveCount(6)
+    await expect(from).toHaveValue("2026-09-01")
+    await expect(rowFor(page, PROPERTY_105_ID)).toContainText("Under Contract")
+    await page.locator("#my-leads-period").selectOption("week")
+    await expect(page.locator('[data-testid^="kpi-"]')).toHaveCount(6)
+  })
+
+  test("offer warnings reflect server deadlines and display red indicators", async ({ page }) => {
+    // Only the dedicated local synthetic fixtures; save and restore both dates.
+    const db = new pg.Client({ host: "127.0.0.1", port: 58322, user: "postgres", password: "postgres", database: "postgres" })
+    await db.connect()
+    const offerLead = "20000000-0000-4000-8000-000000000003"
+    const sentLead = "20000000-0000-4000-8000-000000000004"
+    const entered = (await db.query("select stage_entered_at from acquisition_queue_states where property_id=$1", [offerLead])).rows[0].stage_entered_at
+    const original = (await db.query("select id,sent_at,follow_up_at from acquisition_offers where property_id=$1", [sentLead])).rows[0]
+    try {
+      await db.query("update acquisition_queue_states set stage_entered_at=now()-interval '11 hours' where property_id=$1", [offerLead])
+      await db.query("update acquisition_offers set sent_at=now()-interval '2 hours',follow_up_at=now()+interval '1 hour' where id=$1", [original.id])
+      await openMyLeads(page, "rep")
+      const needsOffer = rowFor(page, offerLead)
+      const offerSent = rowFor(page, sentLead)
+      await expect(needsOffer.getByText("Offer overdue", { exact: true })).toHaveCount(0)
+      await expect(offerSent.getByText("Offer follow-up overdue", { exact: true })).toHaveCount(0)
+      await db.query("update acquisition_queue_states set stage_entered_at=now()-interval '13 hours' where property_id=$1", [offerLead])
+      await db.query("update acquisition_offers set follow_up_at=now()-interval '1 hour' where id=$1", [original.id])
+      await page.reload()
+      await expect(needsOffer.getByText("Offer overdue", { exact: true })).toBeVisible()
+      await expect(offerSent.getByText("Offer follow-up overdue", { exact: true })).toBeVisible()
+      await expect(needsOffer).toHaveClass(/border-l-red-500/)
+      await expect(offerSent).toHaveClass(/border-l-red-500/)
+    } finally {
+      await db.query("update acquisition_queue_states set stage_entered_at=$2 where property_id=$1", [offerLead, entered])
+      await db.query("update acquisition_offers set sent_at=$2,follow_up_at=$3 where id=$1", [original.id, original.sent_at, original.follow_up_at])
+      await db.end()
+    }
   })
 
   test("rep records an attempt, motivation, offer, contract, and archive for 106", async ({ page }) => {

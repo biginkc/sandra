@@ -31,6 +31,14 @@ describe("My Leads workflow dialogs", () => {
     await user.click(screen.getByRole("button", { name: "Save readiness" }))
     expect(onSubmit).not.toHaveBeenCalled()
     expect(screen.getByText("Specify the motivation or choose No motivation provided.")).toBeInTheDocument()
+    expect(screen.getByLabelText("Motivation")).toHaveAttribute(
+      "aria-describedby",
+      "acquisition-motivation-text-error",
+    )
+    expect(screen.getByText("Specify the motivation or choose No motivation provided.")).toHaveAttribute(
+      "id",
+      "acquisition-motivation-text-error",
+    )
 
     await user.click(screen.getByRole("radio", { name: "No motivation provided" }))
     await user.click(screen.getByRole("button", { name: "Save readiness" }))
@@ -82,6 +90,10 @@ describe("My Leads workflow dialogs", () => {
 
     expect(onSubmit).not.toHaveBeenCalled()
     expect(screen.getByText("Choose a date and time.")).toBeInTheDocument()
+    expect(screen.getByLabelText("Required follow-up")).toHaveAttribute(
+      "aria-describedby",
+      "acquisition-offer-follow-up-at-error",
+    )
 
     fireEvent.change(screen.getByLabelText("Required follow-up"), { target: { value: "2026-09-13T09:00" } })
     await user.click(screen.getByRole("button", { name: "Save offer" }))
@@ -161,6 +173,10 @@ describe("My Leads workflow dialogs", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("The lead changed before this attempt was saved."))
     expect(screen.getByLabelText("Note (optional)")).toHaveValue("Seller asked for a callback")
     expect(screen.getByText("Refresh the lead and try again.")).toBeInTheDocument()
+    expect(screen.getByLabelText("External outcome")).toHaveAttribute(
+      "aria-describedby",
+      "acquisition-attempt-outcome-error",
+    )
   })
 
   it("emits lifecycle payloads for contract, decline, handoff, and archive modes", async () => {
@@ -234,5 +250,33 @@ describe("My Leads workflow dialogs", () => {
       mode: "archive",
       confirmed: true,
     })
+  })
+
+  it("associates lifecycle validation errors with their controls", async () => {
+    const user = userEvent.setup()
+    const onSubmit = vi.fn(async () => ({ ok: true as const }))
+    render(
+      <AcquisitionLifecycleDialog
+        {...baseProps}
+        mode="handoff"
+        recipientOptions={[{ id: "jarrad", label: "Jarrad" }]}
+        onSubmit={onSubmit}
+      />,
+    )
+
+    await user.click(screen.getByRole("button", { name: "Hand off lead" }))
+
+    expect(screen.getByLabelText("Handoff reason")).toHaveAttribute(
+      "aria-describedby",
+      "acquisition-handoff-reason-error",
+    )
+    expect(screen.getByLabelText("Reassign to")).toHaveAttribute(
+      "aria-describedby",
+      "acquisition-handoff-recipient-error",
+    )
+    expect(screen.getByText("Choose a handoff reason.")).toHaveAttribute(
+      "id",
+      "acquisition-handoff-reason-error",
+    )
   })
 })

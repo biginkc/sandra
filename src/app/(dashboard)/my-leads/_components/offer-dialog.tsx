@@ -170,9 +170,10 @@ export function AcquisitionOfferDialog({
                   onChange={(event) => setAmount(event.target.value)}
                   placeholder="0.00"
                   aria-invalid={Boolean(fieldError("amount"))}
+                  aria-describedby={fieldError("amount") ? "acquisition-offer-amount-error" : undefined}
                   aria-required="true"
                 />
-                <FieldError message={fieldError("amount")} />
+                <FieldError id="acquisition-offer-amount-error" message={fieldError("amount")} />
               </div>
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="acquisition-offer-method">Offer method</Label>
@@ -181,6 +182,7 @@ export function AcquisitionOfferDialog({
                   value={method}
                   onChange={(event) => setMethod(event.target.value as AcquisitionOfferMethod)}
                   aria-invalid={Boolean(fieldError("method"))}
+                  aria-describedby={fieldError("method") ? "acquisition-offer-method-error" : undefined}
                   aria-required="true"
                   className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
                 >
@@ -189,7 +191,7 @@ export function AcquisitionOfferDialog({
                   <option value="email_text">Email / text</option>
                   <option value="dropbox_sign">Dropbox Sign (logging only)</option>
                 </select>
-                <FieldError message={fieldError("method")} />
+                <FieldError id="acquisition-offer-method-error" message={fieldError("method")} />
               </div>
             </div>
 
@@ -250,10 +252,11 @@ export function AcquisitionOfferDialog({
                       value={motivationText}
                       onChange={(event) => setMotivationText(event.target.value)}
                       aria-invalid={Boolean(fieldError("motivationText"))}
+                      aria-describedby={fieldError("motivationText") ? "acquisition-offer-motivation-text-error" : undefined}
                       placeholder="What is driving the seller?"
                       rows={3}
                     />
-                    <FieldError message={fieldError("motivationText")} />
+                    <FieldError id="acquisition-offer-motivation-text-error" message={fieldError("motivationText")} />
                   </div>
                 )}
               </fieldset>
