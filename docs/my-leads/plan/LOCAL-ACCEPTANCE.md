@@ -1,6 +1,6 @@
 # Isolated local acceptance runtime
 
-Status: full-schema replay passed; browser acceptance in progress, not yet passed.
+Status: local candidate verified; hosted CI, live provider parity, and rollout remain pending.
 
 - Owner: this isolated My Leads task. No Sandra Orchestrator or shared controller is used.
 - Colima profile: `sandra-my-leads-20260911`, created for this task, 2 CPUs / 4 GiB memory / 24 GiB requested disk. Started without changing the default Docker context.
@@ -73,3 +73,15 @@ The Jitter producer candidate is committed locally as `c41f2e0`; neither reposit
 ## Native zoom
 
 `verify-my-leads-local-zoom.mjs` passed at actual Chromium tab zoom 2.0 via a temporary extension's `chrome.tabs.setZoom`, not CSS scaling or viewport emulation. No horizontal page overflow; the attempt dialog opens and cancels. Root inspected the viewport screenshot. The extension/profile are removed in `finally`; no user browser profile is touched. The existing full Chromium installation was incomplete and Playwright's replacement extraction stalled, so the task-owned official browser archive was extracted with the system extractor into a separate temporary directory. The normal headless acceptance browser remained unchanged.
+
+## Candidate commit and native gate
+
+Sandra implementation commit `4328b355` and Jitter producer commit `c41f2e0` are local only. The generated hook launcher was absent after dependency installation without lifecycle scripts, so root explicitly ran the tracked `.husky/pre-commit` with the task-owned local rehearsal database. It passed all 12 atomic-migration tests, the eSign local database rehearsal, typecheck, 3,778 unit tests, and 1,265 RTL tests. No hook requirement was waived.
+
+The local calendar worker reported a missing OAuth encryption key, as expected in this provider-free runtime. Database appointment booking and its ledger were verified; Google/calendar-provider synchronization was not. This is retained as an integration limitation, not reported as external calendar success.
+
+## Cleanup and continuation
+
+The owned Next server, Supabase stack, and Colima profile are stopped. Other profiles and worktrees were preserved. Temporary runtime keys, fixture passwords, credential-bearing startup/reset logs, and the task-owned replacement browser download were removed. Secret-free schema hashes, screenshots, and `identity-manifest.json` remain in the owned temporary directory; the durable schema receipt is in `plan/evidence/full-schema-replay.json`. Restarting local acceptance requires reconstructing only these same four fixture identities and local runtime credentials; do not provision additional principals or invoke shared global setup. The local volume remains available.
+
+PR publication is awaiting a user decision: the approved plan caps the campaign at four accounts, all used locally, while `.github/workflows/e2e.yml` invokes `e2e-identity-lifecycle.ts emit/preflight` to create two job-scoped hosted identities. No push or PR has been performed to bypass that limit. Source implementation/review/local verification is complete; hosted CI, deployment/migration verification, provider parity, and reviewed Maria initialization remain open.

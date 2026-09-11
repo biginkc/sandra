@@ -2,7 +2,7 @@
 
 This is the first assembled implementation review/fix round for this isolated feature. Packet reviews and complementary data/query reviews belong to this same round; they do not reset the cumulative three-round limit. Browser-reproduced blockers are recorded separately below. The earlier REVIEW.md covers planning documents only and is not code approval.
 
-Source remains uncommitted on Sandra baseline `8c7053e7024433f46791eac1b186c1b7a7cf10ec` and Jitter baseline `2c00aafa46e4e29e4c20a496c3561fac0e9143eb`. A final source manifest and complete acceptance run are pending. No release approval is claimed.
+The verified implementation is committed locally as Sandra `4328b355` and Jitter `c41f2e0`, on Sandra baseline `8c7053e7024433f46791eac1b186c1b7a7cf10ec` and Jitter baseline `2c00aafa46e4e29e4c20a496c3561fac0e9143eb`. SOURCE-MANIFEST.json records the candidate source hashes. Seven production-build browser journeys, native 200% zoom, signed loopback transport, full-schema replay, and native commit checks passed. No release approval is claimed.
 
 | Finding | Disposition / evidence |
 |---|---|

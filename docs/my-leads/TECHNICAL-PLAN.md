@@ -1,6 +1,6 @@
 # My Leads — modular technical implementation plan
 
-**Status: implementation and core local acceptance passed; native commit/release gates remain. See [acceptance evidence](plan/ACCEPTANCE-RECEIPT.md).**
+**Status: implementation and core local acceptance passed; hosted CI and release gates remain. See [acceptance evidence](plan/ACCEPTANCE-RECEIPT.md).**
 
 Product authority: [PRD v0.2](PRD.md). Technical contract authority: [CONTRACTS.md](CONTRACTS.md). Exact baseline: Sandra main `8c7053e7024433f46791eac1b186c1b7a7cf10ec`, verified against GitHub on September 11, 2026. The main-folder checkout is an older June branch and must not be used as the implementation baseline.
 

@@ -1,5 +1,16 @@
 # P01–P03/P05–P06 data and workflow review
 
+## Final root dispositions
+
+The numbered findings below preserve the reviewer's initial snapshot; they are not all open defects. See IMPLEMENTATION-REVIEW.md for the assembled review outcome.
+
+- Finding 1: broader former-assignee property-detail access is **not accepted**. CONTRACTS §3/§6/line 94 preserve selected-member scope, history after designation changes, and immutable KPI credit; they do not grant former assignees ongoing access to current property notes after reassignment. The concrete appointment-actor discrepancy was fixed with immutable booking credit plus separate current-assignee lifecycle authorization, and regressions pass.
+- Finding 2: existing fail-closed DNC egress checks are retained. Signed local receiver transport passed. Deployed provider parity remains a release gate; recording late historical evidence is not a permission-to-dial defect.
+- Finding 3: finite/nonfuture offer and decline events and finite ordered follow-up are now enforced; direct-RPC regressions and full-schema replay pass.
+- Finding 4: target-data/locking preflight remains a release check; no source-incompatible disposition value was found.
+- Finding 5: ineligible clocks are intentionally retained without retroactive eligibility. Designation affects future timing, not access-role semantics; no expanded eligibility is inferred.
+- Finding 6: malformed direct RPC casts fail atomically and the UI maps failures to a safe error. The generic validation wording is a nonblocking limitation, not an authorization bypass.
+
 Status: implementation review only. No hosted database, provider, deployment, or
 launch operation was used.
 
