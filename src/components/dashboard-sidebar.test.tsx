@@ -5,7 +5,7 @@ const usePathname = vi.hoisted(() => vi.fn());
 
 vi.mock("next/navigation", () => ({ usePathname }));
 
-import { DashboardMobileNav } from "./dashboard-sidebar";
+import { DashboardMobileNav, DashboardSidebar } from "./dashboard-sidebar";
 
 beforeEach(() => {
   usePathname.mockReturnValue("/dashboard");
@@ -20,7 +20,7 @@ describe("DashboardMobileNav", () => {
     expect(nav.className).toContain("overflow-x-auto");
 
     const links = screen.getAllByRole("link");
-    expect(links).toHaveLength(11);
+    expect(links).toHaveLength(12);
     for (const link of links) {
       expect(link.className).toContain("shrink-0");
       expect(link.className).toContain("whitespace-nowrap");
@@ -40,5 +40,25 @@ describe("DashboardMobileNav", () => {
       "href",
       "/jobs",
     );
+    expect(screen.getByRole("link", { name: "My Leads" })).toHaveAttribute(
+      "href",
+      "/my-leads",
+    );
+  });
+
+  it("keeps the My Leads badge scoped to the signed-in user and hides the link when gated", () => {
+    usePathname.mockReturnValue("/my-leads");
+    const { rerender } = render(
+      <DashboardSidebar initialAcquisitionBadge={7} />,
+    );
+
+    const myLeads = screen.getByRole("link", { name: "My Leads" });
+    expect(myLeads).toHaveAttribute("href", "/my-leads");
+    expect(myLeads).toHaveAttribute("data-active", "true");
+    expect(screen.getByTestId("my-leads-badge")).toHaveTextContent("7");
+
+    rerender(<DashboardSidebar showMyLeads={false} initialAcquisitionBadge={99} />);
+    expect(screen.queryByRole("link", { name: "My Leads" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("my-leads-badge")).not.toBeInTheDocument();
   });
 });

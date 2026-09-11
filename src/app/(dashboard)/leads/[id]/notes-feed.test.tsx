@@ -5,14 +5,16 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { callbacks, createClient } = vi.hoisted(() => {
+const { callbacks, callAction, createClient, createLeadNote } = vi.hoisted(() => {
   const callbacks = {} as Partial<
     Record<"INSERT", (payload: { new: unknown }) => void>
   >;
   return {
     callbacks,
+    callAction: vi.fn(),
     createClient: vi.fn(() => {
       const channel = {
         on: vi.fn(
@@ -36,12 +38,20 @@ const { callbacks, createClient } = vi.hoisted(() => {
         removeChannel: vi.fn(),
       };
     }),
+    createLeadNote: vi.fn(),
   };
 });
 
 vi.mock("@/lib/supabase/client", () => ({ createClient }));
+vi.mock("@/lib/errors/call-action", () => ({ callAction }));
+vi.mock("../actions", () => ({ createLeadNote }));
 
-import { NoteEventCard, type Note, useLeadNotes } from "./notes-feed";
+import {
+  AddNoteComposer,
+  NoteEventCard,
+  type Note,
+  useLeadNotes,
+} from "./notes-feed";
 
 function makeNote(
   id: string,
@@ -60,6 +70,8 @@ function makeNote(
 beforeEach(() => {
   delete callbacks.INSERT;
   createClient.mockClear();
+  callAction.mockReset();
+  createLeadNote.mockReset();
 });
 
 describe("<NoteEventCard />", () => {
@@ -112,5 +124,40 @@ describe("useLeadNotes", () => {
     expect(
       result.current.notes.filter((note) => note.id === "note-new"),
     ).toHaveLength(1);
+  });
+});
+
+describe("<AddNoteComposer />", () => {
+  it("notifies its owner only after the existing note action confirms success", async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    createLeadNote.mockReturnValue(Promise.resolve("action-promise"));
+    callAction.mockResolvedValue({ ok: true, data: { id: "note-1" } });
+
+    render(<AddNoteComposer propertyId="property-1" onSaved={onSaved} />);
+    await user.click(screen.getByText("+ Add note"));
+    await user.type(screen.getByLabelText("Add a note"), "Seller needs a quick close");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith({ id: "note-1" }));
+    expect(createLeadNote).toHaveBeenCalledWith("property-1", "Seller needs a quick close");
+  });
+
+  it("keeps the draft and does not notify its owner after a failed action", async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    createLeadNote.mockReturnValue(Promise.resolve("action-promise"));
+    callAction.mockResolvedValue({
+      ok: false,
+      error: { code: "NOTE_CREATE_FAILED", message: "Note could not be saved" },
+    });
+
+    render(<AddNoteComposer propertyId="property-1" onSaved={onSaved} />);
+    await user.click(screen.getByText("+ Add note"));
+    await user.type(screen.getByLabelText("Add a note"), "Keep this draft");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Add a note")).toHaveValue("Keep this draft"));
+    expect(onSaved).not.toHaveBeenCalled();
   });
 });

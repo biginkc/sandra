@@ -14,7 +14,15 @@ import {
 
 import { completeTaskAction, snoozeTaskAction } from "../../tasks/actions";
 
-type Props = { taskId: string };
+export type TaskActionChange =
+  | { kind: "completed"; taskId: string }
+  | { kind: "snoozed"; taskId: string; until: string };
+
+type Props = {
+  taskId: string;
+  /** Called only after the server confirms the task mutation. */
+  onChanged?: (change: TaskActionChange) => void;
+};
 
 const SNOOZE_PRESETS: ReadonlyArray<{ label: string; days: number }> = [
   { label: "1 day", days: 1 },
@@ -27,13 +35,17 @@ const SNOOZE_PRESETS: ReadonlyArray<{ label: string; days: number }> = [
  * trigger revalidation of /dashboard, so the panel re-renders without
  * the completed / snoozed task naturally on the next router pass.
  */
-export function TaskActionsRow({ taskId }: Props) {
+export function TaskActionsRow({ taskId, onChanged }: Props) {
   const [pending, startTransition] = useTransition();
 
   function complete() {
     startTransition(async () => {
       const result = await completeTaskAction(taskId);
-      if (!result.ok) toast.error(result.error.message);
+      if (!result.ok) {
+        toast.error(result.error.message);
+        return;
+      }
+      onChanged?.({ kind: "completed", taskId });
     });
   }
 
@@ -42,7 +54,11 @@ export function TaskActionsRow({ taskId }: Props) {
     until.setDate(until.getDate() + days);
     startTransition(async () => {
       const result = await snoozeTaskAction(taskId, until.toISOString());
-      if (!result.ok) toast.error(result.error.message);
+      if (!result.ok) {
+        toast.error(result.error.message);
+        return;
+      }
+      onChanged?.({ kind: "snoozed", taskId, until: until.toISOString() });
     });
   }
 

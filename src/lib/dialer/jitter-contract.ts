@@ -25,6 +25,8 @@ export type JitterStartCallRequest = {
   contact_ref?: string;
   /** Sandra's authenticated tenant identity, when available. */
   org_ref?: string;
+  /** Present only after durable My Leads binding; omitted means no acquisition event. */
+  acquisition_episode_ref?: string | null;
 };
 
 export type JitterCallerId = {
