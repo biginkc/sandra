@@ -917,7 +917,7 @@
     },
     {
       "file": "20260912140000_acquisition_launch_commands.sql",
-      "sha256": "678d6066308faee9c3a03b76f509b0ea79dc81d0751647009c35ced81b63dbdc"
+      "sha256": "f7d2aba2c248eacf8cd85fe02e4b7e45466b0cb86beeac0b728fb6e708cc0668"
     }
   ],
   "checks": [

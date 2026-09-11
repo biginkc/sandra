@@ -95,3 +95,13 @@ Focused ESLint/typecheck passed. The tracked native pre-commit verification also
 ## Deployment-readiness authorization amendment
 
 The user now authorizes PR publication and required temporary CI identities (including rerun replacements), with cleanup. The previous account-limit blocker is resolved. Deployment, previews, merging, shared migrations, feature enablement, real cohort writes and real contacts are prohibited. DEPLOYMENT-READINESS.md tracks this narrower completion scope and the new manual review. Earlier checkpoint statuses above are historical.
+
+## Deployment-readiness review verification
+
+- Fresh private PostgreSQL time, call-evidence, workflow/launch and Jitter context rehearsals passed. The call-evidence verifier now independently reduces raw stored facts in JavaScript and matches owner/self RPC KPIs, including a positive, period-independent stale count.
+- Replayed the owned local fixture stack: 216 baseline + 13 feature migrations passed again, recreating the same four principal IDs only.
+- After the confirmed custom-range/badge/error-association fixes, the production build passed. The expanded local browser lane passed all **9 tests in 14.7 seconds, zero retries**. New coverage: equal owner/self KPI tiles; complete custom range entry; normal pre/post offer warning states and red borders. Existing workflows and narrow layout still pass.
+- Post-browser SQL again confirms four principals, one deliberate appointment, zero enrollments and the configured-owner handoff.
+- Initial Sandra GitHub Verify passed; final candidate checks remain to run after review fixes are pushed. Jitter's initial full run passed 2,681 tests but failed one unchanged browser-audio cleanup-timing assertion; the exact focused test passed locally (1 passed/123 skipped), and the failed CI job was rerun without changing product code.
+
+Final launch-fix replay passed 216+13 migrations, then all 9 browser journeys passed again in 14.6 seconds with zero retries. Post-browser outcomes again passed. Native verification after UI fixes passed 3,778 unit and 1,268 RTL tests; the launch-only follow-up passed its focused PG regression and full replay. Final CI evidence is attached to the PRs after publication.

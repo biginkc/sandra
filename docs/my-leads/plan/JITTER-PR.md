@@ -7,3 +7,5 @@ Validation: 245 focused tests and typecheck passed; the committed relevant provi
 Deploy the compatible Sandra receiver before enabling this producer. See docs/my-leads/plan/CALL-EVIDENCE-RECEIPT.md. Live deployment, provider parity, and coordinated rollout remain pending.
 
 Depends on: the Sandra My Leads receiver for release ordering (cross-repository; no unmerged Jitter code dependency). Do not enable/release the producer first. No deployment, preview, merge, shared migration, or real call is authorized.
+
+Manual review completed with a bounded durability fix: sibling event payload survives parent-result interruption and is recovered without another seller create. Executor suite 140/140 and typechecks passed; final exact-state interruption regression passed. The initial full CI run's unchanged browser-audio timing failure passed on focused rerun and full CI rerun without an unrelated product patch. Final CI is recorded on the PR.

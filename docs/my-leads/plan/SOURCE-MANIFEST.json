@@ -1,11 +1,11 @@
 {
   "sandraBase": "8c7053e7024433f46791eac1b186c1b7a7cf10ec",
-  "jitterCandidate": "c41f2e0",
+  "jitterCandidate": "b9f1ecd2bcd9a3a146c9126efbac80e480b290c3",
   "scope": "Changed Sandra implementation, tests, and verification scripts; excludes evolving documentation. Local production build and acceptance evidence are recorded in LOCAL-ACCEPTANCE.md.",
   "files": [
     {
       "path": "e2e/my-leads.local.spec.ts",
-      "sha256": "fda26c8c0110d24e2ed831227847d06f30878ef283f03ca213997f22494811df"
+      "sha256": "9cf30a1f3018ae9ea35c40e76b528eeff05a5cb307f4aa7e64e2629cad225588"
     },
     {
       "path": "playwright.config.ts",
@@ -25,7 +25,7 @@
     },
     {
       "path": "scripts/verify-acquisition-evidence.mjs",
-      "sha256": "b062f9f248954cdbd10b9a998a8a8be1097c795b7dfca1985a07d3f3cb38bcd7"
+      "sha256": "1bdddeabc4a072fea10222921401bff7ee60fc31310e26675ea0357eb43bebe4"
     },
     {
       "path": "scripts/verify-acquisition-time.mjs",
@@ -37,7 +37,7 @@
     },
     {
       "path": "scripts/verify-my-leads-launch.mjs",
-      "sha256": "0a801fd6f3e769c2d6ec5699fb50db381aff079f8bf78e17eae5e3e866ed3618"
+      "sha256": "0d57c98a193cea4283b6d6c90afc4759199db5295e26547f01b338bb55eaf035"
     },
     {
       "path": "scripts/verify-my-leads-local-outcomes.mjs",
@@ -73,7 +73,7 @@
     },
     {
       "path": "src/app/(dashboard)/my-leads/_components/attempt-dialog.tsx",
-      "sha256": "29c5054c7b2199aff48c4d0eebb519fff877a57d1fd6efe21da890763a67e61f"
+      "sha256": "de72ddd279686282a8cb8690a7f8225e124faf022fa29d5756afe7273684b9ab"
     },
     {
       "path": "src/app/(dashboard)/my-leads/_components/detail-panel.test.tsx",
@@ -85,7 +85,7 @@
     },
     {
       "path": "src/app/(dashboard)/my-leads/_components/dialogs.test.tsx",
-      "sha256": "a70d813c5df245ecd77ed952b9025a94dc9527bcb398eea0b15da2d9551e9760"
+      "sha256": "2f9de5e175eae8d25b96034c7358d9a3532da924edff2290ed2e3048b02091d9"
     },
     {
       "path": "src/app/(dashboard)/my-leads/_components/existing-detail-actions.test.tsx",
@@ -97,11 +97,11 @@
     },
     {
       "path": "src/app/(dashboard)/my-leads/_components/lifecycle-dialog.tsx",
-      "sha256": "a3acc8f90cb4a8cc0e63b6413b8b3776e61e4607aed38496f14aff85a4e7c632"
+      "sha256": "7bdab79c395ce87c7fe90e1dc3b70be4b072c789d6c52186984ac763b2e91b5c"
     },
     {
       "path": "src/app/(dashboard)/my-leads/_components/offer-dialog.tsx",
-      "sha256": "3a512a5bb309b944ef9abab204ccb4e1de37b5aa6664b4611dbcaeeb537d299b"
+      "sha256": "11715cbee58e962d3480d633822bc60b390cbe7b20c406cc6dd9944ae843c632"
     },
     {
       "path": "src/app/(dashboard)/my-leads/_components/queue-row.tsx",
@@ -117,7 +117,7 @@
     },
     {
       "path": "src/app/(dashboard)/my-leads/_components/readiness-dialog.tsx",
-      "sha256": "f9b66815729e90bc70bcd527c33be850b7327cac522108f96528907683717caf"
+      "sha256": "bfe02a5f23be132da6f0b56e95ca75d71b2aeda8e45b4a5ecf7e87b5f0a103ea"
     },
     {
       "path": "src/app/(dashboard)/my-leads/_components/types.ts",
@@ -125,7 +125,7 @@
     },
     {
       "path": "src/app/(dashboard)/my-leads/_components/workflow-form.tsx",
-      "sha256": "9549c1ec76c3af3a5285f5211c54a084464e444ab01c507f6cb3696a7b1c6830"
+      "sha256": "1c2e0ace1e3f5b7dd0b70010ed92b3ffa47ac3c353af7a353f3a609d93406a27"
     },
     {
       "path": "src/app/(dashboard)/my-leads/actions.test.ts",
@@ -145,11 +145,11 @@
     },
     {
       "path": "src/app/(dashboard)/my-leads/client.test.tsx",
-      "sha256": "20236780b9719765495c6ad12c405a85df87f87ac39b87fe0a14c92e8c113810"
+      "sha256": "b0a485244fdc46e62474481f80c90b11abbc25f51d082372a68369f793dc135f"
     },
     {
       "path": "src/app/(dashboard)/my-leads/client.tsx",
-      "sha256": "0bd4fd2edfb3dd4a16857995cf013cabe632bd5c3840df72d364445eabea2382"
+      "sha256": "0845f33c4c1cdf8f70550bdd0aec1970bdd15295de1157850d077eb01523fa9c"
     },
     {
       "path": "src/app/(dashboard)/my-leads/nav-actions.ts",
@@ -185,11 +185,11 @@
     },
     {
       "path": "src/components/my-leads-nav-badge.test.tsx",
-      "sha256": "c7542f42db416f2d90181facf572dca4c2943b54df6c451cddaf63b2ea99444a"
+      "sha256": "d64899bc1f6e96583d1f3127683a9d1439eece97634341d0bdfef210cf7bb322"
     },
     {
       "path": "src/components/my-leads-nav-badge.tsx",
-      "sha256": "ee28f0ff1240b3650ce6dac0f2f752b90a719b7a146e7c6375421b6fdb5c70b9"
+      "sha256": "196a980042a3802b565ef3cb163f88d673033bc96e6a6aec54f15df4f9b7a540"
     },
     {
       "path": "src/lib/dialer/jitter-contract.ts",
@@ -341,7 +341,7 @@
     },
     {
       "path": "supabase/migrations/20260912140000_acquisition_launch_commands.sql",
-      "sha256": "678d6066308faee9c3a03b76f509b0ea79dc81d0751647009c35ced81b63dbdc"
+      "sha256": "f7d2aba2c248eacf8cd85fe02e4b7e45466b0cb86beeac0b728fb6e708cc0668"
     },
     {
       "path": "vercel.json",
