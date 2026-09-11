@@ -2,7 +2,7 @@
 
 **Status: provisional and incomplete.** This matrix records the available local evidence for PRD v0.2. It is not a release receipt and does not authorize a rollout.
 
-**Candidate:** Sandra `HEAD` remains `8c7053e7024433f46791eac1b186c1b7a7cf10ec` (the September 10 main baseline) with the My Leads implementation and test work still dirty and not yet committed. The paired Jitter source is committed at `c41f2e0`. PRD authority is `docs/my-leads/PRD.md` v0.2, especially §11 (`:185-202`). No Sandra commit, push, deployment, hosted migration, production data write, or real provider call is claimed.
+**Candidate:** Sandra implementation is committed through `b4f48fdd`, paired with Jitter `c41f2e0`. Subsequent readiness-review changes are recorded in DEPLOYMENT-READINESS.md. Local acceptance is complete only to the scopes below; deployment and hosted migration execution are prohibited for this task.
 
 **Evidence boundary:** `PASS (local)` means a recorded unit, RTL, or private PostgreSQL/loopback result. It does not prove deployed parity or live provider transport. `PARTIAL` means that one or more acceptance dimensions passed while a required browser, fresh replay, or live/release dimension remains. `PENDING` means the required evidence is not complete.
 
@@ -15,7 +15,7 @@
 - The fresh candidate replay passed all **216 baseline + 13 feature migrations**, with all 13 source hashes matching the receipt immediately before browser acceptance (`LOCAL-ACCEPTANCE.md:45-48`).
 - Browser evidence is bounded to the dedicated local lane in `e2e/my-leads.local.spec.ts:187-373`. After the required locator, recipient/detail-refresh, designation, keyboard, reporting-period, and warning-clearance checks were added, the final expanded serial lane passed all **7 tests in 12.4 seconds with zero retries** against the production build. It covered member self-scope/layout, owner selected-rep plus foreign denial, designation off/on, keyboard dialog cancellation, Under Contract period persistence, Contacted warning visibility, the 106 workflow, and the 107 note/appointment/handoff workflow. The preceding four-test lane and fresh replay are retained in `LOCAL-ACCEPTANCE.md:45-54`; the final expanded result is the current local browser result.
 - The final local outcome proof reports **exactly four principals, exactly one deliberate appointment, zero sequence enrollments, and configured-owner Needs sequence handoff** (`LOCAL-ACCEPTANCE.md:60-62`).
-- The local campaign uses exactly four fixed principals and nine synthetic leads; no further acceptance accounts are permitted (`LOCAL-ACCEPTANCE.md:20-22`).
+- The local campaign uses exactly four fixed principals and nine synthetic leads; additional temporary CI accounts and rerun replacements are now explicitly authorized, with exact-run cleanup (`LOCAL-ACCEPTANCE.md:20-22`).
 
 ## Acceptance matrix
 

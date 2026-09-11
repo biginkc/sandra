@@ -6,4 +6,6 @@ The change adds scoped transactional RPCs, idempotent commands, assignment and p
 
 Validation: 3,778 unit tests, 1,265 RTL tests, production build, full 216-baseline + 13-feature SQL replay, seven serial browser acceptance journeys, and real signed loopback receiver transport passed. Private PostgreSQL tests cover concurrency, authorization, late/duplicate evidence, attribution, and launch rollback. See ACCEPTANCE-RECEIPT.md and SOURCE-MANIFEST.json for exact scope and limitations.
 
-Release requires receiver-before-producer ordering, native CI/migration/deployment checks, live provider parity, and a reviewed Maria cohort before feature enablement. No production rollout is included in this local candidate. PR publication is pending resolution of the four-account campaign limit because the existing E2E workflow provisions two job-scoped identities.
+Release requires receiver-before-producer ordering, native CI/migration/deployment checks, live provider parity, and a reviewed Maria cohort before feature enablement. No production rollout is included in this local candidate. The user authorizes temporary CI identities and their cleanup. Deployment, including previews, merging, shared migrations, real calls, and production cohort initialization are excluded from this task.
+
+Depends on: none (within Sandra). The separately reviewed Jitter producer must be released after this receiver.

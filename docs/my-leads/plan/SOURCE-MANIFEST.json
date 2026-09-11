@@ -342,6 +342,10 @@
     {
       "path": "supabase/migrations/20260912140000_acquisition_launch_commands.sql",
       "sha256": "678d6066308faee9c3a03b76f509b0ea79dc81d0751647009c35ced81b63dbdc"
+    },
+    {
+      "path": "vercel.json",
+      "sha256": "7f60e44804f5471f9406a711936cbd2733377535b78027ec9dbc19d37bf4b429"
     }
   ]
 }
