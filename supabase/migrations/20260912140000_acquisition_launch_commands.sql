@@ -186,10 +186,11 @@ as $$
   order by p.id;
 $$;
 
-create or replace function public.my_leads_launch_fingerprint(
+create or replace function public.my_leads_launch_fingerprint_rows(
   p_org_id uuid,
   p_member_id uuid,
-  p_settings_revision bigint
+  p_settings_revision bigint,
+  p_rows jsonb
 )
 returns text
 language sql
@@ -204,17 +205,36 @@ as $$
           'orgId', p_org_id,
           'memberId', p_member_id,
           'settingsRevision', p_settings_revision,
-          'rows', coalesce(
-            (select jsonb_agg(to_jsonb(r) order by r.property_id)
-             from public.my_leads_launch_candidate_rows(p_org_id, p_member_id) r),
-            '[]'::jsonb
-          )
+          'rows', coalesce(p_rows, '[]'::jsonb)
         )::text,
         'UTF8'
       ),
       'sha256'
     ),
     'hex'
+  );
+$$;
+
+create or replace function public.my_leads_launch_fingerprint(
+  p_org_id uuid,
+  p_member_id uuid,
+  p_settings_revision bigint
+)
+returns text
+language sql
+security definer
+stable
+set search_path = ''
+as $$
+  select public.my_leads_launch_fingerprint_rows(
+    p_org_id,
+    p_member_id,
+    p_settings_revision,
+    coalesce(
+      (select jsonb_agg(to_jsonb(r) order by r.property_id)
+       from public.my_leads_launch_candidate_rows(p_org_id, p_member_id) r),
+      '[]'::jsonb
+    )
   );
 $$;
 
@@ -330,6 +350,8 @@ declare
   v_command_id uuid := extensions.gen_random_uuid();
   v_result jsonb;
   v_current_fingerprint text;
+  v_rows jsonb;
+  v_current_rows jsonb;
   v_count integer;
   v_cutover timestamptz := statement_timestamp();
   v_item record;
@@ -383,17 +405,38 @@ begin
     raise exception 'RECIPIENT_UNAVAILABLE' using errcode = '22023';
   end if;
 
-  v_current_fingerprint := public.my_leads_launch_fingerprint(
-    p_org_id, p_member_id, v_settings.settings_revision
+  -- Capture the candidate set once. Every later lock, revalidation and
+  -- write uses this same bounded set; a property assigned after this point
+  -- remains outside the admitted preview.
+  select coalesce(jsonb_agg(to_jsonb(r) order by r.property_id), '[]'::jsonb)
+    into v_rows
+  from public.my_leads_launch_candidate_rows(p_org_id, p_member_id) r;
+  v_count := jsonb_array_length(v_rows);
+  v_current_fingerprint := public.my_leads_launch_fingerprint_rows(
+    p_org_id, p_member_id, v_settings.settings_revision, v_rows
   );
   if v_current_fingerprint is distinct from p_preview_fingerprint then
     raise exception 'LAUNCH_INVALIDATED' using errcode = '40001';
   end if;
 
-  -- Lock the exact preview set in deterministic property order, then verify
-  -- the fingerprint again after those locks prevent assignment races.
+  -- Lock the captured preview set in deterministic property order, then
+  -- re-read only those property IDs. This detects changes to declared rows
+  -- without admitting a newly assigned property into the cohort.
   for v_item in
-    select * from public.my_leads_launch_candidate_rows(p_org_id, p_member_id)
+    select * from jsonb_to_recordset(v_rows) as captured(
+      property_id uuid,
+      expected_episode_id uuid,
+      expected_assigned_user_id uuid,
+      expected_assigned_at timestamptz,
+      expected_episode_initialized_at timestamptz,
+      expected_member_revision bigint,
+      expected_shared_status text,
+      expected_queue_version bigint,
+      expected_queue_stage text,
+      expected_is_dnc_locked boolean,
+      expected_deleted_at timestamptz,
+      expected_settings_revision bigint
+    )
     order by property_id
   loop
     select * into v_property from public.properties p
@@ -406,8 +449,13 @@ begin
     select * into v_prior_queue from public.acquisition_queue_states q
     where q.org_id = p_org_id and q.property_id = v_item.property_id for update;
   end loop;
-  v_current_fingerprint := public.my_leads_launch_fingerprint(
-    p_org_id, p_member_id, v_settings.settings_revision
+  select coalesce(jsonb_agg(to_jsonb(r) order by r.property_id), '[]'::jsonb)
+    into v_current_rows
+  from public.my_leads_launch_candidate_rows(p_org_id, p_member_id) r
+  join jsonb_to_recordset(v_rows) as captured(property_id uuid)
+    on captured.property_id = r.property_id;
+  v_current_fingerprint := public.my_leads_launch_fingerprint_rows(
+    p_org_id, p_member_id, v_settings.settings_revision, v_current_rows
   );
   if v_current_fingerprint is distinct from p_preview_fingerprint then
     raise exception 'LAUNCH_INVALIDATED' using errcode = '40001';
@@ -419,8 +467,6 @@ begin
     v_command_id, p_org_id, v_actor, 'user', 'apply_acquisition_launch',
     p_idempotency_key, v_hash, '{}'::jsonb
   );
-  select count(*) into v_count
-  from public.my_leads_launch_candidate_rows(p_org_id, p_member_id);
   if v_count = 0 then
     raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
@@ -434,7 +480,20 @@ begin
   );
 
   for v_item in
-    select * from public.my_leads_launch_candidate_rows(p_org_id, p_member_id)
+    select * from jsonb_to_recordset(v_rows) as captured(
+      property_id uuid,
+      expected_episode_id uuid,
+      expected_assigned_user_id uuid,
+      expected_assigned_at timestamptz,
+      expected_episode_initialized_at timestamptz,
+      expected_member_revision bigint,
+      expected_shared_status text,
+      expected_queue_version bigint,
+      expected_queue_stage text,
+      expected_is_dnc_locked boolean,
+      expected_deleted_at timestamptz,
+      expected_settings_revision bigint
+    )
     order by property_id
   loop
     select * into v_property from public.properties p
@@ -757,6 +816,7 @@ $$;
 revoke all on function public.bump_my_leads_membership_revision() from public, anon, authenticated, service_role;
 revoke all on function public.my_leads_launch_require_owner(uuid) from public, anon, authenticated, service_role;
 revoke all on function public.my_leads_launch_candidate_rows(uuid, uuid) from public, anon, authenticated, service_role;
+revoke all on function public.my_leads_launch_fingerprint_rows(uuid, uuid, bigint, jsonb) from public, anon, authenticated, service_role;
 revoke all on function public.my_leads_launch_fingerprint(uuid, uuid, bigint) from public, anon, authenticated, service_role;
 revoke all on function public.fn_preview_acquisition_launch(uuid, uuid) from public, anon, service_role;
 grant execute on function public.fn_preview_acquisition_launch(uuid, uuid) to authenticated;

@@ -19,6 +19,8 @@ const org = '10000000-0000-4000-8000-000000000003';
 const property = '10000000-0000-4000-8000-000000000004';
 const legacyProperty = '10000000-0000-4000-8000-000000000049';
 const command = '10000000-0000-4000-8000-000000000005';
+const raceAnchor = '00000000-0000-4000-8000-000000000058';
+const raceLate = '00000000-0000-4000-8000-000000000059';
 
 async function rejectsSql(sql, params, code) {
   await assert.rejects(client.query(sql, params), error => error?.code === code);
@@ -210,6 +212,56 @@ try {
     where e.org_id=$1 and e.property_id=$2 and e.ended_at is null
   `, [org, legacyProperty]);
   assert.deepEqual(legacyRestored.rows[0], { open_episodes: 0, queue_rows: 0 });
+
+  // The apply must use the exact set captured before it waits on a property
+  // lock. A concurrent assignment committed while that lock is held is a
+  // post-preview property and must remain outside the cohort.
+  await client.query(
+    'insert into public.properties (id, org_id, assigned_user_id, status) values ($1,$2,$3,$4)',
+    [raceAnchor, org, maria, 'new_lead'],
+  );
+  const racePreview = (await client.query(
+    'select public.fn_preview_acquisition_launch($1,$2) as result', [org, maria],
+  )).rows[0].result;
+  const applyPid = (await client.query('select pg_backend_pid() as pid')).rows[0].pid;
+  await client2.query('begin');
+  await client2.query('select id from public.properties where id=$1 for update', [raceAnchor]);
+  await client2.query(
+    'insert into public.properties (id, org_id, assigned_user_id, status) values ($1,$2,null,$3)',
+    [raceLate, org, 'new_lead'],
+  );
+  await client2.query('update public.properties set assigned_user_id=$1 where id=$2', [maria, raceLate]);
+  const pendingRaceApply = client.query(
+    'select public.fn_apply_acquisition_launch($1,$2,$3,$4,$5,$6) as result',
+    [org, maria, racePreview.cohortId, racePreview.fingerprint,
+      racePreview.settingsRevision, '10000000-0000-4000-8000-000000000060'],
+  );
+  let reachedLockBoundary = false;
+  for (let attempt = 0; attempt < 100 && !reachedLockBoundary; attempt += 1) {
+    const state = (await client2.query(
+      'select wait_event_type from pg_stat_activity where pid=$1', [applyPid],
+    )).rows[0];
+    reachedLockBoundary = state?.wait_event_type === 'Lock';
+    if (!reachedLockBoundary) await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(reachedLockBoundary, true, 'launch apply must reach the captured-property lock boundary');
+  await client2.query('commit');
+  const raceApply = (await pendingRaceApply).rows[0].result;
+  assert.deepEqual(
+    { ok: raceApply.ok, count: raceApply.count },
+    { ok: true, count: racePreview.previewCount },
+  );
+  const lateCohortItems = await client.query(
+    'select count(*)::int as count from public.acquisition_launch_cohort_items where cohort_id=$1 and property_id=$2',
+    [raceApply.cohortId, raceLate],
+  );
+  assert.equal(lateCohortItems.rows[0].count, 0, 'post-preview assignment must not enter launch cohort');
+  const raceRollback = (await client.query(
+    'select public.fn_rollback_acquisition_launch($1,$2,$3) as result',
+    [org, raceApply.cohortId, '00000000-0000-4000-8000-000000000061'],
+  )).rows[0].result;
+  assert.equal(raceRollback.count, racePreview.previewCount);
+  await client.query('delete from public.properties where id in ($1,$2)', [raceAnchor, raceLate]);
 
   const staleProperty = '10000000-0000-4000-8000-000000000032';
   await client.query('insert into public.properties (id, org_id, assigned_user_id, status) values ($1,$2,$3,$4)', [staleProperty, org, maria, 'new_lead']);
