@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Request } from "@playwright/test";
 
 import {
   adminClient,
@@ -124,8 +124,18 @@ test.describe("send then switch conversation", () => {
       let claimedSend = false;
       let actionResponseReleased = false;
       let bDetailRequestsAfterRelease = 0;
-      let documentNavigations = 0;
-      const onNavigation = () => { documentNavigations += 1; };
+      let documentLoads = 0;
+      let documentNavigationRequests = 0;
+      const onDocumentLoad = () => { documentLoads += 1; };
+      const onDocumentNavigationRequest = (request: Request) => {
+        if (
+          request.isNavigationRequest() &&
+          request.resourceType() === "document" &&
+          request.frame() === page.mainFrame()
+        ) {
+          documentNavigationRequests += 1;
+        }
+      };
 
       await page.route("**/*", async (route) => {
         const request = route.request();
@@ -157,11 +167,18 @@ test.describe("send then switch conversation", () => {
         await actionResponseAllowed;
         await route.fulfill({ response });
       });
-      page.on("framenavigated", onNavigation);
+      page.on("load", onDocumentLoad);
+      page.on("request", onDocumentNavigationRequest);
 
       try {
         await page.goto(`/messages?thread=${encodeURIComponent(a.threadId)}`);
-        documentNavigations = 0;
+        // Native history.replaceState intentionally updates the selected
+        // thread URL but does not create a document request. Count a document
+        // navigation when it starts and again when it loads, resetting after
+        // the initial route settles. The in-page RSC counter separately
+        // detects router refreshes.
+        documentLoads = 0;
+        documentNavigationRequests = 0;
         await expect(page.getByTestId("inbox-detail-panel")).toContainText(`synthetic A ${token}`);
         const shell = `e2e-shell-${token}`;
         await page.getByTestId("inbox-cockpit-grid").evaluate((element, marker) => {
@@ -259,7 +276,8 @@ test.describe("send then switch conversation", () => {
         await expect(page.getByTestId("inbox-detail-panel")).not.toContainText(reply);
         await expect(page).toHaveURL(new RegExp(`[?&]thread=${b.threadId}`));
         expect(heldActionCount).toBe(1);
-        expect(documentNavigations).toBe(0);
+        expect(documentNavigationRequests).toBe(0);
+        expect(documentLoads).toBe(0);
         expect(await page.getByTestId("inbox-cockpit-grid").getAttribute("data-e2e-shell")).toBe(shell);
         expect(await bScroller.evaluate((element) => element.scrollTop)).toBe(scrollBefore);
       } finally {
@@ -270,7 +288,8 @@ test.describe("send then switch conversation", () => {
           window.fetch = scope.__sendSwitchProbe.originalFetch;
           delete scope.__sendSwitchProbe;
         }).catch(() => {});
-        page.off("framenavigated", onNavigation);
+        page.off("load", onDocumentLoad);
+        page.off("request", onDocumentNavigationRequest);
         await page.unroute("**/*");
       }
     }

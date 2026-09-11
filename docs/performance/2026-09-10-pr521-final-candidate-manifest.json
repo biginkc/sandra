@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "generatedOn": "2026-09-10",
+  "pullRequest": 521,
+  "head": "e377d0d3e42dde7a100b00250a59d85aacb1b1b9",
+  "base": "8c7053e7024433f46791eac1b186c1b7a7cf10ec",
+  "branch": "codex/messages-send-switch-hotfix",
+  "worktree": "/Users/jarradhenry/Sites/BMH apps/_codex_worktrees/sandra-messages-send-switch-hotfix",
+  "committedChangedPathCount": 20,
+  "sealedFiles": {
+    "e2e/cockpit-send-switch-hotfix.spec.ts": {
+      "sha256": "c830ecc37507f6c0e06d0602adb4f43efa598ada81260c4fc13e5f6700518572",
+      "status": "reviewed bytes included unchanged in the local sealing commit",
+      "manualReviewVerdict": "APPROVE",
+      "fableReviewVerdict": "APPROVE"
+    }
+  },
+  "dirtyFiles": {
+    "docs/performance/2026-09-10-pr521-isolated-acceptance-plan.md": {
+      "sha256": "8d439cd329d494c59915730a8c4f9b4ebcaf6e93f8954f814401126a69451347"
+    }
+  },
+  "reviewedContextFiles": {
+    "src/app/(dashboard)/leads/[id]/inline-reply.tsx": "334abfb57ee19b783831ff591c550538e3515e16916bcda6eb9bcea4336e9a15",
+    "src/app/(dashboard)/messages/use-conversation-selection.ts": "60bb3976ee407163cf430d46bc5d1b3b40777affac7cb09eb364a3359a6551d2"
+  },
+  "reviews": {
+    "manual": {
+      "receipt": "/Users/jarradhenry/Documents/ChatGPT/New project 2/orchestration/refresh-harness-manual-review.json",
+      "receiptSha256": "32a0804fba8a9b10eeb7f74c19c27389fb6df8c741f76dfad2b3aa0916b4c757",
+      "reviewer": "/root/review_lock_patch",
+      "verdict": "APPROVE",
+      "boundHarnessSha256": "c830ecc37507f6c0e06d0602adb4f43efa598ada81260c4fc13e5f6700518572"
+    },
+    "fable": {
+      "receipt": "/Users/jarradhenry/Documents/ChatGPT/New project 2/orchestration/refresh-harness-fable-review.json",
+      "receiptSha256": "3a656e1953883a023c4aa3feead3b5ccbdf027e759d8a0fd911a723c0abbe6e3",
+      "model": "claude-fable-5-1",
+      "verdict": "APPROVE",
+      "boundHashes": {
+        "e2e/cockpit-send-switch-hotfix.spec.ts": "c830ecc37507f6c0e06d0602adb4f43efa598ada81260c4fc13e5f6700518572",
+        "src/app/(dashboard)/leads/[id]/inline-reply.tsx": "334abfb57ee19b783831ff591c550538e3515e16916bcda6eb9bcea4336e9a15",
+        "src/app/(dashboard)/messages/use-conversation-selection.ts": "60bb3976ee407163cf430d46bc5d1b3b40777affac7cb09eb364a3359a6551d2"
+      }
+    },
+    "manifest": {
+      "receipt": "/Users/jarradhenry/Documents/ChatGPT/New project 2/orchestration/refresh-harness-review-manifest.json",
+      "receiptSha256": "5e61230627e0b2f35203b70da5295a99099a1a989c0a285d2b49b505285e0677"
+    }
+  },
+  "privatePrerequisites": {
+    "hook": ".husky/pre-commit",
+    "databaseScope": "explicit localhost PostgreSQL 17 rehearsal only; no shared synthetic DB admission",
+    "esignAtomicPacket": "12/12 passed",
+    "esignEssentialsRehearsal": "passed and cleaned its uniquely named local database",
+    "typecheck": "passed",
+    "unit": {
+      "testFiles": 334,
+      "tests": 3691,
+      "result": "passed"
+    },
+    "rtl": {
+      "testFiles": 113,
+      "tests": 1260,
+      "result": "passed"
+    },
+    "diffCheck": "passed",
+    "targetedLint": "passed with 0 errors and 1 existing unused-variable warning"
+  },
+  "knownLimits": [
+    "A completion while B detail is still in flight is not covered.",
+    "A route.fetch exception can leave the harness waiting until timeout.",
+    "Provider-mock and quiet-hours proof remain dependent on the admitted browser lane.",
+    "No authenticated browser acceptance, shared physical DB reservation, or push-triggered CI was performed."
+  ],
+  "controllerActionRequired": "Request full-lifecycle publication and authenticated acceptance admission from Merge Controller before any push-triggered shared CI.",
+  "admission": {
+    "sharedDb": false,
+    "sharedCi": false,
+    "production": false,
+    "providerCalls": false,
+    "customerSends": false
+  }
+}

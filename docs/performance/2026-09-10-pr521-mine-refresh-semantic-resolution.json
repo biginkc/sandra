@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "generatedOn": "2026-09-10",
+  "owner": "Sandra — Reply & Conversation Refresh",
+  "ownerStatement": {
+    "path": "docs/performance/2026-09-10-pr521-mine-refresh-owner-statement.md",
+    "sha256": "facd7ff79254cb37edb1a5e768da5fe2c97703eaca7614345321645c6ca5e54f",
+    "signatureMethod": "owner statement content digest"
+  },
+  "mine": {
+    "head": "f201466e38eb0f492871174b60a666bd22f26097",
+    "base": "8c7053e7024433f46791eac1b186c1b7a7cf10ec",
+    "migration": "supabase/migrations/20260910120000_messages_mine_filter_all_statuses.sql",
+    "migrationSha256": "911e207f129d3a34a4176a55d6a563f237da028449b3404685dc1dfe1d445dea",
+    "rollback": "supabase/rollbacks/20260910120000_messages_mine_filter_all_statuses.sql",
+    "rollbackSha256": "0e694436cfc535b4bb8c991983309b5e22b846b7a6fcecddc67ffae326de01e3",
+    "semanticChange": "Mine rows and mine_count include every assigned property status, including prospect; No owner remains leads-only.",
+    "preservedContract": "Eight-argument snapshot RPC, search normalization/matching, all other filter counts, tenant checks, grants, and 15-second timeout."
+  },
+  "refresh": {
+    "head": "e377d0d3e42dde7a100b00250a59d85aacb1b1b9",
+    "base": "8c7053e7024433f46791eac1b186c1b7a7cf10ec",
+    "sealedHarnessSha256": "c830ecc37507f6c0e06d0602adb4f43efa598ada81260c4fc13e5f6700518572",
+    "finalCandidateManifest": "docs/performance/2026-09-10-pr521-final-candidate-manifest.json",
+    "finalCandidateManifestSha256": "135fdbbc3280b4a4a8d3bd73d7e86ebf24002fecfab5dca33d4c8886b03feab5"
+  },
+  "intersection": {
+    "changedPathsComparedWithBase": [],
+    "sharedSemanticContract": "public.sms_inbox_thread_page_snapshot(timestamptz, text, uuid, uuid, boolean, integer, integer, text)",
+    "actualConflictWithRefreshReproducer": false,
+    "reproducerScope": "/messages?thread=<A>; no filter=mine, search, or inboxPage; detail and inbox refresh observed as separate resources"
+  },
+  "compatibility": {
+    "assignedStatus": "Mine refresh adopts assigned prospect and non-prospect rows/counts from the same authoritative snapshot.",
+    "filterCounts": "Mine changes only mine rows/count; No owner, Unread, Escalated, Dispo, Needs Outcome, and All predicates/counts remain preserved.",
+    "search": "p_search remains the eighth argument with the existing trim/minimum-length/100-character normalization and message/contact matching.",
+    "cache": "Refresh route returns Cache-Control private, no-store; client fetch uses cache no-store.",
+    "sendSwitch": "Send completion revalidates selected detail and refreshes current inbox scope; no route rebuild or document navigation is introduced by the Refresh path."
+  },
+  "evidence": {
+    "mineStaticContract": "Committed at f201466e; asserts only the two Mine predicates change and rollback restores the prior function.",
+    "mineIntegrationExpected": "Committed at f201466e; assigned prospect/new_lead Mine rows and counts plus search narrowing are covered but were not rerun against a shared DB here.",
+    "refreshPrivateHook": "Recorded in final-candidate manifest; no shared physical-test-DB admission."
+  },
+  "disposition": "CLEAR_SEMANTICALLY",
+  "controllerGate": "Controller must publish/admit full lifecycle, reservation, cleanup/restoration, and authenticated acceptance before any push-triggered shared CI.",
+  "admission": {
+    "sharedDb": false,
+    "sharedCi": false,
+    "push": false,
+    "production": false,
+    "providerCalls": false,
+    "customerSends": false
+  },
+  "knownLimits": [
+    "B completion while B detail is in flight remains untested.",
+    "route.fetch exception can wait for timeout.",
+    "Provider-mock and quiet-hours proof require the admitted browser lane."
+  ]
+}
