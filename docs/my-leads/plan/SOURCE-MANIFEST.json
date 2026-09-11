@@ -8,8 +8,16 @@
       "sha256": "fda26c8c0110d24e2ed831227847d06f30878ef283f03ca213997f22494811df"
     },
     {
+      "path": "playwright.config.ts",
+      "sha256": "9140776f51f15875ce97c75cb73b7d36ecf254271b8efb76ec49d15629f19393"
+    },
+    {
       "path": "playwright.my-leads-local.config.ts",
       "sha256": "136a5cfbe5b44d336182fb33b703cb2d80401885fd07aeb0e63975f8cf9c4061"
+    },
+    {
+      "path": "playwright.prod.config.ts",
+      "sha256": "a1924639a87baeb497e8243aefe16c641c8debe530421dac6d64404651f48517"
     },
     {
       "path": "scripts/my-leads-launch.ts",
