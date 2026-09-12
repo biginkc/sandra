@@ -1,13 +1,12 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ChevronDown, Search } from "lucide-react"
+import { ChevronDown, ChevronRight, Search } from "lucide-react"
 
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import { MyLeadQueueRow, STAGE_COLORS, STAGE_NEXT } from "./queue-row"
+import { MyLeadQueueRow, STAGE_NEXT } from "./queue-row"
 import {
   MY_LEAD_STAGE_LABELS,
   MY_LEAD_STAGE_ORDER,
@@ -32,6 +31,16 @@ const KPI_LABELS = [
   ["stale-leads", "Stale leads"],
 ] as const
 
+// Solid section colors for the collapsible header bar. Each shade is chosen to
+// clear WCAG AA (≥4.5:1) against the white bar text.
+const STAGE_BAR: Record<MyLeadStage, string> = {
+  not_contacted: "bg-blue-600",
+  contacted: "bg-teal-700",
+  needs_offer: "bg-amber-700",
+  offer_sent: "bg-violet-600",
+  under_contract: "bg-green-700",
+}
+
 export function MyLeadsQueue({
   stages,
   kpis,
@@ -55,6 +64,7 @@ export function MyLeadsQueue({
   const scopeKey = JSON.stringify([search, selectedPeriod, selectedRepId, selectedDateRange?.startDate, selectedDateRange?.endDate])
   const [expansionScope, setExpansionScope] = useState(scopeKey)
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
+  const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<MyLeadStage>>(new Set())
   const [detailStates, setDetailStates] = useState<
     Readonly<Record<string, MyLeadDetailState>>
   >({})
@@ -300,6 +310,15 @@ export function MyLeadsQueue({
             key={stage}
             stage={stage}
             page={stages[stage]}
+            collapsed={collapsedSections.has(stage)}
+            onToggleSection={() =>
+              setCollapsedSections((previous) => {
+                const next = new Set(previous)
+                if (next.has(stage)) next.delete(stage)
+                else next.add(stage)
+                return next
+              })
+            }
             expandedIds={expandedIds}
             detailStates={detailStates}
             onToggleDetails={toggleDetails}
@@ -318,6 +337,8 @@ export function MyLeadsQueue({
 function MyLeadStageSection({
   stage,
   page,
+  collapsed,
+  onToggleSection,
   expandedIds,
   detailStates,
   onToggleDetails,
@@ -329,6 +350,8 @@ function MyLeadStageSection({
 }: {
   stage: MyLeadStage
   page: MyLeadsQueueProps["stages"][MyLeadStage]
+  collapsed: boolean
+  onToggleSection: () => void
   expandedIds: ReadonlySet<string>
   detailStates: Readonly<Record<string, MyLeadDetailState>>
   onToggleDetails: (propertyId: string) => void
@@ -343,62 +366,79 @@ function MyLeadStageSection({
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRowDto) => void
 }) {
   const label = MY_LEAD_STAGE_LABELS[stage]
+  const ChevronIcon = collapsed ? ChevronRight : ChevronDown
 
   return (
     <section className="space-y-2" data-testid={`my-leads-section-${stage}`} aria-labelledby={`my-leads-heading-${stage}`}>
-      <div className="flex flex-wrap items-center gap-2.5">
-        <div className="flex items-center gap-2.5">
-          <h2 id={`my-leads-heading-${stage}`} className={cn("text-xs font-extrabold uppercase tracking-widest", STAGE_COLORS[stage])}>
-            {label}
-          </h2>
-          <Badge variant="secondary" aria-label={`${page.totalCount} ${label} leads`} className="rounded-full border border-border bg-muted font-mono text-[11px] font-semibold text-muted-foreground">
-            {page.totalCount}
-          </Badge>
-        </div>
-        <span className="h-px min-w-8 flex-1 bg-border" aria-hidden="true" />
-        <p className="max-w-full text-[11.5px] text-muted-foreground">{STAGE_NEXT[stage]}</p>
-        {page.totalCount > page.rows.length && (
-          <span className="text-xs text-muted-foreground">
-            Showing {page.rows.length} of {page.totalCount}
-          </span>
+      <h2 id={`my-leads-heading-${stage}`} className="sr-only">{label}</h2>
+      <button
+        type="button"
+        onClick={onToggleSection}
+        aria-expanded={!collapsed}
+        aria-controls={`my-leads-rows-${stage}`}
+        className={cn(
+          "flex w-full items-center gap-2.5 rounded-[10px] px-4 py-2.5 text-left text-white outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white",
+          STAGE_BAR[stage]
+        )}
+      >
+        <ChevronIcon className="size-4 shrink-0" aria-hidden="true" />
+        <span className="text-xs font-bold uppercase tracking-widest text-white">{label}</span>
+        <span
+          aria-label={`${page.totalCount} leads`}
+          className="inline-flex min-w-[22px] items-center justify-center rounded-full bg-black/20 px-2 py-0.5 font-mono text-[11px] font-semibold text-white"
+        >
+          {page.totalCount}
+        </span>
+        <span className="ml-auto hidden max-w-full truncate pl-3 text-[11.5px] text-white sm:block">{STAGE_NEXT[stage]}</span>
+      </button>
+
+      <div id={`my-leads-rows-${stage}`} hidden={collapsed}>
+        {!collapsed && (
+          <div className="space-y-2">
+            {page.totalCount > page.rows.length && (
+              <p className="px-1 text-xs text-muted-foreground">
+                Showing {page.rows.length} of {page.totalCount}
+              </p>
+            )}
+
+            {page.rows.length === 0 ? (
+              <div className="rounded-xl border border-dashed px-4 py-5 text-sm text-muted-foreground">
+                No leads in this section.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {page.rows.map((row) => (
+                  <MyLeadQueueRow
+                    key={row.propertyId}
+                    row={row}
+                    detailsOpen={expandedIds.has(row.propertyId)}
+                    detailState={detailStates[row.propertyId]}
+                    onToggleDetails={() => onToggleDetails(row.propertyId)}
+                    onRetryDetails={() => onRetryDetails(row.propertyId)}
+                    onDetailChanged={() => onDetailChanged(row.propertyId)}
+                    onLoadDetailPage={onLoadDetailPage
+                      ? (group, cursor) => onLoadDetailPage(row.propertyId, group, cursor)
+                      : undefined}
+                    onStageAction={onStageAction}
+                  />
+                ))}
+              </div>
+            )}
+
+            {page.hasMore && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={page.isLoadingMore}
+                onClick={() => void onLoadMore(stage)}
+              >
+                {page.isLoadingMore ? "Loading…" : `Load more ${label}`}
+              </Button>
+            )}
+          </div>
         )}
       </div>
-
-      {page.rows.length === 0 ? (
-        <div className="rounded-xl border border-dashed px-4 py-5 text-sm text-muted-foreground">
-          No leads in this section.
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {page.rows.map((row) => (
-            <MyLeadQueueRow
-              key={row.propertyId}
-              row={row}
-              detailsOpen={expandedIds.has(row.propertyId)}
-              detailState={detailStates[row.propertyId]}
-              onToggleDetails={() => onToggleDetails(row.propertyId)}
-              onRetryDetails={() => onRetryDetails(row.propertyId)}
-              onDetailChanged={() => onDetailChanged(row.propertyId)}
-              onLoadDetailPage={onLoadDetailPage
-                ? (group, cursor) => onLoadDetailPage(row.propertyId, group, cursor)
-                : undefined}
-              onStageAction={onStageAction}
-            />
-          ))}
-        </div>
-      )}
-
-      {page.hasMore && (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={page.isLoadingMore}
-          onClick={() => void onLoadMore(stage)}
-        >
-          {page.isLoadingMore ? "Loading…" : `Load more ${label}`}
-        </Button>
-      )}
     </section>
   )
 }

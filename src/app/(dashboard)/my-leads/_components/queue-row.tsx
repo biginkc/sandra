@@ -42,14 +42,6 @@ const TEMPERATURE_CLASSES = {
   cold: "bg-blue-600 dark:bg-blue-500",
 } as const
 
-export const STAGE_COLORS: Record<MyLeadStage, string> = {
-  not_contacted: "text-blue-700 dark:text-blue-300",
-  contacted: "text-foreground",
-  needs_offer: "text-amber-700 dark:text-amber-300",
-  offer_sent: "text-violet-700 dark:text-violet-300",
-  under_contract: "text-green-700 dark:text-green-300",
-}
-
 export const STAGE_NEXT: Record<MyLeadStage, string> = {
   not_contacted: "Next: place a call or log an outreach attempt.",
   contacted: "Next: plan a callback, or mark ready when the seller is ready for an offer.",
@@ -88,11 +80,16 @@ const NEEDS_COPY: Record<MyLeadStage, React.ReactNode> = {
   ),
 }
 
-const TEMPERATURE_BORDERS = {
-  hot: "border-l-red-600",
-  warm: "border-l-amber-600",
-  cold: "border-l-blue-600",
-} as const
+// Each lead card's border matches its section color (motivation still reads via
+// the colored dot). A light full border + a stronger left accent tie the card to
+// its stage bar.
+const STAGE_CARD_BORDER: Record<MyLeadStage, string> = {
+  not_contacted: "border-blue-200 border-l-blue-500 dark:border-blue-900 dark:border-l-blue-500",
+  contacted: "border-teal-200 border-l-teal-600 dark:border-teal-900 dark:border-l-teal-500",
+  needs_offer: "border-amber-200 border-l-amber-500 dark:border-amber-900 dark:border-l-amber-500",
+  offer_sent: "border-violet-200 border-l-violet-500 dark:border-violet-900 dark:border-l-violet-500",
+  under_contract: "border-green-200 border-l-green-600 dark:border-green-900 dark:border-l-green-500",
+}
 
 const ACTIONS_BY_STAGE: Record<
   MyLeadStage,
@@ -170,8 +167,8 @@ export function MyLeadQueueRow({
   return (
     <article
       className={cn(
-        "overflow-hidden rounded-[14px] border border-l-[3px] border-[#e5e1df] bg-card text-card-foreground dark:border-border",
-        temperature ? TEMPERATURE_BORDERS[temperature] : "border-l-stone-300 dark:border-l-stone-700"
+        "overflow-hidden rounded-[14px] border border-l-[3px] bg-card text-card-foreground",
+        STAGE_CARD_BORDER[row.queueStage]
       )}
       data-testid={`my-lead-row-${row.propertyId}`}
     >

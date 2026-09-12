@@ -103,6 +103,18 @@ describe("MyLeadsQueue", () => {
     expect(screen.getByTestId("kpi-stale-leads")).toHaveTextContent("Stale leads1")
   })
 
+  it("collapses a section so its leads are hidden", async () => {
+    const user = userEvent.setup()
+    render(<MyLeadsQueue {...buildProps()} />)
+
+    const section = screen.getByTestId("my-leads-section-contacted")
+    expect(within(section).getByRole("button", { name: /Show details for 2 Main Street/ })).toBeInTheDocument()
+
+    await user.click(within(section).getByRole("button", { expanded: true }))
+
+    expect(within(section).queryByRole("button", { name: /Show details for 2 Main Street/ })).not.toBeInTheDocument()
+  })
+
   it("keeps load-more controls independent for each stage", async () => {
     const user = userEvent.setup()
     const onLoadMore = vi.fn()
