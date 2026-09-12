@@ -62,8 +62,11 @@ setup("authenticate", async ({ page }) => {
     })),
   );
 
-  await page.goto("/dashboard");
-  await expect(page.locator("text=Sign out")).toBeVisible();
+  // The authenticated shell can render while Overview is still streaming.
+  // Auth setup verifies the session, not completion of the dashboard's data.
+  await page.goto("/dashboard", { waitUntil: "commit" });
+  await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/);
+  await expect(page.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
 
   await page.context().storageState({ path: AUTH_FILE });
 });
