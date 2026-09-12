@@ -31,8 +31,8 @@ function callbackRequest(input: {
   relatedSignatureId?: string | null;
   providerSignatures?: Array<{
     signature_id: string;
-    signer_role: string;
-    signer_name: string;
+    signer_role?: string | null;
+    signer_name?: string | null;
     signer_email_address: string;
     order: number;
     status_code?: string;
@@ -69,7 +69,7 @@ function callbackRequest(input: {
               signature_request_id:
                 input.signRequestId ?? "provider-request-1",
               metadata: {
-                sandra_request_id: input.localRequestId ?? REQUEST_ID,
+                sandra_request_id: input.localRequestId === null ? undefined : input.localRequestId ?? REQUEST_ID,
               },
               ...(input.testMode === undefined ? {} : { test_mode: input.testMode }),
               signatures: input.providerSignatures ?? [],
@@ -886,4 +886,46 @@ describe("injectable Dropbox Sign webhook handler", () => {
     expect(deps.artifactPersistence.storeLinkAndRecordReady).not.toHaveBeenCalled();
     expect(deps.persistence.markReceiptProcessed).toHaveBeenCalledWith(CLAIM);
   });
+});
+
+describe("non-template account callbacks", () => {
+  const signatures = [{ signature_id: "external-signature", signer_name: "Internal fixture",
+    signer_email_address: "fixture@example.com", order: 0 }];
+  it("acknowledges authenticated unrelated reminders without contractual roles", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.persistence.findRequest).mockResolvedValue(null);
+    vi.mocked(deps.metadataProvider.confirmProviderLocalRequestId).mockResolvedValue({ outcome: "unmanaged" });
+    const response = await handleDropboxSignWebhook({ pathSecret: PATH_SECRET, dependencies: deps,
+      request: callbackRequest({ eventType: "signature_request_remind", localRequestId: null, providerSignatures: signatures }) });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(DROPBOX_SIGN_ACKNOWLEDGEMENT);
+    expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+    expect(deps.persistence.reconcileProviderSigners).not.toHaveBeenCalled();
+  });
+  it("still rejects an unrelated callback with an invalid HMAC", async () => {
+    const deps = dependencies();
+    const response = await handleDropboxSignWebhook({ pathSecret: PATH_SECRET, dependencies: deps,
+      request: callbackRequest({ eventHash: "0".repeat(64), localRequestId: null, providerSignatures: signatures }) });
+    expect(response.status).toBe(403);
+    expect(deps.persistence.claimVerifiedReceipt).not.toHaveBeenCalled();
+  });
+  it("fails closed before changing a known contract with incomplete signer identity", async () => {
+    const deps = dependencies();
+    const response = await handleDropboxSignWebhook({ pathSecret: PATH_SECRET, dependencies: deps,
+      request: callbackRequest({ eventType: "signature_request_all_signed", providerSignatures: signatures }) });
+    expect(response.status).toBe(503);
+    expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+    expect(deps.persistence.reconcileProviderSigners).not.toHaveBeenCalled();
+    expect(deps.persistence.markReceiptFailed).toHaveBeenCalledWith(CLAIM, "INCOMPLETE_SIGNER_IDENTITY");
+  });
+});
+
+it("does not ignore a callback with stripped local metadata unless provider confirms it is unmanaged", async () => {
+  const deps = dependencies();
+  vi.mocked(deps.persistence.findRequest).mockResolvedValue(null);
+  vi.mocked(deps.metadataProvider.confirmProviderLocalRequestId).mockResolvedValue({ outcome: "mismatch" });
+  const response = await handleDropboxSignWebhook({ pathSecret: PATH_SECRET, dependencies: deps,
+    request: callbackRequest({ localRequestId: null }) });
+  expect(response.status).toBe(503);
+  expect(deps.persistence.markReceiptIgnored).not.toHaveBeenCalled();
 });
