@@ -17,7 +17,7 @@
 - [PASS] Production build completes for the merged candidate.
 - [PASS] Astro read-only review completed with high confidence: plan approved for preflight/execution; the historical fresh-handoff defect is confirmed fixed in the merged migration and must be rechecked on the current applied database identity.
 - [PASS] Isolated local mutation admission: the user amendment authorizes this session's synthetic stack. A guarded seed apply safely refused overwrite because the 105 expanded IDs already exist; no reset was performed.
-- [PASS] Browser workflow execution and persisted outcomes for the new 84-case batch are recorded for this isolated run. Current CSV totals are 22 PASS and 62 BLOCKED, with no NOT RUN rows. BLOCKED rows carry the exact unavailable capability or incomplete branch coverage; API-assisted writes remain labeled separately and have browser reload/SQL corroboration.
+- [PASS] Browser workflow execution and persisted outcomes for the new 84-case batch are recorded for this isolated run. Current CSV totals are 26 PASS and 58 BLOCKED, with no NOT RUN rows. BLOCKED rows carry the exact unavailable capability or incomplete branch coverage; API-assisted writes remain labeled separately and have browser reload/SQL corroboration.
 - [IN PROGRESS] Exact-current-candidate Astro review and final acceptance packet.
 
 ## Preflight evidence
@@ -33,7 +33,7 @@ Astro reviewed the plan and reported: approve preflight/execution with two corre
 
 ## Current decision
 
-The isolated campaign is ready for a final exact-current-candidate Astro review. No confirmed product defect was discovered, so no source fix was needed this turn; all blocked capabilities, incomplete branches, before/after facts, side-effect checks, and retained-fixture/writer status are recorded in the CSV and receipt.
+The isolated campaign is ready for a final exact-current-candidate Astro review after rerunning the feasible archive-reset, temperature-preservation, motivation-mode, fresh version-0 handoff, and stale-tab recovery checks. No confirmed product defect was discovered, so no source fix was needed this turn; all blocked capabilities, incomplete branches, before/after facts, side-effect checks, and retained-fixture/writer status are recorded in the CSV and receipt.
 
 ## Current execution evidence
 
