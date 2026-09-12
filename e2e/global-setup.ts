@@ -1,4 +1,5 @@
 import { Client } from "pg";
+import { assertDisposableE2EDatabaseEnvironment } from "../src/lib/supabase/e2e-target-safety";
 
 /**
  * Playwright globalSetup: hold a transaction-scoped Postgres advisory lock
@@ -77,6 +78,10 @@ export function assertLockTargetsExpectedProject(
   dbUrl: string,
   env: MinimalEnvironment = process.env,
 ): URL {
+  if (env.E2E_DISPOSABLE_DATABASE === "1") {
+    assertDisposableE2EDatabaseEnvironment(env.TEST_SUPABASE_URL ?? "", { ...env, E2E_CI_SUPABASE_DB_URL: dbUrl });
+    return new URL(dbUrl);
+  }
   let parsed: URL;
   try {
     parsed = new URL(dbUrl);
@@ -143,7 +148,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   // doesn't protect anything," not credential or data exposure.
   const client = new Client({
     connectionString: dbUrl,
-    ssl: { rejectUnauthorized: false },
+    ssl: process.env.E2E_DISPOSABLE_DATABASE === "1" ? false : { rejectUnauthorized: false },
   });
   try {
     await client.connect();

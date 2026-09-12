@@ -104,7 +104,7 @@ export function DashboardSidebar({
   };
 
   return (
-    <nav aria-label="Primary" className="flex flex-1 flex-col gap-1">
+    <nav aria-label="Primary" className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
       {items.map((item) => {
         const active = isActive(item);
         const Icon = item.icon;
