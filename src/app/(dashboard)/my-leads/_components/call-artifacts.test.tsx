@@ -9,14 +9,14 @@ describe("independent call artifacts", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(response()).mockResolvedValueOnce(response({ ...base, summaryStatus: "available", summary: "Seller wants a callback" }));
     render(<MyLeadCallArtifacts callActivityId="call-1" />);
     expect(await screen.findByRole("button", { name: "Load recording (51s)" })).toBeVisible();
-    expect(screen.getByText("Summary processing failed. Other call details remain available.")).toBeVisible();
+    expect(screen.getByText("Summary unavailable. Please reach out to an admin.")).toBeVisible();
     expect(screen.getByText("Seller transcript")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Refresh call details" }));
     expect(await screen.findByText("Seller wants a callback")).toBeVisible();
-    expect(screen.queryByText(/Summary processing failed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Summary unavailable/)).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
-  it.each([["pending", "Recording processing"], ["failed", "Recording processing failed. Other call details remain available."], ["none", "No recording captured"]])("distinguishes %s without a playback request", async (state, label) => {
+  it.each([["pending", "Recording processing"], ["failed", "Recording unavailable. Please reach out to an admin."], ["none", "No recording captured"]])("distinguishes %s without a playback request", async (state, label) => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(response({ ...base, recordingStatus: state }));
     render(<MyLeadCallArtifacts callActivityId="call-1" />);
     expect(await screen.findByText(label)).toBeVisible();

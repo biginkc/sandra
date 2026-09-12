@@ -59,7 +59,7 @@ export function MyLeadCallArtifacts({ callActivityId }: { callActivityId: string
 
 function artifactLabel(name: string, state: string) {
   if (state === "pending") return `${name} processing`;
-  if (state === "failed") return `${name} processing failed. Other call details remain available.`;
+  if (state === "failed") return `${name} unavailable. Please reach out to an admin.`;
   if (state === "none") return name === "Recording" ? "No recording captured" : `${name} not available`;
   return `${name} status unavailable`;
 }
