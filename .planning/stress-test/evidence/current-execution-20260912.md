@@ -1,6 +1,6 @@
 # Current isolated execution receipt
 
-- Candidate: local merge head `5342cc96`, served at `127.0.0.1:58702`
+- Candidate: local merge head `7890622d`, served at `127.0.0.1:58702`
 - Browser: in-app browser, authenticated synthetic rep, desktop viewport
 - Data: dedicated local Supabase stack; expanded 105-lead cohort already existed and was not overwritten
 - Submission method: authenticated workflow RPCs for state-changing steps, followed by in-app-browser reload and assertions. This is marked API-assisted because the in-app browser did not commit `datetime-local` fields.
@@ -20,7 +20,7 @@
 - `J01-00` full attempt sequence: on `20000000-0000-4000-8000-000000001004`, the browser saved a DialPad No answer, then a DialPad Reached attempt. A cache-busting reload moved the row to Contacted; expanded detail showed `ATTEMPTS · 2` with both outcomes and no recording.
 - `J01-01` duplicate save: on `20000000-0000-4000-8000-000000001010`, two immediate Save clicks closed one dialog; reload/detail showed exactly one Manual No answer attempt.
 - `J01-02` source normalization: on `20000000-0000-4000-8000-000000001010` (`Stress not_contacted 11 Fixture Lane`), selecting Manual outreach revealed and accepted Other outreach; reload/detail showed one Manual No answer attempt.
-- `J05-01` archive cancellation: opened the archive confirmation from the expanded Under contract detail and clicked Cancel; the dialog closed without mutation. Candidate `5342cc96`, synthetic rep browser, fixture `20000000-0000-4000-8000-000000001042`.
+- `J05-01` archive cancellation: opened the archive confirmation from the expanded Under contract detail and clicked Cancel; the dialog closed without mutation. Candidate `7890622d`, synthetic rep browser, fixture `20000000-0000-4000-8000-000000001042`.
 - `J02-00` specified readiness: entered a concrete motivation in the readiness dialog and saved; a cache-busting reload placed `20000000-0000-4000-8000-000000001026` in Needs offer / Interested with the Offer needed guidance.
 - `J02-01` explicit no motivation: selected No motivation provided with Keep temperature unchanged; a reload placed `20000000-0000-4000-8000-000000001025` in Needs offer / Interested without an error.
 - `J02-02` draft reset: canceled a readiness dialog after an invalid draft, opened the next fixture, and observed a fresh empty motivation field.
