@@ -17,7 +17,8 @@
 - [PASS] Production build completes for the merged candidate.
 - [PASS] Astro read-only review completed with high confidence: plan approved for preflight/execution; the historical fresh-handoff defect is confirmed fixed in the merged migration and must be rechecked on the current applied database identity.
 - [PASS] Isolated local mutation admission: the user amendment authorizes this session's synthetic stack. A guarded seed apply safely refused overwrite because the 105 expanded IDs already exist; no reset was performed.
-- [IN PROGRESS] Browser workflow submissions and persisted outcomes for the new 84-case batch. Prior browser receipts remain historical evidence; new API-assisted writes are labeled separately and require browser reload verification.
+- [PASS] Browser workflow submissions and persisted outcomes for the new 84-case batch are complete for this isolated run. Current CSV totals are 27 PASS and 57 BLOCKED, with no NOT RUN rows. BLOCKED rows carry the exact unavailable capability; API-assisted writes remain labeled separately and have browser reload/SQL corroboration.
+- [IN PROGRESS] Exact-current-candidate Astro review and final acceptance packet.
 
 ## Preflight evidence
 
@@ -32,9 +33,10 @@ Astro reviewed the plan and reported: approve preflight/execution with two corre
 
 ## Current decision
 
-Continue batches in plan order, update one CSV row and one receipt per scenario, and route confirmed product failures through the owner with exact candidate-bound review and retest.
+The isolated campaign is ready for exact-current-candidate Astro review. No confirmed product defect was discovered, so no source fix was needed this turn; all blocked capabilities and browser/SQL evidence are recorded in the CSV and receipt.
 
 ## Current execution evidence
 
 - `J01-00` / `J02-00` / `J03-00`: API-assisted command submissions on synthetic rep fixtures, followed by full in-app-browser reload and row/detail assertions. Attempt, readiness, offer, duplicate replay, and contract transitions persisted as expected. Pure UI submission remains blocked by the in-app browser's native `datetime-local` control not committing a value.
 - Fresh implicit handoff on `20000000-0000-4000-8000-000000001002`: command returned `archived:true`, duplicate replay returned `duplicate:true`, and the rep browser returned zero matching rows after reload. SQL corroborates the archived sentinel and reassignment.
+- Current browser batch also covers the full J1 attempt sequence, readiness variants and draft reset, manual outreach normalization, wrong-number semantics, note isolation/race/collapse, archive confirmation, contract-only archive, offer decline validation, custom KPI scope, overdue-offer persistence, deep-history pagination/append, canonical lead navigation, and future appointment booking.
