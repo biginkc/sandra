@@ -84,7 +84,7 @@ async function getLead(supabase: Awaited<ReturnType<typeof createClient>>, prope
   return (data as unknown as LeadRow | null) ?? null;
 }
 
-export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActionResult<SoftphoneTarget>> {
+async function resolveLeadCall(propertyId: string, startEffects: boolean): Promise<SoftphoneActionResult<SoftphoneTarget>> {
   try {
     const supabase = await createClient();
     const lead = await getLead(supabase, propertyId);
@@ -119,7 +119,7 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
     }
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return { ok: false, error: "Not signed in." };
-    await pausePropertyEnrollments(supabase, {
+    if (startEffects) await pausePropertyEnrollments(supabase, {
       propertyId: lead.id,
       reason: "call_in_progress",
       actor: { actorType: "user", actorId: user.id },
@@ -145,7 +145,7 @@ export async function resumeFailedSoftphoneCall(propertyId: string): Promise<voi
   }
 }
 
-export async function prepareManualCall(phone: string): Promise<SoftphoneActionResult<SoftphoneTarget>> {
+async function resolveManualCall(phone: string, startEffects: boolean): Promise<SoftphoneActionResult<SoftphoneTarget>> {
   const phoneE164 = toPhoneE164(phone);
   if (!phoneE164) return { ok: false, error: "Enter a valid 10-digit number." };
   try {
@@ -206,7 +206,7 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
       if (!target || !linkedLead.homeowner) return { ok: false, error: "This lead has no callable phone number." };
       const { data: { user }, error: authError } = await supabase.auth.getUser();
       if (authError || !user) return { ok: false, error: "Not signed in." };
-      await pausePropertyEnrollments(supabase, {
+      if (startEffects) await pausePropertyEnrollments(supabase, {
         propertyId: linkedLead.id,
         reason: "call_in_progress",
         actor: { actorType: "user", actorId: user.id },
@@ -632,4 +632,18 @@ export async function completeSoftphoneCall(input: {
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Could not save the call." };
   }
+}
+
+/** Inspection uses the same authorization and target resolution without pausing outreach. */
+export async function inspectLeadCall(propertyId: string): Promise<SoftphoneActionResult<SoftphoneTarget>> {
+  return resolveLeadCall(propertyId, false);
+}
+export async function inspectManualCall(phone: string): Promise<SoftphoneActionResult<SoftphoneTarget>> {
+  return resolveManualCall(phone, false);
+}
+export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActionResult<SoftphoneTarget>> {
+  return resolveLeadCall(propertyId, true);
+}
+export async function prepareManualCall(phone: string): Promise<SoftphoneActionResult<SoftphoneTarget>> {
+  return resolveManualCall(phone, true);
 }

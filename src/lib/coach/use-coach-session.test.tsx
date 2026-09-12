@@ -487,3 +487,61 @@ describe("useCoachSession", () => {
     expect(loadCoachCallContext).not.toHaveBeenCalled();
   });
 });
+
+describe('pre-call snapshot handoff', () => {
+  const setup = {
+    version: 1 as const, operatorId: 'rep-1', targetKey:'lead:a', propertyId:sampleContext.leadId, phoneE164:sampleContext.sellerPhoneE164!,
+    context: sampleContext,
+    edits: { seller_name:'Prepared Seller', rep_name:'Spoken Name', motivation:'', dream_outcome:'buy a smaller home', offer_price:'$180,000' },
+    branches: { Opener:'fsbo', Entry:'vacant', 'offer.outcome-tracks':'Bad news', 'close.decision-tracks':'They accept' },
+  };
+  it('seeds branches and prepared values on first paint, freezes file identity, and preserves live clears through retry', async () => {
+    loadCoachCallContext.mockResolvedValue({...sampleContext,sellerName:'Late Seller',authenticatedRepName:'Wrong Identity',leadId:'wrong-ABC123',motivation:'late reason'});
+    const {result}=renderHook(()=>useCoachSession(null,sampleContext.leadId,sampleContext.sellerPhoneE164,sampleContext.repPhoneE164,true,{sellerName:'Prepared Seller',propertyAddress:sampleContext.propertyAddress,sellerPhoneE164:sampleContext.sellerPhoneE164,maskedSellerPhone:null,setup},'precall-session'));
+    expect(result.current.branchOverrides).toMatchObject({Opener:'fsbo',Entry:'vacant'});
+    expect(result.current.sectionBranchSelections).toMatchObject({'offer.outcome-tracks':'Bad news'});
+    expect(result.current.tokenOverrides).toMatchObject({seller_name:'Prepared Seller',motivation:'',offer_price:'$180,000'});
+    await waitFor(()=>expect(result.current.contextLoad.status).toBe('ready'));
+    expect(result.current.contextLoad.context.authenticatedRepName).toBe('Alex Rep');
+    expect(result.current.contextLoad.context.leadId).toBe(sampleContext.leadId);
+    act(()=>result.current.setEntryField('offer_price',''));
+    act(()=>result.current.retryContext());
+    await waitFor(()=>expect(loadCoachCallContext).toHaveBeenCalledTimes(2));
+    expect(result.current.tokenOverrides?.offer_price).toBe('');
+  });
+  it('lets the live read restore file identity when pre-call identity was unavailable', async () => {
+    loadCoachCallContext.mockResolvedValue(sampleContext);
+    const unresolvedSetup = {
+      ...setup,
+      context: { ...setup.context, authenticatedRepName: null, leadId: null },
+    };
+    const { result } = renderHook(() => useCoachSession(
+      null,
+      sampleContext.leadId,
+      sampleContext.sellerPhoneE164,
+      sampleContext.repPhoneE164,
+      true,
+      {
+        sellerName: 'Prepared Seller',
+        propertyAddress: sampleContext.propertyAddress,
+        sellerPhoneE164: sampleContext.sellerPhoneE164,
+        maskedSellerPhone: null,
+        setup: unresolvedSetup,
+      },
+      'precall-identity-retry',
+    ));
+    await waitFor(() => expect(result.current.contextLoad.status).toBe('ready'));
+    expect(result.current.contextLoad.context.authenticatedRepName).toBe(
+      sampleContext.authenticatedRepName,
+    );
+    expect(result.current.contextLoad.context.leadId).toBe(sampleContext.leadId);
+  });
+  it('replaces all prepared values and branches for a new session before effects run',()=>{
+    loadCoachCallContext.mockReturnValue(new Promise(()=>{}));
+    const {result,rerender}=renderHook(({key,prepared})=>useCoachSession(null,sampleContext.leadId,sampleContext.sellerPhoneE164,sampleContext.repPhoneE164,true,{sellerName:null,propertyAddress:null,sellerPhoneE164:null,maskedSellerPhone:null,setup:prepared},key),{initialProps:{key:'A',prepared:setup}});
+    act(()=>result.current.setEntryField('offer_price','$999'));
+    rerender({key:'B',prepared:{...setup,edits:{...setup.edits,seller_name:'Second Seller',offer_price:'$12'},branches:{...setup.branches,Opener:'sms'}}});
+    expect(result.current.tokenOverrides).toMatchObject({seller_name:'Second Seller',offer_price:'$12'});
+    expect(result.current.branchOverrides.Opener).toBe('sms');
+  });
+});

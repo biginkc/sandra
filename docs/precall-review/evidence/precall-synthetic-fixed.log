@@ -1,0 +1,221 @@
+(node:4852) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+Running 89 tests using 1 worker
+
+[1A[2K(node:4856) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:4856) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+
+[1A[2K(node:4856) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K[1/89] e2e/synthetic/coach-audio-acceptance.spec.ts:120:5 › ready without media attachment stays nonterminal and does not claim restored audio
+[1A[2K[2/89] e2e/synthetic/coach-audio-acceptance.spec.ts:142:5 › frozen RTP status proof remains nonterminal with recovery and hangup available
+[1A[2K[3/89] e2e/synthetic/coach-audio-acceptance.spec.ts:160:5 › advancing inbound RTP plus audible playout restores live audio
+[1A[2K[4/89] e2e/synthetic/coach-audio-acceptance.spec.ts:201:5 › confirmed provider terminal is distinct from explicit manual hangup
+[1A[2K[5/89] e2e/synthetic/coach-audio-acceptance.spec.ts:224:5 › Hang Up uses the explicit user teardown path and never provider proof
+[1A[2K[6/89] e2e/synthetic/coach-audio-acceptance.spec.ts:245:5 › Mute and unmute update Coach only after SDK acknowledgement
+[1A[2K[7/89] e2e/synthetic/coach-audio-acceptance.spec.ts:260:5 › Rejected mute stays truthful and never tears down the call
+[1A[2K[8/89] e2e/synthetic/coach-audio-acceptance.spec.ts:274:5 › Rejected unmute preserves muted truth and never tears down the call
+[1A[2K[9/89] e2e/synthetic/coach-audio-acceptance.spec.ts:290:5 › Hold warns while durable acknowledgement is unknown without blocking controls
+[1A[2K[10/89] e2e/synthetic/coach-audio-acceptance.spec.ts:313:5 › Direct Hold and Resume failures preserve truth until exact provider updates
+[1A[2K[11/89] e2e/synthetic/coach-audio-acceptance.spec.ts:340:5 › Hold reapply failure remains live and visible without duplicate teardown
+[1A[2K[12/89] e2e/synthetic/coach-audio-acceptance.spec.ts:361:7 › keeps interrupted and reconnecting controls accessible at 375x667
+[1A[2K[13/89] e2e/synthetic/coach-audio-acceptance.spec.ts:361:7 › keeps interrupted and reconnecting controls accessible at 375x812
+[1A[2K[14/89] e2e/synthetic/coach-live-contrast.spec.ts:250:5 › approved steel-blue text/surface pairs all meet AA
+[1A[2K[15/89] e2e/synthetic/coach-live-contrast.spec.ts:281:7 › meets WCAG AA for the manual coach surfaces in light mode
+[1A[2Ke2e/synthetic/coach-live-contrast.spec.ts:281:7 › meets WCAG AA for the manual coach surfaces in light mode
+[contrast] transcript rep speaker label: fg=rgb(123,207,248) bg=rgb(53,66,88) ratio=5.85
+
+[1A[2K[contrast] transcript seller speaker label: fg=rgb(246,206,76) bg=rgb(42,54,73) ratio=8.04
+
+[1A[2K[contrast] live status badge: fg=rgb(115,195,234) bg=rgb(21,29,43) ratio=8.63
+
+[1A[2K[contrast] current section title: fg=rgb(154,164,182) bg=rgb(31,42,60) ratio=5.75
+
+[1A[2K[contrast] resolved script token: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+
+[1A[2K[contrast] script body: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+
+[1A[2K[contrast] file number: fg=rgb(199,206,217) bg=rgb(21,29,43) ratio=10.67
+
+[1A[2K[contrast] primary next action while hovered: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+
+[1A[2K[contrast] disabled back action: fg=rgb(157,167,185) bg=rgb(42,54,73) ratio=5.03
+
+[1A[2K[contrast] hang up action while hovered: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+
+[1A[2K[contrast] tone chip: fg=rgb(21,29,43) bg=rgb(252,211,77) ratio=11.72
+
+[1A[2K[contrast] next section preview: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+
+[1A[2K[contrast] next section preview body: fg=rgb(201,207,219) bg=rgb(31,42,60) ratio=9.23
+
+[1A[2K[contrast] resolved entry token: fg=rgb(118,199,239) bg=rgb(31,42,60) ratio=7.69
+
+[1A[2K[contrast] completed phase label: fg=rgb(115,195,234) bg=rgb(21,29,43) ratio=8.63
+
+[1A[2K[contrast] active manual phase label: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+
+[1A[2K[contrast] inactive phase label while hovered: fg=rgb(251,251,252) bg=rgb(53,66,88) ratio=9.80
+
+[1A[2K[16/89] e2e/synthetic/coach-live-contrast.spec.ts:355:7 › meets WCAG AA for the held-call timer in light mode
+[1A[2Ke2e/synthetic/coach-live-contrast.spec.ts:355:7 › meets WCAG AA for the held-call timer in light mode
+[contrast] held-call timer: fg=rgb(243,243,244) bg=rgb(21,29,43) ratio=15.24
+
+[1A[2K[contrast] hold countdown pill: fg=rgb(241,219,132) bg=rgb(21,29,43) ratio=12.24
+
+[1A[2K[contrast] pressed hold control while hovered: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+
+[1A[2K[17/89] e2e/synthetic/coach-live-contrast.spec.ts:372:7 › keeps keypad digits and letters readable in light mode
+[1A[2Ke2e/synthetic/coach-live-contrast.spec.ts:372:7 › keeps keypad digits and letters readable in light mode
+[contrast] keypad digit: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+
+[1A[2K[contrast] keypad letters: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+
+[1A[2K[contrast] hovered keypad digit and letters: fg=rgb(31,42,60) bg=rgb(245,244,242) ratio=13.13
+
+[1A[2K[contrast] disabled keypad digit and letters: fg=rgb(157,167,185) bg=rgb(42,54,73) ratio=5.03
+
+[1A[2K[18/89] e2e/synthetic/coach-live-contrast.spec.ts:385:7 › meets WCAG AA for narrow interrupted Coach controls in light mode
+[1A[2Ke2e/synthetic/coach-live-contrast.spec.ts:385:7 › meets WCAG AA for narrow interrupted Coach controls in light mode
+[contrast] interrupted warning: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+
+[1A[2K[contrast] reconnect audio control: fg=rgb(247,224,136) bg=rgb(42,54,73) ratio=9.27
+
+[1A[2K[contrast] warning hangup control: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+
+[1A[2K[19/89] e2e/synthetic/coach-live-contrast.spec.ts:281:7 › meets WCAG AA for the manual coach surfaces in dark mode
+[1A[2Ke2e/synthetic/coach-live-contrast.spec.ts:281:7 › meets WCAG AA for the manual coach surfaces in dark mode
+[contrast] transcript rep speaker label: fg=rgb(123,207,248) bg=rgb(53,66,88) ratio=5.85
+
+[1A[2K[contrast] transcript seller speaker label: fg=rgb(246,206,76) bg=rgb(42,54,73) ratio=8.04
+
+[1A[2K[contrast] live status badge: fg=rgb(115,195,234) bg=rgb(21,29,43) ratio=8.63
+
+[1A[2K[contrast] current section title: fg=rgb(154,164,182) bg=rgb(31,42,60) ratio=5.75
+
+[1A[2K[contrast] resolved script token: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+
+[1A[2K[contrast] script body: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+
+[1A[2K[contrast] file number: fg=rgb(199,206,217) bg=rgb(21,29,43) ratio=10.67
+
+[1A[2K[contrast] primary next action while hovered: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+
+[1A[2K[contrast] disabled back action: fg=rgb(157,167,185) bg=rgb(42,54,73) ratio=5.03
+
+[1A[2K[contrast] hang up action while hovered: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+
+[1A[2K[contrast] tone chip: fg=rgb(21,29,43) bg=rgb(252,211,77) ratio=11.72
+
+[1A[2K[contrast] next section preview: fg=rgb(118,198,239) bg=rgb(31,42,60) ratio=7.63
+
+[1A[2K[contrast] next section preview body: fg=rgb(201,207,219) bg=rgb(31,42,60) ratio=9.23
+
+[1A[2K[contrast] resolved entry token: fg=rgb(118,199,239) bg=rgb(31,42,60) ratio=7.69
+
+[1A[2K[contrast] completed phase label: fg=rgb(115,195,234) bg=rgb(21,29,43) ratio=8.63
+
+[1A[2K[contrast] active manual phase label: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+
+[1A[2K[contrast] inactive phase label while hovered: fg=rgb(251,251,252) bg=rgb(53,66,88) ratio=9.80
+
+[1A[2K[20/89] e2e/synthetic/coach-live-contrast.spec.ts:355:7 › meets WCAG AA for the held-call timer in dark mode
+[1A[2Ke2e/synthetic/coach-live-contrast.spec.ts:355:7 › meets WCAG AA for the held-call timer in dark mode
+[contrast] held-call timer: fg=rgb(243,243,244) bg=rgb(21,29,43) ratio=15.24
+
+[1A[2K[contrast] hold countdown pill: fg=rgb(241,219,132) bg=rgb(21,29,43) ratio=12.24
+
+[1A[2K[contrast] pressed hold control while hovered: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+
+[1A[2K[21/89] e2e/synthetic/coach-live-contrast.spec.ts:372:7 › keeps keypad digits and letters readable in dark mode
+[1A[2Ke2e/synthetic/coach-live-contrast.spec.ts:372:7 › keeps keypad digits and letters readable in dark mode
+[contrast] keypad digit: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+
+[1A[2K[contrast] keypad letters: fg=rgb(31,42,60) bg=rgb(255,255,255) ratio=14.44
+
+[1A[2K[contrast] hovered keypad digit and letters: fg=rgb(31,42,60) bg=rgb(245,244,242) ratio=13.13
+
+[1A[2K[contrast] disabled keypad digit and letters: fg=rgb(157,167,185) bg=rgb(42,54,73) ratio=5.03
+
+[1A[2K[22/89] e2e/synthetic/coach-live-contrast.spec.ts:385:7 › meets WCAG AA for narrow interrupted Coach controls in dark mode
+[1A[2Ke2e/synthetic/coach-live-contrast.spec.ts:385:7 › meets WCAG AA for narrow interrupted Coach controls in dark mode
+[contrast] interrupted warning: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+
+[1A[2K[contrast] reconnect audio control: fg=rgb(247,224,136) bg=rgb(42,54,73) ratio=9.27
+
+[1A[2K[contrast] warning hangup control: fg=rgb(255,254,254) bg=rgb(220,38,38) ratio=4.80
+
+[1A[2K[23/89] e2e/synthetic/coach-live-contrast.spec.ts:427:7 › contrast probe negative controls › detects text that is invisible against its own background
+[1A[2K[24/89] e2e/synthetic/coach-live-contrast.spec.ts:436:7 › contrast probe negative controls › detects the unreadable half of a split background
+[1A[2K[25/89] e2e/synthetic/coach-live-contrast.spec.ts:475:7 › contrast probe negative controls › detects low-contrast text whose colour is set on a descendant
+[1A[2K[26/89] e2e/synthetic/coach-live-contrast.spec.ts:487:7 › contrast probe negative controls › is not fooled by a high-contrast decorative pseudo-element
+[1A[2K[27/89] e2e/synthetic/coach-live-contrast.spec.ts:500:7 › contrast probe negative controls › passes genuinely readable text (guards against always-fail)
+[1A[2K[28/89] e2e/synthetic/coach-live-responsive-layout.spec.ts:64:7 › keeps transcript, manual script, recommendations, and call controls usable at mobile-tall
+[1A[2K[29/89] e2e/synthetic/coach-live-responsive-layout.spec.ts:64:7 › keeps transcript, manual script, recommendations, and call controls usable at mobile-short
+[1A[2K[30/89] e2e/synthetic/coach-live-responsive-layout.spec.ts:64:7 › keeps transcript, manual script, recommendations, and call controls usable at stacked-breakpoint
+[1A[2K[31/89] e2e/synthetic/coach-live-responsive-layout.spec.ts:64:7 › keeps transcript, manual script, recommendations, and call controls usable at desktop-breakpoint
+[1A[2K[32/89] e2e/synthetic/coach-live-responsive-layout.spec.ts:64:7 › keeps transcript, manual script, recommendations, and call controls usable at desktop
+[1A[2K[33/89] e2e/synthetic/coach-live-responsive-layout.spec.ts:119:5 › keeps offer-entry digits out of DTMF while the keypad and editor are both mounted
+[1A[2K[34/89] e2e/synthetic/coach-live-responsive-layout.spec.ts:136:5 › does not turn a section replacement into keyboard DTMF
+[1A[2K[35/89] e2e/synthetic/coach-live-responsive-layout.spec.ts:152:5 › keeps intentional keyboard DTMF working when no editor is active
+[1A[2K[36/89] e2e/synthetic/coach-live-responsive-layout.spec.ts:162:5 › keeps up-next and section navigation visible while a long script scrolls
+[1A[2K[37/89] e2e/synthetic/coach-live-responsive-layout.spec.ts:190:5 › keeps script text readable with the keypad in a short desktop panel
+[1A[2K[38/89] e2e/synthetic/coach-live-responsive-layout.spec.ts:218:5 › keeps keyboard-focused script controls above the pinned preview
+[1A[2K[39/89] e2e/synthetic/coach-live-user-journey.spec.ts:125:5 › walks every PDF-aligned section forward and backward with correct boundaries and previews
+[1A[2K[40/89] e2e/synthetic/coach-live-user-journey.spec.ts:151:5 › starts each navigated section at the top without resetting scroll for live updates
+[1A[2K[41/89] e2e/synthetic/coach-live-user-journey.spec.ts:169:5 › gives each spoken sentence its own spaced line and keeps the speed question verbatim
+[1A[2K[42/89] e2e/synthetic/coach-live-user-journey.spec.ts:188:5 › renders the seller email-address request once in underwriting and nowhere in the named excluded paths
+[1A[2K[43/89] e2e/synthetic/coach-live-user-journey.spec.ts:224:5 › selects every approved spoken fork and path without changing navigation or call controls
+[1A[2K[44/89] e2e/synthetic/coach-live-user-journey.spec.ts:262:5 › preserves the official numbered outcomes and visibly renders only the approved e-sign handoff
+[1A[2K[45/89] e2e/synthetic/coach-live-user-journey.spec.ts:285:5 › jumps each phase to its first manual section and legacy events are navigation/rendering no-ops
+[1A[2K[46/89] e2e/synthetic/coach-live-user-journey.spec.ts:313:5 › populates known lead tokens, selects lead and occupancy variants, and lets the rep enter deal values
+[1A[2K[47/89] e2e/synthetic/coach-live-user-journey.spec.ts:361:5 › real session hook paints prepared homeowner and address during loading, then trusted context wins
+[1A[2K[48/89] e2e/synthetic/coach-live-user-journey.spec.ts:378:5 › real session hook preserves prepared homeowner and address after context failure and retry
+[1A[2K[49/89] e2e/synthetic/coach-live-user-journey.spec.ts:395:5 › real session hook replaces the prior call with the next prepared target on first paint
+[1A[2K[50/89] e2e/synthetic/coach-live-user-journey.spec.ts:412:5 › emulated finalized transcript at Sandra's Jitter boundary triggers advice only for meaningful homeowner speech
+[1A[2K[51/89] e2e/synthetic/coach-live-user-journey.spec.ts:430:5 › follow-up supersedes automatic work, rejects duplicates, and keeps exactly three grounded questions
+[1A[2K[52/89] e2e/synthetic/coach-live-user-journey.spec.ts:453:5 › late section and call responses cannot overwrite newer visible advice
+[1A[2K[53/89] e2e/synthetic/coach-live-user-journey.spec.ts:487:5 › follow-up request cap is enforced through repeated user clicks without an extra provider call
+[1A[2K[54/89] e2e/synthetic/coach-live-user-journey.spec.ts:507:5 › provider failure preserves prior valid advice and never takes over script, transcript, or navigation
+[1A[2K[55/89] e2e/synthetic/coach-live-user-journey.spec.ts:520:5 › collapse/reopen persists the live session while a new call completely resets it
+[1A[2K[56/89] e2e/synthetic/coach-live-user-journey.spec.ts:540:5 › reconnect, degraded transcript, and context failure remain visible without covering the script
+[1A[2K[57/89] e2e/synthetic/coach-live-user-journey.spec.ts:554:5 › mute, hold, keypad, hangup, and desktop/mobile surface ordering work through user clicks
+[1A[2K[58/89] e2e/synthetic/coach-live-user-journey.spec.ts:580:5 › preserves the two-part greeting and goes straight to the qualification frame
+[1A[2K[59/89] e2e/synthetic/csv-recovery-contract.spec.ts:23:7 › synthetic database-free CSV recovery contract at desktop width
+[1A[2K[60/89] e2e/synthetic/csv-recovery-contract.spec.ts:23:7 › synthetic database-free CSV recovery contract at narrow width
+[1A[2K[61/89] e2e/synthetic/dialer-coach-switch.spec.ts:67:7 › coach switch layout and accessible script picker at 1440px
+[1A[2K[62/89] e2e/synthetic/dialer-coach-switch.spec.ts:67:7 › coach switch layout and accessible script picker at 375px
+[1A[2K[63/89] e2e/synthetic/dnc-lock-contract.spec.ts:113:7 › synthetic database-free DNC contract at desktop width
+[1A[2K[64/89] e2e/synthetic/dnc-lock-contract.spec.ts:113:7 › synthetic database-free DNC contract at narrow width
+[1A[2K[65/89] e2e/synthetic/esign-editor-navigation-history.spec.ts:55:5 › Forward reuses the take-once session for an unfinished initial draft
+[1A[2K[66/89] e2e/synthetic/esign-editor-navigation-history.spec.ts:99:5 › Back restoration preserves the legitimate Forward destination
+[1A[2K[67/89] e2e/synthetic/esign-editor-navigation-history.spec.ts:120:5 › Back from a restarted replacement returns to the library
+[1A[2K[68/89] e2e/synthetic/hold-timer-acceptance.spec.ts:42:5 › shows a truthful hold countdown while preserving the script across collapse and expiry
+[1A[2K[69/89] e2e/synthetic/leads-urgency-contract.spec.ts:16:7 › synthetic database-free Leads urgency contract at desktop width
+[1A[2K[70/89] e2e/synthetic/leads-urgency-contract.spec.ts:16:7 › synthetic database-free Leads urgency contract at narrow width
+[1A[2K[71/89] e2e/synthetic/precall-matrix.spec.ts:121:5 › eight fictional profiles prepare without dialing and keep separate edits
+[1A[2K[72/89] e2e/synthetic/precall-matrix.spec.ts:195:7 › 100 deterministic setup cycles, seed 515
+[1A[2K[73/89] e2e/synthetic/precall-matrix.spec.ts:195:7 › 100 deterministic setup cycles, seed 20260910
+[1A[2K[74/89] e2e/synthetic/precall-matrix.spec.ts:317:7 › profile 0: all selectors and 26 live sections forward/back
+[1A[2K[75/89] e2e/synthetic/precall-matrix.spec.ts:317:7 › profile 1: all selectors and 26 live sections forward/back
+[1A[2K[76/89] e2e/synthetic/precall-matrix.spec.ts:317:7 › profile 2: all selectors and 26 live sections forward/back
+[1A[2K[77/89] e2e/synthetic/precall-matrix.spec.ts:317:7 › profile 3: all selectors and 26 live sections forward/back
+[1A[2K[78/89] e2e/synthetic/precall-matrix.spec.ts:317:7 › profile 4: all selectors and 26 live sections forward/back
+[1A[2K[79/89] e2e/synthetic/precall-matrix.spec.ts:317:7 › profile 5: all selectors and 26 live sections forward/back
+[1A[2K[80/89] e2e/synthetic/precall-matrix.spec.ts:317:7 › profile 6: all selectors and 26 live sections forward/back
+[1A[2K[81/89] e2e/synthetic/precall-matrix.spec.ts:317:7 › profile 7: all selectors and 26 live sections forward/back
+[1A[2K[82/89] e2e/synthetic/precall-matrix.spec.ts:430:7 › setup layout and keyboard at 375x740
+[1A[2K[83/89] e2e/synthetic/precall-matrix.spec.ts:430:7 › setup layout and keyboard at 768x800
+[1A[2K[84/89] e2e/synthetic/precall-matrix.spec.ts:430:7 › setup layout and keyboard at 1280x480
+[1A[2K[85/89] e2e/synthetic/precall-matrix.spec.ts:430:7 › setup layout and keyboard at 1440x900
+[1A[2K[86/89] e2e/synthetic/precall-matrix.spec.ts:499:5 › delayed A-B-A reads and failed retry cannot overwrite explicit edits
+[1A[2K[87/89] e2e/synthetic/precall-matrix.spec.ts:592:5 › setup text and empty-field hints meet 4.5:1 in all groups
+[1A[2K[88/89] e2e/synthetic/promote-leads-background.spec.ts:45:7 › promotion confirmation and truthful results at desktop width
+[1A[2K[89/89] e2e/synthetic/promote-leads-background.spec.ts:45:7 › promotion confirmation and truthful results at narrow width
+[1A[2K  89 passed (4.1m)

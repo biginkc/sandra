@@ -51,3 +51,35 @@ export async function loadCoachCallContext(): Promise<CoachCallContext> {
   }
   return context;
 }
+
+export async function loadPrecallContext(input: {
+  propertyId: string | null;
+  sellerPhoneE164: string | null;
+  repPhoneE164: string | null;
+}) {
+  void input;
+  return { operatorId: "synthetic-operator", context, error: null };
+}
+
+export async function prepareSetupCall(input: {
+  operatorId: string | null;
+  propertyId: string | null;
+  phoneE164: string;
+}) {
+  void input;
+  return {
+    ok: true as const,
+    operatorId: "synthetic-operator",
+    data: {
+      propertyId: context.leadId,
+      contactId: "synthetic-contact",
+      phoneE164: context.sellerPhoneE164 ?? input.phoneE164,
+      maskedPhone: context.sellerPhoneE164 ?? input.phoneE164,
+      name: context.sellerName ?? "Synthetic Homeowner",
+      address: context.propertyAddress ?? "",
+      state: "MO",
+      startedAt: new Date().toISOString(),
+      repName: context.repName ?? "Synthetic Coach",
+    },
+  };
+}

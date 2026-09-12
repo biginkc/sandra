@@ -191,10 +191,10 @@ describe("loadCoachCallContext — occupancy derivation", () => {
     expect(context.occupancy).toBe("owner_occupied");
   });
 
-  it("is tenant_occupied when not vacant and absentee_flag is true", async () => {
+  it("does not infer tenants from an absentee flag even when not vacant", async () => {
     mockSupabase({ email: "a@b.com" }, { ...lead, is_vacant: false, absentee_flag: true });
     const context = await loadCoachCallContext({ propertyId: "p1", sellerPhoneE164: null, repPhoneE164: null });
-    expect(context.occupancy).toBe("tenant_occupied");
+    expect(context.occupancy).toBe("unknown");
   });
 
   it("is unknown when neither is_vacant nor absentee_flag is set", async () => {

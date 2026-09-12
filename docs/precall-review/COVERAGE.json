@@ -1,0 +1,52 @@
+{
+  "baseline": "8c7053e7024433f46791eac1b186c1b7a7cf10ec",
+  "profiles": 8,
+  "individualChoiceCases": 160,
+  "openerOccupancyCases": 128,
+  "offerClosingCases": 64,
+  "pairwiseValuePairs": 165,
+  "pairwiseProfilesPerPair": 8,
+  "sectionAssertions": 86944,
+  "unitMatrixTestsPassed": 517,
+  "browserProfileWalkthroughsPassed": 8,
+  "ordinaryBrowserCyclesPassed": 200,
+  "seeds": [
+    515,
+    20260910
+  ],
+  "negativeControlsDetected": 4,
+  "paidAttempts": 0,
+  "paidSpend": 0,
+  "limitations": [
+    "Working-tree full native and synthetic verification is complete; the frozen exact-head review and CI are still pending.",
+    "Full requested browser fault coverage and 200% zoom validation remain incomplete.",
+    "Independent exact-head manual review is pending.",
+    "No paid calls: all-service rate ceiling and independent 300-second cutoff proof missing.",
+    "No production release or verification."
+  ],
+  "verifiedCommit": "9c96379e999a6d2e02d87f460e169a3826783c67 (pre-freeze evidence; working-tree candidate verified separately)",
+  "fullVerification": {
+    "atomicTests": 12,
+    "postgresRehearsal": "PASS",
+    "typecheck": "PASS",
+    "unitTests": 4218,
+    "rtlTests": 1242,
+    "workingTreeRtlTests": 1253,
+    "workingTreeSyntheticTests": 89,
+    "workingTreeCoachAudioTests": 13
+  },
+  "postReviewWorkingTreeFocusedTests": {
+    "provider": 67,
+    "draftAuth": 11,
+    "panel": 4,
+    "total": 82,
+    "typecheck": "PASS"
+  },
+  "codeReview": {
+    "requests": 1,
+    "substantiveVerdicts": 1,
+    "approvals": 0,
+    "verdict": "CHANGES_REQUIRED",
+    "reviewedCommit": "9c96379e999a6d2e02d87f460e169a3826783c67"
+  }
+}

@@ -18,7 +18,7 @@ export function emitSyntheticCoachBroadcast(payload: unknown): void {
 
 export function createClient() {
   return {
-    auth: { getSession: async () => ({ data: { session: null } }) },
+    auth: { onAuthStateChange: () => ({data:{subscription:{unsubscribe:()=>undefined}}}), getSession: async () => ({ data: { session: null } }) },
     realtime: { setAuth: () => undefined },
     channel: () => {
       let broadcastCallback: BroadcastCallback | null = null;

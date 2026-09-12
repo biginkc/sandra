@@ -1,3 +1,4 @@
+import type { SetupEdits } from "./precall-setup";
 import { COACH_TOKENS, type CoachCallContext, type CoachEntryFields, type CoachToken, type ResolvedToken, type ResolvedTokens } from "./types";
 
 /** Rendered by the UI as a subtle placeholder chip — never left blank. */
@@ -72,6 +73,7 @@ export const EMPTY_ENTRY_FIELDS: CoachEntryFields = {
 export function resolveCoachTokens(
   context: CoachCallContext,
   entryFields: CoachEntryFields = EMPTY_ENTRY_FIELDS,
+  overrides?: SetupEdits,
 ): ResolvedTokens {
   const entries = COACH_TOKENS.map((token): [CoachToken, ResolvedToken] => {
     switch (token) {
@@ -101,7 +103,14 @@ export function resolveCoachTokens(
         return [token, resolvedOrPlaceholder(entryFields.net_to_seller)];
     }
   });
-  return Object.fromEntries(entries) as ResolvedTokens;
+  const resolved = Object.fromEntries(entries) as ResolvedTokens;
+  for (const token of COACH_TOKENS) {
+    if (token !== "file_number" && overrides && Object.hasOwn(overrides, token)) {
+      const value = overrides[token] ?? null;
+      resolved[token] = resolvedOrPlaceholder(token === "seller_name" ? firstName(value) : value);
+    }
+  }
+  return resolved;
 }
 
 export type ScriptTextSegment =

@@ -1,0 +1,16 @@
+
+> sandra@0.1.0 test:rtl
+> vitest run --config vitest.rtl.config.ts src/lib/coach/use-coach-session.test.tsx -t pre-call snapshot handoff
+
+
+ RUN  v4.1.5 /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup
+
+ ✓ src/lib/coach/use-coach-session.test.tsx (19 tests | 17 skipped) 65ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed | 17 skipped (19)
+   Start at  08:02:27
+   Duration  536ms (transform 89ms, setup 62ms, import 104ms, tests 65ms, environment 235ms)
+
+(node:15748) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
