@@ -14,6 +14,490 @@ export type Database = {
   }
   public: {
     Tables: {
+      acquisition_assignment_episodes: {
+        Row: {
+          assignee_user_id: string
+          assigned_at: string | null
+          created_at: string
+          ended_at: string | null
+          episode_kind: string
+          eligible: boolean
+          first_call_activity_id: string | null
+          first_call_actor_user_id: string | null
+          first_call_provider_key: string | null
+          first_call_started_at: string | null
+          id: string
+          initialized_at: string
+          launch_cohort_id: string | null
+          org_id: string
+          property_id: string
+        }
+        Insert: {
+          assignee_user_id: string
+          assigned_at?: string | null
+          created_at?: string
+          ended_at?: string | null
+          episode_kind: string
+          eligible: boolean
+          first_call_activity_id?: string | null
+          first_call_actor_user_id?: string | null
+          first_call_provider_key?: string | null
+          first_call_started_at?: string | null
+          id?: string
+          initialized_at?: string
+          launch_cohort_id?: string | null
+          org_id: string
+          property_id: string
+        }
+        Update: {
+          assignee_user_id?: string
+          assigned_at?: string | null
+          created_at?: string
+          ended_at?: string | null
+          episode_kind?: string
+          eligible?: boolean
+          first_call_activity_id?: string | null
+          first_call_actor_user_id?: string | null
+          first_call_provider_key?: string | null
+          first_call_started_at?: string | null
+          id?: string
+          initialized_at?: string
+          launch_cohort_id?: string | null
+          org_id?: string
+          property_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "acquisition_assignment_episodes_activity_org_fkey"
+            columns: ["first_call_activity_id", "property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "call_activities"
+            referencedColumns: ["id", "property_id", "org_id"]
+          },
+          {
+            foreignKeyName: "acquisition_assignment_episodes_launch_cohort_org_fkey"
+            columns: ["launch_cohort_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "acquisition_launch_cohorts"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "acquisition_assignment_episodes_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "acquisition_assignment_episodes_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      acquisition_attempts: {
+        Row: {
+          actor_user_id: string
+          assignment_episode_id: string | null
+          call_activity_id: string | null
+          command_id: string | null
+          created_at: string
+          id: string
+          idempotency_key: string
+          note: string | null
+          occurred_at: string
+          org_id: string
+          outcome: string | null
+          property_id: string
+          provider_attempt_key: string | null
+          recorded_at: string
+          recording_url: string | null
+          source: string
+          attempt_kind: string
+        }
+        Insert: {
+          actor_user_id: string
+          assignment_episode_id?: string | null
+          attempt_kind: string
+          call_activity_id?: string | null
+          command_id?: string | null
+          created_at?: string
+          id?: string
+          idempotency_key: string
+          note?: string | null
+          occurred_at: string
+          org_id: string
+          outcome?: string | null
+          property_id: string
+          provider_attempt_key?: string | null
+          recorded_at?: string
+          recording_url?: string | null
+          source: string
+        }
+        Update: {
+          actor_user_id?: string
+          assignment_episode_id?: string | null
+          attempt_kind?: string
+          call_activity_id?: string | null
+          command_id?: string | null
+          created_at?: string
+          id?: string
+          idempotency_key?: string
+          note?: string | null
+          occurred_at?: string
+          org_id?: string
+          outcome?: string | null
+          property_id?: string
+          provider_attempt_key?: string | null
+          recorded_at?: string
+          recording_url?: string | null
+          source?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "acquisition_attempts_activity_property_org_fkey"
+            columns: ["call_activity_id", "property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "call_activities"
+            referencedColumns: ["id", "property_id", "org_id"]
+          },
+          {
+            foreignKeyName: "acquisition_attempts_command_org_fkey"
+            columns: ["command_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "acquisition_commands"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "acquisition_attempts_episode_property_org_fkey"
+            columns: ["assignment_episode_id", "property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "acquisition_assignment_episodes"
+            referencedColumns: ["id", "property_id", "org_id"]
+          },
+          {
+            foreignKeyName: "acquisition_attempts_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "acquisition_attempts_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      acquisition_commands: {
+        Row: {
+          actor_kind: string
+          actor_user_id: string | null
+          context_key_hash: string | null
+          created_at: string
+          id: string
+          idempotency_key: string
+          operation: string
+          org_id: string
+          request_hash: string
+          result: Json
+        }
+        Insert: {
+          actor_kind: string
+          actor_user_id?: string | null
+          context_key_hash?: string | null
+          created_at?: string
+          id?: string
+          idempotency_key: string
+          operation: string
+          org_id: string
+          request_hash: string
+          result: Json
+        }
+        Update: {
+          actor_kind?: string
+          actor_user_id?: string | null
+          context_key_hash?: string | null
+          created_at?: string
+          id?: string
+          idempotency_key?: string
+          operation?: string
+          org_id?: string
+          request_hash?: string
+          result?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "acquisition_commands_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      acquisition_launch_cohorts: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          created_by: string
+          id: string
+          member_id: string
+          org_id: string
+          preview_count: number
+          preview_cutoff_at: string | null
+          preview_fingerprint: string
+          started_at: string | null
+          status: string
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          created_by: string
+          id?: string
+          member_id: string
+          org_id: string
+          preview_count?: number
+          preview_cutoff_at?: string | null
+          preview_fingerprint: string
+          started_at?: string | null
+          status: string
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          created_by?: string
+          id?: string
+          member_id?: string
+          org_id?: string
+          preview_count?: number
+          preview_cutoff_at?: string | null
+          preview_fingerprint?: string
+          started_at?: string | null
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "acquisition_launch_cohorts_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      acquisition_offers: {
+        Row: {
+          actor_user_id: string
+          amount_cents: number
+          assignment_episode_id: string | null
+          command_id: string | null
+          created_at: string
+          follow_up_at: string
+          id: string
+          idempotency_key: string
+          org_id: string
+          outcome: string
+          outcome_at: string | null
+          outcome_by: string | null
+          property_id: string
+          sent_at: string
+          sent_via: string
+          updated_at: string
+        }
+        Insert: {
+          actor_user_id: string
+          amount_cents: number
+          assignment_episode_id?: string | null
+          command_id?: string | null
+          created_at?: string
+          follow_up_at: string
+          id?: string
+          idempotency_key: string
+          org_id: string
+          outcome?: string
+          outcome_at?: string | null
+          outcome_by?: string | null
+          property_id: string
+          sent_at: string
+          sent_via: string
+          updated_at?: string
+        }
+        Update: {
+          actor_user_id?: string
+          amount_cents?: number
+          assignment_episode_id?: string | null
+          command_id?: string | null
+          created_at?: string
+          follow_up_at?: string
+          id?: string
+          idempotency_key?: string
+          org_id?: string
+          outcome?: string
+          outcome_at?: string | null
+          outcome_by?: string | null
+          property_id?: string
+          sent_at?: string
+          sent_via?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "acquisition_offers_command_org_fkey"
+            columns: ["command_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "acquisition_commands"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "acquisition_offers_episode_property_org_fkey"
+            columns: ["assignment_episode_id", "property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "acquisition_assignment_episodes"
+            referencedColumns: ["id", "property_id", "org_id"]
+          },
+          {
+            foreignKeyName: "acquisition_offers_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "acquisition_offers_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      acquisition_org_settings: {
+        Row: {
+          active_launch_cohort_id: string | null
+          created_at: string
+          launch_cutover_at: string | null
+          my_leads_enabled: boolean
+          needs_sequence_owner_id: string | null
+          org_id: string
+          settings_revision: number
+          updated_at: string
+        }
+        Insert: {
+          active_launch_cohort_id?: string | null
+          created_at?: string
+          launch_cutover_at?: string | null
+          my_leads_enabled?: boolean
+          needs_sequence_owner_id?: string | null
+          org_id: string
+          settings_revision?: number
+          updated_at?: string
+        }
+        Update: {
+          active_launch_cohort_id?: string | null
+          created_at?: string
+          launch_cutover_at?: string | null
+          my_leads_enabled?: boolean
+          needs_sequence_owner_id?: string | null
+          org_id?: string
+          settings_revision?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "acquisition_org_settings_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: true
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      acquisition_queue_states: {
+        Row: {
+          archive_reason: string | null
+          archived_at: string | null
+          archived_by: string | null
+          created_at: string
+          launch_cohort_id: string | null
+          launch_previous_shared_status: string | null
+          motivation_kind: string | null
+          motivation_recorded: boolean
+          motivation_recorded_at: string | null
+          motivation_recorded_by: string | null
+          motivation_text: string | null
+          org_id: string
+          property_id: string
+          signed_at: string | null
+          signed_by: string | null
+          stage: string
+          stage_entered_at: string
+          updated_at: string
+          version: number
+        }
+        Insert: {
+          archive_reason?: string | null
+          archived_at?: string | null
+          archived_by?: string | null
+          created_at?: string
+          launch_cohort_id?: string | null
+          launch_previous_shared_status?: string | null
+          motivation_kind?: string | null
+          motivation_recorded?: boolean
+          motivation_recorded_at?: string | null
+          motivation_recorded_by?: string | null
+          motivation_text?: string | null
+          org_id: string
+          property_id: string
+          signed_at?: string | null
+          signed_by?: string | null
+          stage: string
+          stage_entered_at: string
+          updated_at?: string
+          version?: number
+        }
+        Update: {
+          archive_reason?: string | null
+          archived_at?: string | null
+          archived_by?: string | null
+          created_at?: string
+          launch_cohort_id?: string | null
+          launch_previous_shared_status?: string | null
+          motivation_kind?: string | null
+          motivation_recorded?: boolean
+          motivation_recorded_at?: string | null
+          motivation_recorded_by?: string | null
+          motivation_text?: string | null
+          org_id?: string
+          property_id?: string
+          signed_at?: string | null
+          signed_by?: string | null
+          stage?: string
+          stage_entered_at?: string
+          updated_at?: string
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "acquisition_queue_states_launch_cohort_org_fkey"
+            columns: ["launch_cohort_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "acquisition_launch_cohorts"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "acquisition_queue_states_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+        ]
+      }
       agent_details: {
         Row: {
           added_at: string
@@ -1904,11 +2388,13 @@ export type Database = {
         Row: {
           access_expires_at: string | null
           access_status: string
+          acquisitions_enabled: boolean
           created_at: string
           deletion_operation_id: string | null
           deletion_prepared_at: string | null
           hugo_config: Json
           id: string
+          my_leads_revision: number
           org_id: string
           role: string
           user_id: string
@@ -1916,11 +2402,13 @@ export type Database = {
         Insert: {
           access_expires_at?: string | null
           access_status?: string
+          acquisitions_enabled?: boolean
           created_at?: string
           deletion_operation_id?: string | null
           deletion_prepared_at?: string | null
           hugo_config?: Json
           id?: string
+          my_leads_revision?: number
           org_id: string
           role?: string
           user_id: string
@@ -1928,11 +2416,13 @@ export type Database = {
         Update: {
           access_expires_at?: string | null
           access_status?: string
+          acquisitions_enabled?: boolean
           created_at?: string
           deletion_operation_id?: string | null
           deletion_prepared_at?: string | null
           hugo_config?: Json
           id?: string
+          my_leads_revision?: number
           org_id?: string
           role?: string
           user_id?: string
@@ -4729,6 +5219,68 @@ export type Database = {
       }
     }
     Functions: {
+      fn_set_acquisition_designation: {
+        Args: {
+          p_enabled: boolean
+          p_expected_enabled: boolean
+          p_idempotency_key: string
+          p_org_id: string
+          p_user_id: string
+        }
+        Returns: Json
+      }
+      fn_set_acquisition_settings: {
+        Args: {
+          p_idempotency_key: string
+          p_needs_sequence_owner_id: string
+          p_org_id: string
+          p_expected_settings_revision: number
+        }
+        Returns: Json
+      }
+      fn_ready_acquisition_offer: {
+        Args: { p_input: Json }
+        Returns: Json
+      }
+      fn_log_acquisition_offer: {
+        Args: { p_input: Json }
+        Returns: Json
+      }
+      fn_record_acquisition_contract: {
+        Args: { p_input: Json }
+        Returns: Json
+      }
+      fn_decline_acquisition_offer: {
+        Args: { p_input: Json }
+        Returns: Json
+      }
+      fn_handoff_acquisition_lead: {
+        Args: { p_input: Json }
+        Returns: Json
+      }
+      fn_archive_acquisition_contract: {
+        Args: { p_input: Json }
+        Returns: Json
+      }
+      fn_preview_acquisition_launch: {
+        Args: { p_member_id: string; p_org_id: string }
+        Returns: Json
+      }
+      fn_apply_acquisition_launch: {
+        Args: {
+          p_cohort_id: string
+          p_expected_settings_revision: number
+          p_idempotency_key: string
+          p_member_id: string
+          p_org_id: string
+          p_preview_fingerprint: string
+        }
+        Returns: Json
+      }
+      fn_rollback_acquisition_launch: {
+        Args: { p_cohort_id: string; p_idempotency_key: string; p_org_id: string }
+        Returns: Json
+      }
       claim_skip_trace_submission: {
         Args: {
           p_job_id: string

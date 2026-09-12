@@ -89,9 +89,11 @@ export function useLeadNotes({
 export function AddNoteComposer({
   propertyId,
   compact = false,
+  onSaved,
 }: {
   propertyId: string;
   compact?: boolean;
+  onSaved?: (note: { id: string }) => void;
 }) {
   const [body, setBody] = useState("");
   const [pending, startTransition] = useTransition();
@@ -107,6 +109,7 @@ export function AddNoteComposer({
         fallbackMessage: "Could not add note",
       });
       if (!result.ok) setBody(draft);
+      else onSaved?.(result.data);
     });
   };
 

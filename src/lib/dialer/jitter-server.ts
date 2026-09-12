@@ -9,6 +9,7 @@ import { reportError } from "@/lib/errors/report";
 import { STATE_TO_TZ } from "@/lib/messaging/quiet-hours";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { bindAcquisitionCallContext, type AcquisitionCallBinding } from "@/lib/my-leads/call-binding";
 
 import { capabilityKey, openCallCapability } from "./call-capability";
 
@@ -303,6 +304,18 @@ export async function startAuthenticatedJitterCall(
     after(() => indexCoachCall({ clientCallId, operatorUserId, propertyId }));
   }
 
+  let acquisition: AcquisitionCallBinding = { tracked: false };
+  if (prepared.data.propertyId) {
+    try {
+      acquisition = await bindAcquisitionCallContext({
+        orgId: SANDRA_ORG_ID, propertyId: prepared.data.propertyId,
+        actorUserId: operator.userId, callToken: intent.idempotencyKey,
+      });
+    } catch {
+      return { ok: false, status: 503, error: "Call context could not be recorded. Please retry.",
+        errorCode: "acquisition_context_pending", ambiguous: false };
+    }
+  }
   const started = await requestJitterStartCall(
     {
       operator_id: operator.userId,
@@ -314,6 +327,7 @@ export async function startAuthenticatedJitterCall(
         : {}),
       ...(prepared.data.contactId ? { contact_ref: prepared.data.contactId } : {}),
       org_ref: SANDRA_ORG_ID,
+      ...(acquisition.tracked ? { acquisition_episode_ref: acquisition.assignmentEpisodeId } : {}),
     },
     intent.idempotencyKey,
   );

@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   getUser: vi.fn(),
   getCallerMemberships: vi.fn(),
   requestStart: vi.fn(),
+  bindAcquisition: vi.fn(),
   requestToken: vi.fn(),
   requestConnect: vi.fn(),
   requestCancel: vi.fn(),
@@ -17,6 +18,8 @@ const mocks = vi.hoisted(() => ({
   trainingRead: vi.fn(),
   after: vi.fn(),
 }));
+
+vi.mock("@/lib/my-leads/call-binding", () => ({ bindAcquisitionCallContext: mocks.bindAcquisition }));
 
 vi.mock("@/lib/dialer/actions", () => ({
   prepareLeadCall: mocks.prepareLeadCall,
@@ -128,6 +131,7 @@ function callTarget(overrides: Record<string, unknown> = {}) {
 describe("authenticated Jitter softphone server boundary", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    mocks.bindAcquisition.mockResolvedValue({ tracked: false });
     vi.stubEnv("HOMEOWNER_TRAINING_ENABLED", "false");
     vi.stubEnv("HOMEOWNER_TRAINING_NUMBER", "");
     vi.stubEnv("HOMEOWNER_TRAINING_OPERATOR_IDS", "");
@@ -184,6 +188,7 @@ describe("authenticated Jitter softphone server boundary", () => {
     START_INTENT = minted.data.intentCapability;
     START_CALL_TOKEN = minted.data.callToken;
     vi.clearAllMocks();
+    mocks.bindAcquisition.mockResolvedValue({ tracked: false });
   });
 
   async function trainingTarget() {
@@ -221,6 +226,27 @@ describe("authenticated Jitter softphone server boundary", () => {
     mocks.trainingUpsert.mockResolvedValue({ error: { message: "database unavailable" } });
     expect((await startAuthenticatedJitterCall(target)).ok).toBe(false);
     expect(mocks.requestCancel).toHaveBeenCalledWith(CALL_ID, "failed");
+  });
+
+  it("binds acquisition evidence before provider egress and carries the original episode", async () => {
+    mocks.bindAcquisition.mockResolvedValue({ tracked: true, assignmentEpisodeId: "episode-original" });
+    const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    expect(result.ok).toBe(true);
+    expect(mocks.bindAcquisition).toHaveBeenCalledWith({ orgId: SANDRA_ORG_ID, propertyId: "property-1", actorUserId: "user-1", callToken: START_CALL_TOKEN });
+    expect(mocks.bindAcquisition.mock.invocationCallOrder[0]).toBeLessThan(mocks.requestStart.mock.invocationCallOrder[0]);
+    expect(mocks.requestStart.mock.calls[0][0].acquisition_episode_ref).toBe("episode-original");
+  });
+
+  it("does not send a call when required durable binding fails", async () => {
+    mocks.bindAcquisition.mockRejectedValue(new Error("database unavailable"));
+    const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    expect(result).toMatchObject({ ok: false, errorCode: "acquisition_context_pending", ambiguous: false });
+    expect(mocks.requestStart).not.toHaveBeenCalled();
+  });
+
+  it("omits acquisition context when the organization is disabled", async () => {
+    await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    expect(mocks.requestStart.mock.calls[0][0]).not.toHaveProperty("acquisition_episode_ref");
   });
 
   it("authorizes active Sandra access and sends the selected caller ID", async () => {
@@ -516,6 +542,7 @@ describe("authenticated Jitter softphone server boundary", () => {
     if (!started.ok) throw new Error("expected successful start");
     const capability = started.data.callId;
     vi.clearAllMocks();
+    mocks.bindAcquisition.mockResolvedValue({ tracked: false });
     mocks.getUser.mockResolvedValue({
       data: { user: { id: "user-1" } },
       error: null,
