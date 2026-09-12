@@ -370,27 +370,26 @@ function MyLeadStageSection({
 
   return (
     <section className="space-y-2" data-testid={`my-leads-section-${stage}`} aria-labelledby={`my-leads-heading-${stage}`}>
+      <h2 id={`my-leads-heading-${stage}`} className="sr-only">{label}</h2>
       <button
         type="button"
         onClick={onToggleSection}
         aria-expanded={!collapsed}
         aria-controls={`my-leads-rows-${stage}`}
         className={cn(
-          "flex w-full items-center gap-2.5 rounded-[10px] px-4 py-2.5 text-left text-white outline-none focus-visible:ring-2 focus-visible:ring-white/60",
+          "flex w-full items-center gap-2.5 rounded-[10px] px-4 py-2.5 text-left text-white outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white",
           STAGE_BAR[stage]
         )}
       >
         <ChevronIcon className="size-4 shrink-0" aria-hidden="true" />
-        <h2 id={`my-leads-heading-${stage}`} className="text-xs font-bold uppercase tracking-widest text-white">
-          {label}
-        </h2>
+        <span className="text-xs font-bold uppercase tracking-widest text-white">{label}</span>
         <span
-          aria-label={`${page.totalCount} ${label} leads`}
-          className="inline-flex min-w-[22px] items-center justify-center rounded-full bg-white/20 px-2 py-0.5 font-mono text-[11px] font-semibold text-white"
+          aria-label={`${page.totalCount} leads`}
+          className="inline-flex min-w-[22px] items-center justify-center rounded-full bg-black/20 px-2 py-0.5 font-mono text-[11px] font-semibold text-white"
         >
           {page.totalCount}
         </span>
-        <span className="ml-auto hidden max-w-full truncate pl-3 text-[11.5px] text-white/85 sm:block">{STAGE_NEXT[stage]}</span>
+        <span className="ml-auto hidden max-w-full truncate pl-3 text-[11.5px] text-white sm:block">{STAGE_NEXT[stage]}</span>
       </button>
 
       <div id={`my-leads-rows-${stage}`} hidden={collapsed}>
