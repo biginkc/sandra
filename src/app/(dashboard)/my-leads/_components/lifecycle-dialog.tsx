@@ -8,8 +8,11 @@ import {
 } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import {
+  DIALOG_CONTENT_CLASS,
   DateTimeField,
   FieldError,
+  RequiredHint,
+  SELECT_FIELD_CLASS,
   WorkflowDialogFooter,
   WorkflowDialogHeader,
   WorkflowFormError,
@@ -187,7 +190,9 @@ export function AcquisitionLifecycleDialog({
         else closeDialog()
       }}
     >
-      <DialogContent className="flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden sm:max-w-xl">
+      <DialogContent
+        className={`flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden ${DIALOG_CONTENT_CLASS}`}
+      >
         <WorkflowDialogHeader title={copy.title} description={`${copy.description} (${propertyLabel})`} />
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
@@ -209,7 +214,7 @@ export function AcquisitionLifecycleDialog({
                     value={offerId}
                     onChange={(event) => setOfferId(event.target.value)}
                     placeholder="Leave blank if there is no matching offer"
-                    className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                    className="border-input bg-background flex h-[38px] w-full rounded-[12px] border px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                   />
                 </div>
               </>
@@ -217,7 +222,7 @@ export function AcquisitionLifecycleDialog({
 
             {mode === "decline-offer" && (
               <>
-                <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm">
+                <div className="rounded-[12px] border border-border bg-muted/30 px-3 py-2 text-sm">
                   <p className="font-medium">Current pending offer</p>
                   <p className="mt-1 break-all text-muted-foreground">
                     {pendingOfferId || "No pending offer is available."}
@@ -237,14 +242,17 @@ export function AcquisitionLifecycleDialog({
             {mode === "handoff" && (
               <>
                 <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="acquisition-handoff-reason">Handoff reason</Label>
+                  <div className="flex items-center">
+                    <Label htmlFor="acquisition-handoff-reason">Handoff reason</Label>
+                    <RequiredHint />
+                  </div>
                   <select
                     id="acquisition-handoff-reason"
                     value={reason}
                     onChange={(event) => setReason(event.target.value as typeof reason)}
                     aria-invalid={Boolean(fieldError("reason"))}
                     aria-describedby={fieldError("reason") ? "acquisition-handoff-reason-error" : undefined}
-                    className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
+                    className={SELECT_FIELD_CLASS}
                   >
                     <option value="">Choose reason</option>
                     <option value="not_interested">Not interested</option>
@@ -253,14 +261,17 @@ export function AcquisitionLifecycleDialog({
                   <FieldError id="acquisition-handoff-reason-error" message={fieldError("reason")} />
                 </div>
                 <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="acquisition-handoff-recipient">Reassign to</Label>
+                  <div className="flex items-center">
+                    <Label htmlFor="acquisition-handoff-recipient">Reassign to</Label>
+                    <RequiredHint />
+                  </div>
                   <select
                     id="acquisition-handoff-recipient"
                     value={recipientUserId}
                     onChange={(event) => setRecipientUserId(event.target.value)}
                     aria-invalid={Boolean(fieldError("recipientUserId"))}
                     aria-describedby={fieldError("recipientUserId") ? "acquisition-handoff-recipient-error" : undefined}
-                    className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
+                    className={SELECT_FIELD_CLASS}
                   >
                     <option value="">Choose configured recipient</option>
                     {recipientOptions.map((recipient) => (
@@ -276,7 +287,7 @@ export function AcquisitionLifecycleDialog({
             )}
 
             {mode === "archive" && (
-              <label className="flex items-start gap-2 rounded-lg border border-border p-3 text-sm">
+              <label className="flex items-start gap-2 rounded-[12px] border border-border p-3 text-sm">
                 <input
                   type="checkbox"
                   checked={confirmed}
@@ -294,6 +305,7 @@ export function AcquisitionLifecycleDialog({
             submitting={submitState.submitting}
             submitLabel={copy.submitLabel}
             onCancel={closeDialog}
+            destructive={mode === "decline-offer" || mode === "archive"}
           />
         </form>
       </DialogContent>

@@ -10,8 +10,12 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import {
+  DIALOG_CONTENT_CLASS,
   DateTimeField,
   FieldError,
+  RequiredHint,
+  SELECT_FIELD_CLASS,
+  TEXT_FIELD_CLASS,
   WorkflowDialogFooter,
   WorkflowDialogHeader,
   WorkflowFormError,
@@ -121,7 +125,9 @@ export function AcquisitionAttemptDialog({
         else closeDialog()
       }}
     >
-      <DialogContent className="flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden sm:max-w-xl">
+      <DialogContent
+        className={`flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden ${DIALOG_CONTENT_CLASS}`}
+      >
         <WorkflowDialogHeader
           title="Log an attempt"
           description={`Record the external outcome for ${propertyLabel}. Opening this dialog does not count as a call.`}
@@ -140,7 +146,7 @@ export function AcquisitionAttemptDialog({
                     setSource(event.target.value as AcquisitionAttemptSource)
                     clearClientErrors()
                   }}
-                  className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
+                  className={SELECT_FIELD_CLASS}
                 >
                   <option value="sandra">Sandra</option>
                   <option value="dialpad">DialPad</option>
@@ -155,7 +161,7 @@ export function AcquisitionAttemptDialog({
                     id="acquisition-attempt-kind"
                     value={kind}
                     onChange={(event) => setKind(event.target.value as AcquisitionAttemptKind)}
-                    className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
+                    className={SELECT_FIELD_CLASS}
                   >
                     <option value="outreach">Other outreach</option>
                     <option value="call">Call</option>
@@ -170,7 +176,10 @@ export function AcquisitionAttemptDialog({
 
             {source === "sandra" && (
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="acquisition-attempt-call-reference">Sandra call reference</Label>
+                <div className="flex items-center">
+                  <Label htmlFor="acquisition-attempt-call-reference">Sandra call reference</Label>
+                  <RequiredHint />
+                </div>
                 {callReferenceOptions.length > 0 ? (
                   <select
                     id="acquisition-attempt-call-reference"
@@ -180,7 +189,7 @@ export function AcquisitionAttemptDialog({
                     aria-invalid={Boolean(clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId)}
                     aria-describedby={clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId ? "acquisition-attempt-call-reference-error" : undefined}
                     aria-required="true"
-                    className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
+                    className={SELECT_FIELD_CLASS}
                   >
                     <option value="">Choose verified call</option>
                     {callReferenceOptions.map((reference) => (
@@ -199,7 +208,10 @@ export function AcquisitionAttemptDialog({
             )}
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="acquisition-attempt-outcome">External outcome</Label>
+              <div className="flex items-center">
+                <Label htmlFor="acquisition-attempt-outcome">External outcome</Label>
+                <RequiredHint />
+              </div>
               <select
                 id="acquisition-attempt-outcome"
                 value={outcome}
@@ -207,7 +219,7 @@ export function AcquisitionAttemptDialog({
                 aria-invalid={Boolean(clientFieldErrors.outcome || submitState.fieldErrors.outcome)}
                 aria-describedby={clientFieldErrors.outcome || submitState.fieldErrors.outcome ? "acquisition-attempt-outcome-error" : undefined}
                 aria-required="true"
-                className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
+                className={SELECT_FIELD_CLASS}
               >
                 <option value="">Choose outcome</option>
                 <option value="no_answer">No answer</option>
@@ -233,6 +245,7 @@ export function AcquisitionAttemptDialog({
                 value={recordingUrl}
                 onChange={(event) => setRecordingUrl(event.target.value)}
                 placeholder="https://…"
+                className={TEXT_FIELD_CLASS}
               />
               <p className="text-xs text-muted-foreground">Recording links are optional for Sandra and DialPad.</p>
             </div>
@@ -245,6 +258,7 @@ export function AcquisitionAttemptDialog({
                 onChange={(event) => setNote(event.target.value)}
                 placeholder="Add context for the next rep"
                 rows={3}
+                className={TEXT_FIELD_CLASS}
               />
             </div>
           </div>

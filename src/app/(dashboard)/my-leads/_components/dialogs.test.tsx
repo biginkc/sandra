@@ -28,6 +28,7 @@ describe("My Leads workflow dialogs", () => {
       />
     )
 
+    expect(screen.getByRole("radiogroup", { name: "Motivation response" })).toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Save readiness" }))
     expect(onSubmit).not.toHaveBeenCalled()
     expect(screen.getByText("Specify the motivation or choose No motivation provided.")).toBeInTheDocument()
@@ -82,6 +83,7 @@ describe("My Leads workflow dialogs", () => {
       />
     )
 
+    expect(screen.getByRole("radiogroup", { name: "Motivation response" })).toBeInTheDocument()
     await user.type(screen.getByLabelText("Offer amount"), "125000.00")
     await user.selectOptions(screen.getByLabelText("Offer method"), "dropbox_sign")
     fireEvent.change(screen.getByLabelText("Offer sent"), { target: { value: "2026-09-12T09:00" } })

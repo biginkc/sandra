@@ -51,7 +51,7 @@ describe("MyLeadDetailPanel", () => {
       ...EMPTY_DETAIL,
       attempts: { rows: [{ id: "attempt", actorLabel: "Maria", outcomeLabel: "Reached", occurredLabel: "Sep 11", sourceLabel: "DialPad", recordingUrl: "https://dialpad.com/call/123" }], hasMore: false, nextCursor: null },
     } }} onRetry={vi.fn()} />)
-    expect(screen.getAllByRole("heading", { level: 3 }).map(heading => heading.textContent)).toEqual(["Attempts", "Notes", "Appointments", "$Offers", "History"])
+    expect(screen.getAllByRole("heading", { level: 3 }).map(heading => heading.textContent)).toEqual(["Attempts · 1", "Notes", "Appointments", "$Offers", "History"])
     expect(screen.getByText("DialPad")).toBeVisible()
     expect(screen.getByRole("link", { name: "Recording" })).toHaveAttribute("href", "https://dialpad.com/call/123")
     expect(screen.getByRole("link", { name: "Recording" })).toHaveAttribute("rel", "noopener noreferrer")
