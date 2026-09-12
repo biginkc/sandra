@@ -237,7 +237,7 @@ describe("MyLeadsClient", () => {
     mocks.loadMyLeads.mockResolvedValueOnce({ ok: true, snapshot: { ...initial, snapshotAt: "2026-09-11T14:01:00.000Z" }, kpis })
     const view = renderClient(initial)
     try {
-      expect(screen.getByText(/Checks for updates every 30 seconds/)).toBeInTheDocument()
+      expect(screen.getByText(/Counts update every 30 seconds/)).toBeInTheDocument()
       await act(async () => { await vi.advanceTimersByTimeAsync(29_999) })
       expect(mocks.loadMyLeads).not.toHaveBeenCalled()
       await act(async () => { await vi.advanceTimersByTimeAsync(1) })
