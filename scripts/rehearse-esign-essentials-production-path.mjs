@@ -1,3 +1,4 @@
+import { rehearseResidentialSchema } from "./rehearse-esign-residential-schema.mjs";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
@@ -1250,6 +1251,7 @@ try {
       await setServiceRole(client);
     }
 
+    await rehearseResidentialSchema(client, ids, metadata);
     console.log("eSign Essentials local rehearsal passed");
   } finally {
     await client.end().catch(() => {});

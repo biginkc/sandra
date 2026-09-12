@@ -7,7 +7,7 @@ import { reportError } from "@/lib/errors/report";
 import { err, ok, type Result } from "@/lib/errors/result";
 import { isValidEsignEmail } from "@/lib/esign/email";
 import {
-  ESIGN_MERGE_FIELD_NAMES,
+  getEsignFieldSchema,
   type EsignDeliveryState,
   type EsignStatus,
   type ProviderSignature,
@@ -57,6 +57,7 @@ export type LeadSendContext = Readonly<{
   hasHomeownerContact: boolean;
   sellerEmailAddress: string | null;
   propertyAddress: string;
+  residentialAddress?: { street: string; city: string; state: string; zip: string };
   connected: boolean;
   sendingEnabled: boolean;
   testMode: boolean;
@@ -394,6 +395,7 @@ async function loadPreflight(
       name: context.sellerName.trim(),
       emailAddress: context.sellerEmailAddress?.trim() ?? "",
     },
+    residentialAddress: context.residentialAddress,
     mergeDefaults: {
       seller_name: context.sellerName.trim(),
       property_address: context.propertyAddress.trim(),
@@ -1164,9 +1166,9 @@ function normalizeSendInput(input: SendContractInput): SendContractInput {
         emailAddress: signer.emailAddress.trim(),
       })),
     mergeValues: Object.fromEntries(
-      ESIGN_MERGE_FIELD_NAMES.map((name) => [
+      getEsignFieldSchema(Object.keys(input.mergeValues))!.names.map((name) => [
         name,
-        input.mergeValues[name].trim(),
+        input.mergeValues[name]!.trim(),
       ]),
     ) as ContractMergeValues,
   };
@@ -1179,12 +1181,9 @@ function assertExactRuntimeSendShape(input: SendContractInput): void {
   ) {
     fail("INVALID_SEND_INPUT", "The contract send details are invalid.");
   }
-  const expectedMergeKeys = [...ESIGN_MERGE_FIELD_NAMES].sort();
-  const actualMergeKeys = Object.keys(input.mergeValues).sort();
-  if (
-    actualMergeKeys.length !== expectedMergeKeys.length ||
-    actualMergeKeys.some((key, index) => key !== expectedMergeKeys[index])
-  ) {
+  if (!input.mergeValues || typeof input.mergeValues !== "object" ||
+    !getEsignFieldSchema(Object.keys(input.mergeValues)) ||
+    Object.values(input.mergeValues).some((value) => typeof value !== "string")) {
     fail("INVALID_SEND_INPUT", "The contract send details are invalid.");
   }
   const expectedSignerKeys = "emailAddress,name,order,role";
@@ -1212,7 +1211,7 @@ export function hashSendPayload(input: SendContractInput): string {
             name,
             emailAddress,
           })),
-        mergeValues: ESIGN_MERGE_FIELD_NAMES.map((name) => [
+        mergeValues: getEsignFieldSchema(Object.keys(input.mergeValues))!.names.map((name) => [
           name,
           input.mergeValues[name],
         ]),

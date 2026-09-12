@@ -249,7 +249,7 @@ export function AddTemplateDialog({
                 placeholder="Template ID from Dropbox Sign"
               />
               <p className="text-muted-foreground text-xs">
-                Sandra validates the provider template server-side. It must be a non-embedded website template with Seller then Buyer signer roles and Sandra&apos;s five merge fields.
+                Sandra validates the provider template server-side. It must be a non-embedded website template with Seller then Buyer signer roles and either the five basic contract fields or all thirteen residential purchase agreement fields.
               </p>
             </div>
           ) : (

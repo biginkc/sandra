@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import type { Result } from "@/lib/errors/result";
 import {
-  ESIGN_TEMPLATE_MERGE_FIELDS,
+  getEsignFieldSchema,
   type TemplateOption,
   type TemplateSignerRole,
 } from "@/lib/esign/contracts";
@@ -452,6 +452,7 @@ async function loadLeadSendContext({
     sellerName,
     hasHomeownerContact: Boolean(contact),
     sellerEmailAddress: contact?.email ?? null,
+    residentialAddress: { street: property.address ?? "", city: property.city ?? "", state: property.state ?? "", zip: property.zip ?? "" },
     propertyAddress: [
       property.address,
       property.city,
@@ -505,7 +506,8 @@ function toTemplateOption(row: {
     !roles
   )
     return [];
-  if (!sameMergeFields(row.merge_field_names)) return [];
+  const schema = getEsignFieldSchema(row.merge_field_names);
+  if (!schema) return [];
   return [
     {
       id: row.id,
@@ -514,7 +516,7 @@ function toTemplateOption(row: {
       providerTemplateId: row.sign_template_id,
       sellerRoleName: row.seller_role,
       signerRoles: roles,
-      mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
+      mergeFieldNames: schema.names,
     },
   ];
 }
@@ -530,19 +532,6 @@ function parseRoles(value: Json | null): readonly TemplateSignerRole[] | null {
     roles.push({ name, order });
   }
   return roles.sort((a, b) => a.order - b.order);
-}
-
-function sameMergeFields(value: string[] | null): boolean {
-  return Boolean(
-    value &&
-    value.length === ESIGN_TEMPLATE_MERGE_FIELDS.length &&
-    [...value]
-      .sort()
-      .every(
-        (field, index) =>
-          field === [...ESIGN_TEMPLATE_MERGE_FIELDS].sort()[index],
-      ),
-  );
 }
 
 async function claimSend(
@@ -673,7 +662,7 @@ async function loadRequest(
     ? toTemplateOption(templateRow, { testMode: true })[0]
     : null;
   if (!template) throw new Error("Request template snapshot is unavailable.");
-  const merge = parseMergeValues(row.merge_value_snapshot);
+  const merge = parseMergeValues(row.merge_value_snapshot, template.mergeFieldNames);
   if (!merge) throw new Error("Request merge snapshot is invalid.");
   return {
     id: row.id,
@@ -705,10 +694,12 @@ async function loadRequest(
   };
 }
 
-function parseMergeValues(value: Json): ContractMergeValues | null {
+function parseMergeValues(value: Json, expectedFields: readonly string[]): ContractMergeValues | null {
   if (!value || Array.isArray(value) || typeof value !== "object") return null;
   const result: Record<string, string> = {};
-  for (const field of ESIGN_TEMPLATE_MERGE_FIELDS) {
+  const schema = getEsignFieldSchema(Object.keys(value));
+  if (!schema || schema.version !== getEsignFieldSchema(expectedFields)?.version) return null;
+  for (const field of schema.names) {
     if (typeof value[field] !== "string") return null;
     result[field] = value[field];
   }

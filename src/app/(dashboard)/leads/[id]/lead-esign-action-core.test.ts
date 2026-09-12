@@ -1775,3 +1775,13 @@ describe("lead eSign action orchestration", () => {
     });
   });
 });
+
+describe("residential send intent hashes", () => {
+  const values = { ...sendInput.mergeValues, buyer_name: "BMH", property_city: "Kansas City", property_state: "MO", property_zip: "64108", legal_description: "Lot fixture", earnest_money_holder: "Escrow", cash_balance: "$100", additional_terms: "" };
+  it.each(["buyer_name", "property_city", "property_state", "property_zip", "legal_description", "earnest_money_holder", "cash_balance", "additional_terms"])("includes %s in the immutable send hash", (field) => {
+    expect(hashSendPayload({ ...sendInput, mergeValues: { ...values, [field]: "changed" } })).not.toBe(hashSendPayload({ ...sendInput, mergeValues: values }));
+  });
+  it("hashes residential values in canonical order", () => {
+    expect(hashSendPayload({ ...sendInput, mergeValues: Object.fromEntries(Object.entries(values).reverse()) as typeof values })).toBe(hashSendPayload({ ...sendInput, mergeValues: values }));
+  });
+});

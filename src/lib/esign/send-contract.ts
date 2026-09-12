@@ -4,9 +4,9 @@ import { ValidationError } from "@/lib/errors/classes";
 import { isValidEsignEmail } from "@/lib/esign/email";
 
 import {
-  ESIGN_MERGE_FIELD_NAMES,
+  getEsignFieldSchema,
   type DropboxSignProvider,
-  type EsignMergeFieldName,
+  type EsignMergeValues,
   type ProviderSignature,
   type TemplateOption,
 } from "./contracts";
@@ -21,7 +21,7 @@ export type ProviderSendContractInput = Readonly<{
     name: string;
     emailAddress: string;
   }>[];
-  mergeValues: Readonly<Record<EsignMergeFieldName, string>>;
+  mergeValues: Readonly<EsignMergeValues>;
   title?: string;
   subject?: string;
   message?: string;
@@ -62,7 +62,7 @@ export function validateContractSendInput(
 ): void {
   assertExactTemplateContract(input.template);
   assertExactSignerAssignments(input.template, input.signers);
-  assertExactMergeValues(input.mergeValues);
+  assertExactMergeValues(input.mergeValues, input.template);
 }
 
 export function validateProviderSignatures(
@@ -85,29 +85,11 @@ function assertExactTemplateContract(template: TemplateOption): void {
     );
   }
 
-  if (
-    template.mergeFieldNames.length !== ESIGN_MERGE_FIELD_NAMES.length ||
-    new Set(template.mergeFieldNames).size !==
-      template.mergeFieldNames.length ||
-    !sameSortedValues(template.mergeFieldNames, ESIGN_MERGE_FIELD_NAMES) ||
-    ESIGN_MERGE_FIELD_NAMES.some(
-      (requiredName) => !template.mergeFieldNames.includes(requiredName),
-    )
-  ) {
+  if (!getEsignFieldSchema(template.mergeFieldNames)) {
     throw new ValidationError(
       "The template merge fields are no longer valid. Refresh and try again.",
     );
   }
-}
-
-function sameSortedValues(
-  actual: readonly string[],
-  expected: readonly string[],
-): boolean {
-  if (actual.length !== expected.length) return false;
-  const actualSorted = [...actual].sort();
-  const expectedSorted = [...expected].sort();
-  return actualSorted.every((value, index) => value === expectedSorted[index]);
 }
 
 function assertExactSignerAssignments(
@@ -134,17 +116,17 @@ function assertExactSignerAssignments(
 
 function assertExactMergeValues(
   mergeValues: ProviderSendContractInput["mergeValues"],
+  template: TemplateOption,
 ): void {
-  const actual = Object.keys(mergeValues);
-  if (
-    actual.length !== ESIGN_MERGE_FIELD_NAMES.length ||
-    ESIGN_MERGE_FIELD_NAMES.some(
-      (name) => !actual.includes(name) || !mergeValues[name].trim(),
-    )
-  ) {
-    throw new ValidationError(
-      "Complete the five required contract fields before sending.",
-    );
+  const schema = getEsignFieldSchema(template.mergeFieldNames);
+  const actual = getEsignFieldSchema(Object.keys(mergeValues));
+  if (!schema || schema.version !== actual?.version || schema.names.some(
+    (name) => typeof mergeValues[name] !== "string" ||
+      (name !== "additional_terms" && !mergeValues[name]?.trim()),
+  )) {
+    throw new ValidationError(schema?.version === "legacy-v1"
+      ? "Complete the five required contract fields before sending."
+      : "Complete all required residential contract fields before sending.");
   }
 }
 

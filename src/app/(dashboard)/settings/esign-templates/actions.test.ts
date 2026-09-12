@@ -217,7 +217,7 @@ describe("template server action boundary", () => {
       error: {
         code: "MERGE_FIELD_MISMATCH",
         message:
-          "Dropbox Sign Sender merge fields must be exactly seller_name, property_address, offer_price, closing_date, and earnest_money.",
+          "Dropbox Sign Sender merge fields must match either the five basic contract fields or all thirteen residential purchase agreement fields.",
       },
     });
   });
