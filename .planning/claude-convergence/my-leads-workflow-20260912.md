@@ -18,7 +18,7 @@
 - [PASS] Astro read-only review completed with high confidence: plan approved for preflight/execution; the historical fresh-handoff defect is confirmed fixed in the merged migration and must be rechecked on the current applied database identity.
 - [PASS] Isolated local mutation admission: the user amendment authorizes this session's synthetic stack. A guarded seed apply safely refused overwrite because the 105 expanded IDs already exist; no reset was performed.
 - [PASS] Browser workflow execution and persisted outcomes for the new 84-case batch are recorded for this isolated run. Current CSV totals are 27 PASS and 57 BLOCKED, with no NOT RUN rows. BLOCKED rows carry the exact unavailable capability or incomplete branch coverage; API-assisted writes remain labeled separately and have browser reload/SQL corroboration.
-- [IN PROGRESS] Exact-current-candidate Astro review and final acceptance packet.
+- [PASS] Exact-current-candidate Astro review and final acceptance packet: Astro approved the partial evidence at `cddae5da`; full campaign readiness remains blocked by the 57 explicitly documented capability/fixture gaps.
 
 ## Preflight evidence
 
@@ -31,9 +31,11 @@
 
 Astro reviewed the plan and reported: approve preflight/execution with two corrections. The tracker must contain a fresh implicit/version-0 handoff case; J04's revised-offer branch must be explicitly BLOCKED rather than NOT RUN. Both corrections were applied. Astro also confirmed the missing-row handoff behavior is a real defect in the older evidence tree but is already fixed and retested in the approved `a9021cfe` candidate; no duplicate source fix was made.
 
+Final exact-current-candidate review: Astro approved the partial evidence at `cddae5da`. The reviewer verified the 84-row, 15-column CSV, 27 PASS / 57 BLOCKED totals, populated bindings, synthetic identity separation, API/browser distinction, and unchanged My Leads source. This is a read-only evidence/source review; it does not certify the remaining blocked workflows or production readiness.
+
 ## Current decision
 
-The isolated campaign is ready for a final exact-current-candidate Astro review after rerunning the feasible archive-reset, temperature-preservation, motivation-mode, fresh version-0 handoff, and two-actor stale-tab recovery checks. No confirmed product defect was discovered, so no source fix was needed this turn; all blocked capabilities, incomplete branches, before/after facts, side-effect checks, and retained-fixture/writer status are recorded in the CSV and receipt.
+The isolated campaign has completed the feasible reruns and received Astro approval for the partial evidence. No confirmed product defect was discovered, so no source fix was needed this turn; all blocked capabilities, incomplete branches, before/after facts, side-effect checks, and retained-fixture/writer status are recorded in the CSV and receipt. Full campaign readiness remains blocked until the 57 named clock, fault-injection, lifecycle, identity, suppression, and provider-control gaps are resolved.
 
 ## Current execution evidence
 
