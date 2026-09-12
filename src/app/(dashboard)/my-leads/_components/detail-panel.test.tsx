@@ -58,7 +58,9 @@ describe("MyLeadDetailPanel", () => {
   })
 
   it("uses authenticated Sandra playback when the external recording URL is absent", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true, json: async () => ({ recordingStatus: "available", durationSeconds: null, transcriptStatus: "none", summaryStatus: "failed", summary: null, transcript: null }),
+    } as Response).mockResolvedValueOnce({
       ok: true,
       json: async () => ({ signedUrl: "https://audio.example.com/call.mp3", expiresAt: new Date(Date.now() + 600000).toISOString() }),
     } as Response)
@@ -67,7 +69,7 @@ describe("MyLeadDetailPanel", () => {
       attempts: { rows: [{ id: "attempt", actorLabel: "Maria", outcomeLabel: "Reached", occurredLabel: "Sep 12", sourceLabel: "Sandra", recordingUrl: null, callActivityId: "call-123" }], hasMore: false, nextCursor: null },
     } }} onRetry={vi.fn()} />)
     expect(screen.queryByText("no recording")).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole("button", { name: "Load recording" }))
+    await userEvent.click(await screen.findByRole("button", { name: "Load recording" }))
     expect(fetchMock).toHaveBeenCalledWith("/api/leads/calls/call-123/recording-url", expect.anything())
     await waitFor(() => expect(screen.getByLabelText("Call recording")).toHaveAttribute("src", "https://audio.example.com/call.mp3"))
     expect(screen.queryByRole("alert")).not.toBeInTheDocument()

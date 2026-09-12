@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { AlertCircle, CalendarClock, FileText, History, Play, PhoneCall, RefreshCw } from "lucide-react"
 
-import { SandraRecordingPlayer } from "@/app/(dashboard)/leads/[id]/sandra-recording-player"
+import { MyLeadCallArtifacts } from "./call-artifacts"
 import { AddNoteComposer } from "@/app/(dashboard)/leads/[id]/notes-feed"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -106,7 +106,7 @@ export function MyLeadDetailPanel({
                 </span>
               )}
               {attempt.callActivityId ? (
-                <SandraRecordingPlayer key={attempt.callActivityId} callActivityId={attempt.callActivityId} />
+                <span>Call details below</span>
               ) : attempt.recordingUrl ? (
                 <a
                   href={attempt.recordingUrl}
@@ -122,6 +122,7 @@ export function MyLeadDetailPanel({
               )}
               <span className="font-mono text-[10.5px] text-muted-foreground">{attempt.occurredLabel}</span>
             </div>
+            {attempt.callActivityId && <MyLeadCallArtifacts key={attempt.callActivityId} callActivityId={attempt.callActivityId} />}
           </div>
         )}
       />
