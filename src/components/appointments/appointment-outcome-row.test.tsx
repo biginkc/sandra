@@ -38,6 +38,7 @@ vi.mock("./book-appointment-popover", () => ({
     triggerRef?: React.Ref<HTMLButtonElement>;
     triggerTabIndex?: number;
     onOpenChange?: (open: boolean) => void;
+    onRescheduled?: (result: { taskId: string }) => void;
   }) => {
     const [opened, setOpened] = React.useState(false);
     return (
@@ -69,6 +70,13 @@ vi.mock("./book-appointment-popover", () => ({
             </button>
           </div>
         ) : null}
+        <button
+          type="button"
+          data-testid={`stub-reschedule-success-${props.taskId}`}
+          onClick={() => props.onRescheduled?.({ taskId: props.taskId ?? "" })}
+        >
+          Confirm reschedule
+        </button>
       </>
     );
   },
@@ -187,6 +195,32 @@ describe("<AppointmentOutcomeRow />", () => {
     );
   });
 
+  it("notifies the owner only after a confirmed completion", async () => {
+    vi.mocked(completeAppointmentAction).mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "held" },
+    });
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AppointmentOutcomeRow
+        taskId="task-1"
+        assigneeId="user-1"
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.click(screen.getByTestId("appointment-held-task-1"));
+
+    await waitFor(() =>
+      expect(onChanged).toHaveBeenCalledWith({
+        kind: "completed",
+        taskId: "task-1",
+        outcome: "held",
+      }),
+    );
+  });
+
   it("Cancel confirms inline before calling cancelAppointmentAction — first click shows Yes/Never mind, doesn't call yet", async () => {
     const user = userEvent.setup();
     render(<AppointmentOutcomeRow taskId="task-1" assigneeId="user-1" />);
@@ -257,6 +291,26 @@ describe("<AppointmentOutcomeRow />", () => {
         expect.anything(),
       ),
     );
+  });
+
+  it("does not notify the owner when completion fails", async () => {
+    vi.mocked(completeAppointmentAction).mockResolvedValue({
+      ok: false,
+      error: { code: "CONFLICT", message: "Appointment already resolved" },
+    });
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AppointmentOutcomeRow
+        taskId="task-1"
+        assigneeId="user-1"
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.click(screen.getByTestId("appointment-held-task-1"));
+    await waitFor(() => expect(completeAppointmentAction).toHaveBeenCalled());
+    expect(onChanged).not.toHaveBeenCalled();
   });
 });
 
@@ -331,6 +385,51 @@ describe("<AppointmentUpcomingActions />", () => {
     await waitFor(() =>
       expect(cancelAppointmentAction).toHaveBeenCalledWith("task-2"),
     );
+  });
+
+  it("notifies the owner after a confirmed cancel", async () => {
+    vi.mocked(cancelAppointmentAction).mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-2", status: "cancelled", ledgerId: "ledger-2" },
+    });
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AppointmentUpcomingActions
+        taskId="task-2"
+        assigneeId="user-1"
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.click(screen.getByTestId("appointment-menu-cancel-task-2"));
+
+    await waitFor(() =>
+      expect(onChanged).toHaveBeenCalledWith({
+        kind: "cancelled",
+        taskId: "task-2",
+      }),
+    );
+  });
+
+  it("notifies the owner after the shared reschedule control confirms", async () => {
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AppointmentUpcomingActions
+        taskId="task-2"
+        assigneeId="user-1"
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.click(screen.getByTestId("appointment-menu-reschedule-task-2"));
+    await user.click(screen.getByTestId("stub-reschedule-success-task-2"));
+
+    expect(onChanged).toHaveBeenCalledWith({
+      kind: "rescheduled",
+      taskId: "task-2",
+    });
   });
 
   it("does not call cancelAppointmentAction when the confirm dialog is dismissed", async () => {

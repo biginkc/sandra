@@ -41,7 +41,9 @@ jobs:
   playwright:
     name: Playwright golden paths
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Five serial server runs exceeded 25 minutes in two observed CI attempts.
+    # Preserve all tests and per-test limits; allow the full suite to finish.
+    timeout-minutes: 45
     environment: e2e-ci
 
     env:

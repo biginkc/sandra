@@ -40,5 +40,11 @@
       "path": "/api/cron/esign-send-reconciliation",
       "schedule": "3-59/5 * * * *"
     }
-  ]
+  ],
+  "git": {
+    "deploymentEnabled": {
+      "codex/my-leads-prd-20260911": false,
+      "codex/my-leads-migration-history": false
+    }
+  }
 }

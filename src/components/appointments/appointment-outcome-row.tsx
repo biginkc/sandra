@@ -18,12 +18,18 @@ import {
   completeAppointmentAction,
 } from "./lifecycle-actions";
 
+export type AppointmentLifecycleChange =
+  | { kind: "completed"; taskId: string; outcome: "held" | "no_show" }
+  | { kind: "cancelled"; taskId: string }
+  | { kind: "rescheduled"; taskId: string };
+
 type Props = {
   taskId: string;
   /** The appointment's assignee — reschedule never changes assignee, so
    *  this fixes the picker's timezone lookup (see BookAppointmentPopover
    *  `mode="reschedule"`). */
   assigneeId: string;
+  onChanged?: (change: AppointmentLifecycleChange) => void;
 };
 
 /**
@@ -36,16 +42,17 @@ type Props = {
  * copy and the disabled/pending state stay consistent with the rest of
  * this row.
  */
-export function AppointmentOutcomeRow({ taskId, assigneeId }: Props) {
+export function AppointmentOutcomeRow({ taskId, assigneeId, onChanged }: Props) {
   const [pending, startTransition] = useTransition();
   const [confirmingCancel, setConfirmingCancel] = useState(false);
 
   function complete(outcome: "held" | "no_show") {
     startTransition(async () => {
-      await callAction(completeAppointmentAction(taskId, outcome), {
+      const result = await callAction(completeAppointmentAction(taskId, outcome), {
         successMessage: outcome === "held" ? "Marked held" : "Marked no-show",
         fallbackMessage: "Could not update the appointment",
       });
+      if (result.ok) onChanged?.({ kind: "completed", taskId, outcome });
     });
   }
 
@@ -59,7 +66,10 @@ export function AppointmentOutcomeRow({ taskId, assigneeId }: Props) {
         successMessage: "Appointment cancelled",
         fallbackMessage: "Could not cancel the appointment",
       });
-      if (result.ok) setConfirmingCancel(false);
+      if (result.ok) {
+        setConfirmingCancel(false);
+        onChanged?.({ kind: "cancelled", taskId });
+      }
     });
   }
 
@@ -103,6 +113,9 @@ export function AppointmentOutcomeRow({ taskId, assigneeId }: Props) {
               triggerVariant="outline"
               triggerSize="sm"
               disabled={pending}
+              onRescheduled={(result) =>
+                onChanged?.({ kind: "rescheduled", taskId: result.taskId })
+              }
             />
           </div>
           <Button
@@ -151,6 +164,7 @@ type UpcomingProps = {
   taskId: string;
   /** The appointment's assignee — see `AppointmentOutcomeRow` above. */
   assigneeId: string;
+  onChanged?: (change: AppointmentLifecycleChange) => void;
 };
 
 /**
@@ -167,6 +181,7 @@ type UpcomingProps = {
 export function AppointmentUpcomingActions({
   taskId,
   assigneeId,
+  onChanged,
 }: UpcomingProps) {
   const [pending, startTransition] = useTransition();
   const menuTriggerRef = useRef<HTMLButtonElement>(null);
@@ -175,10 +190,11 @@ export function AppointmentUpcomingActions({
   function cancel() {
     if (!window.confirm("Cancel this appointment?")) return;
     startTransition(async () => {
-      await callAction(cancelAppointmentAction(taskId), {
+      const result = await callAction(cancelAppointmentAction(taskId), {
         successMessage: "Appointment cancelled",
         fallbackMessage: "Could not cancel the appointment",
       });
+      if (result.ok) onChanged?.({ kind: "cancelled", taskId });
     });
   }
 
@@ -240,6 +256,9 @@ export function AppointmentUpcomingActions({
               queueMicrotask(() => menuTriggerRef.current?.focus());
             }
           }}
+          onRescheduled={(result) =>
+            onChanged?.({ kind: "rescheduled", taskId: result.taskId })
+          }
         />
       </div>
     </div>

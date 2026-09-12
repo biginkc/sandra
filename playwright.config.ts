@@ -135,6 +135,8 @@ export default defineConfig({
   // It must not run in the default CI suite (no creds → it throws in
   // beforeAll). Use playwright.prod.config.ts for that spec.
   testIgnore: [
+    // Requires the four-principal loopback fixture, never the shared CI project.
+    "**/my-leads.local.spec.ts",
     "**/phase-1-5-uat.spec.ts",
     "**/prod-canary/**",
     "**/synthetic/**",

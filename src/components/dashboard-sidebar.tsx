@@ -3,6 +3,7 @@
 import {
   Briefcase,
   Calendar,
+  ClipboardList,
   Download,
   FileText,
   Gauge,
@@ -17,6 +18,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { cn } from "@/lib/utils";
+import { MyLeadsNavBadge, type MyLeadsBadgeRefresh } from "./my-leads-nav-badge";
 
 /**
  * Left-nav for the dashboard — the day-to-day workflow ladder. Admin /
@@ -59,8 +61,13 @@ const ITEMS: readonly Item[] = [
   { href: "/templates", label: "Templates", icon: FileText },
   { href: "/messages", label: "Messages", icon: MessageSquare },
   { href: "/leads", label: "Leads", icon: LayoutDashboard },
+  { href: "/my-leads", label: "My Leads", icon: ClipboardList },
   { href: "/jobs", label: "Jobs", icon: Briefcase },
 ];
+
+function visibleItems(showMyLeads: boolean): readonly Item[] {
+  return showMyLeads ? ITEMS : ITEMS.filter((item) => item.href !== "/my-leads");
+}
 
 const ITEM_BASE =
   "flex items-center gap-3 py-3 text-sm font-bold tracking-[0.02em] transition-all duration-150 ease-in-out";
@@ -75,8 +82,17 @@ const MOBILE_ITEM_ACTIVE = "border-nav-active-border bg-white/10 text-white";
 const MOBILE_ITEM_INACTIVE =
   "text-white/75 hover:bg-white/[0.07] hover:text-white";
 
-export function DashboardSidebar() {
+export function DashboardSidebar({
+  showMyLeads = true,
+  initialAcquisitionBadge = null,
+  onRefreshAcquisitionBadge,
+}: {
+  showMyLeads?: boolean;
+  initialAcquisitionBadge?: number | null;
+  onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
+}) {
   const pathname = usePathname();
+  const items = visibleItems(showMyLeads);
 
   const isActive = (item: Item): boolean => {
     if (pathname === item.href) return true;
@@ -89,7 +105,7 @@ export function DashboardSidebar() {
 
   return (
     <nav aria-label="Primary" className="flex flex-1 flex-col gap-1">
-      {ITEMS.map((item) => {
+      {items.map((item) => {
         const active = isActive(item);
         const Icon = item.icon;
         return (
@@ -101,6 +117,12 @@ export function DashboardSidebar() {
           >
             <Icon className="size-5" aria-hidden />
             <span>{item.label}</span>
+            {item.href === "/my-leads" && (
+              <MyLeadsNavBadge
+                initialCount={initialAcquisitionBadge}
+                onRefresh={onRefreshAcquisitionBadge}
+              />
+            )}
           </Link>
         );
       })}
@@ -108,8 +130,17 @@ export function DashboardSidebar() {
   );
 }
 
-export function DashboardMobileNav() {
+export function DashboardMobileNav({
+  showMyLeads = true,
+  initialAcquisitionBadge = null,
+  onRefreshAcquisitionBadge,
+}: {
+  showMyLeads?: boolean;
+  initialAcquisitionBadge?: number | null;
+  onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
+}) {
   const pathname = usePathname();
+  const items = visibleItems(showMyLeads);
 
   const isActiveHref = (href: string): boolean =>
     pathname === href || pathname.startsWith(href + "/");
@@ -119,7 +150,7 @@ export function DashboardMobileNav() {
       aria-label="Primary"
       className="flex items-center gap-2 overflow-x-auto px-4 py-1"
     >
-      {ITEMS.map((item) => {
+      {items.map((item) => {
         const active = isActiveHref(item.href);
         return (
           <Link
@@ -132,6 +163,12 @@ export function DashboardMobileNav() {
             )}
           >
             {item.label}
+            {item.href === "/my-leads" && (
+              <MyLeadsNavBadge
+                initialCount={initialAcquisitionBadge}
+                onRefresh={onRefreshAcquisitionBadge}
+              />
+            )}
           </Link>
         );
       })}

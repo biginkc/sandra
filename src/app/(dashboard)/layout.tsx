@@ -16,7 +16,9 @@ import { JobFailureNotifier } from "@/components/job-failure-notifier";
 import { NotificationsBell } from "@/components/notifications-bell";
 import { SoftphoneHeaderButton, SoftphoneProvider } from "@/components/softphone/softphone-provider";
 import { isAdminEmail } from "@/lib/auth/allowlist";
+import { getAcquisitionBadge, getAcquisitionRoster } from "@/lib/my-leads/queries";
 import { createClient } from "@/lib/supabase/server";
+import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
 
 export default async function DashboardLayout({
   children,
@@ -29,6 +31,18 @@ export default async function DashboardLayout({
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
   const showAdmin = isAdminEmail(user.email);
+  const [rosterResult, badgeResult] = await Promise.allSettled([
+    getAcquisitionRoster(),
+    getAcquisitionBadge(),
+  ]);
+  const acquisitionRoster =
+    rosterResult.status === "fulfilled" ? rosterResult.value : null;
+  const showMyLeads = Boolean(
+    acquisitionRoster &&
+      (acquisitionRoster.roster.settings.enabled || acquisitionRoster.viewer.isOwner),
+  );
+  const initialAcquisitionBadge =
+    showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value : null;
 
   return (
     <SoftphoneProvider>
@@ -87,7 +101,11 @@ export default async function DashboardLayout({
             priority
           />
         </Link>
-        <DashboardSidebar />
+        <DashboardSidebar
+          showMyLeads={showMyLeads}
+          initialAcquisitionBadge={initialAcquisitionBadge}
+          onRefreshAcquisitionBadge={refreshMyLeadsBadge}
+        />
         <div
           className="mx-6 mt-2 border-t border-white/10 pt-3 text-xs text-white/75"
           title={user.email ?? ""}
@@ -97,7 +115,11 @@ export default async function DashboardLayout({
       </aside>
 
       <div className="nav-field fixed inset-x-0 top-16 z-30 border-b border-white/10 md:hidden">
-        <DashboardMobileNav />
+        <DashboardMobileNav
+          showMyLeads={showMyLeads}
+          initialAcquisitionBadge={initialAcquisitionBadge}
+          onRefreshAcquisitionBadge={refreshMyLeadsBadge}
+        />
       </div>
 
       <div className="flex flex-col pt-[116px] md:pt-16 md:ml-64">

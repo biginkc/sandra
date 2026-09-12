@@ -38,6 +38,8 @@ function loadEnvLocal() {
 loadEnvLocal();
 export default defineConfig({
   testDir: "./e2e",
+  // Local fixture acceptance must never run against a production browser target.
+  testIgnore: ["**/my-leads.local.spec.ts"],
   fullyParallel: false,
   workers: 1,
   retries: 0,
