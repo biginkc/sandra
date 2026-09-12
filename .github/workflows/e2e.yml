@@ -6,36 +6,10 @@ on:
   pull_request:
     branches: [main]
 
-# Serialize all E2E runs against the shared Supabase test project so concurrent
-# runs (PR push + main push, two PRs landing back-to-back, etc.) can't truncate
-# each other's fixtures mid-test. cancel-in-progress: false means later runs
-# queue and wait, rather than killing the running job.
-#
-# Root cause confirmed by Codex investigation 2026-05-07: cockpit/notifications
-# flakes on PR #130's first CI run were caused by E2E runs overlapping against
-# the same TEST_SUPABASE project — one run's reset_tenant_tables() wiped rows
-# the other had just seeded. Symptoms looked like compile-penalty from a static
-# import; the static import was a red herring (PR #131 lazy-load workaround
-# was withdrawn).
-# Kept as the exact legacy static string, not a per-project-ref group: a
-# per-database group was tried (e2e-dedicated-${{ vars.E2E_CI_SUPABASE_...
-# }}) and reverted for two reasons Codex review caught. First, env-level
-# `vars` context resolves EMPTY at concurrency-block evaluation time (the
-# concurrency block evaluates before `env:` is available), so the group
-# name silently became "e2e-dedicated-" for every run — not actually
-# scoped by project at all. Second, and more fundamentally: diverging the
-# group name from the legacy string is exactly what let legacy branches
-# (still carrying the old e2e-shared-test-project group) run in parallel
-# against branches that had already picked up the new name — the opposite
-# of the intended fix. The static legacy string serializes every E2E run,
-# old branch or new, against this one shared database — which is correct,
-# since every E2E run (dedicated project or not) still shares it. The DB
-# advisory lock in e2e/global-setup.ts is the real backstop against
-# cross-branch drift in this string; it doesn't depend on YAML matching.
-concurrency:
-  group: e2e-shared-test-project
-  cancel-in-progress: false
-  queue: max
+# Each job owns a disposable database on its GitHub runner. Hosted legacy
+# branches keep their shared-project queue; these jobs cannot reach that DB.
+permissions:
+  contents: read
 
 jobs:
   playwright:
@@ -44,10 +18,8 @@ jobs:
     # Five serial server runs exceeded 25 minutes in two observed CI attempts.
     # Preserve all tests and per-test limits; allow the full suite to finish.
     timeout-minutes: 45
-    environment: e2e-ci
 
     env:
-      E2E_CI_SUPABASE_PROJECT_REF: ${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}
       NEXT_PUBLIC_SOFTPHONE_TRANSPORT: "simulated"
       # Skip the Haiku intent classifier in e2e — no ANTHROPIC_API_KEY here,
       # and the classifier is already unit-tested in
@@ -72,15 +44,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+
+      - name: Provision disposable E2E database
+        run: node scripts/provision-e2e-local-database.mjs
+
       - name: Generate job-scoped E2E identity
         run: npx tsx scripts/e2e-identity-lifecycle.ts emit
 
       - name: Preflight E2E identity and arm browser-QA circuit breaker
         run: npx tsx scripts/e2e-identity-lifecycle.ts preflight
-        env:
-          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
-          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
-
       - name: Verify Chrome browser
         run: |
           google-chrome --version
@@ -97,17 +72,6 @@ jobs:
           NODE
 
       - name: Run Playwright E2E suite
-        env:
-          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
-          TEST_SUPABASE_ANON_KEY: ${{ secrets.E2E_CI_SUPABASE_ANON_KEY }}
-          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
-          # Transaction-mode pooler URL (port 6543 — this project has no
-          # direct-connection DNS) for the Playwright globalSetup
-          # advisory-lock transaction — see e2e/global-setup.ts, which
-          # configures TLS explicitly in code rather than relying on a
-          # query param here. Never printed; consumed only by the pg
-          # client inside Node.
-          E2E_CI_SUPABASE_DB_URL: ${{ secrets.E2E_CI_SUPABASE_DB_URL }}
         run: |
           # Bound each serial group to a fresh Next dev server. Beyond roughly
           # six minutes the CI server has emitted ECONNRESET and stopped
@@ -128,9 +92,9 @@ jobs:
       - name: Clean up exact-run E2E identities and verify browser-QA isolation
         if: always()
         run: npx tsx scripts/e2e-identity-lifecycle.ts cleanup
-        env:
-          TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}
-          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}
+      - name: Destroy disposable E2E database
+        if: always() && env.E2E_LOCAL_WORKDIR != ''
+        run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup
 
       - name: Upload HTML report on failure
         if: failure()
