@@ -36,6 +36,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [period,setPeriod]=useState<MyLeadsPeriod>('today');const [range,setRange]=useState<MyLeadDateRange|null>(null);
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
   const [error,setError]=useState<string|null>(null);const [loadingStages,setLoadingStages]=useState<Set<MyLeadStage>>(new Set());
+  const [refreshError,setRefreshError]=useState<string|null>(null);
   const [callOptions,setCallOptions]=useState<{propertyId:string;options:{id:string;label:string}[];error:string|null}|null>(null);
   const [callRetry,setCallRetry]=useState(0);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow}|null>(null);
@@ -48,9 +49,14 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const refresh=useCallback(async()=>{
     if(!roster.settings.enabled||selectedRangeStatus!=='ready') return;
     const id=++request.current;
-    const result=await loadMyLeads({memberId:member,search,period,startDate:range?.startDate,endDate:range?.endDate});
-    if(id!==request.current)return;
-    if(result.ok){setSnapshot(result.snapshot);setKpis(result.kpis);setError(null);}else setError(result.message);
+    try {
+      const result=await loadMyLeads({memberId:member,search,period,startDate:range?.startDate,endDate:range?.endDate});
+      if(id!==request.current)return;
+      if(result.ok){setSnapshot(result.snapshot);setKpis(result.kpis);setError(null);setRefreshError(null);}
+      else setRefreshError(result.message);
+    } catch {
+      if(id===request.current)setRefreshError('My Leads could not refresh.');
+    }
   },[member,search,period,range,roster.settings.enabled,selectedRangeStatus]);
   useEffect(()=>{
     if(initialEffect.current){initialEffect.current=false;return;}
@@ -69,10 +75,17 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   useEffect(()=>{
     if(!roster.settings.enabled)return;
     const delay=Math.min(60_000,Math.max(1000,snapshot?.nextWarningAt?Date.parse(snapshot.nextWarningAt)-Date.now():60_000));
-    const timer=setTimeout(()=>{if(!document.hidden)void refresh();},delay);
+    let cancelled=false;
+    // A failed read does not replace snapshot, so it cannot re-arm this effect.
+    // Keep retrying even after transport/authentication failures or hidden tabs.
+    const tick=async()=>{
+      try {if(!document.hidden)await refresh();}
+      finally {if(!cancelled)timer=setTimeout(()=>void tick(),60_000);}
+    };
+    let timer=setTimeout(()=>void tick(),delay);
     const onVisible=()=>{if(!document.hidden)void refresh();};
     document.addEventListener('visibilitychange',onVisible);window.addEventListener('focus',onVisible);
-    return()=>{clearTimeout(timer);document.removeEventListener('visibilitychange',onVisible);window.removeEventListener('focus',onVisible);};
+    return()=>{cancelled=true;clearTimeout(timer);document.removeEventListener('visibilitychange',onVisible);window.removeEventListener('focus',onVisible);};
   },[snapshot,refresh,roster.settings.enabled]);
   const rawRow=(id:string)=>Object.values(snapshot?.stages??{}).flatMap(p=>p?.rows??[]).find(r=>r.propertyId===id);
   const action=(kind:MyLeadAction,id:string)=>{
@@ -119,6 +132,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       <Button disabled={!recipient||settingsBusy} onClick={async()=>{setSettingsBusy(true);try{const result=await changeAcquisitionSettings({orgId:viewer.orgId,needsSequenceOwnerId:recipient,expectedSettingsRevision:roster.settings.revision,idempotencyKey:crypto.randomUUID()});if(!result.ok)setError(result.message);else router.refresh();}finally{setSettingsBusy(false);}}}>Save recipient</Button></div>
     </details>}
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
+    {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis?<p role="status">Loading My Leads…</p>:<>
       {search&&<p className="mb-2 text-sm text-muted-foreground">Section counts match your search. KPIs cover the selected rep.</p>}
       <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={kpiTiles(kpis)} search={search} selectedRepId={member} selectedPeriod={period} selectedDateRange={range}
