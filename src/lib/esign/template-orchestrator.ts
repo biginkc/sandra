@@ -730,7 +730,7 @@ export function createTemplateOrchestrator(ports: TemplateOrchestratorPorts) {
       try {
         deletion = await ports.repository.softDelete(access.data.orgId, templateId, confirmRecentSends);
       } catch {
-        return failure("RECENT_SEND_CHECK_FAILED", "Recent template usage could not be verified.");
+        return failure("TEMPLATE_DELETE_FAILED", "The template could not be removed from Sandra. Try again.");
       }
       if (deletion.outcome === "needs_confirmation") {
         return failure("TEMPLATE_RECENTLY_USED", `Confirm deletion of a template used ${deletion.recentSendCount} time${deletion.recentSendCount === 1 ? "" : "s"} in the last 30 days.`);
