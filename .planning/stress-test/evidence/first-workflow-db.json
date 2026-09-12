@@ -1,0 +1,126 @@
+{
+  "capturedAt": "2026-09-12T05:55:07.096Z",
+  "evidenceKind": "read-only local database corroboration, not browser evidence",
+  "propertyId": "20000000-0000-4000-8000-000000000001",
+  "property": [
+    {
+      "id": "20000000-0000-4000-8000-000000000001",
+      "status": "offer_sent",
+      "motivation_level": null,
+      "assigned_user_id": "10000000-0000-4000-8000-000000000003",
+      "outreach_dispo": null,
+      "follow_up_at": null
+    }
+  ],
+  "queue": [
+    {
+      "property_id": "20000000-0000-4000-8000-000000000001",
+      "org_id": "00000000-0000-0000-0000-000000000bbb",
+      "stage": "offer_sent",
+      "stage_entered_at": "2026-09-11T17:00:00.000Z",
+      "motivation_recorded": true,
+      "motivation_kind": "no_motivation",
+      "motivation_text": null,
+      "motivation_recorded_at": "2026-09-12T05:53:28.268Z",
+      "motivation_recorded_by": "10000000-0000-4000-8000-000000000003",
+      "archived_at": null,
+      "archived_by": null,
+      "archive_reason": null,
+      "version": "3",
+      "launch_cohort_id": null,
+      "launch_previous_shared_status": null,
+      "signed_at": null,
+      "signed_by": null,
+      "created_at": "2026-09-12T05:52:21.724Z",
+      "updated_at": "2026-09-12T05:54:18.314Z"
+    }
+  ],
+  "attempts": [
+    {
+      "id": "cd495519-8461-46c5-8e81-9df052115fbd",
+      "org_id": "00000000-0000-0000-0000-000000000bbb",
+      "property_id": "20000000-0000-4000-8000-000000000001",
+      "assignment_episode_id": "a666a341-9be7-40dc-8c06-4b5f41dd6b3d",
+      "actor_user_id": "10000000-0000-4000-8000-000000000003",
+      "attempt_kind": "outreach",
+      "source": "manual",
+      "outcome": "no_answer",
+      "occurred_at": "2026-09-11T17:00:00.000Z",
+      "recorded_at": "2026-09-12T05:52:21.724Z",
+      "note": null,
+      "recording_url": null,
+      "call_activity_id": null,
+      "provider_attempt_key": null,
+      "idempotency_key": "3bfd7def-5b1f-49e4-8d32-69973f0e0a0f",
+      "command_id": "faad70e6-c9f2-43fd-af96-7e52cd6a8d5e",
+      "created_at": "2026-09-12T05:52:21.724Z"
+    }
+  ],
+  "episodes": [
+    {
+      "id": "a666a341-9be7-40dc-8c06-4b5f41dd6b3d",
+      "org_id": "00000000-0000-0000-0000-000000000bbb",
+      "property_id": "20000000-0000-4000-8000-000000000001",
+      "assignee_user_id": "10000000-0000-4000-8000-000000000003",
+      "episode_kind": "live",
+      "eligible": true,
+      "assigned_at": "2026-09-12T05:49:09.574Z",
+      "initialized_at": "2026-09-12T05:49:09.574Z",
+      "ended_at": null,
+      "first_call_started_at": null,
+      "first_call_actor_user_id": null,
+      "first_call_activity_id": null,
+      "first_call_provider_key": null,
+      "launch_cohort_id": null,
+      "created_at": "2026-09-12T05:49:09.574Z"
+    }
+  ],
+  "offers": [
+    {
+      "id": "dc26b03b-9f63-4a28-ae6b-bae2371d68c7",
+      "org_id": "00000000-0000-0000-0000-000000000bbb",
+      "property_id": "20000000-0000-4000-8000-000000000001",
+      "assignment_episode_id": "a666a341-9be7-40dc-8c06-4b5f41dd6b3d",
+      "actor_user_id": "10000000-0000-4000-8000-000000000003",
+      "amount_cents": "1",
+      "sent_via": "dropbox_sign",
+      "sent_at": "2026-09-11T17:00:00.000Z",
+      "follow_up_at": "2026-09-11T18:00:00.000Z",
+      "outcome": "pending",
+      "outcome_at": null,
+      "outcome_by": null,
+      "idempotency_key": "4182c919-2239-48bd-877d-f5e0e92ce6f3",
+      "command_id": "1fc4d8fe-6159-4591-bd71-581eb9f568ca",
+      "created_at": "2026-09-12T05:54:18.313Z",
+      "updated_at": "2026-09-12T05:54:18.313Z"
+    }
+  ],
+  "tasks": [],
+  "sequenceEnrollments": [],
+  "globalCounts": [
+    {
+      "principals": 4,
+      "tasks": 0,
+      "sequence_enrollments": 0,
+      "esign_requests": 0
+    }
+  ],
+  "checks": {
+    "oneManualNoAnswer": true,
+    "attemptOccurredAt": true,
+    "noMotivation": true,
+    "temperatureNull": true,
+    "stageOfferSent": true,
+    "firstCallNotStopped": true,
+    "oneCentOffer": true,
+    "dropboxSign": true,
+    "offerSentAt": true,
+    "followUpAt": true,
+    "noTasks": true,
+    "noSequenceEnrollments": true,
+    "noEsignRequests": true,
+    "fourPrincipals": true
+  },
+  "allChecksPassed": true,
+  "numericParsingNote": "PostgreSQL bigint amount_cents is returned as string by pg; exact decimal string comparison used."
+}
