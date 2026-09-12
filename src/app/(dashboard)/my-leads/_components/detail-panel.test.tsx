@@ -46,6 +46,17 @@ describe("MyLeadDetailPanel", () => {
     expect(screen.getByText("No history recorded.")).toBeInTheDocument()
   })
 
+  it("places attempts before notes and presents the available source and recording", () => {
+    render(<MyLeadDetailPanel state={{ status: "ready", detail: {
+      ...EMPTY_DETAIL,
+      attempts: { rows: [{ id: "attempt", actorLabel: "Maria", outcomeLabel: "Reached", occurredLabel: "Sep 11", sourceLabel: "DialPad", recordingUrl: "https://dialpad.com/call/123" }], hasMore: false, nextCursor: null },
+    } }} onRetry={vi.fn()} />)
+    expect(screen.getAllByRole("heading", { level: 3 }).map(heading => heading.textContent)).toEqual(["Attempts", "Notes", "Appointments", "$Offers", "History"])
+    expect(screen.getByText("DialPad")).toBeVisible()
+    expect(screen.getByRole("link", { name: "Recording" })).toHaveAttribute("href", "https://dialpad.com/call/123")
+    expect(screen.getByRole("link", { name: "Recording" })).toHaveAttribute("rel", "noopener noreferrer")
+  })
+
   it("shows a group page error and retries with the same cursor", async () => {
     const user = userEvent.setup()
     const onLoadDetailPage = vi

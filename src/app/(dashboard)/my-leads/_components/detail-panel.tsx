@@ -75,7 +75,30 @@ export function MyLeadDetailPanel({
   }
 
   return (
-    <div className="grid gap-4 border-t bg-muted/20 px-4 py-4 md:grid-cols-2 xl:grid-cols-5" role="region" aria-label="Lead details">
+    <div className="space-y-5 border-t bg-muted/20 px-4 py-4" role="region" aria-label="Lead details">
+      <DetailList
+        icon={<PhoneCall aria-hidden="true" />}
+        title="Attempts"
+        page={detail.attempts}
+        emptyLabel="No outreach attempts recorded."
+        paging={paging.attempts}
+        onLoadMore={onLoadDetailPage ? (cursor) => loadGroup("attempts", cursor) : undefined}
+        renderRow={(attempt) => (
+          <div key={attempt.id} className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b py-2 last:border-b-0">
+            <div>
+              <p className="font-medium text-foreground">{attempt.outcomeLabel}</p>
+              <p className="text-xs text-muted-foreground">{attempt.actorLabel}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              {attempt.sourceLabel && <Badge variant="outline">{attempt.sourceLabel}</Badge>}
+              {attempt.recordingUrl && (
+                <a href={attempt.recordingUrl} target="_blank" rel="noopener noreferrer" className="font-medium text-primary underline underline-offset-4">Recording</a>
+              )}
+              <span>{attempt.occurredLabel}</span>
+            </div>
+          </div>
+        )}
+      />
       <DetailList
         icon={<FileText aria-hidden="true" />}
         title="Notes"
@@ -94,88 +117,74 @@ export function MyLeadDetailPanel({
         }
         renderRow={(note) => (
           <div key={note.id} className="space-y-0.5">
-            <p className="font-medium text-foreground">{note.body}</p>
+            <p className="whitespace-pre-wrap text-foreground">{note.body}</p>
             <p className="text-xs text-muted-foreground">
               {note.authorLabel} · {note.createdLabel}
             </p>
           </div>
         )}
       />
-      <DetailList
-        icon={<PhoneCall aria-hidden="true" />}
-        title="Attempts"
-        page={detail.attempts}
-        emptyLabel="No outreach attempts recorded."
-        paging={paging.attempts}
-        onLoadMore={onLoadDetailPage ? (cursor) => loadGroup("attempts", cursor) : undefined}
-        renderRow={(attempt) => (
-          <div key={attempt.id} className="space-y-0.5">
-            <p className="font-medium text-foreground">{attempt.outcomeLabel}</p>
-            <p className="text-xs text-muted-foreground">
-              {attempt.actorLabel} · {attempt.occurredLabel}
-            </p>
-          </div>
-        )}
-      />
-      <DetailList
-        icon={<CalendarClock aria-hidden="true" />}
-        title="Appointments"
-        page={detail.appointments}
-        emptyLabel="No appointments recorded."
-        paging={paging.appointments}
-        onLoadMore={onLoadDetailPage ? (cursor) => loadGroup("appointments", cursor) : undefined}
-        renderRow={(appointment) => (
-          <div key={appointment.id} className="space-y-1.5">
-            <p className="font-medium text-foreground">{appointment.label}</p>
-            <p className="text-xs text-muted-foreground">
-              {appointment.dueLabel} · {appointment.statusLabel}
-            </p>
-            {appointment.lifecycleAction ? (
-              <MyLeadAppointmentActions
-                target={appointment.lifecycleAction}
-                onChanged={() => onChanged?.("appointments")}
-              />
-            ) : appointment.callbackAction ? (
-              <MyLeadCallbackActions
-                target={appointment.callbackAction}
-                onChanged={() => onChanged?.("appointments")}
-              />
-            ) : null}
-          </div>
-        )}
-      />
-      <DetailList
-        icon={<Badge variant="outline">$</Badge>}
-        title="Offers"
-        page={detail.offers}
-        emptyLabel="No offers recorded."
-        paging={paging.offers}
-        onLoadMore={onLoadDetailPage ? (cursor) => loadGroup("offers", cursor) : undefined}
-        renderRow={(offer) => (
-          <div key={offer.id} className="space-y-0.5">
-            <p className="font-medium text-foreground">
-              {offer.amountLabel} · {offer.method}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {offer.sentLabel} · {offer.outcomeLabel}
-            </p>
-          </div>
-        )}
-      />
-      <DetailList
-        icon={<History aria-hidden="true" />}
-        title="History"
-        page={detail.history}
-        emptyLabel="No history recorded."
-        paging={paging.history}
-        onLoadMore={onLoadDetailPage ? (cursor) => loadGroup("history", cursor) : undefined}
-        renderRow={(event) => (
-          <div key={event.id} className="space-y-0.5">
-            <p className="font-medium text-foreground">{event.label}</p>
-            <p className="text-xs text-muted-foreground">{event.createdLabel}</p>
-          </div>
-        )}
-      />
+      <div className="grid gap-5 border-t pt-4 md:grid-cols-3">
+        <DetailList
+          icon={<CalendarClock aria-hidden="true" />}
+          title="Appointments"
+          page={detail.appointments}
+          emptyLabel="No appointments recorded."
+          paging={paging.appointments}
+          onLoadMore={onLoadDetailPage ? (cursor) => loadGroup("appointments", cursor) : undefined}
+          renderRow={(appointment) => (
+            <div key={appointment.id} className="space-y-1.5">
+              <p className="font-medium text-foreground">{appointment.label}</p>
+              <p className="text-xs text-muted-foreground">
+                {appointment.dueLabel} · {appointment.statusLabel}
+              </p>
+              {appointment.lifecycleAction ? (
+                <MyLeadAppointmentActions
+                  target={appointment.lifecycleAction}
+                  onChanged={() => onChanged?.("appointments")}
+                />
+              ) : appointment.callbackAction ? (
+                <MyLeadCallbackActions
+                  target={appointment.callbackAction}
+                  onChanged={() => onChanged?.("appointments")}
+                />
+              ) : null}
+            </div>
+          )}
+        />
+        <DetailList
+          icon={<Badge variant="outline">$</Badge>}
+          title="Offers"
+          page={detail.offers}
+          emptyLabel="No offers recorded."
+          paging={paging.offers}
+          onLoadMore={onLoadDetailPage ? (cursor) => loadGroup("offers", cursor) : undefined}
+          renderRow={(offer) => (
+            <div key={offer.id} className="space-y-0.5">
+              <p className="font-medium text-foreground">
+                {offer.amountLabel} · {offer.method}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {offer.sentLabel} · {offer.outcomeLabel}
+              </p>
+            </div>
+          )}
+        />
+        <DetailList
+          icon={<History aria-hidden="true" />}
+          title="History"
+          page={detail.history}
+          emptyLabel="No history recorded."
+          paging={paging.history}
+          onLoadMore={onLoadDetailPage ? (cursor) => loadGroup("history", cursor) : undefined}
+          renderRow={(event) => (
+            <div key={event.id} className="space-y-0.5">
+              <p className="font-medium text-foreground">{event.label}</p>
+              <p className="text-xs text-muted-foreground">{event.createdLabel}</p>
+            </div>
+          )}
+        />
+      </div>
     </div>
   )
 }
@@ -201,7 +210,7 @@ function DetailList<T extends { id: string }>({
 }) {
   const rows = uniqueRows(page.rows)
   return (
-    <section className="min-w-0 space-y-2">
+    <section className="min-w-0 space-y-2 [overflow-wrap:anywhere]">
       <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         <span className="flex size-4 items-center justify-center [&>svg]:size-3">{icon}</span>
         {title}

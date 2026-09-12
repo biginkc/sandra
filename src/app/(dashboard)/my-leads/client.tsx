@@ -102,7 +102,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis?<p role="status">Loading My Leads…</p>:<>
       {search&&<p className="mb-2 text-sm text-muted-foreground">Section counts match your search. KPIs cover the selected rep.</p>}
-      <MyLeadsQueue stages={pages} kpis={kpiTiles(kpis)} search={search} selectedRepId={member} selectedPeriod={period} selectedDateRange={range}
+      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={kpiTiles(kpis)} search={search} selectedRepId={member} selectedPeriod={period} selectedDateRange={range}
         repOptions={roster.members.filter(m=>m.acquisitionsEnabled||m.hasHistory||m.id===viewer.userId).map(m=>({id:m.id,label:m.label+(m.acquisitionsEnabled?'':' — Acquisitions disabled')}))}
         selectedRepLabel={roster.members.find(m=>m.id===member)?.label}
         onSearchChange={setSearch} onRepChange={setMember} onPeriodChange={setPeriod} onDateRangeChange={setRange}

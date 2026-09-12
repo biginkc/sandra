@@ -1,13 +1,13 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Search } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import { MyLeadQueueRow } from "./queue-row"
+import { cn } from "@/lib/utils"
+import { MyLeadQueueRow, STAGE_COLORS, STAGE_NEXT } from "./queue-row"
 import {
   MY_LEAD_STAGE_LABELS,
   MY_LEAD_STAGE_ORDER,
@@ -40,6 +40,7 @@ export function MyLeadsQueue({
   selectedPeriod,
   selectedDateRange,
   repOptions,
+  canSelectRep = false,
   selectedRepLabel,
   onSearchChange,
   onRepChange,
@@ -51,6 +52,8 @@ export function MyLeadsQueue({
   onLeadChanged,
   onStageAction,
 }: MyLeadsQueueProps) {
+  const scopeKey = JSON.stringify([search, selectedPeriod, selectedRepId, selectedDateRange?.startDate, selectedDateRange?.endDate])
+  const [expansionScope, setExpansionScope] = useState(scopeKey)
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
   const [detailStates, setDetailStates] = useState<
     Readonly<Record<string, MyLeadDetailState>>
@@ -61,6 +64,9 @@ export function MyLeadsQueue({
   const detailRequestSequence = useRef(0)
   const detailPageRequestSequence = useRef(0)
   const mounted = useRef(true)
+  const requestedDetails = useRef(new Set<string>())
+  const activeDetails = useRef(0)
+  const [detailTick, setDetailTick] = useState(0)
 
   useEffect(() => {
     mounted.current = true
@@ -70,14 +76,18 @@ export function MyLeadsQueue({
   }, [])
 
   useEffect(() => {
+    setExpansionScope(scopeKey)
     setExpandedIds(new Set())
     setDetailStates({})
     detailGeneration.current += 1
     requestIds.current = {}
+    requestedDetails.current.clear()
     detailPageRequestIds.current = {}
-  }, [search, selectedPeriod, selectedRepId, selectedDateRange?.startDate, selectedDateRange?.endDate])
+  }, [scopeKey])
 
-  const loadDetails = async (propertyId: string) => {
+  const loadDetails = useCallback(async (propertyId: string) => {
+    requestedDetails.current.add(propertyId)
+    activeDetails.current += 1
     const generation = detailGeneration.current
     const requestId = ++detailRequestSequence.current
     requestIds.current[propertyId] = requestId
@@ -109,8 +119,22 @@ export function MyLeadsQueue({
           message: error instanceof Error ? error.message : "Unable to load lead details.",
         },
       }))
+    } finally {
+      activeDetails.current -= 1
+      if (mounted.current) setDetailTick((tick) => tick + 1)
     }
-  }
+  }, [onLoadDetail])
+
+  // Expand only the loaded rows, and keep at most three detail reads in flight.
+  // Collapsing or changing scope removes waiting work without issuing more reads.
+  useEffect(() => {
+    if (expansionScope !== scopeKey) return
+    const loadedIds = new Set(MY_LEAD_STAGE_ORDER.flatMap((stage) => stages[stage].rows.map((row) => row.propertyId)))
+    for (const propertyId of expandedIds) {
+      if (activeDetails.current >= 3) break
+      if (loadedIds.has(propertyId) && !requestedDetails.current.has(propertyId)) void loadDetails(propertyId)
+    }
+  }, [expandedIds, stages, detailTick, loadDetails, expansionScope, scopeKey])
 
   const toggleDetails = (propertyId: string) => {
     const isOpen = expandedIds.has(propertyId)
@@ -121,17 +145,15 @@ export function MyLeadsQueue({
       return next
     })
 
-    if (!isOpen && !detailStates[propertyId]) {
-      void loadDetails(propertyId)
-    }
   }
 
   const retryDetails = (propertyId: string) => {
-    void loadDetails(propertyId)
+    requestedDetails.current.delete(propertyId)
+    setDetailTick((tick) => tick + 1)
   }
 
   const handleDetailChanged = (propertyId: string) => {
-    void loadDetails(propertyId)
+    retryDetails(propertyId)
     onLeadChanged?.(propertyId)
   }
 
@@ -170,35 +192,13 @@ export function MyLeadsQueue({
 
   return (
     <main className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 px-4 py-6 lg:px-8">
-      <header className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <p className="text-sm font-medium text-muted-foreground">Acquisitions</p>
-            <h1 className="text-2xl font-semibold tracking-tight text-foreground">My Leads</h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {selectedRepLabel || "Your acquisition queue"} · warnings use live queue timing
-            </p>
-          </div>
-          <Badge variant="secondary" className="h-6">
-            {selectedRepLabel || "Signed-in rep"}
-          </Badge>
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">My Leads</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{selectedRepLabel || "Your queue"} · Acquisitions</p>
         </div>
-
-        <div className="grid gap-2 rounded-xl border bg-card p-3 shadow-sm md:grid-cols-[minmax(0,1fr)_12rem_9rem]">
-          <label className="relative block">
-            <Search
-              className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-              aria-hidden="true"
-            />
-            <Input
-              aria-label="Search My Leads"
-              placeholder="Search address, homeowner, or phone"
-              value={search}
-              onChange={(event) => onSearchChange(event.target.value)}
-              className="pl-8"
-            />
-          </label>
-
+        <div className="flex max-w-full flex-wrap items-center gap-2">
+          {canSelectRep && <>
           <label className="sr-only" htmlFor="my-leads-rep">
             Acquisitions member
           </label>
@@ -207,7 +207,7 @@ export function MyLeadsQueue({
             aria-label="Acquisitions member"
             value={selectedRepId}
             onChange={(event) => onRepChange(event.target.value)}
-            className="h-8 rounded-lg border border-input bg-background px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="h-9 max-w-full min-w-0 rounded-lg border border-input bg-background px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
           >
             {repOptions.map((rep) => (
               <option key={rep.id} value={rep.id}>
@@ -216,6 +216,7 @@ export function MyLeadsQueue({
             ))}
           </select>
 
+          </>}
           <label className="sr-only" htmlFor="my-leads-period">
             KPI period
           </label>
@@ -224,7 +225,7 @@ export function MyLeadsQueue({
             aria-label="KPI period"
             value={selectedPeriod}
             onChange={(event) => onPeriodChange(event.target.value as MyLeadsPeriod)}
-            className="h-8 rounded-lg border border-input bg-background px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="h-9 max-w-full min-w-0 rounded-lg border border-input bg-background px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
           >
             <option value="today">Today</option>
             <option value="week">This week</option>
@@ -233,7 +234,7 @@ export function MyLeadsQueue({
           </select>
 
           {selectedPeriod === "custom" && (
-            <div className="grid gap-2 md:col-span-3 md:grid-cols-2">
+            <div className="grid w-full gap-2 sm:grid-cols-2">
               <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                 <span>From</span>
                 <Input
@@ -267,18 +268,27 @@ export function MyLeadsQueue({
         </div>
       </header>
 
-      <section aria-label="Acquisitions KPIs" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+      <section aria-label="Acquisitions KPIs" className="grid grid-cols-2 gap-px overflow-hidden rounded-[16px] border bg-border lg:grid-cols-6">
         {KPI_LABELS.map(([id, label]) => (
-          <Card key={id} size="sm" data-testid={`kpi-${id}`}>
-            <CardContent className="space-y-1">
-              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
-              <p className="text-xl font-semibold tabular-nums text-foreground">{kpiValue(id, kpis)}</p>
-            </CardContent>
-          </Card>
+          <div key={id} data-testid={`kpi-${id}`} className="min-w-0 space-y-1.5 bg-card px-4 py-3.5">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{label}</p>
+            <p className={cn("break-words text-xl font-bold tabular-nums", id === "stale-leads" && kpis.staleLeads > 0 ? "text-amber-700 dark:text-amber-300" : "text-foreground")}>{kpiValue(id, kpis)}</p>
+          </div>
         ))}
       </section>
 
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3" aria-label="Queue controls">
+        <label className="relative block w-full sm:max-w-xs">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+          <Input aria-label="Search My Leads" placeholder="Search name, address, or phone" value={search} onChange={(event) => onSearchChange(event.target.value)} className="pl-8" />
+        </label>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={() => setExpandedIds(new Set(MY_LEAD_STAGE_ORDER.flatMap((stage) => stages[stage].rows.map((row) => row.propertyId))))}>Expand all</Button>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setExpandedIds(new Set())}>Collapse all</Button>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-6">
         {MY_LEAD_STAGE_ORDER.map((stage) => (
           <MyLeadStageSection
             key={stage}
@@ -332,13 +342,15 @@ function MyLeadStageSection({
     <section className="space-y-2" data-testid={`my-leads-section-${stage}`} aria-labelledby={`my-leads-heading-${stage}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <h2 id={`my-leads-heading-${stage}`} className="text-base font-semibold text-foreground">
+          <h2 id={`my-leads-heading-${stage}`} className={cn("text-xs font-bold uppercase tracking-widest", STAGE_COLORS[stage])}>
             {label}
           </h2>
           <Badge variant="secondary" aria-label={`${page.totalCount} ${label} leads`}>
             {page.totalCount}
           </Badge>
         </div>
+        <span className="h-px min-w-8 flex-1 bg-border" aria-hidden="true" />
+        <p className="max-w-full text-xs text-muted-foreground">{STAGE_NEXT[stage]}</p>
         {page.totalCount > page.rows.length && (
           <span className="text-xs text-muted-foreground">
             Showing {page.rows.length} of {page.totalCount}
