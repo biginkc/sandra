@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { act, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as React from "react"
@@ -45,7 +45,9 @@ vi.mock("./_components/queue", () => ({
     onPeriodChange,
     onDateRangeChange,
     onStageAction,
+    kpis: tiles,
   }: {
+    kpis: { attempts: number }
     stages: { not_contacted?: { rows: Array<{ address: string; propertyId: string }> } }
     search: string
     onStageAction: (kind: string, row: { propertyId: string }) => void
@@ -63,6 +65,7 @@ vi.mock("./_components/queue", () => ({
     const row = stages.not_contacted?.rows[0]
     return (
       <section aria-label="Mock My Leads queue">
+        <span data-testid="attempt-count">{tiles.attempts}</span>
         <button onClick={() => row && onStageAction("log-attempt", row)}>Log attempt</button>
         <span data-testid="queue-address">{row?.address}</span>
         <input aria-label="Search My Leads" value={search} onChange={(event) => onSearchChange(event.target.value)} />
@@ -225,6 +228,33 @@ describe("MyLeadsClient", () => {
   beforeEach(() => {
     mocks.loadMyLeads.mockReset()
     mocks.loadMyLeadCallReferences.mockReset()
+  })
+
+  it.each(["result", "rejection"])("marks stale counts and resumes polling after a refresh %s", async mode => {
+    vi.useFakeTimers()
+    const initial = snapshot("106 Fixture Lane")
+    if (mode === "result") mocks.loadMyLeads.mockResolvedValueOnce({ ok: false, message: "Sign in to view My Leads." })
+    else mocks.loadMyLeads.mockRejectedValueOnce(new Error("Unexpected server response"))
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snapshot("Updated Lane"), kpis: { ...kpis, attempts: 8 } })
+    const view = renderClient(initial, { ...kpis, attempts: 7 })
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+      expect(screen.getByRole("alert")).toHaveTextContent("Displayed counts may be out of date")
+      expect(screen.getByRole("button", { name: "Reload and reconnect" })).toBeInTheDocument()
+      expect(screen.getByTestId("queue-address")).toHaveTextContent("106 Fixture Lane")
+      expect(screen.getByTestId("attempt-count")).toHaveTextContent("7")
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+      expect(mocks.loadMyLeads).toHaveBeenCalledTimes(2)
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+      expect(screen.getByTestId("queue-address")).toHaveTextContent("Updated Lane")
+      expect(screen.getByTestId("attempt-count")).toHaveTextContent("8")
+      view.unmount()
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+      expect(mocks.loadMyLeads).toHaveBeenCalledTimes(2)
+    } finally {
+      view.unmount()
+      vi.useRealTimers()
+    }
   })
 
   it("shows lookup loading, then enables the actual call selector", async () => {
