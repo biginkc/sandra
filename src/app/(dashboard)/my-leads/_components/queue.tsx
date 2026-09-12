@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Search } from "lucide-react"
+import { ChevronDown, Search } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -193,45 +193,51 @@ export function MyLeadsQueue({
   return (
     <main className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 px-4 py-6 lg:px-8">
       <header className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">My Leads</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{selectedRepLabel || "Your queue"} · Acquisitions</p>
+        <div className="flex flex-col gap-1">
+          <h1 className="text-[26px] leading-tight font-bold tracking-tight text-foreground">My Leads</h1>
+          <p className="text-sm text-muted-foreground">{selectedRepLabel || "Your queue"} · Acquisitions</p>
         </div>
-        <div className="flex max-w-full flex-wrap items-center gap-2">
+        <div className="flex max-w-full flex-wrap items-center gap-2.5">
           {canSelectRep && <>
           <label className="sr-only" htmlFor="my-leads-rep">
             Acquisitions member
           </label>
-          <select
-            id="my-leads-rep"
-            aria-label="Acquisitions member"
-            value={selectedRepId}
-            onChange={(event) => onRepChange(event.target.value)}
-            className="h-9 max-w-full min-w-0 rounded-lg border border-input bg-background px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-          >
-            {repOptions.map((rep) => (
-              <option key={rep.id} value={rep.id}>
-                {rep.label}
-              </option>
-            ))}
-          </select>
+          <span className="relative inline-flex max-w-full min-w-0">
+            <select
+              id="my-leads-rep"
+              aria-label="Acquisitions member"
+              value={selectedRepId}
+              onChange={(event) => onRepChange(event.target.value)}
+              className="h-9 max-w-full min-w-0 appearance-none rounded-[10px] border border-border bg-card py-2 pr-7 pl-3 text-[12.5px] font-semibold text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              {repOptions.map((rep) => (
+                <option key={rep.id} value={rep.id}>
+                  {rep.label}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="pointer-events-none absolute top-1/2 right-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+          </span>
 
           </>}
           <label className="sr-only" htmlFor="my-leads-period">
             KPI period
           </label>
-          <select
-            id="my-leads-period"
-            aria-label="KPI period"
-            value={selectedPeriod}
-            onChange={(event) => onPeriodChange(event.target.value as MyLeadsPeriod)}
-            className="h-9 max-w-full min-w-0 rounded-lg border border-input bg-background px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-          >
-            <option value="today">Today</option>
-            <option value="week">This week</option>
-            <option value="month">This month</option>
-            <option value="custom">Custom range</option>
-          </select>
+          <span className="relative inline-flex max-w-full min-w-0">
+            <select
+              id="my-leads-period"
+              aria-label="KPI period"
+              value={selectedPeriod}
+              onChange={(event) => onPeriodChange(event.target.value as MyLeadsPeriod)}
+              className="h-9 max-w-full min-w-0 appearance-none rounded-[10px] border border-border bg-card py-2 pr-7 pl-3 text-[12.5px] font-semibold text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              <option value="today">Today</option>
+              <option value="week">This week</option>
+              <option value="month">This month</option>
+              <option value="custom">Custom range</option>
+            </select>
+            <ChevronDown className="pointer-events-none absolute top-1/2 right-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+          </span>
 
           {selectedPeriod === "custom" && (
             <div className="grid w-full gap-2 sm:grid-cols-2">
@@ -268,11 +274,11 @@ export function MyLeadsQueue({
         </div>
       </header>
 
-      <section aria-label="Acquisitions KPIs" className="grid grid-cols-2 gap-px overflow-hidden rounded-[16px] border bg-border lg:grid-cols-6">
+      <section aria-label="Acquisitions KPIs" className="grid grid-cols-2 gap-px overflow-hidden rounded-[16px] border border-border bg-border lg:grid-cols-6">
         {KPI_LABELS.map(([id, label]) => (
           <div key={id} data-testid={`kpi-${id}`} className="min-w-0 space-y-1.5 bg-card px-4 py-3.5">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{label}</p>
-            <p className={cn("break-words text-xl font-bold tabular-nums", id === "stale-leads" && kpis.staleLeads > 0 ? "text-amber-700 dark:text-amber-300" : "text-foreground")}>{kpiValue(id, kpis)}</p>
+            <p className="text-[10px] font-extrabold uppercase tracking-widest text-muted-foreground">{label}</p>
+            <p className={cn("break-words text-[23px] font-extrabold tracking-tight tabular-nums", id === "stale-leads" && kpis.staleLeads > 0 ? "text-amber-700 dark:text-amber-300" : "text-foreground")}>{kpiValue(id, kpis)}</p>
           </div>
         ))}
       </section>
@@ -280,11 +286,11 @@ export function MyLeadsQueue({
       <div className="flex flex-wrap items-center justify-between gap-3" aria-label="Queue controls">
         <label className="relative block w-full sm:max-w-xs">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-          <Input aria-label="Search My Leads" placeholder="Search name, address, or phone" value={search} onChange={(event) => onSearchChange(event.target.value)} className="pl-8" />
+          <Input aria-label="Search My Leads" placeholder="Search name, address, or phone" value={search} onChange={(event) => onSearchChange(event.target.value)} className="rounded-[10px] border-border pl-8 text-[13px]" />
         </label>
         <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={() => setExpandedIds(new Set(MY_LEAD_STAGE_ORDER.flatMap((stage) => stages[stage].rows.map((row) => row.propertyId))))}>Expand all</Button>
-          <Button type="button" variant="ghost" size="sm" onClick={() => setExpandedIds(new Set())}>Collapse all</Button>
+          <Button type="button" variant="outline" size="sm" className="rounded-[10px]" onClick={() => setExpandedIds(new Set(MY_LEAD_STAGE_ORDER.flatMap((stage) => stages[stage].rows.map((row) => row.propertyId))))}>Expand all</Button>
+          <Button type="button" variant="ghost" size="sm" className="rounded-[10px] border border-border" onClick={() => setExpandedIds(new Set())}>Collapse all</Button>
         </div>
       </div>
 
@@ -340,17 +346,17 @@ function MyLeadStageSection({
 
   return (
     <section className="space-y-2" data-testid={`my-leads-section-${stage}`} aria-labelledby={`my-leads-heading-${stage}`}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <h2 id={`my-leads-heading-${stage}`} className={cn("text-xs font-bold uppercase tracking-widest", STAGE_COLORS[stage])}>
+      <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex items-center gap-2.5">
+          <h2 id={`my-leads-heading-${stage}`} className={cn("text-xs font-extrabold uppercase tracking-widest", STAGE_COLORS[stage])}>
             {label}
           </h2>
-          <Badge variant="secondary" aria-label={`${page.totalCount} ${label} leads`}>
+          <Badge variant="secondary" aria-label={`${page.totalCount} ${label} leads`} className="rounded-full border border-border bg-muted font-mono text-[11px] font-semibold text-muted-foreground">
             {page.totalCount}
           </Badge>
         </div>
         <span className="h-px min-w-8 flex-1 bg-border" aria-hidden="true" />
-        <p className="max-w-full text-xs text-muted-foreground">{STAGE_NEXT[stage]}</p>
+        <p className="max-w-full text-[11.5px] text-muted-foreground">{STAGE_NEXT[stage]}</p>
         {page.totalCount > page.rows.length && (
           <span className="text-xs text-muted-foreground">
             Showing {page.rows.length} of {page.totalCount}
@@ -412,8 +418,11 @@ function kpiValue(id: (typeof KPI_LABELS)[number][0], kpis: MyLeadsQueueProps["k
   switch (id) {
     case "attempts":
       return kpis.attempts
-    case "contact-rate":
-      return kpis.contactRateLabel || "Unavailable"
+    case "contact-rate": {
+      const label = kpis.contactRateLabel || "Unavailable"
+      const match = /^(.*\d)(%)$/.exec(label)
+      return match ? <>{match[1]}<small className="text-[13px] font-bold text-muted-foreground">{match[2]}</small></> : label
+    }
     case "assign-to-first-call":
       return kpis.assignToFirstCallLabel || "Unavailable"
     case "appointments-kept":
