@@ -226,6 +226,8 @@ export type MyLeadsQueueProps = {
     group: MyLeadDetailGroupName,
     cursor: string
   ) => Promise<MyLeadDetailPageResult>
+  /** Increments after a successful workflow mutation so open rows refetch detail. */
+  detailRevision?: number
   /** Called after a confirmed existing note/appointment mutation. */
   onLeadChanged?: (propertyId: string) => void
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRow) => void

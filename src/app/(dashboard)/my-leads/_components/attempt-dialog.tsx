@@ -143,7 +143,9 @@ export function AcquisitionAttemptDialog({
                   id="acquisition-attempt-source"
                   value={source}
                   onChange={(event) => {
-                    setSource(event.target.value as AcquisitionAttemptSource)
+                    const nextSource = event.target.value as AcquisitionAttemptSource
+                    setSource(nextSource)
+                    setKind(nextSource === "manual" ? "outreach" : "call")
                     clearClientErrors()
                   }}
                   className={SELECT_FIELD_CLASS}

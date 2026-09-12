@@ -60,7 +60,7 @@ const NEEDS_COPY: Record<MyLeadStage, React.ReactNode> = {
   ),
   contacted: (
     <>
-      Needs: <span className="font-bold text-green-700 dark:text-green-400">reached ✓</span> — mark ready for an offer when there&apos;s a reason to keep going.
+      Needs: <span className="font-bold text-teal-700 dark:text-teal-300">follow-up plan or offer decision</span> — mark ready when there&apos;s a reason to keep going.
     </>
   ),
   needs_offer: (

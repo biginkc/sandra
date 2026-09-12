@@ -139,6 +139,30 @@ describe("My Leads workflow dialogs", () => {
     })
   })
 
+  it("normalizes manual outreach to the supported outreach kind", async () => {
+    const user = userEvent.setup()
+    const onSubmit = vi.fn(async () => ({ ok: true as const }))
+    render(
+      <AcquisitionAttemptDialog
+        {...baseProps}
+        onSubmit={onSubmit}
+      />
+    )
+
+    await user.selectOptions(screen.getByLabelText("Source"), "manual")
+    expect(screen.getByLabelText("Kind")).toHaveValue("outreach")
+    await user.selectOptions(screen.getByLabelText("External outcome"), "no_answer")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), {
+      target: { value: "2026-09-12T09:00" },
+    })
+    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "outreach",
+      source: "manual",
+    }))
+  })
+
   it("preserves fields after a failed submit and prevents duplicate requests", async () => {
     const user = userEvent.setup()
     let resolveSubmit!: (result: AcquisitionFormSubmitResult) => void

@@ -38,9 +38,12 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [error,setError]=useState<string|null>(null);const [loadingStages,setLoadingStages]=useState<Set<MyLeadStage>>(new Set());
   const [callOptions,setCallOptions]=useState<{propertyId:string;options:{id:string;label:string}[]}|null>(null);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow}|null>(null);
+  const [detailRevision,setDetailRevision]=useState(0);
   const [recipient,setRecipient]=useState(roster.settings.recipientId??'');const [settingsBusy,setSettingsBusy]=useState(false);
   const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<{hash:string;key:string}|null>(null);
   const selectedRangeStatus=period==='custom'?customRangeStatus(range):'ready';
+  const serverScopeKey=JSON.stringify([member,period,range?.startDate,range?.endDate]);
+  const previousServerScope=useRef(serverScopeKey);
   const refresh=useCallback(async()=>{
     if(!roster.settings.enabled||selectedRangeStatus!=='ready') return;
     const id=++request.current;
@@ -50,15 +53,18 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   },[member,search,period,range,roster.settings.enabled,selectedRangeStatus]);
   useEffect(()=>{
     if(initialEffect.current){initialEffect.current=false;return;}
+    const scopeChanged=previousServerScope.current!==serverScopeKey;
+    previousServerScope.current=serverScopeKey;
     if(selectedRangeStatus!=='ready'){
       ++request.current;
       setError(selectedRangeStatus==='invalid'?'Choose a valid date range with the start date on or before the end date.':null);
       return;
     }
-    ++request.current;setSnapshot(null);setKpis(null);
+    ++request.current;
+    if(scopeChanged){setSnapshot(null);setKpis(null);}
     const timer=setTimeout(()=>void refresh(),250);
     return()=>{clearTimeout(timer);};
-  },[refresh,selectedRangeStatus]);
+  },[refresh,selectedRangeStatus,serverScopeKey]);
   useEffect(()=>{
     if(!roster.settings.enabled)return;
     const delay=Math.min(60_000,Math.max(1000,snapshot?.nextWarningAt?Date.parse(snapshot.nextWarningAt)-Date.now():60_000));
@@ -85,7 +91,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     const input=JSON.parse(JSON.stringify({...payload,propertyId:dialog.row.propertyId,expectedEpisodeId:dialog.row.assignmentEpisodeId,
       expectedQueueVersion:dialog.row.queueVersion,expectedSharedStatus:dialog.row.sharedStatus,idempotencyKey:submission.current.key})) as Record<string,Json>;
     const result=await submitMyLeadCommand(dialog.action as Parameters<typeof submitMyLeadCommand>[0],input);
-    if(result.ok){setDialog(null);await refresh();router.refresh();}
+    if(result.ok){setDialog(null);setDetailRevision(revision=>revision+1);await refresh();router.refresh();}
     return result;
   },[dialog,refresh,router]);
   const pages=snapshot?stagePages(snapshot):null;
@@ -103,6 +109,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis?<p role="status">Loading My Leads…</p>:<>
       {search&&<p className="mb-2 text-sm text-muted-foreground">Section counts match your search. KPIs cover the selected rep.</p>}
       <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={kpiTiles(kpis)} search={search} selectedRepId={member} selectedPeriod={period} selectedDateRange={range}
+        detailRevision={detailRevision}
         repOptions={roster.members.filter(m=>m.acquisitionsEnabled||m.hasHistory||m.id===viewer.userId).map(m=>({id:m.id,label:m.label+(m.acquisitionsEnabled?'':' — Acquisitions disabled')}))}
         selectedRepLabel={roster.members.find(m=>m.id===member)?.label}
         onSearchChange={setSearch} onRepChange={setMember} onPeriodChange={setPeriod} onDateRangeChange={setRange}
@@ -135,7 +142,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       recipientOptions={roster.settings.recipient?[roster.settings.recipient]:roster.settings.recipientId?roster.members.filter(m=>m.id===roster.settings.recipientId).map(m=>({id:m.id,label:m.label})):[]}
       initialRecipientUserId={roster.settings.recipient?.id??roster.settings.recipientId??''}/>}
     {dialog?.action==='schedule-next-step'&&<div className="fixed bottom-6 right-6 z-50 rounded-xl border bg-background p-5 shadow-lg"><p className="mb-3 font-medium">{dialog.row.address}</p>
-      <BookAppointmentPopover propertyId={dialog.row.propertyId} subjectLabel={dialog.row.address} currentUserId={member} onBooked={()=>{setDialog(null);void refresh();}}/>
+      <BookAppointmentPopover propertyId={dialog.row.propertyId} subjectLabel={dialog.row.address} currentUserId={member} onBooked={()=>{setDialog(null);setDetailRevision(revision=>revision+1);void refresh();}}/>
       <Button variant="ghost" onClick={()=>setDialog(null)}>Close</Button></div>}
   </>;
 }
