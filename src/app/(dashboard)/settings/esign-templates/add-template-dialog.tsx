@@ -346,12 +346,14 @@ export function AddTemplateDialog({
             />
           ) : null}
 
-          <div className="bg-muted/50 rounded-lg border p-3 text-xs">
-            <p className="font-medium">Merge fields included</p>
-            <p className="text-muted-foreground mt-1 font-mono">
-              {ESIGN_MERGE_FIELD_NAMES.join(" · ")}
-            </p>
-          </div>
+          {mode === "embedded" ? (
+            <div className="bg-muted/50 rounded-lg border p-3 text-xs">
+              <p className="font-medium">Merge fields included</p>
+              <p className="text-muted-foreground mt-1 font-mono">
+                {ESIGN_MERGE_FIELD_NAMES.join(" · ")}
+              </p>
+            </div>
+          ) : null}
 
           {(error || validationError || disabledReason) && (
             <p role="alert" className="text-destructive text-sm">
