@@ -11,6 +11,9 @@ export default defineConfig({
     include: ["src/**/*.test.tsx"],
     exclude: ["**/*.integration.test.ts", "node_modules/**", "e2e/**"],
     environment: "jsdom",
+    // Bound simultaneous DOM workloads to reduce resource contention while
+    // preserving the existing per-test deadlines and all navigation assertions.
+    maxWorkers: 2,
     globals: true,
     setupFiles: ["./vitest.rtl.setup.ts"],
     reporters: ["default"],

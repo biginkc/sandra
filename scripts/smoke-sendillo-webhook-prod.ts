@@ -15,6 +15,9 @@
  * Sandra side is live and behaving correctly when hit directly.
  */
 
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
@@ -28,7 +31,51 @@ import type { Database } from "../src/lib/supabase/types";
 const mode = process.env.SENDILLO_SMOKE_MODE === "stop" ? "stop" : "regular";
 const ts = Date.now();
 const tag = `PROD-CANARY-SENDILLO-${mode.toUpperCase()}-${ts}`;
-const phone = `+1555${String(ts).slice(-7)}`;
+function requireOwnedPhone(): string {
+  const phone = env.PROD_CANARY_SMS_TO?.trim();
+  const allowlist = (env.PROD_CANARY_SMS_ALLOWLIST ?? "")
+    .split(",")
+    .map((value) => value.trim());
+  if (
+    !phone ||
+    !/^\+[1-9]\d{9,14}$/.test(phone) ||
+    !allowlist.includes(phone)
+  ) {
+    throw new Error(
+      "Set PROD_CANARY_SMS_TO to an owned E.164 number in PROD_CANARY_SMS_ALLOWLIST.",
+    );
+  }
+  return phone;
+}
+
+async function assertUnusedPhone(
+  client: SupabaseClient<Database>,
+  phone: string,
+): Promise<void> {
+  // Refuse reuse: STOP can affect every matching contact, not just our fixture.
+  for (const column of ["phone_1", "phone_2", "phone_3"] as const) {
+    const { data, error } = await client
+      .from("contacts")
+      .select("id")
+      .eq(column, phone)
+      .limit(1);
+    if (error) throw error;
+    if (data?.length)
+      throw new Error(
+        "Canary phone already belongs to a contact; refusing to mutate it.",
+      );
+  }
+  const { data, error } = await client
+    .from("sms_phone_suppressions")
+    .select("id")
+    .eq("phone_e164", phone)
+    .limit(1);
+  if (error) throw error;
+  if (data?.length)
+    throw new Error(
+      "Canary phone already has a suppression; refusing to reuse it.",
+    );
+}
 function requireSendilloFromNumber(): string {
   const value = env.SENDILLO_FROM_NUMBER;
   if (!value || !/^\+\d{10,15}$/.test(value)) {
@@ -81,19 +128,22 @@ async function resolveOrgId(
   canaryUserId: string,
 ): Promise<string> {
   const explicitOrgId = env.PROD_ORG_ID;
-  if (explicitOrgId) {
-    return explicitOrgId;
-  }
-
   const { data, error } = await client
     .from("memberships")
     .select("org_id")
     .eq("user_id", canaryUserId);
   if (error) {
-    throw new Error(`Could not resolve canary org membership: ${error.message}`);
+    throw new Error(
+      `Could not resolve canary org membership: ${error.message}`,
+    );
   }
 
   const orgIds = Array.from(new Set((data ?? []).map((row) => row.org_id)));
+  if (explicitOrgId) {
+    if (!orgIds.includes(explicitOrgId))
+      throw new Error("PROD_ORG_ID is not a membership of the canary user.");
+    return explicitOrgId;
+  }
   if (orgIds.length !== 1) {
     throw new Error(
       `Could not resolve a single production org for canary user ${canaryUserId}. Set PROD_ORG_ID explicitly.`,
@@ -106,6 +156,8 @@ async function cleanup(
   client: SupabaseClient<Database>,
   ids: {
     externalId: string;
+    orgId: string;
+    phone: string;
     messageIds: string[];
     propertyId: string | null;
     contactId: string | null;
@@ -123,6 +175,20 @@ async function cleanup(
     if (error) cleanupErrors.push(`${label}: ${error.message}`);
   }
 
+  // Discover persisted messages even when the assertion/poll failed before
+  // registering their IDs, so their notifications are not orphaned by cleanup.
+  if (ids.propertyId) {
+    const { data, error } = await client
+      .from("messages")
+      .select("id")
+      .eq("org_id", ids.orgId)
+      .eq("property_id", ids.propertyId);
+    if (error) cleanupErrors.push(`discover messages: ${error.message}`);
+    else
+      ids.messageIds = Array.from(
+        new Set([...ids.messageIds, ...(data ?? []).map((row) => row.id)]),
+      );
+  }
   if (ids.messageIds.length > 0) {
     await runDelete("notifications", () =>
       client
@@ -153,6 +219,25 @@ async function cleanup(
       client.from("sequences").delete().eq("id", sequenceId),
     );
   }
+  // These tables retain rows with SET NULL foreign keys when fixtures vanish.
+  // Remove only the canonical event created by this run before deleting links.
+  await runDelete("sms_inbound_deliveries", () =>
+    client
+      .from("sms_inbound_deliveries")
+      .delete()
+      .eq("org_id", ids.orgId)
+      .eq("provider", "sendillo")
+      .eq("provider_message_id", ids.externalId),
+  );
+  await runDelete("sms_inbound_intents", () =>
+    client
+      .from("sms_inbound_intents")
+      .delete()
+      .eq("org_id", ids.orgId)
+      .eq("provider", "sendillo")
+      .eq("from_address", ids.phone)
+      .eq("first_provider_message_id", ids.externalId),
+  );
   await runDelete("webhook_events", () =>
     client
       .from("webhook_events")
@@ -172,28 +257,166 @@ async function cleanup(
   }
   if (ids.contactId) {
     const contactId = ids.contactId;
+    await runDelete("sms_phone_suppressions", () =>
+      client
+        .from("sms_phone_suppressions")
+        .delete()
+        .eq("org_id", ids.orgId)
+        .eq("channel", "sms")
+        .eq("phone_e164", ids.phone)
+        .eq("first_contact_id", contactId)
+        .eq("provider", "sendillo")
+        .contains("source_detail", { externalId: ids.externalId }),
+    );
     await runDelete("consent_events", () =>
       client.from("consent_events").delete().eq("contact_id", contactId),
     );
-    await runDelete("contacts", () =>
-      client.from("contacts").delete().eq("id", contactId),
+    // Do not erase contact attribution while an owned suppression remains.
+    const { data: remainingSuppressions, error: suppressionCheckError } =
+      await client
+        .from("sms_phone_suppressions")
+        .select("id")
+        .eq("org_id", ids.orgId)
+        .eq("first_contact_id", contactId);
+    if (suppressionCheckError || remainingSuppressions?.length) {
+      cleanupErrors.push(
+        `suppression cleanup not verified: ${suppressionCheckError?.message ?? "owned rows remain"}`,
+      );
+    } else {
+      await runDelete("contacts", () =>
+        client
+          .from("contacts")
+          .delete()
+          .eq("org_id", ids.orgId)
+          .eq("id", contactId),
+      );
+    }
+  }
+  async function verifyEmpty(
+    label: string,
+    query: PromiseLike<{
+      data: unknown[] | null;
+      error: { message: string } | null;
+    }>,
+  ) {
+    const { data, error } = await query;
+    if (error || data?.length)
+      cleanupErrors.push(
+        `${label} cleanup not verified: ${error?.message ?? "rows remain"}`,
+      );
+  }
+  await verifyEmpty(
+    "sms_inbound_deliveries",
+    client
+      .from("sms_inbound_deliveries")
+      .select("id")
+      .eq("org_id", ids.orgId)
+      .eq("provider", "sendillo")
+      .eq("provider_message_id", ids.externalId),
+  );
+  await verifyEmpty(
+    "sms_inbound_intents",
+    client
+      .from("sms_inbound_intents")
+      .select("id")
+      .eq("org_id", ids.orgId)
+      .eq("provider", "sendillo")
+      .eq("first_provider_message_id", ids.externalId),
+  );
+  await verifyEmpty(
+    "webhook_events",
+    client
+      .from("webhook_events")
+      .select("id")
+      .eq("provider", "sendillo")
+      .eq("event_type", "sms_inbound")
+      .eq("external_id", ids.externalId),
+  );
+  if (ids.messageIds.length)
+    await verifyEmpty(
+      "notifications",
+      client
+        .from("notifications")
+        .select("id")
+        .eq("entity_type", "message")
+        .in("entity_id", ids.messageIds),
+    );
+  if (ids.propertyId) {
+    await verifyEmpty(
+      "messages",
+      client.from("messages").select("id").eq("property_id", ids.propertyId),
+    );
+    await verifyEmpty(
+      "properties",
+      client.from("properties").select("id").eq("id", ids.propertyId),
     );
   }
+  if (ids.contactId) {
+    await verifyEmpty(
+      "consent_events",
+      client
+        .from("consent_events")
+        .select("id")
+        .eq("contact_id", ids.contactId),
+    );
+    await verifyEmpty(
+      "contacts",
+      client.from("contacts").select("id").eq("id", ids.contactId),
+    );
+  }
+  if (ids.sequenceEnrollmentId)
+    await verifyEmpty(
+      "sequence_enrollments",
+      client
+        .from("sequence_enrollments")
+        .select("id")
+        .eq("id", ids.sequenceEnrollmentId),
+    );
+  if (ids.sequenceStepId)
+    await verifyEmpty(
+      "sequence_steps",
+      client.from("sequence_steps").select("id").eq("id", ids.sequenceStepId),
+    );
+  if (ids.sequenceId)
+    await verifyEmpty(
+      "sequences",
+      client.from("sequences").select("id").eq("id", ids.sequenceId),
+    );
   if (cleanupErrors.length > 0) {
     throw new Error(`cleanup failed: ${cleanupErrors.join("; ")}`);
   }
 }
 
-async function main(): Promise<void> {
+export async function runSendilloWebhookSmoke(
+  options: { disposableLocalStop?: boolean } = {},
+): Promise<Record<string, unknown>> {
   const supabase = prodSupabase();
+  // STOP appends immutable lead history. The production service role cannot
+  // remove that history or its property. Never enable a write-and-leak canary.
+  const targetUrl = (supabase as unknown as { supabaseUrl?: string })
+    .supabaseUrl;
+  if (
+    mode === "stop" &&
+    (!options.disposableLocalStop || targetUrl !== "http://127.0.0.1:54321")
+  ) {
+    throw new Error(
+      "STOP requires a disposable local proof: production lead history cannot be cleaned through the service API.",
+    );
+  }
+  const phone = requireOwnedPhone();
   const prodEmail = requireProdEmail();
   const sendilloFrom = requireSendilloFromNumber();
   const canaryUserId = await resolveCanaryUserId(supabase, prodEmail);
   const orgId = await resolveOrgId(supabase, canaryUserId);
+  if (phone === sendilloFrom)
+    throw new Error("Canary recipient must differ from the Sendillo sender.");
+  await assertUnusedPhone(supabase, phone);
   const body = mode === "stop" ? "STOP" : `${tag} inbound replay-safe proof`;
   const externalId = `${tag}-message`;
   const ids = {
     externalId,
+    orgId,
+    phone,
     messageIds: [] as string[],
     propertyId: null as string | null,
     contactId: null as string | null,
@@ -210,6 +433,7 @@ async function main(): Promise<void> {
         first_name: "PROD-CANARY",
         last_name: tag,
         phone_1: phone,
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();
@@ -237,12 +461,14 @@ async function main(): Promise<void> {
     ids.propertyId = property.id;
 
     if (mode === "stop") {
-      const { error: consentError } = await supabase.from("consent_events").insert({
-        contact_id: contact.id,
-        channel: "sms",
-        event_type: "opt_in_marketing_written",
-        source: tag,
-      });
+      const { error: consentError } = await supabase
+        .from("consent_events")
+        .insert({
+          contact_id: contact.id,
+          channel: "sms",
+          event_type: "opt_in_marketing_written",
+          source: tag,
+        });
       if (consentError) throw consentError;
 
       const { data: sequence, error: sequenceError } = await supabase
@@ -311,16 +537,17 @@ async function main(): Promise<void> {
     });
     if (anchorError) throw anchorError;
 
-    const status = await fireSendilloInboundWebhook({
+    const payload = {
       data: {
         messageId: externalId,
         from: phone,
         to: sendilloFrom,
         body,
-        type: "SMS",
+        type: "SMS" as const,
         receivedAt: new Date().toISOString(),
       },
-    });
+    };
+    const status = await fireSendilloInboundWebhook(payload);
     if (status !== 200) {
       throw new Error(`Sendillo webhook returned ${status}, expected 200.`);
     }
@@ -346,6 +573,7 @@ async function main(): Promise<void> {
       message.provider !== "sendillo" ||
       message.direction !== "inbound" ||
       message.status !== "received" ||
+      message.body !== body ||
       message.property_id !== property.id ||
       message.contact_id !== contact.id
     ) {
@@ -375,41 +603,68 @@ async function main(): Promise<void> {
         { label: "owner_message_added notification", timeoutMs: 45_000 },
       );
       if (notification.entity_id !== message.id) {
-        throw new Error("owner_message_added notification targeted the wrong message.");
+        throw new Error(
+          "owner_message_added notification targeted the wrong message.",
+        );
       }
     } else {
       const verdict = await pollUntil(
         async () => {
-          const [{ data: latestConsent }, { data: contactRow }, { data: enrollmentRow }] =
-            await Promise.all([
-              supabase
-                .from("consent_events")
-                .select("id, event_type")
-                .eq("contact_id", contact.id)
-                .order("occurred_at", { ascending: false })
-                .limit(1)
-                .maybeSingle(),
-              supabase
-                .from("contacts")
-                .select("sms_opted_out")
-                .eq("id", contact.id)
-                .single(),
-              supabase
-                .from("sequence_enrollments")
-                .select("status")
-                .eq("id", ids.sequenceEnrollmentId!)
-                .single(),
-            ]);
+          const [
+            consentResult,
+            contactResult,
+            enrollmentResult,
+            suppressionResult,
+          ] = await Promise.all([
+            supabase
+              .from("consent_events")
+              .select("id, event_type")
+              .eq("contact_id", contact.id)
+              .eq("event_type", "opt_out")
+              .contains("source_detail", { externalId })
+              .maybeSingle(),
+            supabase
+              .from("contacts")
+              .select("sms_opted_out")
+              .eq("id", contact.id)
+              .single(),
+            supabase
+              .from("sequence_enrollments")
+              .select("status")
+              .eq("id", ids.sequenceEnrollmentId!)
+              .single(),
+            supabase
+              .from("sms_phone_suppressions")
+              .select("id, first_contact_id, provider, source_detail")
+              .eq("org_id", orgId)
+              .eq("channel", "sms")
+              .eq("phone_e164", phone)
+              .contains("source_detail", { externalId })
+              .maybeSingle(),
+          ]);
 
+          for (const result of [
+            consentResult,
+            contactResult,
+            enrollmentResult,
+            suppressionResult,
+          ]) {
+            if (result.error) throw result.error;
+          }
+          const stopConsent = consentResult.data;
+          const contactRow = contactResult.data;
+          const enrollmentRow = enrollmentResult.data;
           if (
-            latestConsent?.event_type === "opt_out" &&
+            suppressionResult.data?.first_contact_id === contact.id &&
+            suppressionResult.data?.provider === "sendillo" &&
+            stopConsent?.event_type === "opt_out" &&
             contactRow?.sms_opted_out === true &&
             (enrollmentRow?.status === "opted_out" ||
               enrollmentRow?.status === "paused")
           ) {
             return {
-              consentId: latestConsent.id,
-              consent: latestConsent.event_type,
+              consentId: stopConsent.id,
+              consent: stopConsent.event_type,
               smsOptedOut: contactRow.sms_opted_out,
               enrollment: enrollmentRow.status,
             };
@@ -435,35 +690,27 @@ async function main(): Promise<void> {
       }
     }
 
-    const replayStatus = await fireSendilloInboundWebhook({
-      data: {
-        messageId: externalId,
-        from: phone,
-        to: sendilloFrom,
-        body,
-        type: "SMS",
-        receivedAt: new Date().toISOString(),
-      },
-    });
+    const replayStatus = await fireSendilloInboundWebhook(payload);
     if (replayStatus !== 200) {
-      throw new Error(`Sendillo replay returned ${replayStatus}, expected 200.`);
+      throw new Error(
+        `Sendillo replay returned ${replayStatus}, expected 200.`,
+      );
     }
 
     await pollUntil(
       async () => {
-        const [{ data: messages, error: messageError }, { data: notifications, error: notificationError }] =
-          await Promise.all([
-            supabase
-              .from("messages")
-              .select("id")
-              .eq("external_id", externalId),
-            supabase
-              .from("notifications")
-              .select("id")
-              .eq("event_type", "owner_message_added")
-              .eq("entity_id", message.id)
-              .eq("user_id", canaryUserId),
-          ]);
+        const [
+          { data: messages, error: messageError },
+          { data: notifications, error: notificationError },
+        ] = await Promise.all([
+          supabase.from("messages").select("id").eq("external_id", externalId),
+          supabase
+            .from("notifications")
+            .select("id")
+            .eq("event_type", "owner_message_added")
+            .eq("entity_id", message.id)
+            .eq("user_id", canaryUserId),
+        ]);
         if (messageError) throw messageError;
         if (notificationError) throw notificationError;
 
@@ -497,21 +744,15 @@ async function main(): Promise<void> {
       }
     }
 
-    console.log(
-      JSON.stringify(
-        {
-          mode,
-          status: "PASS",
-          externalId,
-          messageId: message.id,
-          conversationId: message.conversation_id,
-          propertyId: property.id,
-          contactId: contact.id,
-        },
-        null,
-        2,
-      ),
-    );
+    return {
+      mode,
+      status: "PASS",
+      externalId,
+      messageId: message.id,
+      conversationId: message.conversation_id,
+      propertyId: property.id,
+      contactId: contact.id,
+    };
   } finally {
     await cleanup(supabase, ids);
   }
@@ -526,17 +767,27 @@ function formatError(error: unknown): string {
   }
 }
 
-main().catch((error) => {
-  console.error(
-    JSON.stringify(
-      {
-        mode,
-        status: "FAIL",
-        error: formatError(error),
-      },
-      null,
-      2,
-    ),
-  );
-  process.exit(1);
-});
+// A success report is emitted only after the finally cleanup has succeeded.
+if (
+  process.argv[1] &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  runSendilloWebhookSmoke()
+    .then((report) => {
+      console.log(JSON.stringify(report, null, 2));
+    })
+    .catch((error) => {
+      console.error(
+        JSON.stringify(
+          {
+            mode,
+            status: "FAIL",
+            error: formatError(error),
+          },
+          null,
+          2,
+        ),
+      );
+      process.exit(1);
+    });
+}

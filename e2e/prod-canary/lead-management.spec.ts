@@ -44,10 +44,10 @@ test("production canary edits a canary lead detail status, motivation, and assig
     await page.getByRole("menuitem", { name: "Warm" }).click();
 
     await page.getByRole("button", { name: "Change assignee" }).click();
-    await expect(page.getByRole("menuitem", { name: "Me" })).toBeVisible({
-      timeout: 20_000,
-    });
-    await page.getByRole("menuitem", { name: "Me" }).click();
+    const self = page.getByRole("menuitem", { name: / \(you\)$/ });
+    await expect(self).toBeVisible({ timeout: 20_000 });
+    const selfLabel = (await self.innerText()).trim();
+    await self.click();
 
     await pollUntil(
       async () => {
@@ -80,11 +80,14 @@ test("production canary edits a canary lead detail status, motivation, and assig
         hasText: "Warm",
       }),
     ).toBeVisible();
+    // Team names load when the menu opens. After reload, the trigger initially
+    // uses the persisted email fallback; load the roster before comparing names.
+    await page.getByRole("button", { name: "Change assignee" }).click();
+    await expect(page.getByRole("menuitem", { name: selfLabel, exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
     await expect(
-      page.getByRole("button", { name: "Change assignee" }).filter({
-        hasText: "Assigned: me",
-      }),
-    ).toBeVisible();
+      page.getByRole("button", { name: "Change assignee" }),
+    ).toHaveText(`Assigned: ${selfLabel}`);
   } finally {
     await deleteCanaryPropertiesByAddress(supabase, address);
   }

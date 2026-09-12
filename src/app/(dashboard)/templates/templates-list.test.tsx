@@ -159,6 +159,7 @@ describe("<TemplatesList />", () => {
 
     // Wait for the portaled option to mount, then click it.
     const opt = await screen.findByTestId("templates-category-option-Probate");
+    await waitFor(() => expect(screen.getByTestId("templates-category-option-all")).toHaveFocus());
     await user.click(opt);
 
     await waitFor(() => expect(routerReplace).toHaveBeenCalledTimes(1));
@@ -171,6 +172,9 @@ describe("<TemplatesList />", () => {
 
     await user.click(screen.getByTestId("templates-category-select"));
     const allOpt = await screen.findByTestId("templates-category-option-all");
+    // Opening the popup first focuses its selected option. Wait for that
+    // initialization so it cannot overwrite the next mouse selection.
+    await waitFor(() => expect(screen.getByTestId("templates-category-option-Probate")).toHaveFocus());
     await user.click(allOpt);
 
     await waitFor(() => expect(routerReplace).toHaveBeenCalledTimes(1));
