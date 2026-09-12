@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { completeServerNavigation } from "./support/navigation";
 
 import {
   adminClient,
@@ -203,7 +204,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await expect(leadCard.getByLabel("Due date and time")).toBeVisible();
   await leadCard.getByRole("button", { name: "Cancel" }).click();
 
-  await addressLink.click();
+  await completeServerNavigation(page, detailUrl, () => addressLink.click());
   await expect(page).toHaveURL(detailUrl);
   await expect(
     page.getByRole("heading", { name: property.address }),
@@ -248,9 +249,9 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   );
   await expect(page.getByText("123 Foundation Ave")).toBeVisible();
   await expect(page.getByText("789 Unassigned Lead Rd")).toHaveCount(0);
-  await page
-    .getByRole("combobox", { name: "Choose a teammate" })
-    .selectOption(teammate.id);
+  await completeServerNavigation(page, `/leads?assignee=${teammate.id}`, () =>
+    page.getByRole("combobox", { name: "Choose a teammate" }).selectOption(teammate.id),
+  );
   await expect(page).toHaveURL(
     new RegExp(`/leads\\?assignee=${teammate.id}$`),
   );

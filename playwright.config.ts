@@ -184,6 +184,8 @@ export default defineConfig({
     // attach to an arbitrary process already listening on the port: it may
     // have dev/production credentials or real provider configuration.
     reuseExistingServer: false,
+    // Retain Next route/compilation timings when hosted auth navigation stalls.
+    stdout: "pipe",
     timeout: 120_000,
     env: webServerEnv,
   },

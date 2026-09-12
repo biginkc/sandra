@@ -2,7 +2,7 @@ name: Verify
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/esign-release-e2e-contracts-20260912]
   pull_request:
     branches: [main]
 
