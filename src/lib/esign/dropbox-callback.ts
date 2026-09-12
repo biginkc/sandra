@@ -208,12 +208,15 @@ function parseProviderSignatures(value: unknown): ProviderSignature[] {
     const role = optionalIdentifier(item.signer_role);
     const name = optionalIdentifier(item.signer_name);
     const emailAddress = optionalIdentifier(item.signer_email_address);
-    if (!signatureId || !role || !name || !emailAddress) invalidEvent();
+    if (!signatureId || !emailAddress) invalidEvent();
     const order = optionalOrder(item.order, index);
     return {
       signatureId,
-      role,
-      name,
+      // Non-template account events omit role/name. Preserve absence, never
+      // infer a contractual signer from list order. Known requests require both
+      // before reconciliation in the webhook handler.
+      role: role ?? "",
+      name: name ?? "",
       emailAddress,
       order,
       statusCode: optionalIdentifier(item.status_code),

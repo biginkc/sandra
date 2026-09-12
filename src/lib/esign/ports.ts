@@ -117,11 +117,12 @@ export interface DropboxSignatureRequestMetadataProvider {
     orgId: string;
     callbackConsumerId: string;
     signRequestId: string;
-    localRequestId: string;
+    localRequestId: string | null;
     testMode: boolean | null;
   }): Promise<
     | { outcome: "matched"; providerTestMode: boolean | null }
     | { outcome: "mismatch" }
+    | { outcome: "unmanaged" }
     | { outcome: "mode_unverified" }
   >;
 }

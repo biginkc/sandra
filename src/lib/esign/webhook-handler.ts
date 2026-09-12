@@ -130,6 +130,18 @@ export async function handleDropboxSignWebhook(input: {
         return acknowledgement();
       }
     }
+    if (!request && replay.localRequestId === null) {
+      // The event HMAC does not authenticate its metadata. Confirm absence of
+      // Sandra ownership with a provider read before acknowledging foreign work.
+      const ownership = await input.dependencies.metadataProvider.confirmProviderLocalRequestId({
+        ...identity, signRequestId: replay.signRequestId, localRequestId: null,
+        testMode: replay.testMode ?? null,
+      });
+      if (ownership.outcome === "unmanaged") {
+        await input.dependencies.persistence.markReceiptIgnored(activeClaim, "UNMANAGED_PROVIDER_REQUEST");
+        return acknowledgement();
+      }
+    }
     if (!request || request.orgId !== identity.orgId) {
       throw new SafeWebhookProcessingError("REQUEST_NOT_FOUND", 503);
     }
@@ -144,6 +156,12 @@ export async function handleDropboxSignWebhook(input: {
       providerMetadataTestMode !== request.testMode
     ) {
       throw new SafeWebhookProcessingError("REQUEST_MODE_MISMATCH", 503);
+    }
+
+    if (replay.providerSignatures.some((signature) => !signature.role || !signature.name)) {
+      // Account-wide events for unrelated documents can be acknowledged above.
+      // A known Sandra request needs complete identity before any state change.
+      throw new SafeWebhookProcessingError("INCOMPLETE_SIGNER_IDENTITY", 503);
     }
 
     const providerEventAt = providerEventDate(replay);
