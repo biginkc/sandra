@@ -12,6 +12,7 @@ import {
 } from "@/lib/esign/contracts";
 import { getEsignCredentials } from "@/lib/esign/credentials";
 import { createDropboxSignProvider } from "@/lib/esign/dropbox-sign";
+import { loadEsignCreatorLabel } from "@/lib/esign/sender-identity";
 import { classifyProviderFailure } from "@/lib/esign/provider-failure";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types";
@@ -618,7 +619,7 @@ async function loadRequest(
   const { data: row, error } = await admin
     .from("esign_requests")
     .select(
-      "id,org_id,property_id,template_id,signer_snapshot,merge_value_snapshot,send_intent_id,payload_hash,retry_of_request_id,status,delivery_state,sign_request_id,details_url,void_requested_at,signed_pdf_path,error_message,sent_at,test_mode",
+      "id,org_id,property_id,created_by,template_id,signer_snapshot,merge_value_snapshot,send_intent_id,payload_hash,retry_of_request_id,status,delivery_state,sign_request_id,details_url,void_requested_at,signed_pdf_path,error_message,sent_at,test_mode",
     )
     .eq("org_id", orgId)
     .eq("id", requestId)
@@ -668,6 +669,7 @@ async function loadRequest(
     id: row.id,
     orgId: row.org_id,
     propertyId: row.property_id,
+    createdByLabel: await loadEsignCreatorLabel(row.created_by),
     template,
     signers: (signerRows ?? []).map((signer) => ({
       id: signer.id,
@@ -726,6 +728,8 @@ export async function providerForOrg(
       providerTemplateId,
       signers,
       mergeValues,
+      subject,
+      message,
       signal,
     }) => {
       try {
@@ -739,6 +743,8 @@ export async function providerForOrg(
             emailAddress,
           })),
           mergeValues,
+          subject,
+          message,
           signal,
         });
         if (!output.detailsUrl) return { outcome: "ambiguous" };
@@ -924,6 +930,7 @@ export async function loadLeadEsignPageModel(
       contracts.push({
         id: request.id,
         templateName: request.template.name,
+        createdByLabel: request.createdByLabel ?? null,
         signers: request.signers as LeadContractRow["signers"],
         status: request.status,
         deliveryState: request.deliveryState,

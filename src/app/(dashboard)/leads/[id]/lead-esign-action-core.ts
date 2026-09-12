@@ -74,6 +74,8 @@ export type EsignRequestRecord = Readonly<{
   orgId: string;
   propertyId: string;
   template: TemplateOption;
+  /** Resolved from persisted created_by, never supplied by the browser. */
+  createdByLabel?: string | null;
   signers: readonly (SignerAssignment &
     Readonly<{
       id?: string;
@@ -293,6 +295,8 @@ export type EsignActionProvider = Readonly<{
     providerTemplateId: string;
     signers: readonly SignerAssignment[];
     mergeValues: ContractMergeValues;
+    subject?: string;
+    message?: string;
     signal: AbortSignal;
   }): Promise<ProviderDispatchOutcome>;
   remind(input: {
@@ -577,6 +581,15 @@ async function dispatchClaimed(
         providerTemplateId: request.template.providerTemplateId,
         signers: request.signers,
         mergeValues: request.mergeValues,
+        subject: `${request.testMode ? "TEST — " : ""}${request.template.name}`,
+        message: [
+          request.testMode ? "INTERNAL TEST — not legally binding." : null,
+          request.createdByLabel
+            ? `Prepared by ${request.createdByLabel} for BMH Acquisitions.`
+            : "Prepared by the BMH Acquisitions team.",
+          "Please review the agreement and complete the indicated signatures.",
+          "For questions, email acquisitions@bmhgroupkc.com.",
+        ].filter(Boolean).join("\n\n"),
         signal,
       }),
     );

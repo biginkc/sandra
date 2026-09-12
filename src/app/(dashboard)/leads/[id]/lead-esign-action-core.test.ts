@@ -223,6 +223,26 @@ describe("lead eSign action orchestration", () => {
     vi.useRealTimers();
   });
 
+  it("attributes the email to the persisted creator rather than browser-supplied identity", async () => {
+    const h = harness();
+    h.repository.claimSend.mockResolvedValue({ outcome: "created", request: request({ createdByLabel: "Maria Unkovich" }) });
+    const result = await h.core.send(sendInput);
+    expect(result.ok).toBe(true);
+    expect(h.provider.sendWithTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      subject: "TEST — Purchase agreement",
+      message: expect.stringContaining("Prepared by Maria Unkovich for BMH Acquisitions."),
+    }));
+    expect(h.provider.sendWithTemplate.mock.calls[0][0].message).not.toContain("Someone Else");
+  });
+
+  it("rejects browser-supplied sender identity before dispatch", async () => {
+    const h = harness();
+    const result = await h.core.send({ ...sendInput, createdByLabel: "Someone Else" } as SendContractInput);
+    expect(result.ok).toBe(false);
+    expect(h.repository.claimSend).not.toHaveBeenCalled();
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
   it("returns live preflight blockers and safe seller defaults", async () => {
     const h = harness();
     h.repository.loadLeadSendContext.mockResolvedValue(

@@ -100,6 +100,7 @@ export type ContractSignerView = Readonly<{
 export type LeadContractRow = Readonly<{
   id: string;
   templateName: string;
+  createdByLabel?: string | null;
   signers: readonly ContractSignerView[];
   status: EsignStatus;
   deliveryState: EsignDeliveryState;
