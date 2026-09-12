@@ -19,7 +19,9 @@ const AUTH_FILE = "e2e/.auth/user.json";
  */
 setup("authenticate", async ({ page }) => {
   const admin = adminClient();
-  await ensureTestUser(admin);
+  await setup.step("Provision exact-run test identity", async () => {
+    await ensureTestUser(admin);
+  });
 
   await page.goto("/login");
   await expect(
@@ -62,8 +64,12 @@ setup("authenticate", async ({ page }) => {
     })),
   );
 
-  await page.goto("/dashboard");
-  await expect(page.locator("text=Sign out")).toBeVisible();
+  await setup.step("Load authenticated dashboard", async () => {
+    await page.goto("/dashboard");
+  });
+  await setup.step("Verify authenticated shell", async () => {
+    await expect(page.locator("text=Sign out")).toBeVisible();
+  });
 
   await page.context().storageState({ path: AUTH_FILE });
 });
