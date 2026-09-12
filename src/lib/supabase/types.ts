@@ -4627,6 +4627,99 @@ export type Database = {
           },
         ]
       }
+      esign_completion_reconciliation_audits: {
+        Row: {
+          id: string
+          org_id: string
+          request_id: string
+          receipt_id: string
+          request_snapshot: Json
+          signer_snapshot: Json
+          reconciled_at: string
+        }
+        Insert: {
+          id?: string
+          org_id: string
+          request_id: string
+          receipt_id: string
+          request_snapshot: Json
+          signer_snapshot: Json
+          reconciled_at?: string
+        }
+        Update: {
+          id?: string
+          org_id?: string
+          request_id?: string
+          receipt_id?: string
+          request_snapshot?: Json
+          signer_snapshot?: Json
+          reconciled_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "esign_completion_reconciliation_audits_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "esign_completion_reconciliation_audits_request_id_org_id_fkey"
+            columns: ["request_id", "org_id"]
+            isOneToOne: true
+            referencedRelation: "esign_requests"
+            referencedColumns: ["id", "org_id"]
+          },
+        ]
+      }
+      esign_signed_artifact_archives: {
+        Row: {
+          id: string
+          org_id: string
+          request_id: string
+          lead_file_id: string | null
+          storage_path: string
+          metadata_snapshot: Json
+          reason: string
+          archived_at: string
+        }
+        Insert: {
+          id?: string
+          org_id: string
+          request_id: string
+          lead_file_id?: string | null
+          storage_path: string
+          metadata_snapshot: Json
+          reason: string
+          archived_at?: string
+        }
+        Update: {
+          id?: string
+          org_id?: string
+          request_id?: string
+          lead_file_id?: string | null
+          storage_path?: string
+          metadata_snapshot?: Json
+          reason?: string
+          archived_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "esign_signed_artifact_archives_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "esign_signed_artifact_archives_request_id_org_id_fkey"
+            columns: ["request_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "esign_requests"
+            referencedColumns: ["id", "org_id"]
+          },
+        ]
+      }
       lead_files: {
         Row: {
           content_type: string

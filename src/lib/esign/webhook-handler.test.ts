@@ -128,6 +128,7 @@ function dependencies(
     }),
     persistence,
     metadataProvider: {
+      confirmCompletedRequest: vi.fn(async () => [{ signatureId: "provider-signature-1", role: "Seller", name: "Seller", emailAddress: "seller@example.com", order: 0, statusCode: "signed", signedAt: 1788053900 }]),
       confirmProviderLocalRequestId: vi.fn(async ({ localRequestId }) =>
         localRequestId === REQUEST_ID
           ? { outcome: "matched" as const, providerTestMode: null }
@@ -714,7 +715,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
 
     const response = await handleDropboxSignWebhook({
       request: callbackRequest({
-        eventType: "signature_request_downloadable",
+        eventType: "signature_request_all_signed",
         relatedSignatureId: null,
         providerSignatures: [{
           signature_id: "bb67df41911f964aa66f488bd2878cbd",
@@ -737,7 +738,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
         decision: expect.objectContaining({
           previousStatus: "error",
           nextStatus: "signed",
-          reason: "downloadable",
+          reason: "all_signed",
         }),
       }),
     );
@@ -797,7 +798,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
       },
     });
     const response = await handleDropboxSignWebhook({
-      request: callbackRequest({ eventType: "signature_request_downloadable" }),
+      request: callbackRequest({ eventType: "signature_request_all_signed" }),
       pathSecret: PATH_SECRET,
       dependencies: deps,
     });
@@ -820,10 +821,10 @@ describe("injectable Dropbox Sign webhook handler", () => {
     );
   });
 
-  it("stores and links a validated downloadable PDF exactly once per claim", async () => {
+  it("stores and links a validated final PDF exactly once per claim", async () => {
     const deps = dependencies();
     const response = await handleDropboxSignWebhook({
-      request: callbackRequest({ eventType: "signature_request_downloadable" }),
+      request: callbackRequest({ eventType: "signature_request_all_signed" }),
       pathSecret: PATH_SECRET,
       dependencies: deps,
     });
@@ -837,7 +838,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
         claim: CLAIM,
         artifact: expect.objectContaining({
           storageBucket: "lead-files",
-          storagePath: `${ORG_ID}/${PROPERTY_ID}/esign/${REQUEST_ID}/signed.pdf`,
+          storagePath: `${ORG_ID}/${PROPERTY_ID}/esign/${REQUEST_ID}/signed-final.pdf`,
           contentType: "application/pdf",
         }),
       }),
@@ -864,7 +865,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
     expect(await response.text()).not.toBe(DROPBOX_SIGN_ACKNOWLEDGEMENT);
   });
 
-  it("does not ingest a late downloadable artifact after a different terminal state", async () => {
+  it("does not ingest a late final artifact after a different terminal state", async () => {
     const deps = dependencies();
     vi.mocked(deps.persistence.findRequest).mockResolvedValue({
       id: REQUEST_ID,
@@ -876,7 +877,7 @@ describe("injectable Dropbox Sign webhook handler", () => {
       templateTitle: "Purchase Agreement",
     });
     const response = await handleDropboxSignWebhook({
-      request: callbackRequest({ eventType: "signature_request_downloadable" }),
+      request: callbackRequest({ eventType: "signature_request_all_signed" }),
       pathSecret: PATH_SECRET,
       dependencies: deps,
     });
@@ -912,7 +913,7 @@ describe("non-template account callbacks", () => {
   it("fails closed before changing a known contract with incomplete signer identity", async () => {
     const deps = dependencies();
     const response = await handleDropboxSignWebhook({ pathSecret: PATH_SECRET, dependencies: deps,
-      request: callbackRequest({ eventType: "signature_request_all_signed", providerSignatures: signatures }) });
+      request: callbackRequest({ eventType: "signature_request_viewed", providerSignatures: signatures }) });
     expect(response.status).toBe(503);
     expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
     expect(deps.persistence.reconcileProviderSigners).not.toHaveBeenCalled();
@@ -928,4 +929,82 @@ it("does not ignore a callback with stripped local metadata unless provider conf
     request: callbackRequest({ localRequestId: null }) });
   expect(response.status).toBe(503);
   expect(deps.persistence.markReceiptIgnored).not.toHaveBeenCalled();
+});
+
+it("keeps seller signing and downloadable partial PDFs nonterminal until all_signed, then ignores duplicate final delivery", async () => {
+  const deps = dependencies();
+  for (const eventType of ["signature_request_signed", "signature_request_downloadable"]) {
+    const response = await handleDropboxSignWebhook({ request: callbackRequest({ eventType }), pathSecret: PATH_SECRET, dependencies: deps });
+    expect(response.status).toBe(200);
+  }
+  expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+  expect(deps.metadataProvider.confirmCompletedRequest).not.toHaveBeenCalled();
+  expect(deps.pdfProvider.downloadSignedPdf).not.toHaveBeenCalled();
+  expect(deps.artifactPersistence.storeLinkAndRecordReady).not.toHaveBeenCalled();
+
+  const response = await handleDropboxSignWebhook({ request: callbackRequest({ eventType: "signature_request_all_signed" }), pathSecret: PATH_SECRET, dependencies: deps });
+  expect(response.status).toBe(200);
+  expect(deps.metadataProvider.confirmCompletedRequest).toHaveBeenCalledWith({ orgId: ORG_ID, callbackConsumerId: CONSUMER_ID, signRequestId: "provider-request-1", localRequestId: REQUEST_ID, testMode: true });
+  expect(deps.pdfProvider.downloadSignedPdf).toHaveBeenCalledTimes(1);
+  expect(deps.artifactPersistence.storeLinkAndRecordReady).toHaveBeenCalledTimes(1);
+  vi.mocked(deps.persistence.claimVerifiedReceipt).mockResolvedValue({ outcome: "already_processed", receiptId: CLAIM.receiptId });
+  await handleDropboxSignWebhook({ request: callbackRequest({ eventType: "signature_request_all_signed" }), pathSecret: PATH_SECRET, dependencies: deps });
+  expect(deps.pdfProvider.downloadSignedPdf).toHaveBeenCalledTimes(1);
+});
+
+it("fails closed before final status or PDF changes when provider completion cannot be verified", async () => {
+  const deps = dependencies();
+  vi.mocked(deps.metadataProvider.confirmCompletedRequest).mockResolvedValue(null);
+  const response = await handleDropboxSignWebhook({ request: callbackRequest({ eventType: "signature_request_all_signed" }), pathSecret: PATH_SECRET, dependencies: deps });
+  expect(response.status).toBe(503);
+  expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+  expect(deps.persistence.reconcileProviderSigners).not.toHaveBeenCalled();
+  expect(deps.pdfProvider.downloadSignedPdf).not.toHaveBeenCalled();
+  expect(deps.persistence.markReceiptFailed).toHaveBeenCalledWith(CLAIM, "PROVIDER_COMPLETION_UNVERIFIED");
+});
+
+it.each([null, "signed.pdf", "signed-final.pdf"])("repairs only missing or legacy artifacts on a reclaimed final callback: %s", async (file) => {
+  const deps = dependencies();
+  vi.mocked(deps.persistence.findRequest).mockResolvedValue({ id: REQUEST_ID, orgId: ORG_ID, propertyId: PROPERTY_ID, status: "signed", testMode: true, signedPdfPath: file && `${ORG_ID}/${PROPERTY_ID}/esign/${REQUEST_ID}/${file}`, templateTitle: "Purchase Agreement" });
+  const response = await handleDropboxSignWebhook({ request: callbackRequest({ eventType: "signature_request_all_signed" }), pathSecret: PATH_SECRET, dependencies: deps });
+  expect(response.status).toBe(200);
+  expect(deps.pdfProvider.downloadSignedPdf).toHaveBeenCalledTimes(file === "signed-final.pdf" ? 0 : 1);
+  if (file !== "signed-final.pdf") expect(deps.artifactPersistence.storeLinkAndRecordReady).toHaveBeenCalledWith(expect.objectContaining({ artifact: expect.objectContaining({ storagePath: `${ORG_ID}/${PROPERTY_ID}/esign/${REQUEST_ID}/signed-final.pdf` }) }));
+});
+
+it("leaves a provider GET failure retryable without finalizing or downloading", async () => {
+  const deps = dependencies();
+  vi.mocked(deps.metadataProvider.confirmCompletedRequest).mockRejectedValue(new Error("provider unavailable"));
+  const response = await handleDropboxSignWebhook({ request: callbackRequest({ eventType: "signature_request_all_signed" }), pathSecret: PATH_SECRET, dependencies: deps });
+  expect(response.status).toBe(503);
+  expect(deps.persistence.applyStatusDecision).not.toHaveBeenCalled();
+  expect(deps.pdfProvider.downloadSignedPdf).not.toHaveBeenCalled();
+  expect(deps.persistence.markReceiptProcessed).not.toHaveBeenCalled();
+  expect(deps.persistence.markReceiptFailed).toHaveBeenCalled();
+});
+
+it("retries a not-ready final PDF without linking an object and succeeds on a fresh claim", async () => {
+  const deps = dependencies();
+  vi.mocked(deps.pdfProvider.downloadSignedPdf).mockRejectedValueOnce({ statusCode: 409 });
+  const call = () => handleDropboxSignWebhook({ request: callbackRequest({ eventType: "signature_request_all_signed" }), pathSecret: PATH_SECRET, dependencies: deps });
+  expect((await call()).status).toBe(503);
+  expect(deps.artifactPersistence.storeLinkAndRecordReady).not.toHaveBeenCalled();
+  expect(deps.persistence.markReceiptProcessed).not.toHaveBeenCalled();
+  expect((await call()).status).toBe(200);
+  expect(deps.artifactPersistence.storeLinkAndRecordReady).toHaveBeenCalledTimes(1);
+  expect(deps.metadataProvider.confirmCompletedRequest).toHaveBeenCalledTimes(2);
+});
+
+it("repairs final signer timestamps using the fresh provider snapshot even when callback roles are absent", async () => {
+  const deps = dependencies();
+  const proof = [
+    { signatureId: "seller-id", role: "", name: "", emailAddress: "seller@example.com", order: -1, statusCode: "signed", signedAt: 1788053900 },
+    { signatureId: "buyer-id", role: "", name: "", emailAddress: "buyer@example.com", order: -1, statusCode: "signed", signedAt: 1788053990 },
+  ];
+  vi.mocked(deps.metadataProvider.confirmCompletedRequest).mockResolvedValue(proof);
+  const response = await handleDropboxSignWebhook({ pathSecret: PATH_SECRET, dependencies: deps, request: callbackRequest({
+    eventType: "signature_request_all_signed", providerSignatures: [{ signature_id: "buyer-id", signer_email_address: "buyer@example.com", order: 1, signed_at: 1788053900 }],
+  }) });
+  expect(response.status).toBe(200);
+  expect(deps.persistence.reconcileProviderSigners).toHaveBeenCalledWith(expect.objectContaining({ providerSignatures: proof, signedProviderSignatureId: null }));
 });

@@ -25,7 +25,7 @@ describe("signed PDF safety", () => {
       }),
     ).toEqual({
       storageBucket: "lead-files",
-      storagePath: `${ORG_ID}/${PROPERTY_ID}/esign/${REQUEST_ID}/signed.pdf`,
+      storagePath: `${ORG_ID}/${PROPERTY_ID}/esign/${REQUEST_ID}/signed-final.pdf`,
       fileName: "signed-contract-33333333.pdf",
       contentType: "application/pdf",
       sizeBytes: pdf().byteLength,
@@ -41,7 +41,7 @@ describe("signed PDF safety", () => {
         requestId: zeroVersionRequestId,
         pdf: pdf(),
       }).storagePath,
-    ).toBe(`${ORG_ID}/${PROPERTY_ID}/esign/${zeroVersionRequestId}/signed.pdf`);
+    ).toBe(`${ORG_ID}/${PROPERTY_ID}/esign/${zeroVersionRequestId}/signed-final.pdf`);
   });
 
   it("rejects empty, non-PDF, and oversized responses", () => {

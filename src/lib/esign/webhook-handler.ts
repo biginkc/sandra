@@ -158,9 +158,19 @@ export async function handleDropboxSignWebhook(input: {
       throw new SafeWebhookProcessingError("REQUEST_MODE_MISMATCH", 503);
     }
 
-    if (replay.providerSignatures.some((signature) => !signature.role || !signature.name)) {
-      // Account-wide events for unrelated documents can be acknowledged above.
-      // A known Sandra request needs complete identity before any state change.
+    // Only all_signed guarantees final file readiness. Its signer timestamps
+    // come from an authenticated provider read, matched to persisted IDs in SQL.
+    let providerSignatures = replay.providerSignatures;
+    if (replay.eventType === "signature_request_all_signed") {
+      const confirmed = await input.dependencies.metadataProvider.confirmCompletedRequest({
+        ...identity, signRequestId: replay.signRequestId,
+        localRequestId: request.id, testMode: request.testMode,
+      });
+      if (!confirmed?.length) {
+        throw new SafeWebhookProcessingError("PROVIDER_COMPLETION_UNVERIFIED", 503);
+      }
+      providerSignatures = confirmed;
+    } else if (providerSignatures.some((signature) => !signature.role || !signature.name)) {
       throw new SafeWebhookProcessingError("INCOMPLETE_SIGNER_IDENTITY", 503);
     }
 
@@ -175,21 +185,21 @@ export async function handleDropboxSignWebhook(input: {
       replay.eventType === "signature_request_remind";
     const signerReconciliation =
       supportsSignerReconciliation &&
-      (replay.providerSignatures.length > 0 ||
+      (providerSignatures.length > 0 ||
         replay.eventType === "signature_request_signed")
         ? await input.dependencies.persistence.reconcileProviderSigners({
             orgId: identity.orgId,
             requestId: request.id,
             claim: activeClaim,
             providerEventAt,
-            providerSignatures: replay.providerSignatures,
-            signedProviderSignatureId: replay.relatedSignatureId,
+            providerSignatures,
+            signedProviderSignatureId: replay.eventType === "signature_request_all_signed" ? null : replay.relatedSignatureId,
           })
         : null;
     if (
       signerReconciliation === "unavailable" &&
       (request.status === "error" ||
-        replay.providerSignatures.length > 0)
+        providerSignatures.length > 0)
     ) {
       throw new SafeWebhookProcessingError("SIGNER_RECONCILE_UNAVAILABLE", 503);
     }
@@ -273,7 +283,7 @@ export async function handleDropboxSignWebhook(input: {
     if (
       normalized.artifactReady &&
       authoritativeStatus === "signed" &&
-      request.signedPdfPath === null
+      (request.signedPdfPath === null || request.signedPdfPath === `${identity.orgId}/${request.propertyId}/esign/${request.id}/signed.pdf`)
     ) {
       const pdf = await input.dependencies.pdfProvider.downloadSignedPdf({
         ...identity,

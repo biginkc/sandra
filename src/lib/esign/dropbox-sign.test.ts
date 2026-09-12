@@ -493,13 +493,14 @@ describe("Dropbox Sign provider", () => {
     });
   });
 
-  it("reads provider-side request metadata for webhook attachment proof", async () => {
+  it.each([true, false, null])("reads authoritative request completion with attachment proof: %s", async (isComplete) => {
     sdk.get.mockResolvedValue({
       body: {
         signatureRequest: {
           signatureRequestId: "provider-request-1",
           metadata: { sandra_request_id: "local-uuid" },
           testMode: true,
+          isComplete,
         },
       },
     });
@@ -519,6 +520,8 @@ describe("Dropbox Sign provider", () => {
       signatureRequestId: "provider-request-1",
       localRequestId: "local-uuid",
       testMode: true,
+      isComplete,
+      signatures: [],
     });
     expect(sdk.get).toHaveBeenCalledWith("provider-request-1");
     expect(sdk.interceptorOptions.at(-1)).toEqual({
