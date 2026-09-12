@@ -130,6 +130,7 @@ export type MyLeadAttempt = {
   occurredLabel: string
   sourceLabel?: string
   recordingUrl?: string | null
+  callActivityId?: string | null
 }
 
 export type MyLeadAppointment = {
