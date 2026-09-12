@@ -11,8 +11,12 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { motivationResponse, offerAmountCents, offerFollowUp } from "@/lib/my-leads/validation"
 import {
+  DIALOG_CONTENT_CLASS,
   DateTimeField,
   FieldError,
+  OptionCard,
+  SELECT_FIELD_CLASS,
+  TEXT_FIELD_CLASS,
   WorkflowDialogFooter,
   WorkflowDialogHeader,
   WorkflowFormError,
@@ -151,7 +155,9 @@ export function AcquisitionOfferDialog({
         else closeDialog()
       }}
     >
-      <DialogContent className="flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden sm:max-w-xl">
+      <DialogContent
+        className={`flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden ${DIALOG_CONTENT_CLASS}`}
+      >
         <WorkflowDialogHeader
           title="Log offer"
           description={`Record the offer already made to ${propertyLabel}. This does not send a contract or create a follow-up task.`}
@@ -163,16 +169,20 @@ export function AcquisitionOfferDialog({
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="acquisition-offer-amount">Offer amount</Label>
-                <Input
-                  id="acquisition-offer-amount"
-                  inputMode="decimal"
-                  value={amount}
-                  onChange={(event) => setAmount(event.target.value)}
-                  placeholder="0.00"
-                  aria-invalid={Boolean(fieldError("amount"))}
-                  aria-describedby={fieldError("amount") ? "acquisition-offer-amount-error" : undefined}
-                  aria-required="true"
-                />
+                <div className="flex items-center gap-1.5 rounded-[12px] border border-border px-3 has-focus-visible:border-ring has-focus-visible:ring-3 has-focus-visible:ring-ring/50">
+                  <span className="text-sm font-semibold text-muted-foreground">$</span>
+                  <Input
+                    id="acquisition-offer-amount"
+                    inputMode="decimal"
+                    value={amount}
+                    onChange={(event) => setAmount(event.target.value)}
+                    placeholder="0.00"
+                    aria-invalid={Boolean(fieldError("amount"))}
+                    aria-describedby={fieldError("amount") ? "acquisition-offer-amount-error" : undefined}
+                    aria-required="true"
+                    className="h-[36px] border-0 px-0 font-semibold shadow-none focus-visible:ring-0"
+                  />
+                </div>
                 <FieldError id="acquisition-offer-amount-error" message={fieldError("amount")} />
               </div>
               <div className="flex flex-col gap-1.5">
@@ -184,7 +194,7 @@ export function AcquisitionOfferDialog({
                   aria-invalid={Boolean(fieldError("method"))}
                   aria-describedby={fieldError("method") ? "acquisition-offer-method-error" : undefined}
                   aria-required="true"
-                  className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
+                  className={SELECT_FIELD_CLASS}
                 >
                   <option value="">Choose method</option>
                   <option value="verbal">Verbal</option>
@@ -213,11 +223,11 @@ export function AcquisitionOfferDialog({
             </div>
 
             {motivationRequired ? (
-              <fieldset className="flex flex-col gap-3 rounded-lg border border-border p-4">
-                <legend className="px-1 text-sm font-semibold">Motivation response</legend>
-                <label className="flex items-start gap-2 text-sm">
-                  <input
-                    type="radio"
+              <div className="flex flex-col gap-2">
+                <Label>Motivation response</Label>
+                <div className="flex flex-col gap-2">
+                  <OptionCard
+                    id="acquisition-offer-motivation-specified"
                     name="acquisition-offer-motivation-response"
                     value="specified"
                     checked={motivationKind === "specified"}
@@ -225,13 +235,10 @@ export function AcquisitionOfferDialog({
                       setMotivationKind("specified")
                       clearClientErrors()
                     }}
-                    className="mt-0.5"
+                    label="Seller specified a motivation"
                   />
-                  <span>Seller specified a motivation</span>
-                </label>
-                <label className="flex items-start gap-2 text-sm">
-                  <input
-                    type="radio"
+                  <OptionCard
+                    id="acquisition-offer-motivation-none"
                     name="acquisition-offer-motivation-response"
                     value="no_motivation"
                     checked={motivationKind === "no_motivation"}
@@ -240,10 +247,9 @@ export function AcquisitionOfferDialog({
                       setMotivationText("")
                       clearClientErrors()
                     }}
-                    className="mt-0.5"
+                    label="No motivation provided"
                   />
-                  <span>No motivation provided</span>
-                </label>
+                </div>
                 {motivationKind === "specified" && (
                   <div className="flex flex-col gap-1.5">
                     <Label htmlFor="acquisition-offer-motivation-text">Motivation</Label>
@@ -255,13 +261,14 @@ export function AcquisitionOfferDialog({
                       aria-describedby={fieldError("motivationText") ? "acquisition-offer-motivation-text-error" : undefined}
                       placeholder="What is driving the seller?"
                       rows={3}
+                      className={TEXT_FIELD_CLASS}
                     />
                     <FieldError id="acquisition-offer-motivation-text-error" message={fieldError("motivationText")} />
                   </div>
                 )}
-              </fieldset>
+              </div>
             ) : (
-              <p className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+              <p className="rounded-[12px] border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
                 Motivation is already recorded for this lead.
               </p>
             )}
@@ -272,7 +279,7 @@ export function AcquisitionOfferDialog({
                 id="acquisition-offer-temperature"
                 value={temperature || ""}
                 onChange={(event) => setTemperature((event.target.value || null) as AcquisitionTemperature)}
-                className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
+                className={SELECT_FIELD_CLASS}
               >
                 <option value="">Keep temperature unchanged</option>
                 <option value="hot">Hot</option>

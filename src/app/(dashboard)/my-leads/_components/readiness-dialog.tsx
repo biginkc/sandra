@@ -10,7 +10,11 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { motivationResponse } from "@/lib/my-leads/validation"
 import {
+  DIALOG_CONTENT_CLASS,
   FieldError,
+  OptionCard,
+  SELECT_FIELD_CLASS,
+  TEXT_FIELD_CLASS,
   WorkflowDialogFooter,
   WorkflowDialogHeader,
   WorkflowFormError,
@@ -103,7 +107,9 @@ export function AcquisitionReadinessDialog({
         else closeDialog()
       }}
     >
-      <DialogContent className="flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden sm:max-w-xl">
+      <DialogContent
+        className={`flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden ${DIALOG_CONTENT_CLASS}`}
+      >
         <WorkflowDialogHeader
           title="Ready to make an offer"
           description={`Capture the seller's motivation before moving ${propertyLabel} to Needs offer / Interested.`}
@@ -112,11 +118,11 @@ export function AcquisitionReadinessDialog({
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
             <WorkflowFormError message={clientError || submitState.error} />
 
-            <fieldset className="flex flex-col gap-3 rounded-lg border border-border p-4">
-              <legend className="px-1 text-sm font-semibold">Motivation response</legend>
-              <label className="flex items-start gap-2 text-sm">
-                <input
-                  type="radio"
+            <div className="flex flex-col gap-2">
+              <Label>Motivation response</Label>
+              <div className="flex flex-col gap-2">
+                <OptionCard
+                  id="acquisition-motivation-specified"
                   name="acquisition-motivation-response"
                   value="specified"
                   checked={motivationKind === "specified"}
@@ -124,13 +130,10 @@ export function AcquisitionReadinessDialog({
                     setMotivationKind("specified")
                     clearClientErrors()
                   }}
-                  className="mt-0.5"
+                  label="Seller specified a motivation"
                 />
-                <span>Seller specified a motivation</span>
-              </label>
-              <label className="flex items-start gap-2 text-sm">
-                <input
-                  type="radio"
+                <OptionCard
+                  id="acquisition-motivation-none"
                   name="acquisition-motivation-response"
                   value="no_motivation"
                   checked={motivationKind === "no_motivation"}
@@ -139,10 +142,9 @@ export function AcquisitionReadinessDialog({
                     setMotivationText("")
                     clearClientErrors()
                   }}
-                  className="mt-0.5"
+                  label="No motivation provided"
                 />
-                <span>No motivation provided</span>
-              </label>
+              </div>
               {motivationKind === "specified" && (
                 <div className="flex flex-col gap-1.5">
                   <Label htmlFor="acquisition-motivation-text">Motivation</Label>
@@ -154,11 +156,12 @@ export function AcquisitionReadinessDialog({
                     aria-describedby={clientFieldErrors.motivationText || submitState.fieldErrors.motivationText ? "acquisition-motivation-text-error" : undefined}
                     placeholder="What is driving the seller?"
                     rows={4}
+                    className={TEXT_FIELD_CLASS}
                   />
                   <FieldError id="acquisition-motivation-text-error" message={clientFieldErrors.motivationText || submitState.fieldErrors.motivationText} />
                 </div>
               )}
-            </fieldset>
+            </div>
 
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="acquisition-motivation-temperature">Temperature (optional)</Label>
@@ -166,7 +169,7 @@ export function AcquisitionReadinessDialog({
                 id="acquisition-motivation-temperature"
                 value={temperature || ""}
                 onChange={(event) => setTemperature((event.target.value || null) as AcquisitionTemperature)}
-                className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm"
+                className={SELECT_FIELD_CLASS}
               >
                 <option value="">Keep temperature unchanged</option>
                 <option value="hot">Hot</option>

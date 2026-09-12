@@ -1,12 +1,14 @@
 import {
   AlertTriangle,
-  CalendarClock,
+  ArrowRight,
+  Banknote,
+  CalendarCheck,
   ChevronDown,
-  ChevronUp,
+  ChevronRight,
+  Clock,
   ExternalLink,
-  Clock3,
+  MapPin,
   Phone,
-  UserRound,
 } from "lucide-react"
 
 import Link from "next/link"
@@ -35,9 +37,9 @@ const WARNING_LABELS: Record<MyLeadWarning, string> = {
 }
 
 const TEMPERATURE_CLASSES = {
-  hot: "bg-red-500",
-  warm: "bg-amber-500",
-  cold: "bg-sky-500",
+  hot: "bg-red-600 dark:bg-red-500",
+  warm: "bg-amber-600 dark:bg-amber-500",
+  cold: "bg-blue-600 dark:bg-blue-500",
 } as const
 
 export const STAGE_COLORS: Record<MyLeadStage, string> = {
@@ -56,46 +58,76 @@ export const STAGE_NEXT: Record<MyLeadStage, string> = {
   under_contract: "Signed contract recorded. Archive only when you choose.",
 }
 
+/** Row-detail "Needs:" helper copy — static per-stage wording, distinct from the
+ * section-level STAGE_NEXT text (which other surfaces consume by name). */
+const NEEDS_COPY: Record<MyLeadStage, React.ReactNode> = {
+  not_contacted: (
+    <>
+      Needs: <span className="font-bold text-blue-700 dark:text-blue-300">first attempt logged</span> — moves to Contacted automatically.
+    </>
+  ),
+  contacted: (
+    <>
+      Needs: <span className="font-bold text-green-700 dark:text-green-400">reached ✓</span> — mark ready for an offer when there&apos;s a reason to keep going.
+    </>
+  ),
+  needs_offer: (
+    <>
+      Needs: <span className="font-bold text-amber-700 dark:text-amber-400">offer logged</span> (amount · date · how) — moves to Offer sent.
+    </>
+  ),
+  offer_sent: (
+    <>
+      Needs: <span className="font-bold text-green-700 dark:text-green-400">contract signed</span> → Under contract · <span className="font-bold text-red-700 dark:text-red-400">declined</span> → back to Contacted.
+    </>
+  ),
+  under_contract: (
+    <>
+      Signed. <span className="font-bold text-foreground">Archive</span> when you&apos;re ready.
+    </>
+  ),
+}
+
 const TEMPERATURE_BORDERS = {
-  hot: "border-l-red-500",
-  warm: "border-l-amber-500",
-  cold: "border-l-sky-500",
+  hot: "border-l-red-600",
+  warm: "border-l-amber-600",
+  cold: "border-l-blue-600",
 } as const
 
 const ACTIONS_BY_STAGE: Record<
   MyLeadStage,
-  readonly { action: MyLeadAction; label: string }[]
+  readonly { action: MyLeadAction; label: string; primary?: boolean; danger?: boolean }[]
 > = {
   not_contacted: [
-    { action: "start-call", label: "Start call" },
+    { action: "start-call", label: "Start call", primary: true },
     { action: "log-attempt", label: "Log attempt" },
     { action: "contract-signed", label: "Contract signed" },
-    { action: "handoff", label: "Handoff" },
+    { action: "handoff", label: "Handoff", danger: true },
   ],
   contacted: [
+    { action: "ready-for-offer", label: "Ready to make an offer", primary: true },
     { action: "start-call", label: "Start call" },
     { action: "log-attempt", label: "Log attempt" },
-    { action: "ready-for-offer", label: "Ready to make an offer" },
     { action: "log-offer", label: "Log offer" },
     { action: "contract-signed", label: "Contract signed" },
     { action: "schedule-next-step", label: "Schedule next step" },
-    { action: "handoff", label: "Handoff" },
+    { action: "handoff", label: "Handoff", danger: true },
   ],
   needs_offer: [
+    { action: "log-offer", label: "Log offer", primary: true },
     { action: "start-call", label: "Start call" },
     { action: "log-attempt", label: "Log attempt" },
-    { action: "log-offer", label: "Log offer" },
     { action: "contract-signed", label: "Contract signed" },
-    { action: "handoff", label: "Handoff" },
+    { action: "handoff", label: "Handoff", danger: true },
   ],
   offer_sent: [
+    { action: "contract-signed", label: "Contract signed", primary: true },
     { action: "start-call", label: "Start call" },
     { action: "log-attempt", label: "Log attempt" },
-    { action: "contract-signed", label: "Contract signed" },
-    { action: "decline-offer", label: "Offer declined" },
-    { action: "handoff", label: "Handoff" },
+    { action: "decline-offer", label: "Offer declined", danger: true },
+    { action: "handoff", label: "Handoff", danger: true },
   ],
-  under_contract: [{ action: "archive", label: "Archive" }],
+  under_contract: [{ action: "archive", label: "Archive", primary: true }],
 }
 
 export type MyLeadQueueRowProps = {
@@ -130,17 +162,22 @@ export function MyLeadQueueRow({
         ? "No motivation provided"
         : "Motivation unanswered"
 
+  const currentIndex = MY_LEAD_STAGE_ORDER.indexOf(row.queueStage)
+  const actions = ACTIONS_BY_STAGE[row.queueStage]
+  const primaryAction = actions.find((entry) => entry.primary) ?? actions[0]
+  const secondaryActions = actions.filter((entry) => entry !== primaryAction)
+
   return (
     <article
       className={cn(
-        "overflow-hidden rounded-[14px] border border-l-[3px] bg-card text-card-foreground",
-        temperature ? TEMPERATURE_BORDERS[temperature] : "border-l-stone-300"
+        "overflow-hidden rounded-[14px] border border-l-[3px] border-[#e5e1df] bg-card text-card-foreground dark:border-border",
+        temperature ? TEMPERATURE_BORDERS[temperature] : "border-l-stone-300 dark:border-l-stone-700"
       )}
       data-testid={`my-lead-row-${row.propertyId}`}
     >
       <button
         type="button"
-        className="flex w-full min-w-0 items-center gap-3 px-4 py-3 text-left hover:bg-muted/30 outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/50"
+        className="flex w-full min-w-0 items-center gap-3.5 px-4 py-3.5 text-left hover:bg-muted/30 outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/50"
         aria-label={detailsOpen ? `Hide details for ${row.address}` : `Show details for ${row.address}`}
         aria-describedby={`my-lead-summary-${row.propertyId}`}
         aria-expanded={detailsOpen}
@@ -148,118 +185,165 @@ export function MyLeadQueueRow({
         onClick={onToggleDetails}
       >
         <span
-          className={cn("size-2.5 shrink-0 rounded-full", temperature ? TEMPERATURE_CLASSES[temperature] : "border-2 border-stone-300")}
+          className={cn(
+            "size-[9px] shrink-0 rounded-full box-border",
+            temperature ? TEMPERATURE_CLASSES[temperature] : "border-2 border-stone-300 dark:border-stone-600"
+          )}
           title={temperature ? `${capitalize(temperature)} motivation` : motivationLabel}
           aria-label={temperature ? `${temperature} temperature` : motivationLabel}
         />
         <span id={`my-lead-summary-${row.propertyId}`} className="flex min-w-0 flex-1 flex-col gap-x-4 gap-y-2 xl:flex-row xl:items-center">
           <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="break-words text-sm font-bold">{row.homeownerName || "Homeowner unavailable"}</span>
-            <span className="break-words text-xs text-muted-foreground">{row.address}</span>
-            {row.queueStage === "not_contacted" && <Badge variant="secondary" className="text-blue-700 dark:text-blue-300">New</Badge>}
+            <span className="break-words text-[14.5px] font-bold">{row.homeownerName || "Homeowner unavailable"}</span>
+            <span className="break-words text-[12.5px] text-muted-foreground">{row.address}</span>
+            {row.queueStage === "not_contacted" && (
+              <Badge
+                variant="secondary"
+                className="rounded-md border border-blue-200 bg-blue-100 px-[7px] py-[2px] text-[9.5px] font-extrabold tracking-wide text-blue-700 uppercase dark:border-blue-900 dark:bg-blue-950 dark:text-blue-300"
+              >
+                New
+              </Badge>
+            )}
             {row.archived && <Badge variant="secondary">Archived</Badge>}
           </span>
-          <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
-            <span className="tabular-nums">{row.attemptsCount} {row.attemptsCount === 1 ? "attempt" : "attempts"}</span>
-            <span title={row.assignment.exactLabel} className="tabular-nums">{row.assignment.state === "known" ? `Assigned ${row.assignment.label}` : row.assignment.state === "launch_initialized" ? "Existing lead · assignment unknown" : "Assignment unavailable"}</span>
+          <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px] font-semibold text-muted-foreground">
+            <span className="font-mono tabular-nums">{row.attemptsCount} {row.attemptsCount === 1 ? "attempt" : "attempts"}</span>
+            <span title={row.assignment.exactLabel} className="font-mono tabular-nums">{row.assignment.state === "known" ? `assigned ${row.assignment.label}` : row.assignment.state === "launch_initialized" ? "existing lead · assignment unknown" : "assignment unavailable"}</span>
             {row.warningReasons.map((warning) => (
-              <span key={warning} className="inline-flex max-w-full items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-1 font-semibold text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+              <span key={warning} className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-[#fecaca] bg-[#fee2e2] px-2.5 py-1 text-[11.5px] font-bold text-[#b91c1c] dark:border-red-900 dark:bg-red-950 dark:text-red-300">
                 <AlertTriangle className="size-3 shrink-0" aria-hidden="true" />
                 <span className="break-words">{WARNING_LABELS[warning]}</span>
               </span>
             ))}
-            {row.queueStage === "contacted" && row.nextStep && <span className="max-w-full break-words rounded-full bg-green-50 px-2 py-1 text-green-700 dark:bg-green-950 dark:text-green-200">{row.nextStep.kind === "callback" ? "Callback" : "Appointment"} · {row.nextStep.label}</span>}
-            {row.queueStage === "needs_offer" && !row.warningReasons.includes("offer_needed_overdue") && <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-800 dark:bg-amber-950 dark:text-amber-200">Offer needed</span>}
-            {row.offer && <span className="rounded-full bg-violet-50 px-2 py-1 font-semibold text-violet-700 dark:bg-violet-950 dark:text-violet-200">{row.offer.amountLabel} · {capitalize(row.offer.outcome)}</span>}
+            {row.queueStage === "contacted" && row.nextStep && (
+              <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-[#bbf7d0] bg-[#dcfce7] px-2.5 py-1 text-[11.5px] font-bold text-[#15803d] dark:border-green-900 dark:bg-green-950 dark:text-green-300">
+                <CalendarCheck className="size-3 shrink-0" aria-hidden="true" />
+                <span className="break-words">{row.nextStep.kind === "callback" ? "Callback" : "Appointment"} · {row.nextStep.label}</span>
+              </span>
+            )}
+            {row.queueStage === "needs_offer" && !row.warningReasons.includes("offer_needed_overdue") && (
+              <span className="rounded-full border border-[#fde68a] bg-[#fef3c7] px-2.5 py-1 text-[11.5px] font-bold text-[#b45309] dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">Offer needed</span>
+            )}
+            {row.offer && (
+              <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-[#ddd6fe] bg-[#ede9fe] px-2.5 py-1 text-[11.5px] font-bold text-[#6d28d9] dark:border-violet-900 dark:bg-violet-950 dark:text-violet-300">
+                <Banknote className="size-3 shrink-0" aria-hidden="true" />
+                <span className="break-words">{row.offer.amountLabel} · {capitalize(row.offer.outcome)}</span>
+              </span>
+            )}
           </span>
         </span>
-        {detailsOpen ? <ChevronUp className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" /> : <ChevronDown className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
+        {detailsOpen ? (
+          <ChevronDown className="size-4 shrink-0 text-[#a8a29e]" aria-hidden="true" />
+        ) : (
+          <ChevronRight className="size-4 shrink-0 text-[#a8a29e]" aria-hidden="true" />
+        )}
       </button>
 
       <div id={`my-lead-detail-${row.propertyId}`} hidden={!detailsOpen}>
       {detailsOpen && <>
-      <p className="flex items-center gap-2 border-t px-4 pt-3 text-sm text-muted-foreground"><Phone className="size-3.5" aria-hidden="true" />{row.phone || "Phone unavailable"}</p>
-      <div className="grid gap-4 border-t px-4 py-4 text-sm sm:grid-cols-2">
-        <InfoItem icon={<UserRound aria-hidden="true" />} label="Assigned">
-          <span title={row.assignment.exactLabel}>{row.assignment.label || "Assignment unavailable"}</span>
-          {row.assignment.state === "launch_initialized" && (
-            <span className="text-xs text-muted-foreground">Initialized at launch</span>
-          )}
-          {row.assignment.state === "unknown" && (
-            <span className="text-xs text-muted-foreground">Assignment unavailable</span>
-          )}
-        </InfoItem>
+      <div className="border-t border-[#f0eeec] pl-[33px] pr-[18px] pt-2 pb-[18px] dark:border-border">
+        <p className="flex items-center gap-2 pt-2 text-sm text-muted-foreground"><Phone className="size-3.5" aria-hidden="true" />{row.phone || "Phone unavailable"}</p>
 
-        <InfoItem icon={<Phone aria-hidden="true" />} label="First call">
-          <span title={row.firstCall.exactLabel}>{row.firstCall.label || firstCallLabel(row.firstCall.state)}</span>
-          <span className="text-xs text-muted-foreground">
-            {row.attemptsCount} {row.attemptsCount === 1 ? "attempt" : "attempts"}
-          </span>
-        </InfoItem>
-
-        <InfoItem icon={<Clock3 aria-hidden="true" />} label="Motivation">
-          <span className="inline-flex items-start gap-1.5">
-            {temperature && (
-              <span
-                className={cn("size-2 rounded-full", TEMPERATURE_CLASSES[temperature])}
-                aria-label={`${temperature} temperature`}
-              />
+        <div className="flex flex-wrap gap-2 pt-4">
+          <span
+            className={cn(
+              "inline-flex items-center gap-[7px] rounded-[9px] border px-3 py-[7px] text-xs font-semibold",
+              row.firstCall.state === "started"
+                ? "border-[#bbf7d0] bg-[#dcfce7] text-[#15803d] dark:border-green-900 dark:bg-green-950 dark:text-green-300"
+                : "border-[#e5e1df] bg-[#faf9f7] text-muted-foreground dark:border-border dark:bg-muted/30"
             )}
-            {temperature ? `${capitalize(temperature)} · ` : ""}
-            {motivationLabel}
+            title={row.firstCall.exactLabel}
+          >
+            <Clock className="size-3.5" aria-hidden="true" />
+            {row.firstCall.label || firstCallLabel(row.firstCall.state)}
           </span>
-        </InfoItem>
-
-        <InfoItem icon={<CalendarClock aria-hidden="true" />} label="Next step">
-          <span>{row.nextStep?.label || "No future callback or appointment"}</span>
-        </InfoItem>
-      </div>
-
-      <div className="space-y-3 border-t px-4 py-4">
-        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Where it is</p>
-        <ol aria-label="Lead progress" className="flex flex-wrap gap-x-4 gap-y-3 text-xs">
-          {MY_LEAD_STAGE_ORDER.map((stage) => (
-            <li key={stage} aria-current={stage === row.queueStage ? "step" : undefined} className={cn("flex items-center gap-2", stage === row.queueStage ? "font-bold text-foreground" : "text-muted-foreground")}>
-              <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full border-2", stage === row.queueStage ? "border-blue-600 bg-blue-600 ring-2 ring-blue-200" : "border-stone-300")} />
-              {MY_LEAD_STAGE_LABELS[stage]}
-            </li>
-          ))}
-        </ol>
-        <p className="text-sm text-muted-foreground">{STAGE_NEXT[row.queueStage]}</p>
-      </div>
-
-      {row.offer && (
-        <div className="border-t px-4 py-2 text-sm">
-          <span className="font-medium">Offer: {row.offer.amountLabel}</span>
-          <span className="ml-2 text-muted-foreground">
-            {row.offer.method} · Sent {row.offer.sentLabel}
-            {row.offer.followUpLabel && ` · Follow-up ${row.offer.followUpLabel}`}
+          <span
+            className="inline-flex items-center gap-[7px] rounded-[9px] border border-[#e5e1df] bg-[#faf9f7] px-3 py-[7px] text-xs font-semibold text-muted-foreground dark:border-border dark:bg-muted/30"
+            title={row.assignment.exactLabel}
+          >
+            <MapPin className="size-3.5" aria-hidden="true" />
+            {row.assignment.state === "known"
+              ? `assigned ${row.assignment.label}`
+              : row.assignment.state === "launch_initialized"
+                ? "existing lead · assignment unknown"
+                : "assignment unavailable"}
           </span>
-          {row.offer.outcome !== "pending" && (
-            <Badge variant="secondary" className="ml-2">
-              {capitalize(row.offer.outcome)}
-            </Badge>
+        </div>
+
+        <div className="flex flex-wrap gap-x-6 gap-y-1 pt-3 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5">
+            {temperature && <span className={cn("size-2 rounded-full", TEMPERATURE_CLASSES[temperature])} aria-hidden="true" />}
+            <span className="font-semibold text-foreground">Motivation:</span> {motivationLabel}
+          </span>
+          {row.nextStep && (
+            <span>
+              <span className="font-semibold text-foreground">Next step:</span> {row.nextStep.kind === "callback" ? "Callback" : "Appointment"} · {row.nextStep.label}
+            </span>
           )}
         </div>
-      )}
 
-      <div className="flex flex-wrap gap-2 border-t bg-muted/20 px-4 py-3">
-        {ACTIONS_BY_STAGE[row.queueStage].map(({ action, label }) => (
-          <Button
-            key={action}
-            type="button"
-            variant={action === "start-call" || action === "log-attempt" || action === "log-offer" ? "default" : "outline"}
-            size="sm"
-            onClick={(event) => {
-              event.stopPropagation()
-              onStageAction(action, row)
-            }}
-          >
-            {label}
-          </Button>
-        ))}
-        <Link href={`/leads/${row.propertyId}`} prefetch={false} className={buttonVariants({ variant: "outline", size: "sm" })}>Open lead</Link>
-        {row.zillowHref && <a href={row.zillowHref} target="_blank" rel="noopener noreferrer" className={buttonVariants({ variant: "outline", size: "sm" })}><ExternalLink aria-hidden="true" /> Open in Zillow</a>}
+        <div className="pt-4">
+          <p className="mb-[9px] text-[10px] font-extrabold tracking-[0.08em] text-muted-foreground uppercase">Where it is</p>
+          <ol aria-label="Lead progress" className="flex flex-wrap items-center text-[11px] font-bold">
+            {MY_LEAD_STAGE_ORDER.map((stage, index) => {
+              const status =
+                index < currentIndex ? "done" : index === currentIndex ? "cur" : index === currentIndex + 1 ? "next" : "upcoming"
+              return (
+                <li key={stage} className="flex items-center">
+                  <span
+                    aria-current={stage === row.queueStage ? "step" : undefined}
+                    className={cn("flex items-center gap-[7px]", index > 0 && "ml-0")}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "size-[11px] shrink-0 rounded-full border-2 box-border",
+                        status === "done" && "border-[#a8a29e] bg-[#a8a29e]",
+                        status === "cur" && "border-blue-600 bg-blue-600 ring-[3px] ring-blue-600/20",
+                        status === "next" && "border-dashed border-blue-300",
+                        status === "upcoming" && "border-stone-300 dark:border-stone-600"
+                      )}
+                    />
+                    <span
+                      className={cn(
+                        "whitespace-nowrap",
+                        status === "done" && "text-muted-foreground",
+                        status === "cur" && "text-foreground",
+                        status === "next" && "text-blue-700 dark:text-blue-400",
+                        status === "upcoming" && "text-[#a8a29e]"
+                      )}
+                    >
+                      {MY_LEAD_STAGE_LABELS[stage]}
+                    </span>
+                  </span>
+                  {index < MY_LEAD_STAGE_ORDER.length - 1 && (
+                    <span className={cn("mx-[7px] h-[2px] w-5 shrink-0", status === "done" ? "bg-[#a8a29e]" : "bg-[#e5e1df] dark:bg-border")} />
+                  )}
+                </li>
+              )
+            })}
+          </ol>
+          <p className="mt-2.5 text-xs font-medium text-muted-foreground">{NEEDS_COPY[row.queueStage]}</p>
+        </div>
+
+        {row.offer && (
+          <div className="mt-4 inline-grid grid-cols-3 gap-5 rounded-xl border border-[#e5e1df] bg-[#faf9f7] px-4 py-3 text-xs dark:border-border dark:bg-muted/30">
+            <div>
+              <div className="mb-[3px] text-[10px] font-extrabold tracking-[0.06em] text-muted-foreground uppercase">Amount</div>
+              <div className="font-mono text-[13px] font-bold">{row.offer.amountLabel}</div>
+            </div>
+            <div>
+              <div className="mb-[3px] text-[10px] font-extrabold tracking-[0.06em] text-muted-foreground uppercase">Sent</div>
+              <div className="font-mono text-[13px] font-bold">{row.offer.method} · {row.offer.sentLabel}</div>
+            </div>
+            <div>
+              <div className="mb-[3px] text-[10px] font-extrabold tracking-[0.06em] text-muted-foreground uppercase">Status</div>
+              <div className="font-mono text-[13px] font-bold">
+                {row.offer.followUpLabel ? `Follow-up ${row.offer.followUpLabel}` : capitalize(row.offer.outcome)}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <MyLeadDetailPanel
@@ -269,29 +353,54 @@ export function MyLeadQueueRow({
             onChanged={onDetailChanged ? () => onDetailChanged() : undefined}
             onLoadDetailPage={onLoadDetailPage}
           />
+
+      <div className="flex flex-wrap items-center gap-2.5 border-t border-[#f0eeec] px-4 pt-4 dark:border-border">
+        <Button
+          type="button"
+          variant="default"
+          size="sm"
+          onClick={(event) => {
+            event.stopPropagation()
+            onStageAction(primaryAction.action, row)
+          }}
+        >
+          <ArrowRight className="size-[15px]" aria-hidden="true" />
+          {primaryAction.label}
+        </Button>
+        <Link href={`/leads/${row.propertyId}`} prefetch={false} className={buttonVariants({ variant: "outline", size: "sm" })}>Open lead</Link>
+        {row.zillowHref && (
+          <a
+            href={row.zillowHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={buttonVariants({ variant: "outline", size: "sm", className: "border-[#bfdbfe] text-[#1d4ed8] dark:border-blue-900 dark:text-blue-300" })}
+          >
+            <ExternalLink aria-hidden="true" /> Open in Zillow
+          </a>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 px-4 pt-2.5 pb-4">
+        {secondaryActions.map(({ action, label, danger }) => (
+          <Button
+            key={action}
+            type="button"
+            variant={danger ? "destructive" : "outline"}
+            size="sm"
+            className={cn(!danger && "border-[#e5e1df] bg-background text-muted-foreground hover:text-foreground dark:border-border", danger && "ml-auto")}
+            onClick={(event) => {
+              event.stopPropagation()
+              onStageAction(action, row)
+            }}
+          >
+            {action === "start-call" && <Phone className="size-[13px]" aria-hidden="true" />}
+            {label}
+          </Button>
+        ))}
+      </div>
       </>}
       </div>
     </article>
-  )
-}
-
-function InfoItem({
-  icon,
-  label,
-  children,
-}: {
-  icon: React.ReactNode
-  label: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="min-w-0 space-y-1">
-      <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        <span className="[&>svg]:size-3.5">{icon}</span>
-        {label}
-      </p>
-      <div className="flex min-w-0 flex-col break-words whitespace-normal text-foreground">{children}</div>
-    </div>
   )
 }
 

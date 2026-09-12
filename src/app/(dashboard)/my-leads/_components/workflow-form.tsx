@@ -1,6 +1,6 @@
 "use client"
 
-import { useRef, useState } from "react"
+import { useRef, useState, type ReactNode } from "react"
 import { AlertCircle } from "lucide-react"
 
 import {
@@ -11,9 +11,80 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
+import { cn } from "@/lib/utils"
 import { wallTimeToUtc } from "@/lib/time/zoned"
 import { ACQUISITION_TIME_ZONE } from "@/lib/my-leads/time"
 import type { AcquisitionFormSubmitResult, AcquisitionSubmit } from "./types"
+
+// Shared card shell to match the approved My Leads dialog mock: a 22px
+// rounded card (~420-440px) with a muted footer band. Spread this onto each
+// dialog's <DialogContent className={...}>.
+export const DIALOG_CONTENT_CLASS =
+  "rounded-[22px] sm:max-w-[440px] gap-4"
+
+// Native select styled to look like the mock's rounded field control.
+export const SELECT_FIELD_CLASS =
+  "border-border bg-background flex h-[38px] w-full rounded-[12px] border px-3 text-sm font-normal outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+
+// Text input / textarea styled to look like the mock's .mtext control.
+export const TEXT_FIELD_CLASS = "rounded-[12px] border-border"
+
+export function RequiredHint({ children = "Required" }: { children?: ReactNode }) {
+  return <span className="ml-1 text-xs font-normal text-destructive">— {children}</span>
+}
+
+// Presentational radio "option card" matching the mock's .opt / .opt.sel rows.
+// Wraps a real <input type="radio"> so it stays a role="radio" element for
+// tests and screen readers — only the visual treatment changes.
+export function OptionCard({
+  id,
+  name,
+  value,
+  checked,
+  onChange,
+  label,
+  hint,
+  className,
+}: {
+  id: string
+  name: string
+  value: string
+  checked: boolean
+  onChange: () => void
+  label: ReactNode
+  hint?: ReactNode
+  className?: string
+}) {
+  return (
+    <label
+      htmlFor={id}
+      className={cn(
+        "flex cursor-pointer items-center gap-2.5 rounded-[12px] border border-border px-3 py-2.5 text-sm transition-colors",
+        checked && "border-foreground bg-foreground/[0.04] font-medium",
+        className
+      )}
+    >
+      <input
+        type="radio"
+        id={id}
+        name={name}
+        value={value}
+        checked={checked}
+        onChange={onChange}
+        className="sr-only"
+      />
+      <span
+        aria-hidden="true"
+        className={cn(
+          "box-border size-4 shrink-0 rounded-full border-[1.5px] border-muted-foreground/40",
+          checked && "border-foreground bg-foreground shadow-[inset_0_0_0_2.5px_var(--popover)]"
+        )}
+      />
+      <span className="flex-1">{label}</span>
+      {hint ? <span className="text-xs font-normal text-muted-foreground">{hint}</span> : null}
+    </label>
+  )
+}
 
 export function WorkflowDialogHeader({
   title,
@@ -34,17 +105,19 @@ export function WorkflowDialogFooter({
   submitting,
   submitLabel,
   onCancel,
+  destructive = false,
 }: {
   submitting: boolean
   submitLabel: string
   onCancel: () => void
+  destructive?: boolean
 }) {
   return (
-    <DialogFooter>
+    <DialogFooter className="rounded-b-[22px]">
       <Button type="button" variant="outline" disabled={submitting} onClick={onCancel}>
         Cancel
       </Button>
-      <Button type="submit" disabled={submitting}>
+      <Button type="submit" variant={destructive ? "destructive" : "default"} disabled={submitting}>
         {submitting ? "Saving…" : submitLabel}
       </Button>
     </DialogFooter>
@@ -59,7 +132,7 @@ export function FieldError({ message, id }: { message?: string; id?: string }) {
 export function WorkflowFormError({ message }: { message: string | null }) {
   if (!message) return null
   return (
-    <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">
+    <div className="flex items-start gap-2 rounded-[12px] border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">
       <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
       <span>{message}</span>
     </div>
@@ -93,7 +166,7 @@ export function DateTimeField({
         onChange={(event) => onChange(event.target.value)}
         aria-invalid={Boolean(error)}
         aria-describedby={error ? errorId : undefined}
-        className="border-input bg-background flex h-9 w-full rounded-lg border px-2.5 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        className="border-input bg-background flex h-[38px] w-full rounded-[12px] border px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
       />
       <FieldError id={errorId} message={error} />
       <p className="text-xs text-muted-foreground">Central time ({ACQUISITION_TIME_ZONE})</p>
