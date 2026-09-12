@@ -163,10 +163,12 @@ export async function ensureTestUser(
   const MAX_USER_PAGES = 50;
   let existing: { id: string } | undefined;
   for (let page = 1; page <= MAX_USER_PAGES && !existing; page++) {
+    const inventoryStarted = performance.now();
     const { data: list, error: listErr } = await client.auth.admin.listUsers({
       page,
       perPage: 1000,
     });
+    console.log(`[auth-diagnostic] inventory page completed in ${Math.round(performance.now() - inventoryStarted)}ms`);
     if (listErr) throw listErr;
     const users = list?.users ?? [];
     existing = users.find(
@@ -180,6 +182,7 @@ export async function ensureTestUser(
     assertExistingUserMatchesIdentity(existing, identity);
     userId = existing.id;
   } else {
+    const creationStarted = performance.now();
     const { data: created, error: createErr } =
       await client.auth.admin.createUser({
         email: identity.email,
@@ -187,6 +190,7 @@ export async function ensureTestUser(
         email_confirm: true,
         app_metadata: identity.appMetadata,
       });
+    console.log(`[auth-diagnostic] create principal completed in ${Math.round(performance.now() - creationStarted)}ms`);
     if (createErr || !created?.user)
       throw createErr ?? new Error("createUser returned no user");
     assertExistingUserMatchesIdentity(created.user, identity);
@@ -210,6 +214,7 @@ export async function ensureTestUser(
       ): Promise<{ error: { message: string } | null }>;
     };
   };
+  const membershipStarted = performance.now();
   const { error: membershipErr } = await (client as unknown as MembershipWriter)
     .from("memberships")
     .upsert(
@@ -220,6 +225,7 @@ export async function ensureTestUser(
       },
       { onConflict: "user_id,org_id" },
     );
+  console.log(`[auth-diagnostic] membership upsert completed in ${Math.round(performance.now() - membershipStarted)}ms`);
   if (membershipErr) {
     throw new Error(
       `ensureTestUser: failed to upsert the run-scoped membership: ${membershipErr.message}`,
