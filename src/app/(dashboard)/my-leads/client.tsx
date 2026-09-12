@@ -18,6 +18,8 @@ import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,
 type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null};
 
 type CustomRangeStatus = 'incomplete'|'invalid'|'ready';
+const REFRESH_INTERVAL_MS = 30_000;
+const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
 
 function customRangeStatus(range:MyLeadDateRange|null):CustomRangeStatus {
   if(!range?.startDate||!range.endDate)return 'incomplete';
@@ -74,13 +76,13 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   },[refresh,selectedRangeStatus,serverScopeKey]);
   useEffect(()=>{
     if(!roster.settings.enabled)return;
-    const delay=Math.min(60_000,Math.max(1000,snapshot?.nextWarningAt?Date.parse(snapshot.nextWarningAt)-Date.now():60_000));
+    const delay=Math.min(REFRESH_INTERVAL_MS,Math.max(1000,snapshot?.nextWarningAt?Date.parse(snapshot.nextWarningAt)-Date.now():REFRESH_INTERVAL_MS));
     let cancelled=false;
     // A failed read does not replace snapshot, so it cannot re-arm this effect.
     // Keep retrying even after transport/authentication failures or hidden tabs.
     const tick=async()=>{
       try {if(!document.hidden)await refresh();}
-      finally {if(!cancelled)timer=setTimeout(()=>void tick(),60_000);}
+      finally {if(!cancelled)timer=setTimeout(()=>void tick(),REFRESH_INTERVAL_MS);}
     };
     let timer=setTimeout(()=>void tick(),delay);
     const onVisible=()=>{if(!document.hidden)void refresh();};
@@ -134,6 +136,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
     {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis?<p role="status">Loading My Leads…</p>:<>
+      {snapshot&&<p className="mb-2 text-sm text-muted-foreground">Checks for updates every 30 seconds while this page is visible. Last successful check: <time dateTime={snapshot.snapshotAt}>{refreshTime.format(new Date(snapshot.snapshotAt))}</time>.</p>}
       {search&&<p className="mb-2 text-sm text-muted-foreground">Section counts match your search. KPIs cover the selected rep.</p>}
       <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={kpiTiles(kpis)} search={search} selectedRepId={member} selectedPeriod={period} selectedDateRange={range}
         detailRevision={detailRevision}
