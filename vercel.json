@@ -45,7 +45,8 @@
     "deploymentEnabled": {
       "codex/my-leads-prd-20260911": false,
       "codex/my-leads-migration-history": false,
-      "codex/e2e-reliability-20260912": false
+      "codex/e2e-reliability-20260912": false,
+      "codex/e2e-auth-diagnostic-20260912": false
     }
   }
 }
