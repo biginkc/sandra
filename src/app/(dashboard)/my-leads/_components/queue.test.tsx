@@ -342,6 +342,59 @@ describe("MyLeadsQueue", () => {
     expect(row.queryByRole("button", { name: "Log attempt" })).not.toBeInTheDocument()
   })
 
+  it("describes the contacted gate without claiming the seller was reached", async () => {
+    const user = userEvent.setup()
+    render(<MyLeadsQueue {...buildProps()} />)
+
+    const row = within(screen.getByTestId("my-lead-row-property-2"))
+    await user.click(row.getByRole("button", { name: "Show details for 2 Main Street" }))
+
+    expect(row.getByText(/follow-up plan or offer decision/)).toBeInTheDocument()
+    expect(row.queryByText(/reached ✓/i)).not.toBeInTheDocument()
+  })
+
+  it("refetches open detail after a successful workflow mutation", async () => {
+    const user = userEvent.setup()
+    const onLoadDetail = vi.fn()
+      .mockResolvedValueOnce({ ok: true as const, detail: EMPTY_DETAIL })
+      .mockResolvedValueOnce({
+        ok: true as const,
+        detail: {
+          ...EMPTY_DETAIL,
+          offers: {
+            rows: [{ id: "offer-1", amountLabel: "$1", method: "Verbal", sentLabel: "Today", outcomeLabel: "Pending" }],
+            hasMore: false,
+            nextCursor: null,
+          },
+        },
+      })
+    const props = buildProps({ onLoadDetail })
+    const { rerender } = render(<MyLeadsQueue {...props} detailRevision={0} />)
+
+    await user.click(screen.getByRole("button", { name: "Show details for 1 Main Street" }))
+    await waitFor(() => expect(onLoadDetail).toHaveBeenCalledTimes(1))
+    rerender(<MyLeadsQueue {...props} detailRevision={1} />)
+
+    await waitFor(() => expect(screen.getByText("$1 · Verbal")).toBeInTheDocument())
+    expect(onLoadDetail).toHaveBeenCalledTimes(2)
+  })
+
+  it("does not invalidate other open details when another row is expanded", async () => {
+    const user = userEvent.setup()
+    const onLoadDetail = vi.fn(async () => ({ ok: true as const, detail: EMPTY_DETAIL }))
+    const props = buildProps({ onLoadDetail })
+    const { rerender } = render(<MyLeadsQueue {...props} detailRevision={1} />)
+
+    await user.click(screen.getByRole("button", { name: "Show details for 1 Main Street" }))
+    await waitFor(() => expect(onLoadDetail).toHaveBeenCalledTimes(1))
+    rerender(<MyLeadsQueue {...props} detailRevision={2} />)
+    await waitFor(() => expect(onLoadDetail).toHaveBeenCalledTimes(2))
+
+    await user.click(screen.getByRole("button", { name: "Show details for 2 Main Street" }))
+    await waitFor(() => expect(onLoadDetail).toHaveBeenCalledTimes(3))
+    expect(onLoadDetail).toHaveBeenCalledTimes(3)
+  })
+
   it("shows member selection only with owner authority", () => {
     const props = buildProps({ canSelectRep: false })
     const { rerender } = render(<MyLeadsQueue {...props} />)
