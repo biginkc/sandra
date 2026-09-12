@@ -1,5 +1,11 @@
 # My Leads stress-test campaign
 
+## Current workflow execution plan — 2026-09-12
+
+Use [WORKFLOW-TEST-PLAN.md](WORKFLOW-TEST-PLAN.md) to execute the expanded 26 user journeys as 83 independently tracked scenarios in [WORKFLOW-TEST-CASES.csv](WORKFLOW-TEST-CASES.csv). Use [WORKFLOW-TEST-RECEIPT.md](WORKFLOW-TEST-RECEIPT.md) for evidence. These new cases start NOT RUN; earlier campaign results are historical evidence, not new passes. Current user scope is desktop only, excluding mobile and Maria. Revalidate the candidate and runtime before execution; the candidate and mobile wording below describe the original inventory.
+
+## Original campaign inventory
+
 Objective: actively try to break every My Leads action and connected modal, establish reproducible defects, and prove persisted outcomes. Current candidate65c58eb0.
 
 ## Coverage
