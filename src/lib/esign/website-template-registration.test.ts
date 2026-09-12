@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProviderError } from "@/lib/errors/classes";
 
-import { ESIGN_MERGE_FIELD_NAMES, type ProviderTemplateMetadata } from "./contracts";
+import { ESIGN_MERGE_FIELD_NAMES, ESIGN_RESIDENTIAL_FIELD_NAMES, type ProviderTemplateMetadata } from "./contracts";
 import {
   registerDropboxWebsiteTemplate,
   revalidateDropboxWebsiteTemplate,
@@ -140,6 +140,30 @@ describe("Dropbox website eSign template registration", () => {
       data: [{ outcome: "registered", template_id: "template-local-1" }],
       error: null,
     });
+  });
+
+  it("registers the complete residential template", async () => {
+    const data = metadata();
+    data.documents[0].customFields = ESIGN_RESIDENTIAL_FIELD_NAMES.map((name) => ({
+      ...data.documents[0].customFields[0], name, apiId: name, required: name !== "additional_terms",
+    }));
+    data.mergeFieldNames = [...ESIGN_RESIDENTIAL_FIELD_NAMES];
+    mocks.getTemplate.mockResolvedValue(data);
+    await expect(registerDropboxWebsiteTemplate({ orgId: "org-1", actorId: "user-1",
+      providerTemplateId: "provider-template-1", name: "Residential", documentType: "Purchase agreement" }))
+      .resolves.toMatchObject({ mergeFieldNames: ESIGN_RESIDENTIAL_FIELD_NAMES });
+  });
+
+  it("rejects residential required-flag drift", async () => {
+    const data = metadata();
+    data.documents[0].customFields = ESIGN_RESIDENTIAL_FIELD_NAMES.map((name) => ({
+      ...data.documents[0].customFields[0], name, apiId: name, required: true,
+    }));
+    mocks.getTemplate.mockResolvedValue(data);
+    await expect(registerDropboxWebsiteTemplate({ orgId: "org-1", actorId: "user-1",
+      providerTemplateId: "provider-template-1", name: "Residential", documentType: "Purchase agreement" }))
+      .rejects.toThrow(/supported Sandra contract field set/);
+    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
   it("attests non-embedded Dropbox website metadata before registering", async () => {

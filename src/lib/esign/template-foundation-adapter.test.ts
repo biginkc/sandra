@@ -1,3 +1,4 @@
+import { ESIGN_RESIDENTIAL_FIELD_NAMES } from "./contracts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProviderError } from "@/lib/errors/classes";
@@ -111,7 +112,7 @@ describe("foundation template staging adapter without Dropbox credentials", () =
     expect(mocks.providerFactory).not.toHaveBeenCalled();
   });
 
-  it("lists unavailable website templates from settings without using the send-chooser view", async () => {
+  it.each(["legacy", "residential"])("lists unavailable %s website templates from settings without using the send-chooser view", async (schema) => {
     function query(data: unknown[]) {
       const chain = {
         select: vi.fn(),
@@ -146,7 +147,7 @@ describe("foundation template staging adapter without Dropbox credentials", () =
           { name: "Seller", order: 0 },
           { name: "Buyer", order: 1 },
         ],
-        merge_field_names: [
+        merge_field_names: schema === "residential" ? [...ESIGN_RESIDENTIAL_FIELD_NAMES] : [
           "seller_name",
           "property_address",
           "offer_price",

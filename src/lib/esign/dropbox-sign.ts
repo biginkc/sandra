@@ -26,6 +26,7 @@ import type {
   TemplateSignerRole,
 } from "./contracts";
 import { EsignSecret } from "./secret";
+import { remainingSignatureRequests } from "./quota-policy";
 
 type DropboxApiSet = {
   account: AccountApi;
@@ -303,18 +304,11 @@ export function createDropboxSignProvider(input: {
     async getRemainingSignatureRequests(providerAccountId: string, signal?: AbortSignal) {
       try {
         const response = await abortableAccountApi(input.apiKey, signal).accountGet(providerAccountId);
-        const account = response.body.account as unknown as {
-          quotas?: {
-            api_signature_requests_left?: unknown;
-            apiSignatureRequestsLeft?: unknown;
-          };
-        };
-        const remaining =
-          account.quotas?.api_signature_requests_left ??
-          account.quotas?.apiSignatureRequestsLeft;
-        return typeof remaining === "number" && Number.isFinite(remaining)
-          ? remaining
-          : null;
+        return remainingSignatureRequests(
+          response.body.account,
+          providerAccountId,
+          process.env.DROPBOX_SIGN_QUOTA_POLICIES,
+        );
       } catch (error) {
         throw normalizeDropboxSignError(error);
       }

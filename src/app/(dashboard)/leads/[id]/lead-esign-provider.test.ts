@@ -47,6 +47,18 @@ describe("bound lead eSign provider classification", () => {
     });
   });
 
+  it("forwards the server-generated sender message to Dropbox Sign", async () => {
+    providerMocks.sendWithTemplate.mockResolvedValue({ signatureRequestId: "provider-1", detailsUrl: "https://app.hellosign.com/home/manage", signatures: [] });
+    const provider = await providerForOrg("org-1");
+    const message = "Prepared by Maria Unkovich for BMH Acquisitions.";
+    await provider!.sendWithTemplate({ localRequestId: "request-1", testMode: true,
+      providerTemplateId: "template-1", signers: [],
+      mergeValues: { seller_name: "Seller", property_address: "123 Main", offer_price: "$1", closing_date: "2026-09-30", earnest_money: "$1" },
+      subject: "TEST — Purchase agreement", message, signal: new AbortController().signal,
+    });
+    expect(providerMocks.sendWithTemplate).toHaveBeenCalledWith(expect.objectContaining({ subject: "TEST — Purchase agreement", message }));
+  });
+
   it.each([409, 422] as const)(
     "returns a definitive send failure for non-retryable HTTP %s",
     async (statusCode) => {

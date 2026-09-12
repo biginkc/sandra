@@ -1,7 +1,7 @@
 import type { Result } from "@/lib/errors/result";
 import type {
   EsignDeliveryState,
-  EsignMergeFieldName,
+  EsignMergeValues,
   EsignStatus,
   TemplateOption,
 } from "@/lib/esign/contracts";
@@ -40,7 +40,7 @@ export function primarySendBlocker(
   );
 }
 
-export type ContractMergeValues = Readonly<Record<EsignMergeFieldName, string>>;
+export type ContractMergeValues = Readonly<EsignMergeValues>;
 
 export type SignerAssignment = Readonly<{
   role: string;
@@ -64,6 +64,7 @@ export type LeadEsignPreflight = Readonly<{
     emailAddress: string;
   }>;
   mergeDefaults: ContractMergeValues;
+  residentialAddress?: { street: string; city: string; state: string; zip: string };
 }>;
 
 export type SendContractInput = Readonly<{
@@ -99,6 +100,7 @@ export type ContractSignerView = Readonly<{
 export type LeadContractRow = Readonly<{
   id: string;
   templateName: string;
+  createdByLabel?: string | null;
   signers: readonly ContractSignerView[];
   status: EsignStatus;
   deliveryState: EsignDeliveryState;

@@ -223,6 +223,26 @@ describe("lead eSign action orchestration", () => {
     vi.useRealTimers();
   });
 
+  it("attributes the email to the persisted creator rather than browser-supplied identity", async () => {
+    const h = harness();
+    h.repository.claimSend.mockResolvedValue({ outcome: "created", request: request({ createdByLabel: "Maria Unkovich" }) });
+    const result = await h.core.send(sendInput);
+    expect(result.ok).toBe(true);
+    expect(h.provider.sendWithTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      subject: "TEST — Purchase agreement",
+      message: expect.stringContaining("Prepared by Maria Unkovich for BMH Acquisitions."),
+    }));
+    expect(h.provider.sendWithTemplate.mock.calls[0][0].message).not.toContain("Someone Else");
+  });
+
+  it("rejects browser-supplied sender identity before dispatch", async () => {
+    const h = harness();
+    const result = await h.core.send({ ...sendInput, createdByLabel: "Someone Else" } as SendContractInput);
+    expect(result.ok).toBe(false);
+    expect(h.repository.claimSend).not.toHaveBeenCalled();
+    expect(h.provider.sendWithTemplate).not.toHaveBeenCalled();
+  });
+
   it("returns live preflight blockers and safe seller defaults", async () => {
     const h = harness();
     h.repository.loadLeadSendContext.mockResolvedValue(
@@ -1773,5 +1793,15 @@ describe("lead eSign action orchestration", () => {
       ok: false,
       error: { code: "FILE_AUTHORIZATION_FAILED" },
     });
+  });
+});
+
+describe("residential send intent hashes", () => {
+  const values = { ...sendInput.mergeValues, buyer_name: "BMH", property_city: "Kansas City", property_state: "MO", property_zip: "64108", legal_description: "Lot fixture", earnest_money_holder: "Escrow", cash_balance: "$100", additional_terms: "" };
+  it.each(["buyer_name", "property_city", "property_state", "property_zip", "legal_description", "earnest_money_holder", "cash_balance", "additional_terms"])("includes %s in the immutable send hash", (field) => {
+    expect(hashSendPayload({ ...sendInput, mergeValues: { ...values, [field]: "changed" } })).not.toBe(hashSendPayload({ ...sendInput, mergeValues: values }));
+  });
+  it("hashes residential values in canonical order", () => {
+    expect(hashSendPayload({ ...sendInput, mergeValues: Object.fromEntries(Object.entries(values).reverse()) as typeof values })).toBe(hashSendPayload({ ...sendInput, mergeValues: values }));
   });
 });

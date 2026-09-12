@@ -6,12 +6,13 @@ import { randomUUID } from "node:crypto";
 import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import type { Result } from "@/lib/errors/result";
 import {
-  ESIGN_TEMPLATE_MERGE_FIELDS,
+  getEsignFieldSchema,
   type TemplateOption,
   type TemplateSignerRole,
 } from "@/lib/esign/contracts";
 import { getEsignCredentials } from "@/lib/esign/credentials";
 import { createDropboxSignProvider } from "@/lib/esign/dropbox-sign";
+import { loadEsignCreatorLabel } from "@/lib/esign/sender-identity";
 import { classifyProviderFailure } from "@/lib/esign/provider-failure";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types";
@@ -452,6 +453,7 @@ async function loadLeadSendContext({
     sellerName,
     hasHomeownerContact: Boolean(contact),
     sellerEmailAddress: contact?.email ?? null,
+    residentialAddress: { street: property.address ?? "", city: property.city ?? "", state: property.state ?? "", zip: property.zip ?? "" },
     propertyAddress: [
       property.address,
       property.city,
@@ -505,7 +507,8 @@ function toTemplateOption(row: {
     !roles
   )
     return [];
-  if (!sameMergeFields(row.merge_field_names)) return [];
+  const schema = getEsignFieldSchema(row.merge_field_names);
+  if (!schema) return [];
   return [
     {
       id: row.id,
@@ -514,7 +517,7 @@ function toTemplateOption(row: {
       providerTemplateId: row.sign_template_id,
       sellerRoleName: row.seller_role,
       signerRoles: roles,
-      mergeFieldNames: ESIGN_TEMPLATE_MERGE_FIELDS,
+      mergeFieldNames: schema.names,
     },
   ];
 }
@@ -530,19 +533,6 @@ function parseRoles(value: Json | null): readonly TemplateSignerRole[] | null {
     roles.push({ name, order });
   }
   return roles.sort((a, b) => a.order - b.order);
-}
-
-function sameMergeFields(value: string[] | null): boolean {
-  return Boolean(
-    value &&
-    value.length === ESIGN_TEMPLATE_MERGE_FIELDS.length &&
-    [...value]
-      .sort()
-      .every(
-        (field, index) =>
-          field === [...ESIGN_TEMPLATE_MERGE_FIELDS].sort()[index],
-      ),
-  );
 }
 
 async function claimSend(
@@ -629,7 +619,7 @@ async function loadRequest(
   const { data: row, error } = await admin
     .from("esign_requests")
     .select(
-      "id,org_id,property_id,template_id,signer_snapshot,merge_value_snapshot,send_intent_id,payload_hash,retry_of_request_id,status,delivery_state,sign_request_id,details_url,void_requested_at,signed_pdf_path,error_message,sent_at,test_mode",
+      "id,org_id,property_id,created_by,template_id,signer_snapshot,merge_value_snapshot,send_intent_id,payload_hash,retry_of_request_id,status,delivery_state,sign_request_id,details_url,void_requested_at,signed_pdf_path,error_message,sent_at,test_mode",
     )
     .eq("org_id", orgId)
     .eq("id", requestId)
@@ -673,12 +663,13 @@ async function loadRequest(
     ? toTemplateOption(templateRow, { testMode: true })[0]
     : null;
   if (!template) throw new Error("Request template snapshot is unavailable.");
-  const merge = parseMergeValues(row.merge_value_snapshot);
+  const merge = parseMergeValues(row.merge_value_snapshot, template.mergeFieldNames);
   if (!merge) throw new Error("Request merge snapshot is invalid.");
   return {
     id: row.id,
     orgId: row.org_id,
     propertyId: row.property_id,
+    createdByLabel: await loadEsignCreatorLabel(row.created_by),
     template,
     signers: (signerRows ?? []).map((signer) => ({
       id: signer.id,
@@ -705,10 +696,12 @@ async function loadRequest(
   };
 }
 
-function parseMergeValues(value: Json): ContractMergeValues | null {
+function parseMergeValues(value: Json, expectedFields: readonly string[]): ContractMergeValues | null {
   if (!value || Array.isArray(value) || typeof value !== "object") return null;
   const result: Record<string, string> = {};
-  for (const field of ESIGN_TEMPLATE_MERGE_FIELDS) {
+  const schema = getEsignFieldSchema(Object.keys(value));
+  if (!schema || schema.version !== getEsignFieldSchema(expectedFields)?.version) return null;
+  for (const field of schema.names) {
     if (typeof value[field] !== "string") return null;
     result[field] = value[field];
   }
@@ -735,6 +728,8 @@ export async function providerForOrg(
       providerTemplateId,
       signers,
       mergeValues,
+      subject,
+      message,
       signal,
     }) => {
       try {
@@ -748,6 +743,8 @@ export async function providerForOrg(
             emailAddress,
           })),
           mergeValues,
+          subject,
+          message,
           signal,
         });
         if (!output.detailsUrl) return { outcome: "ambiguous" };
@@ -933,6 +930,7 @@ export async function loadLeadEsignPageModel(
       contracts.push({
         id: request.id,
         templateName: request.template.name,
+        createdByLabel: request.createdByLabel ?? null,
         signers: request.signers as LeadContractRow["signers"],
         status: request.status,
         deliveryState: request.deliveryState,

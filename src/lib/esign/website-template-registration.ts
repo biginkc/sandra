@@ -5,7 +5,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types";
 
 import {
-  ESIGN_MERGE_FIELD_NAMES,
+  getEsignFieldSchema,
   ESIGN_TEMPLATE_SIGNER_ROLES,
   requireTemplateTitle,
   type ProviderTemplateField,
@@ -82,7 +82,9 @@ export async function registerDropboxWebsiteTemplate(
     providerTemplateId: metadata.providerTemplateId,
     sellerRoleName: "Seller",
     signerRoles: ESIGN_TEMPLATE_SIGNER_ROLES,
-    mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
+    mergeFieldNames: getEsignFieldSchema(metadata.documents.flatMap((document) =>
+      document.customFields.filter((field) => field.assignedTo === "sender").map((field) => field.name ?? ""),
+    ))!.names,
   };
 }
 
@@ -245,7 +247,7 @@ function validateWebsiteProviderMetadata(
   const customFields = metadata.documents.flatMap((document) => document.customFields);
   if (!hasExactSenderMergeFields(customFields)) {
     throw new ProviderError(
-      "Dropbox Sign merge fields must exactly match Sandra's five Sender fields.",
+      "Dropbox Sign merge fields must exactly match a supported Sandra contract field set.",
       "dropbox_sign",
       { providerCode: "merge_field_mismatch" },
     );
@@ -260,31 +262,13 @@ function validateWebsiteProviderMetadata(
 }
 
 function hasExactSenderMergeFields(fields: readonly ProviderTemplateField[]): boolean {
-  const expectedFields = [...ESIGN_MERGE_FIELD_NAMES].sort();
-  const expectedNameFields = fields.filter(
-    (field) =>
-      typeof field.name === "string" &&
-      ESIGN_MERGE_FIELD_NAMES.includes(
-        field.name as (typeof ESIGN_MERGE_FIELD_NAMES)[number],
-      ),
-  );
   const senderFields = fields.filter((field) => field.assignedTo === "sender");
-  const actualFields = senderFields
-    .filter(
-      (field) =>
-        isValidSenderMergeField(field) &&
-        ESIGN_MERGE_FIELD_NAMES.includes(
-          field.name as (typeof ESIGN_MERGE_FIELD_NAMES)[number],
-        ),
-    )
-    .map((field) => field.name as string)
-    .sort();
-  return (
-    expectedNameFields.length === expectedFields.length &&
-    senderFields.length === expectedFields.length &&
-    actualFields.length === expectedFields.length &&
-    actualFields.every((field, index) => field === expectedFields[index])
-  );
+  const schema = getEsignFieldSchema(senderFields.map((field) => field.name ?? ""));
+  if (!schema) return false;
+  return senderFields.every(isValidSenderMergeField) &&
+    (schema.version !== "residential-v1" || senderFields.every((field) =>
+      field.required === (field.name !== "additional_terms"))) &&
+    fields.filter((field) => schema.names.some((name) => name === field.name)).length === schema.names.length;
 }
 
 function isValidSenderMergeField(field: ProviderTemplateField): boolean {
