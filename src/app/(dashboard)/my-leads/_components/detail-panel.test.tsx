@@ -57,6 +57,21 @@ describe("MyLeadDetailPanel", () => {
     expect(screen.getByRole("link", { name: "Recording" })).toHaveAttribute("rel", "noopener noreferrer")
   })
 
+  it("uses authenticated Sandra playback when the external recording URL is absent", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({ url: "https://audio.example.com/call.mp3", expiresAt: new Date(Date.now() + 600000).toISOString() }),
+    } as Response)
+    render(<MyLeadDetailPanel state={{ status: "ready", detail: {
+      ...EMPTY_DETAIL,
+      attempts: { rows: [{ id: "attempt", actorLabel: "Maria", outcomeLabel: "Reached", occurredLabel: "Sep 12", sourceLabel: "Sandra", recordingUrl: null, callActivityId: "call-123" }], hasMore: false, nextCursor: null },
+    } }} onRetry={vi.fn()} />)
+    expect(screen.queryByText("no recording")).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Load recording" }))
+    expect(fetchMock).toHaveBeenCalledWith("/api/leads/calls/call-123/recording-url", expect.anything())
+    fetchMock.mockRestore()
+  })
+
   it("shows a group page error and retries with the same cursor", async () => {
     const user = userEvent.setup()
     const onLoadDetailPage = vi
