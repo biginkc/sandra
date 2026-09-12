@@ -71,7 +71,7 @@ export function buildSignedPdfArtifact(input: {
 
   return {
     storageBucket: "lead-files",
-    storagePath: `${orgId}/${propertyId}/esign/${requestId}/signed.pdf`,
+    storagePath: `${orgId}/${propertyId}/esign/${requestId}/signed-final.pdf`,
     fileName: `signed-contract-${requestId.slice(0, 8)}.pdf`,
     contentType: SIGNED_PDF_CONTENT_TYPE,
     sizeBytes,

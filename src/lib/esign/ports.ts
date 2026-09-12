@@ -113,6 +113,13 @@ export interface DropboxSignedPdfProvider {
 }
 
 export interface DropboxSignatureRequestMetadataProvider {
+  confirmCompletedRequest(input: {
+    orgId: string;
+    callbackConsumerId: string;
+    signRequestId: string;
+    localRequestId: string;
+    testMode: boolean;
+  }): Promise<ProviderSignature[] | null>;
   confirmProviderLocalRequestId(input: {
     orgId: string;
     callbackConsumerId: string;

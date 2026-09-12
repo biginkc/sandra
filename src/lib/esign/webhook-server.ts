@@ -60,6 +60,18 @@ export function createConcreteDropboxSignWebhookDependencies(
     }),
     persistence: database,
     metadataProvider: {
+      async confirmCompletedRequest(input) {
+        const credentials = await loadActiveCredentials(input);
+        if (!credentials) throw new SafeEsignServerError("ACTIVE_CREDENTIALS_NOT_FOUND");
+        const metadata = await createDropboxSignProvider({
+          apiKey: credentials.apiKey, clientId: credentials.clientId,
+        }).getSignatureRequestMetadata(input.signRequestId);
+        if (metadata.signatureRequestId !== input.signRequestId ||
+          metadata.localRequestId !== input.localRequestId ||
+          metadata.testMode !== input.testMode || metadata.isComplete !== true ||
+          !metadata.signatures?.length) return null;
+        return metadata.signatures;
+      },
       async confirmProviderLocalRequestId(input) {
         const credentials = await loadActiveCredentials(input);
         if (!credentials) {

@@ -399,7 +399,17 @@ export function createDropboxSignProvider(input: {
             typeof request.metadata?.sandra_request_id === "string"
               ? request.metadata.sandra_request_id
               : null,
-        testMode: typeof request.testMode === "boolean" ? request.testMode : null,
+          testMode: typeof request.testMode === "boolean" ? request.testMode : null,
+          isComplete: typeof request.isComplete === "boolean" ? request.isComplete : null,
+          signatures: (request.signatures ?? []).map((signature) => ({
+            signatureId: signature.signatureId ?? "",
+            role: signature.signerRole ?? "",
+            name: signature.signerName ?? "",
+            emailAddress: signature.signerEmailAddress ?? "",
+            order: signature.order ?? -1,
+            statusCode: signature.statusCode ?? null,
+            signedAt: signature.signedAt ?? null,
+          })),
         };
       } catch (error) {
         throw normalizeDropboxSignError(error);

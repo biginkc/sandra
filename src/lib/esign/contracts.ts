@@ -180,6 +180,8 @@ export type SendWithTemplateOutput = {
 };
 
 export type ProviderSignatureRequestMetadata = {
+  isComplete: boolean | null;
+  signatures: ProviderSignature[];
   signatureRequestId: string;
   localRequestId: string | null;
   testMode: boolean | null;
