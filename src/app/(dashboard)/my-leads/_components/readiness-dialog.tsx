@@ -119,8 +119,8 @@ export function AcquisitionReadinessDialog({
             <WorkflowFormError message={clientError || submitState.error} />
 
             <div className="flex flex-col gap-2">
-              <Label>Motivation response</Label>
-              <div className="flex flex-col gap-2">
+              <Label id="acquisition-readiness-motivation-label">Motivation response</Label>
+              <div role="radiogroup" aria-labelledby="acquisition-readiness-motivation-label" className="flex flex-col gap-2">
                 <OptionCard
                   id="acquisition-motivation-specified"
                   name="acquisition-motivation-response"

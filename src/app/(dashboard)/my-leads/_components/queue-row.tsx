@@ -310,7 +310,7 @@ export function MyLeadQueueRow({
                         status === "done" && "text-muted-foreground",
                         status === "cur" && "text-foreground",
                         status === "next" && "text-blue-700 dark:text-blue-400",
-                        status === "upcoming" && "text-[#a8a29e]"
+                        status === "upcoming" && "text-muted-foreground"
                       )}
                     >
                       {MY_LEAD_STAGE_LABELS[stage]}

@@ -115,9 +115,9 @@ export function MyLeadDetailPanel({
                   Recording
                 </a>
               ) : (
-                <span className="text-[11.5px] font-medium text-[#a8a29e] italic">no recording</span>
+                <span className="text-[11.5px] font-medium text-muted-foreground italic">no recording</span>
               )}
-              <span className="font-mono text-[10.5px] text-[#a8a29e]">{attempt.occurredLabel}</span>
+              <span className="font-mono text-[10.5px] text-muted-foreground">{attempt.occurredLabel}</span>
             </div>
           </div>
         )}

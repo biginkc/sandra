@@ -224,8 +224,8 @@ export function AcquisitionOfferDialog({
 
             {motivationRequired ? (
               <div className="flex flex-col gap-2">
-                <Label>Motivation response</Label>
-                <div className="flex flex-col gap-2">
+                <Label id="acquisition-offer-motivation-label">Motivation response</Label>
+                <div role="radiogroup" aria-labelledby="acquisition-offer-motivation-label" className="flex flex-col gap-2">
                   <OptionCard
                     id="acquisition-offer-motivation-specified"
                     name="acquisition-offer-motivation-response"
