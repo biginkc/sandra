@@ -1,8 +1,10 @@
 name: Disposable canary validation
 
-# Manual validation first. Replacing production schedules is a separate decision.
+# Validate this candidate branch without changing production schedules.
 on:
   workflow_dispatch: {}
+  push:
+    branches: [codex/disposable-canary-runner-20260912]
 
 permissions:
   contents: read
