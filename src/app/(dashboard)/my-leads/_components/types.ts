@@ -41,13 +41,16 @@ export type MyLeadQueueRow = {
   propertyId: string
   queueStage: MyLeadStage
   address: string
+  zillowHref?: string | null
   homeownerName: string | null
   phone: string | null
   assignment: {
     label: string
+    exactLabel?: string
     state: MyLeadAssignmentState
   }
   firstCall: {
+    exactLabel?: string
     state: MyLeadFirstCallState
     label: string | null
   }
@@ -125,6 +128,8 @@ export type MyLeadAttempt = {
   actorLabel: string
   outcomeLabel: string
   occurredLabel: string
+  sourceLabel?: string
+  recordingUrl?: string | null
 }
 
 export type MyLeadAppointment = {
@@ -209,6 +214,7 @@ export type MyLeadsQueueProps = {
   selectedDateRange: MyLeadDateRange | null
   repOptions: readonly MyLeadRepOption[]
   selectedRepLabel?: string | null
+  canSelectRep?: boolean
   onSearchChange: (value: string) => void
   onRepChange: (repId: string) => void
   onPeriodChange: (period: MyLeadsPeriod) => void

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { StrictMode } from "react"
 import { describe, expect, it, vi } from "vitest"
@@ -74,6 +74,7 @@ function buildProps(overrides: Partial<MyLeadsQueueProps> = {}): MyLeadsQueuePro
       { id: "jarrad", label: "Jarrad" },
     ],
     selectedRepLabel: "Maria",
+    canSelectRep: true,
     onSearchChange: vi.fn(),
     onRepChange: vi.fn(),
     onPeriodChange: vi.fn(),
@@ -150,6 +151,7 @@ describe("MyLeadsQueue", () => {
     fireEvent.change(screen.getByLabelText("KPI start date"), {
       target: { value: "2026-09-01" },
     })
+    await user.click(screen.getByRole("button", { name: "Show details for 2 Main Street" }))
     await user.click(screen.getByRole("button", { name: "Ready to make an offer" }))
 
     expect(props.onSearchChange).toHaveBeenLastCalledWith("oak")
@@ -159,9 +161,10 @@ describe("MyLeadsQueue", () => {
     expect(props.onStageAction).toHaveBeenCalledWith("ready-for-offer", expect.objectContaining({ queueStage: "contacted" }))
   })
 
-  it("keeps contract and first-call follow-up actions available in every permitted stage", () => {
+  it("keeps contract and first-call follow-up actions available in every permitted stage", async () => {
     render(<MyLeadsQueue {...buildProps()} />)
 
+    await userEvent.click(screen.getByRole("button", { name: "Expand all" }))
     const notContacted = within(screen.getByTestId("my-lead-row-property-1"))
     const contacted = within(screen.getByTestId("my-lead-row-property-2"))
     const needsOffer = within(screen.getByTestId("my-lead-row-property-3"))
@@ -306,4 +309,53 @@ describe("MyLeadsQueue", () => {
     expect(onLoadDetailPage).toHaveBeenCalledWith("property-1", "notes", "cursor-1")
     expect(screen.getAllByText("First page note")).toHaveLength(1)
   })
+  it("truly collapses metadata and actions, preserves warnings, and opens with the keyboard", async () => {
+    const user = userEvent.setup()
+    render(<MyLeadsQueue {...buildProps()} />)
+    const row = within(screen.getByTestId("my-lead-row-property-2"))
+    const toggle = row.getByRole("button", { name: "Show details for 2 Main Street" })
+    expect(toggle).toHaveAccessibleDescription(/Homeowner 2.*2 attempts.*No future next step/)
+    expect(toggle).toHaveAttribute("aria-expanded", "false")
+    expect(row.getByText("No future next step")).toBeVisible()
+    expect(row.queryByRole("button", { name: "Log attempt" })).not.toBeInTheDocument()
+    expect(row.queryByText("Needs a simple sale")).not.toBeInTheDocument()
+    toggle.focus()
+    await user.keyboard("{Enter}")
+    expect(toggle).toHaveAttribute("aria-expanded", "true")
+    expect(row.getByRole("link", { name: "Open lead" })).toHaveAttribute("href", "/leads/property-2")
+    expect(row.getByRole("list", { name: "Lead progress" })).toBeVisible()
+    expect(row.getByRole("button", { name: "Log attempt" })).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Collapse all" }))
+    expect(toggle).toHaveAttribute("aria-expanded", "false")
+    expect(row.queryByRole("button", { name: "Log attempt" })).not.toBeInTheDocument()
+  })
+
+  it("shows member selection only with owner authority", () => {
+    const props = buildProps({ canSelectRep: false })
+    const { rerender } = render(<MyLeadsQueue {...props} />)
+    expect(screen.queryByRole("combobox", { name: "Acquisitions member" })).not.toBeInTheDocument()
+    rerender(<MyLeadsQueue {...props} canSelectRep />)
+    expect(screen.getByRole("combobox", { name: "Acquisitions member" })).toBeVisible()
+  })
+
+  it("limits detail concurrency, stops queued reads on collapse, and reuses loaded details", async () => {
+    const pending: Array<() => void> = []
+    const onLoadDetail = vi.fn(() => new Promise<{ ok: true; detail: MyLeadDetail }>((resolve) => {
+      pending.push(() => resolve({ ok: true, detail: EMPTY_DETAIL }))
+    }))
+    const props = buildProps({ onLoadDetail })
+    render(<MyLeadsQueue {...props} />)
+    await userEvent.click(screen.getByRole("button", { name: "Expand all" }))
+    expect(onLoadDetail).toHaveBeenCalledTimes(3)
+    expect(props.onLoadMore).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole("button", { name: "Collapse all" }))
+    await act(async () => { pending.splice(0).forEach((resolve) => resolve()) })
+    expect(onLoadDetail).toHaveBeenCalledTimes(3)
+    await userEvent.click(screen.getByRole("button", { name: "Expand all" }))
+    expect(onLoadDetail).toHaveBeenCalledTimes(5)
+    await act(async () => { pending.splice(0).forEach((resolve) => resolve()) })
+    await userEvent.click(screen.getByRole("button", { name: "Expand all" }))
+    expect(onLoadDetail).toHaveBeenCalledTimes(5)
+  })
+
 })

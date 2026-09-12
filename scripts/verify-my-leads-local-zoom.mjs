@@ -34,6 +34,7 @@ try {
   await expect(page.getByRole('heading',{name:'My Leads',exact:true})).toBeVisible();
   const layout=await page.evaluate(()=>({width:document.documentElement.scrollWidth,viewport:window.innerWidth}));
   assert.ok(layout.width<=layout.viewport,'Page overflows at native 200% zoom');
+  await page.getByRole('button',{name:/Show details for/}).first().click();
   const action=page.getByRole('button',{name:'Log attempt',exact:true}).first();await action.click();
   await expect(page.getByRole('dialog')).toBeVisible();await page.keyboard.press('Escape');await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.evaluate(()=>window.scrollTo(0,0));

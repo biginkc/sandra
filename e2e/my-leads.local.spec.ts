@@ -192,8 +192,7 @@ test.describe.serial("My Leads local acceptance", () => {
     await expect(page.getByRole("link", { name: "My Leads" })).toBeVisible()
     await expect(page.getByText(ADDRESS_106, { exact: true })).toBeVisible()
     await expect(page.getByText(ADDRESS_107, { exact: true })).toBeVisible()
-    await expect(page.locator("#my-leads-rep")).toHaveValue(REP_ID)
-    await expect(page.locator("#my-leads-rep option")).toHaveCount(1)
+    await expect(page.locator("#my-leads-rep")).toHaveCount(0)
     await expect(page.getByText("Manage Acquisitions", { exact: true })).toHaveCount(0)
 
     await page.screenshot({ path: path.join(FIXTURE_DIR, "my-leads-desktop.png"), fullPage: true })
@@ -263,7 +262,8 @@ test.describe.serial("My Leads local acceptance", () => {
     await openMyLeads(page, "rep")
     const row = rowFor(page, PROPERTY_102_ID)
     await expect(row).toContainText(ADDRESS_102)
-    await expect(row).toContainText("Contacted")
+    await row.getByRole("button", { name: `Show details for ${ADDRESS_102}` }).press("Enter")
+    await expect(row.locator('[aria-current="step"]')).toHaveText("Contacted")
     await expect(row.getByText("No future next step", { exact: true })).toBeVisible()
 
     const logAttempt = row.getByRole("button", { name: "Log attempt" })
@@ -279,11 +279,11 @@ test.describe.serial("My Leads local acceptance", () => {
     await openMyLeads(page, "rep")
     const row = rowFor(page, PROPERTY_105_ID)
     await expect(row).toContainText(ADDRESS_105)
-    await expect(row).toContainText("Under Contract")
+    await expect(row.locator("xpath=ancestor::section[@data-testid='my-leads-section-under_contract']")).toBeVisible()
 
     await page.locator("#my-leads-period").selectOption("month")
     await expect(page.locator("#my-leads-period")).toHaveValue("month")
-    await expect(row).toContainText("Under Contract")
+    await expect(row.locator("xpath=ancestor::section[@data-testid='my-leads-section-under_contract']")).toBeVisible()
   })
 
   test("custom reporting dates remain editable until a complete range is entered", async ({ page }) => {
@@ -300,7 +300,7 @@ test.describe.serial("My Leads local acceptance", () => {
     await refreshed
     await expect(page.locator('[data-testid^="kpi-"]')).toHaveCount(6)
     await expect(from).toHaveValue("2026-09-01")
-    await expect(rowFor(page, PROPERTY_105_ID)).toContainText("Under Contract")
+    await expect(page.getByTestId("my-leads-section-under_contract").getByTestId(`my-lead-row-${PROPERTY_105_ID}`)).toBeVisible()
     await page.locator("#my-leads-period").selectOption("week")
     await expect(page.locator('[data-testid^="kpi-"]')).toHaveCount(6)
   })
@@ -326,8 +326,8 @@ test.describe.serial("My Leads local acceptance", () => {
       await page.reload()
       await expect(needsOffer.getByText("Offer overdue", { exact: true })).toBeVisible()
       await expect(offerSent.getByText("Offer follow-up overdue", { exact: true })).toBeVisible()
-      await expect(needsOffer).toHaveClass(/border-l-red-500/)
-      await expect(offerSent).toHaveClass(/border-l-red-500/)
+      await expect(needsOffer.getByText("Offer overdue", { exact: true }).locator("..")).toHaveClass(/text-red-700/)
+      await expect(offerSent.getByText("Offer follow-up overdue", { exact: true }).locator("..")).toHaveClass(/text-red-700/)
     } finally {
       await db.query("update acquisition_queue_states set stage_entered_at=$2 where property_id=$1", [offerLead, entered])
       await db.query("update acquisition_offers set sent_at=$2,follow_up_at=$3 where id=$1", [original.id, original.sent_at, original.follow_up_at])
@@ -339,6 +339,7 @@ test.describe.serial("My Leads local acceptance", () => {
     await openMyLeads(page, "rep")
     const row = rowFor(page, PROPERTY_106_ID)
     await expect(row).toContainText(ADDRESS_106)
+    await row.getByRole("button", { name: `Show details for ${ADDRESS_106}` }).click()
 
     await row.getByRole("button", { name: "Log attempt" }).click()
     const attemptDialog = page.getByRole("dialog")
@@ -347,7 +348,7 @@ test.describe.serial("My Leads local acceptance", () => {
     await page.getByLabel("When did the outreach occur?").fill(centralWallTime(-30))
     await page.getByRole("button", { name: "Save attempt" }).click()
     await expect(page.getByRole("button", { name: "Save attempt" })).toHaveCount(0)
-    await expect(row).toContainText("Contacted")
+    await expect(row.locator('[aria-current="step"]')).toHaveText("Contacted")
 
     await row.getByRole("button", { name: "Ready to make an offer" }).click()
     const readinessDialog = page.getByRole("dialog")
@@ -358,7 +359,7 @@ test.describe.serial("My Leads local acceptance", () => {
     await page.getByLabel("Motivation", { exact: true }).fill("Seller is relocating and wants a simple sale.")
     await page.getByRole("button", { name: "Save readiness" }).click()
     await expect(page.getByRole("button", { name: "Save readiness" })).toHaveCount(0)
-    await expect(row).toContainText("Needs offer / Interested")
+    await expect(row.locator('[aria-current="step"]')).toHaveText("Needs offer / Interested")
 
     await row.getByRole("button", { name: "Log offer" }).click()
     const offerDialog = page.getByRole("dialog")
@@ -369,7 +370,7 @@ test.describe.serial("My Leads local acceptance", () => {
     await page.getByLabel("Required follow-up").fill(centralWallTime(60))
     await page.getByRole("button", { name: "Save offer" }).click()
     await expect(page.getByRole("button", { name: "Save offer" })).toHaveCount(0)
-    await expect(row).toContainText("Offer Sent")
+    await expect(row.locator('[aria-current="step"]')).toHaveText("Offer Sent")
 
     await row.getByRole("button", { name: "Contract signed" }).click()
     const contractDialog = page.getByRole("dialog")
@@ -377,7 +378,7 @@ test.describe.serial("My Leads local acceptance", () => {
     await page.getByLabel("Signed at").fill(centralWallTime(-5))
     await page.getByRole("button", { name: "Record contract" }).click()
     await expect(page.getByRole("button", { name: "Record contract" })).toHaveCount(0)
-    await expect(row).toContainText("Under Contract")
+    await expect(row.locator("xpath=ancestor::section[@data-testid='my-leads-section-under_contract']")).toBeVisible()
 
     await row.getByRole("button", { name: "Archive" }).click()
     const archiveDialog = page.getByRole("dialog")
@@ -391,6 +392,7 @@ test.describe.serial("My Leads local acceptance", () => {
     await openMyLeads(page, "rep")
     const row = rowFor(page, PROPERTY_107_ID)
     await expect(row).toContainText(ADDRESS_107)
+    await row.getByRole("button", { name: `Show details for ${ADDRESS_107}` }).click()
 
     await row.getByRole("button", { name: "Log attempt" }).click()
     const attemptDialog = page.getByRole("dialog")
@@ -399,9 +401,8 @@ test.describe.serial("My Leads local acceptance", () => {
     await page.getByLabel("When did the outreach occur?").fill(centralWallTime(-20))
     await page.getByRole("button", { name: "Save attempt" }).click()
     await expect(page.getByRole("button", { name: "Save attempt" })).toHaveCount(0)
-    await expect(row).toContainText("Contacted")
+    await expect(row.locator('[aria-current="step"]')).toHaveText("Contacted")
 
-    await row.getByRole("button", { name: `Show details for ${ADDRESS_107}` }).click()
     const details = page.getByRole("region", { name: "Lead details" })
     await expect(details).toBeVisible()
     await details.getByText("+ Add note", { exact: true }).click()
