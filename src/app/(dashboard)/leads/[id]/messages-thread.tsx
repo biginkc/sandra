@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 
 import { Badge } from "@/components/ui/badge";
@@ -33,6 +33,7 @@ type Props = {
   propertyId: string | null;
   onLiveMessage?: (message: Message, event: "INSERT" | "UPDATE") => void;
   nowMs?: number;
+  scrollContainerRef?: RefObject<HTMLDivElement | null>;
 };
 
 export type LeadMessageScope = {
@@ -83,6 +84,7 @@ export function MessagesThread({
   propertyId,
   onLiveMessage,
   nowMs,
+  scrollContainerRef,
 }: Props) {
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = useLiveNow(nowMs ?? fallbackNowMs);
@@ -92,13 +94,24 @@ export function MessagesThread({
     onLiveMessage,
   });
   const endRef = useRef<HTMLDivElement | null>(null);
+  const followLatest = useRef(true);
+  useEffect(() => {
+    const container = scrollContainerRef?.current;
+    if (!container) return;
+    const track = () => { followLatest.current = container.scrollHeight - container.clientHeight - container.scrollTop <= 80; };
+    container.addEventListener("scroll", track, { passive: true });
+    return () => container.removeEventListener("scroll", track);
+  }, [scrollContainerRef]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
-      endRef.current?.scrollIntoView({ block: "end" });
+      const container = scrollContainerRef?.current;
+      if (container) {
+        if (followLatest.current) container.scrollTop = container.scrollHeight;
+      } else endRef.current?.scrollIntoView({ block: "end" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [contactId, conversationId, messages.length, propertyId]);
+  }, [contactId, conversationId, messages.length, propertyId, scrollContainerRef]);
 
   if (messages.length === 0) {
     return (

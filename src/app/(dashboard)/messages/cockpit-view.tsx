@@ -2,7 +2,7 @@
 
 import { MessageSquarePlusIcon, PlusIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
@@ -22,6 +22,8 @@ import { InboxThreadList } from "./inbox-thread-list";
 import { QueuePanel, type QueuedRow } from "./queue-panel";
 import { QueueStatsBanner } from "./queue-stats-banner";
 import { UnknownSenderList } from "./unknown-sender-list";
+import { useInboxRefresh, type InboxRefreshSnapshot } from "./use-inbox-refresh";
+import { useConversationSelection } from "./use-conversation-selection";
 import { useQueueStats } from "./use-queue-stats";
 
 type Props = {
@@ -75,28 +77,42 @@ const INBOX_CHANGE_TIMEOUT_MS = 10_000;
 export function CockpitView({
   activeTab,
   filter,
-  threads,
+  threads: initialThreads,
   queued,
   queuedHasMore = false,
-  selectedThreadId = null,
-  threadDetail,
+  selectedThreadId: serverThreadId = null,
+  threadDetail: serverThreadDetail,
   unknownSenders,
-  filterCounts,
+  filterCounts: initialCounts,
   assigneeEmails,
   currentUserId,
   queueStats,
   hideDnc,
-  hiddenDncCount,
-  searchDegraded = false,
-  inboxPage = 1,
-  inboxPageSize = 200,
-  inboxTotal = threads.length,
+  hiddenDncCount: initialHiddenCount,
+  searchDegraded: initialDegraded = false,
+  inboxPage: initialPage = 1,
+  inboxPageSize: initialPageSize = 200,
+  inboxTotal: initialTotal = initialThreads.length,
   queueLoadFailed = false,
   queueStatsFailed = false,
   nowMs,
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { select: selectConversation, reset: resetConversation, ...conversation } =
+    useConversationSelection(serverThreadId, serverThreadDetail);
+  const selectedThreadId = conversation.selectedId;
+  const threadDetail = conversation.detail;
+  const initialInbox = useMemo<InboxRefreshSnapshot>(() => ({
+    page: { threads: initialThreads, counts: initialCounts, hiddenCount: initialHiddenCount, degraded: initialDegraded,
+      page: initialPage, pageSize: initialPageSize, total: initialTotal },
+    unknown: initialCounts.unknown, dismissed: initialCounts.dismissed,
+  }), [initialThreads, initialCounts, initialHiddenCount, initialDegraded, initialPage, initialPageSize, initialTotal]);
+  const query = new URLSearchParams({ filter, hideDnc: hideDnc ? "1" : "0", inboxPage: String(initialPage), search: searchParams.get("search") ?? "" }).toString();
+  const inbox = useInboxRefresh(initialInbox, query, activeTab === "inbox" && THREAD_FILTERS.has(filter), selectedThreadId, serverThreadId);
+  const { threads, hiddenCount: hiddenDncCount, degraded: searchDegraded, page: inboxPage, pageSize: inboxPageSize, total: inboxTotal } = inbox.snapshot.page;
+  const filterCounts = { ...initialCounts, ...inbox.snapshot.page.counts, unknown: inbox.snapshot.unknown, dismissed: inbox.snapshot.dismissed };
+
   const liveNowMs = useLiveNow(nowMs);
   const inboxTotalPages = Math.max(Math.ceil(inboxTotal / inboxPageSize), 1);
   const [pendingInboxChange, setPendingInboxChange] =
@@ -117,6 +133,13 @@ export function CockpitView({
     string | null
   >(queueStatsFailed ? null : "server-snapshot");
   const [queueStatsRefreshSignal, setQueueStatsRefreshSignal] = useState(0);
+  const refreshSelectedDetail = conversation.revalidate;
+  const refreshInbox = inbox.refresh;
+  const handleReplySent = useCallback(() => {
+    refreshSelectedDetail();
+    refreshInbox();
+    setQueueStatsRefreshSignal(value => value + 1);
+  }, [refreshSelectedDetail, refreshInbox]);
   if (lastServerQueueStatsFailed !== queueStatsFailed) {
     setLastServerQueueStatsFailed(queueStatsFailed);
     setLiveQueueStatsFailed(queueStatsFailed);
@@ -136,7 +159,19 @@ export function CockpitView({
     onRefreshFailure: handleQueueStatsRefreshFailure,
   });
 
+  const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
+  const serverSelectedThreadId =
+    selectedThreadId ?? threadDetail?.threadId ?? null;
+  const previousServerSelection = useRef(serverSelectedThreadId);
+  const [mobileShowsDetail, setMobileShowsDetail] = useState(
+    serverSelectedThreadId !== null,
+  );
+  const [focusReturnThreadId, setFocusReturnThreadId] = useState<string | null>(
+    null,
+  );
+
   const setTab = (next: string) => {
+    setPendingThreadId(null);
     setPendingInboxChange(null);
     setCompletedInboxChange(null);
     setInboxChangeError(null);
@@ -147,10 +182,13 @@ export function CockpitView({
       sp.set("tab", next);
     }
     const qs = sp.toString();
+    resetConversation();
     router.replace(qs ? `/messages?${qs}` : "/messages");
   };
   const setInboxPage = useCallback(
     (nextPage: number) => {
+      setPendingThreadId(null);
+      setMobileShowsDetail(false);
       setPendingInboxChange(null);
       setCompletedInboxChange(null);
       setInboxChangeError(null);
@@ -158,10 +196,11 @@ export function CockpitView({
       if (nextPage <= 1) sp.delete("inboxPage");
       else sp.set("inboxPage", String(nextPage));
       sp.delete("thread");
+      resetConversation();
       const qs = sp.toString();
       router.push(qs ? `/messages?${qs}` : "/messages");
     },
-    [router, searchParams],
+    [router, searchParams, resetConversation],
   );
   const handleTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const tabs = Array.from(
@@ -182,24 +221,6 @@ export function CockpitView({
   };
 
   const showThreadList = THREAD_FILTERS.has(filter);
-  // Track which contactId the user is currently navigating *to*. The
-  // setState here is a synchronous high-priority update so the next
-  // render commits BEFORE the RSC round-trip completes — which is what
-  // lets the detail panel show a skeleton instead of stale bubbles
-  // from the previous selection. Using useTransition would be cleaner
-  // semantically, but React's concurrent mode keeps the old tree
-  // visible during transitions, so isPending never flips in the tree
-  // the user is looking at.
-  const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
-  const serverSelectedThreadId =
-    selectedThreadId ?? threadDetail?.threadId ?? null;
-  const previousServerSelection = useRef(serverSelectedThreadId);
-  const [mobileShowsDetail, setMobileShowsDetail] = useState(
-    serverSelectedThreadId !== null,
-  );
-  const [focusReturnThreadId, setFocusReturnThreadId] = useState<string | null>(
-    null,
-  );
 
   const handleSelectThread = useCallback(
     (threadId: string) => {
@@ -211,9 +232,10 @@ export function CockpitView({
       setFocusReturnThreadId(null);
       const sp = new URLSearchParams(searchParams.toString());
       sp.set("thread", threadId);
-      router.replace(`/messages?${sp.toString()}`, { scroll: false });
+      window.history.replaceState(null, "", `/messages?${sp.toString()}`);
+      void selectConversation(threadId);
     },
-    [searchParams, router],
+    [searchParams, selectConversation],
   );
 
   useEffect(() => {
@@ -234,11 +256,11 @@ export function CockpitView({
     const sp = new URLSearchParams(searchParams.toString());
     sp.delete("thread");
     const qs = sp.toString();
-    router.replace(qs ? `/messages?${qs}` : "/messages", { scroll: false });
-    router.refresh();
+    window.history.replaceState(null, "", qs ? `/messages?${qs}` : "/messages");
+    void selectConversation(null);
   }, [
     pendingThreadId,
-    router,
+    selectConversation,
     searchParams,
     selectedThreadId,
     threadDetail?.threadId,
@@ -299,8 +321,8 @@ export function CockpitView({
   // Skeleton shows when the user has clicked a thread that the server
   // hasn't returned yet. Same-thread re-clicks: pendingContactId
   // matches threadDetail.contactId already → no skeleton.
-  const isLoadingThread =
-    pendingThreadId !== null && selectedThreadId !== pendingThreadId;
+  const isLoadingThread = conversation.loading ||
+    (pendingThreadId !== null && selectedThreadId !== pendingThreadId);
 
   const handleInboxFilterChange = useCallback(
     (next: InboxFilter) => {
@@ -328,10 +350,11 @@ export function CockpitView({
       else sp.set("filter", next);
       sp.delete("thread");
       sp.delete("inboxPage");
+      resetConversation();
       const qs = sp.toString();
       router.push(qs ? `/messages?${qs}` : "/messages");
     },
-    [filter, pendingInboxChange, router, searchParams],
+    [filter, pendingInboxChange, router, searchParams, resetConversation],
   );
 
   const handleHideDncChange = useCallback(
@@ -350,10 +373,11 @@ export function CockpitView({
       else sp.set("hideDnc", "0");
       sp.delete("thread");
       sp.delete("inboxPage");
+      resetConversation();
       const qs = sp.toString();
       router.push(qs ? `/messages?${qs}` : "/messages");
     },
-    [hideDnc, pendingInboxChange, router, searchParams],
+    [hideDnc, pendingInboxChange, router, searchParams, resetConversation],
   );
 
   useEffect(() => {
@@ -482,8 +506,10 @@ export function CockpitView({
                 >
                   <div className="flex h-full min-h-0 flex-col gap-2">
                     <div className="min-h-0 flex-1">
+                      {inbox.failed && <div role="alert">Inbox updates did not load. <button type="button" className="min-h-11 underline" onClick={inbox.refresh}>Retry updates</button></div>}
                       <InboxThreadList
                         initial={threads}
+                        onRefresh={inbox.refresh}
                         selectedThreadId={
                           pendingThreadId ??
                           threadDetail?.threadId ??
@@ -530,14 +556,27 @@ export function CockpitView({
                   className={`${mobileShowsDetail ? "block" : "hidden"} min-h-0 md:block`}
                   data-testid="inbox-detail-view"
                 >
-                  <InboxDetail
+                  {conversation.error ? (
+                    <div role="alert" className="rounded-md border p-4">
+                      <p>{conversation.error}</p>
+                      <button type="button" className="min-h-11 underline"
+                        onClick={() => { void selectConversation(selectedThreadId); }}>Retry conversation</button>
+                      <button type="button" className="ml-4 min-h-11 underline"
+                        onClick={handleBackToList}>All conversations</button>
+                    </div>
+                  ) : <>
+                    {conversation.refreshError && <div role="alert">{conversation.refreshError} <button type="button" className="min-h-11 underline" onClick={conversation.revalidate}>Retry updates</button></div>}
+                    <InboxDetail
                     data={threadDetail}
+                    onRevalidate={conversation.revalidate}
+                    onReplySent={handleReplySent}
+                    revalidationPending={conversation.refreshing || Boolean(conversation.refreshError)}
                     isLoading={isLoadingThread}
                     assigneeEmails={assigneeEmails}
                     currentUserId={currentUserId}
                     onBackToList={handleBackToList}
                     nowMs={liveNowMs}
-                  />
+                  /></>}
                 </div>
               </div>
             )}
