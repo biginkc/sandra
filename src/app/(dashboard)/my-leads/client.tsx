@@ -36,7 +36,8 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [period,setPeriod]=useState<MyLeadsPeriod>('today');const [range,setRange]=useState<MyLeadDateRange|null>(null);
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
   const [error,setError]=useState<string|null>(null);const [loadingStages,setLoadingStages]=useState<Set<MyLeadStage>>(new Set());
-  const [callOptions,setCallOptions]=useState<{propertyId:string;options:{id:string;label:string}[]}|null>(null);
+  const [callOptions,setCallOptions]=useState<{propertyId:string;options:{id:string;label:string}[];error:string|null}|null>(null);
+  const [callRetry,setCallRetry]=useState(0);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow}|null>(null);
   const [detailRevision,setDetailRevision]=useState(0);
   const [recipient,setRecipient]=useState(roster.settings.recipientId??'');const [settingsBusy,setSettingsBusy]=useState(false);
@@ -82,8 +83,20 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
         phones:row.phones,dncLocked:false,contactDnc:row.contactDnc,callable:row.phones.some(phone=>!!phone.trim())&&!row.contactDnc});return;
     }
     submission.current=null;setCallOptions(null);setDialog({action:kind,row});
-    if(kind==='log-attempt')void loadMyLeadCallReferences(id,member).then(result=>{if(result.ok)setCallOptions({propertyId:id,options:result.options});else setError(result.message);});
+
   };
+  useEffect(()=>{
+    if(dialog?.action!=='log-attempt')return;
+    let cancelled=false;
+    const propertyId=dialog.row.propertyId;
+    setCallOptions(null);
+    void loadMyLeadCallReferences(propertyId,member).then(result=>{
+      if(!cancelled)setCallOptions({propertyId,options:result.ok?result.options:[],error:result.ok?null:result.message});
+    }).catch(()=>{
+      if(!cancelled)setCallOptions({propertyId,options:[],error:'Could not load Sandra calls.'});
+    });
+    return()=>{cancelled=true;};
+  },[dialog,member,callRetry]);
   const submit=useCallback(async(payload:object)=>{
     if(!dialog)return {ok:false as const,message:'Select a lead first.'};
     const hash=JSON.stringify(payload);
@@ -134,7 +147,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
 
       <p className="mt-3 text-xs text-muted-foreground">{kpis.firstCallPending} first calls pending · {kpis.pendingOutcomes} call outcomes pending{kpis.orgAppointmentsUnattributed?` · ${kpis.orgAppointmentsUnattributed} appointments in this organization have unknown historical attribution`:''}</p>
     </>}
-    {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]}/>}
+    {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} key={dialog.row.propertyId} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]} callReferencesLoading={!callOptions} callReferencesError={callOptions?.error} onRetryCallReferences={()=>setCallRetry(value=>value+1)}/>}
     {common&&dialog?.action==='ready-for-offer'&&<AcquisitionReadinessDialog {...common} onSubmit={payload=>submit(payload)} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
     {common&&dialog?.action==='log-offer'&&<AcquisitionOfferDialog {...common} onSubmit={payload=>submit(payload)} motivationRequired={!motivation} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
     {common&&dialog&&['contract-signed','decline-offer','handoff','archive'].includes(dialog.action)&&<AcquisitionLifecycleDialog {...common} onSubmit={payload=>submit(payload)} mode={dialog.action as AcquisitionLifecycleMode}

@@ -6,6 +6,7 @@ import * as React from "react"
 const mocks = vi.hoisted(() => ({
   routerRefresh: vi.fn(),
   loadMyLeads: vi.fn(),
+  loadMyLeadCallReferences: vi.fn(),
 }))
 
 vi.mock("next/navigation", () => ({
@@ -24,7 +25,7 @@ vi.mock("./actions", () => ({
   loadMyLeads: mocks.loadMyLeads,
   loadMyLeadsStage: vi.fn(),
   loadMyLeadDetail: vi.fn(),
-  loadMyLeadCallReferences: vi.fn(),
+  loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
   submitMyLeadCommand: vi.fn(),
   changeAcquisitionDesignation: vi.fn(),
   changeAcquisitionSettings: vi.fn(),
@@ -43,9 +44,11 @@ vi.mock("./_components/queue", () => ({
     selectedDateRange,
     onPeriodChange,
     onDateRangeChange,
+    onStageAction,
   }: {
-    stages: { not_contacted?: { rows: Array<{ address: string }> } }
+    stages: { not_contacted?: { rows: Array<{ address: string; propertyId: string }> } }
     search: string
+    onStageAction: (kind: string, row: { propertyId: string }) => void
     onSearchChange: (value: string) => void
     canSelectRep: boolean
     selectedRepId: string
@@ -60,6 +63,7 @@ vi.mock("./_components/queue", () => ({
     const row = stages.not_contacted?.rows[0]
     return (
       <section aria-label="Mock My Leads queue">
+        <button onClick={() => row && onStageAction("log-attempt", row)}>Log attempt</button>
         <span data-testid="queue-address">{row?.address}</span>
         <input aria-label="Search My Leads" value={search} onChange={(event) => onSearchChange(event.target.value)} />
         {canSelectRep && (
@@ -110,9 +114,6 @@ vi.mock("./_components/queue", () => ({
   },
 }))
 
-vi.mock("./_components/attempt-dialog", () => ({
-  AcquisitionAttemptDialog: () => null,
-}))
 vi.mock("./_components/readiness-dialog", () => ({
   AcquisitionReadinessDialog: () => null,
 }))
@@ -223,6 +224,51 @@ function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis) {
 describe("MyLeadsClient", () => {
   beforeEach(() => {
     mocks.loadMyLeads.mockReset()
+    mocks.loadMyLeadCallReferences.mockReset()
+  })
+
+  it("shows lookup loading, then enables the actual call selector", async () => {
+    const user = userEvent.setup()
+    let resolve!: (value: unknown) => void
+    mocks.loadMyLeadCallReferences.mockReturnValue(new Promise(r => { resolve = r }))
+    renderClient(snapshot("106 Fixture Lane"))
+    await user.click(screen.getByRole("button", { name: "Log attempt" }))
+    expect(screen.getByRole("status")).toHaveTextContent("Loading Sandra calls")
+    expect(screen.getByRole("option", { name: "Sandra" })).toBeDisabled()
+    resolve({ ok: true, options: [{ id: "call-1", label: "Today at 9 AM" }] })
+    await waitFor(() => expect(screen.getByRole("option", { name: "Sandra" })).toBeEnabled())
+    await user.selectOptions(screen.getByLabelText("Source"), "sandra")
+    expect(screen.getByLabelText("Sandra call")).toHaveValue("call-1")
+  })
+
+  it.each(["result", "rejection"])("retries a lookup %s inside the dialog without losing the note", async mode => {
+    const user = userEvent.setup()
+    if (mode === "result") mocks.loadMyLeadCallReferences.mockResolvedValueOnce({ ok: false, message: "Failed" })
+    else mocks.loadMyLeadCallReferences.mockRejectedValueOnce(new Error("Network"))
+    mocks.loadMyLeadCallReferences.mockResolvedValueOnce({ ok: true, options: [{ id: "call-1", label: "Today at 9 AM" }] })
+    renderClient(snapshot("106 Fixture Lane"))
+    await user.click(screen.getByRole("button", { name: "Log attempt" }))
+    await user.type(screen.getByLabelText("Note (optional)"), "Keep this note")
+    await user.click(await screen.findByRole("button", { name: "Retry loading Sandra calls" }))
+    await waitFor(() => expect(screen.getByRole("option", { name: "Sandra" })).toBeEnabled())
+    expect(screen.getByLabelText("Note (optional)")).toHaveValue("Keep this note")
+    expect(mocks.loadMyLeadCallReferences).toHaveBeenCalledTimes(2)
+  })
+
+  it("ignores a stale lookup after closing and reopening the same lead", async () => {
+    const user = userEvent.setup()
+    let resolveOld!: (value: unknown) => void
+    mocks.loadMyLeadCallReferences.mockReturnValueOnce(new Promise(r => { resolveOld = r }))
+    mocks.loadMyLeadCallReferences.mockResolvedValueOnce({ ok: true, options: [{ id: "new-call", label: "Current call" }] })
+    renderClient(snapshot("106 Fixture Lane"))
+    await user.click(screen.getByRole("button", { name: "Log attempt" }))
+    await user.click(screen.getByRole("button", { name: "Cancel" }))
+    await user.click(screen.getByRole("button", { name: "Log attempt" }))
+    await user.selectOptions(screen.getByLabelText("Source"), "sandra")
+    expect(screen.getByLabelText("Sandra call")).toHaveValue("new-call")
+    resolveOld({ ok: true, options: [{ id: "old-call", label: "Stale call" }] })
+    await waitFor(() => expect(screen.getByLabelText("Sandra call")).toHaveValue("new-call"))
+    expect(screen.queryByRole("option", { name: "Stale call" })).not.toBeInTheDocument()
   })
 
   it("preserves expanded queue details when router refresh supplies new initial props", async () => {
