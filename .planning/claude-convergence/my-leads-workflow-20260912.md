@@ -17,7 +17,7 @@
 - [PASS] Production build completes for the merged candidate.
 - [PASS] Astro read-only review completed with high confidence: plan approved for preflight/execution; the historical fresh-handoff defect is confirmed fixed in the merged migration and must be rechecked on the current applied database identity.
 - [PASS] Isolated local mutation admission: the user amendment authorizes this session's synthetic stack. A guarded seed apply safely refused overwrite because the 105 expanded IDs already exist; no reset was performed.
-- [PASS] Browser workflow submissions and persisted outcomes for the new 84-case batch are complete for this isolated run. Current CSV totals are 27 PASS and 57 BLOCKED, with no NOT RUN rows. BLOCKED rows carry the exact unavailable capability; API-assisted writes remain labeled separately and have browser reload/SQL corroboration.
+- [PASS] Browser workflow execution and persisted outcomes for the new 84-case batch are recorded for this isolated run. Current CSV totals are 22 PASS and 62 BLOCKED, with no NOT RUN rows. BLOCKED rows carry the exact unavailable capability or incomplete branch coverage; API-assisted writes remain labeled separately and have browser reload/SQL corroboration.
 - [IN PROGRESS] Exact-current-candidate Astro review and final acceptance packet.
 
 ## Preflight evidence
@@ -25,7 +25,7 @@
 - Dedicated local Supabase containers are present on the documented Colima profile, API `58321`, PostgreSQL `58322`; identity values and credentials were not copied into this ledger.
 - Existing local Next process on port `58700` and current database connections were observed. No process was stopped or reset; this run uses the candidate on port `58702`.
 - Seed preview completed in plan-only mode: 105 synthetic leads, 21 per stage, detail pagination fixture counts. A guarded apply was attempted and safely refused because augmented IDs already exist; no reset or overwrite was performed.
-- The candidate worktree was advanced from the older evidence base to `origin/main` with a local merge; plan artifacts remain isolated and uncommitted.
+- The candidate worktree was advanced from the older evidence base to `origin/main` with a local merge; source candidate is `7890622d`, and the current evidence binding is committed in `c72d2cbb`.
 
 ## Astro review
 
@@ -33,7 +33,7 @@ Astro reviewed the plan and reported: approve preflight/execution with two corre
 
 ## Current decision
 
-The isolated campaign is ready for exact-current-candidate Astro review. No confirmed product defect was discovered, so no source fix was needed this turn; all blocked capabilities and browser/SQL evidence are recorded in the CSV and receipt.
+The isolated campaign is ready for a final exact-current-candidate Astro review. No confirmed product defect was discovered, so no source fix was needed this turn; all blocked capabilities, incomplete branches, before/after facts, side-effect checks, and retained-fixture/writer status are recorded in the CSV and receipt.
 
 ## Current execution evidence
 

@@ -3,7 +3,9 @@
 - Candidate: local merge head `7890622d`, served at `127.0.0.1:58702`
 - Browser: in-app browser, authenticated synthetic rep, desktop viewport
 - Data: dedicated local Supabase stack; expanded 105-lead cohort already existed and was not overwritten
+- Identity mapping: `synthetic-rep` is the disposable rep auth identity `…0003`, `synthetic-owner` is the disposable owner auth identity `…0002`, and both are scoped to synthetic org `…0bbb`; no Maria account, production identity, credential, or browser storage was used.
 - Submission method: authenticated workflow RPCs for state-changing steps, followed by in-app-browser reload and assertions. This is marked API-assisted because the in-app browser did not commit `datetime-local` fields.
+- Fixture retention and writers: the expanded synthetic fixtures are intentionally retained for audit in the owned local database. State-changing writers were the in-app browser or authenticated local RPCs; external providers, notifications, tasks, enrollment, and eSign sends were inert or explicitly checked, and local settings changed for race tests were restored.
 
 ## Verified transitions
 
@@ -15,15 +17,15 @@
 | J05-00 signing step | `20000000-0000-4000-8000-000000001042` | BLOCKED, assisted | `fn_record_acquisition_contract` returned `stage=under_contract`; replay returned `duplicate=true`; browser reload showed Under contract. Full browser sign-and-archive path was not executed. |
 | J08-03 fresh implicit handoff | `20000000-0000-4000-8000-000000001002` | BLOCKED, assisted | `fn_handoff_acquisition_lead` returned `archived=true`; replay returned `duplicate=true`; browser reload/search returned zero matching rows. SQL confirms archived sentinel and owner reassignment; browser submission was not exercised. |
 
-## Pure browser UI pass
+## Browser observations and PASS coverage
 
 - `J01-00` full attempt sequence: on `20000000-0000-4000-8000-000000001004`, the browser saved a DialPad No answer, then a DialPad Reached attempt. A cache-busting reload moved the row to Contacted; expanded detail showed `ATTEMPTS · 2` with both outcomes and no recording.
 - `J01-01` duplicate save: on `20000000-0000-4000-8000-000000001010`, two immediate Save clicks closed one dialog; reload/detail showed exactly one Manual No answer attempt.
 - `J01-02` source normalization: on `20000000-0000-4000-8000-000000001010` (`Stress not_contacted 11 Fixture Lane`), selecting Manual outreach revealed and accepted Other outreach; reload/detail showed one Manual No answer attempt.
-- `J05-01` archive cancellation: opened the archive confirmation from the expanded Under contract detail and clicked Cancel; the dialog closed without mutation. Candidate `7890622d`, synthetic rep browser, fixture `20000000-0000-4000-8000-000000001042`.
+- `J05-01` archive cancellation: opened the archive confirmation from the expanded Under contract detail and clicked Cancel; the dialog closed without mutation. BLOCKED for the required tick, untick, Cancel, reopen sequence; rerun that exact branch before PASS. Candidate `7890622d`, synthetic rep browser, fixture `20000000-0000-4000-8000-000000001042`.
 - `J02-00` specified readiness: entered a concrete motivation in the readiness dialog and saved; a cache-busting reload placed `20000000-0000-4000-8000-000000001026` in Needs offer / Interested with the Offer needed guidance.
-- `J02-01` explicit no motivation: selected No motivation provided with Keep temperature unchanged; a reload placed `20000000-0000-4000-8000-000000001025` in Needs offer / Interested without an error.
-- `J02-02` draft reset: canceled a readiness dialog after an invalid draft, opened the next fixture, and observed a fresh empty motivation field.
+- `J02-01` explicit no motivation: selected No motivation provided with Keep temperature unchanged; a reload placed `20000000-0000-4000-8000-000000001025` in Needs offer / Interested without an error. BLOCKED because the fixture's non-default temperature was not captured before and after; rerun with UI and SQL before/after evidence.
+- `J02-02` draft reset: canceled a readiness dialog after an invalid draft, opened the next fixture, and observed a fresh empty motivation field. BLOCKED because the specified → No motivation → specified mode-switch clearing and required check was not completed; rerun that branch before PASS.
 - `J08-02` required handoff reason: on `20000000-0000-4000-8000-000000001044`, submitted the handoff dialog with no reason; it stayed open and displayed Choose a handoff reason, with no write.
 - `J08-00` one-way browser handoff: owner-configured recipient was selected for `20000000-0000-4000-8000-000000001022` (`Stress contacted 02 Fixture Lane`); the rep browser submitted Needs nurture and reload removed the old queue row. Reassign-back was not exercised.
 - `J08-01` recipient-change race: rep held a Needs nurture handoff for `20000000-0000-4000-8000-000000001025` while owner changed the configured recipient to the rep; submit returned `The handoff recipient is unavailable`, then the owner recipient was restored without a lead write.
@@ -53,13 +55,30 @@
 - `J10-00` stale tab: rep browser held a valid attempt form for `20000000-0000-4000-8000-000000001024` while owner browser handed it off; Save returned `This lead changed`, and reload showed zero old-rep rows.
 - `J12-00`/`J12-01`: owner browser enabled the synthetic owner designation, observed it selectable, changed recipient to the rep and back to owner, then restored the designation. Five rapid designation clicks settled on enabled and a final restoring click returned disabled.
 - `J12-02`: empty recipient left Save recipient disabled; the disabled owner remained available in the scope selector with an explicit Acquisitions disabled label. A separately seeded disabled-member history fixture was not available.
-- `J16-02` missing/no-motivation recovery: blank readiness Save on `20000000-0000-4000-8000-000000001027` showed the required motivation error; selecting No motivation provided saved and reload retained Needs offer / Interested.
+- `J16-02` missing/no-motivation recovery: blank readiness Save on `20000000-0000-4000-8000-000000001027` showed the required motivation error; selecting No motivation provided saved and reload retained Needs offer / Interested. BLOCKED because this exercised readiness rather than J16's direct Log offer recovery; rerun the direct-offer omission/no-motivation path and check offer plus side effects.
 - `J17-00` advanced-stage outreach: a browser DialPad No answer on `20000000-0000-4000-8000-000000001043` persisted one attempt while reload retained Needs offer / Interested.
 - `J19-02` second-tab resolution: rep detail remained open while the owner command resolved `20000000-0000-4000-8000-000000001064`; old-rep reload was empty. Browser decline commit remained blocked by chronology-sensitive native datetime input.
 - `J22-01` pending-detail clear: clearing search concurrently with a detail click on `20000000-0000-4000-8000-000000001025` left no stale detail or cross-property content.
 - `J22-02` pagination plus similar selection: after loading the Contacted stage page, the browser narrowed to exact `Stress contacted 05 Fixture Lane` and opened only that row; no duplicate or cross-property detail appeared.
 - `J26-01` concurrent history note: Load more notes and Add note were triggered together on `20000000-0000-4000-8000-000000001021`; reload retained one `Concurrent history note` without a loading error.
-- `J26-02` retry/missing recording: two immediate Load more attempts clicks yielded 40 unique rows, no error, and no lingering Loading details; optional recordings remained absent as allowed.
+- `J26-02` retry/missing recording: two immediate Load more attempts clicks yielded 40 unique rows, no error, and no lingering Loading details; optional recordings remained absent as allowed. BLOCKED because no failed detail-group request was injected; rerun with one attempts-group failure and retry only that group while the other groups remain loaded.
+
+## Persistence and side-effect checks for browser PASS rows
+
+| Cases | Before → after persisted fact | Side-effect check |
+| --- | --- | --- |
+| J01-00, J01-01, J01-02 | Not-contacted/known attempt baselines → Contacted with the expected new attempt(s), and the duplicate Save produced one row. | No offer, task, appointment, enrollment, or provider send was created; detail reload matched the queue. |
+| J02-00 | Contacted → Needs offer / Interested with the specified motivation and Warm temperature. | No task or appointment appeared; reload and detail matched. |
+| J08-01, J08-02 | Handoff form recipient race/blank reason → no lead mutation; dialog error remained actionable. | Recipient settings were restored; no queue write or external effect. |
+| J09-00, J09-01 | Owner scope baseline → owner-attributed attempt and final requested rep scope; rapid selection did not leak an earlier scope. | Existing rep attempt remained; no unrelated row or side effect changed. |
+| J10-00 | Rep row/form open → owner handoff, stale Save error, and zero old-rep queue rows after reload. | No stale attempt was written; reassignment was the sole transition. |
+| J11-00, J11-01, J11-02 | Two lead note baselines/draft state → one note on each intended lead, no draft after collapse, one note after duplicate Add. | Notes stayed property-scoped; no duplicate note or unrelated lead write. |
+| J12-00, J12-01 | Owner designation/recipient baseline → requested recipient transition, then restored designation and recipient terminal state. | Settings were restored; no lead, task, or provider mutation. |
+| J17-00 | Needs offer / Interested → same stage with one new DialPad No answer attempt. | Existing progression/timestamps remained; no offer, task, or appointment was created. |
+| J19-01 | Active pending overdue offer → same pending offer and warning under a custom range excluding sent date. | Range change created no activity or state mutation. |
+| J22-00, J22-01, J22-02 | Similar-address queue/search baselines → only the selected canonical lead opened, or no detail after clear race. | No cross-property detail, stale action, duplicate row, or write. |
+| J25-01 | Contacted/no-attempt baseline → one distinct Wrong number attempt and Contacted stage after reload. | No provider call, offer, task, or suppression mutation was created. |
+| J26-00, J26-01 | 60 notes/60 attempts/25 offers/26 history baseline → cursors exhausted and one appended note persisted once. | Concurrent load/Add produced no duplicate note or loading error; optional recordings remained absent honestly. |
 
 ## Blocked case matrix
 
@@ -74,6 +93,6 @@
 ## Limits and triage
 
 - The native date/time control could not be committed reliably for chronology-sensitive offer, contract, decline, and task submissions through this in-app browser surface. Those rows are marked BLOCKED when API corroboration was used; pure browser UI validations and the browser-capable workflows remain PASS.
-- All 84 CSV cases are terminal: 27 PASS and 57 BLOCKED. BLOCKED rows identify the unavailable clock, fault-injection, identity, side-effect, or native-control capability; they are not product failures.
+- All 84 CSV cases are terminal: 22 PASS and 62 BLOCKED. BLOCKED rows identify the unavailable clock, fault-injection, identity, side-effect, native-control capability, or incomplete branch coverage; they are not product failures. Each CSV row includes a concrete setup check, next action, and retained-fixture/writer status.
 - No confirmed product defect was discovered in these transitions. The incorrect recipient UUID used during setup was a fixture-input error and produced `RECIPIENT_UNAVAILABLE`; correcting it succeeded without a source change.
 - Historical receipts in `RESULTS.md` cover the prior browser campaign and remain separate evidence; they are not silently counted as current submissions.
