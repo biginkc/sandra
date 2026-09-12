@@ -1,3 +1,4 @@
+import { rehearseWebsiteRemoval } from "./rehearse-esign-website-removal.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -79,5 +80,6 @@ export async function rehearseResidentialSchema(client, ids, legacyMetadata) {
   const retried = await claim(values, randomUUID(), "e".repeat(64), sent.id);
   assert.equal(retried.outcome, "created");
   assert.deepEqual(retried.merge_value_snapshot, values);
+  await rehearseWebsiteRemoval(client, ids, templateId, metadata, sent.id);
   console.log("Residential contract schema: registration, drift, payload, replay, retry, rollback and reapply passed");
 }
