@@ -10,26 +10,9 @@ export async function openMenuByTestId(
 
   await expect(trigger).toBeVisible({ timeout: 10_000 });
 
-  const openAttempts = [
-    async () => trigger.click(),
-    async () => {
-      await page.keyboard.press("Escape");
-      await trigger.focus();
-      await page.keyboard.press("Enter");
-    },
-    async () => {
-      await page.keyboard.press("Escape");
-      await trigger.click({ force: true });
-    },
-  ];
-
-  for (const open of openAttempts) {
-    await open();
-    if (await item.isVisible({ timeout: 1_500 })) {
-      return item;
-    }
-  }
-
+  // isVisible() does not wait, even when passed a timeout. Repeated trigger
+  // actions can close a menu whose opening animation is still in progress.
+  await trigger.click();
   await expect(item).toBeVisible({ timeout: 10_000 });
   return item;
 }
