@@ -216,6 +216,8 @@ export type MyLeadsQueueProps = {
   repOptions: readonly MyLeadRepOption[]
   selectedRepLabel?: string | null
   canSelectRep?: boolean
+  /** Background queue replacement must not remove open detail/media controls. */
+  onReviewingChange?: (active: boolean) => void
   onSearchChange: (value: string) => void
   onRepChange: (repId: string) => void
   onPeriodChange: (period: MyLeadsPeriod) => void

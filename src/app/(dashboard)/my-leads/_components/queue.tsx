@@ -50,6 +50,7 @@ export function MyLeadsQueue({
   selectedDateRange,
   repOptions,
   canSelectRep = false,
+  onReviewingChange,
   selectedRepLabel,
   onSearchChange,
   onRepChange,
@@ -80,6 +81,10 @@ export function MyLeadsQueue({
   const requestedDetails = useRef(new Set<string>())
   const activeDetails = useRef(0)
   const [detailTick, setDetailTick] = useState(0)
+
+  useEffect(() => {
+    onReviewingChange?.(expandedIds.size > 0)
+  }, [expandedIds, onReviewingChange])
 
   useEffect(() => {
     mounted.current = true
