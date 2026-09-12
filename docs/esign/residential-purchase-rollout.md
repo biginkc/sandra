@@ -16,3 +16,24 @@ The app validates the payload against the selected template. The forward migrati
 Deploy via the normal PR and test-to-production migration workflows. Leave mode and sending controls as configured; this change does not activate live sending. After app and schema deploy, register and revalidate the correct residential website template. Remove the incorrect employment-letter test asset from selectable purchase choices while preserving history.
 
 Before operational activation, separately verify the acquisitions shared address and Dropbox Sign account identity, account/app callback configuration and authentication, an authorized internal signing test, stored final PDF/audit, paid API entitlement and an authorized harmless live canary. Neither a unit-test pass nor a saved provider template proves live delivery. If rollout fails, disable new sends while retaining callbacks and existing requests; do not blindly replay uncertain sends.
+
+## Verified shared signature allowances
+
+Some accounts have a billing allowance shared by API, website and add-ons. The
+provider account response has no documented plan discriminator. Do not infer a
+shared plan from `is_paid_hs`, a zero API counter, or a positive document counter.
+
+For an independently verified shared plan, set server-only
+`DROPBOX_SIGN_QUOTA_POLICIES` to a JSON object keyed by exact provider account ID.
+Each entry requires `basis: "shared_signature_requests"`, the verified `plan`
+label, positive integer `allowance`, and ISO `verifiedAt`/`validUntil` timestamps.
+Reverify billing and refresh the attestation before the next billing boundary;
+windows longer than 32 days are rejected. Never record keys or passwords here.
+An account email change does not transfer policy to a different provider account.
+
+Live checks fetch the account afresh and require its ID to match the stored ID.
+An attested account uses `documents_left`; other accounts use the API counter.
+Malformed or expired configured attestations fail closed. Balances must be
+nonnegative safe integers and cannot exceed the attested allowance. The existing
+10-request reserve, monthly 40-request fuse and test/live controls remain active.
+Configuration does not authorize a live request or a subscription change.
