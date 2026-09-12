@@ -33,12 +33,24 @@ vi.mock("./actions", () => ({
 vi.mock("./_components/queue", () => ({
   MyLeadsQueue: ({
     stages,
+    search,
+    onSearchChange,
+    canSelectRep,
+    selectedRepId,
+    repOptions,
+    onRepChange,
     selectedPeriod,
     selectedDateRange,
     onPeriodChange,
     onDateRangeChange,
   }: {
     stages: { not_contacted?: { rows: Array<{ address: string }> } }
+    search: string
+    onSearchChange: (value: string) => void
+    canSelectRep: boolean
+    selectedRepId: string
+    repOptions: Array<{ id: string; label: string }>
+    onRepChange: (value: string) => void
     selectedPeriod: string
     selectedDateRange: { startDate: string; endDate: string } | null
     onPeriodChange: (period: string) => void
@@ -49,6 +61,12 @@ vi.mock("./_components/queue", () => ({
     return (
       <section aria-label="Mock My Leads queue">
         <span data-testid="queue-address">{row?.address}</span>
+        <input aria-label="Search My Leads" value={search} onChange={(event) => onSearchChange(event.target.value)} />
+        {canSelectRep && (
+          <select aria-label="Acquisitions member" value={selectedRepId} onChange={(event) => onRepChange(event.target.value)}>
+            {repOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+          </select>
+        )}
         <select
           aria-label="KPI period"
           value={selectedPeriod}
@@ -259,5 +277,58 @@ describe("MyLeadsClient", () => {
       startDate: "2026-09-01",
       endDate: "2026-09-11",
     })
+  })
+
+  it("keeps the search control focused while its filtered queue refreshes", async () => {
+    const user = userEvent.setup()
+    const initialSnapshot = snapshot("106 Fixture Lane")
+    mocks.loadMyLeads.mockResolvedValue({
+      ok: true as const,
+      snapshot: { ...initialSnapshot, search: "abc" },
+      kpis,
+    })
+    renderClient(initialSnapshot)
+
+    const input = screen.getByRole("textbox", { name: "Search My Leads" })
+    await user.type(input, "abc")
+
+    expect(input).toHaveValue("abc")
+    expect(input).toHaveFocus()
+    await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalledWith({
+      memberId: "rep-1",
+      search: "abc",
+      period: "today",
+      startDate: undefined,
+      endDate: undefined,
+    }))
+  })
+
+  it("clears the prior rep queue before loading a changed rep scope", async () => {
+    const user = userEvent.setup()
+    const ownerViewer = { ...viewer, userId: "owner-1", isOwner: true }
+    const ownerRoster: AcquisitionRoster = {
+      ...roster,
+      isOwner: true,
+      members: [
+        ...roster.members,
+        { id: "rep-2", label: "Other rep", role: "member", acquisitionsEnabled: true, active: true, hasHistory: true },
+      ],
+    }
+    mocks.loadMyLeads.mockImplementation(() => new Promise(() => undefined))
+    const initialSnapshot = snapshot("Rep one Fixture Lane")
+    render(
+      <MyLeadsClient
+        viewer={ownerViewer}
+        roster={ownerRoster}
+        initialMemberId="rep-1"
+        initialSnapshot={initialSnapshot}
+        initialKpis={kpis}
+      />,
+    )
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Acquisitions member" }), "rep-2")
+
+    expect(screen.getByRole("status")).toHaveTextContent("Loading My Leads…")
+    expect(screen.queryByTestId("queue-address")).not.toBeInTheDocument()
   })
 })

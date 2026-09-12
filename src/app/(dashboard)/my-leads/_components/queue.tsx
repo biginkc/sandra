@@ -58,6 +58,7 @@ export function MyLeadsQueue({
   onLoadMore,
   onLoadDetail,
   onLoadDetailPage,
+  detailRevision = 0,
   onLeadChanged,
   onStageAction,
 }: MyLeadsQueueProps) {
@@ -68,6 +69,8 @@ export function MyLeadsQueue({
   const [detailStates, setDetailStates] = useState<
     Readonly<Record<string, MyLeadDetailState>>
   >({})
+  const expandedIdsRef = useRef<ReadonlySet<string>>(new Set())
+  expandedIdsRef.current = expandedIds
   const requestIds = useRef<Record<string, number>>({})
   const detailPageRequestIds = useRef<Record<string, number>>({})
   const detailGeneration = useRef(0)
@@ -94,6 +97,23 @@ export function MyLeadsQueue({
     requestedDetails.current.clear()
     detailPageRequestIds.current = {}
   }, [scopeKey])
+
+  useEffect(() => {
+    if (detailRevision === 0) return
+    detailGeneration.current += 1
+    requestedDetails.current.clear()
+    requestIds.current = {}
+    detailPageRequestIds.current = {}
+    setDetailStates((previous) => {
+      const next = { ...previous }
+      for (const propertyId of Object.keys(next)) {
+        if (expandedIdsRef.current.has(propertyId)) next[propertyId] = { status: "loading" }
+        else delete next[propertyId]
+      }
+      return next
+    })
+    setDetailTick((tick) => tick + 1)
+  }, [detailRevision])
 
   const loadDetails = useCallback(async (propertyId: string) => {
     requestedDetails.current.add(propertyId)
