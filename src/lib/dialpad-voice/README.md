@@ -29,7 +29,7 @@ The SQL tests start disposable local PostgreSQL clusters with prerequisite fixtu
 relations. They do not connect to hosted Supabase and do not replace a complete
 application migration rehearsal. FFmpeg tests exercise generated WAV media.
 
-Separately, `scripts/rehearse-dialpad-full-schema.mjs` replayed all 250 current
+Separately, `scripts/rehearse-dialpad-full-schema.mjs` replayed the initial 250
 SQL migrations against a fresh genuine local Supabase Auth/Storage database.
 The receipt hashes match the current files. This proves clean installation
 compatibility, not hosted-schema parity or provider behavior.
@@ -131,3 +131,12 @@ manual-dialing behavior has been evaluated: native calls may bypass Sandra's lea
 checks. The panel does not yet integrate guarded start, mute/hold/DTMF parity,
 call wrap, or live Coach. Unit/RTL proof of frame persistence and message handling
 is not provider login, media, navigation-audio, or end-to-end calling proof.
+
+
+The subsequent duration-evidence migration was verified as a local upgrade from
+that replayed 250-migration database to 251 migrations, followed by all seven
+full-schema behavior checks. It validates terminal timing before storing duration
+and uses a private event timestamp to allow newer corrections without regression
+from older deliveries. Provider connected duration remains distinct from measured
+talk duration. This is not a claim of a fresh 251-migration replay or live timing
+semantics.
