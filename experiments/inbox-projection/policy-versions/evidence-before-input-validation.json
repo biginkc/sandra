@@ -1,0 +1,54 @@
+{
+  "at": "2026-09-13 20:04:08.786363+00",
+  "checks": [
+    {
+      "name": "persistent initial property/requester dependency vector is complete; missing authoritative baseline is rejected",
+      "passed": true
+    },
+    {
+      "name": "message read/delivery/order display, property no-op/context and membership badge revisions leave action vector unchanged",
+      "passed": true
+    },
+    {
+      "name": "outcome, owner/follow-up, eligibility, contact references and template inputs advance separate property purposes",
+      "passed": true
+    },
+    {
+      "name": "contact template names separated from phone/type and opt-out policy",
+      "passed": true
+    },
+    {
+      "name": "consent audit noise excluded; event ordering, old/new contact/channel and deletion advance retained channel policy",
+      "passed": true
+    },
+    {
+      "name": "suppression time is policy-relevant despite summary exclusion; audit fields excluded and old/new scoped route retained",
+      "passed": true
+    },
+    {
+      "name": "thread identity excludes responder display; review action/status changes stay separate from reply content",
+      "passed": true
+    },
+    {
+      "name": "membership access restriction and conservative effective configuration changes advance access dependency",
+      "passed": true
+    },
+    {
+      "name": "old/new tenant identities retained; deletion/reinsertion cannot reuse a revision; rollback restores all counters",
+      "passed": true
+    },
+    {
+      "name": "ordinary authenticated/service roles cannot read or forge worker-private counters",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "b9117f27ea295aed893b0246c09a6737b171d567c26bd56c3df55f7bac37a8a7",
+  "field_map_sha256": "8e737c9717ac1835e81476226bada670619cb7ecb2f8a80e3621174bfbbcb347",
+  "runner_sha256": "7310a0dcb79ba2eb6dccb7d00a5d4efe5d292cda93fcaea7f4e18f1d98f3550f",
+  "limits": [
+    "Purpose-scoped source counters, not a complete prepared-reply/authorization dependency contract",
+    "No provider/business-line/template/global permission config coverage beyond enumerated fields",
+    "Historical baseline seeding and execution-time canonical locks/receipt transaction remain required",
+    "No production changes or trigger bypass/retry certification"
+  ]
+}

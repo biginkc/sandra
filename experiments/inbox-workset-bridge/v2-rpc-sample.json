@@ -1,0 +1,38 @@
+{
+  "scope": {
+    "id": "4e5f2339-3cea-4844-b3de-a545316895e2",
+    "org_id": "f9d45ebb-947d-4a83-86a9-a4baa1871b3e",
+    "handles": [
+      null
+    ],
+    "targets": [
+      {
+        "id": "63050942-d215-4e89-bcd8-10c596c8a5e1",
+        "kind": "known_conversation"
+      }
+    ],
+    "user_id": "6ef71013-f789-40bd-a480-5d0fddb366b6",
+    "refreshed": true,
+    "created_at": "2026-09-13T21:28:59.833559+00:00",
+    "expires_at": "2026-09-13T21:43:59.833559+00:00",
+    "generation": "4",
+    "session_id": "24e401ff-1f80-4a36-8c41-bcca4007a9eb",
+    "next_cursor": "29f6306a-aa74-4b60-8fcf-5f5cac4d28d6",
+    "access_epoch": "8"
+  },
+  "counts": {
+    "as_of": "2026-09-13T21:29:00.377886+00:00",
+    "counts": {
+      "all": 3,
+      "mine": 1,
+      "dispo": 0,
+      "unread": 1,
+      "unknown": 0,
+      "dismissed": 0,
+      "escalated": 0,
+      "unassigned": 2,
+      "needs_outcome": 0
+    },
+    "access_epoch": "8"
+  }
+}

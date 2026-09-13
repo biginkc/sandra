@@ -1,0 +1,15 @@
+{
+  "at": "2026-09-13 19:33:06.290109+00",
+  "checks": [
+    {
+      "name": "real worker blocks after source snapshot; replaced claim fences old cursor and rolls back child enqueue; replacement progresses",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "841dd151a0a5e2ea623d4ac2c936e097d45af190383e906ad1184fb6d58c53b3",
+  "runner_sha256": "26fdc08488edd8d4cb904af42d938efe44f3607236a79f2f0958a839c7617647",
+  "limits": [
+    "Lease expiry simulated by fixture-private update; actual concurrent sessions and lock wait verified",
+    "No process crash, deadlock freedom, production workload or provider execution claim"
+  ]
+}

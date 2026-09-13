@@ -1,0 +1,15 @@
+{
+  "at": "2026-09-13 19:39:57.833925+00",
+  "checks": [
+    {
+      "name": "real route worker blocks after edge snapshot; replaced claim fences old cursor and rolls back child enqueue; replacement progresses",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "0e42f835e29d3aa34e41ead32fa5daf80eb5d59e1aa182b547bd5cde2e0cbbc5",
+  "runner_sha256": "3037c39d903ac9e4452b678eac6afe67e85304ddbc1d55a53ab921e035015802",
+  "limits": [
+    "Lease expiry simulated by fixture-private update; actual concurrent sessions and lock wait verified",
+    "No process crash, deadlock freedom, production workload or provider execution claim"
+  ]
+}
