@@ -10,12 +10,13 @@ const request = (suffix = "") => new Request(`http://localhost/api/inbox-v2/deta
 beforeEach(() => {
   vi.clearAllMocks();
   vi.stubEnv("INBOX_V2_EXPERIMENT_ENABLED", "1");
+  vi.stubEnv("INBOX_TIMING_ENABLED", undefined);
   mocks.create.mockResolvedValue({ auth: { getUser: mocks.getUser } });
   mocks.getUser.mockResolvedValue({ data: { user: { id: "member" } }, error: null });
   mocks.membership.mockResolvedValue({ ok: true, membership: { user_id: "member", org_id: "org" } });
   mocks.read.mockResolvedValue({ status: "ready", conversationId: id, messages: [] });
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe("flagged Inbox detail GET", () => {
   it("defaults closed before creating any client", async () => {
@@ -51,6 +52,44 @@ describe("flagged Inbox detail GET", () => {
     mocks.read.mockResolvedValue({ status: "unavailable", conversationId: id });
     expect((await GET(request())).status).toBe(404);
     mocks.read.mockRejectedValue(new Error("Private body and SQL password"));
+    const response = await GET(request());
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Conversation unavailable" });
+  });
+});
+
+
+describe("opt-in detail route observability", () => {
+  it("does not log by default", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    expect((await GET(request())).status).toBe(200);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("emits one payload-free timing for reader failure=%s", async failed => {
+    vi.stubEnv("INBOX_TIMING_ENABLED", "1");
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    if (failed) mocks.read.mockRejectedValue(new Error("private user body address URL password"));
+    const response = await GET(request());
+    expect(response.status).toBe(failed ? 500 : 200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    if (failed) expect(await response.json()).toEqual({ error: "Conversation unavailable" });
+    expect(log).toHaveBeenCalledTimes(1);
+    const event = JSON.parse(log.mock.calls[0][0]);
+    expect(event).toEqual({
+      event: "inbox.detail.server_timing.v1", status: failed ? 500 : 200,
+      outcome: failed ? "error" : "returned", elapsedMs: expect.any(Number),
+    });
+    expect(event.elapsedMs).toBeGreaterThanOrEqual(0);
+    expect(log.mock.calls[0][0]).not.toContain(id);
+    expect(log.mock.calls[0][0]).not.toContain("private");
+  });
+
+  it("preserves the response when logging fails", async () => {
+    vi.stubEnv("INBOX_TIMING_ENABLED", "1");
+    vi.spyOn(console, "info").mockImplementation(() => { throw new Error("collector down"); });
+    expect((await GET(request())).status).toBe(200);
+    mocks.read.mockRejectedValue(new Error("private"));
     const response = await GET(request());
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "Conversation unavailable" });

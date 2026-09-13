@@ -8,6 +8,37 @@ const failure = (status: number, error: string) => Response.json({ error }, { st
 
 /** Additive P0 experiment only. Reads never mark messages read. */
 export async function GET(request: Request) {
+  const timingEnabled = process.env.INBOX_TIMING_ENABLED === "1";
+  const started = timingEnabled ? safeNow() : null;
+  let response: Response | undefined;
+  try {
+    response = await readResponse(request);
+    return response;
+  } finally {
+    if (timingEnabled) {
+      try {
+        const ended = safeNow();
+        const status = response?.status ?? 500;
+        console.info(JSON.stringify({
+          event: "inbox.detail.server_timing.v1",
+          status,
+          outcome: status >= 500 ? "error" : status >= 400 ? "rejected" : "returned",
+          elapsedMs: started === null || ended === null
+            ? null : Math.round(Math.max(0, ended - started) * 100) / 100,
+        }));
+      } catch { /* Observability must not affect response or disclose exception data. */ }
+    }
+  }
+}
+
+function safeNow(): number | null {
+  try {
+    const now = performance.now();
+    return Number.isFinite(now) ? now : null;
+  } catch { return null; }
+}
+
+async function readResponse(request: Request) {
   if (process.env.INBOX_V2_EXPERIMENT_ENABLED !== "1") return failure(404, "Not found");
   try {
     const params = new URL(request.url).searchParams;

@@ -57,3 +57,14 @@ remain open. The production experiment flag remains unset.
 Final review found and fixed cache retention after a successful HTML login redirect.
 A regression test now proves a failed current read invalidates other cached displays.
 Recorded browser timings precede this error-path-only correction.
+
+## Cache expiry: unmet revisit case
+
+Two additional network revisits after a31-second wait (excluded from timing)
+took231ms and308ms. Both exceeded the200ms revisit target. Immediate cached
+revisits took about65ms. These are two observations, not a tail percentile.
+The earlier cached-revisit result must not be generalized to all revisits; the
+network path needs further improvement. See browser-candidate1-cache-expiry.json.
+
+With20samples, reported p99 in raw artifacts is just the sample maximum. These
+are descriptive sample quantiles, not reliable population tail estimates.
