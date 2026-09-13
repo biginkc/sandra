@@ -4,6 +4,7 @@ import type { DialpadVoiceDatabase } from "./database.generated";
 import { DialpadVoiceClient, DialpadVoiceError } from "./client";
 import { downloadDialpadRecording, type RecordingDecoder } from "./recording-download";
 import { retainDialpadRecording } from "./recording-storage";
+import { signedRecordingUrl } from "./recording-source";
 
 function id(value: unknown): string | null {
   if (typeof value === "string" && value.trim()) return value;
@@ -44,12 +45,24 @@ export async function processDialpadRecording(options: {
     } else {
       const segments = Array.isArray(call.recording_details) ? call.recording_details : [];
       const segment = segments.map(object).find((value) => value && id(value.id) === artifact.provider_recording_id);
-      if (!segment || typeof segment.url !== "string" || segment.recording_type !== artifact.recording_kind) {
+      if (!segment || segment.recording_type !== artifact.recording_kind) {
         errorCode = "recording_not_yet_available";
       } else {
-        const download = await downloadDialpadRecording({
-          url: segment.url, apiKey: options.apiKey, decode: options.decode, fetchImpl: options.fetchImpl,
+        const eventUrl = await signedRecordingUrl(client, {
+          orgId, callId: artifact.provider_call_id, providerUserId: options.providerUserId,
+          recordingId: artifact.provider_recording_id, recordingKind: artifact.recording_kind,
         });
+        const restUrl = typeof segment.url === "string" ? segment.url : null;
+        const url = eventUrl ?? restUrl;
+        if (!url) throw new Error("Recording source unavailable");
+        let download = await downloadDialpadRecording({ url, apiKey: options.apiKey, decode: options.decode, fetchImpl: options.fetchImpl });
+        // A stored event link may expire while Call Get now has a fresh link.
+        // Try that distinct authenticated source once for source/access failures only;
+        // never follow a redirect, rewrite a URL, or bypass media validation.
+        if (!download.ok && eventUrl && restUrl && eventUrl !== restUrl &&
+          ["invalid_url", "login_required", "http_error", "redirect_rejected", "html_response"].includes(download.reason)) {
+          download = await downloadDialpadRecording({ url: restUrl, apiKey: options.apiKey, decode: options.decode, fetchImpl: options.fetchImpl });
+        }
         if (!download.ok) {
           errorCode = `recording_${download.reason}`;
           if (download.reason === "login_required") status = "denied";

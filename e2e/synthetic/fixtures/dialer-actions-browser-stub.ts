@@ -12,6 +12,8 @@ const target = {
 
 export const loadDialerRecents = async () => ({ ok: true as const, data: [] });
 export const searchDialerLeads = async () => ({ ok: true as const, data: [] });
+// Browser preparation only reads eligibility; server start owns sequence pause.
+export const inspectLeadCall = async () => ({ ok: true as const, data: target });
 export const prepareLeadCall = async () => ({ ok: true as const, data: target });
 export const prepareManualCall = prepareLeadCall;
 export const completeSoftphoneCall = async () => ({ ok: true as const, data: {} });
