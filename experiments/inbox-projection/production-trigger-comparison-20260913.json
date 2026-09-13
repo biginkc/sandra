@@ -1,0 +1,194 @@
+{
+  "production_sample": {
+    "reader": "postgres",
+    "database": "postgres",
+    "read_only": "on",
+    "sampled_at": "2026-09-13T19:11:50.406519+00:00",
+    "in_recovery": false,
+    "server_version": "17.6",
+    "server_version_num": "170006"
+  },
+  "scope": "Noninternal triggers on preflight allowlist only; hashes are fingerprints, not semantic proof. Local experiment-only triggers intentionally omitted.",
+  "comparisons": [
+    {
+      "table": "messages",
+      "name": "guard_training_messages",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "messages",
+      "name": "messages_reject_dnc_locked_read",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "messages",
+      "name": "trg_messages_fill_sms_conversation_id",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "properties",
+      "name": "global_dnc_properties_write_barrier",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "properties",
+      "name": "guard_training_property",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "properties",
+      "name": "preserve_promote_leads_item_on_property_delete",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "properties",
+      "name": "properties_true_dnc_lock_guard",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "properties",
+      "name": "trg_my_leads_property_assignment",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "properties",
+      "name": "trg_properties_active_assignee",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "properties",
+      "name": "trg_properties_supersede_ai_disposition_reviews",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "properties",
+      "name": "zz_serialize_property_safety_before_csv_consent",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "contacts",
+      "name": "aa_serialize_contact_safety_before_csv_consent",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "contacts",
+      "name": "contacts_phone_type_required",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "contacts",
+      "name": "contacts_propagate_true_dnc_lock",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "contacts",
+      "name": "contacts_reject_dnc_locked_property",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "contacts",
+      "name": "contacts_true_dnc_lock_guard",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "contacts",
+      "name": "global_dnc_contacts_write_barrier",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "contacts",
+      "name": "global_phone_dnc_propagate_contact_lock",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "contacts",
+      "name": "guard_training_contact",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "contacts",
+      "name": "zz_apply_global_phone_dnc_to_contact",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "consent_events",
+      "name": "a_sync_contact_org",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "consent_events",
+      "name": "aa_serialize_consent_safety_before_csv_consent",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "consent_events",
+      "name": "csv_import_consent_events_immutable",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "consent_events",
+      "name": "guard_training_consent",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "sms_phone_suppressions",
+      "name": "aa_serialize_phone_suppression_before_csv_consent",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "global_phone_dnc_registry",
+      "name": "global_phone_dnc_registry_append_only",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "memberships",
+      "name": "trg_bump_my_leads_membership_revision",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "memberships",
+      "name": "trg_hugo_membership_lifecycle_service_guard",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "memberships",
+      "name": "trg_hugo_membership_owner_guard",
+      "status": "match",
+      "differing_fields": []
+    },
+    {
+      "table": "memberships",
+      "name": "trg_my_leads_designation_guard",
+      "status": "match",
+      "differing_fields": []
+    }
+  ]
+}

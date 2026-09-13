@@ -1,0 +1,21 @@
+{
+  "at": "2026-09-13T13:02:17Z",
+  "checks": [
+    {
+      "name": "existing bucket concurrent RR miss waits then fails40001 without source or registry leak",
+      "passed": true
+    },
+    {
+      "name": "whole RR transaction retry uses one retained identity and exactly two dirty generations",
+      "passed": true
+    }
+  ],
+  "org": "9018e1a9-f0f9-4b23-b0a7-1e979686d928",
+  "sqlstate": "40001",
+  "setup_sha256": "cb710a8f6560ad9be383abde53b020c16939d7856dacff0451adfe82cb76694d",
+  "limits": [
+    "Correction preserves initial19+5 receipts separately; they describe pre-correction setup",
+    "Existing bucket deliberately preseeded without raw group to exercise retained/colliding-bucket miss",
+    "Enabled writers still need whole-transaction retry; no automatic retry was added to production"
+  ]
+}
