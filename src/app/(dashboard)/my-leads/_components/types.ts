@@ -85,7 +85,7 @@ export type MyLeadStagePage = {
 
 export type MyLeadsKpis = Pick<import("@/lib/my-leads/queries").AcquisitionKpis,
   "attempts" | "reached" | "offersSent" | "contactWithoutFollowUp" | "needsOffers" | "appointmentsOverdue" |
-  "lastAttemptAt" | "asOf" | "missingRecordings" | "recordingExpectationUnknown" | "averageTalkSeconds" |
+  "lastAttemptAt" | "lastAttemptClockVersion" | "asOf" | "missingRecordings" | "recordingExpectationUnknown" | "averageTalkSeconds" |
   "talkTimeSamples" | "talkTimeUnknown" | "conversationsOverFiveMinutes">
 
 export type MyLeadRepOption = {

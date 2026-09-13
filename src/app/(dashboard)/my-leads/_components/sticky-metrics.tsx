@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState, type RefObject } from "react"
-import { formatDuration } from "./metrics"
+import { DailyCallClock, formatDuration } from "./daily-call-clock"
 import type { MyLeadsKpis } from "./types"
 
 /** Mirrors the expanded cards only after they scroll behind the dashboard navigation. */
@@ -11,9 +11,7 @@ export function StickyMyLeadsMetrics({ kpis, expandedRef, repLabel }: {
   repLabel?: string | null
 }) {
   const [visible, setVisible] = useState(false)
-  const [elapsed, setElapsed] = useState(0)
   const stripRef = useRef<HTMLDivElement>(null)
-  const clockStart = useRef(0)
   useEffect(() => {
     const expanded = expandedRef.current
     const strip = stripRef.current
@@ -37,28 +35,12 @@ export function StickyMyLeadsMetrics({ kpis, expandedRef, repLabel }: {
     window.addEventListener("resize", onResize)
     return () => { observer.disconnect(); window.removeEventListener("resize", onResize) }
   }, [expandedRef])
-  useEffect(() => {
-    clockStart.current = performance.now()
-    setElapsed(0)
-  }, [kpis.asOf])
-  useEffect(() => {
-    if (!visible) return
-    const tick = () => setElapsed((performance.now() - clockStart.current) / 1000)
-    tick()
-    const timer = window.setInterval(tick, 1000)
-    return () => window.clearInterval(timer)
-  }, [visible, kpis.asOf])
-
   const count = (value: number | undefined) => Number.isFinite(value) ? value : "—"
-  const hasSnapshot = typeof kpis.asOf === "string" && Number.isFinite(Date.parse(kpis.asOf))
-  const lastAttempt = !hasSnapshot || kpis.lastAttemptAt === undefined ? "—"
-    : kpis.lastAttemptAt === null ? "None yet"
-      : formatDuration((Date.parse(kpis.asOf) - Date.parse(kpis.lastAttemptAt)) / 1000 + elapsed)
   const metrics = [
     ["No follow-up", count(kpis.contactWithoutFollowUp), "Active Contact leads without a future follow-up appointment"],
     ["Needs offer", count(kpis.needsOffers), "Active leads needing offers"],
     ["Overdue", count(kpis.appointmentsOverdue), "Outstanding overdue appointments, including previous days"],
-    ["Last attempt", lastAttempt, "Elapsed since this rep’s latest attempt, including previous days"],
+    ["Last attempt", <DailyCallClock key="daily-clock" kpis={kpis} />, "Today’s calls · Mon–Fri, 9am–5pm Central"],
     ["Reaches / attempts", `${count(kpis.reached)} / ${count(kpis.attempts)}`, "Today’s reaches / attempts · Central time"],
     ["Offers sent", count(kpis.offersSent), "Today’s offers sent · Central time"],
     ["Missing recordings", count(kpis.missingRecordings), `Expected recordings unavailable after five minutes · ${count(kpis.recordingExpectationUnknown)} with unknown expectation excluded`],
@@ -70,7 +52,7 @@ export function StickyMyLeadsMetrics({ kpis, expandedRef, repLabel }: {
       className="overflow-x-auto overscroll-x-contain rounded-xl border border-border bg-card shadow-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
       data-testid="sticky-metrics">
       <dl className="flex w-max min-w-full divide-x divide-border">
-        {metrics.map(([label, value, detail]) => <div key={label} title={String(detail)} className="relative flex-1 whitespace-nowrap px-3 py-2">
+        {metrics.map(([label, value, detail]) => <div key={String(label)} title={String(detail)} className="relative flex-1 whitespace-nowrap px-3 py-2">
           <dt className="text-[10px] font-semibold text-muted-foreground">{label}</dt>
           <dd className="text-base font-bold tabular-nums">{value}</dd>
           <dd className="sr-only">{detail}</dd>
