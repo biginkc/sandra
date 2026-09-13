@@ -65,3 +65,30 @@ for (const width of [390, 1440]) {
     await expect(strip).toHaveCount(0)
   })
 }
+
+test("Sunday does not carry Saturday's call clock into either display", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.setContent(`<style>${css}</style><div id="root"></div>`)
+  await page.addScriptTag({ content: js })
+  await expect(page.getByTestId("kpi-last-attempt")).toContainText("Outside work hours")
+  await expect(page.getByTestId("kpi-last-attempt").locator("time")).toHaveCount(0)
+  await page.evaluate(() => window.scrollTo(0, 700))
+  await expect(page.getByTestId("sticky-metrics")).toBeVisible()
+  await expect(page.getByTestId("sticky-metrics")).toContainText("Outside work hours")
+  await expect(page.getByTestId("sticky-metrics").locator("time")).toHaveCount(0)
+})
+
+test("working-day call ticks equally when the sticky display mounts later", async ({ page }) => {
+  await page.clock.install()
+  await page.route("http://clock.test/**", route => route.fulfill({ contentType: "text/html", body: '<div id="root"></div>' }))
+  await page.goto("http://clock.test/?clock=working")
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.addStyleTag({ content: css })
+  await page.addScriptTag({ content: js })
+  await expect(page.getByTestId("kpi-last-attempt").locator("time")).toHaveText("1m 0s")
+  await page.clock.runFor(2000)
+  await expect(page.getByTestId("kpi-last-attempt").locator("time")).toHaveText("1m 2s")
+  await page.evaluate(() => window.scrollTo(0, 700))
+  await expect(page.getByTestId("sticky-metrics")).toBeVisible()
+  await expect(page.getByTestId("sticky-metrics").locator("time")).toHaveText("1m 2s")
+})
