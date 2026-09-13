@@ -1,0 +1,49 @@
+{
+  "read_only": "on",
+  "sampled_at": "2026-09-13T19:12:20.936191+00:00",
+  "message_buckets": [
+    {
+      "n": 14999,
+      "status": "received",
+      "channel": "sms",
+      "direction": "inbound"
+    },
+    {
+      "n": 60277,
+      "status": "delivered",
+      "channel": "sms",
+      "direction": "outbound"
+    },
+    {
+      "n": 3632,
+      "status": "failed",
+      "channel": "sms",
+      "direction": "outbound"
+    },
+    {
+      "n": 17746,
+      "status": "sent",
+      "channel": "sms",
+      "direction": "outbound"
+    },
+    {
+      "n": 29262,
+      "status": "paused",
+      "channel": "sms",
+      "direction": "outbound"
+    },
+    {
+      "n": 32,
+      "status": "queued",
+      "channel": "sms",
+      "direction": "outbound"
+    }
+  ],
+  "sms_conversation_history": {
+    "p50": 1,
+    "p95": 3,
+    "p99": 5,
+    "max_messages": 44,
+    "conversations": 100724
+  }
+}

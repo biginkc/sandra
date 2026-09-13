@@ -1,0 +1,31 @@
+{
+  "at": "2026-09-13T13:03:10Z",
+  "checks": [
+    {
+      "name": "direction transitions dirty departing/entering unknown identities and use the customer side of route edges",
+      "passed": true
+    },
+    {
+      "name": "source UUID replacement retains old version and creates new version while moving edge",
+      "passed": true
+    },
+    {
+      "name": "unknown organization move retains distinct scoped sender UUIDs and dirties both",
+      "passed": true
+    },
+    {
+      "name": "equal timestamps share raw identity; microsecond ordering changes dirty display without inventing unknown tie policy",
+      "passed": true
+    },
+    {
+      "name": "NULL and empty sender excluded while initial proof preserves nonempty whitespace",
+      "passed": true
+    }
+  ],
+  "org": "13e92048-7313-4c29-a171-22e1a216ddac",
+  "setup_sha256": "8b26dab36039731397c30220c0b3ad77db1b2a82983c63533c305ec8dc064b04",
+  "limits": [
+    "No winner assertion for equal-timestamp unknown messages: legacy tie behavior remains undefined",
+    "Additional synthetic rows only; no parent fanout or expiry implementation"
+  ]
+}
