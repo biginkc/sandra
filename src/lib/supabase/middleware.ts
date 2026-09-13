@@ -32,7 +32,9 @@ function loginDenialResponse(request: NextRequest, url: URL): NextResponse {
     return new NextResponse(null, {
       status: 200,
       headers: {
-        "x-action-redirect": `${url.href};replace`,
+        // Relative destination preserves the browser origin when Next normalizes
+        // a loopback hostname or runs behind an internal reverse proxy.
+        "x-action-redirect": `${url.pathname}${url.search}${url.hash};replace`,
         "Cache-Control": "no-store",
       },
     });

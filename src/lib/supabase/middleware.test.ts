@@ -355,7 +355,8 @@ describe("action authorization denial transport", () => {
   }
   async function expectActionDenial(response: Awaited<ReturnType<typeof updateSession>>, destination: string) {
     expect(response.status).toBe(200);
-    expect(response.headers.get("x-action-redirect")).toBe(`${destination};replace`);
+    const target = new URL(destination);
+    expect(response.headers.get("x-action-redirect")).toBe(`${target.pathname}${target.search}${target.hash};replace`);
     expect(response.headers.has("location")).toBe(false);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.has("x-middleware-next")).toBe(false);
