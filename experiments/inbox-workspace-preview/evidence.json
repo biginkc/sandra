@@ -1,0 +1,68 @@
+{
+  "sourceHashes": {
+    "inbox-workspace.tsx": "cf19c696cefa9532a932f65eecd0175eda76ab1a1c33f0d0eb3d656c23961e01",
+    "selection.ts": "c7830cf50528bd46b2a049404f8503b92c323556d3417c1f80f8dd2148a3be78",
+    "workspace.module.css": "ad91b3a6537aa5ab248d2ab9b961470abc022a17b150598633d1764be7ea550e"
+  },
+  "servedBundleHashes": {
+    "app.js": "356c9f37a0e216f1d529ab0fcbea483d9a84d5e21cb4c20357cfbe8d26089be1",
+    "app.css": "a8102b401e6af2d8d4d4aeb1ab5daf063122de1c080c8c2df9ce8da18f9c06be"
+  },
+  "at": "2026-09-13T19:08:53.417Z",
+  "kind": "headless synthetic component interaction proof",
+  "checks": [
+    {
+      "name": "plain click selects only; Shift-click toggles scattered rows without opening",
+      "passed": true
+    },
+    {
+      "name": "visible checkbox toggles without replacing existing selection",
+      "passed": true
+    },
+    {
+      "name": "explicit Open and Close preserve selected group",
+      "passed": true
+    },
+    {
+      "name": "Shift-drag immediately selects intersecting rows without a hold timer",
+      "passed": true
+    },
+    {
+      "name": "Escape during rectangle restores pre-gesture selection",
+      "passed": true
+    },
+    {
+      "name": "click and drop invoke the same controlled action contract for the group",
+      "passed": true
+    },
+    {
+      "name": "selection review removes an exception without clearing other selected rows",
+      "passed": true
+    },
+    {
+      "name": "filter change retains selected identities",
+      "passed": true
+    },
+    {
+      "name": "real TanStack virtual list mounts a subset of 80 resident rows",
+      "passed": true
+    },
+    {
+      "name": "Shift rectangle keeps selecting newly mounted rows during edge auto-scroll",
+      "passed": true
+    },
+    {
+      "name": "narrow layout keeps actions available without page horizontal overflow",
+      "passed": true
+    },
+    {
+      "name": "no browser runtime errors",
+      "passed": true
+    }
+  ],
+  "mountedRows": 16,
+  "limits": [
+    "No backend, authorization, provider, sync, or read acknowledgment integration",
+    "Headless repeatable checks and screenshots are not a human-feel or production-latency measurement"
+  ]
+}
