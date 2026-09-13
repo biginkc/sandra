@@ -1,0 +1,45 @@
+{
+  "at": "2026-09-13 19:32:05.314085+00",
+  "checks": [
+    {
+      "name": "property/contact insertion and consumed field change enqueue only parent; unrelated timestamp ignored",
+      "passed": true
+    },
+    {
+      "name": "bounded checkpoint advances; newer parent generation preserves active scan; replay token rejected",
+      "passed": true
+    },
+    {
+      "name": "rollback/retry preserves atomic progress; review-only links reached; ack retains newer pending generation",
+      "passed": true
+    },
+    {
+      "name": "expired lease reclaims with fresh fence; subsequent generation includes earlier cursor positions",
+      "passed": true
+    },
+    {
+      "name": "review property/conversation move and deletion capture departed and resulting conversation keys",
+      "passed": true
+    },
+    {
+      "name": "contact parent fans out by actual message links with bounded source-record cursor",
+      "passed": true
+    },
+    {
+      "name": "old/new tenant keys retained separately through contact move and deletion",
+      "passed": true
+    },
+    {
+      "name": "ordinary authenticated and service roles cannot read private parent work",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "841dd151a0a5e2ea623d4ac2c936e097d45af190383e906ad1184fb6d58c53b3",
+  "runner_sha256": "d9347e2f82f21a6bb940302242017e9b8d5929d54a03499955f270c502644751",
+  "limits": [
+    "Owned fixture only; no production migration or representative load evidence",
+    "Simulated expiry and transaction rollback, not process-crash or concurrent stale-checkpoint proof",
+    "No consent/suppression/thread capture or command-policy versions",
+    "No privileged bypass repair or production backfill"
+  ]
+}
