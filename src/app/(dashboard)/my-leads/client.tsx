@@ -34,6 +34,24 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [callOptions,setCallOptions]=useState<{propertyId:string;options:{id:string;label:string}[];error:string|null}|null>(null);
   const [callRetry,setCallRetry]=useState(0);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow}|null>(null);
+  type Opening = {action:MyLeadAction;row:QueueRow;scope:string};
+  type CurrentRead = Awaited<ReturnType<typeof loadMyLeads>> | null;
+  const openingScope=JSON.stringify([member,search]);
+  const activeScope=useRef(openingScope);activeScope.current=openingScope;
+  const currentSnapshot=useRef(snapshot);currentSnapshot.current=snapshot;
+  const mutationReads=useRef(new Map<string,{scope:string;episodeId:string|null;requestId:number;read:Promise<CurrentRead>}>());
+  const renderedRead=useRef<{snapshot:QueueSnapshot;requestId:number;scope:string}|null>(null);
+  useEffect(()=>{
+    const read=renderedRead.current;if(!read||read.snapshot!==snapshot)return;
+    // A committed newer authorized read supersedes both successful and failed barriers.
+    for(const [propertyId,barrier] of mutationReads.current){
+      if(barrier.scope===read.scope&&barrier.requestId<=read.requestId)mutationReads.current.delete(propertyId);
+    }
+  },[snapshot]);
+  const pendingOpening=useRef<Opening|null>(null);
+  const [openingStatus,setOpeningStatus]=useState<{opening:Opening;message:string;busy:boolean}|null>(null);
+  const cancelOpening=()=>{pendingOpening.current=null;setOpeningStatus(null);};
+  useEffect(()=>{pendingOpening.current=null;setOpeningStatus(null);mutationReads.current.clear();},[openingScope]);
   const activeDialog=useRef(dialog);activeDialog.current=dialog;
   const recoveredRow=useRef<{opening:NonNullable<typeof dialog>;row:QueueRow}|null>(null);
   const [recovery,setRecovery]=useState<{opening:NonNullable<typeof dialog>;message:string;blocked:boolean;busy:boolean}|null>(null);
@@ -61,20 +79,29 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const serverScopeKey=member;
   const previousServerScope=useRef(serverScopeKey);
   const refresh=useCallback(async(background=false)=>{
-    if(!roster.settings.enabled) return;
+    if(!roster.settings.enabled) return null;
     const id=++request.current;
     try {
       const result=await loadMyLeads({memberId:member,search,period:'today'});
-      if(id!==request.current)return;
+      if(id!==request.current)return null;
       if(result.ok){
         // Replacing a paginated/reordered queue can unmount its recording player.
         // Background checks may update KPIs, but must leave open lead details alone.
-        if(!background||!reviewingDetails.current)setSnapshot(result.snapshot);
+        if(!background||!reviewingDetails.current){renderedRead.current={snapshot:result.snapshot,requestId:id,scope:JSON.stringify([member,search])};setSnapshot(result.snapshot);}
+        else {
+          // Playback keeps the visible queue stable, but a successful read must still
+          // replace a failed barrier before the next workflow opening.
+          for(const [propertyId,barrier] of mutationReads.current){
+            if(barrier.scope===JSON.stringify([member,search])&&barrier.requestId<=id)mutationReads.current.set(propertyId,{...barrier,requestId:id,read:Promise.resolve(result)});
+          }
+        }
         setKpis(result.kpis);setLastCheckedAt(result.snapshot.snapshotAt);setError(null);setRefreshError(null);
       }
       else setRefreshError(result.message);
+      return result;
     } catch {
       if(id===request.current)setRefreshError('My Leads could not refresh.');
+      return null;
     }
   },[member,search,roster.settings.enabled]);
   useEffect(()=>{
@@ -102,14 +129,41 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     return()=>{cancelled=true;clearTimeout(timer);document.removeEventListener('visibilitychange',onVisible);window.removeEventListener('focus',onVisible);};
   },[snapshot,refresh,roster.settings.enabled]);
   const rawRow=(id:string)=>Object.values(snapshot?.stages??{}).flatMap(p=>p?.rows??[]).find(r=>r.propertyId===id);
+  const finishOpening=async(opening:Opening,read:Promise<CurrentRead>)=>{
+    pendingOpening.current=opening;
+    setOpeningStatus({opening,message:'Loading current lead…',busy:true});
+    const result=await read;
+    if(pendingOpening.current!==opening||activeScope.current!==opening.scope)return;
+    if(!result?.ok){setOpeningStatus({opening,message:'Could not load current lead details. Retry to continue.',busy:false});return;}
+    const fresh=Object.values(result.snapshot.stages).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===opening.row.propertyId);
+    if(!fresh||fresh.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
+      setOpeningStatus({opening,message:'This lead is unavailable or its assignment changed. Refresh the queue and reopen it.',busy:false});return;
+    }
+    const latest=Object.values(currentSnapshot.current?.stages??{}).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===fresh.propertyId);
+    // Do not rewind an even newer rendered snapshot, or silently change episodes.
+    if(!latest||latest.assignmentEpisodeId!==fresh.assignmentEpisodeId){setOpeningStatus({opening,message:'This lead assignment changed. Refresh the queue and reopen it.',busy:false});return;}
+    const row=latest&&latest.queueVersion>=fresh.queueVersion?latest:fresh;
+    pendingOpening.current=null;setOpeningStatus(null);submission.current=null;setCallOptions(null);
+    setDialog({action:opening.action,row});
+  };
+  const retryOpening=()=>{
+    const opening=pendingOpening.current;if(!opening||openingStatus?.busy)return;
+    const read=refresh();mutationReads.current.set(opening.row.propertyId,{scope:opening.scope,episodeId:opening.row.assignmentEpisodeId,requestId:request.current,read});
+    void finishOpening(opening,read);
+  };
   const action=(kind:MyLeadAction,id:string)=>{
     const row=rawRow(id);if(!row)return;
+    cancelOpening();
     if(kind==='start-call'){
       if(!softphone?.callingEnabled){setError('Calling is not enabled.');return;}
       softphone.openLead({id:row.propertyId,contactId:row.contactId,firstName:row.homeownerName?.split(' ')[0]??'',name:row.homeownerName??row.address,address:row.address,state:row.state,
         phones:row.phones,dncLocked:false,contactDnc:row.contactDnc,callable:row.phones.some(phone=>!!phone.trim())&&!row.contactDnc});return;
     }
-    submission.current=null;setCallOptions(null);setDialog({action:kind,row});
+    const previous=mutationReads.current.get(id);
+    if(previous?.scope===openingScope&&previous.episodeId===row.assignmentEpisodeId){
+      void finishOpening({action:kind,row,scope:openingScope},previous.read);return;
+    }
+    cancelOpening();submission.current=null;setCallOptions(null);setDialog({action:kind,row});
 
   };
   useEffect(()=>{
@@ -135,9 +189,14 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       expectedQueueVersion:row.queueVersion,expectedSharedStatus:row.sharedStatus,idempotencyKey:submission.current.key})) as Record<string,Json>;
     const result=await submitMyLeadCommand(dialog.action as Parameters<typeof submitMyLeadCommand>[0],input);
     if(!result.ok&&'code' in result&&(result.code==='FORBIDDEN'||result.code==='STALE_STATE')&&activeDialog.current===dialog)setRecovery({opening:dialog,message:result.message,blocked:true,busy:false});
-    if(result.ok){setDialog(current=>current===dialog?null:current);setDetailRevision(revision=>revision+1);await refresh();router.refresh();}
+    if(result.ok){
+      // Publish the refresh barrier before closing so a rapid next click is retained
+      // and initialized from authorized post-command metadata, never the old row.
+      const read=refresh();mutationReads.current.set(dialog.row.propertyId,{scope:openingScope,episodeId:dialog.row.assignmentEpisodeId,requestId:request.current,read});
+      setDialog(current=>current===dialog?null:current);setDetailRevision(revision=>revision+1);await read;router.refresh();
+    }
     return result;
-  },[dialog,refresh,router,recovery]);
+  },[dialog,refresh,router,recovery,openingScope]);
   const pages=snapshot?stagePages(snapshot):null;
   if(pages)for(const stage of loadingStages)pages[stage].isLoadingMore=true;
   const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;
@@ -145,6 +204,11 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   // A previous form can finish after its post-save refresh and must not close a new form.
   const common=dialog?{open:true,propertyId:dialog.row.propertyId,propertyLabel:dialog.row.address,onOpenChange:(open:boolean)=>{if(!open)setDialog(current=>current===dialog?null:current);}}:null;
   return <>
+    {openingStatus&&<div role="status" className="mb-4 rounded border p-3">
+      {openingStatus.message}
+      {!openingStatus.busy&&<Button type="button" variant="outline" onClick={retryOpening}>Retry opening</Button>}
+      <Button type="button" variant="ghost" onClick={cancelOpening}>Cancel opening</Button>
+    </div>}
     {viewer.isOwner&&<details className="mb-4 rounded-lg border p-4"><summary className="cursor-pointer font-medium">Manage Acquisitions</summary>
       <div className="mt-3 space-y-3">{roster.members.filter(m=>m.active).map(m=><label key={m.id} className="flex items-center gap-2">
         <input type="checkbox" checked={m.acquisitionsEnabled} disabled={settingsBusy} onChange={async()=>{setSettingsBusy(true);try{const result=await changeAcquisitionDesignation({orgId:viewer.orgId,userId:m.id,enabled:!m.acquisitionsEnabled,expectedEnabled:m.acquisitionsEnabled,idempotencyKey:crypto.randomUUID()});if(!result.ok)setError(result.message);else router.refresh();}finally{setSettingsBusy(false);}}}/>{m.label}
