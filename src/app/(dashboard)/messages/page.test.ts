@@ -46,8 +46,10 @@ vi.mock("@/lib/messages/list-threads", () => ({
     const isActualLead = (row: Thread) =>
       row.propertyStatus !== null && row.propertyStatus !== "prospect";
     const filtered = activeRows.filter((row) => {
+      // Mine includes every assigned thread regardless of status (prospects
+      // included). No owner keeps the leads-only boundary.
       if (opts.filter === "mine")
-        return isActualLead(row) && row.assigneeId === opts.currentUserId;
+        return row.assigneeId === opts.currentUserId;
       if (opts.filter === "unassigned")
         return isActualLead(row) && row.assigneeId === null;
       if (opts.filter === "unread") return row.unreadCount > 0;
@@ -63,8 +65,7 @@ vi.mock("@/lib/messages/list-threads", () => ({
         all: visible.length,
         mine: opts.currentUserId
           ? visible.filter(
-              (row) =>
-                isActualLead(row) && row.assigneeId === opts.currentUserId,
+              (row) => row.assigneeId === opts.currentUserId,
             ).length
           : 0,
         unassigned: opts.currentUserId
