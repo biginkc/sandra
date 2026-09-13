@@ -67,3 +67,27 @@ percentiles, safety/parity results, candidate decision and unresolved risks.
 First benchmark candidate 1. Move to candidate 2 only on budget/correctness
 failure; candidate 3 initially receives a paper assessment. Never mark a budget
 passed from service-role metadata timings or a tiny demo dataset.
+
+## September 13 progress
+
+- Initial user-approved targets and 50-recipient cap recorded in
+  `approved-budget.md`; remaining search/list/ingestion targets are not fabricated.
+- Main baseline updated to 7912891c. Dependency review resolved overlap as
+  independent additive work, without copying unreviewed branches.
+- New candidate-neutral request/cursor validator has 19 passing unit tests.
+  Page timing helper and existing page regression lane have 17 passing tests
+  with timing off and on. Typecheck and focused lint pass.
+- Independent peer review found no P0 blocker in validator/catalog capture.
+  Before P1 freezes response types, add explicit reconciliation metadata and a
+  deliberate message projection; the current response type is provisional.
+- Catalog SQL successfully ran on the exclusively owned local stack, in a
+  read-only transaction. This does not establish production schema parity.
+- Production Supabase CLI authentication failed with Unauthorized. User asked
+  to restore login; isolated work continues.
+- Owned Colima profile `inbox-redesign-20260913` hosts the isolated Supabase
+  project at API58421/database58422. No other Colima profile was started or
+  selected as the user's default. Local keys are retained outside the repository.
+- Repository verification initially lacked explicit local DB configuration, then
+  a nested rehearsal needed PG connection settings. The corrected run explicitly
+  targets the owned local cluster using the Node24 runtime. These failed setup
+  attempts are not passing product-test evidence.
