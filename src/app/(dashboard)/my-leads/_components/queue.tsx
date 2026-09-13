@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { MyLeadsMetrics } from "./metrics"
+import { StickyMyLeadsMetrics } from "./sticky-metrics"
 import { MyLeadQueueRow, STAGE_NEXT } from "./queue-row"
 import {
   MY_LEAD_STAGE_LABELS,
@@ -50,6 +51,7 @@ export function MyLeadsQueue({
   onLeadChanged,
   onStageAction,
 }: MyLeadsQueueProps) {
+  const expandedMetricsRef = useRef<HTMLDivElement>(null)
   const scopeKey = JSON.stringify([search, selectedRepId])
   const [expansionScope, setExpansionScope] = useState(scopeKey)
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
@@ -248,7 +250,8 @@ export function MyLeadsQueue({
         </div>
       </header>
 
-      <MyLeadsMetrics kpis={kpis} />
+      <div ref={expandedMetricsRef}><MyLeadsMetrics kpis={kpis} /></div>
+      <StickyMyLeadsMetrics kpis={kpis} expandedRef={expandedMetricsRef} repLabel={selectedRepLabel} />
 
       <div className="flex flex-wrap items-center justify-between gap-3" aria-label="Queue controls">
         <label className="relative block w-full sm:max-w-xs">
