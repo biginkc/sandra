@@ -1,0 +1,47 @@
+/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-projection-t2/node_modules/playwright/lib/matchers/expect.js:213
+        return matcher.call(target, ...args);
+                       ^
+
+A [Error]: expect(locator).toHaveText(expected) failed
+
+Locator:  locator('[data-preview-notice]')
+Expected: "Preview action: assign · 3 selected. No operation was submitted."
+Received: "Preview action: outcome · 3 selected. No operation was submitted."
+Timeout:  5000ms
+
+Call log:
+  - Expect "to.have.text" with timeout 5000ms
+  - waiting for locator('[data-preview-notice]')
+    9 × locator resolved to <p data-preview-notice="true">Preview action: outcome · 3 selected. No operatio…</p>
+      - unexpected value "Preview action: outcome · 3 selected. No operation was submitted."
+
+    at Proxy.<anonymous> (/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-projection-t2/node_modules/playwright/lib/matchers/expect.js:213:24)
+    at file:///Users/jarradhenry/Documents/ChatGPT/New%20project%202/tmp/inbox-projection-t2/experiments/inbox-workspace-preview/verify.mjs:40:54 {
+  matcherResult: {
+    name: 'toHaveText',
+    expected: 'Preview action: assign · 3 selected. No operation was submitted.',
+    message: 'expect(locator).toHaveText(expected) failed\n' +
+      '\n' +
+      "Locator:  locator('[data-preview-notice]')\n" +
+      'Expected: "Preview action: assign · 3 selected. No operation was submitted."\n' +
+      'Received: "Preview action: outcome · 3 selected. No operation was submitted."\n' +
+      'Timeout:  5000ms\n' +
+      '\n' +
+      'Call log:\n' +
+      '  - Expect "to.have.text" with timeout 5000ms\n' +
+      "  - waiting for locator('[data-preview-notice]')\n" +
+      '    9 × locator resolved to <p data-preview-notice="true">Preview action: outcome · 3 selected. No operatio…</p>\n' +
+      '      - unexpected value "Preview action: outcome · 3 selected. No operation was submitted."\n',
+    pass: false,
+    actual: 'Preview action: outcome · 3 selected. No operation was submitted.',
+    log: [
+      '  - Expect "to.have.text" with timeout 5000ms',
+      "  - waiting for locator('[data-preview-notice]')",
+      '    9 × locator resolved to <p data-preview-notice="true">Preview action: outcome · 3 selected. No operatio…</p>',
+      '      - unexpected value "Preview action: outcome · 3 selected. No operation was submitted."'
+    ],
+    timeout: 5000
+  }
+}
+
+Node.js v22.23.2
