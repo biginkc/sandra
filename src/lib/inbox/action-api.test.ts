@@ -42,10 +42,10 @@ describe("action review and recovery decoding", () => {
         await expect(client([ok({ members: [choices.members[0], choices.members[0]] })]).repository.assignees(signal())).rejects.toMatchObject({ status: 503 });
     });
     it("recovers only the exact supplied key and distinguishes not observed", async () => {
-        const c = client([ok({ operation: null }), ok({ operation: { operation_id: id(8), accepted_at: "2026-09-13T00:00:00Z" } })]);
-        expect(await c.repository.recover(id(3), signal())).toBeNull();
-        expect(await c.repository.recover(id(3), signal())).toEqual({ operationId: id(8), acceptedAt: "2026-09-13T00:00:00Z" });
-        expect(c.rpc.mock.calls[0]).toEqual(["inbox_recover_operation", { idempotency_key: id(3) }]);
+        const c = client([ok({ state: "pending", operation: null }), ok({ state: "accepted", operation: { operation_id: id(8), accepted_at: "2026-09-13T00:00:00Z" } })]);
+        expect(await c.repository.recover(id(5), id(3), signal())).toEqual({state:"pending",operation:null});
+        expect(await c.repository.recover(id(5), id(3), signal())).toEqual({ state: "accepted", operation: { operationId: id(8), acceptedAt: "2026-09-13T00:00:00Z" } });
+        expect(c.rpc.mock.calls[0]).toEqual(["inbox_recover_operation", { preparation_id: id(5), idempotency_key: id(3) }]);
     });
     it("requires an explicit expanded SMS scope for opt-out review", async () => {
         const raw = JSON.stringify({ ...request, definition: { version: 1, steps: [{ type: "outcome", value: "opted_out" }] } });
@@ -54,4 +54,9 @@ describe("action review and recovery decoding", () => {
         expect((await client([ok(actor), ok(row)]).repository.prepare(raw, signal())).smsSafetySummary).toEqual({ contacts: 1, linkedProperties: 2, activeEnrollments: 3 });
         await expect(client([ok(actor), ok({ ...row, sms_safety_summary: null })]).repository.prepare(raw, signal())).rejects.toMatchObject({ status: 503 });
     });
+});
+it("distinguishes definitive expired-not-accepted from still pending and rejects contradictory recovery data", async () => {
+    expect(await client([ok({ state: "expired_not_accepted", operation: null })]).repository.recover(id(5), id(3), signal())).toEqual({ state: "expired_not_accepted", operation: null });
+    await expect(client([ok({ state: "expired_not_accepted", operation: { operation_id: id(8) } })]).repository.recover(id(5), id(3), signal())).rejects.toMatchObject({ status: 503 });
+    await expect(client([ok({ state: "accepted", operation: null })]).repository.recover(id(5), id(3), signal())).rejects.toMatchObject({ status: 503 });
 });

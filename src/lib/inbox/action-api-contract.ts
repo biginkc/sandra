@@ -69,3 +69,5 @@ export interface InboxOperationStatus {
 }
 
 export interface InboxAssigneeChoice { userId: string; label: string }
+
+export type InboxActionRecovery = { state: "accepted"; operation: AcceptedInboxAction } | { state: "pending" | "expired_not_accepted"; operation: null };

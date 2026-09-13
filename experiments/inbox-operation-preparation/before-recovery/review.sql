@@ -34,30 +34,19 @@ BEGIN
 END $$;
 CREATE FUNCTION public.inbox_action_assignees() RETURNS jsonb
 LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_action_api.assignees() $$;
-CREATE FUNCTION inbox_action_api.recover(p uuid,k uuid) RETURNS jsonb
+CREATE FUNCTION inbox_action_api.recover(k uuid) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE a jsonb;result jsonb;binding inbox_action_api.preparation_requests;operation inbox_operations.operations;expires timestamptz;
+DECLARE a jsonb;result jsonb;
 BEGIN
- IF p IS NULL OR k IS NULL THEN RAISE EXCEPTION 'Invalid recovery reference';END IF;
+ IF k IS NULL THEN RAISE EXCEPTION 'Invalid recovery key';END IF;
  a:=inbox_action_api.authorize(NULL);
- SELECT * INTO binding FROM inbox_action_api.preparation_requests r WHERE r.preparation_id=p AND r.org_id=(a->>'org_id')::uuid AND r.requester_id=(a->>'user_id')::uuid;
- IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_ACTION_PREPARATION_UNAVAILABLE' USING ERRCODE='42501';END IF;
- IF binding.idempotency_key IS DISTINCT FROM k THEN RAISE EXCEPTION 'INBOX_ACTION_IDEMPOTENCY_MISMATCH';END IF;
- PERFORM inbox_action_api.lock_request_key(binding.org_id,binding.requester_id,k);
- SELECT * INTO operation FROM inbox_operations.operations o WHERE o.org_id=binding.org_id AND o.requester_id=binding.requester_id AND o.idempotency_key=k;
- IF FOUND THEN
-  IF operation.input_hash IS DISTINCT FROM binding.input_hash THEN RAISE EXCEPTION 'INBOX_ACTION_IDEMPOTENCY_MISMATCH';END IF;
-  result:=jsonb_build_object('state','accepted','operation',jsonb_build_object('operation_id',operation.id,'accepted_at',operation.created_at));
- ELSE
-  SELECT expires_at INTO STRICT expires FROM inbox_operations.preparations WHERE id=p;
-  result:=jsonb_build_object('state',CASE WHEN expires<=clock_timestamp() THEN 'expired_not_accepted' ELSE 'pending' END,'operation',NULL);
- END IF;
- PERFORM inbox_action_api.authorize(binding.org_id,binding.requester_id);
- RETURN result;
+ SELECT jsonb_build_object('operation_id',o.id,'accepted_at',o.created_at) INTO result FROM inbox_operations.operations o WHERE o.org_id=(a->>'org_id')::uuid AND o.requester_id=(a->>'user_id')::uuid AND o.idempotency_key=k;
+ PERFORM inbox_action_api.authorize((a->>'org_id')::uuid,(a->>'user_id')::uuid);
+ RETURN jsonb_build_object('operation',result);
 END $$;
-CREATE FUNCTION public.inbox_recover_operation(preparation_id uuid,idempotency_key uuid) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_action_api.recover(preparation_id,idempotency_key) $$;
+CREATE FUNCTION public.inbox_recover_operation(idempotency_key uuid) RETURNS jsonb
+LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_action_api.recover(idempotency_key) $$;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_action_api FROM PUBLIC,anon,authenticated,service_role;
-REVOKE ALL ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_action_assignees(),public.inbox_recover_operation(uuid,uuid) FROM PUBLIC,anon,service_role;
-GRANT EXECUTE ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_action_assignees(),public.inbox_recover_operation(uuid,uuid) TO authenticated;
+REVOKE ALL ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_action_assignees(),public.inbox_recover_operation(uuid) FROM PUBLIC,anon,service_role;
+GRANT EXECUTE ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_action_assignees(),public.inbox_recover_operation(uuid) TO authenticated;
 COMMIT;

@@ -47,9 +47,9 @@ def execute(op,s):
 members=json.loads(sql(auth+'SELECT public.inbox_action_assignees()'))['members'];need({r['user_id'] for r in members}=={u,a} and all(r['label'].endswith('@example.invalid') for r in members),'Authoritative member labels')
 prep=prepare();need(prep['affected_property_count']==1 and prep['effect_count']==2 and prep['items'][0]['resolution']['property_id']==p,'Preparation actual mapping')
 wrong=sql(auth+f"SELECT public.inbox_accept_action('{prep['preparation_id']}','{uid()}')",True);need(wrong.returncode!=0 and 'IDEMPOTENCY_MISMATCH' in wrong.stderr,'Key mismatch accepted')
-need(json.loads(sql(auth+f"SELECT public.inbox_recover_operation('{prep['idempotency_key']}')"))['operation'] is None,'Unaccepted key recovered')
+need(json.loads(sql(auth+f"SELECT public.inbox_recover_operation('{prep['preparation_id']}','{prep['idempotency_key']}')"))['operation'] is None,'Unaccepted key recovered')
 accepted=accept(prep);op=accepted['operation_id'];
-need(json.loads(sql(auth+f"SELECT public.inbox_recover_operation('{prep['idempotency_key']}')"))['operation']==accepted,'Accepted identity recovery failed')
+need(json.loads(sql(auth+f"SELECT public.inbox_recover_operation('{prep['preparation_id']}','{prep['idempotency_key']}')"))['operation']==accepted,'Accepted identity recovery failed')
 need(accept(prep)==accepted,'Accepted identity replay changed')
 st=status(op);need(not st['completed'] and st['result'] is None and all(x['state']=='pending' for x in st['steps']),'Initial status')
 for step in st['steps']:execute(op,step['id'])
@@ -78,7 +78,7 @@ prep5=prepare([{'type':'outcome','value':'opted_out'}]);need(prep5['sms_safety_s
 need(sql(f"SELECT sms_opted_out FROM contacts WHERE id='{c}'")=='t','Authoritatively prepared SMS effect absent')
 checks.append('server-derived SMS contact/scope/policy executes actual opt-out')
 for role in ['anon','service_role']:
- for call in [f"public.inbox_prepare_action('{{}}','{uid()}')",f"public.inbox_accept_action('{prep['preparation_id']}','{prep['idempotency_key']}')",f"public.inbox_operation_status('{op}')","public.inbox_action_assignees()",f"public.inbox_recover_operation('{prep['idempotency_key']}')"]:
+ for call in [f"public.inbox_prepare_action('{{}}','{uid()}')",f"public.inbox_accept_action('{prep['preparation_id']}','{prep['idempotency_key']}')",f"public.inbox_operation_status('{op}')","public.inbox_action_assignees()",f"public.inbox_recover_operation('{prep['preparation_id']}','{prep['idempotency_key']}')"]:
   r=sql(f'SET ROLE {role};SELECT {call}',True);need(r.returncode!=0 and '42501' in r.stderr and 'permission denied for function' in r.stderr,'Direct wrapper role denial failed')
 checks.append('anon/service_role denied all five public wrappers; canonical member labels, exact key recovery and SMS review scope pass')
 missing=uid();excluded=prepare([{'type':'outcome','value':'nurture'}],[{'kind':'conversation','id':missing}]);need(excluded['effect_count']==0 and excluded['items'][0]['exclusion_code']=='conversation_unavailable','Absent target not excluded')

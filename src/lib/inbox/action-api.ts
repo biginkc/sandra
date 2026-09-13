@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/types";
 import { parseInboxActionIntent, parseInboxActionDefinition, InvalidInboxActionError } from "./action-definition";
 import { retryReceiptTransaction } from "@/lib/messaging/receipt-persistence";
-import type { InboxAssigneeChoice, AcceptedInboxAction, InboxActionExclusion, InboxMetadataStep, InboxOperationStatus, InboxStepState, PreparedInboxAction, PreparedInboxActionItem } from "./action-api-contract";
+import type { InboxActionRecovery, InboxAssigneeChoice, AcceptedInboxAction, InboxActionExclusion, InboxMetadataStep, InboxOperationStatus, InboxStepState, PreparedInboxAction, PreparedInboxActionItem } from "./action-api-contract";
 type ActionDatabase = Omit<Database, "public"> & {
     public: Omit<Database["public"], "Functions"> & {
         Functions: Database["public"]["Functions"] & {
@@ -28,7 +28,7 @@ type ActionDatabase = Omit<Database, "public"> & {
                 Returns: Json;
             };
             inbox_action_assignees: { Args: Record<string, never>; Returns: Json };
-            inbox_recover_operation: { Args: { idempotency_key: string }; Returns: Json };
+            inbox_recover_operation: { Args: { preparation_id: string; idempotency_key: string }; Returns: Json };
             inbox_operation_status: {
                 Args: {
                     operation_id: string;
@@ -147,12 +147,13 @@ export function createInboxActionRepository(client: InboxActionClient) {
             const seen = new Set<string>();
             return result.members.map(value => { const row = record(value), userId = id(row.user_id); need(!seen.has(userId) && typeof row.label === "string" && row.label.trim().length > 0 && row.label.length <= 320); seen.add(userId); return { userId, label: row.label }; });
         },
-        async recover(idempotencyKey: string, signal: AbortSignal): Promise<AcceptedInboxAction | null> {
-            need(UUID.test(idempotencyKey), 400); signal.throwIfAborted();
-            const response = await client.rpc("inbox_recover_operation", { idempotency_key: idempotencyKey }).abortSignal(signal);
+        async recover(preparationId: string, idempotencyKey: string, signal: AbortSignal): Promise<InboxActionRecovery> {
+            need(UUID.test(preparationId) && UUID.test(idempotencyKey), 400); signal.throwIfAborted();
+            const response = await retryReceiptTransaction(() => { signal.throwIfAborted(); return client.rpc("inbox_recover_operation", { preparation_id: preparationId, idempotency_key: idempotencyKey }).abortSignal(signal); });
             signal.throwIfAborted(); failure(response.error); const row = record(response.data);
-            if (row.operation === null) return null;
-            const operation = record(row.operation); return { operationId: id(operation.operation_id), acceptedAt: timestamp(operation.accepted_at) };
+            if (row.state === "pending" || row.state === "expired_not_accepted") { need(row.operation === null); return { state: row.state, operation: null }; }
+            need(row.state === "accepted");
+            const operation = record(row.operation); return { state: "accepted", operation: { operationId: id(operation.operation_id), acceptedAt: timestamp(operation.accepted_at) } };
         },
         async status(operationId: string, signal: AbortSignal): Promise<InboxOperationStatus> {
             need(UUID.test(operationId), 400);

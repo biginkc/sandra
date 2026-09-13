@@ -23,9 +23,9 @@ import { GET as recover } from "@/app/api/inbox/operations/recover/route";
 import { GET as assignees } from "@/app/api/inbox/actions/assignees/route";
 it("recovery admits one exact key query and assignees admit no overrides", async () => {
  mocks.recover.mockResolvedValue(null); mocks.assignees.mockResolvedValue([]);
- expect((await recover(new Request(`http://localhost/api/inbox/operations/recover?idempotencyKey=${id}`))).status).toBe(200);
+ expect((await recover(new Request(`http://localhost/api/inbox/operations/recover?preparationId=${id}&idempotencyKey=${id}`))).status).toBe(200);
  expect(mocks.recover.mock.calls[0][0]).toBe(id);
- expect((await recover(new Request(`http://localhost/api/inbox/operations/recover?idempotencyKey=${id}&idempotencyKey=${id}`))).status).toBe(403);
+ expect((await recover(new Request(`http://localhost/api/inbox/operations/recover?preparationId=${id}&idempotencyKey=${id}&idempotencyKey=${id}`))).status).toBe(403);
  expect((await assignees(new Request("http://localhost/api/inbox/actions/assignees"))).status).toBe(200);
  expect((await assignees(new Request("http://localhost/api/inbox/actions/assignees?org=other"))).status).toBe(403);
 });

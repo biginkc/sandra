@@ -1,0 +1,7 @@
+{
+  "org": "3bab47ac-935e-4dd8-8eec-2d0d748c775c",
+  "claims": "{\"sub\": \"932a3d4c-3d2a-440e-b673-54bf17870e86\", \"role\": \"authenticated\", \"session_id\": \"12dd46b7-a3dd-4606-ba52-246be3ba094d\", \"exp\": 4102444800}",
+  "preparation_id": "304b5f4d-a13c-44a2-924d-8be03b4b16b2",
+  "key": "f7bfe46a-ddc0-444b-8a9d-d90081bb11c0",
+  "expires_at": "2026-09-13T23:05:44.080159+00:00"
+}

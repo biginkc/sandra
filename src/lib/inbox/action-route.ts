@@ -12,7 +12,7 @@ export async function inboxActionRoute(request: Request, action: "prepare" | "ac
     signal.addEventListener("abort", cancel, { once: true });
     try {
         const url = new URL(request.url), origin = request.headers.get("origin");
-        if ((action === "recover" ? [...url.searchParams.keys()].length !== 1 || !url.searchParams.has("idempotencyKey") : !!url.search) || (origin && origin !== url.origin) || request.headers.get("sec-fetch-site") === "cross-site")
+        if ((action === "recover" ? [...url.searchParams.keys()].length !== 2 || !url.searchParams.has("idempotencyKey") || !url.searchParams.has("preparationId") : !!url.search) || (origin && origin !== url.origin) || request.headers.get("sec-fetch-site") === "cross-site")
             throw new InboxActionApiError(403);
         let raw = "";
         if (action === "prepare" || action === "accept") {
@@ -58,7 +58,7 @@ export async function inboxActionRoute(request: Request, action: "prepare" | "ac
             return Response.json(await repository.accept(reference.preparationId, reference.idempotencyKey, signal), { headers });
         }
         if (action === "assignees") return Response.json({ members: await repository.assignees(signal) }, { headers });
-        if (action === "recover") return Response.json({ operation: await repository.recover(url.searchParams.get("idempotencyKey") ?? "", signal) }, { headers });
+        if (action === "recover") return Response.json(await repository.recover(url.searchParams.get("preparationId") ?? "", url.searchParams.get("idempotencyKey") ?? "", signal), { headers });
         if (!operationId)
             throw new InboxActionApiError(400);
         return Response.json(await repository.status(operationId, signal), { headers });

@@ -20,14 +20,6 @@ BEGIN
  IF u IS NOT NULL AND a->>'user_id' IS DISTINCT FROM u::text THEN RAISE EXCEPTION 'INBOX_ACTION_FORBIDDEN' USING ERRCODE='42501';END IF;
  RETURN a;
 END $$;
--- Hash collisions only serialize unrelated keys; exact relational predicates
--- remain authoritative. Acceptance and recovery share this transaction lock.
-CREATE FUNCTION inbox_action_api.lock_request_key(o uuid,u uuid,k uuid) RETURNS void
-LANGUAGE plpgsql SET search_path='' AS $$
-BEGIN
- IF o IS NULL OR u IS NULL OR k IS NULL THEN RAISE EXCEPTION 'Invalid request key';END IF;
- PERFORM pg_advisory_xact_lock(hashtextextended('sandra:inbox:accept:v1:'||o::text||':'||u::text||':'||k::text,0));
-END $$;
 -- A baseline is established only while the metadata row is locked and canonical
 -- capture is installed on every relevant writer. Existing counters are never
 -- reset. A concurrent source writer must advance the same counter before commit,

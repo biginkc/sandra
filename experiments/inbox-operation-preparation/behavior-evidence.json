@@ -10,14 +10,15 @@
   ],
   "source_hashes": {
     "worker.sql": "5ddff6ea035d79a59d2396b825eb87bd9d4a75669588a5edd32fe7d4254a6a12",
-    "setup.sql": "6b026f678bf72ffdf82e1daf02d4e6305781435abb8004b91aa438165ee39e00",
-    "accept.sql": "ddc2714337cc5aa813bd51b63af9b20047148a0bb9a5f7e467a1c5825d6552bc",
+    "setup.sql": "cf3e5c61c81643b8386b3d5e361966f31200c08a3698c513ca08c36f4b75b377",
+    "accept.sql": "fdd19c945b24f40057ed1fe63e90833ef27217462e977bb8d14945163cae24a9",
     "setup-before-runtime-fix.sql": "1d16fc352a4694ae02dcc2b076cd99a78eb3756ea5a4377ac2d185bfb9860feb",
-    "review.sql": "e941f65f84fd7ecf219530e866fd885b11a0a9c8ccbd4f1c464752435e06f6a0",
-    "public-api.sql": "45bafaf0f48c30c9cb98e1bd808b9d2112b7c191c692ee6de4302f1f624bc768"
+    "review.sql": "faae82983465db8dd5624cd8fcc8bf5f44916fb2994afa30460f1e6832695eab",
+    "public-api.sql": "45bafaf0f48c30c9cb98e1bd808b9d2112b7c191c692ee6de4302f1f624bc768",
+    "worker-role.sql": "03a495196ed87970fdf10dc2a2d0baf20b967b2233939b3247d25a273df70b3a"
   },
-  "runner_sha256": "affed2f4234e5a2af5f855af809d0c7f23d874c5e4075f6fe4fa8924ee4389c4",
-  "fixture_org": "3bab47ac-935e-4dd8-8eec-2d0d748c775c",
+  "runner_sha256": "959f00cf81bde0e61f2efde986ab11ef78d36b9bdabc419b0415b3f16e42775d",
+  "fixture_org": "cb8c1d5f-a367-4f71-b29c-02b96b064942",
   "limits": [
     "Trusted SQL JWT claims; HTTP cryptographic JWT proof separate",
     "No browser or durable dispatcher runtime proof"

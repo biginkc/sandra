@@ -1,0 +1,20 @@
+{
+  "checks": [
+    "natural five-minute never-posted preparation expiry returns definitive expired_not_accepted",
+    "later acceptance of same original preparation/key rejected with no operation",
+    "already accepted expired preparation recovers and replays original immutable identity"
+  ],
+  "case": {
+    "org": "3bab47ac-935e-4dd8-8eec-2d0d748c775c",
+    "claims": "{\"sub\": \"932a3d4c-3d2a-440e-b673-54bf17870e86\", \"role\": \"authenticated\", \"session_id\": \"12dd46b7-a3dd-4606-ba52-246be3ba094d\", \"exp\": 4102444800}",
+    "preparation_id": "304b5f4d-a13c-44a2-924d-8be03b4b16b2",
+    "key": "f7bfe46a-ddc0-444b-8a9d-d90081bb11c0",
+    "expires_at": "2026-09-13T23:05:44.080159+00:00"
+  },
+  "source_hashes": {
+    "setup.sql": "cf3e5c61c81643b8386b3d5e361966f31200c08a3698c513ca08c36f4b75b377",
+    "accept.sql": "fdd19c945b24f40057ed1fe63e90833ef27217462e977bb8d14945163cae24a9",
+    "review.sql": "faae82983465db8dd5624cd8fcc8bf5f44916fb2994afa30460f1e6832695eab"
+  },
+  "runner_sha256": "493463eaf4e11c0d18b0b41b976edaf500227bd09e149669c29a0de59101ecac"
+}

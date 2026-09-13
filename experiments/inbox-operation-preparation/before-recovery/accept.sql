@@ -40,7 +40,6 @@ BEGIN
  SELECT * INTO binding FROM inbox_action_api.preparation_requests r WHERE r.preparation_id=accept.preparation_id AND r.org_id=(a->>'org_id')::uuid AND r.requester_id=(a->>'user_id')::uuid;
  IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_ACTION_PREPARATION_UNAVAILABLE' USING ERRCODE='42501';END IF;
  IF binding.idempotency_key IS DISTINCT FROM k THEN RAISE EXCEPTION 'INBOX_ACTION_IDEMPOTENCY_MISMATCH';END IF;
- PERFORM inbox_action_api.lock_request_key(binding.org_id,binding.requester_id,k);
  operation_id:=inbox_operations.accept_prepared(binding.org_id,binding.requester_id,k,preparation_id);
  SELECT created_at INTO STRICT accepted_at FROM inbox_operations.operations WHERE org_id=binding.org_id AND id=operation_id;
  RETURN jsonb_build_object('operation_id',operation_id,'accepted_at',accepted_at);
