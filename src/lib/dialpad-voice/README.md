@@ -106,3 +106,11 @@ error handling, including retries, and `leaseLost` counts rejected ownership.
 This closes a local implementation gap for bound calls only: unbound or ambiguous
 starts, hosted scheduling, late data after the polling window, authenticated
 recording downloads, and end-to-end parity remain separate acceptance gates.
+
+
+The unmounted `hangupMariaDialpadCall` server action is separately gated by
+`DIALPAD_VOICE_HANGUP_ENABLED`. It accepts only an intent ID, requires the active
+pilot rep and matching persisted call activity, and sends exact-call hangup.
+It never releases transport ownership or treats request acceptance as terminal
+evidence. Unbound starts still cannot be controlled through this action. No live
+hangup has been validated.
