@@ -18,7 +18,7 @@ export const metadata = {
   title: "Jobs · Sandra CRM",
 };
 
-export const JOBS_SORTABLE_COLUMNS = [
+const JOBS_SORTABLE_COLUMNS = [
   "title",
   "type",
   "status",

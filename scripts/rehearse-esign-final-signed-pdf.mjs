@@ -115,7 +115,8 @@ export async function rehearseFinalSignedPdf(client, ids) {
   const race=await request(); await object(race.old,100); await object(race.final);
   await client.query('update public.esign_requests set signed_pdf_path=$2 where id=$1',[race.id,race.old]);
   const a=await claim(race), b=await claim(race,'signature_request_all_signed',randomUUID(),'app');
-  const concurrent=new pg.Client({...client.connectionParameters});
+  // pg intentionally makes password non-enumerable; preserve it for the race connection.
+  const concurrent=new pg.Client({...client.connectionParameters,password:client.connectionParameters.password});
   await concurrent.connect();
   try {
     await concurrent.query("select set_config('request.jwt.claim.role','service_role',false)");

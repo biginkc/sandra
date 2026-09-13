@@ -22,7 +22,7 @@ export const metadata = {
   title: "Lists · Sandra CRM",
 };
 
-export const LISTS_SORTABLE_COLUMNS = [
+const LISTS_SORTABLE_COLUMNS = [
   "name",
   "members",
   "created_at",

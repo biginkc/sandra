@@ -9,7 +9,7 @@ import type { JitterAuthOk } from "../../../_lib/auth";
 import {
   isSupportedJitterWritebackProvider,
   PUT,
-} from "./route";
+} from "./handlers";
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 

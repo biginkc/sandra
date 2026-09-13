@@ -29,7 +29,7 @@ vi.mock("next/server", async () => {
   };
 });
 
-import { runAppointmentReminderSweep, sweepStaleDispatchingReminders } from "./route";
+import { runAppointmentReminderSweep, sweepStaleDispatchingReminders } from "./handlers";
 
 type RawRow = {
   delivery_id: string;

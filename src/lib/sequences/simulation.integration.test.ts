@@ -16,7 +16,7 @@ import {
   resetMockState,
   type MockPersona,
 } from "@/lib/messaging/providers/mock";
-import { runSequenceTick } from "@/app/api/cron/sequence-tick/route";
+import { runSequenceTick } from "@/app/api/cron/sequence-tick/handlers";
 
 import { enrollLead } from "./enrollment";
 
