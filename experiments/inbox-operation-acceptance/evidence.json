@@ -1,0 +1,57 @@
+{
+  "at": "2026-09-13T20:22:29.736Z",
+  "checks": [
+    {
+      "name": "Canonical input hash and preparation tenant binding enforced in storage",
+      "passed": true
+    },
+    {
+      "name": "Production core fails closed without authoritative adapter",
+      "passed": true
+    },
+    {
+      "name": "Atomic accepted operation, two conversation mappings, deduplicated two property steps, and one dispatch event",
+      "passed": true
+    },
+    {
+      "name": "Same-hash replay survives preparation expiry/staleness; changed input conflicts and current response access remains required",
+      "passed": true
+    },
+    {
+      "name": "Preparation and accepted saved-definition copy cannot mutate",
+      "passed": true
+    },
+    {
+      "name": "Failure after operation/item materialization rolls back operation, items, steps and dispatch together",
+      "passed": true
+    },
+    {
+      "name": "Synthetic canonical effect rolls back with receipt/fence failure; successful transaction and replay retain one effect and receipt",
+      "passed": true
+    },
+    {
+      "name": "Expired worker fenced; completion rollback atomic; completed step cannot be reclaimed; dependent assignment receives prior outcome receipt",
+      "passed": true
+    },
+    {
+      "name": "Dispatcher lease reclaim retains stable event identity and rejects stale acknowledgement",
+      "passed": true
+    },
+    {
+      "name": "No PUBLIC execute grants; direct acceptance denied for existing roles: authenticated, service_role",
+      "passed": true
+    },
+    {
+      "name": "Concurrent replay with expired preparation waits for the accepted key and returns the same durable operation",
+      "passed": true
+    }
+  ],
+  "cleanup": "Exact created disposable database removed",
+  "setup_sha256": "04d34d74ef76dd11585ee45728e2a0a1f6e635cb2fd0376a4ef9b014ea12dae3",
+  "runner_sha256": "edc88c35e292385b76b6c9c817bcbce80da556ad90467ea1646932b2178e6343",
+  "limits": [
+    "Synthetic private adapter only; real authorization and canonical effects not integrated",
+    "No provider calls, no application endpoints, no production migration",
+    "No cross-replica admission budgets, failure/retry receipts or cancellation implemented yet"
+  ]
+}
