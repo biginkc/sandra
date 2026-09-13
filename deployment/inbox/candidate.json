@@ -1,0 +1,73 @@
+{
+  "status": "proposed-not-provisioned",
+  "workspaceId": "b6fd2179-2a55-4cb8-b890-0dd4ce8b9c23",
+  "projectName": "sandra-inbox",
+  "environmentName": "pilot",
+  "region": "us-east4-eqdc4a",
+  "database": {
+    "projectRef": "copflsklaefwzipsrjqz",
+    "region": "us-east-1",
+    "newDirectConnectionBudget": 8,
+    "newReplicationSlots": 1,
+    "publication": "exact-narrow-projection-only"
+  },
+  "services": [
+    {
+      "name": "inbox-electric",
+      "image": "electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139",
+      "replicas": 1,
+      "cpuLimit": 1,
+      "memoryGiBLimit": 1,
+      "volumeGiBLimit": 10,
+      "volumeMount": "/var/lib/electric",
+      "public": false,
+      "port": 3000,
+      "env": {
+        "ELECTRIC_LONG_POLL_TIMEOUT": "8000"
+      }
+    },
+    {
+      "name": "inbox-restate",
+      "image": "docker.restate.dev/restatedev/restate@sha256:675b85e7bf674f9dfda04a391fa33e850650d57e464b694ca8df5866acad95cc",
+      "replicas": 1,
+      "cpuLimit": 1,
+      "memoryGiBLimit": 2,
+      "volumeGiBLimit": 20,
+      "volumeMount": "/restate-data",
+      "public": false,
+      "port": 8080,
+      "privateAdminPort": 9070
+    },
+    {
+      "name": "inbox-worker",
+      "image": null,
+      "releasePrerequisite": "reviewed authoritative-operation and projection worker image",
+      "replicas": 1,
+      "cpuLimit": 1,
+      "memoryGiBLimit": 1,
+      "volumeGiBLimit": 0,
+      "public": false
+    },
+    {
+      "name": "inbox-sync-relay",
+      "sourceDirectory": "services/inbox-sync-relay",
+      "replicas": 1,
+      "cpuLimit": 0.5,
+      "memoryGiBLimit": 0.5,
+      "volumeGiBLimit": 0,
+      "public": true,
+      "port": 3000,
+      "authentication": "server-only high-entropy Bearer token"
+    }
+  ],
+  "resourcePrices": {
+    "memoryGBMonthUSD": 10,
+    "cpuMonthUSD": 20,
+    "volumeGBMonthUSD": 0.15,
+    "egressGBUSD": 0.05
+  },
+  "proposedIncrementalMonthlyReviewThresholdUSD": 150,
+  "assumedMonthlyEgressGB": 100,
+  "hardCostCapGuaranteed": false,
+  "approval": null
+}
