@@ -4,6 +4,7 @@ import type { Database, Json } from "@/lib/supabase/types";
 import { retryReceiptTransaction } from "@/lib/messaging/receipt-persistence";
 
 type ReadDatabase = Omit<Database, "public"> & { public: Omit<Database["public"], "Functions"> & { Functions: Database["public"]["Functions"] & {
+  inbox_history_page: { Args: { org_id: string; conversation_id: string; before_cursor?: string }; Returns: Json };
   inbox_read_detail: { Args: { org_id: string; conversation_id: string }; Returns: Json };
   inbox_acknowledge_read: { Args: { boundary_id: string; batch_number: number }; Returns: Json };
 } } };
@@ -38,10 +39,10 @@ function fail(error: { code?: string; message?: string } | null): void {
 }
 export function createInboxReadRepository(client: InboxReadClient) {
   return {
-    async detail(orgId: string, conversationId: string, signal: AbortSignal) {
-      requireValue(UUID.test(orgId) && UUID.test(conversationId), 400);
+    async detail(orgId: string, conversationId: string, signal: AbortSignal, beforeCursor?: string) {
+      requireValue(UUID.test(orgId) && UUID.test(conversationId) && (beforeCursor === undefined || UUID.test(beforeCursor)), 400);
       signal.throwIfAborted();
-      const { data, error } = await client.rpc("inbox_read_detail", { org_id: orgId, conversation_id: conversationId }).abortSignal(signal);
+      const { data, error } = await client.rpc("inbox_history_page", { org_id: orgId, conversation_id: conversationId, ...(beforeCursor ? { before_cursor: beforeCursor } : {}) }).abortSignal(signal);
       signal.throwIfAborted();
       fail(error);
       const row = record(data);
@@ -56,7 +57,7 @@ export function createInboxReadRepository(client: InboxReadClient) {
           direction: message.direction, readAtRaw: nullableTimestamp(message.read_at_raw), inboundRevision: revision(message.inbound_revision) };
       });
       return { requesterId: id(row.requester_id), orgId, conversationId, headRevision: revision(row.head_revision),
-        readBoundary: id(row.read_boundary), boundaryExpiresAt: timestamp(row.boundary_expires_at), captureGeneration: id(row.capture_generation), history };
+        readBoundary: id(row.read_boundary), boundaryExpiresAt: timestamp(row.boundary_expires_at), captureGeneration: id(row.capture_generation), history, nextCursor: row.next_cursor === null ? null : id(row.next_cursor) };
     },
     async acknowledge(boundaryId: string, batch: number, signal: AbortSignal) {
       requireValue(UUID.test(boundaryId) && Number.isSafeInteger(batch) && batch >= 0 && batch <= 2147483647, 400);

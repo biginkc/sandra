@@ -22,7 +22,7 @@ describe("disabled-by-default Inbox read routes", () => {
     expect((await POST(request({ boundaryId, batch: 0 }))).status).toBe(404);
     expect(mocks.createClient).not.toHaveBeenCalled();
   });
-  it("refuses unsupported history cursors instead of silently returning page one", async () => {
+  it("refuses malformed history cursors instead of silently returning page one", async () => {
     expect((await GET(new Request(`https://inbox.test/api/inbox/conversations/x/detail?orgId=${boundaryId}&before=old`), params)).status).toBe(400);
     expect(mocks.createClient).not.toHaveBeenCalled();
   });

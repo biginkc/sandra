@@ -27,11 +27,48 @@ export function ConversationHistory(props: ConversationHistoryProps) {
     snapshot.data.conversationId === conversationId ? snapshot.data : null;
   const [readState, setReadState] = useState<ReadState | null>(null);
   const [retry, setRetry] = useState(0);
+  const [revokedBoundary, setRevokedBoundary] = useState<string | null>(null);
   const progress = useRef<{ boundary: string; batch: number; complete: boolean; revoked: boolean } | null>(null);
   const transport = props.fetch ?? fetch;
+  const pagingRequest = useRef<AbortController | null>(null);
+  const readRequest = useRef<AbortController | null>(null);
+  const [paging, setPaging] = useState<{ boundary: string; pages: InboxDetailSnapshot[]; shifted: boolean; busy: boolean; error?: string } | null>(null);
+  const pageState = paging?.boundary === data?.readBoundary ? paging : null;
+  const pages = pageState?.pages ?? (data ? [data] : []);
+  const nextCursor = pages.at(-1)?.nextCursor;
+  useEffect(() => () => { pagingRequest.current?.abort(); }, [data?.readBoundary, requestGeneration]);
+  async function older() {
+    if (!data || !nextCursor || pageState?.busy || progress.current?.revoked) return;
+    pagingRequest.current?.abort();
+    const controller = new AbortController(); pagingRequest.current = controller;
+    const boundary = data.readBoundary;
+    setPaging({ boundary, pages, shifted: pageState?.shifted ?? false, busy: true });
+    try {
+      const response = await transport(`/api/inbox/conversations/${conversationId}/detail?orgId=${orgId}&before=${nextCursor}`, {
+        credentials: "same-origin", redirect: "error", cache: "no-store",
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
+      });
+      if (controller.signal.aborted) return;
+      if (response.status === 401 || response.status === 403) {
+        if (progress.current?.boundary === boundary) progress.current.revoked = true;
+        setRevokedBoundary(boundary); setReadState({ boundary, status: "permission_lost" }); controller.abort(); readRequest.current?.abort(); onAccessLost(); return;
+      }
+      if (response.status === 410) throw Error("Refresh messages to continue through older history.");
+      if (!response.ok) throw Error("Older messages could not load. Try again.");
+      const page: InboxDetailSnapshot = await response.json();
+      if (controller.signal.aborted) return;
+      if (page.orgId !== orgId || page.conversationId !== conversationId || page.requesterId !== data.requesterId || page.readBoundary !== boundary ||
+        !Array.isArray(page.history) || page.history.length > 50 || !(page.nextCursor === null || typeof page.nextCursor === "string")) throw Error("Older history did not match this conversation.");
+      // Keep the cached newest page plus one older page: at most 100 messages
+      // for this conversation, including the parent Query cache.
+      setPaging({ boundary, pages: [page], shifted: true, busy: false });
+    } catch (failure) {
+      if (!controller.signal.aborted) setPaging({ boundary, pages, shifted: pageState?.shifted ?? false, busy: false, error: failure instanceof Error ? failure.message : "Older messages unavailable." });
+    }
+  }
   useEffect(() => {
     if (!data || !visible) return;
-    const controller = new AbortController();
+    const controller = new AbortController(); readRequest.current = controller;
     let frame: number | undefined;
     let started = false;
     const boundary = data.readBoundary;
@@ -63,7 +100,8 @@ export function ConversationHistory(props: ConversationHistoryProps) {
               if (controller.signal.aborted) return;
               if (response.status === 401 || response.status === 403) {
                 current.revoked = true;
-                setReadState({ boundary, status: "permission_lost" });
+                pagingRequest.current?.abort();
+                setRevokedBoundary(boundary); setReadState({ boundary, status: "permission_lost" });
                 controller.abort();
                 onAccessLost();
                 return;
@@ -92,10 +130,15 @@ export function ConversationHistory(props: ConversationHistoryProps) {
   }, [data, visible, requestGeneration, transport, retry, onAccessLost]);
   if (!data || !visible) return null;
   const status = readState?.boundary === data.readBoundary ? readState.status : "pending";
-  if (status === "permission_lost") return null;
+  if (status === "permission_lost" || revokedBoundary === data.readBoundary) return null;
   return <section aria-label="Conversation history">
+    <div className="mb-3 flex flex-wrap items-center gap-3 text-sm">
+      {nextCursor && <button type="button" className="underline" disabled={pageState?.busy} onClick={() => void older()}>{pageState?.busy ? "Loading older messages…" : "Load older messages"}</button>}
+      {pageState?.shifted && <><span>Showing older messages.</span><button type="button" className="underline" onClick={() => { pagingRequest.current?.abort(); setPaging(null); }}>Back to latest messages</button></>}
+      {pageState?.error && <span role="alert">{pageState.error}</span>}
+    </div>
     <ol className="space-y-3">
-      {[...data.history].reverse().map(message => <li key={message.id} className={message.direction === "outbound" ? "ml-8 rounded-lg bg-muted p-3" : "mr-8 rounded-lg border p-3"}>
+      {[...new Map(pages.flatMap(page => page.history).map(message => [message.id, message])).values()].reverse().map(message => <li key={message.id} className={message.direction === "outbound" ? "ml-8 rounded-lg bg-muted p-3" : "mr-8 rounded-lg border p-3"}>
         <p className="whitespace-pre-wrap break-words">{message.body ?? ""}</p>
         <p className="mt-1 text-xs text-muted-foreground">{message.direction === "outbound" ? "Sent" : "Received"} · <time dateTime={message.createdAtRaw}>{new Date(message.createdAtRaw).toLocaleString()}</time></p>
       </li>)}
