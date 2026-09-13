@@ -48,9 +48,7 @@ CREATE FUNCTION public.inbox_counts_v2(org_id uuid,filter jsonb) RETURNS jsonb L
 DECLARE a jsonb;after_access jsonb;f jsonb;result jsonb;
 BEGIN
  a:=inbox_t2_bridge.authorize(org_id);f:=inbox_t2_bridge.normalize_filter(filter);
- SELECT jsonb_object_agg(view,total) INTO result FROM (
- SELECT view,(SELECT count(*) FROM inbox_t2_bridge.matching(org_id,(a->>'user_id')::uuid,f||jsonb_build_object('view',view))) total
- FROM unnest(ARRAY['all','mine','unassigned','unread','escalated','dispo','needs_outcome','unknown','dismissed'])view) counts;
+ SELECT inbox_t2_bridge.counts_typed(org_id,(a->>'user_id')::uuid,f) INTO result;
  after_access:=inbox_t2_bridge.authorize(org_id);
  IF (after_access->>'user_id',after_access->>'session_id',after_access->>'access_epoch') IS DISTINCT FROM (a->>'user_id',a->>'session_id',a->>'access_epoch') THEN RAISE EXCEPTION 'INBOX_ACCESS_CHANGED' USING ERRCODE='42501';END IF;
  RETURN jsonb_build_object('counts',result,'as_of',statement_timestamp(),'access_epoch',a->>'access_epoch');
@@ -78,10 +76,8 @@ BEGIN
   IF NOT FOUND OR cur.user_id<>u OR cur.session_id<>sid OR cur.org_id<>o OR cur.access_epoch<>e OR cur.expires_at<=now_at OR cur.revoked OR cur.filter IS DISTINCT FROM f THEN RAISE EXCEPTION 'INBOX_CURSOR_DENIED' USING ERRCODE='42501';END IF;
  END IF;
  SELECT coalesce(jsonb_agg(to_jsonb(rows) ORDER BY latest_at DESC NULLS LAST,target_kind,target_id),'[]') INTO page_rows FROM (
- SELECT * FROM inbox_t2_bridge.matching(o,u,f) m
- WHERE cursor_id IS NULL OR CASE WHEN cur.cursor_at IS NULL THEN m.latest_at IS NULL AND (m.target_kind,m.target_id)>(cur.cursor_kind,cur.cursor_target)
- ELSE m.latest_at<cur.cursor_at OR m.latest_at IS NULL OR (m.latest_at=cur.cursor_at AND (m.target_kind,m.target_id)>(cur.cursor_kind,cur.cursor_target)) END
- ORDER BY latest_at DESC NULLS LAST,target_kind,target_id LIMIT n+1) rows;
+ SELECT * FROM inbox_t2_bridge.page(o,u,f,cur.cursor_at,cur.cursor_kind,cur.cursor_target,cursor_id IS NOT NULL,n+1)
+) rows;
  SELECT coalesce(jsonb_agg(jsonb_build_object('kind',x->>'target_kind','id',x->>'target_id') ORDER BY ordinal),'[]') INTO ids FROM jsonb_array_elements(page_rows) WITH ORDINALITY a(x,ordinal) WHERE ordinal<=n;
  INSERT INTO inbox_t2_bridge.worksets(org_id,user_id,session_id,access_epoch,generation,created_at,expires_at,filter,targets,handles)
  VALUES(o,u,sid,e,coalesce(gen,0)+1,now_at,least(now_at+interval '15 minutes',(a->>'expires_at')::timestamptz),f,ids,(SELECT jsonb_agg(null::text) FROM generate_series(1,greatest(1,(jsonb_array_length(ids)+99)/100)))) RETURNING * INTO created;

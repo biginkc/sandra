@@ -1,26 +1,27 @@
 {
   "scope": {
-    "id": "9fcbbdb4-ad8e-466a-9554-9e1268a10094",
-    "org_id": "fa07815c-5e0c-417d-b586-6aa9f5a3414c",
+    "id": "4e5f2339-3cea-4844-b3de-a545316895e2",
+    "org_id": "f9d45ebb-947d-4a83-86a9-a4baa1871b3e",
     "handles": [
       null
     ],
     "targets": [
       {
-        "id": "05b4fac3-5c8a-4572-8464-c10c443f62b3",
+        "id": "63050942-d215-4e89-bcd8-10c596c8a5e1",
         "kind": "known_conversation"
       }
     ],
-    "user_id": "0e490d6f-fb51-4b5e-a2b7-1c43196cb09f",
+    "user_id": "6ef71013-f789-40bd-a480-5d0fddb366b6",
     "refreshed": true,
-    "expires_at": "2026-09-13T21:31:06.045965+00:00",
+    "created_at": "2026-09-13T21:28:59.833559+00:00",
+    "expires_at": "2026-09-13T21:43:59.833559+00:00",
     "generation": "4",
-    "session_id": "d5468b8d-4fc0-4124-9030-c1b3bcf34507",
-    "next_cursor": "950a02d8-8821-4f26-aa6f-3cfed635833a",
+    "session_id": "24e401ff-1f80-4a36-8c41-bcca4007a9eb",
+    "next_cursor": "29f6306a-aa74-4b60-8fcf-5f5cac4d28d6",
     "access_epoch": "8"
   },
   "counts": {
-    "as_of": "2026-09-13T21:16:06.629593+00:00",
+    "as_of": "2026-09-13T21:29:00.377886+00:00",
     "counts": {
       "all": 3,
       "mine": 1,
