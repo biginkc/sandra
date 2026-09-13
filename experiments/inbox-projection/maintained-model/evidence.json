@@ -1,0 +1,32 @@
+{
+  "at": "2026-09-13 19:17:34.760045+00",
+  "checks": [
+    {
+      "name": "actual known/unknown computations publish through one typed model with persistent group identity",
+      "passed": true
+    },
+    {
+      "name": "older captured generation leaves pending repair; subsequent publication rejects stale results",
+      "passed": true
+    },
+    {
+      "name": "direct unknown dismissal/deletion updates stored group and retains identity after tombstone",
+      "passed": true
+    },
+    {
+      "name": "expiry deadline is inclusive; atomic wake survives retry/rollback and publishes tombstone with new generation",
+      "passed": true
+    },
+    {
+      "name": "ordinary authenticated/service roles cannot read private maintained rows",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "256ea6fe951440b6879acfec0502698b9a3a8203be04aa68bf09e15274133966",
+  "runner_sha256": "2246303389c9bae00a0f4d30313263f119d9bad40d2f13543b8b8a3db22849ed",
+  "limits": [
+    "Private unified publication and expiry primitive; no continuous worker scheduling or parent fanout",
+    "Trusted worker candidates, not an authenticated public API",
+    "No production writes or representative performance measurement"
+  ]
+}
