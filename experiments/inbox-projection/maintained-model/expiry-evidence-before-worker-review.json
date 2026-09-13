@@ -1,0 +1,58 @@
+{
+  "at": "2026-09-13 19:26:20.614631+00",
+  "checks": [
+    {
+      "name": "two overlapping scheduler processes cross a real deadline and enqueue exactly one generation",
+      "passed": true
+    },
+    {
+      "name": "separate worker process consumes expiry work and publishes actual canonical tombstone",
+      "passed": true
+    },
+    {
+      "name": "scheduler invocation after completion leaves the target unchanged",
+      "passed": true
+    }
+  ],
+  "scheduler_receipts": [
+    {
+      "discovered": 1,
+      "results": [
+        {
+          "target_id": "58e45fb5-6bd6-4262-89e3-74b436e0feb4",
+          "status": "enqueued"
+        }
+      ]
+    },
+    {
+      "discovered": 1,
+      "results": [
+        {
+          "target_id": "58e45fb5-6bd6-4262-89e3-74b436e0feb4",
+          "status": "superseded"
+        }
+      ]
+    }
+  ],
+  "worker_receipt": {
+    "claimed": 1,
+    "results": [
+      {
+        "target_id": "58e45fb5-6bd6-4262-89e3-74b436e0feb4",
+        "status": "applied"
+      }
+    ]
+  },
+  "source_hashes": {
+    "setup.sql": "256ea6fe951440b6879acfec0502698b9a3a8203be04aa68bf09e15274133966",
+    "queue.sql": "cb4c12d07ff3f3aef6ccb20fff1894d8e59c89d94586cf250ed0b451b7d79ca2",
+    "expiry-once.py": "5a34f743d3ce72cc42c1c06c36d2a5e0f592a902a03ebf81cc1181e55b22011d",
+    "worker-once.py": "60b81df26a850ae42b382d86fdb737eb9a3f4d5e3a988029dec6bebcf30e171e",
+    "expiry-proof.py": "b619f94f3cfebf139bf5bc82ace2fe55f2b358b46edc03d897d2839387075611"
+  },
+  "limits": [
+    "Owned synthetic canonical database only",
+    "Two real scheduler processes; not a process-death test or throughput benchmark",
+    "No installed continuous daemon, parent fanout, production deployment or provider action"
+  ]
+}

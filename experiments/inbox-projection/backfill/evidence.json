@@ -1,0 +1,33 @@
+{
+  "at": "2026-09-13 19:47:58.987622+00",
+  "checks": [
+    {
+      "name": "bounded historical scan begins with durable checkpoint; replay token cannot advance or duplicate effects",
+      "passed": true
+    },
+    {
+      "name": "transaction rollback preserves cursor and edges; a behind-cursor arrival is covered by live capture",
+      "passed": true
+    },
+    {
+      "name": "lease reclaim resumes persisted scan; messages/reviews seed retained unknown identity, edges and known/review targets",
+      "passed": true
+    },
+    {
+      "name": "bounded collision evidence blocks readiness and follows later delete/reinsert without automatic repair",
+      "passed": true
+    },
+    {
+      "name": "private backfill/collision state inaccessible to ordinary authenticated and service roles",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "d7ff8e2f2c39328a8b25e04fdde9e6fe201ea5f721158789ef4d37820e9ed4d0",
+  "runner_sha256": "b379cd8ba650a723d95556f578e262d3b1191dae3435f2d5776c753df37c80f6",
+  "limits": [
+    "Missing historical private state modeled by deleting only fresh owned fixture entries while capture remained active",
+    "No actual process crash; rollback and durable lease-reclaim exercised",
+    "Fingerprint verifies endpoints, not privileged trigger bypass between observations",
+    "No production cutover, policy-version seeding or SLO claim"
+  ]
+}

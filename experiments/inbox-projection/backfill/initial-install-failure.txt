@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-projection-t2/experiments/inbox-projection/backfill/run.py", line 23, in <module>
+    sql((P/'setup.sql').read_text())
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-projection-t2/experiments/inbox-projection/backfill/run.py", line 14, in sql
+    if check and r.returncode: raise RuntimeError(r.stderr)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: ERROR:  42725: operator is not unique: text || "char"
+LINE 2: ..._agg(t.tgrelid::regclass::text||':'||t.tgname||':'||t.tgenab...
+                                                             ^
+HINT:  Could not choose a best candidate operator. You might need to add explicit type casts.
+LOCATION:  op_error, parse_oper.c:627

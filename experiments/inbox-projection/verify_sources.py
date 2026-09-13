@@ -34,6 +34,45 @@ def main() -> None:
     for record in records:
         verify_file(licenses, record["file"], record["sha256"])
 
+    # Current maintained-model receipts bind the tested SQL and harness sources.
+    maintained = ROOT / "maintained-model"
+    if maintained.exists():
+        for receipt, bindings in (
+            ("evidence.json", {"setup.sql": "setup_sha256", "run.py": "runner_sha256"}),
+            ("queue-evidence.json", {"queue.sql": "queue_sql_sha256", "queue-proof.py": "runner_sha256"}),
+        ):
+            recorded = json.loads((maintained / receipt).read_text())
+            for name, key in bindings.items():
+                verify_file(maintained, name, recorded[key])
+        expiry = json.loads((maintained / "expiry-evidence.json").read_text())
+        for name, digest in expiry["source_hashes"].items():
+            verify_file(maintained, name, digest)
+
+    parent = ROOT / "parent-capture"
+    if parent.exists():
+        for receipt, runner in (("evidence.json", "run.py"), ("concurrency-evidence.json", "concurrency.py")):
+            recorded = json.loads((parent / receipt).read_text())
+            verify_file(parent, "setup.sql", recorded["setup_sha256"])
+            verify_file(parent, runner, recorded["runner_sha256"])
+
+    safety = ROOT / "safety-capture"
+    if safety.exists():
+        for receipt, runner in (("evidence.json", "run.py"), ("concurrency-evidence.json", "concurrency.py")):
+            recorded = json.loads((safety / receipt).read_text())
+            verify_file(safety, "setup.sql", recorded["setup_sha256"])
+            verify_file(safety, runner, recorded["runner_sha256"])
+
+    backfill = ROOT / "backfill"
+    if backfill.exists():
+        for receipt, runner in (
+            ("evidence.json", "run.py"),
+            ("concurrency-evidence.json", "concurrency.py"),
+            ("collision-concurrency-evidence.json", "collision-concurrency.py"),
+        ):
+            recorded = json.loads((backfill / receipt).read_text())
+            verify_file(backfill, "setup.sql", recorded["setup_sha256"])
+            verify_file(backfill, runner, recorded["runner_sha256"])
+
     python_files = list(ROOT.rglob("*.py"))
     for path in python_files:
         ast.parse(path.read_text(), filename=str(path))
