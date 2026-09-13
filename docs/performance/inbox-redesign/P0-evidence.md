@@ -1,6 +1,6 @@
 # P0 evidence and dependency record
 
-Status: started; no candidate comparison or implementation performance claim.
+Status: baseline measured on an isolated synthetic workload; candidate experiment in progress. No production performance claim.
 
 ## Scope
 
@@ -13,13 +13,13 @@ authorized synthetic data. Use ordinary user access for representative timings.
 
 | Evidence | Current result | Remaining work |
 |---|---|---|
-| Main baseline | 269d44ca at worktree creation | Recheck before implementation/PR |
-| Production deployment | Not verified | Record deployed SHA and configuration |
-| Catalog/index definitions | Script prepared, not run | Bounded authorized metadata snapshot |
-| Conversation click baseline | Historical reports only | First open/revisit p50/p95/p99 |
+| Main baseline | 7912891c, recorded production deployment SHA | Recheck before merge |
+| Production deployment | GitHub deployment 6419416079 reports success for 7912891c | Independently verify runtime/configuration |
+| Catalog/index definitions | Read-only snapshot ran on owned local stack | Production snapshot pending restored CLI authentication |
+| Conversation click baseline | Six local Chrome opens at 55,000 conversations: first 2.39–2.86s, revisits 1.847–1.879s | Larger sample, candidate comparison and arrival load |
 | Current volume/distribution | Partial estimates only | Conversation/history/unknown skew |
 | Incoming activity | Not measured | Peak arrivals and concurrency |
-| Candidate comparison | Not started | Freeze workload and budget first |
+| Candidate comparison | Additive flag-gated independent read experiment implemented | Same-fixture browser comparison; full P0 decision still pending |
 | Inventory parity | 50 mapped entries | Each needs actual evidence |
 
 `catalog-snapshot.sql` gathers only table estimates, index definitions and
@@ -91,3 +91,31 @@ passed from service-role metadata timings or a tiny demo dataset.
   a nested rehearsal needed PG connection settings. The corrected run explicitly
   targets the owned local cluster using the Node24 runtime. These failed setup
   attempts are not passing product-test evidence.
+
+## Local baseline and experiment, September 13
+
+Full repository verification passed at cc92acf7: 3,953 unit and 1,318 RTL tests,
+typecheck, migration rehearsal and atomic checks. PR #548 GitHub checks are now
+all green, including Playwright golden paths. Later local additions need their
+own verification; these passing checks do not cover unpushed code.
+
+At 55,000 synthetic conversations and 550,750 tenant messages, ordinary-member
+source reads measured list p95 1,513.5ms versus short detail p95 15.3ms (20 serial
+samples). Browser measurements from the same-sized BMH fixture in a local
+production build found initial list 1,935.6ms and conversation switching above
+the approved targets. See browser-baseline-55000.json and sanitized server spans.
+Six clicks establish a reproducible problem, not a certified production p95.
+The local cluster retains other synthetic fixtures; total rows exceed this tenant.
+
+The independent read experiment is disabled unless INBOX_V2_EXPERIMENT_ENABLED=1.
+It preserves ordinary authentication, membership and tenant checks, uses bounded
+stable history pagination, and never marks read. An independent source review
+found no blocker for this experiment. Real backend pagination, tenant rejection
+and read-state preservation passed 31 execution checks (endpoint-correctness.json). The reused context
+helper performs an extra latest-100-history read; no claim is made that every
+query in this candidate is already optimized.
+
+Production metadata access, actual volume/arrival/concurrency distributions,
+remaining list/search/filter/ingestion numerical gates, and complete parity proof
+are still outstanding. The approved initial latency targets permit this focused
+P0 experiment; they do not establish the final architecture decision.

@@ -22,14 +22,21 @@ export type InboxReadRequest = {
   before: HistoryPosition | null;
 };
 
+export type InboxHistoryMessage = Pick<InboxDetail["initialMessages"][number],
+  "id" | "created_at" | "channel" | "direction" | "body" | "status" |
+  "read_at" | "sent_at" | "delivered_at" | "failed_at" | "from_address" | "to_address">;
+
 /** Display data only. Permission/consent must be rechecked by mutation handlers. */
 export type InboxReadResponse =
   | {
       status: "ready";
       conversationId: string;
       context: Omit<InboxDetail, "initialMessages" | "conversationId" | "threadId">;
-      messages: InboxDetail["initialMessages"];
+      /** Oldest-to-newest within this page; the cursor requests the older page. */
+      messages: InboxHistoryMessage[];
       nextCursor: string | null;
+      /** Separate read observations, NOT an atomic snapshot or universal revision. */
+      freshness: { contextReadCompletedAt: string; latestInbound: HistoryPosition | null };
     }
   | { status: "unavailable" | "error"; conversationId: string };
 
