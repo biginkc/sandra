@@ -399,3 +399,61 @@ it.each(["log-offer", "log-attempt"])("retains a new %s draft when an earlier sa
   expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({propertyId:"property-1",expectedEpisodeId:"episode-1",...(nextAction==="log-offer"?{amountCents:12500050}:{note:"Second opening draft",outcome:"no_answer"})});
   expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).not.toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
 });
+
+describe('stale form recovery',()=>{
+  beforeEach(()=>{vi.resetAllMocks();mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});});
+  async function rejectedDraft(code='STALE_STATE'){
+    const user=userEvent.setup();
+    mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:false,code,message:'This lead changed. Refresh before trying again.'});
+    renderClient(snapshot('106 Fixture Lane'));
+    await user.click(screen.getByRole('button',{name:'Log attempt'}));
+    await user.selectOptions(screen.getByLabelText('External outcome'),'reached');
+    fireEvent.change(screen.getByLabelText('When did the outreach occur?'),{target:{value:'2026-09-11T09:00'}});
+    await user.type(screen.getByLabelText('Note (optional)'),'Keep this original draft');
+    await user.click(screen.getByRole('button',{name:'Save attempt'}));
+    await screen.findByRole('button',{name:'Refresh'});
+    expect(screen.getByRole('button',{name:'Save attempt'})).toBeDisabled();
+    return user;
+  }
+  it('refreshes version metadata while preserving the draft and only saves on explicit retry',async()=>{
+    const user=await rejectedDraft();
+    const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=2;
+    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
+    await user.click(screen.getByRole('button',{name:'Refresh'}));
+    await screen.findByText('Lead refreshed. Your draft is retained. Review it before saving.');
+    expect(screen.getByLabelText('Note (optional)')).toHaveValue('Keep this original draft');
+    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
+    mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:true});
+    await user.click(screen.getByRole('button',{name:'Save attempt'}));
+    await waitFor(()=>expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({expectedQueueVersion:2,expectedEpisodeId:'episode-1',note:'Keep this original draft'});
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).not.toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
+  });
+  it('ignores recovery finishing after cancellation and reopening the same lead',async()=>{
+    const user=await rejectedDraft();
+    let release!: (value: unknown)=>void;
+    mocks.loadMyLeads.mockReturnValueOnce(new Promise(resolve=>{release=resolve;}));
+    await user.click(screen.getByRole('button',{name:'Refresh'}));
+    await user.click(screen.getByRole('button',{name:'Cancel'}));
+    await user.click(screen.getByRole('button',{name:'Log attempt'}));
+    await user.type(screen.getByLabelText('Note (optional)'),'New opening draft');
+    const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=99;
+    await act(async()=>release({ok:true,snapshot:fresh,kpis}));
+    expect(screen.getByLabelText('Note (optional)')).toHaveValue('New opening draft');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button',{name:'Save attempt'})).toBeEnabled();
+    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
+  });
+  it.each(['missing','different episode','failed read'])('retains draft and refuses retry after %s',async(kind)=>{
+    const user=await rejectedDraft('FORBIDDEN');
+    const fresh=snapshot('106 Fixture Lane');
+    if(kind==='missing')fresh.stages.not_contacted!.rows=[];
+    if(kind==='different episode')fresh.stages.not_contacted!.rows[0].assignmentEpisodeId='episode-2';
+    mocks.loadMyLeads.mockResolvedValue(kind==='failed read'?{ok:false,message:'denied'}:{ok:true,snapshot:fresh,kpis});
+    await user.click(screen.getByRole('button',{name:'Refresh'}));
+    await waitFor(()=>expect(screen.getByRole('button',{name:'Refresh'})).toBeEnabled());
+    expect(screen.getByLabelText('Note (optional)')).toHaveValue('Keep this original draft');
+    expect(screen.getByRole('button',{name:'Save attempt'})).toBeDisabled();
+    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
+  });
+});

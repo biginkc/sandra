@@ -6,6 +6,7 @@ import { useOptionalSoftphone } from '@/components/softphone/softphone-provider'
 import { BookAppointmentPopover } from '@/components/appointments/book-appointment-popover';
 import type { Json } from '@/lib/supabase/types';
 import type { AcquisitionKpis,AcquisitionRoster,QueueSnapshot,QueueRow } from '@/lib/my-leads/queries';
+import { WorkflowRecoveryContext } from './_components/workflow-form';
 import { MyLeadsQueue } from './_components/queue';
 import { AcquisitionAttemptDialog } from './_components/attempt-dialog';
 import { AcquisitionReadinessDialog } from './_components/readiness-dialog';
@@ -33,6 +34,27 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [callOptions,setCallOptions]=useState<{propertyId:string;options:{id:string;label:string}[];error:string|null}|null>(null);
   const [callRetry,setCallRetry]=useState(0);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow}|null>(null);
+  const activeDialog=useRef(dialog);activeDialog.current=dialog;
+  const recoveredRow=useRef<{opening:NonNullable<typeof dialog>;row:QueueRow}|null>(null);
+  const [recovery,setRecovery]=useState<{opening:NonNullable<typeof dialog>;message:string;blocked:boolean;busy:boolean}|null>(null);
+  const recoverDialog=async()=>{
+    const opening=dialog;if(!opening||recovery?.busy)return;
+    setRecovery({opening,message:'Checking current lead access…',blocked:true,busy:true});
+    try {
+      const result=await loadMyLeads({memberId:member,search,period:'today'});
+      if(activeDialog.current!==opening)return;
+      if(!result.ok)throw new Error('read failed');
+      const row=Object.values(result.snapshot.stages).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===opening.row.propertyId);
+      // Never move a retained draft into a different assignment episode.
+      if(!row||row.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
+        setRecovery({opening,message:'This lead is unavailable in this queue or its assignment changed. Your draft is retained; copy it before closing. Reopen the lead from the current queue to start a new update.',blocked:true,busy:false});return;
+      }
+      recoveredRow.current={opening,row};submission.current=null;
+      setRecovery({opening,message:'Lead refreshed. Your draft is retained. Review it before saving.',blocked:false,busy:false});
+    }catch{
+      if(activeDialog.current===opening)setRecovery({opening,message:'Could not refresh this lead. Your draft is retained. Try Refresh again.',blocked:true,busy:false});
+    }
+  };
   const [detailRevision,setDetailRevision]=useState(0);
   const [recipient,setRecipient]=useState(roster.settings.recipientId??'');const [settingsBusy,setSettingsBusy]=useState(false);
   const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<{hash:string;key:string}|null>(null);
@@ -104,14 +126,18 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   },[dialog,member,callRetry]);
   const submit=useCallback(async(payload:object)=>{
     if(!dialog)return {ok:false as const,message:'Select a lead first.'};
+    if(recovery?.opening===dialog&&(recovery.blocked||recovery.busy))return {ok:false as const,message:recovery.message};
+    const row=recoveredRow.current?.opening===dialog?recoveredRow.current.row:dialog.row;
+    setRecovery(null);
     const hash=JSON.stringify(payload);
     if(submission.current?.hash!==hash)submission.current={hash,key:crypto.randomUUID()};
-    const input=JSON.parse(JSON.stringify({...payload,propertyId:dialog.row.propertyId,expectedEpisodeId:dialog.row.assignmentEpisodeId,
-      expectedQueueVersion:dialog.row.queueVersion,expectedSharedStatus:dialog.row.sharedStatus,idempotencyKey:submission.current.key})) as Record<string,Json>;
+    const input=JSON.parse(JSON.stringify({...payload,propertyId:row.propertyId,expectedEpisodeId:row.assignmentEpisodeId,
+      expectedQueueVersion:row.queueVersion,expectedSharedStatus:row.sharedStatus,idempotencyKey:submission.current.key})) as Record<string,Json>;
     const result=await submitMyLeadCommand(dialog.action as Parameters<typeof submitMyLeadCommand>[0],input);
+    if(!result.ok&&'code' in result&&(result.code==='FORBIDDEN'||result.code==='STALE_STATE')&&activeDialog.current===dialog)setRecovery({opening:dialog,message:result.message,blocked:true,busy:false});
     if(result.ok){setDialog(current=>current===dialog?null:current);setDetailRevision(revision=>revision+1);await refresh();router.refresh();}
     return result;
-  },[dialog,refresh,router]);
+  },[dialog,refresh,router,recovery]);
   const pages=snapshot?stagePages(snapshot):null;
   if(pages)for(const stage of loadingStages)pages[stage].isLoadingMore=true;
   const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;
@@ -157,6 +183,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       {search&&<p className="mb-2 text-sm text-muted-foreground">Section counts match your search. KPIs cover the selected rep.</p>}
       <p className="mt-3 text-xs text-muted-foreground">{kpis.firstCallPending} first calls pending · {kpis.pendingOutcomes} call outcomes pending{kpis.orgAppointmentsUnattributed?` · ${kpis.orgAppointmentsUnattributed} appointments in this organization have unknown historical attribution`:''}</p>
     </>}
+    <WorkflowRecoveryContext.Provider value={recovery?.opening===dialog?{...recovery,refresh:()=>void recoverDialog()}:null}>
     {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} key={dialog.row.propertyId} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]} callReferencesLoading={!callOptions} callReferencesError={callOptions?.error} onRetryCallReferences={()=>setCallRetry(value=>value+1)}/>}
     {common&&dialog?.action==='ready-for-offer'&&<AcquisitionReadinessDialog {...common} onSubmit={payload=>submit(payload)} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
     {common&&dialog?.action==='log-offer'&&<AcquisitionOfferDialog {...common} onSubmit={payload=>submit(payload)} motivationRequired={!motivation} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
@@ -164,6 +191,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       pendingOfferId={dialog.row.offer?.outcome==='pending'?dialog.row.offer.id:null}
       recipientOptions={roster.settings.recipient?[roster.settings.recipient]:roster.settings.recipientId?roster.members.filter(m=>m.id===roster.settings.recipientId).map(m=>({id:m.id,label:m.label})):[]}
       initialRecipientUserId={roster.settings.recipient?.id??roster.settings.recipientId??''}/>}
+    </WorkflowRecoveryContext.Provider>
     {dialog?.action==='schedule-next-step'&&<div className="fixed bottom-6 right-6 z-50 rounded-xl border bg-background p-5 shadow-lg"><p className="mb-3 font-medium">{dialog.row.address}</p>
       <BookAppointmentPopover propertyId={dialog.row.propertyId} subjectLabel={dialog.row.address} currentUserId={member} onBooked={()=>{setDialog(current=>current===dialog?null:current);setDetailRevision(revision=>revision+1);void refresh();}}/>
       <Button variant="ghost" onClick={()=>setDialog(null)}>Close</Button></div>}
