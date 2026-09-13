@@ -6,6 +6,7 @@ import { MyLeadDetailPanel } from "./detail-panel"
 import type { MyLeadDetail } from "./types"
 
 const EMPTY_DETAIL: MyLeadDetail = {
+  messages: { rows: [], hasMore: false, nextCursor: null },
   notes: { rows: [], hasMore: false, nextCursor: null },
   attempts: { rows: [], hasMore: false, nextCursor: null },
   appointments: { rows: [], hasMore: false, nextCursor: null },

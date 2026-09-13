@@ -17,6 +17,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { MyLeadDetailPanel } from "./detail-panel"
+import { MyLeadSmsStrip } from "./sms-strip"
 import {
   MY_LEAD_STAGE_LABELS,
   MY_LEAD_STAGE_ORDER,
@@ -136,7 +137,7 @@ export type MyLeadQueueRowProps = {
   onDetailChanged?: () => void
   onLoadDetailPage?: (
     group: MyLeadDetailGroupName,
-    cursor: string
+    cursor: string | null
   ) => Promise<MyLeadDetailPageResult>
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRow) => void
 }
@@ -278,6 +279,12 @@ export function MyLeadQueueRow({
             </span>
           )}
         </div>
+
+        <MyLeadSmsStrip
+          state={detailState ?? { status: "loading" }}
+          onRetry={onRetryDetails}
+          onLoadDetailPage={onLoadDetailPage}
+        />
 
         <div className="pt-4">
           <p className="mb-[9px] text-[10px] font-extrabold tracking-[0.08em] text-muted-foreground uppercase">Where it is</p>
