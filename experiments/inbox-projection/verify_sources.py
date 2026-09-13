@@ -62,6 +62,17 @@ def main() -> None:
             verify_file(safety, "setup.sql", recorded["setup_sha256"])
             verify_file(safety, runner, recorded["runner_sha256"])
 
+    backfill = ROOT / "backfill"
+    if backfill.exists():
+        for receipt, runner in (
+            ("evidence.json", "run.py"),
+            ("concurrency-evidence.json", "concurrency.py"),
+            ("collision-concurrency-evidence.json", "collision-concurrency.py"),
+        ):
+            recorded = json.loads((backfill / receipt).read_text())
+            verify_file(backfill, "setup.sql", recorded["setup_sha256"])
+            verify_file(backfill, runner, recorded["runner_sha256"])
+
     python_files = list(ROOT.rglob("*.py"))
     for path in python_files:
         ast.parse(path.read_text(), filename=str(path))
