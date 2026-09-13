@@ -2,6 +2,7 @@ import "server-only";
 import { createClient } from "@/lib/supabase/server";
 import { createInboxActionRepository, InboxActionApiError, type InboxActionClient } from "./action-api";
 import { InvalidInboxActionError, parseInboxActionAcceptance } from "./action-definition";
+import { isInboxSameOrigin } from "./same-origin";
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
 export async function inboxActionRoute(request: Request, action: "prepare" | "accept" | "status" | "assignees" | "recover", operationId?: string) {
     if (process.env.INBOX_ACTIONS_SERVER_ENABLED !== "1")
@@ -11,8 +12,8 @@ export async function inboxActionRoute(request: Request, action: "prepare" | "ac
     const cancel = () => { void reader?.cancel().catch(() => { }); };
     signal.addEventListener("abort", cancel, { once: true });
     try {
-        const url = new URL(request.url), origin = request.headers.get("origin");
-        if ((action === "recover" ? [...url.searchParams.keys()].length !== 2 || !url.searchParams.has("idempotencyKey") || !url.searchParams.has("preparationId") : !!url.search) || (origin && origin !== url.origin) || request.headers.get("sec-fetch-site") === "cross-site")
+        const url = new URL(request.url);
+        if ((action === "recover" ? [...url.searchParams.keys()].length !== 2 || !url.searchParams.has("idempotencyKey") || !url.searchParams.has("preparationId") : !!url.search) || !isInboxSameOrigin(request))
             throw new InboxActionApiError(403);
         let raw = "";
         if (action === "prepare" || action === "accept") {

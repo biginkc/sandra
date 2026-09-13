@@ -29,3 +29,15 @@ it("recovery admits one exact key query and assignees admit no overrides", async
  expect((await assignees(new Request("http://localhost/api/inbox/actions/assignees"))).status).toBe(200);
  expect((await assignees(new Request("http://localhost/api/inbox/actions/assignees?org=other"))).status).toBe(403);
 });
+
+it("accepts browser Host authority through Next internal hostname while retaining cross-site and query checks", async () => {
+ const headers = { "content-type": "application/json", host: "127.0.0.1:52582", origin: "http://127.0.0.1:52582", "sec-fetch-site": "same-origin" };
+ const make = (path = "", override = {}) => new Request(`http://localhost:52582/api/inbox/actions/prepare${path}`, { method: "POST", headers: { ...headers, ...override }, body: "{}" });
+ expect((await prepare(make())).status).toBe(200);
+ expect(mocks.prepare).toHaveBeenCalledTimes(1);
+ expect((await prepare(make("", { "sec-fetch-site": "cross-site" }))).status).toBe(403);
+ expect((await prepare(make("?organization=other"))).status).toBe(403);
+ expect((await prepare(make("", { host: "foreign.invalid" }))).status).toBe(403);
+ expect((await prepare(make("", { host: "localhost:52582", "x-forwarded-host": "127.0.0.1:52582" }))).status).toBe(403);
+ expect(mocks.prepare).toHaveBeenCalledTimes(1);
+});
