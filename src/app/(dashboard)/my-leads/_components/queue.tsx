@@ -195,7 +195,7 @@ export function MyLeadsQueue({
   const loadDetailPage = async (
     propertyId: string,
     group: MyLeadDetailGroupName,
-    cursor: string
+    cursor: string | null
   ): Promise<MyLeadDetailPageResult> => {
     if (!onLoadDetailPage) return { ok: false, message: "More detail is unavailable." }
     const requestKey = `${propertyId}:${group}`
@@ -217,7 +217,9 @@ export function MyLeadsQueue({
           ...previous,
           [propertyId]: {
             status: "ready",
-            detail: appendDetailPage(current.detail, group, result.page),
+            detail: cursor === null
+              ? { ...current.detail, [group]: result.page }
+              : appendDetailPage(current.detail, group, result.page),
           },
         }
       })
@@ -385,7 +387,7 @@ function MyLeadStageSection({
   onLoadDetailPage?: (
     propertyId: string,
     group: MyLeadDetailGroupName,
-    cursor: string
+    cursor: string | null
   ) => Promise<MyLeadDetailPageResult>
   onLoadMore: MyLeadsQueueProps["onLoadMore"]
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRowDto) => void

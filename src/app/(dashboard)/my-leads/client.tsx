@@ -168,7 +168,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
         onLoadDetailPage={async(propertyId,group,cursor)=>{
           const result=await loadMyLeadDetail({memberId:member,propertyId,group,cursor});if(!result.ok)return result;
           const detail=detailView(result.detail,roster);
-          switch(group){case 'notes':return {ok:true,group,page:detail.notes};case 'attempts':return {ok:true,group,page:detail.attempts};case 'appointments':return {ok:true,group,page:detail.appointments};case 'offers':return {ok:true,group,page:detail.offers};case 'history':return {ok:true,group,page:detail.history};}
+          switch(group){case 'messages':return {ok:true,group,page:detail.messages};case 'notes':return {ok:true,group,page:detail.notes};case 'attempts':return {ok:true,group,page:detail.attempts};case 'appointments':return {ok:true,group,page:detail.appointments};case 'offers':return {ok:true,group,page:detail.offers};case 'history':return {ok:true,group,page:detail.history};}
         }}
         onLeadChanged={()=>{void refresh();router.refresh();}} onStageAction={(kind,row)=>action(kind,row.propertyId)}/>
 

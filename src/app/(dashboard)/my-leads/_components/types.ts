@@ -168,6 +168,16 @@ export type MyLeadHistoryEvent = {
   createdLabel: string
 }
 
+export type MyLeadSmsMessage = {
+  id: string
+  body: string
+  direction: "inbound" | "outbound"
+  createdAt: string
+  createdLabel: string
+  deliveryStatus: string
+  attachmentCount: number
+}
+
 export type MyLeadDetailGroup<T> = {
   rows: readonly T[]
   hasMore: boolean
@@ -175,6 +185,8 @@ export type MyLeadDetailGroup<T> = {
 }
 
 export type MyLeadDetail = {
+  /** Newest first, including earlier pages; the strip reverses the complete group. */
+  messages: MyLeadDetailGroup<MyLeadSmsMessage>
   notes: MyLeadDetailGroup<MyLeadNote>
   attempts: MyLeadDetailGroup<MyLeadAttempt>
   appointments: MyLeadDetailGroup<MyLeadAppointment>
@@ -194,6 +206,7 @@ export type MyLeadDetailState =
 export type MyLeadDetailGroupName = keyof MyLeadDetail
 
 export type MyLeadDetailPageResult =
+  | { ok: true; group: "messages"; page: MyLeadDetailGroup<MyLeadSmsMessage> }
   | { ok: true; group: "notes"; page: MyLeadDetailGroup<MyLeadNote> }
   | { ok: true; group: "attempts"; page: MyLeadDetailGroup<MyLeadAttempt> }
   | { ok: true; group: "appointments"; page: MyLeadDetailGroup<MyLeadAppointment> }
@@ -227,7 +240,7 @@ export type MyLeadsQueueProps = {
   onLoadDetailPage?: (
     propertyId: string,
     group: MyLeadDetailGroupName,
-    cursor: string
+    cursor: string | null
   ) => Promise<MyLeadDetailPageResult>
   /** Increments after a successful workflow mutation so open rows refetch detail. */
   detailRevision?: number
@@ -243,7 +256,7 @@ export type MyLeadDetailPanelProps = {
   onChanged?: (group: "notes" | "appointments") => void
   onLoadDetailPage?: (
     group: MyLeadDetailGroupName,
-    cursor: string
+    cursor: string | null
   ) => Promise<MyLeadDetailPageResult>
 }
 

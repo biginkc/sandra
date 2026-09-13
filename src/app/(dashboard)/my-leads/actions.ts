@@ -16,7 +16,7 @@ export async function loadMyLeadsStage(input:{memberId:string;search:string;stag
   try {return {ok:true as const,snapshot:await getAcquisitionQueue(input)};}
   catch(error){return {ok:false as const,message:error instanceof Error?error.message:'Could not load this section.'};}
 }
-export async function loadMyLeadDetail(input:{memberId:string;propertyId:string;group?:DetailGroup;cursor?:string}) {
+export async function loadMyLeadDetail(input:{memberId:string;propertyId:string;group?:DetailGroup;cursor?:string|null}) {
   try {return {ok:true as const,detail:await getAcquisitionDetail(input)};}
   catch(error){return {ok:false as const,message:error instanceof Error?error.message:'Could not load lead details.'};}
 }

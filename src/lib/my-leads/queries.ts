@@ -79,14 +79,86 @@ export async function getAcquisitionBadge(): Promise<number> {
   catch(error) { if(error instanceof MyLeadsReadError&&error.code==='FEATURE_DISABLED') return 0; throw error; }
 }
 
-export type DetailGroup = 'notes'|'attempts'|'appointments'|'offers'|'history';
+export type DetailGroup = 'notes'|'attempts'|'appointments'|'offers'|'history'|'messages';
 export type DetailFact = { id:string; at:string; actorId:string|null; body?:string; outcome?:string|null; source?:string;
+  direction?:'inbound'|'outbound'; deliveryStatus?:string; attachmentCount?:number;
   recordingUrl?:string|null; callActivityId?:string|null; amountCents?:number; method?:string; title?:string; status?:string; type?:'appointment'|'callback'; lifecycleState?:'past_due'|'upcoming'|null; callbackActionAllowed?:boolean; currentAssigneeId?:string|null; kind?:string; endedAt?:string|null };
 export type AcquisitionDetail = { groups: Partial<Record<DetailGroup,{ rows:DetailFact[];cursor:string|null;hasMore:boolean }>> };
+
+const SMS_PAGE_SIZE=20;
+const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SMS_TIMESTAMP=/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-](?:0\d|1[0-4]):[0-5]\d)$/;
+type SmsScope={orgId:string;memberId:string;propertyId:string};
+type SmsCursor=SmsScope&{version:1;at:string;id:string};
+
+function decodeSmsCursor(raw:string|null|undefined,scope:SmsScope):SmsCursor|null {
+  if(raw==null) return null;
+  try {
+    if(raw.length>1024||!/^[A-Za-z0-9_-]+$/.test(raw)) throw new Error('Malformed cursor');
+    const cursor:unknown=JSON.parse(Buffer.from(raw,'base64url').toString('utf8'));
+    if(!cursor||typeof cursor!=='object'||Array.isArray(cursor)) throw new Error('Malformed cursor');
+    const value=cursor as Partial<SmsCursor>;
+    if(value.version!==1||value.orgId!==scope.orgId||value.memberId!==scope.memberId||value.propertyId!==scope.propertyId
+      ||typeof value.id!=='string'||!UUID.test(value.id)||typeof value.at!=='string'||!SMS_TIMESTAMP.test(value.at)
+      ||!Number.isFinite(Date.parse(value.at))) throw new Error('Invalid cursor');
+    const date=value.at.slice(0,10);
+    if(date.startsWith('0000')||new Date(`${date}T00:00:00Z`).toISOString().slice(0,10)!==date) throw new Error('Invalid cursor date');
+    // Preserve PostgreSQL's microseconds; Date.toISOString() would lose the tie-break precision.
+    return value as SmsCursor;
+  } catch {
+    throw new MyLeadsReadError('INVALID_INPUT','Refresh the lead to load its text messages.');
+  }
+}
+
+async function readAcquisitionSmsHistory(viewer:Awaited<ReturnType<typeof myLeadsViewer>>,scope:SmsScope,rawCursor?:string|null) {
+  if(!UUID.test(scope.propertyId)) throw new MyLeadsReadError('INVALID_INPUT','Choose a valid lead.');
+  const cursor=decodeSmsCursor(rawCursor,scope);
+  // The detail RPC has already authorized this read. Recheck current assignment before
+  // deriving the homeowner contact; a contact supplied by the browser is never trusted.
+  const {data:property,error:propertyError}=await viewer.client.from('properties')
+    .select('homeowner_contact_id').eq('org_id',scope.orgId).eq('id',scope.propertyId)
+    .eq('assigned_user_id',scope.memberId).is('deleted_at',null).eq('is_dnc_locked',false).maybeSingle();
+  if(propertyError) throw new MyLeadsReadError('READ_FAILED','Text messages could not load. Please retry.');
+  if(!property) throw new MyLeadsReadError('FORBIDDEN','This lead is no longer available in the selected queue.');
+  const contactId=property.homeowner_contact_id;
+  if(contactId!==null&&!UUID.test(contactId)) throw new MyLeadsReadError('READ_FAILED','Text messages could not load. Please retry.');
+
+  let query=viewer.client.from('messages').select('id,created_at,body,direction,status,metadata')
+    .eq('org_id',scope.orgId).eq('channel','sms')
+    .or('direction.eq.inbound,and(direction.eq.outbound,status.in.(sent,delivered,failed,bounced))');
+  // Contact-only texts can predate property linkage. Never include texts explicitly
+  // attributed to a different property belonging to the same homeowner.
+  query=contactId
+    ?query.or(`property_id.eq.${scope.propertyId},and(property_id.is.null,contact_id.eq.${contactId})`)
+    :query.eq('property_id',scope.propertyId);
+  if(cursor) query=query.or(`created_at.lt.${cursor.at},and(created_at.eq.${cursor.at},id.lt.${cursor.id})`);
+  const {data,error}=await query.order('created_at',{ascending:false}).order('id',{ascending:false}).limit(SMS_PAGE_SIZE+1);
+  if(error||data===null) throw new MyLeadsReadError('READ_FAILED','Text messages could not load. Please retry.');
+  const hasMore=data.length>SMS_PAGE_SIZE;
+  const rows:DetailFact[]=data.slice(0,SMS_PAGE_SIZE).map(message=>{
+    const metadata=message.metadata;
+    const mediaUrls=metadata&&typeof metadata==='object'&&!Array.isArray(metadata)?metadata.mediaUrls:null;
+    return {id:message.id,at:message.created_at,actorId:null,body:message.body,
+      direction:message.direction as 'inbound'|'outbound',deliveryStatus:message.status,
+      attachmentCount:Array.isArray(mediaUrls)?mediaUrls.filter(url=>typeof url==='string'&&url.length>0).length:0};
+  });
+  const last=rows.at(-1);
+  // This scoped cursor is a pagination position, never an authorization token.
+  const next=hasMore&&last?Buffer.from(JSON.stringify({...scope,version:1,at:last.at,id:last.id} satisfies SmsCursor)).toString('base64url'):null;
+  return {rows,cursor:next,hasMore};
+}
+
 export async function getAcquisitionDetail(input: {memberId:string;propertyId:string;group?:DetailGroup;cursor?:string|null}): Promise<AcquisitionDetail> {
   const viewer=await myLeadsViewer();
   if(!viewer.isOwner&&input.memberId!==viewer.userId) throw new MyLeadsReadError('FORBIDDEN','You can view only your own queue.');
-  return readRpc<AcquisitionDetail>(viewer.client,'fn_get_acquisition_detail',{
-    p_org_id:viewer.orgId,p_member_id:input.memberId,p_property_id:input.propertyId,p_group:input.group??null,p_cursor:input.cursor??null,
+  const messagesOnly=input.group==='messages';
+  const detail=await readRpc<AcquisitionDetail>(viewer.client,'fn_get_acquisition_detail',{
+    p_org_id:viewer.orgId,p_member_id:input.memberId,p_property_id:input.propertyId,
+    // The deployed RPC accepts only its original groups and UUID cursors. Use a
+    // valid group to authorize every messages page without passing it an SMS cursor.
+    p_group:messagesOnly?'history':input.group??null,p_cursor:messagesOnly?null:input.cursor??null,
   });
+  if(input.group&&!messagesOnly) return detail;
+  const messages=await readAcquisitionSmsHistory(viewer,{orgId:viewer.orgId,memberId:input.memberId,propertyId:input.propertyId},messagesOnly?input.cursor:null);
+  return {groups:messagesOnly?{messages}:{...detail.groups,messages}};
 }

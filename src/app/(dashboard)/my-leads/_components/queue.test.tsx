@@ -13,6 +13,7 @@ import {
 } from "./types"
 
 const EMPTY_DETAIL: MyLeadDetail = {
+  messages: { rows: [], hasMore: false, nextCursor: null },
   notes: { rows: [], hasMore: false, nextCursor: null },
   attempts: { rows: [], hasMore: false, nextCursor: null },
   appointments: { rows: [], hasMore: false, nextCursor: null },
@@ -87,6 +88,38 @@ function buildProps(overrides: Partial<MyLeadsQueueProps> = {}): MyLeadsQueuePro
 }
 
 describe("MyLeadsQueue", () => {
+  it("loads SMS with expanded details and prepends older texts without duplicates", async () => {
+    const user = userEvent.setup()
+    const message = (id: string, body: string, direction: "inbound" | "outbound") => ({
+      id, body, direction, createdAt: "2026-09-13T18:00:00Z", createdLabel: "Sep 13, 2026, 1:00 PM CDT", deliveryStatus: "delivered", attachmentCount: 0,
+    })
+    const newest = message("3", "What price works?", "outbound")
+    const previous = message("2", "Yes, I am interested.", "inbound")
+    const oldest = message("1", "Would you consider selling?", "outbound")
+    const onLoadDetail = vi.fn(async () => ({ ok: true as const, detail: {
+      ...EMPTY_DETAIL, messages: { rows: [newest, previous], hasMore: true, nextCursor: "sms-cursor" },
+    } }))
+    const onLoadDetailPage = vi.fn(async () => ({ ok: true as const, group: "messages" as const,
+      page: { rows: [previous, oldest], hasMore: false, nextCursor: null },
+    }))
+    render(<MyLeadsQueue {...buildProps({ onLoadDetail, onLoadDetailPage })} />)
+    expect(onLoadDetail).not.toHaveBeenCalled()
+    await user.click(screen.getByRole("button", { name: "Show details for 1 Main Street" }))
+    const strip = await screen.findByRole("list", { name: "Text message history" })
+    expect(within(strip).getAllByRole("listitem").map(item => item.textContent)).toEqual([
+      expect.stringContaining("Yes, I am interested."), expect.stringContaining("What price works?"),
+    ])
+    const motivation = screen.getByText("Needs a simple sale")
+    expect(motivation.compareDocumentPosition(strip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Load earlier texts" }))
+    await waitFor(() => expect(within(strip).getAllByRole("listitem")).toHaveLength(3))
+    expect(within(strip).getAllByRole("listitem").map(item => item.textContent)).toEqual([
+      expect.stringContaining("Would you consider selling?"), expect.stringContaining("Yes, I am interested."), expect.stringContaining("What price works?"),
+    ])
+    expect(onLoadDetailPage).toHaveBeenCalledWith("property-1", "messages", "sms-cursor")
+    expect(onLoadDetail).toHaveBeenCalledTimes(1)
+  })
+
   it("renders the five PRD sections and the six KPI tiles in order", () => {
     render(<MyLeadsQueue {...buildProps()} />)
 
@@ -101,6 +134,28 @@ describe("MyLeadsQueue", () => {
     expect(screen.getByTestId("kpi-attempts")).toHaveTextContent("Attempts12")
     expect(screen.getByTestId("kpi-contact-rate")).toHaveTextContent("Contact rate50%")
     expect(screen.getByTestId("kpi-stale-leads")).toHaveTextContent("Stale leads1")
+  })
+
+  it("refreshes only the text group when a new reply or delivery update arrives", async () => {
+    const user = userEvent.setup()
+    const sent = { id: "sent", body: "Would 2 PM work?", direction: "outbound" as const, createdAt: "2026-09-13T18:00:00Z", createdLabel: "Today", deliveryStatus: "sent", attachmentCount: 0 }
+    const onLoadDetail = vi.fn(async () => ({ ok: true as const, detail: { ...EMPTY_DETAIL,
+      messages: { rows: [sent], hasMore: false, nextCursor: null },
+      notes: { rows: [{ id: "note", authorLabel: "Maria", body: "Keep this note visible", createdLabel: "Today" }], hasMore: false, nextCursor: null },
+    } }))
+    const onLoadDetailPage = vi.fn(async () => ({ ok: true as const, group: "messages" as const, page: {
+      rows: [{ ...sent, id: "reply", direction: "inbound" as const, body: "Please call at 3 PM." }, { ...sent, deliveryStatus: "failed" }], hasMore: false, nextCursor: null,
+    } }))
+    render(<MyLeadsQueue {...buildProps({ onLoadDetail, onLoadDetailPage })} />)
+    await user.click(screen.getByRole("button", { name: "Show details for 1 Main Street" }))
+    const note = await screen.findByText("Keep this note visible")
+    expect(screen.queryByText("Not delivered")).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Refresh texts" }))
+    await screen.findByText("Please call at 3 PM.")
+    expect(screen.getByText("Not delivered")).toBeVisible()
+    expect(screen.getByText("Keep this note visible")).toBe(note)
+    expect(onLoadDetailPage).toHaveBeenCalledWith("property-1", "messages", null)
+    expect(onLoadDetail).toHaveBeenCalledTimes(1)
   })
 
   it("collapses a section so its leads are hidden", async () => {
@@ -205,7 +260,8 @@ describe("MyLeadsQueue", () => {
     expect(onLoadDetail).not.toHaveBeenCalled()
     await user.click(screen.getByRole("button", { name: "Show details for 1 Main Street" }))
     expect(onLoadDetail).toHaveBeenCalledWith("property-1")
-    expect(screen.getByRole("status")).toHaveTextContent("Loading details…")
+    expect(screen.getByText("Loading details…")).toHaveAttribute("role", "status")
+    expect(screen.getByText("Loading texts…")).toHaveAttribute("role", "status")
 
     resolveDetails({
       ok: true,
