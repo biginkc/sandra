@@ -1,0 +1,780 @@
+{
+  "at": "2026-09-13T12:20:16Z",
+  "postgres": "PostgreSQL 17.6 on aarch64-unknown-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+  "checks": [
+    {
+      "name": "direct/force_custom_plan exact50 and raw timestamp/UUID37+37 cursor",
+      "passed": true
+    },
+    {
+      "name": "direct/force_generic_plan exact50 and raw timestamp/UUID37+37 cursor",
+      "passed": true
+    },
+    {
+      "name": "keys_materialized/force_custom_plan exact50 and raw timestamp/UUID37+37 cursor",
+      "passed": true
+    },
+    {
+      "name": "keys_materialized/force_custom_plan both samples use limited scoped keys plus one PK lookup per key",
+      "passed": true
+    },
+    {
+      "name": "keys_materialized/force_generic_plan exact50 and raw timestamp/UUID37+37 cursor",
+      "passed": true
+    },
+    {
+      "name": "keys_materialized/force_generic_plan both samples use limited scoped keys plus one PK lookup per key",
+      "passed": true
+    },
+    {
+      "name": "keys_lateral/force_custom_plan exact50 and raw timestamp/UUID37+37 cursor",
+      "passed": true
+    },
+    {
+      "name": "keys_lateral/force_generic_plan exact50 and raw timestamp/UUID37+37 cursor",
+      "passed": true
+    }
+  ],
+  "summary": {
+    "direct/force_custom_plan": {
+      "first": [
+        {
+          "ms": 4.548,
+          "nodes": [
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "idx_messages_created",
+              "Actual Rows": 52,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": 10617,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 20042,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 4.33,
+          "nodes": [
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "idx_messages_created",
+              "Actual Rows": 52,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": 10617,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 20042,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ],
+      "cursor": [
+        {
+          "ms": 0.1,
+          "nodes": [
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "idx_messages_created",
+              "Actual Rows": 45,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": 6,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 12,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 0.106,
+          "nodes": [
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "idx_messages_created",
+              "Actual Rows": 45,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": 6,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 12,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ]
+    },
+    "direct/force_generic_plan": {
+      "first": [
+        {
+          "ms": 0.06,
+          "nodes": [
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 18,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 0.062,
+          "nodes": [
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 18,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ],
+      "cursor": [
+        {
+          "ms": 0.075,
+          "nodes": [
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 14,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 0.062,
+          "nodes": [
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 14,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ]
+    },
+    "keys_materialized/force_custom_plan": {
+      "first": [
+        {
+          "ms": 0.226,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 50,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 200,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 0.225,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 50,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 200,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ],
+      "cursor": [
+        {
+          "ms": 0.187,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 37,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 148,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 0.192,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 37,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 148,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ]
+    },
+    "keys_materialized/force_generic_plan": {
+      "first": [
+        {
+          "ms": 0.229,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 50,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 200,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 0.236,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 50,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 200,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ],
+      "cursor": [
+        {
+          "ms": 0.204,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 37,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 148,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 0.193,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 37,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 148,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ]
+    },
+    "keys_lateral/force_custom_plan": {
+      "first": [
+        {
+          "ms": 0.247,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 50,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 200,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 0.248,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 50,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 200,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ],
+      "cursor": [
+        {
+          "ms": 0.267,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 37,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 148,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 0.223,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 37,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 148,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ]
+    },
+    "keys_lateral/force_generic_plan": {
+      "first": [
+        {
+          "ms": 0.273,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 50,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 200,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 0.264,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 50,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 50,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 200,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ],
+      "cursor": [
+        {
+          "ms": 0.211,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 37,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 148,
+              "Shared Read Blocks": 0
+            }
+          ]
+        },
+        {
+          "ms": 0.223,
+          "nodes": [
+            {
+              "Node Type": "Index Only Scan",
+              "Index Name": "t2_proof_history_idx",
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": 0,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "CTE Scan",
+              "Index Name": null,
+              "Actual Rows": 37,
+              "Actual Loops": 1,
+              "Rows Removed by Filter": null,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 4,
+              "Shared Read Blocks": 0
+            },
+            {
+              "Node Type": "Index Scan",
+              "Index Name": "messages_pkey",
+              "Actual Rows": 1,
+              "Actual Loops": 37,
+              "Rows Removed by Filter": 0,
+              "Heap Fetches": null,
+              "Shared Hit Blocks": 148,
+              "Shared Read Blocks": 0
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "fixture": {
+    "rows": 100000,
+    "org": "35210142-b51b-4428-828e-987feede99bf",
+    "conv": "f291c854-9488-46cd-82a3-626da799a0a3",
+    "seed_client_ms": 18434.327750001103
+  },
+  "noise": [
+    {
+      "org": "35210142-b51b-4428-828e-987feede99bf",
+      "conversation": "65028e90-da0d-4144-95e1-0aab5e4d2ac1",
+      "rows": 5000
+    },
+    {
+      "org": "d7c05417-e420-4a23-adb4-983d30fc003d",
+      "conversation": "162b417a-531b-4499-a2b8-ed4a272bb44b",
+      "rows": 5000
+    }
+  ],
+  "limits": [
+    "Read-only owner SQL, no API or auth proof",
+    "Plan cache settings transaction-local comparison only; no production hint",
+    "Fixed server page limit; tenant/conversation and cursor values are prepared parameters",
+    "Two warmed samples, no cache flush; no global setting/index/statistics/data changes"
+  ]
+}
