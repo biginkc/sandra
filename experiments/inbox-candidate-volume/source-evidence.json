@@ -1,0 +1,6 @@
+{
+  "python_syntax": "passed",
+  "rejected_obsolete_separate_org_manifest_before_connection": true,
+  "applied": false,
+  "scope": "Source admission checks only; canonical seed behavior and resource cost untested"
+}

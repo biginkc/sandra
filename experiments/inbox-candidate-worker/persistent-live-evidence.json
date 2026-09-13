@@ -1,0 +1,41 @@
+{
+  "frontend_result": {
+    "passed": true,
+    "messageId": "8b8cda63-d68a-469b-82ba-bc6de456b113",
+    "arrivalVisibleMs": 852.9834999999998,
+    "readProjectionVisibleMs": 791.2735420000008,
+    "receipt": {
+      "boundaryId": "55ff005c-92c9-40f8-b9e4-2f80859fa4b3",
+      "batch": 0,
+      "changed": 1,
+      "completed": true
+    },
+    "canonical": {
+      "messages": 3,
+      "unread_inbound": 0
+    },
+    "navigations": 1,
+    "worker": {
+      "healthy": true,
+      "lastSuccess": 1789341662638,
+      "counts": {
+        "baseline": 1,
+        "backfill": 0,
+        "parent": 0,
+        "expiry": 0,
+        "summary": 0,
+        "stale": 0
+      },
+      "poolConnections": 1
+    },
+    "sourceSha256": "50872e701af611a076a524a0f1de6fa7ae49a05953c797018d6d16aa139ee451",
+    "proof": "canonical inbound insert \u2192 bounded candidate projector \u2192 Electric \u2192 visible preview/Unread; actual read acknowledgment \u2192 projector \u2192 visible unread removal, no reload",
+    "limitations": "Two-conversation owned local fixture, not production scale/SLO evidence"
+  },
+  "runtime_sources": {
+    "services/inbox-projection-worker/core.mjs": "c8b5ea065579cf6ef0c5c83fce7a884000e7b11716871654b74de43d20f26a43",
+    "services/inbox-projection-worker/server.mjs": "5774ecc5042942891df6b050e9e8d2cb87111970dd338eeb5df6386139b88c93",
+    "services/inbox-projection-worker/worker-role.sql": "7660002ea09959251c02d2551f2805daf808409faf3cd15207de3e2c8080b489"
+  },
+  "scope": "Actual persistent-pool source-to-visible/read-to-unread-removal proof; small fixture only"
+}
