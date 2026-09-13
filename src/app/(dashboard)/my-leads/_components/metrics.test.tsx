@@ -28,3 +28,17 @@ it("formats duration without negative time or raw seconds", () => {
   expect(formatDuration(222)).toBe("3m 42s")
   expect(formatDuration(3601)).toBe("1h 0m 1s")
 })
+
+it("preserves legacy metrics while new RPC fields are unavailable during rollout", () => {
+  const legacy = {attempts: 25, reached: 8, offersSent: 3} as MyLeadsKpis
+  const {container} = render(<MyLeadsMetrics kpis={legacy} />)
+  expect(screen.getByRole("status")).toHaveTextContent("Some metrics are temporarily unavailable")
+  expect(screen.getByTestId("kpi-contacts")).toHaveTextContent("8 / 25")
+  expect(screen.getByTestId("kpi-offers-sent")).toHaveTextContent("3")
+  for (const id of ["contact-without-follow-up", "needs-offers", "appointments-overdue", "last-attempt", "missing-recordings", "average-talk-time", "conversations-over-five-minutes"]) {
+    expect(screen.getByTestId(`kpi-${id}`)).toHaveTextContent("—")
+  }
+  expect(screen.getByTestId("kpi-average-talk-time")).toHaveTextContent("Talk time unavailable")
+  expect(screen.getByTestId("kpi-missing-recordings")).toHaveTextContent("Recording coverage unavailable")
+  expect(container).not.toHaveTextContent(/undefined|NaN|No attempts yet/)
+})

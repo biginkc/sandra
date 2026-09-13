@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from "react"
 import type { MyLeadsKpis } from "./types"
 
 export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds)) return "—"
   const total = Math.max(0, Math.round(seconds))
   const days = Math.floor(total / 86400)
   const hours = Math.floor(total / 3600) % 24
@@ -39,26 +40,35 @@ function Metric({ id, label, children, detail }: { id: string; label: string; ch
 }
 
 export function MyLeadsMetrics({ kpis }: { kpis: MyLeadsKpis }) {
-  const coverage = `${kpis.talkTimeSamples} reached calls with duration${kpis.talkTimeUnknown ? ` · ${kpis.talkTimeUnknown} without duration excluded` : ""}`
+  // During a rolling deployment the RPC can still return its legacy shape.
+  const count = (value: number | undefined) => Number.isFinite(value) ? value : "—"
+  const hasSnapshot = typeof kpis.asOf === "string" && Number.isFinite(Date.parse(kpis.asOf))
+  const coverage = Number.isFinite(kpis.talkTimeSamples) && Number.isFinite(kpis.talkTimeUnknown)
+    ? `${kpis.talkTimeSamples} reached calls with duration${kpis.talkTimeUnknown ? ` · ${kpis.talkTimeUnknown} without duration excluded` : ""}`
+    : "Talk time unavailable"
+  const recordingCoverage = Number.isFinite(kpis.recordingExpectationUnknown)
+    ? `Expected, unavailable after 5 minutes${kpis.recordingExpectationUnknown ? ` · ${kpis.recordingExpectationUnknown} with unknown expectation excluded` : ""}`
+    : "Recording coverage unavailable"
   return <div className="space-y-4">
     <p className="text-sm text-muted-foreground">All leads for this rep · Unaffected by search or filters</p>
+    {!hasSnapshot && <p role="status" className="text-sm text-muted-foreground">Some metrics are temporarily unavailable.</p>}
     <section aria-labelledby="my-leads-attention-heading" className="space-y-2">
       <h2 id="my-leads-attention-heading" className="text-sm font-semibold">Needs attention <span className="font-normal text-muted-foreground">· Includes previous days</span></h2>
       <dl className="grid grid-cols-1 gap-px overflow-hidden rounded-2xl border border-border bg-border sm:grid-cols-3">
-        <Metric id="contact-without-follow-up" label="Contact: no follow-up appointment">{kpis.contactWithoutFollowUp}</Metric>
-        <Metric id="needs-offers" label="Leads needing offers">{kpis.needsOffers}</Metric>
-        <Metric id="appointments-overdue" label="Overdue appointments">{kpis.appointmentsOverdue}</Metric>
+        <Metric id="contact-without-follow-up" label="Contact: no follow-up appointment">{count(kpis.contactWithoutFollowUp)}</Metric>
+        <Metric id="needs-offers" label="Leads needing offers">{count(kpis.needsOffers)}</Metric>
+        <Metric id="appointments-overdue" label="Overdue appointments">{count(kpis.appointmentsOverdue)}</Metric>
       </dl>
     </section>
     <section aria-labelledby="my-leads-activity-heading" className="space-y-2">
       <h2 id="my-leads-activity-heading" className="text-sm font-semibold">Today’s activity <span className="font-normal text-muted-foreground">· Central time</span></h2>
       <dl className="grid grid-cols-1 gap-px overflow-hidden rounded-2xl border border-border bg-border sm:grid-cols-3">
-        <Metric id="last-attempt" label="Since last attempt" detail="Latest attempt, including previous days"><SinceLastAttempt key={kpis.asOf} at={kpis.lastAttemptAt} asOf={kpis.asOf} /></Metric>
+        <Metric id="last-attempt" label="Since last attempt" detail="Latest attempt, including previous days">{hasSnapshot && kpis.lastAttemptAt !== undefined ? <SinceLastAttempt key={kpis.asOf} at={kpis.lastAttemptAt} asOf={kpis.asOf} /> : "—"}</Metric>
         <Metric id="contacts" label="Contacts" detail="Reaches / attempts">{kpis.reached} / {kpis.attempts}</Metric>
         <Metric id="offers-sent" label="Offers sent">{kpis.offersSent}</Metric>
-        <Metric id="missing-recordings" label="Missing recordings" detail={`Expected, unavailable after 5 minutes${kpis.recordingExpectationUnknown ? ` · ${kpis.recordingExpectationUnknown} with unknown expectation excluded` : ""}`}>{kpis.missingRecordings}</Metric>
+        <Metric id="missing-recordings" label="Missing recordings" detail={recordingCoverage}>{count(kpis.missingRecordings)}</Metric>
         <Metric id="average-talk-time" label="Average talk time" detail={coverage}>{kpis.averageTalkSeconds === null ? "—" : formatDuration(kpis.averageTalkSeconds)}</Metric>
-        <Metric id="conversations-over-five-minutes" label="Conversations > 5 minutes" detail="Reached calls with known talk time">{kpis.conversationsOverFiveMinutes}</Metric>
+        <Metric id="conversations-over-five-minutes" label="Conversations > 5 minutes" detail="Reached calls with known talk time">{count(kpis.conversationsOverFiveMinutes)}</Metric>
       </dl>
     </section>
   </div>
