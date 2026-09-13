@@ -36,6 +36,7 @@ export type AcquisitionAttemptDialogProps = {
   propertyId: string
   propertyLabel: string
   initialCallActivityId?: string | null
+  initialCallSource?: "sandra" | "dialpad"
   callReferenceOptions?: readonly AcquisitionCallReferenceOption[]
   callReferencesLoading?: boolean
   callReferencesError?: string | null
@@ -49,6 +50,7 @@ export function AcquisitionAttemptDialog({
   propertyId,
   propertyLabel,
   initialCallActivityId = null,
+  initialCallSource,
   callReferenceOptions = [],
   callReferencesLoading = false,
   callReferencesError = null,
@@ -56,21 +58,26 @@ export function AcquisitionAttemptDialog({
   onOpenChange,
   onSubmit,
 }: AcquisitionAttemptDialogProps) {
-  const [source, setSource] = useState<AcquisitionAttemptSource>(initialCallActivityId ? "sandra" : "dialpad")
+  const initialSource = initialCallSource ?? callReferenceOptions.find(call => call.id === initialCallActivityId)?.source ?? "sandra"
+  const [selectedSource, setSource] = useState<AcquisitionAttemptSource | null>(null)
+  const source = selectedSource ?? (initialCallActivityId ? initialSource : "dialpad")
+  const awaitingInitialSource = Boolean(initialCallActivityId && !initialCallSource && callReferencesLoading && !callReferenceOptions.some(call => call.id === initialCallActivityId))
   const [kind, setKind] = useState<AcquisitionAttemptKind>("call")
   const [outcome, setOutcome] = useState<AcquisitionAttemptFormPayload["outcome"] | "">("")
   const [occurredAt, setOccurredAt] = useState("")
   const [note, setNote] = useState("")
   const [recordingUrl, setRecordingUrl] = useState("")
   const [callActivityId, setCallActivityId] = useState(initialCallActivityId || "")
-  const availableCalls = initialCallActivityId && !callReferenceOptions.some(call => call.id === initialCallActivityId)
-    ? [{ id: initialCallActivityId, label: "Selected Sandra call" }, ...callReferenceOptions]
+  const availableCalls = initialCallActivityId && !awaitingInitialSource && !callReferenceOptions.some(call => call.id === initialCallActivityId)
+    ? [{ id: initialCallActivityId, source: initialSource, label: `Selected ${initialSource === "sandra" ? "Sandra" : "DialPad"} call` }, ...callReferenceOptions]
     : callReferenceOptions
-  const sandraAvailable = availableCalls.length > 0
+  const sandraAvailable = availableCalls.some(call => (call.source ?? "sandra") === "sandra")
+  const sourceCalls = availableCalls.filter(call => (call.source ?? "sandra") === source)
+  const sourceLabel = source === "sandra" ? "Sandra" : "DialPad"
   const [clientError, setClientError] = useState<string | null>(null)
   const [clientFieldErrors, setClientFieldErrors] = useState<Record<string, string>>({})
   const resetFields = () => {
-    setSource(initialCallActivityId ? "sandra" : "dialpad")
+    setSource(null)
     setKind("call")
     setOutcome("")
     setOccurredAt("")
@@ -103,9 +110,10 @@ export function AcquisitionAttemptDialog({
     clearClientErrors()
 
     const nextFieldErrors: Record<string, string> = {}
+    if (selectedSource === null && awaitingInitialSource) nextFieldErrors.callActivityId = "Wait for the selected call to finish loading."
     if (!outcome) nextFieldErrors.outcome = "Choose the external outcome."
-    if (source === "sandra" && !availableCalls.some(call => call.id === callActivityId)) {
-      nextFieldErrors.callActivityId = "Choose the Sandra call you want to record an outcome for."
+    if ((source === "sandra" || (source === "dialpad" && callActivityId)) && !sourceCalls.some(call => call.id === callActivityId)) {
+      nextFieldErrors.callActivityId = `Choose the ${sourceLabel} call you want to record an outcome for.`
     }
     const occurred = centralDateTimeToIso(occurredAt)
     if (!occurred.ok) nextFieldErrors.occurredAt = occurred.message
@@ -123,7 +131,7 @@ export function AcquisitionAttemptDialog({
       occurredAt: occurred.value,
       note: note.trim() || null,
       recordingUrl: recordingUrl.trim() || null,
-      callActivityId: source === "sandra" ? callActivityId.trim() : null,
+      callActivityId: source !== "manual" ? callActivityId.trim() || null : null,
     })
   }
 
@@ -156,7 +164,8 @@ export function AcquisitionAttemptDialog({
                     const nextSource = event.target.value as AcquisitionAttemptSource
                     if (nextSource === "sandra" && !sandraAvailable) return
                     setSource(nextSource)
-                    if (nextSource === "sandra" && availableCalls.length === 1) setCallActivityId(availableCalls[0].id)
+                    const nextCalls = availableCalls.filter(call => (call.source ?? "sandra") === nextSource)
+                    setCallActivityId(nextSource === "sandra" && nextCalls.length === 1 ? nextCalls[0].id : "")
                     setKind(nextSource === "manual" ? "outreach" : "call")
                     clearClientErrors()
                   }}
@@ -183,45 +192,45 @@ export function AcquisitionAttemptDialog({
                 </div>
               ) : (
                 <div className="flex flex-col justify-end gap-1.5 text-sm text-muted-foreground">
-                  {source === "sandra" ? "Existing Sandra call" : "DialPad manual call"}
+                  {source === "sandra" ? "Existing Sandra call" : callActivityId ? "Existing DialPad call" : "DialPad manual call"}
                 </div>
               )}
             </div>
 
             <div className="text-sm text-muted-foreground">
               {callReferencesLoading ? (
-                <p role="status">Loading Sandra calls… You can still log outreach made outside Sandra.</p>
+                <p role="status">Loading calls… You can still log outreach made outside Sandra.</p>
               ) : callReferencesError ? (
                 <div role="alert">
-                  <p>Could not load Sandra calls. Retry to select a call made in Sandra.</p>
-                  {onRetryCallReferences && <button type="button" className="mt-1 underline" onClick={onRetryCallReferences}>Retry loading Sandra calls</button>}
+                  <p>Could not load calls. Retry to select a linked call.</p>
+                  {onRetryCallReferences && <button type="button" className="mt-1 underline" onClick={onRetryCallReferences}>Retry loading calls</button>}
                 </div>
-              ) : !sandraAvailable ? (
+              ) : availableCalls.length === 0 ? (
                 <p>No Sandra calls need an outcome for this lead. Calls made in Sandra appear here automatically. For outreach made outside Sandra, choose DialPad or Manual outreach.</p>
               ) : (
-                <p>For a call made in Sandra, choose Sandra and select the call by date and time.</p>
+                <p>Choose the source and select a pending call by date and time. DialPad also supports manual entries without a linked call.</p>
               )}
             </div>
 
-            {source === "sandra" && (
+            {(source === "sandra" || (source === "dialpad" && sourceCalls.length > 0)) && (
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center">
-                  <Label htmlFor="acquisition-attempt-call-reference">Sandra call</Label>
-                  <RequiredHint />
+                  <Label htmlFor="acquisition-attempt-call-reference">{sourceLabel} call</Label>
+                  {source === "sandra" && <RequiredHint />}
                 </div>
-                {sandraAvailable ? (
+                {sourceCalls.length > 0 ? (
                   <select
                     id="acquisition-attempt-call-reference"
-                    aria-label="Sandra call"
+                    aria-label={`${sourceLabel} call`}
                     value={callActivityId}
                     onChange={(event) => setCallActivityId(event.target.value)}
                     aria-invalid={Boolean(clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId)}
                     aria-describedby={clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId ? "acquisition-attempt-call-reference-error" : undefined}
-                    aria-required="true"
+                    aria-required={source === "sandra"}
                     className={SELECT_FIELD_CLASS}
                   >
-                    <option value="">Choose a call</option>
-                    {availableCalls.map((reference) => (
+                    <option value="">{source === "dialpad" ? "Manual call — no linked call" : "Choose a call"}</option>
+                    {sourceCalls.map((reference) => (
                       <option key={reference.id} value={reference.id}>
                         {reference.label}
                       </option>

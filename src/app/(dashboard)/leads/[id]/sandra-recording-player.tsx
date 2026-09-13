@@ -14,6 +14,7 @@ type RecordingUrlResponse = {
   signedUrl?: unknown;
   expiresAt?: unknown;
   error?: unknown;
+  recordingSegments?: unknown;
 };
 
 type SignedRecording = {
@@ -35,10 +36,41 @@ export type SandraRecordingPlayerProps = {
   durationSeconds?: number;
 };
 
-export function SandraRecordingPlayer({
+type RecordingSegment = { artifactId: string; durationSeconds: number | null };
+class MultipleRecordingSegments extends Error {
+  constructor(readonly segments: RecordingSegment[]) { super("Choose a recording segment"); }
+}
+
+export function SandraRecordingPlayer(props: SandraRecordingPlayerProps) {
+  return <SegmentedRecordingPlayer key={props.callActivityId} {...props} />;
+}
+
+function SegmentedRecordingPlayer(props: SandraRecordingPlayerProps) {
+  const [segments, setSegments] = useState<RecordingSegment[]>([]);
+  const [selected, setSelected] = useState("");
+  const selectedSegment = segments.find(segment => segment.artifactId === selected);
+  return <div className="space-y-2">
+    {segments.length > 0 && <label className="block text-sm">
+      Recording segment
+      <select aria-label="Recording segment" value={selected} onChange={event => setSelected(event.target.value)} className="ml-2 rounded border p-1">
+        <option value="">Choose a segment</option>
+        {segments.map((segment, index) => <option key={segment.artifactId} value={segment.artifactId}>
+          Segment {index + 1}{segment.durationSeconds === null ? "" : ` (${segment.durationSeconds}s)`}
+        </option>)}
+      </select>
+    </label>}
+    {(segments.length === 0 || selected) && <SingleRecordingPlayer key={selected || "initial"} {...props}
+      artifactId={selected || undefined} durationSeconds={selectedSegment ? selectedSegment.durationSeconds ?? undefined : props.durationSeconds}
+      onSegments={setSegments} />}
+  </div>;
+}
+
+function SingleRecordingPlayer({
   callActivityId,
   durationSeconds,
-}: SandraRecordingPlayerProps) {
+  artifactId,
+  onSegments,
+}: SandraRecordingPlayerProps & { artifactId?: string; onSegments: (segments: RecordingSegment[]) => void }) {
   const [state, setState] = useState<PlayerState>({ status: "idle" });
   const requestIdRef = useRef(0);
   const requestAbortRef = useRef<AbortController | null>(null);
@@ -72,6 +104,7 @@ export function SandraRecordingPlayer({
         const renewed = await requestSignedRecording(
           callActivityId,
           controller.signal,
+          artifactId,
         );
         if (requestId === requestIdRef.current) {
           const audio = audioRef.current;
@@ -89,6 +122,10 @@ export function SandraRecordingPlayer({
           }
         }
       } catch (error) {
+        if (requestId === requestIdRef.current && error instanceof MultipleRecordingSegments) {
+          onSegments(error.segments);
+          return;
+        }
         if (isAbortError(error) && !timedOut) return;
         if (requestId === requestIdRef.current) {
           if (
@@ -112,7 +149,7 @@ export function SandraRecordingPlayer({
           requestAbortRef.current = null;
       }
     },
-    [callActivityId],
+    [callActivityId, artifactId, onSegments],
   );
 
   const applyPendingRenewal = useCallback(() => {
@@ -277,12 +314,25 @@ async function safeJson(response: Response): Promise<RecordingUrlResponse> {
 async function requestSignedRecording(
   callActivityId: string,
   signal: AbortSignal,
+  artifactId?: string,
 ): Promise<SignedRecording> {
   const response = await fetch(
-    `/api/leads/calls/${encodeURIComponent(callActivityId)}/recording-url`,
+    `/api/leads/calls/${encodeURIComponent(callActivityId)}/recording-url${artifactId ? `?artifactId=${encodeURIComponent(artifactId)}` : ""}`,
     { cache: "no-store", signal },
   );
   const body = await safeJson(response);
+  if (response.status === 409 && body.error === "recording_multiple_segments" && Array.isArray(body.recordingSegments)) {
+    const segments: RecordingSegment[] = [];
+    for (const entry of body.recordingSegments) {
+      if (!entry || typeof entry !== "object" || typeof entry.artifactId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entry.artifactId)
+        || (entry.durationSeconds != null && (typeof entry.durationSeconds !== "number" || !Number.isFinite(entry.durationSeconds) || entry.durationSeconds < 0))) {
+        throw new Error("Invalid recording segment list");
+      }
+      segments.push({ artifactId: entry.artifactId, durationSeconds: entry.durationSeconds ?? null });
+    }
+    if (segments.length < 2 || new Set(segments.map(segment => segment.artifactId)).size !== segments.length) throw new Error("Invalid recording segment list");
+    throw new MultipleRecordingSegments(segments);
+  }
   if (
     !response.ok ||
     typeof body.signedUrl !== "string" ||

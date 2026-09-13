@@ -30,7 +30,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const onReviewingChange=useCallback((active:boolean)=>{reviewingDetails.current=active;setReviewing(active);},[]);
   const [error,setError]=useState<string|null>(null);const [loadingStages,setLoadingStages]=useState<Set<MyLeadStage>>(new Set());
   const [refreshError,setRefreshError]=useState<string|null>(null);
-  const [callOptions,setCallOptions]=useState<{propertyId:string;options:{id:string;label:string}[];error:string|null}|null>(null);
+  const [callOptions,setCallOptions]=useState<{propertyId:string;options:{id:string;label:string;source?:'sandra'|'dialpad'}[];error:string|null}|null>(null);
   const [callRetry,setCallRetry]=useState(0);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow}|null>(null);
   const [detailRevision,setDetailRevision]=useState(0);

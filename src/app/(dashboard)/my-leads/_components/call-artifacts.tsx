@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 
 type Artifacts = {
   recordingStatus: string; durationSeconds: number | null;
+  recordingComplete?: boolean; recordingSegments?: Array<{ artifactId: string; durationSeconds: number | null }>;
   transcriptStatus: string; transcript: string | null;
   summaryStatus: string; summary: string | null;
 };
@@ -43,9 +44,13 @@ export function MyLeadCallArtifacts({ callActivityId }: { callActivityId: string
     {error && <p role="status">Call details could not be refreshed. Try again.</p>}
     {!artifacts && !error && <p role="status">Loading recording and summary…</p>}
     {artifacts && <>
-      {artifacts.recordingStatus === "available"
-        ? <SandraRecordingPlayer key={callActivityId} callActivityId={callActivityId} durationSeconds={artifacts.durationSeconds ?? undefined} />
-        : <p role="status">{artifactLabel("Recording", artifacts.recordingStatus)}</p>}
+      {artifacts.recordingStatus !== "available" && <p role="status">{artifacts.recordingStatus === "failed" && (artifacts.recordingSegments?.length ?? 0) > 0
+        ? "Some recording segments could not be saved. Please reach out to an admin."
+        : artifactLabel("Recording", artifacts.recordingStatus)}</p>}
+      {artifacts.recordingStatus !== "available" && (artifacts.recordingSegments?.length ?? 0) > 0 &&
+        <p role="status">Partial recording available. The full recording is incomplete.</p>}
+      {(artifacts.recordingStatus === "available" || (artifacts.recordingSegments?.length ?? 0) > 0) &&
+        <SandraRecordingPlayer key={callActivityId} callActivityId={callActivityId} durationSeconds={artifacts.recordingComplete === false ? undefined : artifacts.durationSeconds ?? undefined} />}
       {artifacts.summaryStatus === "available" && artifacts.summary
         ? <section aria-label="AI summary"><h4 className="font-semibold">AI summary</h4><p className="whitespace-pre-wrap">{artifacts.summary}</p></section>
         : <p role="status">{artifactLabel("Summary", artifacts.summaryStatus)}</p>}

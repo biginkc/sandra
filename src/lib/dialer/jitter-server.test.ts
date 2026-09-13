@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  markDispatch: vi.fn(),
+  reserveTransport: vi.fn(),
+  finishTransport: vi.fn(),
   prepareLeadCall: vi.fn(),
   prepareManualCall: vi.fn(),
   getUser: vi.fn(),
@@ -18,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   trainingRead: vi.fn(),
   after: vi.fn(),
 }));
+
+vi.mock("@/lib/dialpad-voice/jitter-exclusion", () => ({ markJitterDispatch: mocks.markDispatch, reserveJitterTransport: mocks.reserveTransport, finishJitterTransport: mocks.finishTransport }));
 
 vi.mock("@/lib/my-leads/call-binding", () => ({ bindAcquisitionCallContext: mocks.bindAcquisition }));
 
@@ -129,12 +134,27 @@ function callTarget(overrides: Record<string, unknown> = {}) {
 }
 
 describe("authenticated Jitter softphone server boundary", () => {
+  it("rejects missing configuration before reservation or lead pause", async () => {
+    vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "");
+    expect(await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1" }))).toMatchObject({ ok: false, errorCode: "jitter_not_configured", ambiguous: false });
+    expect(mocks.reserveTransport).not.toHaveBeenCalled();
+    expect(mocks.prepareLeadCall).not.toHaveBeenCalled();
+    expect(mocks.requestStart).not.toHaveBeenCalled();
+  });
+  it("rejects another transport before lead pause or provider dispatch", async () => {
+    mocks.reserveTransport.mockRejectedValueOnce(new Error("conflict"));
+    expect((await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1" }))).ok).toBe(false);
+    expect(mocks.prepareLeadCall).not.toHaveBeenCalled();
+    expect(mocks.requestStart).not.toHaveBeenCalled();
+  });
+
   beforeEach(async () => {
     vi.clearAllMocks();
     mocks.bindAcquisition.mockResolvedValue({ tracked: false });
     vi.stubEnv("HOMEOWNER_TRAINING_ENABLED", "false");
     vi.stubEnv("HOMEOWNER_TRAINING_NUMBER", "");
     vi.stubEnv("HOMEOWNER_TRAINING_OPERATOR_IDS", "");
+    vi.stubEnv("JITTER_SOFTPHONE_BASE_URL", "https://jitter.example.test");
     vi.stubEnv("JITTER_SOFTPHONE_SERVICE_TOKEN", "test-service-token");
     vi.stubEnv("SOFTPHONE_CAPABILITY_KEY", OLD_CAPABILITY_KEY);
     vi.stubEnv("SOFTPHONE_CAPABILITY_KEY_PREVIOUS", "");
@@ -146,6 +166,8 @@ describe("authenticated Jitter softphone server boundary", () => {
     mocks.getCallerMemberships.mockResolvedValue([
       { user_id: "user-1", org_id: SANDRA_ORG_ID, role: "member" },
     ]);
+    mocks.reserveTransport.mockResolvedValue(true);
+    mocks.finishTransport.mockResolvedValue(undefined);
     mocks.prepareLeadCall.mockResolvedValue({ ok: true, data: preparedTarget });
     mocks.prepareManualCall.mockResolvedValue({
       ok: true,

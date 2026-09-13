@@ -31,7 +31,7 @@ export async function submitMyLeadCommand(command:keyof typeof commands,input:Re
   catch { return {ok:false as const,message:'Sign in with an active organization before updating a lead.'}; }
   const client=viewer.client;
   input={...input,orgId:viewer.orgId};
-  const {data,error}=await (client as unknown as {rpc(name:string,args:{p_input:Json}):Promise<{data:Json|null;error:{message?:string}|null}>}).rpc(command==='log-attempt'&&input.source==='sandra'?'fn_finalize_acquisition_attempt':commands[command],{p_input:input});
+  const {data,error}=await (client as unknown as {rpc(name:string,args:{p_input:Json}):Promise<{data:Json|null;error:{message?:string}|null}>}).rpc(command==='log-attempt'&&(input.source==='sandra'||(input.source==='dialpad'&&typeof input.callActivityId==='string'&&input.callActivityId.trim().length>0))?'fn_finalize_acquisition_attempt':commands[command],{p_input:input});
   if(error) {
     const message=error.message??'';
     return {ok:false as const,message:message.includes('STALE_')?'This lead changed. Refresh before trying again.':message.includes('MOTIVATION')?'Specify motivation or choose No motivation provided.':message.includes('PENDING_OFFER')?'Resolve the current pending offer first.':message.includes('RECIPIENT')?'The handoff recipient is unavailable. Ask the owner to update settings.':'The update could not be saved. Check the fields and retry.'};
@@ -51,8 +51,8 @@ export async function changeAcquisitionSettings(input:SetAcquisitionSettingsInpu
 export async function loadMyLeadCallReferences(propertyId:string,memberId:string) {
   try {
     const viewer=await myLeadsViewer();
-    const {data,error}=await (viewer.client as unknown as {rpc(name:string,args:Record<string,string>):Promise<{data:{id:string;occurredAt:string}[]|null;error:unknown}>}).rpc('fn_get_acquisition_call_references',{p_org_id:viewer.orgId,p_property_id:propertyId,p_member_id:memberId});
+    const {data,error}=await (viewer.client as unknown as {rpc(name:string,args:Record<string,string>):Promise<{data:{id:string;occurredAt:string;source?:'sandra'|'dialpad'}[]|null;error:unknown}>}).rpc('fn_get_acquisition_call_references',{p_org_id:viewer.orgId,p_property_id:propertyId,p_member_id:memberId});
     if(error||!data)return {ok:false as const,message:'Could not load pending call references.'};
-    return {ok:true as const,options:data.map(call=>({id:call.id,label:new Intl.DateTimeFormat('en-US',{dateStyle:'medium',timeStyle:'short',timeZone:'America/Chicago'}).format(new Date(call.occurredAt))+' Central'}))};
+    return {ok:true as const,options:data.map(call=>({id:call.id,source:call.source??'sandra',label:new Intl.DateTimeFormat('en-US',{dateStyle:'medium',timeStyle:'short',timeZone:'America/Chicago'}).format(new Date(call.occurredAt))+' Central'}))};
   }catch{return {ok:false as const,message:'Could not load pending call references.'};}
 }

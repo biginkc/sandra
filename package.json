@@ -6,6 +6,9 @@
     "node": ">=22"
   },
   "scripts": {
+    "dialpad:recover-starts": "node --conditions=react-server --import tsx scripts/recover-dialpad-starts.ts",
+    "dialpad:voice-events": "node --conditions=react-server --import tsx scripts/process-dialpad-voice-events.ts",
+    "dialpad:recording": "node --conditions=react-server --import tsx scripts/process-dialpad-recording.ts",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",

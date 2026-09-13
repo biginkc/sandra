@@ -513,3 +513,39 @@ describe("<SandraRecordingPlayer />", () => {
     await act(async () => Promise.resolve());
   });
 });
+
+it("offers every segment in server order and requests the selected artifact", async () => {
+  const first = "11111111-1111-4111-8111-111111111111";
+  const second = "22222222-2222-4222-8222-222222222222";
+  fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "recording_multiple_segments", recordingSegments: [{ artifactId: first, durationSeconds: 20 }, { artifactId: second, durationSeconds: 30 }] }), { status: 409 }));
+  render(<SandraRecordingPlayer callActivityId="call" />);
+  fireEvent.click(screen.getByRole("button", { name: "Load recording" }));
+  const selector = await screen.findByLabelText("Recording segment");
+  expect(screen.getAllByRole("option").map(option => option.textContent)).toEqual(["Choose a segment", "Segment 1 (20s)", "Segment 2 (30s)"]);
+  fireEvent.change(selector, { target: { value: second } });
+  fetchMock.mockResolvedValueOnce(recordingResponse("https://storage.example.test/second.wav", "2099-01-01T00:00:00.000Z"));
+  fireEvent.click(screen.getByRole("button", { name: "Load recording (30s)" }));
+  expect(await screen.findByLabelText("Call recording")).toHaveAttribute("src", "https://storage.example.test/second.wav");
+  expect(fetchMock).toHaveBeenLastCalledWith(`/api/leads/calls/call/recording-url?artifactId=${second}`, expect.objectContaining({ cache: "no-store" }));
+  fireEvent.change(selector, { target: { value: first } });
+  expect(screen.queryByLabelText("Call recording")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Load recording (20s)" })).toBeInTheDocument();
+});
+
+it("rejects malformed segment lists instead of silently hiding a segment", async () => {
+  fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "recording_multiple_segments", recordingSegments: [{ artifactId: "not-an-id" }] }), { status: 409 }));
+  render(<SandraRecordingPlayer callActivityId="call" />);
+  fireEvent.click(screen.getByRole("button", { name: "Load recording" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Invalid recording segment list");
+  expect(screen.queryByLabelText("Recording segment")).not.toBeInTheDocument();
+});
+
+it("does not use whole-call duration for a segment of unknown length", async () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "recording_multiple_segments", recordingSegments: [{ artifactId: id, durationSeconds: null }, { artifactId: "22222222-2222-4222-8222-222222222222", durationSeconds: 30 }] }), { status: 409 }));
+  render(<SandraRecordingPlayer callActivityId="call" durationSeconds={100} />);
+  fireEvent.click(screen.getByRole("button", { name: "Load recording (100s)" }));
+  fireEvent.change(await screen.findByLabelText("Recording segment"), { target: { value: id } });
+  expect(screen.getByRole("button", { name: "Load recording" })).toBeInTheDocument();
+  expect(screen.queryByText(/100s/)).not.toBeInTheDocument();
+});

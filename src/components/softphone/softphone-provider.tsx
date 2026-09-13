@@ -19,7 +19,7 @@ import { ArrowDownLeftIcon, ArrowUpRightIcon, DeleteIcon, PhoneIcon, XIcon } fro
 import {
   completeSoftphoneCall,
   loadDialerRecents,
-  prepareLeadCall,
+  inspectLeadCall,
   prepareManualCall,
   resumeFailedSoftphoneCall,
   searchDialerLeads,
@@ -786,7 +786,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   const openLead = useCallback((lead: SoftphoneLead) => {
     if (!callingEnabled || startInFlightRef.current) return;
     const phoneE164 = lead.phones[0] ?? "";
-    void startTarget(() => prepareLeadCall(lead.id), {
+    void startTarget(() => inspectLeadCall(lead.id), {
       propertyId: lead.id,
       contactId: lead.contactId,
       phoneE164,
@@ -1010,8 +1010,8 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
                 callerIdReady={callerIdReady}
                 onCallerIdChange={selectCallerId}
                 onRetryCallerIds={() => { void loadCallerIds(); }}
-                onLead={(suggestion) => void startTarget(() => prepareLeadCall(suggestion.propertyId))}
-                onRecent={(recent) => void startTarget(() => recent.propertyId ? prepareLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164))}
+                onLead={(suggestion) => void startTarget(() => inspectLeadCall(suggestion.propertyId))}
+                onRecent={(recent) => void startTarget(() => recent.propertyId ? inspectLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164))}
                 onManual={() => void startTarget(() => prepareManualCall(manualDigits))}
                 onDigit={enterManualDigit}
                 onBackspace={() => { const next = dialInputRef.current.slice(0, -1); dialInputRef.current = next; setDialInput(next); }}

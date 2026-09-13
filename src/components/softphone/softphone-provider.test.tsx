@@ -3,10 +3,10 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { completeSoftphoneCall, loadCallerIds, loadDialerRecents, mintStartIntent, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, searchDialerLeads, createTransport, jitterEnabled, transportEnabled, playDtmfTone } = vi.hoisted(() => ({
+const { completeSoftphoneCall, loadCallerIds, loadDialerRecents, mintStartIntent, inspectLeadCall, prepareManualCall, resumeFailedSoftphoneCall, searchDialerLeads, createTransport, jitterEnabled, transportEnabled, playDtmfTone } = vi.hoisted(() => ({
   completeSoftphoneCall: vi.fn(),
   loadDialerRecents: vi.fn(async () => ({ ok: true, data: [] as DialerRecent[] })),
-  prepareLeadCall: vi.fn(),
+  inspectLeadCall: vi.fn(),
   prepareManualCall: vi.fn(),
   resumeFailedSoftphoneCall: vi.fn(),
   createTransport: vi.fn(),
@@ -21,7 +21,7 @@ const { completeSoftphoneCall, loadCallerIds, loadDialerRecents, mintStartIntent
 vi.mock("@/lib/dialer/actions", () => ({
   completeSoftphoneCall,
   loadDialerRecents,
-  prepareLeadCall,
+  inspectLeadCall,
   prepareManualCall,
   resumeFailedSoftphoneCall,
   searchDialerLeads,
@@ -86,7 +86,7 @@ import { SoftphoneHeaderButton, SoftphoneProvider } from "./softphone-provider";
 describe("SoftphoneProvider transport gate", () => {
   beforeEach(() => {
     completeSoftphoneCall.mockReset();
-    prepareLeadCall.mockReset();
+    inspectLeadCall.mockReset();
     prepareManualCall.mockReset();
     searchDialerLeads.mockResolvedValue({ ok: true, data: [] });
     playDtmfTone.mockReset();
@@ -140,7 +140,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("shows one company caller ID read-only and sends it with the call", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    inspectLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
     const user = userEvent.setup();
     render(<SoftphoneProvider><SoftphoneHeaderButton /><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
     await user.click(screen.getByTestId("header-dialer-button"));
@@ -181,10 +181,10 @@ describe("SoftphoneProvider transport gate", () => {
     render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
     await user.click(screen.getByTestId("call-lead-button"));
     expect(screen.getByTestId("call-preparing")).toHaveTextContent("Softphone Lead");
-    expect(prepareLeadCall).not.toHaveBeenCalled();
+    expect(inspectLeadCall).not.toHaveBeenCalled();
     resolveInventory({ ok: false, error: "Inventory unavailable" });
     expect(await screen.findByRole("alert")).toHaveTextContent("Inventory unavailable");
-    expect(prepareLeadCall).not.toHaveBeenCalled();
+    expect(inspectLeadCall).not.toHaveBeenCalled();
     expect(screen.getByTestId("retry-caller-ids")).toBeVisible();
   });
 
@@ -207,7 +207,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("shows the selected lead while preparation is pending without flashing the idle keypad", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockImplementation(() => new Promise(() => undefined));
+    inspectLeadCall.mockImplementation(() => new Promise(() => undefined));
     const user = userEvent.setup();
     render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
 
@@ -220,7 +220,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("recovers from a rejected preparation and permits the next call attempt", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall
+    inspectLeadCall
       .mockRejectedValueOnce(new Error("network failed"))
       .mockResolvedValueOnce({ ok: false, error: "Lead is not callable." });
     const lead = { id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true };
@@ -233,12 +233,12 @@ describe("SoftphoneProvider transport gate", () => {
 
     await user.click(screen.getByTestId("call-lead-button"));
     expect(await screen.findByRole("alert")).toHaveTextContent("Lead is not callable.");
-    expect(prepareLeadCall).toHaveBeenCalledTimes(2);
+    expect(inspectLeadCall).toHaveBeenCalledTimes(2);
   });
 
   it("does not mint a Jitter intent or invoke intent cancel in simulated mode", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({
+    inspectLeadCall.mockResolvedValue({
       ok: true,
       data: {
         propertyId: "property-1",
@@ -272,7 +272,7 @@ describe("SoftphoneProvider transport gate", () => {
         ok: true,
         data: { callToken: "server-call-token", intentCapability: "server-intent-capability" },
       });
-    prepareLeadCall.mockResolvedValue({
+    inspectLeadCall.mockResolvedValue({
       ok: true,
       data: {
         propertyId: "property-1",
@@ -366,7 +366,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("keeps live keypad hidden until requested and sends digits only while live and not held", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    inspectLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
     const sendDigit = vi.fn(async () => true);
     createTransport.mockImplementation(() => {
       let listener: ((state: "connecting" | "live" | "ended") => void) | null = null;
@@ -388,7 +388,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("keeps the call live and tells the rep when Hold fails", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    inspectLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
     let listener: ((state: "connecting" | "live" | "hold_sync_pending") => void) | null = null;
     const emitState = (state: "connecting" | "live" | "hold_sync_pending") => listener?.(state);
     const hangup = vi.fn();
@@ -428,7 +428,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("keeps held truth and controls usable when Resume fails until provider correction", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    inspectLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
     let listener: ((state: "connecting" | "live" | "hold_sync_confirmed" | "resume_sync_pending") => void) | null = null;
     const emitState = (state: "connecting" | "live" | "hold_sync_confirmed" | "resume_sync_pending") => listener?.(state);
     const hangup = vi.fn();
@@ -470,7 +470,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("settles successful Hold controls while durable sync is unknown", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    inspectLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
     let listener: ((state: "connecting" | "live" | "hold_sync_pending") => void) | null = null;
     const hangup = vi.fn();
     createTransport.mockImplementation(() => ({
@@ -498,7 +498,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("settles successful Resume controls while durable sync is unknown", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    inspectLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
     let listener: ((state: "connecting" | "live" | "hold_sync_confirmed" | "resume_sync_pending") => void) | null = null;
     const hangup = vi.fn();
     createTransport.mockImplementation(() => ({
@@ -526,7 +526,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("offers Reconnect Audio while preserving manual Hang Up", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    inspectLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
     let listener: ((state: "connecting" | "live" | "audio_reconnecting" | "audio_reconnect_required" | "ended") => void) | null = null;
     const hangup = vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const }));
     const reconnectAudio = vi.fn(async () => {
@@ -564,7 +564,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("persists the exact live handle before a registered-connect response settles", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    inspectLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
     let listener: ((state: "ringing" | "live") => void) | null = null;
     createTransport.mockImplementation(() => ({
       onStateChange: vi.fn((cb) => { listener = cb; }),
@@ -595,7 +595,7 @@ describe("SoftphoneProvider transport gate", () => {
     ["not_callable", "This number is no longer callable."],
   ] as const)("returns to idle without wrap-up for %s", async (rejectionState, message) => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({
+    inspectLeadCall.mockResolvedValue({
       ok: true,
       data: {
         propertyId: "property-1",
@@ -653,7 +653,7 @@ describe("SoftphoneProvider transport gate", () => {
     ["caller_id_inventory_unavailable", "Company calling numbers could not be verified."],
   ] as const)("returns to idle with caller-ID Retry and no wrap-up for %s", async (rejectionState, message) => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({
+    inspectLeadCall.mockResolvedValue({
       ok: true,
       data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" },
     });
@@ -691,7 +691,7 @@ describe("SoftphoneProvider transport gate", () => {
   it("still clears a refused start when sequence resume loses its response", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     resumeFailedSoftphoneCall.mockRejectedValueOnce(new Error("response lost"));
-    prepareLeadCall.mockResolvedValue({
+    inspectLeadCall.mockResolvedValue({
       ok: true,
       data: {
         propertyId: "property-1",
@@ -744,7 +744,7 @@ describe("SoftphoneProvider transport gate", () => {
   it("still reaches failed wrap-up when sequence resume loses its response", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     resumeFailedSoftphoneCall.mockRejectedValueOnce(new Error("response lost"));
-    prepareLeadCall.mockResolvedValue({
+    inspectLeadCall.mockResolvedValue({
       ok: true,
       data: {
         propertyId: "property-1",
@@ -797,7 +797,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("shows a blocking warning when Jitter teardown is still unconfirmed", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({
+    inspectLeadCall.mockResolvedValue({
       ok: true,
       data: {
         propertyId: "property-1",
@@ -904,7 +904,7 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("keeps one wrap token and re-enables retry after a lost completion response", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({
+    inspectLeadCall.mockResolvedValue({
       ok: true,
       data: {
         propertyId: "property-1",
@@ -977,7 +977,7 @@ describe("SoftphoneProvider transport gate", () => {
       hold: vi.fn(async () => true),
       hangup,
     });
-    prepareLeadCall.mockResolvedValue({
+    inspectLeadCall.mockResolvedValue({
       ok: true,
       data: {
         propertyId: "property-1",
@@ -1045,7 +1045,7 @@ describe("SoftphoneProvider coach UI flag", () => {
     coachChannels = [];
     removeCoachChannel.mockReset();
     completeSoftphoneCall.mockReset();
-    prepareLeadCall.mockReset();
+    inspectLeadCall.mockReset();
     resumeFailedSoftphoneCall.mockReset();
     mintStartIntent.mockReset();
     loadDialerRecents.mockResolvedValue({ ok: true, data: [] });
@@ -1095,7 +1095,7 @@ describe("SoftphoneProvider coach UI flag", () => {
     window.localStorage.clear();
     // Existing coach lifecycle tests explicitly opt in; new reps default off.
     window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled: true, scriptId: "closr-outbound" }));
-    prepareLeadCall.mockResolvedValue({
+    inspectLeadCall.mockResolvedValue({
       ok: true,
       data: {
         propertyId: "property-1",
@@ -1195,7 +1195,7 @@ describe("SoftphoneProvider coach UI flag", () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
     window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled: false, scriptId: "closr-outbound" }));
-    prepareManualCall.mockImplementation(() => prepareLeadCall());
+    prepareManualCall.mockImplementation(() => inspectLeadCall());
     searchDialerLeads.mockResolvedValue({ ok: true, data: [{ propertyId: "property-1", name: "Softphone Lead", detail: "1 Main St", contactId: "contact-1", phoneE164: "+18165550123", address: "1 Main St", state: "MO" }] });
     loadDialerRecents.mockResolvedValue({ ok: true, data: [{ id: "recent-1", propertyId: "property-1", phoneE164: "+18165550123", name: "Softphone Lead", detail: "1 Main St", when: "Today", contactId: "contact-1", missed: false }] });
     const user = userEvent.setup();
@@ -1251,7 +1251,7 @@ describe("SoftphoneProvider coach UI flag", () => {
     transportEnabled.mockReturnValue(true);
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
     window.localStorage.clear();
-    const prepared = await prepareLeadCall();
+    const prepared = await inspectLeadCall();
     window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({ handle: { id: "retained" }, target: prepared.data, startedAt: new Date().toISOString(), wrapToken: "retained-token" }));
     const recover = vi.fn(async () => undefined);
     const transport = { ...createTransport(), recover };
