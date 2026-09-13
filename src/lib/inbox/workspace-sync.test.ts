@@ -14,6 +14,26 @@ function setup(fetcher: typeof fetch) {
 }
 const tick = () => new Promise(resolve=>setTimeout(resolve,20));
 describe("bounded workspace synchronization lifecycle",()=> {
+  it("lets Electric parse wire booleans before full presentation validation",async()=> {
+    let requests=0;
+    const fetcher=vi.fn<typeof fetch>(()=> {
+      if(++requests>1)return new Promise<Response>(()=>{});
+      return Promise.resolve(new Response(JSON.stringify([{key:"one",headers:{operation:"insert"},value:{...summary,unread:"true"}},{headers:{control:"up-to-date",global_last_seen_lsn:"0"}}]),{headers:{"content-type":"application/json","electric-handle":"wire-bool","electric-offset":"0_0","electric-schema":JSON.stringify({unread:{type:"bool"}}),"electric-cursor":"1"}}));
+    });
+    const {sync}=setup(fetcher);sync.replace({...scope,scopeId:"dddddddd-dddd-4ddd-8ddd-dddddddddddd"});
+    await vi.waitFor(()=>expect(sync.getSnapshot().state).toBe("live"));
+    expect(sync.getSnapshot().rows[0].unread).toBe(true);
+  });
+  it("rejects malformed parsed presentation values before publishing",async()=> {
+    let requests=0;
+    const fetcher=vi.fn<typeof fetch>(()=> {
+      if(++requests>1)return new Promise<Response>(()=>{});
+      return Promise.resolve(new Response(JSON.stringify([{key:"one",headers:{operation:"insert"},value:{...summary,name:123}},{headers:{control:"up-to-date",global_last_seen_lsn:"0"}}]),{headers:{"content-type":"application/json","electric-handle":"bad-presentation","electric-offset":"0_0","electric-schema":"{}","electric-cursor":"1"}}));
+    });
+    const {sync}=setup(fetcher);sync.replace({...scope,scopeId:"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"});
+    await vi.waitFor(()=>expect(sync.getSnapshot().state).toBe("resync_required"));
+    expect(sync.getSnapshot().rows).toEqual([]);
+  });
   it("rejects delivery after expiry even when the expiry timer has not run",async()=> {
     let deliver:((response:Response)=>void)|undefined;
     const {sync}=setup(vi.fn<typeof fetch>(()=>new Promise<Response>(resolve=>{deliver=resolve;})));

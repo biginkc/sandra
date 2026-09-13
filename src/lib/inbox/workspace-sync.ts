@@ -119,7 +119,9 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
         if (!Array.isArray(messages) || messages.length > 2000) { fail("resync_required"); throw Error("Unbounded sync batch"); }
         for (const message of messages) {
           if (message?.headers?.control === "must-refetch") { fail("resync_required"); throw Error("Snapshot reset required"); }
-          if (message?.headers?.operation === "insert") { summaryRow(message.value); key(message.value); }
+          // Electric parses PostgreSQL wire strings (including boolean) using its schema.
+          // Validate identity here; validate complete typed rows only after parsing/merge.
+          if (message?.headers?.operation === "insert") key(message.value);
         }
       }
       return response;
