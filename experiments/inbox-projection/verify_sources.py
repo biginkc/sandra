@@ -48,6 +48,13 @@ def main() -> None:
         for name, digest in expiry["source_hashes"].items():
             verify_file(maintained, name, digest)
 
+    parent = ROOT / "parent-capture"
+    if parent.exists():
+        for receipt, runner in (("evidence.json", "run.py"), ("concurrency-evidence.json", "concurrency.py")):
+            recorded = json.loads((parent / receipt).read_text())
+            verify_file(parent, "setup.sql", recorded["setup_sha256"])
+            verify_file(parent, runner, recorded["runner_sha256"])
+
     python_files = list(ROOT.rglob("*.py"))
     for path in python_files:
         ast.parse(path.read_text(), filename=str(path))
