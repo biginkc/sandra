@@ -1,0 +1,37 @@
+{
+  "scope": {
+    "id": "9fcbbdb4-ad8e-466a-9554-9e1268a10094",
+    "org_id": "fa07815c-5e0c-417d-b586-6aa9f5a3414c",
+    "handles": [
+      null
+    ],
+    "targets": [
+      {
+        "id": "05b4fac3-5c8a-4572-8464-c10c443f62b3",
+        "kind": "known_conversation"
+      }
+    ],
+    "user_id": "0e490d6f-fb51-4b5e-a2b7-1c43196cb09f",
+    "refreshed": true,
+    "expires_at": "2026-09-13T21:31:06.045965+00:00",
+    "generation": "4",
+    "session_id": "d5468b8d-4fc0-4124-9030-c1b3bcf34507",
+    "next_cursor": "950a02d8-8821-4f26-aa6f-3cfed635833a",
+    "access_epoch": "8"
+  },
+  "counts": {
+    "as_of": "2026-09-13T21:16:06.629593+00:00",
+    "counts": {
+      "all": 3,
+      "mine": 1,
+      "dispo": 0,
+      "unread": 1,
+      "unknown": 0,
+      "dismissed": 0,
+      "escalated": 0,
+      "unassigned": 2,
+      "needs_outcome": 0
+    },
+    "access_epoch": "8"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "checks": [
+    "canonical contact search",
+    "phone digits",
+    "SMS full history FTS older than 500 days outside first page",
+    "literal wildcard escaping",
+    "short search disabled",
+    "100 character cap",
+    "overlapping independent counts"
+  ],
+  "limitations": [
+    "Small synthetic fixture, no realistic-volume performance claim"
+  ]
+}
