@@ -9,7 +9,7 @@ DECLARE homeowner uuid;scope_revision bigint;contact public.contacts;property_id
 BEGIN
  SELECT homeowner_contact_id INTO homeowner FROM public.properties WHERE org_id=o AND id=p FOR UPDATE;
  IF NOT FOUND THEN RAISE EXCEPTION 'Property missing';END IF;
- IF homeowner IS NULL THEN RETURN jsonb_build_object('contact_id',NULL,'paused',paused,'reused',false);END IF;
+ IF homeowner IS NULL THEN result:=jsonb_build_object('contact_id',NULL,'paused',paused);END IF;
  IF expected_scope->>'contact_id' IS DISTINCT FROM homeowner::text THEN RAISE EXCEPTION 'SMS scope contact changed';END IF;
  SELECT revision INTO scope_revision FROM inbox_operation_domain.sms_scopes WHERE org_id=o AND contact_id=homeowner FOR UPDATE;
  IF NOT FOUND THEN RAISE EXCEPTION 'SMS scope changed or unseeded';END IF;

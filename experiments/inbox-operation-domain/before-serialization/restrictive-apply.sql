@@ -28,15 +28,6 @@ BEGIN
   SELECT * INTO member FROM public.memberships WHERE org_id=o AND user_id=assignee;
   IF NOT FOUND OR member.access_status<>'active' OR member.deletion_prepared_at IS NOT NULL OR (member.access_expires_at IS NOT NULL AND member.access_expires_at<=clock_timestamp()) THEN RAISE EXCEPTION 'Assignee unavailable';END IF;
  END IF;
- -- Serialize same-operation/contact safety BEFORE locking individual properties
- -- or reading the committed shared receipt. A waiting sibling then sees the
- -- previous effect's post-state instead of validating stale shared revisions.
- IF (step->>'action'='outcome' AND payload->>'value'='opted_out') OR step->'predecessor_result'->'sms'->>'contact_id' IS NOT NULL THEN
-  IF step->'original_dependencies'->'sms_scope'->>'contact_id' IS NOT NULL THEN
-   PERFORM 1 FROM inbox_operation_domain.sms_scopes WHERE org_id=o AND contact_id=(step->'original_dependencies'->'sms_scope'->>'contact_id')::uuid FOR UPDATE;
-   IF NOT FOUND THEN RAISE EXCEPTION 'SMS scope changed or unseeded';END IF;
-  END IF;
- END IF;
  SELECT * INTO p FROM public.properties WHERE org_id=o AND id=property_id FOR UPDATE;
  IF NOT FOUND OR p.deleted_at IS NOT NULL OR p.is_training OR p.is_dnc_locked THEN RAISE EXCEPTION 'Property ineligible';END IF;
  IF NOT EXISTS(SELECT 1 FROM inbox_operations.item_steps WHERE org_id=o AND operation_id=op AND step_id=s) THEN RAISE EXCEPTION 'Property effect has no mappings';END IF;

@@ -68,9 +68,9 @@
   "setup_sha256": {
     "setup.sql": "b7ca70de5cfe321ad3996b98de2f6097ba9b0545e7e2eb7bb0c955e9cc2a35ff",
     "restrictive-scope.sql": "8b21a491160fedfb84ef85d1156fcede5ffdb8f56855786d430faed1784776d9",
-    "restrictive-effect.sql": "766f2a6069184ded2aac765a8a06d3a56cdd94202c709ca6cf573a1b6868595e",
-    "restrictive-apply.sql": "b0d463a1828dc96074a8510e7bca3f2550d3ba199965cea9ba613c4bf19d0978"
+    "restrictive-effect.sql": "3e643d1cd5b370f7cea3588a4caf9146a29e25da6eec808b0c4621ca424124df",
+    "restrictive-apply.sql": "c92977a209ead8e9c25e468887ecdc5d4e00a5688ae65128f7980996ed2ccdfa"
   },
   "runner_sha256": "3ee6889b1046270b70d5fb30ecf9cef962d18ae70806cdd05ccaaffa78577c38",
-  "fixture_operation_id": "f7eb26cd-3b3f-4bf6-a0a5-73f3c372ad20"
+  "fixture_operation_id": "a2604533-d9ac-4622-8b19-146cf394e74e"
 }

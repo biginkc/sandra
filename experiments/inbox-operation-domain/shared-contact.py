@@ -3,7 +3,8 @@ if not __debug__:raise SystemExit('Optimized Python refused')
 import hashlib,json,runpy,sys
 from pathlib import Path
 P=Path(__file__).resolve().parent
-if sys.argv[1:]!=['--run-owned-fixture']:raise SystemExit('Explicit fixture required')
+concurrent=sys.argv[1:]==['--run-owned-fixture','--concurrent']
+if not concurrent and sys.argv[1:]!=['--run-owned-fixture']:raise SystemExit('Explicit fixture required')
 sys.argv=[str(P/'run-sms.py'),'--run-owned-fixture','--continue-installed'];f=runpy.run_path(str(P/'run-sms.py'))
 for key in ['sql','need','uid','lit','o','u','a','c','p','conv','sibling']:globals()[key]=f[key]
 conv2,m2,seq,e1,e2,prep,operation,item1,item2,s1,s2=[uid() for _ in range(11)]
@@ -24,17 +25,35 @@ for prop,conversation,item,step in [(p,conv,item1,s1),(sibling,conv2,item2,s2)]:
  deps={'policy':policy,'targets':targets,'sms_scope':scope}
  sql(f"INSERT INTO inbox_operations.items VALUES('{o}','{operation}','{item}','conversation','{conversation}','{{\"property_id\":\"{prop}\"}}',NULL);INSERT INTO inbox_operations.steps(org_id,operation_id,id,effect_key,ordinal,action,payload,dependencies) VALUES('{o}','{operation}','{step}','property:{prop}',0,'outcome','{{\"property_id\":\"{prop}\",\"value\":\"opted_out\"}}',{lit(json.dumps(deps))});INSERT INTO inbox_operations.item_steps VALUES('{o}','{operation}','{item}','{step}')")
 g1=sql(f"SELECT inbox_operations.claim_step('{o}','{operation}','{s1}')");g2=sql(f"SELECT inbox_operations.claim_step('{o}','{operation}','{s2}')")
-first=json.loads(sql(f"SELECT inbox_operation_domain.apply_property_step('{o}','{operation}','{s1}',{g1})"))
-external=sql(f"BEGIN;UPDATE contacts SET sms_opted_out=false WHERE id='{c}';SELECT inbox_operation_domain.apply_property_step('{o}','{operation}','{s2}',{g2});COMMIT",False)
-need(external.returncode!=0 and 'Dependency conflict' in external.stderr,'Shared safety ignored external contact change: '+external.stderr)
-mismatch=sql(f"BEGIN;UPDATE inbox_operations.steps SET dependencies=jsonb_set(dependencies,'{{sms_scope,revision}}','\"999999\"') WHERE org_id='{o}' AND operation_id='{operation}' AND id='{s2}';SELECT inbox_operation_domain.apply_property_step('{o}','{operation}','{s2}',{g2});COMMIT",False)
-need(mismatch.returncode!=0 and 'Shared SMS preparation mismatch' in mismatch.stderr,'Shared safety ignored original scope mismatch')
-second=json.loads(sql(f"SELECT inbox_operation_domain.apply_property_step('{o}','{operation}','{s2}',{g2})"))
+if concurrent:
+ import sessions
+ sessions.configure(f['D']+['exec','-i',f['N'],'psql','-XqAt','-U','postgres','-d','postgres','-v','ON_ERROR_STOP=1','-v','VERBOSITY=verbose'],sql)
+ holder=sessions.Session();worker=sessions.Session()
+ try:
+  holder.barrier(f"BEGIN;SELECT revision FROM inbox_operation_domain.sms_scopes WHERE org_id='{o}' AND contact_id='{c}' FOR UPDATE;")
+  worker.close(f"SELECT inbox_operation_domain.apply_property_step('{o}','{operation}','{s2}',{g2});")
+  sessions.blocked(worker,holder)
+  # The second effect must wait before owning its property or reading shared
+  # receipts, so the first can finish without a property/scope inversion.
+  holder.barrier(f"SELECT inbox_operation_domain.apply_property_step('{o}','{operation}','{s1}',{g1});")
+  holder.close('COMMIT;');rc,out,err=holder.result();need(rc==0,err)
+  first=next(json.loads(line) for line in out.splitlines() if line.startswith('{'))
+  rc,out,err=worker.result();need(rc==0,err)
+  second=next(json.loads(line) for line in out.splitlines() if line.startswith('{'))
+ finally:
+  for process in sessions.processes:process.stop()
+else:
+ first=json.loads(sql(f"SELECT inbox_operation_domain.apply_property_step('{o}','{operation}','{s1}',{g1})"))
+ external=sql(f"BEGIN;UPDATE contacts SET sms_opted_out=false WHERE id='{c}';SELECT inbox_operation_domain.apply_property_step('{o}','{operation}','{s2}',{g2});COMMIT",False)
+ need(external.returncode!=0 and 'Dependency conflict' in external.stderr,'Shared safety ignored external contact change: '+external.stderr)
+ mismatch=sql(f"BEGIN;UPDATE inbox_operations.steps SET dependencies=jsonb_set(dependencies,'{{sms_scope,revision}}','\"999999\"') WHERE org_id='{o}' AND operation_id='{operation}' AND id='{s2}';SELECT inbox_operation_domain.apply_property_step('{o}','{operation}','{s2}',{g2});COMMIT",False)
+ need(mismatch.returncode!=0 and 'Shared SMS preparation mismatch' in mismatch.stderr,'Shared safety ignored original scope mismatch')
+ second=json.loads(sql(f"SELECT inbox_operation_domain.apply_property_step('{o}','{operation}','{s2}',{g2})"))
 need(first['sms']['reused'] is False and second['sms']['reused'] is True,'Safety was not deduplicated')
 need(sql(f"SELECT count(*) FROM properties WHERE id IN ('{p}','{sibling}') AND outreach_dispo='opted_out'")=='2','Both property outcomes missing')
 need(sql(f"SELECT count(*) FROM inbox_operations.receipts WHERE org_id='{o}' AND operation_id='{operation}'")=='2','Two property receipts missing')
 need(sql(f"SELECT count(*) FROM inbox_operation_domain.shared_sms_receipts WHERE org_id='{o}' AND operation_id='{operation}'")=='1','Safety receipt duplicated')
 need(sql(f"SELECT count(*) FROM consent_events WHERE source_detail->>'operationStepId' IN ('{s1}','{s2}')")=='1','Consent duplicated')
 need(sql(f"SELECT count(*) FROM sequence_enrollments WHERE id IN ('{e1}','{e2}') AND status='opted_out'")=='2','Shared enrollment stop incomplete')
-(P/'shared-contact-evidence.json').write_text(json.dumps({'checks':[{'name':name,'passed':True} for name in ['two properties share one contact safety effect and both complete','external shared contact edit still conflicts','different original scope cannot reuse safety receipt','one consent event and one immutable safety receipt','both active enrollments stopped']],'source_hashes':{name:hashlib.sha256((P/name).read_bytes()).hexdigest() for name in ['restrictive-scope.sql','restrictive-effect.sql','restrictive-apply.sql']},'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'fixture_operation_id':operation},indent=2)+'\n')
+(P/('shared-contact-concurrent-evidence.json' if concurrent else 'shared-contact-evidence.json')).write_text(json.dumps({'checks':[{'name':name,'passed':True} for name in ['two properties share one contact safety effect and both complete',*(['concurrent second property waits before source locks and reads committed safety receipt'] if concurrent else ['external shared contact edit still conflicts','different original scope cannot reuse safety receipt']),'one consent event and one immutable safety receipt','both active enrollments stopped']],'source_hashes':{name:hashlib.sha256((P/name).read_bytes()).hexdigest() for name in ['restrictive-scope.sql','restrictive-effect.sql','restrictive-apply.sql']},'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'fixture_operation_id':operation},indent=2)+'\n')
 print('Two-property same-contact safety deduplication and strict conflict checks passed')

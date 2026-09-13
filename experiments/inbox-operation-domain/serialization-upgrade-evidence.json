@@ -1,0 +1,7 @@
+{
+  "source_hashes": {
+    "restrictive-effect.sql": "3e643d1cd5b370f7cea3588a4caf9146a29e25da6eec808b0c4621ca424124df",
+    "restrictive-apply.sql": "c92977a209ead8e9c25e468887ecdc5d4e00a5688ae65128f7980996ed2ccdfa"
+  },
+  "scope": "Only two private function bodies changed; no reset"
+}
