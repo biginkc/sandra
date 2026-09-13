@@ -302,6 +302,7 @@ describe("Jitter attempt call-activity provider boundary", () => {
     { recording_expected: 1 },
     { call_evidence_version: 2 },
     { call_evidence_version: 1 },
+    { call_evidence_version: 1, ended_at: "2026-09-13T12:05:01.000Z" },
     { call_evidence_version: 1, ended_at: "infinity" },
   ])("rejects invalid provider evidence before reserving a receipt: %j", async (evidence) => {
     const client = serviceClient();
@@ -317,7 +318,7 @@ describe("Jitter attempt call-activity provider boundary", () => {
   it.each([
     { talk_duration_seconds: 0, recording_expected: false },
     { talk_duration_seconds: 301, recording_expected: true },
-    { call_evidence_version: 1, ended_at: "2026-09-13T12:05:01.000Z", talk_duration_seconds: 301, recording_expected: true },
+    { call_evidence_version: 1, provider_call_id: "seller-leg", ended_at: "2026-09-13T12:05:01.000Z", talk_duration_seconds: 301, recording_expected: true },
     { talk_duration_seconds: null, recording_expected: null },
   ])("passes signed provider evidence unchanged to the atomic RPC: %j", async (evidence) => {
     const client = serviceClient();

@@ -54,6 +54,13 @@ begin
     if not found then
       raise exception 'call evidence requires existing activity';
     end if;
+    if nullif(btrim(p_body->>'provider_call_id'),'') is null
+      or p_body->>'provider_call_id' is distinct from v_activity.provider_call_id
+      or (p_body->>'property_id' is not null and (p_body->>'property_id')::uuid is distinct from v_activity.property_id)
+      or (p_body->>'contact_id' is not null and (p_body->>'contact_id')::uuid is distinct from v_activity.contact_id)
+      or (p_body->>'operator_user_id' is not null and (p_body->>'operator_user_id')::uuid is distinct from v_activity.operator_user_id) then
+      raise exception 'call evidence identity mismatch' using errcode='22023';
+    end if;
     update public.call_activities
       set talk_duration_seconds=coalesce(v_talk::integer,talk_duration_seconds),
           recording_expected=coalesce(v_expected,recording_expected),

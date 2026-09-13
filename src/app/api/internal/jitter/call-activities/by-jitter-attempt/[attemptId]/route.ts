@@ -324,6 +324,11 @@ function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
     return unprocessable("invalid_timestamp", "ended_at");
   }
 
+  if (body.call_evidence_version === 1 &&
+    (typeof body.provider_call_id !== "string" || body.provider_call_id.trim() === "")) {
+    return unprocessable("missing_required_field", "provider_call_id");
+  }
+
   if (
     body.talk_duration_seconds !== undefined &&
     body.talk_duration_seconds !== null &&
