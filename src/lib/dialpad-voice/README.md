@@ -29,7 +29,7 @@ The SQL tests start disposable local PostgreSQL clusters with prerequisite fixtu
 relations. They do not connect to hosted Supabase and do not replace a complete
 application migration rehearsal. FFmpeg tests exercise generated WAV media.
 
-Separately, `scripts/rehearse-dialpad-full-schema.mjs` replayed all 249 current
+Separately, `scripts/rehearse-dialpad-full-schema.mjs` replayed all 250 current
 SQL migrations against a fresh genuine local Supabase Auth/Storage database.
 The receipt hashes match the current files. This proves clean installation
 compatibility, not hosted-schema parity or provider behavior.
@@ -76,3 +76,33 @@ the durable inbox for reconciliation rather than silently bypassing exclusion.
 - Complete browser workflow verification and release review. Mel and long-call/drop testing remain deferred.
 
 No public recording-sharing workaround or browser-session credentials are used.
+
+## Bound-call REST reconciliation (disabled)
+
+`npm run dialpad:reconcile-bound` refuses to run unless
+`DIALPAD_BOUND_RECONCILIATION_ENABLED=true`. It uses the existing server database
+credentials and `DIALPAD_VOICE_API_KEY`. No scheduler is installed.
+
+This pilot is restricted in SQL to Maria's already provider-bound activities in
+BMH's organization. Each invocation seeds at most 100 existing-call jobs and
+claims at most one. Call Get shares the recording worker's seven-second database
+budget; HTTP 429 extends that shared budget by 60 seconds. Successful snapshots
+become due after 15 minutes; provider-terminal calls pause after a 24-hour
+enrichment window. Active calls never age out. Eight consecutive processing
+failures stop automatic retry. Paused, failed, and quarantined jobs require
+operator investigation; none establishes recording completeness.
+
+REST snapshots retain their original payload and explicit provenance separately
+from signed webhook receipts. SQL verifies the persisted call, intent, rep,
+organization, numbers, and start timestamp before enriching the existing call.
+It never creates acquisition credit or manufactures `custom_data`. Discovered
+recording segments enter the existing recording jobs without overwriting owned
+copies. The recording completeness gate still requires a qualifying manifest.
+
+CLI `acknowledgedReceipts` counts receipts whose lease-protected processing was acknowledged,
+including quarantined receipts; it is **not a successful-tracking count**. Inspect
+job status and error code to determine the result. `failed` counts acknowledged
+error handling, including retries, and `leaseLost` counts rejected ownership.
+This closes a local implementation gap for bound calls only: unbound or ambiguous
+starts, hosted scheduling, late data after the polling window, authenticated
+recording downloads, and end-to-end parity remain separate acceptance gates.
