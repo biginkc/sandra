@@ -1,0 +1,8 @@
+{
+  "installed": true,
+  "hashes": {
+    "projection.sql": "57cdc34ad11830ef5a0785f1b0a6b328505dfb5b96b959a8aee0481a0e2ac3e4",
+    "auth.sql": "9685fd03ef99f140b2fdcf1512d501a37a8b548e4c46848999d1641df41bd2cc",
+    "worksets.sql": "e246f82442e21688f6cb61723de850dabc2c61b729316db0700fc1e12b126b47"
+  }
+}

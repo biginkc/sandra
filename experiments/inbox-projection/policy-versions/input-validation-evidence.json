@@ -1,0 +1,31 @@
+{
+  "at": "2026-09-13 20:12:34.015826+00",
+  "checks": [
+    {
+      "name": "SQL NULL, JSON null, object, boolean and numeric requirements/event lists rejected",
+      "passed": true
+    },
+    {
+      "name": "null/missing/unknown namespace and malformed typed keys, route/channel values and extra fields rejected",
+      "passed": true
+    },
+    {
+      "name": "invalid organization, duplicate/unseeded requirements and mixed valid/invalid batch fail without persisted prefix",
+      "passed": true
+    },
+    {
+      "name": "all fourteen supported key types validate; valid private bump/snapshot works and rollback removes test baseline",
+      "passed": true
+    },
+    {
+      "name": "ordinary roles cannot call bump/snapshot; definer/search-path/ACL and all seven enabled source trigger attachments verified",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "ae524b76ebbd24295e6145c33fe100208299523b5145c61019e132a19f01d4d1",
+  "runner_sha256": "0be7b77008c0633fd33f3c043dd93aae915f55c3a3688bba4efc21ba782ee795",
+  "limits": [
+    "Focused private input validation only; earlier source-trigger/concurrency receipts correspond to preserved pre-validation setup",
+    "No new canonical source writes, authorization checks or production actions"
+  ]
+}

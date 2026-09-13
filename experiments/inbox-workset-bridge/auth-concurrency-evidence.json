@@ -1,0 +1,6 @@
+{
+  "passed": true,
+  "reads": 40,
+  "distinct_revisions_observed": 11,
+  "claim": "Returned org and epoch remain a coherent committed pair during canonical membership changes"
+}
