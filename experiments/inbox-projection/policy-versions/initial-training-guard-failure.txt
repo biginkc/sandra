@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-projection-t2/experiments/inbox-projection/policy-versions/run.py", line 44, in <module>
+    rev=v('property_policy',[p]);sql(f"UPDATE properties SET is_training=true WHERE id='{p}'");need(v('property_policy',[p])==rev+1,'Eligibility flip missed')
+                                 ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-projection-t2/experiments/inbox-projection/policy-versions/run.py", line 14, in sql
+    if check and r.returncode: raise RuntimeError(r.stderr)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: ERROR:  23514: TRAINING_PROTECTED: training marker is immutable
+CONTEXT:  PL/pgSQL function guard_training_property() line 26 at RAISE
+LOCATION:  exec_stmt_raise, pl_exec.c:3911

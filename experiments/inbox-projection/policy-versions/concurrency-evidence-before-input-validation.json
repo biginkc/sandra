@@ -1,0 +1,23 @@
+{
+  "at": "2026-09-13 20:05:56.139475+00",
+  "checks": [
+    {
+      "name": "independent review inserts serialize shared property dependency and commit two increments",
+      "passed": true
+    },
+    {
+      "name": "rolled-back first review allocation disappears; waiting writer commits exactly one revision",
+      "passed": true
+    },
+    {
+      "name": "stale REPEATABLE READ writer fails40001 with no source row; whole-transaction retry preserves one logical insert and two revisions",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "b9117f27ea295aed893b0246c09a6737b171d567c26bd56c3df55f7bac37a8a7",
+  "runner_sha256": "ad95268d9df7326c9dde3e68e43248163016777d9b82c6cd2ea0f2168f747925",
+  "limits": [
+    "Observed independent-session lock waits on shared dependency path, not universal deadlock freedom",
+    "Whole transaction retry tested for this owned SQL insertion; application/provider retry contract still incomplete"
+  ]
+}
