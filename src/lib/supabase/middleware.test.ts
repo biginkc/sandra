@@ -344,3 +344,95 @@ describe("updateSession membership authorization", () => {
     },
   );
 });
+
+describe("action authorization denial transport", () => {
+  const cookieName = "sb-copflsklaefwzipsrjqz-auth-token.0";
+  function actionRequest() {
+    return new NextRequest("https://sandra.test/my-leads?view=queue", {
+      method: "POST",
+      headers: { "Next-Action": "synthetic-action-id", cookie: `${cookieName}=stale` },
+    });
+  }
+  async function expectActionDenial(response: Awaited<ReturnType<typeof updateSession>>, destination: string) {
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-action-redirect")).toBe(`${destination};replace`);
+    expect(response.headers.has("location")).toBe(false);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.has("x-middleware-next")).toBe(false);
+    expect(await response.text()).toBe("");
+    expect(response.cookies.get(cookieName)?.value).toBe("");
+    expect(response.headers.get("set-cookie")).toContain("Max-Age=0");
+  }
+
+  it("redirects expired action sessions without admitting the action", async () => {
+    const { getUser, from } = mockProtectedSession();
+    getUser.mockResolvedValue({ data: { user: null } } as never);
+    const response = await updateSession(actionRequest());
+    await expectActionDenial(response, "https://sandra.test/login?view=queue&next=%2Fmy-leads%3Fview%3Dqueue");
+    expect(getUser).toHaveBeenCalledOnce();
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it("expires cookie chunks written during failed action-session recovery", async () => {
+    createServerClient.mockImplementation((_url, _key, options) => ({
+      auth: {
+        getUser: async () => {
+          options.cookies.setAll([{ name: "sb-copflsklaefwzipsrjqz-auth-token.1", value: "failed-refresh-chunk", options: { path: "/" } }]);
+          return { data: { user: null } };
+        },
+      },
+    }));
+    const response = await updateSession(actionRequest());
+    expect(response.cookies.get("sb-copflsklaefwzipsrjqz-auth-token.1")?.value).toBe("");
+    expect(response.headers.get("set-cookie")).not.toContain("failed-refresh-chunk");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it.each([
+    { method: "GET", actionHeader: true },
+    { method: "POST", actionHeader: false },
+  ])("retains HTTP 307 for $method without an action POST", async ({ method, actionHeader }) => {
+    const { getUser } = mockProtectedSession();
+    getUser.mockResolvedValue({ data: { user: null } } as never);
+    const response = await updateSession(new NextRequest("https://sandra.test/my-leads", {
+      method, headers: actionHeader ? { "Next-Action": "synthetic-action-id" } : {},
+    }));
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toBe("https://sandra.test/login?next=%2Fmy-leads");
+    expect(response.headers.has("x-action-redirect")).toBe(false);
+  });
+
+  it("preserves domain rejection and cookie clearing for actions", async () => {
+    const { getUser, signOut, from } = mockProtectedSession();
+    getUser.mockResolvedValue({ data: { user: { id: "seeded-auth-user", email: "outsider@example.invalid", identities: [] } } });
+    const response = await updateSession(actionRequest());
+    await expectActionDenial(response, "https://sandra.test/login?error=domain");
+    expect(signOut).toHaveBeenCalledOnce();
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it("preserves missing membership rejection even if sign-out fails", async () => {
+    const { signOut, from } = mockProtectedSession({ memberships: [], signOutThrows: true });
+    const response = await updateSession(actionRequest());
+    await expectActionDenial(response, "https://sandra.test/login?error=access");
+    expect(from).toHaveBeenCalledWith("memberships");
+    expect(signOut).toHaveBeenCalledWith({ scope: "local" });
+  });
+
+  it("preserves invalid Hugo proof rejection for actions", async () => {
+    const { getClaims, from } = mockProtectedSession({ authMethod: "password" });
+    const response = await updateSession(actionRequest());
+    await expectActionDenial(response, "https://sandra.test/login?error=password_disabled");
+    expect(getClaims).toHaveBeenCalledOnce();
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it("still authorizes valid actions instead of converting them to denials", async () => {
+    const { getUser, from } = mockProtectedSession({ memberships: [{ user_id: "seeded-auth-user" }] });
+    const response = await updateSession(actionRequest());
+    expect(response.headers.get("x-middleware-next")).toBe("1");
+    expect(response.headers.has("x-action-redirect")).toBe(false);
+    expect(getUser).toHaveBeenCalledOnce();
+    expect(from).toHaveBeenCalledWith("memberships");
+  });
+});

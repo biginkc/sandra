@@ -23,6 +23,23 @@ export function isPublicPath(path: string): boolean {
   );
 }
 
+function loginDenialResponse(request: NextRequest, url: URL): NextResponse {
+  if (request.method === "POST" && request.headers.has("next-action")) {
+    // Pinned Next.js action transport: server-action-reducer consumes this
+    // header before validating RSC content. A bare HTTP redirect follows the
+    // POST to /login and produces an unexpected non-RSC response instead.
+    // Keep this localized and recheck the protocol when upgrading Next.js.
+    return new NextResponse(null, {
+      status: 200,
+      headers: {
+        "x-action-redirect": `${url.href};replace`,
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+  return NextResponse.redirect(url);
+}
+
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
   const writtenCookieNames = new Set<string>();
@@ -67,7 +84,7 @@ export async function updateSession(request: NextRequest) {
     url.searchParams.set("error", error);
     return expireSupabaseAuthCookies(
       request,
-      NextResponse.redirect(url),
+      loginDenialResponse(request, url),
       writtenCookieNames,
     );
   };
@@ -79,7 +96,12 @@ export async function updateSession(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("next", path + request.nextUrl.search);
-    return NextResponse.redirect(url);
+    const response = loginDenialResponse(request, url);
+    // Auth may have attempted a refresh and written cookie chunks before
+    // returning no user. Do not retain those chunks on an action denial.
+    return request.method === "POST" && request.headers.has("next-action")
+      ? expireSupabaseAuthCookies(request, response, writtenCookieNames)
+      : response;
   }
 
   // Domain allowlist — if someone's authenticated but not on the
