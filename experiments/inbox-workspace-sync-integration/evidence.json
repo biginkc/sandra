@@ -1,0 +1,50 @@
+{
+  "recordedAt": "2026-09-13T20:04:29.171Z",
+  "status": "passed",
+  "checks": [
+    "Gateway rejects SQL tampering, foreign scope and unbound handle before upstream access",
+    "Gateway denies missing synthetic session",
+    "PostgreSQL → Electric 1.8.1 → scoped gateway → adapter snapshot contains exactly two authorized typed rows, excluding opposite-kind same-UUID and foreign-tenant fixtures",
+    "Actual partial UPDATE merges changed preview and preserves unchanged fields",
+    "Actual key-only DELETE removes the unknown row from collection",
+    "Revocation after upstream read returns 403 before body forwarding and clears adapter rows/cache boundary"
+  ],
+  "versions": {
+    "electric": "1.8.1",
+    "client": "1.5.28",
+    "db": "0.9.0",
+    "collection": "0.4.8"
+  },
+  "stats": {
+    "upstreamRequests": 5,
+    "forwardedMessages": 4,
+    "denied": 4,
+    "maxResponseBytes": 1182,
+    "shapes": 1,
+    "operations": [
+      "insert",
+      "insert",
+      "update",
+      "delete"
+    ],
+    "partialUpdate": true,
+    "noForeignRows": true
+  },
+  "hashes": {
+    "src/lib/inbox/workspace-sync.ts": "8232e03ffebb3a5e57e29c3e86a2d9ffba69bc4ea1f1688cd16d3ca2a2cd3f07",
+    "src/lib/inbox/workspace-sync.test.ts": "49a4d4bc1c9a6076567161f2fe049f1d4cda839e5f300df9d4acf1c579b35d8f",
+    "experiments/inbox-workspace-sync-integration/run.ts": "0bb8056357447eeee08b0b041b1448257c59b3af348396aac4f0906dd66c8c87"
+  },
+  "limits": [
+    "Synthetic session gateway, not production authorization",
+    "Fixture summary DTO, not canonical T2 projection or writer capture",
+    "No browser render/latency or production acceptance measurement",
+    "No service or publication configuration changed beyond adding/removing this run's own table"
+  ],
+  "cleanup": {
+    "schemaRemoved": true,
+    "publicationRestored": true,
+    "listenerClosed": true,
+    "databaseClientClosed": true
+  }
+}
