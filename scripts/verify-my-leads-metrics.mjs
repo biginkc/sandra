@@ -55,6 +55,7 @@ try {
  ('${id(21)}','${org}','${property}','${rep}','call','sandra','no_answer',now()-interval '1 hour');
  insert into acquisition_commands(org_id,operation,result) values('${org}','finalize_acquisition_attempt','{"attemptId":"${id(21)}"}');`);
  migration('20260913100000_my_leads_metrics.sql');
+ migration('20260913203019_my_leads_daily_call_clock.sql');
  assert.equal(sql(`select coalesce(outcome,'pending') from acquisition_attempts where id='${id(20)}'`),'pending');
  assert.equal(sql(`select outcome from acquisition_attempts where id='${id(21)}'`),'no_answer');
  let result=kpi();assert.equal(result.contactWithoutFollowUp,1);assert.equal(result.attempts,2);assert.equal(result.firstCallSamples,0);assert.equal(result.appointmentsHeld,0);assert.equal(result.reached,0);assert.equal(result.recordingExpectationUnknown,2);
@@ -100,7 +101,9 @@ try {
  // A queue filter with no results has no effect on subsequent KPIs.
  sql(`${auth} select fn_get_acquisition_queue_page('${org}','${rep}','no matching address');`);
  assert.equal(kpi().attempts,9);assert.equal(kpi().needsOffers,1);
- assert.equal(sql(`select max(occurred_at) from acquisition_attempts where id='${id(150)}'`),sql(`select ('${result.lastAttemptAt}'::timestamptz)`));
+ assert.equal(result.lastAttemptClockVersion,1);
+ assert.equal(result.lastAttemptAt,historical.lastAttemptAt);
+ assert.equal(sql(`select coalesce(max(occurred_at)::text,'none') from acquisition_attempts where org_id='${org}' and actor_user_id='${rep}' and attempt_kind='call' and occurred_at>=date_trunc('day',now() at time zone 'America/Chicago') at time zone 'America/Chicago' and occurred_at<=now()`),sql(`select coalesce(${result.lastAttemptAt ? `'${result.lastAttemptAt}'::timestamptz::text` : 'null'},'none')`));
  sql(`update acquisition_attempts set recording_url='https://example.test/recording' where id='${id(140)}'`);assert.equal(kpi().missingRecordings,1);
  // Authoritative provider end wins over a later browser wrap-up timestamp.
  sql(`update call_activities set provider_ended_at=now()-interval '10 minutes',ended_at=now() where id='${id(43)}'`);assert.equal(kpi().missingRecordings,1);
@@ -129,7 +132,36 @@ try {
  assert.throws(()=>sql(`${auth} select fn_finalize_acquisition_attempt('${JSON.stringify({...finalize,idempotencyKey:id(174),outcome:'reached'})}')`),/STALE_STATE/);
  assert.throws(()=>sql(`${auth} select fn_get_acquisition_kpis('${org}','${other}',now()-interval '1 day',now())`),/FORBIDDEN/);
  assert.throws(()=>sql(`${auth} select fn_get_acquisition_kpis('${id(999)}','${rep}',now()-interval '1 day',now())`),/FORBIDDEN/);
- console.log('PASS: actual SQL inventory, overdue/snooze/reassignment, all attempts, call-only quality/coverage, recording grace, provider field protection, explicit outcomes, replay, tenant/rep guards.');
+ // Freeze only the server clock in the real migrated RPC, in this disposable cluster.
+ // This exercises its exact query under Central/UTC disagreement and both DST offsets.
+ const clockMigration=readFileSync(new URL('../supabase/migrations/20260913203019_my_leads_daily_call_clock.sql',import.meta.url),'utf8');
+ const freezeClock=at=>sql(clockMigration.replace('v_at timestamptz:=statement_timestamp();',`v_at timestamptz:='${at}'::timestamptz;`));
+ sql('delete from acquisition_attempts');
+ const attempt=(n,at,kind='call',actor=rep,tenant=org)=>sql(`insert into acquisition_attempts(id,org_id,property_id,actor_user_id,attempt_kind,source,outcome,occurred_at) values('${id(n)}','${tenant}','${property}','${actor}','${kind}','${kind==='call'?'dialpad':'manual'}','no_answer','${at}')`);
+ const expectClock=at=>assert.equal(kpi().lastAttemptAt===null?null:Date.parse(kpi().lastAttemptAt),at===null?null:Date.parse(at));
+ freezeClock('2026-09-13T15:00:00Z');
+ attempt(200,'2026-09-12T17:00:00Z');
+ expectClock(null); // Sunday's historical 22-hour clock must not be returned.
+ freezeClock('2026-09-14T15:00:00Z');
+ attempt(201,'2026-09-14T14:30:00Z','outreach');expectClock(null);
+ attempt(202,'2026-09-14T14:00:00Z');expectClock('2026-09-14T14:00:00Z');
+ attempt(203,'2026-09-14T14:45:00Z','call',other);
+ attempt(204,'2026-09-14T14:46:00Z','call',rep,id(999));
+ attempt(205,'2026-09-14T15:00:01Z');expectClock('2026-09-14T14:00:00Z');
+ attempt(206,'2026-09-14T14:55:00Z');expectClock('2026-09-14T14:55:00Z');
+ freezeClock('2026-09-15T04:59:59Z');expectClock('2026-09-14T15:00:01Z'); // Still Monday Central.
+ freezeClock('2026-09-15T05:00:00Z');expectClock(null);
+ attempt(207,'2026-09-15T05:00:00Z');expectClock('2026-09-15T05:00:00Z');
+ for(const [n,now,before,start] of [
+   [210,'2026-03-08T15:00:00Z','2026-03-08T05:59:59Z','2026-03-08T06:00:00Z'],
+   [220,'2026-11-01T15:00:00Z','2026-11-01T04:59:59Z','2026-11-01T05:00:00Z'],
+ ]) {
+   sql('delete from acquisition_attempts');freezeClock(now);
+   attempt(n,before);expectClock(null);attempt(n+1,start);expectClock(start);
+ }
+ assert.equal(sql(`select has_function_privilege('anon','public.fn_get_acquisition_kpis(uuid,uuid,timestamptz,timestamptz)','EXECUTE')`),'f');
+ assert.equal(sql(`select has_function_privilege('authenticated','public.fn_get_acquisition_kpis(uuid,uuid,timestamptz,timestamptz)','EXECUTE')`),'t');
+ console.log('PASS: actual SQL inventory, overdue/snooze/reassignment, all attempts, call-only quality/coverage, recording grace, provider field protection, explicit outcomes, replay, tenant/rep guards, daily actual-call clock, report independence, Central midnight, DST and future-event exclusion.');
 } finally {
  if(started)run('pg_ctl',['-D',cluster,'-m','immediate','-w','stop']);
  rmSync(cluster,{recursive:true,force:true});rmSync(socket,{recursive:true,force:true});
