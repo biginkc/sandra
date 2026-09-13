@@ -1,0 +1,40 @@
+{
+  "status": "completed",
+  "fixtureConversations": 55000,
+  "initialListMs": 1935.587083,
+  "observations": [
+    {
+      "phase": "first_open",
+      "milliseconds": 2389.0336250000005
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 2864.8287500000006
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1879.2282500000001
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1847.9633329999997
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1847.0017499999994
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1848.4634999999998
+    }
+  ],
+  "visibleRows": 200,
+  "blockedExternalRequests": 0,
+  "pageErrors": [],
+  "limitations": [
+    "Local production build with synthetic password session; not genuine Hugo production SSO",
+    "Six alternating opens; no incoming load; not a certified percentile",
+    "Synthetic mark-read effects only; no sends or outcomes",
+    "Click-to-correct-panel plus two animation frames includes Playwright overhead"
+  ]
+}

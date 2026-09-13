@@ -1,0 +1,48 @@
+{
+  "experiment": "candidate1 independent read and bounded cache",
+  "status": "completed",
+  "fixtureConversations": 55000,
+  "initialListMs": 1532.293834,
+  "observations": [
+    {
+      "phase": "first_open",
+      "milliseconds": 247.9027500000002,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 229.8543749999999,
+      "readSource": "network"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 65.67716700000028,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 65.03800000000001,
+      "readSource": "memory"
+    },
+    {
+      "phase": "expired_revisit",
+      "milliseconds": 308.47279100000014,
+      "readSource": "network"
+    },
+    {
+      "phase": "expired_revisit",
+      "milliseconds": 230.6975409999941,
+      "readSource": "network"
+    }
+  ],
+  "visibleRows": 200,
+  "blockedExternalRequests": 0,
+  "pageErrors": [],
+  "limitations": [
+    "Local production build with synthetic password session; not genuine Hugo production SSO",
+    "Two first opens, two immediate revisits,31-second wait outside measured interval, two expired revisits; local synthetic observations only",
+    "Read-only experiment: no mark-read, sends or outcomes; minimal page omits full Inbox parity",
+    "Click-to-correct-panel plus two animation frames includes Playwright overhead",
+    "Only two observations per phase; report ranges, not population percentiles"
+  ]
+}

@@ -1,0 +1,6920 @@
+{
+  "events": [
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1901.69,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 78.77,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1821.1,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 350.86,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 291.54,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 347.94,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1696.25,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 26.08,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1669.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 335.08,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 275.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 341.34,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 2040.5,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 113.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 14.1,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1877.84,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 617.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 112.8,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 576.22,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 601.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 35.17,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 2458.98,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 25.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 2311.56,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 275.26,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 86.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 179.4,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 499.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 114.51,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 2038.21,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 89.44,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 13.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1843.28,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 423.62,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 71.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 261.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 466.25,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 91.78,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1656.72,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 64.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.92,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1573.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 352.97,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 40.05,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 288.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 359.82,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 12.49,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1534.41,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 34.18,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.87,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1480.1,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 301.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 43.15,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 254.77,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 333.9,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 14.12,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1601.97,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 35.2,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1545.44,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 317.84,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 45.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 275.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 298.15,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 14.63,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1572.91,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 37.35,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.68,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1515.64,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 358.21,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 51.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 188.34,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 358.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 14.09,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 2126.21,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 36.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 2089.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 620.91,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 616.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 618.42,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1949.39,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 75.01,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 10.3,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1844.99,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 543.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 75.44,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 340.29,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 574.43,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 18.93,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1631.47,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 24.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.13,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1585.78,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 316.44,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 39.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 210.76,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 338.11,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 15.94,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1855.15,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 31.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1795.34,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 383.98,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 42.15,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 341.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 340.38,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 23.61,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6538.65,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 89.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 18.08,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6407.29,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1115.83,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 53.49,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 682.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1078.94,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 23.6,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6411.01,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 161.76,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 12.38,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6205.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1001.8,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1945.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 427.47,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 2592.87,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 31.15,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6504.13,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 108.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.77,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6352.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 943.24,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 85.01,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 659.73,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1049.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 35.93,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7565.09,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 147.44,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 526.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6850.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1829.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1432.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 963.76,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1344.91,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 40.61,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 8435.02,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 162.16,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 375.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 7262.14,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1259.6,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1526.08,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 468.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1164.64,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 635.11,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 8474.55,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 171.45,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 472.94,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 7091.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1701.53,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1446.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 861.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1318.27,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 738.9,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5645.73,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 72.84,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 10.1,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5535.67,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 725.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1006.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 602.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 769.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 26.97,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5790.74,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 82.53,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 19.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5669.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 740.29,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 990.2,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1855.14,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 788.14,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 19.49,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6750.22,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 81.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 19.6,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6619.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 2143.4,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 979.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1605.82,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1961.35,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 29.81,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5576.87,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 71.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.74,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5476.27,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1045.53,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 750.38,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 829.05,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1154.16,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 23.13,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5248.76,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 119.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 9.45,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 4965.11,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 667.22,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 867.21,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 444.35,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 908.74,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 154.68,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5369.9,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 110.8,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.85,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5236.81,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 720.65,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 734.07,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 600.96,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 721.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 16.25,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 2179.38,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 100.43,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 2060.87,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 708.51,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 42.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 563.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 792.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.24,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1679.11,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 44.86,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.04,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1539.53,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 354.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 58.79,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 261.99,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 361.04,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 88.56,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5744.72,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 82.97,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 8.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5620.49,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 864.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 51.91,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 573.91,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 941.35,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 32.58,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6169.39,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 80.48,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.82,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6060.6,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 827.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 56.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 674.3,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 919.18,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 21.31,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6709.36,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 153.05,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 10.24,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6232.36,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1113.78,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 2038.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1290.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 903.16,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 313.55,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6818.1,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 181.83,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 11.79,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6599.56,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1785.48,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 2038.36,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1758.87,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1454.24,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 24.75,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7440.83,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 172.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 320.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6544.28,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1600.8,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1639.62,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 778.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1037.78,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 403.61,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7511.28,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 194.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 1378.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5898.86,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 735.22,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 634.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 799.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 835.05,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 39.74,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5843.42,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 98.08,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 9.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5703.53,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 929.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 479.68,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 799.26,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 939.78,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 32,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6355.9,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 76.14,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.45,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6249.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 858.28,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 62.34,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 701.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 963.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 22.5,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5605.84,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 77.1,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 8.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5490.85,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 903.15,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 627.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 462.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 800.97,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 29.05,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5055.38,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 104.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 45.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 4833.85,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1024.08,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 805.2,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1087.4,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 894.79,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 71.88,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5841.94,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 89.38,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 123.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5610.93,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 944.9,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 441.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 474.75,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 834.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 18.32,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5146.17,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 84.81,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 8.07,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5032.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 710.18,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 905.75,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 444.62,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 857.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 20.86,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5848.86,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 97.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5723,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 830.95,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 50.94,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 476.87,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 879.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 21.45,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5922.08,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 67.97,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.6,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5834.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 887.56,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 41.99,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 556.13,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 967.63,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 14.84,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5897.59,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 127.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5743.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1046.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1916.96,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1353.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1350.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 22.21,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6776.86,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 91.59,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 511.22,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5736.56,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1537.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1108.95,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1359.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1419.22,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 437.34,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6823.65,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 112.64,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 523.29,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5819.45,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1095.36,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1375.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 795.4,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1618.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 368.11,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7618.05,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 103.43,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 7345.76,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1088.01,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1972.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 524.47,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 2482.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 163.36,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5860.26,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 89.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 9.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5743.78,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 730.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 741.15,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 640.21,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 788.98,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 17.48,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5958.81,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 171.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 239.43,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5529.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1086.07,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 458.21,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 658.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1222.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 18.11,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5452.94,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 103.11,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 3.56,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5307.43,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1402.15,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 588.82,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 512.65,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 891.36,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 38.69,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6512.93,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 104.4,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6379.99,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 867.75,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 777.93,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 673.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 818.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 23.99,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5854.76,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 97.21,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5729.25,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1180.54,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 591.25,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 537.48,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1330.86,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 20.25,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5369.06,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 95.51,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 11.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5159.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 979.13,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 575.49,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 868.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 874.97,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 103.31,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 2123.32,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 57.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 160.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1891.91,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 639.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 67.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 516.92,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 639.59,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.01,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1750.25,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 35.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.77,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1581.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 338.27,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 47.62,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 267.68,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 345.01,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 126.05,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6275.95,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 92.63,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 9,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6137.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 781.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 75.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 584.94,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 840.64,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 36.33,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7013.26,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 84.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.67,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6894,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 815.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 81.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 572.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 824.77,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 29.76,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6906.14,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 145.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 403.48,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6323.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 2070.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 773.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 733.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1635.94,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 33.96,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6994.56,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 146.18,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6819.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1211.1,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 2094.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 961.85,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 785.18,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 23.98,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7790.77,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 160.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 377.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6582.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1001.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1611.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 772.86,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1670.05,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 670.22,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7827.68,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 150.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 659.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6570.34,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1328.28,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1389.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 720.56,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1487.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 447.44,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5525.27,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 48.73,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.54,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5450.86,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 285.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 327.65,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 227.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 281.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 20.98,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5773.35,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 79.98,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 18.21,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5660.21,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 680.79,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 718.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 516.29,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 797.77,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 14.82,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6079.13,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 80.05,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.25,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5977.67,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 670.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 313.85,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 558.22,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 859.38,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 16.01,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6280.22,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 96.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 272.15,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5894.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 694.18,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 426.26,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1030.65,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 922.27,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 16.33,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5497.3,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 147.3,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 221.16,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5033.93,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 790,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 627.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 931.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1102.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 94.75,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5546.61,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 140.87,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5349.84,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 757.08,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 886.26,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 644.24,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 868.63,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 50.91,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6103.04,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 123.99,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 14.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5942.96,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 812.04,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 46.84,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 580.62,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1021.04,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 21.33,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6166.78,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 70.28,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 8.95,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6069.79,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 752.77,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 41.8,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 602.59,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 964.92,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 17.61,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6096.38,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 174.85,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5894.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 730.18,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1872.34,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1459.9,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1614.27,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 22.26,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6071.01,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 163.99,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 419.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5461.8,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 778.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1602.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1923.92,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1950.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 25.57,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7495.78,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 163.98,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.78,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6524.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1984.1,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 2005.43,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1255.56,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1669.59,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 802.85,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7489.58,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 172.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 407.67,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6509.28,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1965.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1602.97,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 576.26,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1452.05,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 400.03,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6005.62,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 158.38,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5821,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 759.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1194.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 588.9,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 886.55,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 21.99,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6033.43,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 92.45,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 17.55,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5892.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 794.86,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 63.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 493.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 908.05,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 30.97,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6245.8,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 184.35,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 352.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5691.08,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1086.64,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 801.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1022.82,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1093.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 17.78,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 4973.13,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 119.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 48.22,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 4717.14,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1083.79,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 815.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 477.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1088.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 87.98,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6615.01,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 182.47,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 353.68,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6059.67,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 751.68,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 778.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 912.97,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1366.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 19.03,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5384.58,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 117.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5241.62,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 872.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 554.11,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 514.79,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 959.01,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 21.01,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1883.43,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 85.96,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.45,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1777.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 548.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 39,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 507.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 598.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.79,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1702.3,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 52.36,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.35,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1623.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 339.48,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 42.53,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 334.14,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 337.28,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 18.79,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1637.67,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 30.67,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.47,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1537.35,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 186.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 33.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 207.54,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 277.76,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 64.07,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 2119.37,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 37.13,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 2012.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 300.87,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 41.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 296.4,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 348.07,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 63.63,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1923.13,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 89.83,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.05,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1813.87,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 477.84,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 40.24,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 378.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 479.83,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.22,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1759.43,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 40.8,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.35,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1643.86,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 356.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 49.54,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 295.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 349,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 67.24,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6183.93,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 115.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.38,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6043.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 747.96,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1913.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 975.73,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1408.8,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 18.82,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6259.54,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 94.93,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 17.45,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6124.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 802.35,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 51.27,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 582.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 918.11,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 22.46,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6299.52,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 99.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 13.97,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6168.34,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 823.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 53.26,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 628.45,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 862.81,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 17.99,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6197.68,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 177.38,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 648.22,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5354.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1893.45,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1247.84,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1193.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 886.98,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 17.78,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6262.24,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 135.24,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 506.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5602.96,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 950.54,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1792.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1775.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1873.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 17.44,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6280.2,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 152.92,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 709.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5390.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1838.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1559.9,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1207.04,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1008.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 27.59,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5536.54,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 90.68,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5414.95,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 820.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 48.43,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 578.25,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 930.73,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 23.67,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5886.89,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 147.76,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 1013.64,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 4676.68,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 962.59,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 888.36,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 988.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1151.8,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 48.68,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5996.46,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 126.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5848.35,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1084.38,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1982.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1311.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1936.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 14.1,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6048.48,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 103.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.13,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5924.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 697.3,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1355.94,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 570.36,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 814.75,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 16.24,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6220.59,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 114.56,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 3.34,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6083.86,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 803.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1976.49,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1237.86,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 778.24,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 18.69,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6208.83,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 156.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 433.01,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5607.24,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1118.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1423.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 446.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1075.91,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 11.73,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1739.37,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 39.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 10.25,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1637.74,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 359.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 53.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 325.34,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 383.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 51.92,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 2216.12,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 23.81,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.64,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 2084.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 603.9,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 35.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 360.8,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 276.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 103.54,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1887.24,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 89.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.08,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1687.93,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 401.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 45.65,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 367.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 475.27,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 105.56,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5480.73,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 104.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5344.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 771.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 49.64,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 581.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 883.14,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 23.53,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5642.14,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 70.97,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 3.55,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5551.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 802.26,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 46.44,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 602.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 809.82,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 16.14,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6267.5,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 123.74,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 9.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6022.77,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 728.13,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1455.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1751.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1232.79,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 111.28,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6286.01,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 143.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 25.78,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5876.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1412.11,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1762.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1900,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1926.9,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 239.98,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7157.95,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 135.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 18.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6954.25,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1112.94,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1767.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 516.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1151.94,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 49.12,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7158.47,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 136.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 12.75,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6963.38,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1340.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1763.73,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1960.04,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1403.92,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 45.58,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6147.08,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 59.93,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 3.99,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6059.82,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 803.76,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 32.2,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 666.2,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1080.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 23.21,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5596.1,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 131.74,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 8.13,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5439.48,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 825.67,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 608.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 697.59,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1007.64,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 16.56,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6476.25,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 113.07,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.07,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6334.99,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1239.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 560.22,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 727.44,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1019.81,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 22.98,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5819.89,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 126.98,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.68,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5666.34,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1264.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 592.97,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 587.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1438.28,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 18.68,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5325.85,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 73.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.79,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5196.56,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1073.05,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 481.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 469.16,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 794.98,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 48.06,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 4731.05,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 111.1,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 3.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 4603.53,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 869.85,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 406.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 575.54,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 793.85,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 12.86,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5649.49,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 183.56,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.18,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5438.29,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 2163.73,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1814.57,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 484.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1117.48,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 22.31,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5986.9,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 109.77,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 11.84,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5840.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 892.73,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 64.96,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 626.69,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 860.82,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 24.44,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6175.15,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 110.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 13.74,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6028.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 840.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 61.96,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 600.9,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 977.45,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 23.13,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6837.71,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 167.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 19.91,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6124.53,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 2244.86,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1798.69,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1757.04,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1378.64,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 526.02,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6865.1,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 195.2,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 481.93,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5866.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 831.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1339.13,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 773.81,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1654.26,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 321.25,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 7044.24,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 176.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6827.95,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1081.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1814.91,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1606.26,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1224.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 33.66,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6246.45,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 87.8,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 2.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 6133.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 942.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 35.26,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 685.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1008.59,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 23.08,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5703.12,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 124.08,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 62.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5500.76,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 873.15,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 360.94,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 467.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 981.98,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 15.84,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 6046.98,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 140.93,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.78,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5884.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 908.14,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 686.11,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 504.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1064.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 14.24,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5271.61,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 101.87,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 8.76,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5144.83,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 685.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1220.91,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 590.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 905.83,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 16.02,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5322.05,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 129.04,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 82.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5017.47,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1019.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 1118.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 1331.67,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1022.28,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 93.25,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 5397.47,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 113.16,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 64.93,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 5206.18,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 1408.21,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 963.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 897.52,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 1171.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.03,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 2056.72,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 39.9,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 6.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1987.99,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 378.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 52.31,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 304.16,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 422.25,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 22.5,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1827.89,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 77.14,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.44,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1730.63,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 446.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 35.64,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 283.97,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 493.65,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 12.54,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1731.84,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 41.3,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1670.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 405.87,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 56.94,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 345.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 405.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.96,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1607.23,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 30.1,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1556.27,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 308.59,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 30.85,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 270.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 308.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.14,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1607.93,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 40.25,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 7.62,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1546.44,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 313.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 40.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 191.91,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 279.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.48,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1612.19,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 33.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.3,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1561.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 198.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 38.41,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 254.73,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 285.75,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 12.83,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 2005.29,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 125.77,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.83,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1864.67,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 479.09,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 44.65,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 413.83,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 506.73,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 9.85,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 2300.09,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 34.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.15,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 2239.4,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 784.95,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 39.76,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 606.92,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 820.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 20.53,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1656.61,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 61.5,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.82,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1578.4,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 340.2,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 38.74,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 293.42,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 348.96,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 11.74,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1556.19,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 26.16,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1511.22,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 270.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 44.47,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 141.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 242.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.23,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1506.61,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 21.7,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 2.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1469.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 278.56,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 28.12,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 182.08,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 279.2,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.4,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1558.03,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 25.25,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 3.93,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1514.4,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 247.29,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 37.29,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 206.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 284.17,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 14.35,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1585.17,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 37.32,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1529.89,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 307.24,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 53.38,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 172.82,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 275.84,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 12.57,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1549.95,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 26.81,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.62,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1503.06,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 270.07,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 37.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 204.15,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 258.36,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 14.35,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1617.99,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 38.28,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 3.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1561.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 309.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 46.25,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 175.11,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 290.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 14.87,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1510.18,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 24.02,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.36,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1469,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 279.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 38.99,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 228.3,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 272.96,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 12.7,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1681.05,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 38.69,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1624.01,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 320.95,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 46.71,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 258.93,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 357.6,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 12.83,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1531.16,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 22.33,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 4.91,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1490.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 305.01,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 27.39,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 230.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 320.61,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.76,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1658.8,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 49.36,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1590.07,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 257.69,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 51.59,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 309.14,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 359.34,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 14.03,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1560.07,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 34.23,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.92,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1506.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 313.92,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 43.72,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 265.36,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 303.88,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.19,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1593.23,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 40.54,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.55,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1533.96,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 291.76,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 48.1,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 272.46,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 325.81,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 12.94,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1571.13,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 37.6,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.37,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1514.58,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 323.34,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 41.78,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 276.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 316.35,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.46,
+          "status": "resolved"
+        }
+      ]
+    },
+    {
+      "event": "inbox.page.server_timing.v1",
+      "surface": "inbox",
+      "totalMs": 1709.65,
+      "outcome": "returned",
+      "spans": [
+        {
+          "stage": "auth",
+          "durationMs": 36.66,
+          "status": "resolved"
+        },
+        {
+          "stage": "canonicalization",
+          "durationMs": 5.04,
+          "status": "resolved"
+        },
+        {
+          "stage": "list",
+          "durationMs": 1654.26,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue",
+          "durationMs": 369.44,
+          "status": "resolved"
+        },
+        {
+          "stage": "detail",
+          "durationMs": 45.19,
+          "status": "resolved"
+        },
+        {
+          "stage": "unknown",
+          "durationMs": 321.03,
+          "status": "resolved"
+        },
+        {
+          "stage": "queue_stats",
+          "durationMs": 383.48,
+          "status": "resolved"
+        },
+        {
+          "stage": "mark_read",
+          "durationMs": 13.55,
+          "status": "resolved"
+        }
+      ]
+    }
+  ],
+  "note": "Includes earlier setup and six-click run; expanded40click run follows those. No direct per-click correlation recorded."
+}
