@@ -1,10 +1,11 @@
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as React from "react"
 
 const mocks = vi.hoisted(() => ({
   routerRefresh: vi.fn(),
+  submitMyLeadCommand: vi.fn(),
   loadMyLeads: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
 }))
@@ -26,7 +27,7 @@ vi.mock("./actions", () => ({
   loadMyLeadsStage: vi.fn(),
   loadMyLeadDetail: vi.fn(),
   loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
-  submitMyLeadCommand: vi.fn(),
+  submitMyLeadCommand: mocks.submitMyLeadCommand,
   changeAcquisitionDesignation: vi.fn(),
   changeAcquisitionSettings: vi.fn(),
 }))
@@ -59,6 +60,7 @@ vi.mock("./_components/queue", () => ({
       <section aria-label="Mock My Leads queue">
         <span data-testid="attempt-count">{tiles.attempts}</span>
         <button onClick={() => row && onStageAction("log-attempt", row)}>Log attempt</button>
+        <button onClick={() => row && onStageAction("log-offer", row)}>Log offer</button>
         <span data-testid="queue-address">{row?.address}</span>
         <input aria-label="Search My Leads" value={search} onChange={(event) => onSearchChange(event.target.value)} />
         {canSelectRep && (
@@ -78,9 +80,7 @@ vi.mock("./_components/queue", () => ({
 vi.mock("./_components/readiness-dialog", () => ({
   AcquisitionReadinessDialog: () => null,
 }))
-vi.mock("./_components/offer-dialog", () => ({
-  AcquisitionOfferDialog: () => null,
-}))
+
 vi.mock("./_components/lifecycle-dialog", () => ({
   AcquisitionLifecycleDialog: () => null,
 }))
@@ -186,6 +186,7 @@ function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis) {
 describe("MyLeadsClient", () => {
   beforeEach(() => {
     mocks.loadMyLeads.mockReset()
+    mocks.submitMyLeadCommand.mockReset()
     mocks.loadMyLeadCallReferences.mockReset()
   })
 
@@ -358,3 +359,43 @@ describe("MyLeadsClient", () => {
     expect(screen.queryByTestId("queue-address")).not.toBeInTheDocument()
   })
 })
+
+
+it.each(["log-offer", "log-attempt"])("retains a new %s draft when an earlier save finishes refreshing", async (nextAction) => {
+  const user = userEvent.setup();
+  const initial = snapshot("106 Fixture Lane");
+  let release!: (value: unknown) => void;
+  mocks.loadMyLeads.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+  mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:initial,kpis});
+  mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});
+  mocks.submitMyLeadCommand.mockResolvedValue({ok:true});
+  renderClient(initial);
+  await user.click(screen.getByRole("button",{name:"Log attempt"}));
+  await user.selectOptions(screen.getByLabelText("External outcome"),"reached");
+  fireEvent.change(screen.getByLabelText("When did the outreach occur?"),{target:{value:"2026-09-11T09:00"}});
+  await user.click(screen.getByRole("button",{name:"Save attempt"}));
+  await waitFor(()=>expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(mocks.loadMyLeads).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole("button",{name:nextAction==="log-offer"?"Log offer":"Log attempt"}));
+  if(nextAction==="log-offer"){
+    await user.type(screen.getByLabelText("Offer amount"),"125000.50");
+    await user.selectOptions(screen.getByLabelText("Offer method"),"verbal");
+    fireEvent.change(screen.getByLabelText("Offer sent"),{target:{value:"2026-09-11T10:00"}});
+    fireEvent.change(screen.getByLabelText("Required follow-up"),{target:{value:"2026-09-12T10:00"}});
+    await user.click(screen.getByRole("radio",{name:"No motivation provided"}));
+  }else{
+    await user.selectOptions(screen.getByLabelText("External outcome"),"no_answer");
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"),{target:{value:"2026-09-11T11:00"}});
+    await user.type(screen.getByLabelText("Note (optional)"),"Second opening draft");
+  }
+  await act(async()=>{release({ok:true,snapshot:initial,kpis});});
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
+  if(nextAction==="log-offer")expect(screen.getByLabelText("Offer amount")).toHaveValue("125000.50");
+  else expect(screen.getByLabelText("Note (optional)")).toHaveValue("Second opening draft");
+  await user.click(screen.getByRole("button",{name:nextAction==="log-offer"?"Save offer":"Save attempt"}));
+  await waitFor(()=>expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
+  expect(mocks.submitMyLeadCommand.mock.calls[1][0]).toBe(nextAction);
+  expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({propertyId:"property-1",expectedEpisodeId:"episode-1",...(nextAction==="log-offer"?{amountCents:12500050}:{note:"Second opening draft",outcome:"no_answer"})});
+  expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).not.toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
+});

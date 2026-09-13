@@ -109,13 +109,15 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     const input=JSON.parse(JSON.stringify({...payload,propertyId:dialog.row.propertyId,expectedEpisodeId:dialog.row.assignmentEpisodeId,
       expectedQueueVersion:dialog.row.queueVersion,expectedSharedStatus:dialog.row.sharedStatus,idempotencyKey:submission.current.key})) as Record<string,Json>;
     const result=await submitMyLeadCommand(dialog.action as Parameters<typeof submitMyLeadCommand>[0],input);
-    if(result.ok){setDialog(null);setDetailRevision(revision=>revision+1);await refresh();router.refresh();}
+    if(result.ok){setDialog(current=>current===dialog?null:current);setDetailRevision(revision=>revision+1);await refresh();router.refresh();}
     return result;
   },[dialog,refresh,router]);
   const pages=snapshot?stagePages(snapshot):null;
   if(pages)for(const stage of loadingStages)pages[stage].isLoadingMore=true;
   const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;
-  const common=dialog?{open:true,propertyId:dialog.row.propertyId,propertyLabel:dialog.row.address,onOpenChange:(open:boolean)=>{if(!open)setDialog(null);}}:null;
+  // Completion callbacks belong to one opening, even when the same lead is reopened.
+  // A previous form can finish after its post-save refresh and must not close a new form.
+  const common=dialog?{open:true,propertyId:dialog.row.propertyId,propertyLabel:dialog.row.address,onOpenChange:(open:boolean)=>{if(!open)setDialog(current=>current===dialog?null:current);}}:null;
   return <>
     {viewer.isOwner&&<details className="mb-4 rounded-lg border p-4"><summary className="cursor-pointer font-medium">Manage Acquisitions</summary>
       <div className="mt-3 space-y-3">{roster.members.filter(m=>m.active).map(m=><label key={m.id} className="flex items-center gap-2">
@@ -163,7 +165,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       recipientOptions={roster.settings.recipient?[roster.settings.recipient]:roster.settings.recipientId?roster.members.filter(m=>m.id===roster.settings.recipientId).map(m=>({id:m.id,label:m.label})):[]}
       initialRecipientUserId={roster.settings.recipient?.id??roster.settings.recipientId??''}/>}
     {dialog?.action==='schedule-next-step'&&<div className="fixed bottom-6 right-6 z-50 rounded-xl border bg-background p-5 shadow-lg"><p className="mb-3 font-medium">{dialog.row.address}</p>
-      <BookAppointmentPopover propertyId={dialog.row.propertyId} subjectLabel={dialog.row.address} currentUserId={member} onBooked={()=>{setDialog(null);setDetailRevision(revision=>revision+1);void refresh();}}/>
+      <BookAppointmentPopover propertyId={dialog.row.propertyId} subjectLabel={dialog.row.address} currentUserId={member} onBooked={()=>{setDialog(current=>current===dialog?null:current);setDetailRevision(revision=>revision+1);void refresh();}}/>
       <Button variant="ghost" onClick={()=>setDialog(null)}>Close</Button></div>}
   </>;
 }
