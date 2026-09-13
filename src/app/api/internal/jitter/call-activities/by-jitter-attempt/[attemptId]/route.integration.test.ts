@@ -1096,7 +1096,7 @@ describe("internal.jitter.call-activities writeback PUT", () => {
   });
 
   it("returns 422 when org_id mismatches the property", async () => {
-    const seeded = await seedDialerBatch(testClient);
+    const seeded = await seedDialerBatch(testClient, { org_id: TEST_ORG_B_ID });
     const attemptId = `attempt-${crypto.randomUUID()}`;
     const response = await PUT(
       jsonRequest(
@@ -1104,7 +1104,7 @@ describe("internal.jitter.call-activities writeback PUT", () => {
         "PUT",
         {
           ...writebackBody(seeded),
-          org_id: "00000000-0000-0000-0000-000000000ccc",
+          org_id: BMH_ORG_ID,
         },
         { "idempotency-key": "activity-org-mismatch" },
       ),

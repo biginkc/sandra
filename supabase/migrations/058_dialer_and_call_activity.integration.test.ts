@@ -143,6 +143,7 @@ async function insertActivity(orgId = BMH_ORG_ID): Promise<{
       contact_id: item.contactId,
       dialer_batch_item_id: item.id,
       jitter_attempt_id: crypto.randomUUID(),
+      jitter_session_id: "migration-058-test",
       provider: "jitter",
       outcome: "no_answer",
       updated_at: "2000-01-01T00:00:00.000Z",
@@ -211,6 +212,7 @@ describe("Migration 058 — dialer + call activity", () => {
       contact_id: item.contactId,
       dialer_batch_item_id: item.id,
       jitter_attempt_id: attemptId,
+      jitter_session_id: "migration-058-test",
       provider: "jitter",
     };
     const first = await (serviceClient as any)

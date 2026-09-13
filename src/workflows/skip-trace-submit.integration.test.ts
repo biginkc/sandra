@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -72,6 +72,7 @@ async function seedQueuedJob(
       title: "Submit safety test",
       input_params: {
         property_ids: propertyIds,
+        authorized_max_credits: propertyIds.length * 5,
         ...(priorEligibilityAudit
           ? { eligibility_exclusions: priorEligibilityAudit }
           : {}),
@@ -88,6 +89,10 @@ describe("skipTraceSubmitWorkflow DNC recheck (integration)", () => {
     await resetTenantTables(supabase);
     process.env.SKIP_TRACE_PROVIDER = "mock";
     MockSkipTraceProvider.reset();
+  });
+
+  afterAll(async () => {
+    await resetTenantTables(supabase);
   });
 
   afterEach(() => {
