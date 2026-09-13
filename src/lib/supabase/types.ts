@@ -785,6 +785,9 @@ export type Database = {
           disposition: string | null
           do_not_call_requested: boolean
           duration_seconds: number | null
+          provider_ended_at: string | null
+          talk_duration_seconds: number | null
+          recording_expected: boolean | null
           ended_at: string | null
           error_code: string | null
           error_message: string | null
@@ -817,6 +820,9 @@ export type Database = {
           disposition?: string | null
           do_not_call_requested?: boolean
           duration_seconds?: number | null
+          provider_ended_at?: string | null
+          talk_duration_seconds?: number | null
+          recording_expected?: boolean | null
           ended_at?: string | null
           error_code?: string | null
           error_message?: string | null
@@ -849,6 +855,9 @@ export type Database = {
           disposition?: string | null
           do_not_call_requested?: boolean
           duration_seconds?: number | null
+          provider_ended_at?: string | null
+          talk_duration_seconds?: number | null
+          recording_expected?: boolean | null
           ended_at?: string | null
           error_code?: string | null
           error_message?: string | null

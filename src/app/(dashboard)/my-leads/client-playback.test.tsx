@@ -31,6 +31,7 @@ const roster: AcquisitionRoster = {
 }
 
 const kpis: AcquisitionKpis = {
+  contactWithoutFollowUp: 2, needsOffers: 3, appointmentsOverdue: 4, lastAttemptAt: null, asOf: "2026-09-11T14:00:00Z", missingRecordings: 1, recordingExpectationUnknown: 0, averageTalkSeconds: 180, talkTimeSamples: 1, talkTimeUnknown: 0, conversationsOverFiveMinutes: 0,
   attempts: 1,
   reached: 1,
   pendingOutcomes: 0,
@@ -114,7 +115,7 @@ it("keeps the real recording player mounted through polling and focus updates th
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(screen.getByTestId("sandra-recording-audio")).toBe(audio);
     expect(audio.currentTime).toBe(17);
-    expect(screen.getByTestId("kpi-attempts")).toHaveTextContent("8");
+    expect(screen.getByTestId("kpi-contacts")).toHaveTextContent("8");
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(screen.getByTestId("sandra-recording-audio")).toBe(audio);
     expect(audio.currentTime).toBe(17);

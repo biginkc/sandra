@@ -220,7 +220,7 @@ test.describe.serial("My Leads local acceptance", () => {
       const { context: repContext, page: repPage } = await newFixturePage(browser)
       try {
         await openMyLeads(repPage, "rep")
-        await expect(repPage.locator('[data-testid^="kpi-"]')).toHaveCount(6)
+        await expect(repPage.locator('[data-testid^="kpi-"]')).toHaveCount(9)
         expect(await repPage.locator('[data-testid^="kpi-"]').allTextContents()).toEqual(ownerKpis)
       } finally {
         await repContext.close()
@@ -275,34 +275,16 @@ test.describe.serial("My Leads local acceptance", () => {
     await expect(row.getByText("No future next step", { exact: true })).toBeVisible()
   })
 
-  test("Under Contract fixture 105 remains visible when the reporting period changes", async ({ page }) => {
+  test("today metrics remain independent of lead search and historical leads remain available", async ({ page }) => {
     await openMyLeads(page, "rep")
-    const row = rowFor(page, PROPERTY_105_ID)
-    await expect(row).toContainText(ADDRESS_105)
-    await expect(row.locator("xpath=ancestor::section[@data-testid='my-leads-section-under_contract']")).toBeVisible()
-
-    await page.locator("#my-leads-period").selectOption("month")
-    await expect(page.locator("#my-leads-period")).toHaveValue("month")
-    await expect(row.locator("xpath=ancestor::section[@data-testid='my-leads-section-under_contract']")).toBeVisible()
-  })
-
-  test("custom reporting dates remain editable until a complete range is entered", async ({ page }) => {
-    await openMyLeads(page, "rep")
-    await page.locator("#my-leads-period").selectOption("custom")
-    const from = page.getByLabel("KPI start date")
-    const to = page.getByLabel("KPI end date")
-    await expect(from).toBeVisible()
-    await expect(to).toBeVisible()
-    await from.fill("2026-09-01")
-    await expect(to).toBeVisible()
-    const refreshed = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === "/my-leads" && response.ok())
-    await to.fill("2026-09-30")
-    await refreshed
-    await expect(page.locator('[data-testid^="kpi-"]')).toHaveCount(6)
-    await expect(from).toHaveValue("2026-09-01")
-    await expect(page.getByTestId("my-leads-section-under_contract").getByTestId(`my-lead-row-${PROPERTY_105_ID}`)).toBeVisible()
-    await page.locator("#my-leads-period").selectOption("week")
-    await expect(page.locator('[data-testid^="kpi-"]')).toHaveCount(6)
+    await expect(rowFor(page, PROPERTY_105_ID)).toContainText(ADDRESS_105)
+    await expect(page.getByRole("combobox", { name: "KPI period" })).toHaveCount(0)
+    const stableMetrics = page.locator('[data-testid^="kpi-"]:not([data-testid="kpi-last-attempt"])')
+    const before = await stableMetrics.allTextContents()
+    await page.getByRole("textbox", { name: "Search My Leads" }).fill(ADDRESS_105)
+    await expect(rowFor(page, PROPERTY_105_ID)).toBeVisible()
+    await expect.poll(() => stableMetrics.allTextContents()).toEqual(before)
+    await expect(page.locator('[data-testid^="kpi-"]')).toHaveCount(9)
   })
 
   test("offer warnings reflect server deadlines and display red indicators", async ({ page }) => {

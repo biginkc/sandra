@@ -293,6 +293,43 @@ describe("Jitter attempt call-activity provider boundary", () => {
     expect(client.rpc).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { talk_duration_seconds: -1 },
+    { talk_duration_seconds: 1.5 },
+    { talk_duration_seconds: 2_147_483_648 },
+    { talk_duration_seconds: "90" },
+    { recording_expected: "true" },
+    { recording_expected: 1 },
+    { call_evidence_version: 2 },
+    { call_evidence_version: 1 },
+    { call_evidence_version: 1, ended_at: "infinity" },
+  ])("rejects invalid provider evidence before reserving a receipt: %j", async (evidence) => {
+    const client = serviceClient();
+    const payload = body("sandra_softphone", evidence);
+    authMock.mockResolvedValue({ ok: true, consumerId: "consumer-1", orgId: ORG_ID,
+      serviceClient: client as unknown as JitterAuthOk["serviceClient"], rawBody: JSON.stringify(payload) });
+    const response = await PUT(request(payload), context("sandra-attempt"));
+    expect(response.status).toBe(422);
+    expect(idempotencyMock).not.toHaveBeenCalled();
+    expect(client.rpc).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { talk_duration_seconds: 0, recording_expected: false },
+    { talk_duration_seconds: 301, recording_expected: true },
+    { call_evidence_version: 1, ended_at: "2026-09-13T12:05:01.000Z", talk_duration_seconds: 301, recording_expected: true },
+    { talk_duration_seconds: null, recording_expected: null },
+  ])("passes signed provider evidence unchanged to the atomic RPC: %j", async (evidence) => {
+    const client = serviceClient();
+    const payload = body("sandra_softphone", evidence);
+    authMock.mockResolvedValue({ ok: true, consumerId: "consumer-1", orgId: ORG_ID,
+      serviceClient: client as unknown as JitterAuthOk["serviceClient"], rawBody: JSON.stringify(payload) });
+    const response = await PUT(request(payload), context("sandra-attempt"));
+    expect(response.status).toBe(200);
+    expect(client.rpc).toHaveBeenCalledWith("jitter_writeback_call_activity",
+      expect.objectContaining({ p_body: expect.objectContaining(evidence) }));
+  });
+
   it("keeps the provider predicate exact rather than accepting arbitrary strings", () => {
     expect(isSupportedJitterWritebackProvider("jitter")).toBe(true);
     expect(isSupportedJitterWritebackProvider("sandra_softphone")).toBe(true);

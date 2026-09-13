@@ -3,7 +3,8 @@ const mocks=vi.hoisted(()=>({viewer:vi.fn(),rpc:vi.fn(),revalidate:vi.fn()}));
 vi.mock('next/cache',()=>({revalidatePath:mocks.revalidate}));
 vi.mock('@/lib/my-leads/queries',()=>({myLeadsViewer:mocks.viewer,getAcquisitionQueue:vi.fn(),getAcquisitionKpis:vi.fn(),getAcquisitionDetail:vi.fn()}));
 vi.mock('@/lib/my-leads/settings',()=>({setAcquisitionDesignation:vi.fn(),setAcquisitionSettings:vi.fn()}));
-import { submitMyLeadCommand } from './actions';
+import { getAcquisitionKpis, getAcquisitionQueue } from '@/lib/my-leads/queries';
+import { loadMyLeads, submitMyLeadCommand } from './actions';
 beforeEach(()=>{vi.resetAllMocks();mocks.viewer.mockResolvedValue({orgId:'actual-org',userId:'actor',client:{rpc:mocks.rpc}});mocks.rpc.mockResolvedValue({data:{ok:true},error:null});});
 describe('My Leads command integration',()=>{
   it('injects the authenticated organization, overriding client input',async()=>{
@@ -23,4 +24,10 @@ describe('My Leads command integration',()=>{
     expect(await submitMyLeadCommand('handoff',{propertyId:'lead'})).toEqual({ok:false,message:'This lead changed. Refresh before trying again.'});
     expect(mocks.revalidate).not.toHaveBeenCalled();
   });
+});
+
+it('keeps KPI scope at today for the rep regardless of search and obsolete period inputs',async()=>{
+  await loadMyLeads({memberId:'rep',search:'filtered lead',period:'custom',startDate:'2020-01-01',endDate:'2020-01-02'});
+  expect(getAcquisitionKpis).toHaveBeenCalledWith({memberId:'rep',period:'today'});
+  expect(getAcquisitionQueue).toHaveBeenCalledWith(expect.objectContaining({search:'filtered lead'}));
 });

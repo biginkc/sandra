@@ -6,6 +6,7 @@ import { ChevronDown, ChevronRight, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
+import { MyLeadsMetrics } from "./metrics"
 import { MyLeadQueueRow, STAGE_NEXT } from "./queue-row"
 import {
   MY_LEAD_STAGE_LABELS,
@@ -18,18 +19,8 @@ import {
   type MyLeadDetailState,
   type MyLeadQueueRow as MyLeadQueueRowDto,
   type MyLeadStage,
-  type MyLeadsPeriod,
   type MyLeadsQueueProps,
 } from "./types"
-
-const KPI_LABELS = [
-  ["attempts", "Attempts"],
-  ["contact-rate", "Contact rate"],
-  ["assign-to-first-call", "Assign → first call"],
-  ["appointments-kept", "Appointments kept"],
-  ["offers-sent", "Offers sent"],
-  ["stale-leads", "Stale leads"],
-] as const
 
 // Solid section colors for the collapsible header bar. Each shade is chosen to
 // clear WCAG AA (≥4.5:1) against the white bar text.
@@ -46,16 +37,12 @@ export function MyLeadsQueue({
   kpis,
   search,
   selectedRepId,
-  selectedPeriod,
-  selectedDateRange,
   repOptions,
   canSelectRep = false,
   onReviewingChange,
   selectedRepLabel,
   onSearchChange,
   onRepChange,
-  onPeriodChange,
-  onDateRangeChange,
   onLoadMore,
   onLoadDetail,
   onLoadDetailPage,
@@ -63,7 +50,7 @@ export function MyLeadsQueue({
   onLeadChanged,
   onStageAction,
 }: MyLeadsQueueProps) {
-  const scopeKey = JSON.stringify([search, selectedPeriod, selectedRepId, selectedDateRange?.startDate, selectedDateRange?.endDate])
+  const scopeKey = JSON.stringify([search, selectedRepId])
   const [expansionScope, setExpansionScope] = useState(scopeKey)
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
   const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<MyLeadStage>>(new Set())
@@ -257,68 +244,11 @@ export function MyLeadsQueue({
           </span>
 
           </>}
-          <label className="sr-only" htmlFor="my-leads-period">
-            KPI period
-          </label>
-          <span className="relative inline-flex max-w-full min-w-0">
-            <select
-              id="my-leads-period"
-              aria-label="KPI period"
-              value={selectedPeriod}
-              onChange={(event) => onPeriodChange(event.target.value as MyLeadsPeriod)}
-              className="h-9 max-w-full min-w-0 appearance-none rounded-[10px] border border-border bg-card py-2 pr-7 pl-3 text-[12.5px] font-semibold text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-            >
-              <option value="today">Today</option>
-              <option value="week">This week</option>
-              <option value="month">This month</option>
-              <option value="custom">Custom range</option>
-            </select>
-            <ChevronDown className="pointer-events-none absolute top-1/2 right-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-          </span>
 
-          {selectedPeriod === "custom" && (
-            <div className="grid w-full gap-2 sm:grid-cols-2">
-              <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                <span>From</span>
-                <Input
-                  aria-label="KPI start date"
-                  type="date"
-                  value={selectedDateRange?.startDate || ""}
-                  onChange={(event) =>
-                    onDateRangeChange({
-                      startDate: event.target.value,
-                      endDate: selectedDateRange?.endDate || "",
-                    })
-                  }
-                />
-              </label>
-              <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                <span>To</span>
-                <Input
-                  aria-label="KPI end date"
-                  type="date"
-                  value={selectedDateRange?.endDate || ""}
-                  onChange={(event) =>
-                    onDateRangeChange({
-                      startDate: selectedDateRange?.startDate || "",
-                      endDate: event.target.value,
-                    })
-                  }
-                />
-              </label>
-            </div>
-          )}
         </div>
       </header>
 
-      <section aria-label="Acquisitions KPIs" className="grid grid-cols-2 gap-px overflow-hidden rounded-[16px] border border-border bg-border lg:grid-cols-6">
-        {KPI_LABELS.map(([id, label]) => (
-          <div key={id} data-testid={`kpi-${id}`} className="min-w-0 space-y-1.5 bg-card px-4 py-3.5">
-            <p className="text-[10px] font-extrabold uppercase tracking-widest text-muted-foreground">{label}</p>
-            <p className={cn("break-words text-[23px] font-extrabold tracking-tight tabular-nums", id === "stale-leads" && kpis.staleLeads > 0 ? "text-amber-700 dark:text-amber-300" : "text-foreground")}>{kpiValue(id, kpis)}</p>
-          </div>
-        ))}
-      </section>
+      <MyLeadsMetrics kpis={kpis} />
 
       <div className="flex flex-wrap items-center justify-between gap-3" aria-label="Queue controls">
         <label className="relative block w-full sm:max-w-xs">
@@ -479,24 +409,4 @@ function appendDetailPage(
   const existingIds = new Set(current.rows.map((row) => row.id))
   const rows = [...current.rows, ...page.rows.filter((row) => !existingIds.has(row.id))]
   return { ...detail, [group]: { ...page, rows } } as MyLeadDetail
-}
-
-function kpiValue(id: (typeof KPI_LABELS)[number][0], kpis: MyLeadsQueueProps["kpis"]) {
-  switch (id) {
-    case "attempts":
-      return kpis.attempts
-    case "contact-rate": {
-      const label = kpis.contactRateLabel || "Unavailable"
-      const match = /^(.*\d)(%)$/.exec(label)
-      return match ? <>{match[1]}<small className="text-[13px] font-bold text-muted-foreground">{match[2]}</small></> : label
-    }
-    case "assign-to-first-call":
-      return kpis.assignToFirstCallLabel || "Unavailable"
-    case "appointments-kept":
-      return kpis.appointmentsKeptLabel || "Unavailable"
-    case "offers-sent":
-      return kpis.offersSent
-    case "stale-leads":
-      return kpis.staleLeads
-  }
 }

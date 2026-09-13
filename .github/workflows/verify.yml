@@ -27,6 +27,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Rehearse My Leads metrics and signed call evidence
+        run: node scripts/verify-my-leads-metrics.mjs && node scripts/rehearse-call-metrics-writeback.mjs
+
       - name: Run verify
         env:
           SUPABASE_LOCAL_DB_URL: postgresql://runner@localhost:5432/postgres

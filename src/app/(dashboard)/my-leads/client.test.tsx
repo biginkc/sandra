@@ -40,10 +40,6 @@ vi.mock("./_components/queue", () => ({
     selectedRepId,
     repOptions,
     onRepChange,
-    selectedPeriod,
-    selectedDateRange,
-    onPeriodChange,
-    onDateRangeChange,
     onStageAction,
     kpis: tiles,
   }: {
@@ -56,10 +52,6 @@ vi.mock("./_components/queue", () => ({
     selectedRepId: string
     repOptions: Array<{ id: string; label: string }>
     onRepChange: (value: string) => void
-    selectedPeriod: string
-    selectedDateRange: { startDate: string; endDate: string } | null
-    onPeriodChange: (period: string) => void
-    onDateRangeChange: (range: { startDate: string; endDate: string }) => void
   }) => {
     const [expanded, setExpanded] = React.useState(false)
     const row = stages.not_contacted?.rows[0]
@@ -73,40 +65,6 @@ vi.mock("./_components/queue", () => ({
           <select aria-label="Acquisitions member" value={selectedRepId} onChange={(event) => onRepChange(event.target.value)}>
             {repOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
           </select>
-        )}
-        <select
-          aria-label="KPI period"
-          value={selectedPeriod}
-          onChange={(event) => onPeriodChange(event.target.value)}
-        >
-          <option value="today">Today</option>
-          <option value="custom">Custom range</option>
-        </select>
-        {selectedPeriod === "custom" && (
-          <>
-            <input
-              aria-label="KPI start date"
-              type="date"
-              value={selectedDateRange?.startDate || ""}
-              onChange={(event) =>
-                onDateRangeChange({
-                  startDate: event.target.value,
-                  endDate: selectedDateRange?.endDate || "",
-                })
-              }
-            />
-            <input
-              aria-label="KPI end date"
-              type="date"
-              value={selectedDateRange?.endDate || ""}
-              onChange={(event) =>
-                onDateRangeChange({
-                  startDate: selectedDateRange?.startDate || "",
-                  endDate: event.target.value,
-                })
-              }
-            />
-          </>
         )}
         <button type="button" onClick={() => setExpanded(true)}>
           Expand details
@@ -152,6 +110,7 @@ const roster: AcquisitionRoster = {
 }
 
 const kpis: AcquisitionKpis = {
+  contactWithoutFollowUp: 2, needsOffers: 3, appointmentsOverdue: 4, lastAttemptAt: null, asOf: "2026-09-11T14:00:00Z", missingRecordings: 1, recordingExpectationUnknown: 0, averageTalkSeconds: 180, talkTimeSamples: 1, talkTimeUnknown: 0, conversationsOverFiveMinutes: 0,
   attempts: 1,
   reached: 1,
   pendingOutcomes: 0,
@@ -348,37 +307,6 @@ describe("MyLeadsClient", () => {
     expect(mocks.loadMyLeads).not.toHaveBeenCalled()
   })
 
-  it("keeps the queue and date controls mounted until a custom range is complete", async () => {
-    const user = userEvent.setup()
-    const initialSnapshot = snapshot("106 Fixture Lane")
-    mocks.loadMyLeads.mockResolvedValue({
-      ok: true as const,
-      snapshot: initialSnapshot,
-      kpis,
-    })
-    renderClient(initialSnapshot)
-
-    await user.selectOptions(screen.getByRole("combobox", { name: "KPI period" }), "custom")
-    expect(screen.getByTestId("queue-address")).toHaveTextContent("106 Fixture Lane")
-    expect(screen.getByLabelText("KPI start date")).toBeInTheDocument()
-    expect(mocks.loadMyLeads).not.toHaveBeenCalled()
-    window.dispatchEvent(new Event("focus"))
-    expect(mocks.loadMyLeads).not.toHaveBeenCalled()
-
-    await user.type(screen.getByLabelText("KPI start date"), "2026-09-01")
-    expect(mocks.loadMyLeads).not.toHaveBeenCalled()
-
-    await user.type(screen.getByLabelText("KPI end date"), "2026-09-11")
-    await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalledOnce())
-    expect(mocks.loadMyLeads).toHaveBeenCalledWith({
-      memberId: "rep-1",
-      search: "",
-      period: "custom",
-      startDate: "2026-09-01",
-      endDate: "2026-09-11",
-    })
-  })
-
   it("keeps the search control focused while its filtered queue refreshes", async () => {
     const user = userEvent.setup()
     const initialSnapshot = snapshot("106 Fixture Lane")
@@ -398,8 +326,6 @@ describe("MyLeadsClient", () => {
       memberId: "rep-1",
       search: "abc",
       period: "today",
-      startDate: undefined,
-      endDate: undefined,
     }))
   })
 
