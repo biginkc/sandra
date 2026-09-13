@@ -1,4 +1,5 @@
 import "server-only";
+import { InboxHttpError } from "./http-error";
 
 export type InboxSyncTarget = { kind: "known_conversation" | "unknown_sender"; id: string };
 export type InboxSession = { userId: string; sessionId: string; expiresAt: number };
@@ -6,7 +7,7 @@ export type InboxAccess = { sessionActive: boolean; activeMembershipCount: numbe
 export interface DurableInboxScope {
   id: string; orgId: string; userId: string; sessionId: string; accessEpoch: string;
   generation: string; expiresAt: number; targets: readonly InboxSyncTarget[];
-  handle: string | null;
+  handles: (string | null)[];
 }
 /** Implement with durable database state. No process-local fallback is permitted.
  * getAccess must revalidate current session revocation as well as membership.
@@ -22,7 +23,7 @@ export interface InboxSyncRepository {
   /** Atomically compare current handle AND scope/auth identity; scope must remain active.
    * Return false on conflict, expiration, replacement, revoked access or unavailable authority.
    */
-  bindHandle(scope: DurableInboxScope, expectedHandle: string | null, nextHandle: string, signal: AbortSignal): Promise<boolean>;
+  bindHandle(scope: DurableInboxScope, partitionIndex: number, expectedHandle: string | null, nextHandle: string, signal: AbortSignal): Promise<boolean>;
 }
 /** Canonical filter syntax is implemented/validated by the durable repository.
  * Unknown fields must fail; never interpolate filter values into SQL.
@@ -30,6 +31,8 @@ export interface InboxSyncRepository {
 export type InboxWorksetRequest = {
   orgId: string; filter: Readonly<Record<string, unknown>>;
   cursor: string | null; limit: number;
+  /** Optional old generation to replace atomically; must belong to this same org/user/session. */
+  replacesScopeId?: string;
 };
 export interface InboxWorksetRepository extends InboxSyncRepository {
   /** One consistent DB operation: reauthorize current session + exactly one global active
@@ -86,10 +89,10 @@ export function createInboxSyncGateway(options: InboxGatewayOptions) {
       const session=authenticated?{...authenticated}:null;
       if(!session||!uuid.test(session.userId)||!session.sessionId||!Number.isFinite(session.expiresAt)||session.expiresAt<=now())throw new Denied(401);
       const stored=await repository.getScope(scopeId,signal);guard();
-      const scope=stored ? {...stored,targets:Array.isArray(stored.targets)?stored.targets.map(target=>({...target})):stored.targets} : null;
+      const scope=stored ? {...stored,handles:Array.isArray(stored.handles)?[...stored.handles]:stored.handles,targets:Array.isArray(stored.targets)?stored.targets.map(target=>({...target})):stored.targets} : null;
       if(!scope||scope.id!==scopeId||!uuid.test(scope.orgId)||scope.userId!==session.userId||scope.sessionId!==session.sessionId)throw new Denied(403);
       if(!scope.generation||!scope.accessEpoch||!Number.isFinite(scope.expiresAt)||scope.expiresAt<=now())throw new Denied(410);
-      if(!validTargets(scope.targets))throw new Denied(503);
+      if(!validTargets(scope.targets) || !Array.isArray(scope.handles) || scope.handles.length !== Math.max(1,Math.ceil(scope.targets.length/100)) || scope.handles.some(handle=>handle!==null && (typeof handle!=="string" || handle.length>256)))throw new Denied(503);
       // Copy repository-owned membership so an adapter cannot mutate the predicate during awaits.
       const targets=scope.targets.map(target=>({...target}));
       const authorize=async()=> {
@@ -105,22 +108,28 @@ export function createInboxSyncGateway(options: InboxGatewayOptions) {
       };
       const deadline=await authorize();
       clearTimeout(timer);timer=setTimeout(()=>leaseController.abort(),Math.max(0,deadline-now()));
-      const url=new URL(request.url), allowed=new Set(["offset","handle","live","cursor","log"]);
+      const url=new URL(request.url), allowed=new Set(["offset","handle","live","cursor","log","partition"]);
       for(const key of url.searchParams.keys())if(!allowed.has(key)||url.searchParams.getAll(key).length!==1)throw new Denied(400);
+      const partitionRaw=url.searchParams.get("partition")??"0";
+      if(!/^[0-4]$/.test(partitionRaw))throw new Denied(400);
+      const partition=Number(partitionRaw);
+      if(partition>=scope.handles.length)throw new Denied(400);
+      const partitionTargets=targets.slice(partition*100,(partition+1)*100);
+      const expectedHandle=scope.handles[partition];
       const offset=url.searchParams.get("offset")??"-1", handle=url.searchParams.get("handle");
       if(!/^(-1|\d+_(\d+|inf))$/.test(offset)||offset.length>64)throw new Denied(400);
-      if((handle&&handle!==scope.handle)||(offset!=="-1"&&!handle))throw new Denied(403);
+      if((handle&&handle!==expectedHandle)||(offset!=="-1"&&!handle))throw new Denied(403);
       if(url.searchParams.has("live")&&url.searchParams.get("live")!=="true")throw new Denied(400);
       if(url.searchParams.has("log")&&url.searchParams.get("log")!=="full")throw new Denied(400);
       if((url.searchParams.get("cursor")?.length??0)>256)throw new Denied(400);
       const upstream=new URL(electric);
-      for(const [key,value]of url.searchParams)upstream.searchParams.set(key,value);
+      for(const [key,value]of url.searchParams)if(key!=="partition")upstream.searchParams.set(key,value);
       upstream.searchParams.set("offset",offset);upstream.searchParams.set("table",options.projectionTable);
       upstream.searchParams.set("columns",columns);upstream.searchParams.set("replica","default");
       const predicates:string[]=[];let parameter=2;
       upstream.searchParams.set("params[1]",scope.orgId);
       for(const kind of ["known_conversation","unknown_sender"] as const) {
-        const members=targets.filter(target=>target.kind===kind);if(!members.length)continue;
+        const members=partitionTargets.filter(target=>target.kind===kind);if(!members.length)continue;
         const positions=members.map(target=>{const index=parameter++;upstream.searchParams.set(`params[${index}]`,target.id);return `$${index}`;});
         predicates.push(`(target_kind = '${kind}' AND target_id IN (${positions.join(",")}))`);
       }
@@ -133,7 +142,7 @@ export function createInboxSyncGateway(options: InboxGatewayOptions) {
       await authorize();if(now()>=deadline)throw new Denied(403);
       const next=upstreamResponse.headers.get("electric-handle");
       if(next) {
-        if(next.length>256||!await repository.bindHandle(scope,scope.handle,next,signal))throw new Denied(409);
+        if(next.length>256||!await repository.bindHandle(scope,partition,expectedHandle,next,signal))throw new Denied(409);
         await authorize();if(now()>=deadline)throw new Denied(403);
       }
       // Never forward arbitrary upstream headers or diagnostic/error bodies.
@@ -143,7 +152,7 @@ export function createInboxSyncGateway(options: InboxGatewayOptions) {
       const body=new Uint8Array(bytes);let position=0;for(const chunk of chunks){body.set(chunk,position);position+=chunk.length;}
       guard();if(now()>=deadline)throw new Denied(403);
       return new Response(upstreamResponse.status===204?null:body,{status:upstreamResponse.status,headers});
-    } catch(error) {leaseController.abort();void reader?.cancel().catch(()=>{});return Response.json({error:"Inbox synchronization unavailable"},{status:error instanceof Denied?error.status:503,headers:noStore});}
+    } catch(error) {leaseController.abort();void reader?.cancel().catch(()=>{});return Response.json({error:"Inbox synchronization unavailable"},{status:error instanceof Denied || error instanceof InboxHttpError ? error.status : 503,headers:noStore});}
     finally {clearTimeout(timer);reader?.releaseLock();}
   };
 }
