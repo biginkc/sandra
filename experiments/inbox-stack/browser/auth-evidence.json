@@ -1,0 +1,29 @@
+{
+  "at": "2026-09-13T11:37:16.785Z",
+  "passed": 4,
+  "checks": [
+    {
+      "name": "late old-shape403 after real renewal leaves replacement live, selected and actionable",
+      "passed": true
+    },
+    {
+      "name": "renewal POST401 removes visible rows, selection, inspection and populated receipt UI",
+      "passed": true
+    },
+    {
+      "name": "renewal POST403 removes visible rows, selection, inspection and populated receipt UI",
+      "passed": true
+    },
+    {
+      "name": "no uncaught browser exceptions",
+      "passed": true
+    }
+  ],
+  "renewalTimerMs": 45000,
+  "limits": [
+    "Synthetic local browser only; no membership or canonical database mutations",
+    "Receipt content is intercepted fixture data; no internal cache introspection",
+    "Late403 is returned by injected fetch after replacement; SDK may discard it on cleanup before onError, so this proves observable resilience, not stale callback branch execution",
+    "No production auth or load certification"
+  ]
+}

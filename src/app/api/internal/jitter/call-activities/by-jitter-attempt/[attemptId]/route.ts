@@ -23,6 +23,9 @@ type WritebackBody = {
   started_at?: string | null;
   ended_at?: string | null;
   duration_seconds?: number | null;
+  talk_duration_seconds?: number | null;
+  recording_expected?: boolean | null;
+  call_evidence_version?: 1;
   outcome?: string | null;
   disposition?: string | null;
   callback_at?: string | null;
@@ -312,6 +315,37 @@ function validatePayloadSyntax(body: WritebackBody): NextResponse | null {
       body.duration_seconds > POSTGRES_INT4_MAX)
   ) {
     return unprocessable("invalid_duration", "duration_seconds");
+  }
+
+  if (body.call_evidence_version !== undefined && body.call_evidence_version !== 1) {
+    return unprocessable("invalid_evidence_version", "call_evidence_version");
+  }
+  if (body.call_evidence_version === 1 && !validTimestamp(body.ended_at)) {
+    return unprocessable("invalid_timestamp", "ended_at");
+  }
+
+  if (body.call_evidence_version === 1 &&
+    (typeof body.provider_call_id !== "string" || body.provider_call_id.trim() === "")) {
+    return unprocessable("missing_required_field", "provider_call_id");
+  }
+
+  if (
+    body.talk_duration_seconds !== undefined &&
+    body.talk_duration_seconds !== null &&
+    (typeof body.talk_duration_seconds !== "number" ||
+      !Number.isSafeInteger(body.talk_duration_seconds) ||
+      body.talk_duration_seconds < 0 ||
+      body.talk_duration_seconds > POSTGRES_INT4_MAX)
+  ) {
+    return unprocessable("invalid_duration", "talk_duration_seconds");
+  }
+
+  if (
+    body.recording_expected !== undefined &&
+    body.recording_expected !== null &&
+    typeof body.recording_expected !== "boolean"
+  ) {
+    return unprocessable("invalid_boolean", "recording_expected");
   }
 
   if (

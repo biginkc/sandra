@@ -1,0 +1,5 @@
+{
+  "direct": "SELECT id,created_at::text AS created_at_raw,body,inbox_inbound_revision::text AS revision FROM public.messages WHERE org_id=$1 AND conversation_id=$2 AND channel='sms' ORDER BY created_at DESC,id DESC LIMIT 50",
+  "keys_materialized": "WITH page AS MATERIALIZED (SELECT id,created_at FROM public.messages WHERE org_id=$1 AND conversation_id=$2 AND channel='sms' ORDER BY created_at DESC,id DESC LIMIT 50) SELECT m.id,m.created_at::text AS created_at_raw,m.body,m.inbox_inbound_revision::text AS revision FROM page p JOIN public.messages m ON m.id=p.id AND m.org_id=$1 AND m.conversation_id=$2 AND m.channel='sms' ORDER BY p.created_at DESC,p.id DESC",
+  "keys_lateral": "WITH page AS MATERIALIZED (SELECT id,created_at FROM public.messages WHERE org_id=$1 AND conversation_id=$2 AND channel='sms' ORDER BY created_at DESC,id DESC LIMIT 50) SELECT m.id,m.created_at_raw,m.body,m.revision FROM page p CROSS JOIN LATERAL (SELECT id,created_at::text AS created_at_raw,body,inbox_inbound_revision::text AS revision FROM public.messages WHERE id=p.id AND org_id=$1 AND conversation_id=$2 AND channel='sms' LIMIT 1) m ORDER BY p.created_at DESC,p.id DESC"
+}

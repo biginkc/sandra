@@ -77,30 +77,26 @@ describe("coach realtime authorization CI security contract", () => {
     expect(withoutSqlComments(ciTestProjectSetup)).toContain("coach-realtime-authorization");
   });
 
-  it("keeps Playwright service-role access on the dedicated CI project", () => {
-    // The identity-generation/preflight/collision-guard surface that used
-    // to live inline in this workflow (E2E_DEDICATED_CI, the node preflight
-    // script, E2E_PREFLIGHT_FAILED labels) moved to
-    // scripts/e2e-identity-lifecycle.ts + src/lib/supabase/e2e-identity-guard.ts
-    // when PR #455 landed on main — see
-    // src/lib/testing/e2e-identity-contract.test.ts for that surface's own
-    // contract test. What's left here is just: the job still runs against
-    // the dedicated CI project's own secrets, never the shared test project's.
-    expect(e2eWorkflow).toMatch(/playwright:[\s\S]*environment:\s*e2e-ci/);
-    expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_URL");
-    expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_SERVICE_ROLE_KEY");
-    expect(e2eWorkflow).not.toContain("secrets.TEST_SUPABASE_SERVICE_ROLE_KEY");
-    expect(e2eWorkflow).toContain("E2E_CI_SUPABASE_PROJECT_REF");
+  it("keeps Playwright on a disposable database without hosted credentials", () => {
+    const provisioning = readFileSync(path.join(repoRoot, "scripts/provision-e2e-local-database.mjs"), "utf8");
+    expect(e2eWorkflow).toContain("node scripts/provision-e2e-local-database.mjs");
+    expect(withoutComments(e2eWorkflow)).not.toMatch(/environment:\s*e2e-ci|secrets\./);
+    expect(provisioning).toContain("Unexpected disposable stack endpoints");
+    expect(provisioning).toContain("publish('TEST_SUPABASE_SERVICE_ROLE_KEY', status.SERVICE_ROLE_KEY)");
+    expect(provisioning.indexOf("Unexpected disposable stack endpoints")).toBeLessThan(provisioning.indexOf("const admin = createClient"));
   });
 
-  it("holds a DB-level advisory lock for the whole E2E suite run", () => {
-    // GitHub concurrency groups only serialize runs whose *own* checked-out
-    // e2e.yml carries the same group string — a branch that hasn't rebased
-    // onto a group-string change can run in parallel against the same
-    // dedicated CI project. The DB advisory lock is immune to that drift.
-    expect(e2eWorkflow).toContain("secrets.E2E_CI_SUPABASE_DB_URL");
+  it("retains the DB advisory lock with a validated disposable connection", () => {
+    const setup = readFileSync(path.join(repoRoot, "e2e/global-setup.ts"), "utf8");
+    const provisioning = readFileSync(path.join(repoRoot, "scripts/provision-e2e-local-database.mjs"), "utf8");
+    expect(provisioning).toContain("publish('E2E_CI_SUPABASE_DB_URL', status.DB_URL)");
+    expect(setup).toContain("assertDisposableE2EDatabaseEnvironment");
+    expect(setup).toContain("pg_advisory_xact_lock");
+    expect(setup).toContain('client.query("BEGIN")');
+    expect(setup).toContain('client.query("ROLLBACK")');
+    expect(setup).toContain('client.query("COMMIT")');
     expect(withoutComments(e2eWorkflow)).not.toMatch(/echo[^\n]*E2E_CI_SUPABASE_DB_URL/i);
-    expect(withoutComments(e2eWorkflow)).not.toMatch(/console\.log\([^)]*(dbUrl|DB_URL)/i);
+    expect(provisioning).not.toMatch(/console\.log\([^)]*(dbUrl|DB_URL)/i);
   });
   it("labels Coach preflight failures without exposing identity values", () => {
     expect(coachWorkflow).toContain("COACH_PREFLIGHT_FAILED: owner_missing");
@@ -179,18 +175,14 @@ describe("coach realtime authorization CI security contract", () => {
     expect(canaryJob).toContain("github.event.pull_request.head.repo.full_name == github.repository");
   });
 
-  it("serializes with the migration and E2E workflows against the shared test project", () => {
-    expect(coachWorkflow).toContain("group: e2e-shared-test-project");
-    expect(migrationWorkflow).toContain("group: e2e-shared-test-project");
-    // e2e.yml's group stays the static legacy string too — a per-project-ref
-    // group was tried and reverted (env-level `vars` resolves empty at
-    // concurrency-evaluation time, and a diverged group name is exactly
-    // what let old and new branches run in parallel against each other).
-    // See the concurrency block's own comment in e2e.yml.
-    expect(e2eWorkflow).toContain("group: e2e-shared-test-project");
-    for (const workflow of [coachWorkflow, migrationWorkflow, e2eWorkflow]) {
+  it("keeps hosted Coach and migrations serialized while E2E is isolated", () => {
+    for (const workflow of [coachWorkflow, migrationWorkflow]) {
+      expect(workflow).toContain("group: e2e-shared-test-project");
       expect(workflow).toContain("queue: max");
     }
+    expect(withoutComments(e2eWorkflow)).not.toContain("group: e2e-shared-test-project");
+    expect(e2eWorkflow).toContain("Provision disposable E2E database");
+    expect(e2eWorkflow).toContain("Destroy disposable E2E database");
   });
 
   it("cleanup runs unconditionally in the same job — no separate approval gate, and no schema DDL left to protect", () => {

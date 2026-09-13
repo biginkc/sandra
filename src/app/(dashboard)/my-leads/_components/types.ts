@@ -83,15 +83,10 @@ export type MyLeadStagePage = {
   isLoadingMore?: boolean
 }
 
-/** Labels are preformatted by the query adapter so this component does no date math. */
-export type MyLeadsKpis = {
-  attempts: number
-  contactRateLabel: string | null
-  assignToFirstCallLabel: string | null
-  appointmentsKeptLabel: string | null
-  offersSent: number
-  staleLeads: number
-}
+export type MyLeadsKpis = Pick<import("@/lib/my-leads/queries").AcquisitionKpis,
+  "attempts" | "reached" | "offersSent" | "contactWithoutFollowUp" | "needsOffers" | "appointmentsOverdue" |
+  "lastAttemptAt" | "asOf" | "missingRecordings" | "recordingExpectationUnknown" | "averageTalkSeconds" |
+  "talkTimeSamples" | "talkTimeUnknown" | "conversationsOverFiveMinutes">
 
 export type MyLeadRepOption = {
   id: string
@@ -130,6 +125,7 @@ export type MyLeadAttempt = {
   occurredLabel: string
   sourceLabel?: string
   recordingUrl?: string | null
+  callActivityId?: string | null
 }
 
 export type MyLeadAppointment = {
@@ -167,6 +163,16 @@ export type MyLeadHistoryEvent = {
   createdLabel: string
 }
 
+export type MyLeadSmsMessage = {
+  id: string
+  body: string
+  direction: "inbound" | "outbound"
+  createdAt: string
+  createdLabel: string
+  deliveryStatus: string
+  attachmentCount: number
+}
+
 export type MyLeadDetailGroup<T> = {
   rows: readonly T[]
   hasMore: boolean
@@ -174,6 +180,8 @@ export type MyLeadDetailGroup<T> = {
 }
 
 export type MyLeadDetail = {
+  /** Newest first, including earlier pages; the strip reverses the complete group. */
+  messages: MyLeadDetailGroup<MyLeadSmsMessage>
   notes: MyLeadDetailGroup<MyLeadNote>
   attempts: MyLeadDetailGroup<MyLeadAttempt>
   appointments: MyLeadDetailGroup<MyLeadAppointment>
@@ -193,6 +201,7 @@ export type MyLeadDetailState =
 export type MyLeadDetailGroupName = keyof MyLeadDetail
 
 export type MyLeadDetailPageResult =
+  | { ok: true; group: "messages"; page: MyLeadDetailGroup<MyLeadSmsMessage> }
   | { ok: true; group: "notes"; page: MyLeadDetailGroup<MyLeadNote> }
   | { ok: true; group: "attempts"; page: MyLeadDetailGroup<MyLeadAttempt> }
   | { ok: true; group: "appointments"; page: MyLeadDetailGroup<MyLeadAppointment> }
@@ -210,21 +219,19 @@ export type MyLeadsQueueProps = {
   kpis: MyLeadsKpis
   search: string
   selectedRepId: string
-  selectedPeriod: MyLeadsPeriod
-  selectedDateRange: MyLeadDateRange | null
   repOptions: readonly MyLeadRepOption[]
   selectedRepLabel?: string | null
   canSelectRep?: boolean
+  /** Background queue replacement must not remove open detail/media controls. */
+  onReviewingChange?: (active: boolean) => void
   onSearchChange: (value: string) => void
   onRepChange: (repId: string) => void
-  onPeriodChange: (period: MyLeadsPeriod) => void
-  onDateRangeChange: (range: MyLeadDateRange) => void
   onLoadMore: (stage: MyLeadStage) => void | Promise<void>
   onLoadDetail: (propertyId: string) => Promise<MyLeadDetailResult>
   onLoadDetailPage?: (
     propertyId: string,
     group: MyLeadDetailGroupName,
-    cursor: string
+    cursor: string | null
   ) => Promise<MyLeadDetailPageResult>
   /** Increments after a successful workflow mutation so open rows refetch detail. */
   detailRevision?: number
@@ -240,7 +247,7 @@ export type MyLeadDetailPanelProps = {
   onChanged?: (group: "notes" | "appointments") => void
   onLoadDetailPage?: (
     group: MyLeadDetailGroupName,
-    cursor: string
+    cursor: string | null
   ) => Promise<MyLeadDetailPageResult>
 }
 

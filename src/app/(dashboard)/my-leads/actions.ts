@@ -8,7 +8,7 @@ import type { QueueStage } from '@/lib/my-leads/types';
 
 export async function loadMyLeads(input:{memberId:string;search:string;period:'today'|'week'|'month'|'custom';startDate?:string;endDate?:string}) {
   try {
-    const [snapshot,kpis]=await Promise.all([getAcquisitionQueue(input),getAcquisitionKpis(input)]);
+    const [snapshot,kpis]=await Promise.all([getAcquisitionQueue(input),getAcquisitionKpis({memberId:input.memberId,period:'today'})]);
     return {ok:true as const,snapshot,kpis};
   } catch(error) {return {ok:false as const,message:error instanceof Error?error.message:'Could not load My Leads.'};}
 }
@@ -16,7 +16,7 @@ export async function loadMyLeadsStage(input:{memberId:string;search:string;stag
   try {return {ok:true as const,snapshot:await getAcquisitionQueue(input)};}
   catch(error){return {ok:false as const,message:error instanceof Error?error.message:'Could not load this section.'};}
 }
-export async function loadMyLeadDetail(input:{memberId:string;propertyId:string;group?:DetailGroup;cursor?:string}) {
+export async function loadMyLeadDetail(input:{memberId:string;propertyId:string;group?:DetailGroup;cursor?:string|null}) {
   try {return {ok:true as const,detail:await getAcquisitionDetail(input)};}
   catch(error){return {ok:false as const,message:error instanceof Error?error.message:'Could not load lead details.'};}
 }

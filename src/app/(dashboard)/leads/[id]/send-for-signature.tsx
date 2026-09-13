@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { callAction } from "@/lib/errors/call-action";
@@ -20,9 +21,10 @@ import {
   cancelPendingDialogClose,
   type DialogCloseEventDetails,
 } from "@/lib/esign/pending-dialog";
-import type {
-  EsignMergeFieldName,
-  TemplateOption,
+import {
+  getEsignFieldSchema,
+  type EsignMergeFieldName,
+  type TemplateOption,
 } from "@/lib/esign/contracts";
 
 import {
@@ -41,9 +43,18 @@ const MERGE_FIELDS: ReadonlyArray<{
   label: string;
   type: "text" | "date";
   placeholder?: string;
+  multiline?: boolean;
 }> = [
   { name: "seller_name", label: "Seller name", type: "text" },
   { name: "property_address", label: "Property address", type: "text" },
+  { name: "buyer_name", label: "Buyer name / entity", type: "text" },
+  { name: "property_city", label: "Property city", type: "text" },
+  { name: "property_state", label: "Property state", type: "text" },
+  { name: "property_zip", label: "Property ZIP", type: "text" },
+  { name: "legal_description", label: "Legal description", type: "text", multiline: true },
+  { name: "earnest_money_holder", label: "Earnest money holder", type: "text" },
+  { name: "cash_balance", label: "Cash balance", type: "text", placeholder: "$0.00" },
+  { name: "additional_terms", label: "Additional terms (optional)", type: "text", multiline: true },
   {
     name: "offer_price",
     label: "Offer price",
@@ -189,8 +200,8 @@ export function SendForSignatureDialog({
 
       const next = result.data;
       setPreflight(next);
-      setMergeValues({ ...next.mergeDefaults });
       const firstTemplate = next.templates[0] ?? null;
+      setMergeValues(firstTemplate ? defaultsFor(firstTemplate, next) : null);
       setSelectedTemplateId(firstTemplate?.id ?? "");
       setSigners(firstTemplate ? assignmentsFor(firstTemplate, next) : []);
       setSendIntentId(createSendIntentId());
@@ -255,9 +266,10 @@ export function SendForSignatureDialog({
     (preflight && selectedTemplate && !sellerSigner?.emailAddress.trim()
       ? "owner_email_missing"
       : null);
+  const mergeFields = selectedTemplate?.mergeFieldNames.map((name) => MERGE_FIELDS.find((field) => field.name === name)!).filter(Boolean) ?? [];
   const fieldsComplete =
     mergeValues !== null &&
-    MERGE_FIELDS.every(({ name }) => mergeValues[name].trim().length > 0);
+    mergeFields.every(({ name }) => name === "additional_terms" || (mergeValues[name]?.trim().length ?? 0) > 0);
   const signersComplete =
     selectedTemplate !== null &&
     signers.length === selectedTemplate.signerRoles.length &&
@@ -282,6 +294,8 @@ export function SendForSignatureDialog({
     );
     if (template && preflight) {
       setSigners(assignmentsFor(template, preflight));
+      setMergeValues(defaultsFor(template, preflight));
+      setSendIntentId(createSendIntentId());
     } else {
       setSigners([]);
     }
@@ -476,27 +490,35 @@ export function SendForSignatureDialog({
                 <legend className="px-1 text-sm font-semibold">
                   Contract values
                 </legend>
-                {MERGE_FIELDS.map((field) => (
+                {mergeFields.map((field) => (
                   <div
                     key={field.name}
                     className={
-                      field.name === "property_address" ? "sm:col-span-2" : ""
+                      field.name === "property_address" || field.multiline ? "sm:col-span-2" : ""
                     }
                   >
                     <Label htmlFor={`esign-merge-${field.name}`}>
-                      {field.label}
+                      {field.name === "property_address" && selectedTemplate?.mergeFieldNames.includes("property_city") ? "Property street address" : field.label}
                     </Label>
-                    <Input
-                      id={`esign-merge-${field.name}`}
-                      name={field.name}
-                      type={field.type}
-                      placeholder={field.placeholder}
-                      value={mergeValues[field.name]}
-                      onChange={(event) =>
-                        updateMergeValue(field.name, event.target.value)
-                      }
-                      className="mt-1.5"
-                    />
+                    {field.multiline ? (
+                      <Textarea
+                        id={`esign-merge-${field.name}`}
+                        name={field.name}
+                        value={mergeValues[field.name] ?? ""}
+                        onChange={(event) => updateMergeValue(field.name, event.target.value)}
+                        className="mt-1.5"
+                      />
+                    ) : (
+                      <Input
+                        id={`esign-merge-${field.name}`}
+                        name={field.name}
+                        type={field.type}
+                        placeholder={field.placeholder}
+                        value={mergeValues[field.name] ?? ""}
+                        onChange={(event) => updateMergeValue(field.name, event.target.value)}
+                        className="mt-1.5"
+                      />
+                    )}
                   </div>
                 ))}
               </fieldset>
@@ -587,4 +609,15 @@ function createSendIntentId(): string {
     return crypto.randomUUID();
   }
   return `send-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function defaultsFor(template: TemplateOption, preflight: LeadEsignPreflight): ContractMergeValues {
+  const schema = getEsignFieldSchema(template.mergeFieldNames)!;
+  const values = Object.fromEntries(schema.names.map((name) => [name, preflight.mergeDefaults[name] ?? ""])) as ContractMergeValues;
+  if (schema.version === "residential-v1") {
+    const address = preflight.residentialAddress;
+    return { ...values, property_address: address?.street ?? "",
+      property_city: address?.city ?? "", property_state: address?.state ?? "", property_zip: address?.zip ?? "" };
+  }
+  return values;
 }

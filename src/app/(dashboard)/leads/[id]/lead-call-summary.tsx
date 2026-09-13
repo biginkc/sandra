@@ -240,10 +240,7 @@ function SummaryState({
   if (row.summary_status === "failed") {
     return (
       <p className="text-destructive break-words text-xs" role="status">
-        AI summary failed
-        {transcript?.summary_error_message
-          ? `: ${transcript.summary_error_message}`
-          : ""}
+        AI summary unavailable. Please reach out to an admin.
       </p>
     );
   }

@@ -1,0 +1,122 @@
+{
+  "at": "2026-09-13T12:17:12Z",
+  "container_id": "603c10117cb7ef6a07d81448dd1a25b0c1ee2787a59f75871015c4a416cac557",
+  "target": {
+    "rows": 100000,
+    "org": "35210142-b51b-4428-828e-987feede99bf",
+    "conv": "f291c854-9488-46cd-82a3-626da799a0a3",
+    "seed_client_ms": 18434.327750001103
+  },
+  "noise": [
+    {
+      "org": "35210142-b51b-4428-828e-987feede99bf",
+      "conversation": "65028e90-da0d-4144-95e1-0aab5e4d2ac1",
+      "rows": 5000
+    },
+    {
+      "org": "d7c05417-e420-4a23-adb4-983d30fc003d",
+      "conversation": "162b417a-531b-4499-a2b8-ed4a272bb44b",
+      "rows": 5000
+    }
+  ],
+  "noise_created_at": "2026-09-02 plus microseconds; all later than target2026-09-01",
+  "load": "committed1000-row batches, all canonical and projection capture enabled",
+  "checks": [
+    {
+      "name": "same-org/different-conversation and other-org newer noise leaves exact latest50 target IDs unchanged",
+      "passed": true
+    }
+  ],
+  "expected_ids": [
+    "7e64db0c-02d9-4217-ac37-3ec0305eab6f",
+    "fa5ea50a-62c2-43e3-8bf8-0de44df674e4",
+    "d971f724-15e6-4084-aaa3-bd8d6908504b",
+    "be71d0c2-a9af-4e2a-80ab-5033ab5270f1",
+    "b43a3c76-bb1d-44b2-98f7-f64c30e6dff2",
+    "a2d0ddd0-ec1a-4c1f-809b-15897c33ea07",
+    "81887fed-19a9-40cd-9fd7-d089d2985a6c",
+    "78da5725-9b05-4081-81e5-5c7c459c00a3",
+    "7546d89e-cbaf-41d3-859a-b632a74e19d4",
+    "27bed5d5-2b8c-42ab-83c3-3f3da5fae736",
+    "1582eb95-b9c3-4c74-8016-51fc40ce84f1",
+    "bdfef377-40e9-48cc-b054-4ca3c18570d0",
+    "b5a0e57f-2d52-4df4-af2c-572bf3cb1fae",
+    "a6a5534f-25b4-4093-a6c6-75965e12d34f",
+    "9b0fe7b2-76d4-46e8-8b46-c1fd6b797428",
+    "9459ac55-f16a-46f9-8945-2d3d39415218",
+    "598b5b42-c47a-431d-a2ea-2c196afdf1ce",
+    "3eca29fb-50eb-48c6-9856-a26aa927326e",
+    "380c9513-a8f1-4b89-9d58-df460fa12fd7",
+    "173866ca-a413-41b0-9e18-8df1973ff019",
+    "0da0b998-c14e-4604-8a48-94a1c60ccf0c",
+    "de066932-dacd-406b-a9b0-0a1f6afd2e1c",
+    "db08d559-ecc2-4fa5-b1e2-4abd7ec3f493",
+    "c06a5c16-6283-414b-9ed5-3888f7c9a4ca",
+    "ab8fcccf-0582-4876-8f38-1a2dda248b14",
+    "a9341960-77ea-4de9-90b9-ccaf5d9337fb",
+    "85d25c3c-2d43-49e1-9dfa-c1f40c0ef2e6",
+    "5f6856da-0e77-45e8-978f-06de27772821",
+    "3957d743-60ce-4988-abfe-eb218a114dd2",
+    "0177e313-a669-43b6-b2ba-05537d2f4e65",
+    "01746c9f-ec71-4961-9bc2-720036df7343",
+    "b841e3d9-eed7-46f4-9300-76c5bb60504b",
+    "b80f1345-17dd-486d-bc9f-a8e59ff97576",
+    "8321e67e-b8b9-4c7e-9fa3-70bac16b1a2b",
+    "82aac7a1-93de-471e-9d1d-9ef04d0fb4a0",
+    "5843ba56-210e-42f3-914b-fe9f02b61f01",
+    "56717c22-9c6e-494e-bf91-2ed87fb90213",
+    "4f892dff-27c4-4502-ba2a-82e958e767ce",
+    "282b8ee8-28d4-4ae0-9aba-4d9f0919793d",
+    "269cf605-b204-490f-bcf7-6637c94e2ac4",
+    "161078a1-6386-4329-8d45-fcebb613e618",
+    "f1d68792-437a-42a5-8057-00685f958df7",
+    "e8306609-adf8-447b-9aef-a0dfc70899cf",
+    "d6353184-2243-4ccf-af34-61cbfe52180b",
+    "c7faf2b2-66b7-4185-8c9c-b4ca81fd6b86",
+    "c1690e55-1675-4690-8d1b-bd25c4af0aab",
+    "9d015777-57ac-4e2f-9b24-000613d5347f",
+    "85815fad-408e-4f37-8550-d97f77f02964",
+    "44dd2676-bb1e-4085-a459-75aba45cf6ff",
+    "30d16d1c-112d-4e3d-9f18-7f385b9609c2"
+  ],
+  "summary": [
+    {
+      "execution_ms": 5.006,
+      "planning_ms": 0.66,
+      "nodes": [
+        {
+          "Node Type": "Index Scan",
+          "Relation Name": "messages",
+          "Index Name": "idx_messages_created",
+          "Actual Rows": 52,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": 10617,
+          "Shared Hit Blocks": 20118,
+          "Shared Read Blocks": 0,
+          "Sort Method": null
+        }
+      ]
+    },
+    {
+      "execution_ms": 4.186,
+      "planning_ms": 0.699,
+      "nodes": [
+        {
+          "Node Type": "Index Scan",
+          "Relation Name": "messages",
+          "Index Name": "idx_messages_created",
+          "Actual Rows": 52,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": 10617,
+          "Shared Hit Blocks": 20042,
+          "Shared Read Blocks": 0,
+          "Sort Method": null
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "Original evidence preserved; no index hints or dropped indexes",
+    "One10k newer-noise distribution is not a production guarantee"
+  ]
+}

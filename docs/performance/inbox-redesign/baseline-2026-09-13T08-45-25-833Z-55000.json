@@ -1,0 +1,121 @@
+{
+  "runId": "b71771a6-91bc-47f0-ba16-36c8340c0b80",
+  "orgId": "0b4576be-9f22-496b-baec-aa4bcde1eac0",
+  "startedAt": "2026-09-13T08:45:25.833Z",
+  "requestedConversations": 55000,
+  "status": "completed",
+  "observations": [
+    {
+      "name": "detail_long_history",
+      "milliseconds": [
+        65.06554100000358,
+        19.59733299999789,
+        18.02708299999358,
+        17.29062500000873,
+        16.315207999999984,
+        16.67149999999674,
+        17.01229100000637,
+        14.7065419999999,
+        19.195459000009578,
+        20.44108299999789,
+        15.40733299999556,
+        15.248082999998587,
+        14.046833000000333,
+        15.187209000010625,
+        14.683165999987978,
+        15.284249999996973,
+        15.845749999993131,
+        17.153292000002693,
+        14.357583000004524,
+        16.077332999993814
+      ],
+      "errors": [],
+      "p50": 16.077332999993814,
+      "p95": 20.44108299999789,
+      "p99": 65.06554100000358
+    },
+    {
+      "name": "detail_recent_history",
+      "milliseconds": [
+        13.214666999992914,
+        14.354250000003958,
+        12.033582999996725,
+        14.287458000006154,
+        14.534167000005255,
+        12.90937500000291,
+        13.35954099999799,
+        14.263625000006869,
+        14.627500000002328,
+        15.068833000012091,
+        12.132874999995693,
+        15.263250000003609,
+        13.570333000010578,
+        14.404958999992232,
+        13.57766699999047,
+        15.571959000008064,
+        15.174708999998984,
+        12.57499999999709,
+        14.495957999999519,
+        14.153833000003942
+      ],
+      "errors": [],
+      "p50": 14.263625000006869,
+      "p95": 15.263250000003609,
+      "p99": 15.571959000008064
+    },
+    {
+      "name": "list_first_page",
+      "milliseconds": [
+        1513.549250000011,
+        1415.921166,
+        1720.912875000009,
+        1337.1005829999922,
+        1291.5584579999995,
+        1331.7432499999995,
+        1267.5629590000026,
+        1258.6072920000006,
+        1272.769042,
+        1421.7774999999965,
+        1273.488292000009,
+        1273.572749999992,
+        1297.5172919999895,
+        1259.643333,
+        1254.6545420000039,
+        1309.2257499999978,
+        1274.8082080000022,
+        1272.8496659999946,
+        1269.0633329999982,
+        1251.9558749999997
+      ],
+      "errors": [],
+      "p50": 1273.572749999992,
+      "p95": 1513.549250000011,
+      "p99": 1720.912875000009
+    }
+  ],
+  "limitations": [
+    "Modeled synthetic volume, not verified production distribution",
+    "Local ordinary-user source read timings, not browser click latency",
+    "Serial requests without concurrent arrivals; no performance budget pass claimed",
+    "Percentiles from 20 repeats are descriptive, not tail-latency certification",
+    "Fixtures retained in exclusively owned local stack; repeated runs increase total database size"
+  ],
+  "guards": {
+    "project": "sandra-inbox-redesign-20260913",
+    "apiPort": 58421,
+    "databasePort": 58422,
+    "outboundTriggers": 0,
+    "activeCronJobs": 0,
+    "authenticatedStatementTimeout": "8s",
+    "seedStatementTimeout": "15s"
+  },
+  "authRole": "member",
+  "seedMilliseconds": 66778.37008299999,
+  "fixture": {
+    "messages": 550750,
+    "conversations": 55000,
+    "unknown_messages": 250
+  },
+  "totalDatabaseMessages": 561500,
+  "finishedAt": "2026-09-13T08:47:01.057Z"
+}

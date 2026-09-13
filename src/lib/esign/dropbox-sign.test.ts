@@ -300,6 +300,7 @@ describe("Dropbox Sign provider", () => {
     sdk.accountGet.mockResolvedValue({
       body: {
         account: {
+          accountId: "provider-account-1",
           quotas: { api_signature_requests_left: 17 },
         },
       },
@@ -320,6 +321,29 @@ describe("Dropbox Sign provider", () => {
     expect(sdk.interceptorOptions.at(-1)).toEqual({
       signal: controller.signal,
     });
+  });
+
+  it("applies the server shared-quota policy through the provider and fails closed", async () => {
+    const provider = createDropboxSignProvider({ apiKey: new EsignSecret("api-key"), clientId: "client-id" });
+    const policy = {
+      basis: "shared_signature_requests", plan: "Essentials 50", allowance: 50,
+      verifiedAt: new Date(Date.now() - 60_000).toISOString(),
+      validUntil: new Date(Date.now() + 60_000).toISOString(),
+    };
+    try {
+      vi.stubEnv("DROPBOX_SIGN_QUOTA_POLICIES", JSON.stringify({ "provider-account-1": policy }));
+      sdk.accountGet.mockResolvedValue({ body: { account: {
+        accountId: "provider-account-1", quotas: { apiSignatureRequestsLeft: 0, documentsLeft: 47 },
+      } } });
+      await expect(provider.getRemainingSignatureRequests?.("provider-account-1")).resolves.toBe(47);
+      await expect(provider.getRemainingSignatureRequests?.("other-account")).resolves.toBeNull();
+      vi.stubEnv("DROPBOX_SIGN_QUOTA_POLICIES", JSON.stringify({ "provider-account-1": {
+        ...policy, validUntil: new Date(Date.now() - 1).toISOString(),
+      } }));
+      await expect(provider.getRemainingSignatureRequests?.("provider-account-1")).resolves.toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("preserves bounded Dropbox rate-limit reset metadata on 429 failures", async () => {
@@ -378,6 +402,24 @@ describe("Dropbox Sign provider", () => {
         rateLimitResetUnixSeconds: 1788054300,
       },
     });
+  });
+
+  it.each([true, false])("uses a fixed per-signer redirect without private data (test mode: %s)", async (testMode) => {
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+    });
+    await provider.sendWithTemplate({
+      localRequestId: "private-request-id",
+      templateId: "provider-template",
+      testMode,
+      signers: [{ role: "Seller", name: "Private Seller", emailAddress: "seller@example.com" }],
+      mergeValues: { property_address: "Private property" },
+    });
+    expect(sdk.send).toHaveBeenLastCalledWith(expect.objectContaining({
+      signingRedirectUrl: "https://bmhgroupkc.com/signing-complete",
+      testMode,
+    }));
   });
 
   it("forces test mode and preserves local/provider identifiers separately", async () => {
@@ -469,13 +511,14 @@ describe("Dropbox Sign provider", () => {
     });
   });
 
-  it("reads provider-side request metadata for webhook attachment proof", async () => {
+  it.each([true, false, null])("reads authoritative request completion with attachment proof: %s", async (isComplete) => {
     sdk.get.mockResolvedValue({
       body: {
         signatureRequest: {
           signatureRequestId: "provider-request-1",
           metadata: { sandra_request_id: "local-uuid" },
           testMode: true,
+          isComplete,
         },
       },
     });
@@ -495,6 +538,8 @@ describe("Dropbox Sign provider", () => {
       signatureRequestId: "provider-request-1",
       localRequestId: "local-uuid",
       testMode: true,
+      isComplete,
+      signatures: [],
     });
     expect(sdk.get).toHaveBeenCalledWith("provider-request-1");
     expect(sdk.interceptorOptions.at(-1)).toEqual({

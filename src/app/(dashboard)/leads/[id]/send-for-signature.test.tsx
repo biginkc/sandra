@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ESIGN_MERGE_FIELD_NAMES,
+  ESIGN_RESIDENTIAL_FIELD_NAMES,
   type TemplateOption,
 } from "@/lib/esign/contracts";
 
@@ -452,3 +453,30 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
+
+it("submits all residential terms with street-only defaults and optional additional terms", async () => {
+  const user = userEvent.setup();
+  const api = actions({ ...preflight,
+    templates: [{ ...template, mergeFieldNames: ESIGN_RESIDENTIAL_FIELD_NAMES }],
+    residentialAddress: { street: "123 Main St", city: "Kansas City", state: "MO", zip: "64108" },
+    mergeDefaults: { ...preflight.mergeDefaults, property_address: "123 Main St, Kansas City, MO, 64108" },
+  });
+  render(<SendForSignature propertyId="property-1" initialBlockers={[]} {...api} />);
+  await user.click(screen.getByTestId("send-for-signature-trigger"));
+  expect(await screen.findByLabelText("Property street address")).toHaveValue("123 Main St");
+  expect(screen.getByLabelText("Property city")).toHaveValue("Kansas City");
+  expect(screen.getByLabelText("Additional terms (optional)")).toHaveValue("");
+  await user.type(screen.getByLabelText("Buyer name / entity"), "BMH Buyer LLC");
+  await user.type(screen.getByLabelText("Legal description"), "Internal lot fixture");
+  await user.type(screen.getByLabelText("Earnest money holder"), "Internal escrow fixture");
+  await user.type(screen.getByLabelText("Cash balance"), "$124,000");
+  const buyer = within(screen.getByTestId("esign-signer-1"));
+  await user.type(buyer.getByLabelText("Name"), "Authorized Buyer");
+  await user.type(buyer.getByLabelText("Email"), "buyer@example.com");
+  await user.click(screen.getByRole("checkbox"));
+  await user.click(screen.getByRole("button", { name: "Send for signature" }));
+  await waitFor(() => expect(api.sendAction).toHaveBeenCalledOnce());
+  expect(api.sendAction.mock.calls[0][0].mergeValues).toEqual({ ...preflight.mergeDefaults,
+    buyer_name: "BMH Buyer LLC", property_address: "123 Main St", property_city: "Kansas City", property_state: "MO", property_zip: "64108",
+    legal_description: "Internal lot fixture", earnest_money_holder: "Internal escrow fixture", cash_balance: "$124,000", additional_terms: "" });
+});

@@ -1,0 +1,144 @@
+{
+  "status": "passed",
+  "startedAt": "2026-09-13T09:09:22.660Z",
+  "checks": [
+    {
+      "name": "fixture API matches owned stack",
+      "passed": true
+    },
+    {
+      "name": "fixture uses ordinary member role",
+      "passed": true
+    },
+    {
+      "name": "owned populated conversation exists",
+      "passed": true
+    },
+    {
+      "name": "independent synthetic tenant fixture exists",
+      "passed": true
+    },
+    {
+      "name": "fixture covers four pages",
+      "passed": true
+    },
+    {
+      "name": "ordinary fixture user authenticated",
+      "passed": true
+    },
+    {
+      "name": "anonymous denied by middleware or endpoint",
+      "passed": true
+    },
+    {
+      "name": "caller tenant parameter rejected",
+      "passed": true
+    },
+    {
+      "name": "foreign and nonexistent conversations indistinguishable",
+      "passed": true
+    },
+    {
+      "name": "page 1 identity and bounded rows",
+      "passed": true
+    },
+    {
+      "name": "page 1 private cache policy",
+      "passed": true
+    },
+    {
+      "name": "page 1 authoritative rows and chronological order",
+      "passed": true
+    },
+    {
+      "name": "page 1 excludes broad database payload",
+      "passed": true
+    },
+    {
+      "name": "page 1 has older cursor",
+      "passed": true
+    },
+    {
+      "name": "page 2 identity and bounded rows",
+      "passed": true
+    },
+    {
+      "name": "page 2 private cache policy",
+      "passed": true
+    },
+    {
+      "name": "page 2 authoritative rows and chronological order",
+      "passed": true
+    },
+    {
+      "name": "page 2 excludes broad database payload",
+      "passed": true
+    },
+    {
+      "name": "page 2 has older cursor",
+      "passed": true
+    },
+    {
+      "name": "page 3 identity and bounded rows",
+      "passed": true
+    },
+    {
+      "name": "page 3 private cache policy",
+      "passed": true
+    },
+    {
+      "name": "page 3 authoritative rows and chronological order",
+      "passed": true
+    },
+    {
+      "name": "page 3 excludes broad database payload",
+      "passed": true
+    },
+    {
+      "name": "page 3 has older cursor",
+      "passed": true
+    },
+    {
+      "name": "page 4 identity and bounded rows",
+      "passed": true
+    },
+    {
+      "name": "page 4 private cache policy",
+      "passed": true
+    },
+    {
+      "name": "page 4 authoritative rows and chronological order",
+      "passed": true
+    },
+    {
+      "name": "page 4 excludes broad database payload",
+      "passed": true
+    },
+    {
+      "name": "page 4 has older cursor",
+      "passed": true
+    },
+    {
+      "name": "no repeated messages across pages",
+      "passed": true
+    },
+    {
+      "name": "read status unchanged for entire conversation",
+      "passed": true
+    }
+  ],
+  "limitations": [
+    "Local candidate production build and synthetic ordinary-member session; not production Hugo SSO",
+    "No concurrent arrivals; endpoint correctness only, not performance acceptance",
+    "SELECT-only SQL; no message, outcome, assignment or read-status mutations issued by this harness",
+    "Anonymous requests are rejected by existing middleware with a login redirect before the endpoint401 handler"
+  ],
+  "anonymousResponse": {
+    "status": 307,
+    "locationPath": "/login"
+  },
+  "pages": 4,
+  "messagesCompared": 20,
+  "readStatusesCompared": 510,
+  "finishedAt": "2026-09-13T09:09:23.655Z"
+}

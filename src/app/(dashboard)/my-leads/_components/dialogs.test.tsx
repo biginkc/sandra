@@ -139,6 +139,44 @@ describe("My Leads workflow dialogs", () => {
     })
   })
 
+  it("keeps Sandra unavailable without a call and explains how to log external outreach", async () => {
+    const user = userEvent.setup()
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={vi.fn()} />)
+    expect(screen.getByRole("option", { name: "Sandra" })).toBeDisabled()
+    expect(screen.getByText(/No Sandra calls need an outcome/)).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText("Source"), "sandra")
+    expect(screen.getByLabelText("Source")).toHaveValue("dialpad")
+    expect(screen.queryByLabelText("Sandra call")).not.toBeInTheDocument()
+  })
+
+  it("selects a real Sandra call and submits its reference", async () => {
+    const user = userEvent.setup()
+    const onSubmit = vi.fn(async () => ({ ok: true as const }))
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={onSubmit} callReferenceOptions={[
+      { id: "call-1", label: "Sep 12, 2026, 9:00 AM Central" },
+      { id: "call-2", label: "Sep 12, 2026, 10:00 AM Central" },
+    ]} />)
+    await user.selectOptions(screen.getByLabelText("Source"), "sandra")
+    await user.selectOptions(screen.getByLabelText("Sandra call"), "call-2")
+    await user.selectOptions(screen.getByLabelText("External outcome"), "reached")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-12T10:00" } })
+    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source: "sandra", callActivityId: "call-2", outcome: "reached" }))
+  })
+
+  it("automatically selects the only pending Sandra call", async () => {
+    const user = userEvent.setup()
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={vi.fn()} callReferenceOptions={[{ id: "call-1", label: "9 AM Central" }]} />)
+    await user.selectOptions(screen.getByLabelText("Source"), "sandra")
+    expect(screen.getByLabelText("Sandra call")).toHaveValue("call-1")
+  })
+
+  it("uses the call supplied by the call flow on the first render", () => {
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={vi.fn()} initialCallActivityId="call-1" />)
+    expect(screen.getByLabelText("Source")).toHaveValue("sandra")
+    expect(screen.getByLabelText("Sandra call")).toHaveValue("call-1")
+  })
+
   it("normalizes manual outreach to the supported outreach kind", async () => {
     const user = userEvent.setup()
     const onSubmit = vi.fn(async () => ({ ok: true as const }))

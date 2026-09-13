@@ -23,16 +23,16 @@ describe("Dropbox Sign lifecycle normalization", () => {
     });
   });
 
-  it("marks signed only from all-signed or downloadable completion semantics", () => {
+  it("marks signed only from all-signed; downloadable can be partial", () => {
     expect(apply("viewed", "signature_request_all_signed")).toMatchObject({
       nextStatus: "signed",
       changed: true,
-      artifactReady: false,
+      artifactReady: true,
     });
     expect(apply("awaiting", "signature_request_downloadable")).toMatchObject({
-      nextStatus: "signed",
-      changed: true,
-      artifactReady: true,
+      nextStatus: "awaiting",
+      changed: false,
+      artifactReady: false,
     });
   });
 
@@ -43,10 +43,10 @@ describe("Dropbox Sign lifecycle normalization", () => {
       reason: "all_signed",
     });
     expect(apply("error", "signature_request_downloadable")).toMatchObject({
-      nextStatus: "signed",
-      changed: true,
-      artifactReady: true,
-      reason: "downloadable",
+      nextStatus: "error",
+      changed: false,
+      artifactReady: false,
+      reason: "terminal_sticky",
     });
   });
 
@@ -68,12 +68,12 @@ describe("Dropbox Sign lifecycle normalization", () => {
     });
   });
 
-  it("preserves the downloadable artifact signal after Signed", () => {
-    expect(apply("signed", "signature_request_downloadable")).toMatchObject({
+  it("preserves the all-signed artifact signal after Signed", () => {
+    expect(apply("signed", "signature_request_all_signed")).toMatchObject({
       nextStatus: "signed",
       changed: false,
       artifactReady: true,
-      reason: "downloadable",
+      reason: "all_signed",
     });
   });
 

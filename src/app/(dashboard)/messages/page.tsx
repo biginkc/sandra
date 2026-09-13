@@ -1,3 +1,4 @@
+import { createInboxServerTiming } from "@/lib/inbox-v2/server-timing";
 import { createClient } from "@/lib/supabase/server";
 import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
@@ -57,7 +58,22 @@ export default async function MessagesPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  // eslint-disable-next-line react-hooks/purity -- Server Component request timestamp is intentionally captured once and serialized to every client relative-time formatter.
+  const timing = createInboxServerTiming();
+  let returned = false;
+  try {
+    const result = await renderMessagesPage(searchParams, timing);
+    returned = true;
+    return result;
+  } finally {
+    timing.finish(returned ? "returned" : "interrupted");
+  }
+}
+
+async function renderMessagesPage(
+  searchParams: Promise<Record<string, string | string[] | undefined>>,
+  timing: ReturnType<typeof createInboxServerTiming>,
+) {
+  // Capture one request timestamp for every client relative-time formatter.
   const requestNowMs = Date.now();
   const sp = await searchParams;
   const rawFilter = firstSearchParam(sp.filter);
@@ -69,6 +85,7 @@ export default async function MessagesPage({
   }
 
   const activeTab = firstSearchParam(sp.tab) === "outbox" ? "outbox" : "inbox";
+  timing.setSurface(activeTab);
   const filter = parseInboxFilter(rawFilter ?? undefined);
   // DNC toggle — ON by default per feedback-f E1. Only `?hideDnc=0` flips
   // it off so we can keep clean URLs the rest of the time.
@@ -76,10 +93,11 @@ export default async function MessagesPage({
   const selectedThreadId = firstSearchParam(sp.thread);
   const requestedInboxPage = parsePositivePage(firstSearchParam(sp.inboxPage));
 
-  const supabase = await createClient();
-  const {
-    data: { user: currentUser },
-  } = await supabase.auth.getUser();
+  const { supabase, currentUser } = await timing.measure("auth", async () => {
+    const supabase = await createClient();
+    const { data: { user: currentUser } } = await supabase.auth.getUser();
+    return { supabase, currentUser };
+  });
   const currentUserId = currentUser?.id ?? null;
   const effectiveFilter = normalizeInboxFilterForUser(filter, currentUserId);
 
@@ -89,7 +107,7 @@ export default async function MessagesPage({
   // in canonical ids only.
   const canonicalThreadId =
     isThreadFilter(effectiveFilter) && selectedThreadId
-      ? await canonicalizeThreadId(supabase, selectedThreadId)
+      ? await timing.measure("canonicalization", () => canonicalizeThreadId(supabase, selectedThreadId))
       : null;
 
   // Fetch everything in parallel. The thread list + unknown active count
@@ -104,20 +122,20 @@ export default async function MessagesPage({
       : 1;
   const [threadPage, queuedResult, threadDetail, unknownAll, queueStatsResult] =
     await Promise.all([
-      listThreadPage(supabase, {
+      timing.measure("list", () => listThreadPage(supabase, {
         search,
         filter: pageFilter,
         currentUserId,
         includeThreadId: canonicalThreadId,
         hideNoise: hideDnc,
         page: effectiveInboxPage,
-      }),
-      listQueuedPage(null),
+      })),
+      timing.measure("queue", () => listQueuedPage(null)),
       canonicalThreadId
-        ? fetchInboxDetail(supabase, canonicalThreadId)
+        ? timing.measure("detail", () => fetchInboxDetail(supabase, canonicalThreadId))
         : Promise.resolve(null),
-      listUnknownSenders(supabase, { includeDismissed: true }),
-      getQueueStats(),
+      timing.measure("unknown", () => listUnknownSenders(supabase, { includeDismissed: true })),
+      timing.measure("queue_stats", () => getQueueStats()),
     ]);
 
   const visibleThreads = threadPage.threads;
@@ -152,20 +170,22 @@ export default async function MessagesPage({
   }
   if (assigneeIds.size > 0) {
     try {
-      const membership = await getSingleActiveMembership();
-      if (membership.ok) {
-        const members = await loadOrgTeamMembers(membership.membership.org_id, {
-          historicalAssigneeIds: [...assigneeIds],
-        });
-        for (const member of members) {
-          if (assigneeIds.has(member.id)) {
-            assigneeEmails[member.id] = teamMemberPrimaryLabel(
-              member,
-              currentUserId,
-            );
+      await timing.measure("assignee", async () => {
+        const membership = await getSingleActiveMembership();
+        if (membership.ok) {
+          const members = await loadOrgTeamMembers(membership.membership.org_id, {
+            historicalAssigneeIds: [...assigneeIds],
+          });
+          for (const member of members) {
+            if (assigneeIds.has(member.id)) {
+              assigneeEmails[member.id] = teamMemberPrimaryLabel(
+                member,
+                currentUserId,
+              );
+            }
           }
         }
-      }
+      });
     } catch {
       // ids still render — pretty labels are best-effort.
     }
@@ -176,7 +196,7 @@ export default async function MessagesPage({
     : { rows: [], hasMore: false };
 
   if (isThreadFilter(effectiveFilter) && threadDetail) {
-    await markMessagesReadForThread(threadDetail.threadId);
+    await timing.measure("mark_read", () => markMessagesReadForThread(threadDetail.threadId));
   }
 
   const unknownActive = unknownAll.filter((s) => !s.isDismissed);

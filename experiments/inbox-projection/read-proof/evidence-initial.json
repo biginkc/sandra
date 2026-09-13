@@ -1,0 +1,49 @@
+{
+  "at": "2026-09-13T12:06:27Z",
+  "source_revision": "c2b46ff6f45ada359e9b448b8d6682a2a94ae952",
+  "container_id": "603c10117cb7ef6a07d81448dd1a25b0c1ee2787a59f75871015c4a416cac557",
+  "checks": [
+    {
+      "name": "one SQL MVCC snapshot excludes uncommitted head and message and returns latest50",
+      "passed": true,
+      "boundary_text": "451"
+    },
+    {
+      "name": "latest50 render boundary acknowledges448 eligible rows in bounded200-row transactions",
+      "passed": true,
+      "changed_per_batch": [
+        200,
+        200,
+        48,
+        0
+      ]
+    },
+    {
+      "name": "later/backdated, reinserted, re-entered and moved-out rows remain unread",
+      "passed": true
+    },
+    {
+      "name": "explicit org/conversation/SMS/inbound predicates leave alternate tenant/conversation and noninbound rows untouched",
+      "passed": true
+    },
+    {
+      "name": "read batches do not advance inbound arrival head",
+      "passed": true
+    },
+    {
+      "name": "permanentDNC acquired after snapshot rejects batch and both selected rows remain unread",
+      "passed": true,
+      "rows_still_unread": 2
+    }
+  ],
+  "sql_snapshot": "WITH head AS MATERIALIZED (\n SELECT coalesce((SELECT revision FROM public.inbox_inbound_heads WHERE org_id='8316ab64-2b3b-49fa-bc3a-05428556de7b' AND conversation_id='26916424-abc1-49ac-9abe-d191d4700929'),0)::text AS revision\n), history AS MATERIALIZED (\n SELECT id,created_at::text AS created_at_raw,inbox_inbound_revision::text AS inbound_revision,direction,read_at::text AS read_at_raw\n FROM public.messages WHERE org_id='8316ab64-2b3b-49fa-bc3a-05428556de7b' AND conversation_id='26916424-abc1-49ac-9abe-d191d4700929' AND channel='sms'\n ORDER BY created_at DESC,id DESC LIMIT 50\n) SELECT json_build_object('head',(SELECT revision FROM head),'history',coalesce((SELECT json_agg(row_to_json(h)) FROM history h),'[]'::json));",
+  "sql_batch": "WITH eligible AS MATERIALIZED (\n SELECT id FROM public.messages WHERE org_id='8316ab64-2b3b-49fa-bc3a-05428556de7b' AND conversation_id='26916424-abc1-49ac-9abe-d191d4700929' AND channel='sms' AND direction='inbound' AND read_at IS NULL AND inbox_inbound_revision <= 451::bigint\n ORDER BY id LIMIT 200 FOR UPDATE\n), changed AS (\n UPDATE public.messages m SET read_at=statement_timestamp() FROM eligible e WHERE m.id=e.id\n AND m.org_id='8316ab64-2b3b-49fa-bc3a-05428556de7b' AND m.conversation_id='26916424-abc1-49ac-9abe-d191d4700929' AND m.channel='sms' AND m.direction='inbound' AND m.read_at IS NULL AND m.inbox_inbound_revision <= 451::bigint RETURNING m.id\n) SELECT count(*) FROM changed;",
+  "limits": [
+    "PostgreSQL owner executes explicit scoped protocol SQL; no ordinary-user authentication/authorization proof",
+    "No API, signed boundary, requester binding, expiry, receipt persistence or browser render acknowledgment implemented",
+    "No SKIP LOCKED; lock timeout is bounded and error exits whole transaction, production retry still separate",
+    "Plans describe small offline canonical fixture, not production cardinality or performance budgets",
+    "One snapshot SQL returns head/history together; unrelated detail context and permission lifecycle are not included",
+    "Snapshot-only header uses text revision; SQL casts trusted testboundary tobigint, not untrusted token validation"
+  ]
+}

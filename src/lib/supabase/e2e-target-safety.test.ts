@@ -123,3 +123,18 @@ describe("E2E Supabase target safety", () => {
     ).not.toThrow();
   });
 });
+
+ describe("disposable E2E target binding", () => {
+  const env = { CI: "1", E2E_DISPOSABLE_DATABASE: "1", E2E_CI_SUPABASE_DB_URL: "postgresql://postgres:postgres@127.0.0.1:54322/postgres" };
+  it("allows an explicitly isolated API and lock pair in CI", () => {
+    expect(() => assertSafeE2ESupabaseTargetFromEnvironment("http://127.0.0.1:54321", env)).not.toThrow();
+  });
+  it.each(["https://bnkipfoqggwyttbykjfn.supabase.co", "http://127.0.0.1:54321/other", "http://user:pass@127.0.0.1:54321", "http://127.0.0.1:54321?target=remote", "https://127.0.0.1:54321"])("rejects an alternate API: %s", (url) => {
+    expect(() => assertSafeE2ESupabaseTargetFromEnvironment(url, env)).toThrow(/exact loopback/);
+  });
+  it("rejects a remote lock or hosted ref despite a local API", () => {
+    for (const extra of [{ E2E_CI_SUPABASE_DB_URL: "postgresql://postgres:secret@remote:5432/postgres" }, { E2E_CI_SUPABASE_PROJECT_REF: "bnkipfoqggwyttbykjfn" }]) {
+      expect(() => assertSafeE2ESupabaseTargetFromEnvironment("http://127.0.0.1:54321", { ...env, ...extra })).toThrow(/exact loopback/);
+    }
+  });
+});

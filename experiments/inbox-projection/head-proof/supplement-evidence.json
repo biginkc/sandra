@@ -1,0 +1,56 @@
+{
+  "at": "2026-09-13T11:58:08Z",
+  "checks": [
+    {
+      "name": "UPDATE RETURNING retains old revision while following SELECT sees final AFTER stamp",
+      "passed": true,
+      "returning_revision": "1",
+      "final_revision": "3"
+    },
+    {
+      "name": "rollback-only benchmark does not persist capture disable",
+      "passed": true
+    }
+  ],
+  "baseline_capture_disabled_100_rows": [
+    {
+      "wal_insert_bytes": 82824,
+      "server_elapsed_ms": 4.465
+    },
+    {
+      "wal_insert_bytes": 83032,
+      "server_elapsed_ms": 4.233
+    },
+    {
+      "wal_insert_bytes": 84224,
+      "server_elapsed_ms": 3.825
+    }
+  ],
+  "capture_enabled_100_rows": [
+    {
+      "wal_insert_bytes": 197056,
+      "server_elapsed_ms": 13.56
+    },
+    {
+      "wal_insert_bytes": 209000,
+      "server_elapsed_ms": 16.271
+    },
+    {
+      "wal_insert_bytes": 224856,
+      "server_elapsed_ms": 14.141
+    }
+  ],
+  "whole_fixture_pg_stat_estimates": {
+    "n_tup_ins": 1216,
+    "n_tup_upd": 637,
+    "n_dead_tup_estimate": 902
+  },
+  "limits": [
+    "Capture-disabled control exists only inside rollback transaction on exclusively owned offline fixture; no other canonical trigger disabled",
+    "WAL insertion LSN delta includes whole isolated server activity and rollback work is not free; not a production ingestion budget",
+    "Three samples and100rows cannot establish tail latency or capacity",
+    "n_dead_tup is asynchronous estimated whole-fixture state, not exact per-operation dead tuple count; self-stamp creates extra MVCC updates",
+    "AFTER INSERT and UPDATE RETURNING are not safe final revision DTOs; perform final snapshot read",
+    "Later AFTER projection must enqueue identity keys/recompute authoritative state, not overwrite from stale outer NEW"
+  ]
+}

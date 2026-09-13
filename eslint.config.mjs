@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Independently pinned integration lab; checked through its own package.
+    "experiments/inbox-stack/**",
   ]),
 ]);
 

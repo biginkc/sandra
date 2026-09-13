@@ -2,6 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { detailView, queueRow } from './adapter';
 import type { AcquisitionDetail, AcquisitionRoster, QueueRow } from '@/lib/my-leads/queries';
 
+it('preserves SMS direction, full text, delivery state, and newest-first pagination',()=>{
+  const detail:AcquisitionDetail={groups:{messages:{rows:[
+    {id:'recent',at:'2026-09-13T18:00:00Z',actorId:null,body:'Thanks!\nPlease call tomorrow.',direction:'inbound',deliveryStatus:'received',attachmentCount:1},
+    {id:'earlier',at:'2026-09-13T17:00:00Z',actorId:null,body:'Would tomorrow work?',direction:'outbound',deliveryStatus:'failed',attachmentCount:0},
+  ],hasMore:true,cursor:'earlier-page'}}};
+  const messages=detailView(detail,{members:[]} as unknown as AcquisitionRoster).messages;
+  expect(messages.rows.map(row=>row.id)).toEqual(['recent','earlier']);
+  expect(messages.rows[0]).toMatchObject({body:'Thanks!\nPlease call tomorrow.',direction:'inbound',attachmentCount:1,createdAt:'2026-09-13T18:00:00Z'});
+  expect(messages.rows[0].createdLabel).toContain('2026');
+  expect(messages.rows[0].createdLabel).toContain('CDT');
+  expect(messages.rows[1].deliveryStatus).toBe('failed');
+  expect(messages).toMatchObject({hasMore:true,nextCursor:'earlier-page'});
+});
+
 describe('appointment lifecycle attribution',()=>{
   it('uses current task assignee for canonical actions while retaining original booking credit',()=>{
     const detail={groups:{appointments:{rows:[{id:'appointment',actorId:'original-rep',currentAssigneeId:'current-rep',type:'appointment',lifecycleState:'upcoming',at:'2026-09-11T18:00:00Z'}],hasMore:false,cursor:null}}} as AcquisitionDetail;
@@ -44,4 +58,11 @@ describe('attempt display',()=>{
     expect(attempt.outcomeLabel).toBe('No answer');
     expect(attempt.recordingUrl).toBe(expected);
   });
+});
+
+it('retains Sandra call identity for authenticated playback without an external URL',()=>{
+  const detail={groups:{attempts:{rows:[{id:'attempt',actorId:null,at:'2026-09-12T18:00:00Z',source:'sandra',callActivityId:'call-123',recordingUrl:null}],hasMore:false,cursor:null}}} as AcquisitionDetail;
+  expect(detailView(detail,{members:[]} as unknown as AcquisitionRoster).attempts.rows[0]).toMatchObject({callActivityId:'call-123',recordingUrl:null});
+  detail.groups.attempts!.rows[0].source='dialpad';
+  expect(detailView(detail,{members:[]} as unknown as AcquisitionRoster).attempts.rows[0].callActivityId).toBeNull();
 });

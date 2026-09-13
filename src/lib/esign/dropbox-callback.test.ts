@@ -83,6 +83,17 @@ describe("Dropbox Sign callback parsing and authenticity", () => {
     );
   });
 
+  it.each([undefined, null])("accepts omitted or null account-event signer roles (%s)", (role) => {
+    const form = callbackForm(replay());
+    const payload = JSON.parse(form.get("json") as string);
+    payload.signature_request.signatures = [{ signature_id: "account-signature", signer_role: role,
+      signer_name: null, signer_email_address: "internal@example.com", order: 0 }];
+    form.set("json", JSON.stringify(payload));
+    const result = parseDropboxSignCallbackFormData(form);
+    expect(result.providerSignatures[0]).toMatchObject({ role: "", name: "", signatureId: "account-signature" });
+    expect(verifyDropboxSignEventHash(result, API_KEY)).toBe(true);
+  });
+
   it("verifies the documented HMAC input and rejects an invalid hash", () => {
     const event = replay();
     expect(verifyDropboxSignEventHash(event, API_KEY)).toBe(true);

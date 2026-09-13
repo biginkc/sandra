@@ -150,6 +150,22 @@ describe("concrete eSign webhook server binding", () => {
     expect(serverMocks.createDropboxSignProvider).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [{ signatureRequestId: "provider-request-1", localRequestId: null, testMode: false }, "unmanaged"],
+    [{ signatureRequestId: "wrong-request", localRequestId: null, testMode: false }, "mismatch"],
+    [{ signatureRequestId: "provider-request-1", localRequestId: REQUEST_ID, testMode: false }, "mismatch"],
+  ])("classifies provider-confirmed ownership without trusting callback metadata", async (metadata, outcome) => {
+    serverMocks.getEsignCredentials.mockResolvedValue({ apiKey: { reveal: () => "dropbox-api-key" }, clientId: "client-1" });
+    const client = { from: vi.fn()
+      .mockReturnValueOnce(queryResult({ org_id: ORG_ID }))
+      .mockReturnValueOnce(queryResult({ id: CONSUMER_ID, org_id: ORG_ID })),
+      rpc: vi.fn(), storage: { from: vi.fn() } } as unknown as AdminClient;
+    serverMocks.createDropboxSignProvider.mockReturnValue({ getSignatureRequestMetadata: vi.fn().mockResolvedValue(metadata) });
+    await expect(createConcreteDropboxSignWebhookDependencies(client).metadataProvider.confirmProviderLocalRequestId({
+      orgId: ORG_ID, callbackConsumerId: CONSUMER_ID, signRequestId: "provider-request-1", localRequestId: null, testMode: false,
+    })).resolves.toEqual({ outcome });
+  });
+
   it("returns Dropbox provider mode after metadata proves the Sandra local request id", async () => {
     serverMocks.getEsignCredentials.mockClear();
     serverMocks.createDropboxSignProvider.mockClear();
@@ -364,4 +380,26 @@ describe("concrete eSign webhook server binding", () => {
     expect((caught as Error).message).not.toContain(privateError);
     expect(rpc).not.toHaveBeenCalled();
   });
+});
+
+it.each([
+  [{}, true],
+  [{ isComplete: false }, false],
+  [{ isComplete: null }, false],
+  [{ signatureRequestId: "different-provider-request" }, false],
+  [{ localRequestId: "different-local-request" }, false],
+  [{ testMode: true }, false],
+  [{ testMode: null }, false],
+])("confirms final completion only for exact provider ownership, mode and complete state: %j", async (override, expected) => {
+  serverMocks.getEsignCredentials.mockResolvedValue({ apiKey: { reveal: () => "dropbox-api-key" }, clientId: "client-1" });
+  const client = { from: vi.fn()
+    .mockReturnValueOnce(queryResult({ org_id: ORG_ID }))
+    .mockReturnValueOnce(queryResult({ id: CONSUMER_ID, org_id: ORG_ID })),
+    rpc: vi.fn(), storage: { from: vi.fn() } } as unknown as AdminClient;
+  serverMocks.createDropboxSignProvider.mockReturnValue({ getSignatureRequestMetadata: vi.fn().mockResolvedValue({
+    signatureRequestId: "provider-request-1", localRequestId: REQUEST_ID, testMode: false, isComplete: true, signatures: [{ signatureId: "known-id", signedAt: 1788053900 }], ...override,
+  }) });
+  await expect(createConcreteDropboxSignWebhookDependencies(client).metadataProvider.confirmCompletedRequest({
+    orgId: ORG_ID, callbackConsumerId: CONSUMER_ID, signRequestId: "provider-request-1", localRequestId: REQUEST_ID, testMode: false,
+  })).resolves.toEqual(expected ? [{ signatureId: "known-id", signedAt: 1788053900 }] : null);
 });

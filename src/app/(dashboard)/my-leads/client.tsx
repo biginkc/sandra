@@ -11,67 +11,73 @@ import { AcquisitionAttemptDialog } from './_components/attempt-dialog';
 import { AcquisitionReadinessDialog } from './_components/readiness-dialog';
 import { AcquisitionOfferDialog } from './_components/offer-dialog';
 import { AcquisitionLifecycleDialog } from './_components/lifecycle-dialog';
-import type { MyLeadAction,MyLeadStage,MyLeadsPeriod,MyLeadDateRange,AcquisitionLifecycleMode } from './_components/types';
+import type { MyLeadAction,MyLeadStage,AcquisitionLifecycleMode } from './_components/types';
 import { detailView,kpiTiles,stagePages } from './adapter';
 import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,submitMyLeadCommand,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
 
 type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null};
 
-type CustomRangeStatus = 'incomplete'|'invalid'|'ready';
-
-function customRangeStatus(range:MyLeadDateRange|null):CustomRangeStatus {
-  if(!range?.startDate||!range.endDate)return 'incomplete';
-  const isDate=(value:string)=>{
-    if(!/^\d{4}-\d{2}-\d{2}$/.test(value))return false;
-    const parsed=new Date(`${value}T00:00:00.000Z`);
-    return !Number.isNaN(parsed.getTime())&&parsed.toISOString().slice(0,10)===value;
-  };
-  if(!isDate(range.startDate)||!isDate(range.endDate)||range.startDate>range.endDate)return 'invalid';
-  return 'ready';
-}
+const REFRESH_INTERVAL_MS = 30_000;
+const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
 
 export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis}:Props) {
   const router=useRouter();const softphone=useOptionalSoftphone();
   const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState('');
-  const [period,setPeriod]=useState<MyLeadsPeriod>('today');const [range,setRange]=useState<MyLeadDateRange|null>(null);
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
+  const [lastCheckedAt,setLastCheckedAt]=useState(initialSnapshot?.snapshotAt??null);
+  const reviewingDetails=useRef(false);
+  const [reviewing,setReviewing]=useState(false);
+  const onReviewingChange=useCallback((active:boolean)=>{reviewingDetails.current=active;setReviewing(active);},[]);
   const [error,setError]=useState<string|null>(null);const [loadingStages,setLoadingStages]=useState<Set<MyLeadStage>>(new Set());
-  const [callOptions,setCallOptions]=useState<{propertyId:string;options:{id:string;label:string}[]}|null>(null);
+  const [refreshError,setRefreshError]=useState<string|null>(null);
+  const [callOptions,setCallOptions]=useState<{propertyId:string;options:{id:string;label:string}[];error:string|null}|null>(null);
+  const [callRetry,setCallRetry]=useState(0);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow}|null>(null);
   const [detailRevision,setDetailRevision]=useState(0);
   const [recipient,setRecipient]=useState(roster.settings.recipientId??'');const [settingsBusy,setSettingsBusy]=useState(false);
   const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<{hash:string;key:string}|null>(null);
-  const selectedRangeStatus=period==='custom'?customRangeStatus(range):'ready';
-  const serverScopeKey=JSON.stringify([member,period,range?.startDate,range?.endDate]);
+  const serverScopeKey=member;
   const previousServerScope=useRef(serverScopeKey);
-  const refresh=useCallback(async()=>{
-    if(!roster.settings.enabled||selectedRangeStatus!=='ready') return;
+  const refresh=useCallback(async(background=false)=>{
+    if(!roster.settings.enabled) return;
     const id=++request.current;
-    const result=await loadMyLeads({memberId:member,search,period,startDate:range?.startDate,endDate:range?.endDate});
-    if(id!==request.current)return;
-    if(result.ok){setSnapshot(result.snapshot);setKpis(result.kpis);setError(null);}else setError(result.message);
-  },[member,search,period,range,roster.settings.enabled,selectedRangeStatus]);
+    try {
+      const result=await loadMyLeads({memberId:member,search,period:'today'});
+      if(id!==request.current)return;
+      if(result.ok){
+        // Replacing a paginated/reordered queue can unmount its recording player.
+        // Background checks may update KPIs, but must leave open lead details alone.
+        if(!background||!reviewingDetails.current)setSnapshot(result.snapshot);
+        setKpis(result.kpis);setLastCheckedAt(result.snapshot.snapshotAt);setError(null);setRefreshError(null);
+      }
+      else setRefreshError(result.message);
+    } catch {
+      if(id===request.current)setRefreshError('My Leads could not refresh.');
+    }
+  },[member,search,roster.settings.enabled]);
   useEffect(()=>{
     if(initialEffect.current){initialEffect.current=false;return;}
     const scopeChanged=previousServerScope.current!==serverScopeKey;
     previousServerScope.current=serverScopeKey;
-    if(selectedRangeStatus!=='ready'){
-      ++request.current;
-      setError(selectedRangeStatus==='invalid'?'Choose a valid date range with the start date on or before the end date.':null);
-      return;
-    }
     ++request.current;
     if(scopeChanged){setSnapshot(null);setKpis(null);}
     const timer=setTimeout(()=>void refresh(),250);
     return()=>{clearTimeout(timer);};
-  },[refresh,selectedRangeStatus,serverScopeKey]);
+  },[refresh,serverScopeKey]);
   useEffect(()=>{
     if(!roster.settings.enabled)return;
-    const delay=Math.min(60_000,Math.max(1000,snapshot?.nextWarningAt?Date.parse(snapshot.nextWarningAt)-Date.now():60_000));
-    const timer=setTimeout(()=>{if(!document.hidden)void refresh();},delay);
-    const onVisible=()=>{if(!document.hidden)void refresh();};
+    const delay=Math.min(REFRESH_INTERVAL_MS,Math.max(1000,snapshot?.nextWarningAt?Date.parse(snapshot.nextWarningAt)-Date.now():REFRESH_INTERVAL_MS));
+    let cancelled=false;
+    // A failed read does not replace snapshot, so it cannot re-arm this effect.
+    // Keep retrying even after transport/authentication failures or hidden tabs.
+    const tick=async()=>{
+      try {if(!document.hidden)await refresh(true);}
+      finally {if(!cancelled)timer=setTimeout(()=>void tick(),REFRESH_INTERVAL_MS);}
+    };
+    let timer=setTimeout(()=>void tick(),delay);
+    const onVisible=()=>{if(!document.hidden)void refresh(true);};
     document.addEventListener('visibilitychange',onVisible);window.addEventListener('focus',onVisible);
-    return()=>{clearTimeout(timer);document.removeEventListener('visibilitychange',onVisible);window.removeEventListener('focus',onVisible);};
+    return()=>{cancelled=true;clearTimeout(timer);document.removeEventListener('visibilitychange',onVisible);window.removeEventListener('focus',onVisible);};
   },[snapshot,refresh,roster.settings.enabled]);
   const rawRow=(id:string)=>Object.values(snapshot?.stages??{}).flatMap(p=>p?.rows??[]).find(r=>r.propertyId===id);
   const action=(kind:MyLeadAction,id:string)=>{
@@ -82,8 +88,20 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
         phones:row.phones,dncLocked:false,contactDnc:row.contactDnc,callable:row.phones.some(phone=>!!phone.trim())&&!row.contactDnc});return;
     }
     submission.current=null;setCallOptions(null);setDialog({action:kind,row});
-    if(kind==='log-attempt')void loadMyLeadCallReferences(id,member).then(result=>{if(result.ok)setCallOptions({propertyId:id,options:result.options});else setError(result.message);});
+
   };
+  useEffect(()=>{
+    if(dialog?.action!=='log-attempt')return;
+    let cancelled=false;
+    const propertyId=dialog.row.propertyId;
+    setCallOptions(null);
+    void loadMyLeadCallReferences(propertyId,member).then(result=>{
+      if(!cancelled)setCallOptions({propertyId,options:result.ok?result.options:[],error:result.ok?null:result.message});
+    }).catch(()=>{
+      if(!cancelled)setCallOptions({propertyId,options:[],error:'Could not load Sandra calls.'});
+    });
+    return()=>{cancelled=true;};
+  },[dialog,member,callRetry]);
   const submit=useCallback(async(payload:object)=>{
     if(!dialog)return {ok:false as const,message:'Select a lead first.'};
     const hash=JSON.stringify(payload);
@@ -106,13 +124,14 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       <Button disabled={!recipient||settingsBusy} onClick={async()=>{setSettingsBusy(true);try{const result=await changeAcquisitionSettings({orgId:viewer.orgId,needsSequenceOwnerId:recipient,expectedSettingsRevision:roster.settings.revision,idempotencyKey:crypto.randomUUID()});if(!result.ok)setError(result.message);else router.refresh();}finally{setSettingsBusy(false);}}}>Save recipient</Button></div>
     </details>}
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
+    {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis?<p role="status">Loading My Leads…</p>:<>
-      {search&&<p className="mb-2 text-sm text-muted-foreground">Section counts match your search. KPIs cover the selected rep.</p>}
-      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={kpiTiles(kpis)} search={search} selectedRepId={member} selectedPeriod={period} selectedDateRange={range}
+      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={kpiTiles(kpis)} search={search} selectedRepId={member}
+        onReviewingChange={onReviewingChange}
         detailRevision={detailRevision}
         repOptions={roster.members.filter(m=>m.acquisitionsEnabled||m.hasHistory||m.id===viewer.userId).map(m=>({id:m.id,label:m.label+(m.acquisitionsEnabled?'':' — Acquisitions disabled')}))}
         selectedRepLabel={roster.members.find(m=>m.id===member)?.label}
-        onSearchChange={setSearch} onRepChange={setMember} onPeriodChange={setPeriod} onDateRangeChange={setRange}
+        onSearchChange={setSearch} onRepChange={setMember}
         onLoadMore={async stage=>{
           const cursor=snapshot?.stages[stage]?.cursor;if(!cursor||loadingStages.has(stage))return;
           const id=request.current;setLoadingStages(previous=>new Set(previous).add(stage));
@@ -128,13 +147,15 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
         onLoadDetailPage={async(propertyId,group,cursor)=>{
           const result=await loadMyLeadDetail({memberId:member,propertyId,group,cursor});if(!result.ok)return result;
           const detail=detailView(result.detail,roster);
-          switch(group){case 'notes':return {ok:true,group,page:detail.notes};case 'attempts':return {ok:true,group,page:detail.attempts};case 'appointments':return {ok:true,group,page:detail.appointments};case 'offers':return {ok:true,group,page:detail.offers};case 'history':return {ok:true,group,page:detail.history};}
+          switch(group){case 'messages':return {ok:true,group,page:detail.messages};case 'notes':return {ok:true,group,page:detail.notes};case 'attempts':return {ok:true,group,page:detail.attempts};case 'appointments':return {ok:true,group,page:detail.appointments};case 'offers':return {ok:true,group,page:detail.offers};case 'history':return {ok:true,group,page:detail.history};}
         }}
         onLeadChanged={()=>{void refresh();router.refresh();}} onStageAction={(kind,row)=>action(kind,row.propertyId)}/>
 
+      {lastCheckedAt&&<p className="mb-2 text-sm text-muted-foreground">Counts update every 30 seconds while this page is visible. Last successful check: <time dateTime={lastCheckedAt}>{refreshTime.format(new Date(lastCheckedAt))}</time>.{reviewing?' The lead list stays in place while details are open.':''}</p>}
+      {search&&<p className="mb-2 text-sm text-muted-foreground">Section counts match your search. KPIs cover the selected rep.</p>}
       <p className="mt-3 text-xs text-muted-foreground">{kpis.firstCallPending} first calls pending · {kpis.pendingOutcomes} call outcomes pending{kpis.orgAppointmentsUnattributed?` · ${kpis.orgAppointmentsUnattributed} appointments in this organization have unknown historical attribution`:''}</p>
     </>}
-    {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]}/>}
+    {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} key={dialog.row.propertyId} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]} callReferencesLoading={!callOptions} callReferencesError={callOptions?.error} onRetryCallReferences={()=>setCallRetry(value=>value+1)}/>}
     {common&&dialog?.action==='ready-for-offer'&&<AcquisitionReadinessDialog {...common} onSubmit={payload=>submit(payload)} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
     {common&&dialog?.action==='log-offer'&&<AcquisitionOfferDialog {...common} onSubmit={payload=>submit(payload)} motivationRequired={!motivation} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
     {common&&dialog&&['contract-signed','decline-offer','handoff','archive'].includes(dialog.action)&&<AcquisitionLifecycleDialog {...common} onSubmit={payload=>submit(payload)} mode={dialog.action as AcquisitionLifecycleMode}

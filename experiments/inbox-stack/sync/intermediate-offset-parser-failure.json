@@ -1,0 +1,57 @@
+{
+  "at": "2026-09-13T11:13:15.694Z",
+  "status": "FAIL",
+  "results": [
+    {
+      "name": "unauthenticated rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "scope and bounds request tamper rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "500-ID base snapshot and tenant exclusion",
+      "status": "PASS",
+      "details": {
+        "rows": 500,
+        "upstreamUrlBytes": 471
+      }
+    },
+    {
+      "name": "cross-user workset and handle tamper rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "direct database update delivered through resumed shape",
+      "status": "PASS",
+      "details": {
+        "matched": true
+      }
+    },
+    {
+      "name": "outside-ID and other-tenant updates absent from bounded shape",
+      "status": "PASS",
+      "details": {
+        "changedRows": 1
+      }
+    }
+  ],
+  "error": "Error: condition timeout",
+  "stats": {
+    "denialReasons": [
+      "synthetic_session_required",
+      "only_limit_1_to_500",
+      "only_limit_1_to_500",
+      "only_limit_1_to_500",
+      "workset_missing",
+      "handle_not_bound_to_workset",
+      "protocol_parameter_not_allowed",
+      "invalid_offset"
+    ],
+    "forwardedRows": 1004,
+    "upstreamRequests": 6,
+    "maxUpstreamUrlBytes": 515,
+    "denied": 8
+  }
+}

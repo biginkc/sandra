@@ -1,0 +1,33 @@
+{
+  "at": "2026-09-13T12:11:53Z",
+  "checks": [
+    {
+      "name": "installed-candidate preflight refuses before any fixture inserts",
+      "passed": true
+    },
+    {
+      "name": "authenticated SELECT head ACL returns42501 permission denied",
+      "passed": true
+    },
+    {
+      "name": "authenticated UPDATE head ACL returns42501 permission denied",
+      "passed": true
+    },
+    {
+      "name": "service_role SELECT head ACL returns42501 permission denied",
+      "passed": true
+    },
+    {
+      "name": "service_role UPDATE head ACL returns42501 permission denied",
+      "passed": true
+    },
+    {
+      "name": "both head proof entrypoints reject optimizedPython",
+      "passed": true
+    }
+  ],
+  "limits": [
+    "Read-only validation; original schema-install evidence preserved",
+    "Row counts compare bounded exclusive fixture before and after refused entrypoint"
+  ]
+}

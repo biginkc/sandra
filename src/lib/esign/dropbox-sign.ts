@@ -26,6 +26,7 @@ import type {
   TemplateSignerRole,
 } from "./contracts";
 import { EsignSecret } from "./secret";
+import { remainingSignatureRequests } from "./quota-policy";
 
 type DropboxApiSet = {
   account: AccountApi;
@@ -263,6 +264,9 @@ export function createDropboxSignProvider(input: {
         subject: request.subject,
         message: request.message,
         testMode: request.testMode,
+        // Per-signer completion redirect, independent of all_signed callbacks.
+        // Keep this fixed: never put signer, lead, or request data in the URL.
+        signingRedirectUrl: "https://bmhgroupkc.com/signing-complete",
       };
       try {
         const response =
@@ -303,18 +307,11 @@ export function createDropboxSignProvider(input: {
     async getRemainingSignatureRequests(providerAccountId: string, signal?: AbortSignal) {
       try {
         const response = await abortableAccountApi(input.apiKey, signal).accountGet(providerAccountId);
-        const account = response.body.account as unknown as {
-          quotas?: {
-            api_signature_requests_left?: unknown;
-            apiSignatureRequestsLeft?: unknown;
-          };
-        };
-        const remaining =
-          account.quotas?.api_signature_requests_left ??
-          account.quotas?.apiSignatureRequestsLeft;
-        return typeof remaining === "number" && Number.isFinite(remaining)
-          ? remaining
-          : null;
+        return remainingSignatureRequests(
+          response.body.account,
+          providerAccountId,
+          process.env.DROPBOX_SIGN_QUOTA_POLICIES,
+        );
       } catch (error) {
         throw normalizeDropboxSignError(error);
       }
@@ -405,7 +402,17 @@ export function createDropboxSignProvider(input: {
             typeof request.metadata?.sandra_request_id === "string"
               ? request.metadata.sandra_request_id
               : null,
-        testMode: typeof request.testMode === "boolean" ? request.testMode : null,
+          testMode: typeof request.testMode === "boolean" ? request.testMode : null,
+          isComplete: typeof request.isComplete === "boolean" ? request.isComplete : null,
+          signatures: (request.signatures ?? []).map((signature) => ({
+            signatureId: signature.signatureId ?? "",
+            role: signature.signerRole ?? "",
+            name: signature.signerName ?? "",
+            emailAddress: signature.signerEmailAddress ?? "",
+            order: signature.order ?? -1,
+            statusCode: signature.statusCode ?? null,
+            signedAt: signature.signedAt ?? null,
+          })),
         };
       } catch (error) {
         throw normalizeDropboxSignError(error);

@@ -1,0 +1,717 @@
+{
+  "at": "2026-09-13T12:14:59Z",
+  "source_revision": "c2b46ff6f45ada359e9b448b8d6682a2a94ae952",
+  "container_id": "603c10117cb7ef6a07d81448dd1a25b0c1ee2787a59f75871015c4a416cac557",
+  "cohorts": [
+    {
+      "rows": 1000,
+      "org": "7ad05c9c-ba13-4fc4-8b64-d6410db91390",
+      "conv": "199e71be-c877-4c66-8295-e0dc21460d15",
+      "seed_client_ms": 212.95266700326465
+    },
+    {
+      "rows": 10000,
+      "org": "cef0ae59-1545-48fd-bd24-cde5aa96f0cd",
+      "conv": "d710a5f5-ec80-4279-b517-4ee3f28523b6",
+      "seed_client_ms": 1808.7240419990849
+    },
+    {
+      "rows": 100000,
+      "org": "35210142-b51b-4428-828e-987feede99bf",
+      "conv": "f291c854-9488-46cd-82a3-626da799a0a3",
+      "seed_client_ms": 18434.327750001103
+    }
+  ],
+  "message_triggers": [
+    {
+      "tgname": "guard_training_messages",
+      "tgenabled": "O"
+    },
+    {
+      "tgname": "inbox_capture_inbound_head",
+      "tgenabled": "O"
+    },
+    {
+      "tgname": "messages_reject_dnc_locked_read",
+      "tgenabled": "O"
+    },
+    {
+      "tgname": "trg_messages_fill_sms_conversation_id",
+      "tgenabled": "O"
+    },
+    {
+      "tgname": "zzz_inbox_guard_inbound_revision_insert",
+      "tgenabled": "O"
+    },
+    {
+      "tgname": "zzz_inbox_guard_inbound_revision_update",
+      "tgenabled": "O"
+    },
+    {
+      "tgname": "zzzz_inbox_t2_projection_dirty",
+      "tgenabled": "O"
+    }
+  ],
+  "load_method": "committed batches of at most1000 messages, 30s statement timeout, canonical head and projection dirty capture enabled",
+  "checks": [
+    {
+      "name": "1000: raw-microsecond timestamp and UUID cursor traverses tie without gap/duplicate",
+      "passed": true,
+      "cursor_created_at_raw": "2026-09-01 00:00:00.000096+00"
+    },
+    {
+      "name": "1000: fixed200 boundary marks exactly200; remaining800 late-only rows stay unread",
+      "passed": true
+    },
+    {
+      "name": "10000: raw-microsecond timestamp and UUID cursor traverses tie without gap/duplicate",
+      "passed": true,
+      "cursor_created_at_raw": "2026-09-01 00:00:00.000996+00"
+    },
+    {
+      "name": "10000: fixed200 boundary marks exactly200; remaining9800 late-only rows stay unread",
+      "passed": true
+    },
+    {
+      "name": "100000: raw-microsecond timestamp and UUID cursor traverses tie without gap/duplicate",
+      "passed": true,
+      "cursor_created_at_raw": "2026-09-01 00:00:00.009996+00"
+    },
+    {
+      "name": "100000: fixed200 boundary marks exactly200; remaining99800 late-only rows stay unread",
+      "passed": true
+    },
+    {
+      "name": "1000: actual late-only plan uses unread index with zero candidate rows and zero filter rejections",
+      "passed": true
+    },
+    {
+      "name": "10000: actual late-only plan uses unread index with zero candidate rows and zero filter rejections",
+      "passed": true
+    },
+    {
+      "name": "100000: actual late-only plan uses unread index with zero candidate rows and zero filter rejections",
+      "passed": true
+    }
+  ],
+  "index_creation": [
+    {
+      "name": "t2_proof_history_idx",
+      "client_ms": 84.32737499970244,
+      "bytes": 8740864
+    },
+    {
+      "name": "t2_proof_unread_idx",
+      "client_ms": 115.6120829982683,
+      "bytes": 8650752
+    }
+  ],
+  "summary": {
+    "1000": {
+      "baseline_history": {
+        "execution_ms": 0.328,
+        "planning_ms": 0.54,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "idx_messages_created",
+            "Actual Rows": 52,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 1332,
+            "Shared Hit Blocks": 965,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          }
+        ]
+      },
+      "indexed_history": {
+        "execution_ms": 0.056,
+        "planning_ms": 0.635,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_history_idx",
+            "Actual Rows": 50,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 13,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          }
+        ]
+      },
+      "baseline_batch": {
+        "execution_ms": 12.356,
+        "planning_ms": 0.667,
+        "nodes": [
+          {
+            "Node Type": "Sort",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 147,
+            "Shared Read Blocks": 0,
+            "Sort Method": "quicksort"
+          },
+          {
+            "Node Type": "Bitmap Heap Scan",
+            "Relation Name": "messages",
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 800,
+            "Shared Hit Blocks": 144,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "Bitmap Index Scan",
+            "Relation Name": null,
+            "Index Name": "idx_messages_org",
+            "Actual Rows": 2112,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 3,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "Bitmap Heap Scan",
+            "Relation Name": "messages",
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 800,
+            "Shared Hit Blocks": 144,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "Bitmap Index Scan",
+            "Relation Name": null,
+            "Index Name": "idx_messages_org",
+            "Actual Rows": 2112,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 3,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 347,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 4587,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          }
+        ]
+      },
+      "indexed_batch": {
+        "execution_ms": 16.073,
+        "planning_ms": 0.967,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_unread_idx",
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 20,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_unread_idx",
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 20,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 200,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 220,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 5291,
+            "Shared Read Blocks": 6,
+            "Sort Method": null
+          }
+        ]
+      },
+      "late_only_empty": {
+        "execution_ms": 0.081,
+        "planning_ms": 0.845,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_unread_idx",
+            "Actual Rows": 0,
+            "Actual Loops": 0,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_unread_idx",
+            "Actual Rows": 0,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 5,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 0,
+            "Actual Loops": 0,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 0,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 5,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          }
+        ]
+      }
+    },
+    "10000": {
+      "baseline_history": {
+        "execution_ms": 0.154,
+        "planning_ms": 0.518,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "idx_messages_created",
+            "Actual Rows": 52,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 616,
+            "Shared Hit Blocks": 37,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          }
+        ]
+      },
+      "indexed_history": {
+        "execution_ms": 0.058,
+        "planning_ms": 0.681,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_history_idx",
+            "Actual Rows": 50,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 17,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          }
+        ]
+      },
+      "baseline_batch": {
+        "execution_ms": 16.285,
+        "planning_ms": 0.689,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "messages_pkey",
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 12310,
+            "Shared Hit Blocks": 23266,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 23466,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "messages_pkey",
+            "Actual Rows": 1,
+            "Actual Loops": 200,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 773,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 28678,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          }
+        ]
+      },
+      "indexed_batch": {
+        "execution_ms": 11.885,
+        "planning_ms": 0.865,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_unread_idx",
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 19,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_unread_idx",
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 19,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 219,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 5266,
+            "Shared Read Blocks": 161,
+            "Sort Method": null
+          }
+        ]
+      },
+      "late_only_empty": {
+        "execution_ms": 0.084,
+        "planning_ms": 0.814,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_unread_idx",
+            "Actual Rows": 0,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 5,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_unread_idx",
+            "Actual Rows": 0,
+            "Actual Loops": 0,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 0,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 5,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 0,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 5,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          }
+        ]
+      }
+    },
+    "100000": {
+      "baseline_history": {
+        "execution_ms": 0.238,
+        "planning_ms": 0.729,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "idx_messages_created",
+            "Actual Rows": 52,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 616,
+            "Shared Hit Blocks": 39,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          }
+        ]
+      },
+      "indexed_history": {
+        "execution_ms": 0.172,
+        "planning_ms": 0.753,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "idx_messages_created",
+            "Actual Rows": 52,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 616,
+            "Shared Hit Blocks": 39,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          }
+        ]
+      },
+      "baseline_batch": {
+        "execution_ms": 279.424,
+        "planning_ms": 3.1,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "messages_pkey",
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 111650,
+            "Shared Hit Blocks": 100428,
+            "Shared Read Blocks": 68646,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 100628,
+            "Shared Read Blocks": 68646,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "messages_pkey",
+            "Actual Rows": 1,
+            "Actual Loops": 200,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 796,
+            "Shared Read Blocks": 4,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 105816,
+            "Shared Read Blocks": 68768,
+            "Sort Method": null
+          }
+        ]
+      },
+      "indexed_batch": {
+        "execution_ms": 12.204,
+        "planning_ms": 0.923,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_unread_idx",
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 19,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 219,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "messages_pkey",
+            "Actual Rows": 1,
+            "Actual Loops": 200,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 800,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 200,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 6098,
+            "Shared Read Blocks": 6,
+            "Sort Method": null
+          }
+        ]
+      },
+      "late_only_empty": {
+        "execution_ms": 0.095,
+        "planning_ms": 1.027,
+        "nodes": [
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "t2_proof_unread_idx",
+            "Actual Rows": 0,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 5,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 0,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 5,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "Index Scan",
+            "Relation Name": "messages",
+            "Index Name": "messages_pkey",
+            "Actual Rows": 0,
+            "Actual Loops": 0,
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          },
+          {
+            "Node Type": "CTE Scan",
+            "Relation Name": null,
+            "Index Name": null,
+            "Actual Rows": 0,
+            "Actual Loops": 1,
+            "Rows Removed by Filter": null,
+            "Shared Hit Blocks": 5,
+            "Shared Read Blocks": 0,
+            "Sort Method": null
+          }
+        ]
+      }
+    }
+  },
+  "distribution": {
+    "each_cohort": "one org and one conversation, inbound SMS only, body179ASCII bytes, metadataNULL,10rows per microsecond timestamp tie",
+    "eligible_boundary": 200,
+    "late_rows": "all remaining revisions>200; kept unread",
+    "cache": "two repeated plan samples; no cache flush, data/index caches warmed by inserts/index build",
+    "shared_table": "contains earlier T2 synthetic fixtures plus111000 new rows"
+  },
+  "limits": [
+    "Offline synthetic sweep capped100k cohort, no production capacity/latency certification",
+    "Index creation uses regular CREATE INDEX in exclusive fixture, not production concurrent migration rehearsal",
+    "Bounded200 mutations do not by themselves prove bounded joined UPDATE execution; inspect recorded plans",
+    "Revision/id traversal changes lock order and requires concurrency integration before production",
+    "Projection dirty capture remains enabled; this is not a comparative write-amplification measurement",
+    "No canonical trigger disabled, heads reset or existing data deleted"
+  ]
+}

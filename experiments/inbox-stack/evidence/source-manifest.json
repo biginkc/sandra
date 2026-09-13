@@ -1,0 +1,33 @@
+{
+  "at": "2026-09-13T11:39:57.132223+00:00",
+  "purpose": "Source fingerprints for the isolated T1 integration candidate; consult individual reports for their test scope.",
+  "files": {
+    "browser/app.tsx": "fb301a89539d9cd3e2f029eb4c960475f64d352ccc46a668bedda6bfb89673e6",
+    "browser/server.ts": "8c02a0d96d04637c975a3300a4a6314378f8177719d428c76c37a481ed65c23c",
+    "browser/verify-auth.mjs": "5388c913641570d01922208d331d186a7e2ca34c54294d983713516443bed974",
+    "browser/verify.mjs": "0c9435ce3f560ae46cb71a28e06c74801d35eb44a81b0e00ef5a860665fab52a",
+    "bulk/domain.ts": "6f8afc1f1dc0022aa266a077da4da867b0e724123939421619b629880b69535f",
+    "bulk/http-test.ts": "4f72e1f2573a5216f1d20359ea0f2b8a8034199ba5cd9c74301306c13f515d31",
+    "bulk/relay.ts": "3dfbe33763a30181c566cc6d1804bf2e9ebac9025ffa06b164265679af9891b4",
+    "bulk/server.ts": "b573d0916b58d55e53cfaae9b4905daacc6593de5d7463f808fb90191c2bc601",
+    "bulk/setup.sql": "3c7184a1133dfb97fb48d40b40ae1c3ca152852ff04ca15ed4e011be570dffea",
+    "bulk/setup.ts": "254b614632f38fdf862f56ebfb40398b862556476a4900e35a92a9838b173bce",
+    "bulk/start-runtime.sh": "7fc6a83043a20b60d85ccee4ca99bd1c7e92f2f3608b34da177e90c031aea151",
+    "bulk/test.ts": "44e2c932c26628e28a78625c4e8c4862cd16896f2f43cdd578707683a2e40462",
+    "bulk/worker.ts": "032160db804931cb0f1fa2855e34fafbd2f5b7f28fd6e59d2a75213558050ee9",
+    "evidence/production-preflight.sql": "bcc2c7ceaff35c9bfd6b1ec6bf67e8c427327d2e1d38e968e0ff5492d7636fa0",
+    "package-lock.json": "ed963c7d209ff99bc99df5e09b4528f8994de3f72edf0bdbdf4993135d38cd54",
+    "package.json": "a578057aa00c5c0c53f9be6b37dc091c73876325cfb40d7b79462ec8e228cf96",
+    "shared/database.ts": "01a30a0d0b865d91ef5bfa22e7913d57dc6a7de6fdd00b35ecd52bb9c147e69e",
+    "shared/setup.sql": "97228eb22d7e894583439547e646ed65f8423f4ff508192a8df9b230096ee17b",
+    "shared/start-database.py": "549e1f2c40dba7a7cab3790b736fa89680db4293ae7b5e6ebfb22ef34dec5fed",
+    "sync/gateway.ts": "d7fe37482c1d68a952e16d93bca7f62e8b923027746cc4b1b621e8b356c56a35",
+    "sync/serve.ts": "6375c2c75ab199231e0eacabe4c6570589fbdcd50b679cf8b976b744f77fa9ec",
+    "sync/setup.sql": "1af7d6a1d064dae159486c8c15006121af16366e2d9ab6221a66705c32188eb5",
+    "sync/start-electric.sh": "2aff9b4ceb882037a08ff56b4913a5c8127a3c1b3e5e8a16915556b53831d525",
+    "sync/verify.ts": "9e04f8ca18310d73b1e628736cc5c7dd2850b473bc98671bea090f26ecb68c87",
+    "tsconfig.json": "e1ae6fc641b06e3a0f7181b992208c0935e0a1a3aa8f43b88e02f0212b761e99",
+    "ui/selection.test.ts": "e6e26c7c2ab31fe0cbab560a34a9bb48cdeab681eeaeb9d06f74de8daa91e8ee",
+    "ui/selection.ts": "1c6ecca1d05ec00677fa7cf6ac9c29ffcd21b0b3bc6f9c810572bce2cf0729ab"
+  }
+}

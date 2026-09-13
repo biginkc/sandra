@@ -1,0 +1,46 @@
+{
+  "at": "2026-09-13T11:12:41.621Z",
+  "runtime": "1.7.5",
+  "sdk": "1.17.0",
+  "imageDigest": "sha256:675b85e7bf674f9dfda04a391fa33e850650d57e464b694ca8df5866acad95cc",
+  "checks": [
+    {
+      "name": "missing identity denied",
+      "passed": true
+    },
+    {
+      "name": "cross tenant targets denied",
+      "passed": true
+    },
+    {
+      "name": "property deduplication and request hash conflict",
+      "passed": true
+    },
+    {
+      "name": "lost relay acknowledgement same invocation and exactly two canonical writes",
+      "passed": true
+    },
+    {
+      "name": "SIGKILL after canonical commit before journal acknowledgement resumes without duplicate update",
+      "passed": true
+    },
+    {
+      "name": "between-step failure retries without reapplying outcome",
+      "passed": true
+    },
+    {
+      "name": "execution membership revocation blocks writes and receipt access",
+      "passed": true
+    },
+    {
+      "name": "authoritative revision conflict does not overwrite concurrent writer",
+      "passed": true
+    }
+  ],
+  "limits": [
+    "synthetic local DB only",
+    "no provider sends",
+    "single worker and sequential target executor",
+    "no production load or HA validation"
+  ]
+}

@@ -37,6 +37,9 @@ export type AcquisitionAttemptDialogProps = {
   propertyLabel: string
   initialCallActivityId?: string | null
   callReferenceOptions?: readonly AcquisitionCallReferenceOption[]
+  callReferencesLoading?: boolean
+  callReferencesError?: string | null
+  onRetryCallReferences?: () => void
   onOpenChange: (open: boolean) => void
   onSubmit: AcquisitionSubmit<AcquisitionAttemptFormPayload>
 }
@@ -47,16 +50,23 @@ export function AcquisitionAttemptDialog({
   propertyLabel,
   initialCallActivityId = null,
   callReferenceOptions = [],
+  callReferencesLoading = false,
+  callReferencesError = null,
+  onRetryCallReferences,
   onOpenChange,
   onSubmit,
 }: AcquisitionAttemptDialogProps) {
-  const [source, setSource] = useState<AcquisitionAttemptSource>("dialpad")
+  const [source, setSource] = useState<AcquisitionAttemptSource>(initialCallActivityId ? "sandra" : "dialpad")
   const [kind, setKind] = useState<AcquisitionAttemptKind>("call")
   const [outcome, setOutcome] = useState<AcquisitionAttemptFormPayload["outcome"] | "">("")
   const [occurredAt, setOccurredAt] = useState("")
   const [note, setNote] = useState("")
   const [recordingUrl, setRecordingUrl] = useState("")
   const [callActivityId, setCallActivityId] = useState(initialCallActivityId || "")
+  const availableCalls = initialCallActivityId && !callReferenceOptions.some(call => call.id === initialCallActivityId)
+    ? [{ id: initialCallActivityId, label: "Selected Sandra call" }, ...callReferenceOptions]
+    : callReferenceOptions
+  const sandraAvailable = availableCalls.length > 0
   const [clientError, setClientError] = useState<string | null>(null)
   const [clientFieldErrors, setClientFieldErrors] = useState<Record<string, string>>({})
   const resetFields = () => {
@@ -94,8 +104,8 @@ export function AcquisitionAttemptDialog({
 
     const nextFieldErrors: Record<string, string> = {}
     if (!outcome) nextFieldErrors.outcome = "Choose the external outcome."
-    if (source === "sandra" && !callActivityId.trim()) {
-      nextFieldErrors.callActivityId = "Enter the existing Sandra call reference."
+    if (source === "sandra" && !availableCalls.some(call => call.id === callActivityId)) {
+      nextFieldErrors.callActivityId = "Choose the Sandra call you want to record an outcome for."
     }
     const occurred = centralDateTimeToIso(occurredAt)
     if (!occurred.ok) nextFieldErrors.occurredAt = occurred.message
@@ -144,13 +154,15 @@ export function AcquisitionAttemptDialog({
                   value={source}
                   onChange={(event) => {
                     const nextSource = event.target.value as AcquisitionAttemptSource
+                    if (nextSource === "sandra" && !sandraAvailable) return
                     setSource(nextSource)
+                    if (nextSource === "sandra" && availableCalls.length === 1) setCallActivityId(availableCalls[0].id)
                     setKind(nextSource === "manual" ? "outreach" : "call")
                     clearClientErrors()
                   }}
                   className={SELECT_FIELD_CLASS}
                 >
-                  <option value="sandra">Sandra</option>
+                  <option value="sandra" disabled={!sandraAvailable}>Sandra</option>
                   <option value="dialpad">DialPad</option>
                   <option value="manual">Manual outreach</option>
                 </select>
@@ -176,16 +188,31 @@ export function AcquisitionAttemptDialog({
               )}
             </div>
 
+            <div className="text-sm text-muted-foreground">
+              {callReferencesLoading ? (
+                <p role="status">Loading Sandra calls… You can still log outreach made outside Sandra.</p>
+              ) : callReferencesError ? (
+                <div role="alert">
+                  <p>Could not load Sandra calls. Retry to select a call made in Sandra.</p>
+                  {onRetryCallReferences && <button type="button" className="mt-1 underline" onClick={onRetryCallReferences}>Retry loading Sandra calls</button>}
+                </div>
+              ) : !sandraAvailable ? (
+                <p>No Sandra calls need an outcome for this lead. Calls made in Sandra appear here automatically. For outreach made outside Sandra, choose DialPad or Manual outreach.</p>
+              ) : (
+                <p>For a call made in Sandra, choose Sandra and select the call by date and time.</p>
+              )}
+            </div>
+
             {source === "sandra" && (
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center">
-                  <Label htmlFor="acquisition-attempt-call-reference">Sandra call reference</Label>
+                  <Label htmlFor="acquisition-attempt-call-reference">Sandra call</Label>
                   <RequiredHint />
                 </div>
-                {callReferenceOptions.length > 0 ? (
+                {sandraAvailable ? (
                   <select
                     id="acquisition-attempt-call-reference"
-                    aria-label="Sandra call reference"
+                    aria-label="Sandra call"
                     value={callActivityId}
                     onChange={(event) => setCallActivityId(event.target.value)}
                     aria-invalid={Boolean(clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId)}
@@ -193,8 +220,8 @@ export function AcquisitionAttemptDialog({
                     aria-required="true"
                     className={SELECT_FIELD_CLASS}
                   >
-                    <option value="">Choose verified call</option>
-                    {callReferenceOptions.map((reference) => (
+                    <option value="">Choose a call</option>
+                    {availableCalls.map((reference) => (
                       <option key={reference.id} value={reference.id}>
                         {reference.label}
                       </option>
@@ -202,7 +229,7 @@ export function AcquisitionAttemptDialog({
                   </select>
                 ) : (
                   <p className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
-                    A verified Sandra call reference must be supplied by the call flow.
+                    This call is no longer available. Close and reopen this dialog to refresh Sandra calls.
                   </p>
                 )}
                 <FieldError id="acquisition-attempt-call-reference-error" message={clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId} />

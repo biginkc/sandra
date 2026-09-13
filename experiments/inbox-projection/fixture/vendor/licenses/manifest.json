@@ -1,0 +1,61 @@
+{
+  "licenses": [
+    {
+      "project": "supabase/auth",
+      "commit": "2a2f425554e8eca701722f4aab794ccf3647b27b",
+      "url": "https://raw.githubusercontent.com/supabase/auth/2a2f425554e8eca701722f4aab794ccf3647b27b/LICENSE",
+      "file": "supabase-auth-2a2f425554e8eca701722f4aab794ccf3647b27b-LICENSE",
+      "sha256": "c317de2f5a8987bf1d2f640e4a1b20985480ecc5656be0d676599b5419e0b0c9"
+    },
+    {
+      "project": "supabase/auth",
+      "commit": "3b77d62d71ad810697273a518a48bb0b539be4e6",
+      "url": "https://raw.githubusercontent.com/supabase/auth/3b77d62d71ad810697273a518a48bb0b539be4e6/LICENSE",
+      "file": "supabase-auth-3b77d62d71ad810697273a518a48bb0b539be4e6-LICENSE",
+      "sha256": "c317de2f5a8987bf1d2f640e4a1b20985480ecc5656be0d676599b5419e0b0c9"
+    },
+    {
+      "project": "supabase/auth",
+      "commit": "d8ec8015e50f6199786a9e5f05589888fa8862be",
+      "url": "https://raw.githubusercontent.com/supabase/auth/d8ec8015e50f6199786a9e5f05589888fa8862be/LICENSE",
+      "file": "supabase-auth-d8ec8015e50f6199786a9e5f05589888fa8862be-LICENSE",
+      "sha256": "c317de2f5a8987bf1d2f640e4a1b20985480ecc5656be0d676599b5419e0b0c9"
+    },
+    {
+      "project": "supabase/auth",
+      "commit": "e062eeae0079a6b1a70d5d5da9e5ac5cb8c21194",
+      "url": "https://raw.githubusercontent.com/supabase/auth/e062eeae0079a6b1a70d5d5da9e5ac5cb8c21194/LICENSE",
+      "file": "supabase-auth-e062eeae0079a6b1a70d5d5da9e5ac5cb8c21194-LICENSE",
+      "sha256": "c317de2f5a8987bf1d2f640e4a1b20985480ecc5656be0d676599b5419e0b0c9"
+    },
+    {
+      "project": "supabase/postgres",
+      "commit": "73119f8bfae2bfb07ddfa18240ab8e5f56f737a8",
+      "url": "https://raw.githubusercontent.com/supabase/postgres/73119f8bfae2bfb07ddfa18240ab8e5f56f737a8/LICENSE",
+      "file": "supabase-postgres-73119f8bfae2bfb07ddfa18240ab8e5f56f737a8-LICENSE",
+      "sha256": "fd313c784c2e3c964fe043fdb7bcffa8f84627d53d2cf3a61c61586ff6c3f4c1"
+    },
+    {
+      "project": "supabase/realtime",
+      "commit": "935ddbb25e2bd76c2829fc32b09ba28258ace48e",
+      "url": "https://raw.githubusercontent.com/supabase/realtime/935ddbb25e2bd76c2829fc32b09ba28258ace48e/LICENSE",
+      "file": "supabase-realtime-935ddbb25e2bd76c2829fc32b09ba28258ace48e-LICENSE",
+      "sha256": "56351b5c92da783a59b13835c13dcdae5f6b2da04baaf69f4b02a9429f2c334e"
+    },
+    {
+      "project": "supabase/storage",
+      "commit": "e89d526fa3e3e7600b6a22cedf43aa058924d19a",
+      "url": "https://raw.githubusercontent.com/supabase/storage/e89d526fa3e3e7600b6a22cedf43aa058924d19a/LICENSE",
+      "file": "supabase-storage-e89d526fa3e3e7600b6a22cedf43aa058924d19a-LICENSE",
+      "sha256": "87420ad3debbb44af3e5aac29f5bafd4427eef7a28c6e5eae199bdde1ad7c2e2"
+    }
+  ],
+  "postgres_image_source_verification": {
+    "release_tag": "17.6.1.165",
+    "resolved_commit": "73119f8bfae2bfb07ddfa18240ab8e5f56f737a8",
+    "source_sql_url": "https://raw.githubusercontent.com/supabase/postgres/73119f8bfae2bfb07ddfa18240ab8e5f56f737a8/migrations/db/migrations/20250623125453_tmp_grant_storage_tables_to_postgres_with_grant_option.sql",
+    "sha256": "1289f81f7111147fc334fa44ec00c31c871f5ba325c16cc205646ff07507cf04",
+    "matches_vendored_image_sql": true
+  },
+  "notice_discovery": "Root directory inventories at each pinned commit contain LICENSE and no separate NOTICE or COPYRIGHT file."
+}

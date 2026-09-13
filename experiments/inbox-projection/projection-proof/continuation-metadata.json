@@ -1,0 +1,102 @@
+{
+  "message_indexes": [
+    {
+      "name": "messages_pkey",
+      "definition": "CREATE UNIQUE INDEX messages_pkey ON public.messages USING btree (id)"
+    },
+    {
+      "name": "idx_messages_property",
+      "definition": "CREATE INDEX idx_messages_property ON public.messages USING btree (property_id) WHERE (property_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_messages_contact",
+      "definition": "CREATE INDEX idx_messages_contact ON public.messages USING btree (contact_id) WHERE (contact_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_messages_conversation",
+      "definition": "CREATE INDEX idx_messages_conversation ON public.messages USING btree (conversation_id) WHERE (conversation_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_messages_created",
+      "definition": "CREATE INDEX idx_messages_created ON public.messages USING btree (created_at DESC)"
+    },
+    {
+      "name": "idx_messages_external_id",
+      "definition": "CREATE INDEX idx_messages_external_id ON public.messages USING btree (external_id) WHERE (external_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_messages_org",
+      "definition": "CREATE INDEX idx_messages_org ON public.messages USING btree (org_id)"
+    },
+    {
+      "name": "idx_messages_unread_inbound",
+      "definition": "CREATE INDEX idx_messages_unread_inbound ON public.messages USING btree (property_id, created_at DESC) WHERE ((direction = 'inbound'::text) AND (read_at IS NULL))"
+    },
+    {
+      "name": "idx_messages_unknown_active",
+      "definition": "CREATE INDEX idx_messages_unknown_active ON public.messages USING btree (from_address, created_at DESC) WHERE ((contact_id IS NULL) AND (dismissed_at IS NULL))"
+    },
+    {
+      "name": "idx_messages_queued_scheduled",
+      "definition": "CREATE INDEX idx_messages_queued_scheduled ON public.messages USING btree (scheduled_for) WHERE ((status = 'queued'::text) AND (scheduled_for IS NOT NULL))"
+    },
+    {
+      "name": "idx_messages_inbound_provider_external_unique",
+      "definition": "CREATE UNIQUE INDEX idx_messages_inbound_provider_external_unique ON public.messages USING btree (provider, external_id) WHERE ((direction = 'inbound'::text) AND (external_id IS NOT NULL))"
+    },
+    {
+      "name": "idx_messages_ai_responder_inbound_unique",
+      "definition": "CREATE UNIQUE INDEX idx_messages_ai_responder_inbound_unique ON public.messages USING btree (((metadata ->> 'inbound_message_id'::text))) WHERE ((channel = 'sms'::text) AND (direction = 'outbound'::text) AND ((metadata ->> 'generated_by'::text) = 'ai_responder_v1'::text) AND (metadata ? 'inbound_message_id'::text))"
+    },
+    {
+      "name": "idx_messages_campaign_property_unique",
+      "definition": "CREATE UNIQUE INDEX idx_messages_campaign_property_unique ON public.messages USING btree (campaign_id, property_id) WHERE ((campaign_id IS NOT NULL) AND (direction = 'outbound'::text))"
+    },
+    {
+      "name": "idx_messages_campaign_id_status",
+      "definition": "CREATE INDEX idx_messages_campaign_id_status ON public.messages USING btree (campaign_id, status) WHERE (campaign_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_messages_attributed_outbound_message_id",
+      "definition": "CREATE INDEX idx_messages_attributed_outbound_message_id ON public.messages USING btree (attributed_outbound_message_id) WHERE (attributed_outbound_message_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_messages_inbound_intent_unique",
+      "definition": "CREATE UNIQUE INDEX idx_messages_inbound_intent_unique ON public.messages USING btree (inbound_intent_id) WHERE ((channel = 'sms'::text) AND (direction = 'inbound'::text) AND (inbound_intent_id IS NOT NULL))"
+    },
+    {
+      "name": "idx_messages_campaign_queue_controls",
+      "definition": "CREATE INDEX idx_messages_campaign_queue_controls ON public.messages USING btree (campaign_id, status, scheduled_for) WHERE ((campaign_id IS NOT NULL) AND (channel = 'sms'::text) AND (direction = 'outbound'::text) AND (status = ANY (ARRAY['queued'::text, 'paused'::text])))"
+    },
+    {
+      "name": "idx_messages_property_direction_created",
+      "definition": "CREATE INDEX idx_messages_property_direction_created ON public.messages USING btree (property_id, direction, created_at DESC) WHERE (property_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_messages_property_created_id",
+      "definition": "CREATE INDEX idx_messages_property_created_id ON public.messages USING btree (property_id, created_at DESC, id DESC) WHERE (property_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_messages_sms_inbox_org_conversation_latest",
+      "definition": "CREATE INDEX idx_messages_sms_inbox_org_conversation_latest ON public.messages USING btree (org_id, conversation_id, created_at DESC, id DESC) INCLUDE (contact_id, property_id, direction, read_at) WHERE ((channel = 'sms'::text) AND (contact_id IS NOT NULL) AND (conversation_id IS NOT NULL) AND (status <> ALL (ARRAY['queued'::text, 'paused'::text])))"
+    },
+    {
+      "name": "messages_fts_gin",
+      "definition": "CREATE INDEX messages_fts_gin ON public.messages USING gin (fts)"
+    },
+    {
+      "name": "t2_proof_history_idx",
+      "definition": "CREATE INDEX t2_proof_history_idx ON public.messages USING btree (org_id, conversation_id, created_at DESC, id DESC) WHERE (channel = 'sms'::text)"
+    },
+    {
+      "name": "t2_proof_unread_idx",
+      "definition": "CREATE INDEX t2_proof_unread_idx ON public.messages USING btree (org_id, conversation_id, inbox_inbound_revision, id) WHERE ((channel = 'sms'::text) AND (direction = 'inbound'::text) AND (read_at IS NULL))"
+    }
+  ],
+  "head_trigger_enabled": "O",
+  "message_estimated_rows": 106036,
+  "projection_schema_exists": true,
+  "idle_in_transaction_sessions": 0,
+  "at": "2026-09-13T12:16:01Z",
+  "limitation": "Catalog estimates and current indexes only. No production latency or bounded-work claim."
+}

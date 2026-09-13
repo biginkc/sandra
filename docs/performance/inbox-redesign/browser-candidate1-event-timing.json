@@ -1,0 +1,102 @@
+{
+  "browserEventToPaint": [
+    {
+      "milliseconds": 147.30000000074506,
+      "readSource": "network",
+      "phase": "first_open"
+    },
+    {
+      "milliseconds": 130,
+      "readSource": "network",
+      "phase": "first_open"
+    },
+    {
+      "milliseconds": 32.399999998509884,
+      "readSource": "memory",
+      "phase": "revisit"
+    },
+    {
+      "milliseconds": 30,
+      "readSource": "memory",
+      "phase": "revisit"
+    },
+    {
+      "milliseconds": 229.39999999850988,
+      "readSource": "network",
+      "phase": "expired_revisit"
+    },
+    {
+      "milliseconds": 114.79999999701977,
+      "readSource": "network",
+      "phase": "expired_revisit"
+    }
+  ],
+  "detailResources": [
+    {
+      "durationMs": 133.89999999850988,
+      "waitToFirstByteMs": 128.30000000074506,
+      "transferBytes": 4707
+    },
+    {
+      "durationMs": 111.89999999850988,
+      "waitToFirstByteMs": 108.10000000149012,
+      "transferBytes": 4707
+    },
+    {
+      "durationMs": 217.69999999925494,
+      "waitToFirstByteMs": 211.59999999776483,
+      "transferBytes": 4707
+    },
+    {
+      "durationMs": 99,
+      "waitToFirstByteMs": 96.10000000149012,
+      "transferBytes": 4707
+    }
+  ],
+  "experiment": "candidate1 independent read and bounded cache",
+  "status": "completed",
+  "fixtureConversations": 55000,
+  "initialListMs": 1573.878292,
+  "observations": [
+    {
+      "phase": "first_open",
+      "milliseconds": 237.82258300000012,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 224.07124999999996,
+      "readSource": "network"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 64.30658399999993,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 63.25450000000001,
+      "readSource": "memory"
+    },
+    {
+      "phase": "expired_revisit",
+      "milliseconds": 337.5436669999981,
+      "readSource": "network"
+    },
+    {
+      "phase": "expired_revisit",
+      "milliseconds": 232.24666699999943,
+      "readSource": "network"
+    }
+  ],
+  "visibleRows": 200,
+  "blockedExternalRequests": 0,
+  "pageErrors": [],
+  "limitations": [
+    "Local production build with synthetic password session; not genuine Hugo production SSO",
+    "Two first opens, two immediate revisits,31-second wait outside measured interval, two expired revisits; local synthetic observations only",
+    "Read-only experiment: no mark-read, sends or outcomes; minimal page omits full Inbox parity",
+    "Click-to-correct-panel plus two animation frames includes Playwright overhead",
+    "Browser-event measurements start in a capture click listener, wait for correct detail/history DOM and two animation frames; separate from Playwright action-start timings. Six total observations only."
+  ]
+}
