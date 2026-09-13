@@ -1,0 +1,18 @@
+{
+  "checks": [
+    "bounded latest50 snapshot records boundary without acknowledging history",
+    "three bounded batches acknowledge451 including older pages; backdated later arrival remains unread",
+    "lost-response replay returns immutable completed receipt without re-marking later unread",
+    "unknown boundary and direct private storage access denied",
+    "expired unaccepted boundary fails without writes",
+    "current membership suspension and session deletion deny acknowledgment"
+  ],
+  "setup_sha256": "d8d13328cd70d0b4e6a0414c9d3560f99f00151928e68a1186693342d87035c7",
+  "runner_sha256": "47086ef3975c7d6d6f2bd0bac1c863aad6b7f174053573cd82f308acb104ff23",
+  "limits": [
+    "SQL trusted claims only, no JWT transport",
+    "No browser render binding yet",
+    "Concurrency, DNC and source identity cases pending",
+    "No production migration or activation"
+  ]
+}
