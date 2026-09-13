@@ -29,7 +29,7 @@ The SQL tests start disposable local PostgreSQL clusters with prerequisite fixtu
 relations. They do not connect to hosted Supabase and do not replace a complete
 application migration rehearsal. FFmpeg tests exercise generated WAV media.
 
-Separately, `scripts/rehearse-dialpad-full-schema.mjs` replayed all 248 current
+Separately, `scripts/rehearse-dialpad-full-schema.mjs` replayed all 249 current
 SQL migrations against a fresh genuine local Supabase Auth/Storage database.
 The receipt hashes match the current files. This proves clean installation
 compatibility, not hosted-schema parity or provider behavior.

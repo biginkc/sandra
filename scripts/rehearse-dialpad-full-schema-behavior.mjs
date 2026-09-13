@@ -3,11 +3,17 @@
  */
 import assert from 'node:assert/strict';
 import {createHash,createHmac,randomUUID} from 'node:crypto';
-import {writeFileSync} from 'node:fs';
+import {writeFileSync,readFileSync,existsSync} from 'node:fs';
 import pg from 'pg';
 import webhookAuth from '../src/lib/dialpad-voice/webhook-auth.ts';
 const {verifyDialpadVoiceEvent}=webhookAuth;
-const client=new pg.Client({host:'127.0.0.1',port:59422,user:'postgres',password:'postgres',database:'postgres'});
+const dir=process.argv[2]??'/tmp/sandra-dialpad-full-schema-Dp6VHR';
+assert.match(dir,/^\/tmp\/sandra-dialpad-full-schema-[A-Za-z0-9]+$/);
+assert.equal(existsSync(dir+'/supabase/.temp/project-ref'),false);
+const config=readFileSync(dir+'/supabase/config.toml','utf8');
+const port=Number(config.match(/\[db\]\s*[\s\S]*?^port = (\d+)/m)?.[1]);
+assert.ok(port>=59000&&port<60000);
+const client=new pg.Client({host:'127.0.0.1',port,user:'postgres',password:'postgres',database:'postgres'});
 const receipt={scope:'Genuine local full-schema synthetic behavior; rollback only',checks:[],failure:null};
 let step='connect';
 try {
@@ -51,4 +57,4 @@ try {
  assert.equal((await client.query('select count(*)::int n from acquisition_attempts where org_id=$1',[foreign])).rows[0].n,0);receipt.checks.push('wrong-org receipt rejected with zero foreign credit');
  console.log('PASS: '+receipt.checks.length+' full-schema behavior checks');
 }catch(error){receipt.failure={step,code:error.code??null,message:error.message};console.error(JSON.stringify(receipt.failure));process.exitCode=1;}
-finally{await client.query('rollback');await client.end();writeFileSync('/tmp/sandra-dialpad-full-schema-Dp6VHR/behavior-receipt.json',JSON.stringify(receipt,null,2),{mode:0o600});}
+finally{await client.query('rollback');await client.end();writeFileSync(dir+'/behavior-receipt.json',JSON.stringify(receipt,null,2),{mode:0o600});}

@@ -61,6 +61,7 @@ create or replace function public.fn_get_acquisition_kpis(p_org_id uuid,p_member
 returns jsonb language plpgsql security definer set search_path='' as $$
 declare
   v_at timestamptz:=statement_timestamp();
+  v_today_start timestamptz := date_trunc('day', v_at at time zone 'America/Chicago') at time zone 'America/Chicago';
   v_attempts bigint; v_reached bigint; v_pending bigint; v_offers bigint; v_last timestamptz;
   v_contact bigint; v_needs_offer bigint; v_overdue bigint;
   v_missing bigint; v_recording_unknown bigint; v_talk_samples bigint; v_talk_unknown bigint;
@@ -77,7 +78,8 @@ begin
     into v_attempts,v_reached,v_pending from public.acquisition_attempts
     where org_id=p_org_id and actor_user_id=p_member_id and occurred_at>=p_start and occurred_at<p_end;
   select max(occurred_at) into v_last from public.acquisition_attempts
-    where org_id=p_org_id and actor_user_id=p_member_id and occurred_at<=v_at;
+    where org_id=p_org_id and actor_user_id=p_member_id and attempt_kind='call'
+      and occurred_at>=v_today_start and occurred_at<=v_at;
   select count(*) into v_offers from public.acquisition_offers
     where org_id=p_org_id and actor_user_id=p_member_id and sent_at>=p_start and sent_at<p_end;
 
@@ -132,7 +134,7 @@ begin
     'firstCallElapsedSeconds',v_first_seconds,'appointmentsDue',v_due,'appointmentsHeld',v_held,
     'orgAppointmentsUnattributed',v_unattributed,'staleLeads',v_stale,'attempts',v_attempts,'reached',v_reached,'pendingOutcomes',v_pending,
     'offersSent',v_offers,'contactWithoutFollowUp',v_contact,'needsOffers',v_needs_offer,
-    'appointmentsOverdue',v_overdue,'lastAttemptAt',v_last,'asOf',v_at,
+    'appointmentsOverdue',v_overdue,'lastAttemptAt',v_last,'lastAttemptClockVersion',1,'asOf',v_at,
     'missingRecordings',v_missing,'recordingExpectationUnknown',v_recording_unknown,
     'averageTalkSeconds',v_talk_average,'talkTimeSamples',v_talk_samples,'talkTimeUnknown',v_talk_unknown,
     'conversationsOverFiveMinutes',v_long);

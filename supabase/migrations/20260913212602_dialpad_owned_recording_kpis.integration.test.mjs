@@ -86,6 +86,20 @@ test('Dialpad KPI requires complete private owned recording manifest; legacy sem
     sql(`update acquisition_attempts set recording_url='https://legacy.test/audio'`);missing(0);
     sql(`update acquisition_attempts set recording_url=null;update call_activities set recording_path='legacy/path'`);missing(0);
     sql(`update call_activities set recording_path=null,recording_expected=null`);missing(0);assert.equal(kpis().recordingExpectationUnknown,1);
+    // Daily clock is call-only, Chicago-today, and independent of reporting bounds.
+    sql(`delete from acquisition_attempts;
+      insert into acquisition_attempts(org_id,actor_user_id,occurred_at,attempt_kind)
+      values('${org}','${rep}',(date_trunc('day',now() at time zone 'America/Chicago') at time zone 'America/Chicago')-interval '1 second','call'),
+        ('${org}','${rep}',now(),'sms');`);
+    const historicalKpis=()=>JSON.parse(sql(`select fn_get_acquisition_kpis('${org}','${rep}',now()-interval '30 days',now()-interval '2 days')`));
+    assert.equal(historicalKpis().lastAttemptAt,null);
+    sql(`insert into acquisition_attempts(org_id,actor_user_id,occurred_at,attempt_kind)
+      values('${org}','${rep}',date_trunc('day',now() at time zone 'America/Chicago') at time zone 'America/Chicago','call');`);
+    const daily=historicalKpis();
+    const today=Number(sql(`select extract(epoch from (date_trunc('day',now() at time zone 'America/Chicago') at time zone 'America/Chicago'))*1000`));
+    assert.equal(Date.parse(daily.lastAttemptAt),today);
+    assert.equal(daily.lastAttemptClockVersion,1);
+    assert.equal(daily.attempts,0); // Report bounds still govern reporting metrics.
     for(const role of ['anon','authenticated','service_role']) assert.equal(sql(`select has_function_privilege('${role}','public.dialpad_has_complete_owned_recording(uuid,text)','EXECUTE')`),'f');
     for (const role of ['anon','authenticated']) assert.equal(sql(`select has_function_privilege('${role}','public.fn_dialpad_recording_complete(uuid,text)','EXECUTE')`),'f');
     assert.equal(sql(`select has_function_privilege('authenticated','public.fn_get_acquisition_kpis(uuid,uuid,timestamptz,timestamptz)','EXECUTE')`),'t');
