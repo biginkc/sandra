@@ -1,0 +1,15 @@
+{
+  "source": "supabase/migrations/20260909080000_messages_search.sql",
+  "sha256": "9d831995fbe24a8b047fb3cf03a3d3c92bd7114458f0bad0b7a4f35da35e9568",
+  "source_revision": "4bea39257757071cbfcca5e9150b98441a6da7d0",
+  "status": "offline_compilation_and_parity_passed",
+  "transformations": [
+    "Retain canonical pending/recent/old-review/core/classification CTE semantics",
+    "Replace actor visible-org checks with explicit worker-private organization and conversation scope",
+    "Remove search and multi-conversation collision detector from single keyed compute",
+    "Explicit as-of minus2160elapsedhours (90days); no upper timestamp bound added",
+    "Preview capped120; long review/escalation reasons omitted from narrow summary",
+    "Filter base fields retained; requester-dependent mine/unassigned and selected unread override applied downstream"
+  ],
+  "candidate_sha256": "f24712b35916307cdd0050017e01860cc7ee8939e32fb183ab2158822d43be30"
+}

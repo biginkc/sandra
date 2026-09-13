@@ -1,0 +1,212 @@
+{
+  "kind": "post-run independent-review source manifest",
+  "recorded_at": "2026-09-13T12:47:59.580589+00:00",
+  "base_commit": "580ff7286e29e695bfd2db1faf9ea20c6a452e59",
+  "scope": "Current source and retained evidence bytes reviewed after execution; not an assertion that every file hash was captured during each run. Historical failure and v1 receipts retain their separate scope.",
+  "files": [
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/README.md",
+      "sha256": "3f0830492b1b6f385b89319928a75638780741301597e0e072dee066ee7e9811"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/cleanup-v2.json",
+      "sha256": "ef611291676f0c813befc510207e0e9c9f887b3c7072c9392b997828bae240b9"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/cleanup.json",
+      "sha256": "6e2c37103b445a330f5566ff8a2517506d27b1023367c6f5ce948aa950a52e34"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/evidence-v2.json",
+      "sha256": "f2e272f98367e30cff0b9219be5709b06cb00807d5a8ece5822787112dff5a50"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/evidence.json",
+      "sha256": "f1677e4470651dbcc6528e6ff80866bc57873a2bbb8ddb143b2c4d31b707b9da"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/failure-20260913T122714.json",
+      "sha256": "b3b245d9bfc031327600d80106a15e5ba60562d772722ccb7676a28ab8c32eac"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/plan-probe.py",
+      "sha256": "d14e936479925ce4f4d7b31171242c45ff8d8fbd4f8864fcf9bff08f4a010368"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/probe-v2-output.json",
+      "sha256": "4a963653947f4f3471706e4a80267b9b17a72999f1bec28e22388dd9cdf5764d"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123403/evidence.json",
+      "sha256": "847962ace9c8d4ec78f1bfa1474b0121ba07b66dfc4aec9c3a7bc021f8956bc0"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123403/force_custom_plan-deep.json",
+      "sha256": "01b05e841324d5e896d231a748a8d35b551b435237cf8aa6baf3f55d9a374868"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123403/force_custom_plan-deep.stderr.txt",
+      "sha256": "6315ff126c7d85a9ef2bc113c0714359fdf84f5589cc9accd198dbcbd9c68acf"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123403/force_custom_plan-first.json",
+      "sha256": "2fa92859e86a8ce821f17ee504e9288ccb30aff17428ecb51ead44afd5be243a"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123403/force_custom_plan-first.stderr.txt",
+      "sha256": "58a847ed5585d16027320d8199cd4ec1d85c579a0a35bc0ec644f8c0dc0d3668"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123403/force_generic_plan-deep.json",
+      "sha256": "9c4cd59bd07fc3abac04a64600f472126cc66c3c9004d1b8a735460ac1901a38"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123403/force_generic_plan-deep.stderr.txt",
+      "sha256": "4b02c57a726276dd110836dd4ddaae829b4aabcecd7c315d22fefd82d77562e5"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123403/force_generic_plan-first.json",
+      "sha256": "c3b5ac3f27a2c95e99f6917cd33cc540bfd7234d9968ff7b27413fe6768a693d"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123403/force_generic_plan-first.stderr.txt",
+      "sha256": "0363adf5add9e787615c8f6ffc86da04ccdf52c64064dd5e77471214a2983e63"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123456/evidence.json",
+      "sha256": "4a963653947f4f3471706e4a80267b9b17a72999f1bec28e22388dd9cdf5764d"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123456/force_custom_plan-deep.json",
+      "sha256": "64ab7de4b97fca3222c2e19aeb4571687628e1b7fe515230e5f17fd2326b8681"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123456/force_custom_plan-deep.stderr.txt",
+      "sha256": "2bbb50ce621d6fc35d8e6b5866accca3740ba405c381ddf01de97c905db735fd"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123456/force_custom_plan-first.json",
+      "sha256": "ae4b28b51fe1082c47fad44c789c692f6589d8d23fc1feda20ed0a547ff73333"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123456/force_custom_plan-first.stderr.txt",
+      "sha256": "ec0b49cf874b85ae8a59189f030160ba6e62036b8fbb824aec9d5ab4d0123a03"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123456/force_generic_plan-deep.json",
+      "sha256": "34cda7964b10b095aa399fa729d631a05c9bd45812c3bef7cf2fda72c2b361c4"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123456/force_generic_plan-deep.stderr.txt",
+      "sha256": "73befb34ab272cfc0393a7e47d1eef595ff020ff09b61c43c2e3f41af5285fff"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123456/force_generic_plan-first.json",
+      "sha256": "2dfe0f36b53840002511c784398565e5c289dde08c934e888555b022a71bb232"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/rpc-plans-20260913T123456/force_generic_plan-first.stderr.txt",
+      "sha256": "e7208e4304839918a4816750e9a9ad21132ebedb1b060bc822e62d8c3ebcc8e3"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/run-v1.py",
+      "sha256": "cf7bd823db03a511462e107266477674fa622e4aad69bbaf327c8d643f0ee1d4"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/run.py",
+      "sha256": "ce3c926992ed49f922cf493b607599fe8261c7c4ba4e6a80f06bc61b6bb1ea42"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/setup-v2.sql",
+      "sha256": "bee0520f65816a19b211d6962cabad836a8e21d632b648af838c1d3840987620"
+    },
+    {
+      "path": "experiments/inbox-projection/authenticated-detail/setup.sql",
+      "sha256": "8e13aaea327dafa55bac4185ead4024099b467e52f6a65908331018df810d8c6"
+    },
+    {
+      "path": "experiments/inbox-projection/capture-boundary-integration/README.md",
+      "sha256": "7b74084d01c67bc50dd345f055f0e982c05b08513103093843f52d40bf5f24bf"
+    },
+    {
+      "path": "experiments/inbox-projection/capture-boundary-integration/evidence.json",
+      "sha256": "abd3387812e4d582a47960ef490fee0582a6e480b1f5b1f51947594e68d549f3"
+    },
+    {
+      "path": "experiments/inbox-projection/capture-boundary-integration/guard.py",
+      "sha256": "556603303c450988de2e8d9afd5b1cd5a11fe33cb8c6a31db6c7c0e4a3795db5"
+    },
+    {
+      "path": "experiments/inbox-projection/capture-boundary-integration/run.mjs",
+      "sha256": "90962a8f375e334fb70b2975d8c6bd2184965e5649a36c07c1036f5e9e614ccc"
+    },
+    {
+      "path": "experiments/inbox-projection/capture-boundary-integration/setup.sql",
+      "sha256": "4284a90214179ca2e7148d697d42a2951cbb7c87f4afea3a679f6d1cd3dda4c7"
+    },
+    {
+      "path": "experiments/inbox-projection/summary-contract/README.md",
+      "sha256": "7e9139001d4cf5902c1ba12f7d6007f3246d795e9d0e5f3b1f66792f56349750"
+    },
+    {
+      "path": "experiments/inbox-projection/summary-contract/attempts.jsonl",
+      "sha256": "aad10d097fd5d49a6a425e69e1132ba7233c2c8c478864f862c0840de683b8fb"
+    },
+    {
+      "path": "experiments/inbox-projection/summary-contract/compute.sql",
+      "sha256": "f24712b35916307cdd0050017e01860cc7ee8939e32fb183ab2158822d43be30"
+    },
+    {
+      "path": "experiments/inbox-projection/summary-contract/evidence-initial.json",
+      "sha256": "872b05fd6816b045640371f4f7ca9a061bbf6995513c6e9174bc1794ed1bae30"
+    },
+    {
+      "path": "experiments/inbox-projection/summary-contract/evidence.json",
+      "sha256": "c5af66f4606962649bea6e80d140dcd2f414966637d80007c077a9dfeafab736"
+    },
+    {
+      "path": "experiments/inbox-projection/summary-contract/fixture-cases.csv",
+      "sha256": "fe0e35da6813258cdf0e5011c3ecbf6245cc44b956ccb928abb173b3406267ea"
+    },
+    {
+      "path": "experiments/inbox-projection/summary-contract/run.py",
+      "sha256": "ee25caed96e4697adfe144404ea9c3dffa6810427080b9dace1e83c674782cc4"
+    },
+    {
+      "path": "experiments/inbox-projection/summary-contract/source-provenance.json",
+      "sha256": "8c91c29741d7a6637d1d69bf87e3b7a5b0728c8f4460a60e28a26999a0b0a1b5"
+    },
+    {
+      "path": "experiments/inbox-projection/unknown-summary-contract/README.md",
+      "sha256": "192eb342a77e2837a314cd9b7a0827f5d8860d59faa7faede1dd5c06cc6ab535"
+    },
+    {
+      "path": "experiments/inbox-projection/unknown-summary-contract/compute.sql",
+      "sha256": "e8604e26e0032b17fd1226da93b8717926cedd824b4bab08434ac58c305b7769"
+    },
+    {
+      "path": "experiments/inbox-projection/unknown-summary-contract/evidence.json",
+      "sha256": "a0aa4b897a1d02629f3e7d22c565974c9a325d30109aaa79d4a8c0ab6bcd5226"
+    },
+    {
+      "path": "experiments/inbox-projection/unknown-summary-contract/parity-oracle.ts",
+      "sha256": "31697a94eb42ea21cb63ce841e025e143d2005b67d17d2a9b162606be752bde9"
+    },
+    {
+      "path": "experiments/inbox-projection/unknown-summary-contract/run.py",
+      "sha256": "74b86e3f56ac1fe0397edcfbe3650972e3180e685f1669cf891ebc76677de811"
+    },
+    {
+      "path": "experiments/inbox-projection/unknown-summary-contract/source-provenance.json",
+      "sha256": "fd506d3dfa6cd5583753ed603bf3b4c986c2109816957fcc57272b5c24e127f2"
+    },
+    {
+      "path": "src/lib/inbox/read-boundary.test.ts",
+      "sha256": "3672de1a13e00258126bc4d083175fdda8539cad007f86789b5b331ed120d2f6"
+    },
+    {
+      "path": "src/lib/inbox/read-boundary.ts",
+      "sha256": "eafd5532b9cfd39d92826d7b4b137c208717c28cb09de4812e82c886db64bc7b"
+    }
+  ]
+}
