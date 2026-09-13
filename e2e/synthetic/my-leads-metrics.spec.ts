@@ -30,6 +30,11 @@ for (const width of [390, 1440]) {
     else expect(second!.y).toBe(first!.y)
     const strip = page.getByTestId("sticky-metrics")
     await expect(strip).toHaveCount(0)
+    // Align the fixture's fractional text height to a scrollable CSS pixel so
+    // the exact edge-adjacent observer transition below is deterministic.
+    await page.getByTestId("expanded-metrics").evaluate(node => {
+      node.style.height = `${Math.ceil(node.getBoundingClientRect().height)}px`
+    })
     const expanded = await page.getByTestId("expanded-metrics").boundingBox()
     const inset = width < 768 ? 116 : 64
     await page.evaluate(y => window.scrollTo(0, y), expanded!.y + expanded!.height - inset + 40)
@@ -51,6 +56,11 @@ for (const width of [390, 1440]) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
     await strip.evaluate(node => { node.scrollLeft = 0; node.blur() })
     await page.screenshot({ path: `/tmp/my-leads-sticky-metrics-${width}.png`, fullPage: false })
+    // Returning through an edge-adjacent intersection must clear the strip.
+    // At this position the cards have zero intersection area but are intersecting.
+    await page.evaluate(y => window.scrollTo(0, y), expanded!.y + expanded!.height - inset)
+    await expect.poll(async () => (await page.getByTestId("expanded-metrics").boundingBox())!.y + expanded!.height).toBeCloseTo(inset, 0)
+    await expect(strip).toHaveCount(0)
     await page.evaluate(() => window.scrollTo(0, 0))
     await expect(strip).toHaveCount(0)
   })
