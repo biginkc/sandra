@@ -1,0 +1,108 @@
+{
+  "status": "PASS",
+  "at": "2026-09-13T12:33:10Z",
+  "setup_sha256": "f24712b35916307cdd0050017e01860cc7ee8939e32fb183ab2158822d43be30",
+  "runner_sha256": "ee25caed96e4697adfe144404ea9c3dffa6810427080b9dace1e83c674782cc4",
+  "org": "a5f21bf5-8998-42d4-b63b-38b272283b85",
+  "other_org": "650e3a3a-279c-4a4a-a78e-33709a1007f8",
+  "as_of": "2026-09-13 12:33:04.190803+00",
+  "checks": [
+    {
+      "name": "private compute SQL compiles on canonical fixture",
+      "passed": true
+    },
+    {
+      "name": "recent row fields and existing needs-outcome predicate",
+      "passed": true
+    },
+    {
+      "name": "exact90day boundary and one-microsecond expiry",
+      "passed": true
+    },
+    {
+      "name": "old pending review exception independent of recent window",
+      "passed": true
+    },
+    {
+      "name": "closing old review produces keyed tombstone",
+      "passed": true
+    },
+    {
+      "name": "pending review joins only selected property",
+      "passed": true
+    },
+    {
+      "name": "recent propertyless review fallback",
+      "passed": true
+    },
+    {
+      "name": "recent cohort ignores old unread while pending review exists",
+      "passed": true
+    },
+    {
+      "name": "queued paused contactless and email rows excluded",
+      "passed": true
+    },
+    {
+      "name": "latest outbound route and narrow120-character preview",
+      "passed": true
+    },
+    {
+      "name": "shared property preserves separate conversation identities",
+      "passed": true
+    },
+    {
+      "name": "same conversation UUID in two organizations stays scoped",
+      "passed": true
+    },
+    {
+      "name": "assignment lead boundary and raw owner preserved",
+      "passed": true
+    },
+    {
+      "name": "latest consent tie ordering and contact optout precedence",
+      "passed": true
+    },
+    {
+      "name": "DNC remains reviewable but test traffic never does",
+      "passed": true
+    },
+    {
+      "name": "phone suppression normalizes route and remains organization scoped",
+      "passed": true
+    },
+    {
+      "name": "equal timestamp chooses highestUUID and latestnonnullproperty independently",
+      "passed": true
+    },
+    {
+      "name": "missing and invalid compute scope fail explicitly",
+      "passed": true
+    },
+    {
+      "name": "existing authenticated Inbox RPC field and visibility parity",
+      "passed": true,
+      "compared_rows": 28,
+      "filters": [
+        "all/show-noise",
+        "all/hide-noise",
+        "dispo/show-noise",
+        "dispo/hide-noise"
+      ]
+    },
+    {
+      "name": "DST-spanning2160hour boundary has identical membership across timezones",
+      "passed": true
+    },
+    {
+      "name": "private compute denies authenticated and service roles with42501",
+      "passed": true
+    }
+  ],
+  "limits": [
+    "Synthetic small cohorts; no bounded-scan or production workload claim",
+    "RPC uses simulated DB auth claims for own fixture membership; no JWT or external API verification",
+    "Compute remains worker-private and is not integrated with generation/CAS or dirty fanout",
+    "Case plan has additional scenarios not yet executed; use actual check list as evidence"
+  ]
+}

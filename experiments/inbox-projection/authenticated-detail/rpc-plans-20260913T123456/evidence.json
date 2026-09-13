@@ -1,0 +1,317 @@
+{
+  "status": "MEASURED",
+  "at": "2026-09-13T12:34:57Z",
+  "setup_sha256": "bee0520f65816a19b211d6962cabad836a8e21d632b648af838c1d3840987620",
+  "probe_sha256": "d14e936479925ce4f4d7b31171242c45ff8d8fbd4f8864fcf9bff08f4a010368",
+  "summary": {
+    "force_custom_plan-first": {
+      "exact_ids_match": true,
+      "head": "100000",
+      "cursor": null,
+      "bounded_observed": true,
+      "history_scans": [
+        {
+          "Node Type": "Index Scan",
+          "Index Name": "inbox_inbound_heads_pkey",
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "((org_id = '35210142-b51b-4428-828e-987feede99bf'::uuid) AND (conversation_id = 'f291c854-9488-46cd-82a3-626da799a0a3'::uuid))",
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 2,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "Index Only Scan",
+          "Index Name": "t2_proof_history_idx",
+          "Actual Rows": 50,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "((org_id = '35210142-b51b-4428-828e-987feede99bf'::uuid) AND (conversation_id = 'f291c854-9488-46cd-82a3-626da799a0a3'::uuid))",
+          "Filter": null,
+          "Heap Fetches": 0,
+          "Shared Hit Blocks": 5,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "CTE Scan",
+          "Index Name": null,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": null,
+          "Index Cond": null,
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 2,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "CTE Scan",
+          "Index Name": null,
+          "Actual Rows": 50,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": null,
+          "Index Cond": null,
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 5,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "Index Scan",
+          "Index Name": "messages_pkey",
+          "Actual Rows": 1,
+          "Actual Loops": 50,
+          "Rows Removed by Filter": 0,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "(id = p.id)",
+          "Filter": "((org_id = '35210142-b51b-4428-828e-987feede99bf'::uuid) AND (conversation_id = 'f291c854-9488-46cd-82a3-626da799a0a3'::uuid) AND (channel = 'sms'::text))",
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 200,
+          "Shared Read Blocks": 0
+        }
+      ],
+      "inner_plan_count": 3
+    },
+    "force_custom_plan-deep": {
+      "exact_ids_match": true,
+      "head": "100000",
+      "cursor": {
+        "at": "2026-09-01 00:00:00.001+00",
+        "id": "350115fa-33f3-4be3-ac40-3272bff9a73d"
+      },
+      "bounded_observed": true,
+      "history_scans": [
+        {
+          "Node Type": "Index Scan",
+          "Index Name": "inbox_inbound_heads_pkey",
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "((org_id = '35210142-b51b-4428-828e-987feede99bf'::uuid) AND (conversation_id = 'f291c854-9488-46cd-82a3-626da799a0a3'::uuid))",
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 2,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "Index Only Scan",
+          "Index Name": "t2_proof_history_idx",
+          "Actual Rows": 50,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "((org_id = '35210142-b51b-4428-828e-987feede99bf'::uuid) AND (conversation_id = 'f291c854-9488-46cd-82a3-626da799a0a3'::uuid) AND (ROW(created_at, id) < ROW('2026-09-01 00:00:00.001+00'::timestamp with time zone, '350115fa-33f3-4be3-ac40-3272bff9a73d'::uuid)))",
+          "Filter": null,
+          "Heap Fetches": 10,
+          "Shared Hit Blocks": 7,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "CTE Scan",
+          "Index Name": null,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": null,
+          "Index Cond": null,
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 2,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "CTE Scan",
+          "Index Name": null,
+          "Actual Rows": 50,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": null,
+          "Index Cond": null,
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 7,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "Index Scan",
+          "Index Name": "messages_pkey",
+          "Actual Rows": 1,
+          "Actual Loops": 50,
+          "Rows Removed by Filter": 0,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "(id = p.id)",
+          "Filter": "((org_id = '35210142-b51b-4428-828e-987feede99bf'::uuid) AND (conversation_id = 'f291c854-9488-46cd-82a3-626da799a0a3'::uuid) AND (channel = 'sms'::text))",
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 200,
+          "Shared Read Blocks": 0
+        }
+      ],
+      "inner_plan_count": 3
+    },
+    "force_generic_plan-first": {
+      "exact_ids_match": true,
+      "head": "100000",
+      "cursor": null,
+      "bounded_observed": true,
+      "history_scans": [
+        {
+          "Node Type": "Index Scan",
+          "Index Name": "inbox_inbound_heads_pkey",
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "((org_id = $1) AND (conversation_id = $2))",
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 2,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "Index Only Scan",
+          "Index Name": "t2_proof_history_idx",
+          "Actual Rows": 50,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "((org_id = $1) AND (conversation_id = $2))",
+          "Filter": null,
+          "Heap Fetches": 0,
+          "Shared Hit Blocks": 5,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "CTE Scan",
+          "Index Name": null,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": null,
+          "Index Cond": null,
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 2,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "CTE Scan",
+          "Index Name": null,
+          "Actual Rows": 50,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": null,
+          "Index Cond": null,
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 5,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "Index Scan",
+          "Index Name": "messages_pkey",
+          "Actual Rows": 1,
+          "Actual Loops": 50,
+          "Rows Removed by Filter": 0,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "(id = p.id)",
+          "Filter": "((org_id = $1) AND (conversation_id = $2) AND (channel = 'sms'::text))",
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 200,
+          "Shared Read Blocks": 0
+        }
+      ],
+      "inner_plan_count": 3
+    },
+    "force_generic_plan-deep": {
+      "exact_ids_match": true,
+      "head": "100000",
+      "cursor": {
+        "at": "2026-09-01 00:00:00.001+00",
+        "id": "350115fa-33f3-4be3-ac40-3272bff9a73d"
+      },
+      "bounded_observed": true,
+      "history_scans": [
+        {
+          "Node Type": "Index Scan",
+          "Index Name": "inbox_inbound_heads_pkey",
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "((org_id = $1) AND (conversation_id = $2))",
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 2,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "Index Only Scan",
+          "Index Name": "t2_proof_history_idx",
+          "Actual Rows": 50,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "((org_id = $1) AND (conversation_id = $2) AND (ROW(created_at, id) < ROW($3, $4)))",
+          "Filter": null,
+          "Heap Fetches": 10,
+          "Shared Hit Blocks": 7,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "CTE Scan",
+          "Index Name": null,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": null,
+          "Index Cond": null,
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 2,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "CTE Scan",
+          "Index Name": null,
+          "Actual Rows": 50,
+          "Actual Loops": 1,
+          "Rows Removed by Filter": null,
+          "Rows Removed by Index Recheck": null,
+          "Index Cond": null,
+          "Filter": null,
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 7,
+          "Shared Read Blocks": 0
+        },
+        {
+          "Node Type": "Index Scan",
+          "Index Name": "messages_pkey",
+          "Actual Rows": 1,
+          "Actual Loops": 50,
+          "Rows Removed by Filter": 0,
+          "Rows Removed by Index Recheck": 0,
+          "Index Cond": "(id = p.id)",
+          "Filter": "((org_id = $1) AND (conversation_id = $2) AND (channel = 'sms'::text))",
+          "Heap Fetches": null,
+          "Shared Hit Blocks": 200,
+          "Shared Read Blocks": 0
+        }
+      ],
+      "inner_plan_count": 3
+    }
+  },
+  "limits": [
+    "Actual function nested plans under forced custom/generic; not driver automatic transition",
+    "Statement snapshot auth using synthetic trusted claims; no HTTP/JWT verification",
+    "Warmed isolated corpus, no timing percentile or production guarantee",
+    "Session LOAD and SET LOCAL only; temporary membership rolled back",
+    "Deep cursor chosen with OFFSET in test oracle only, not in candidate RPC"
+  ]
+}

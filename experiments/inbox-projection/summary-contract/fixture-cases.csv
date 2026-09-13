@@ -1,0 +1,22 @@
+case,fixture,expected,execution_status
+recent-window,"One inbound at cutoff, one1usolder, one recent outbound",At exact cutoff inbound contributes unread; older excluded; latest outbound sets route direction; at+1us cutoff row expires,partial_see_README
+dst-window,Run same as-of across DST with UTC and America/Chicago session settings,"Identical cohort under2160elapsedhours, matching Date.now subtraction",executed_see_evidence
+tie-order,Two eligible messages samecreated_at differentUUID andpropertyID,HighestUUID supplieslatestcontact/time/route; mostrecentnonnullproperty chosen by timestamp+UUID,executed_see_evidence
+excluded-rows,"Newer queued,paused,contactless,email andNULLstatus messages",All excluded by originalpredicate; NULLstatus stays excluded via SQLNOTIN,partial_see_README
+recent-property-fallback,Recentmessages haveNULLproperty; pendingreview pointsatproperty,Reviewproperty selected; reviewjoins onlyif selectedpropertymatches,executed_see_evidence
+recent-old-unread,Recent unread message plus old unread message and pending review,Only the recent unread message contributes: unread_count=1; pending review does not widen a recent cohort,executed_see_evidence
+old-review,OnlyoldeligibleSMS pluspendingreview,Alloldeligiblemessagesformreviewcohort; has_recentfalse; reviewvisible evenDNC; normalviewsfalse,executed_see_evidence
+old-no-review,OnlyoldeligibleSMS withoutpendingreview,existsfalse; summarytombstone candidate,executed_see_evidence
+pending-close,Closeonlypendingreviewonoldconversation,Oldsummarydisappears; revieweventmustdirtyconversation,executed_see_evidence
+review-property-mismatch,RecentnonnullpropertyA; pendingreviewpropertyB,SummarypropertyA; pendingreviewnotattached; reviewvisibilityfalse,executed_see_evidence
+property-shared,TwoconversationUUIDs shareproperty,Separatecomputeoutputs; nomerging; samepropertyowner/outcomepreserved,executed_see_evidence
+tenant-collision,SameconversationUUID existsintwoorgs,Eachcomputescopesorgexactly; crossorgcontact/propertyjoinproducesnojoin; noauthorizationclaim,executed_see_evidence
+name-route,Entitynamepresentandblankentityname; inbound/outboundroutevariants,"Preservecoalesceentitynameemptystringsemantics; customer/businessroutefromlatesteligiblemessage, notcontactphone",partial_see_README
+owner-outcome,"Prospect,new_lead,contacted andexistingotherstatuses; ownernonnull/null",Rawstatus/outcomeunchanged; assignmenteligibleonlynonnullnonprospect; needsoutcomeonlyexistingthree-statuspredicate,partial_see_README
+consent,Optin/outatsametimestampdifferentUUID; mixedSMS/email,LatestSMScanonicaleventbyoccurred_at+UUIDwins; contactflagsstilloverrideoptin,executed_see_evidence
+suppression,"10digit,11digitUS andunsupportedphone; suppressionotherorg",USnormalizedroute suppressiononlysameorgSMS; unsupportedformdoesnotinventnormalization,partial_see_README
+noise-review,"Canaryname,Jitteraddress,optout,DNC andpendingreview",Testtrafficneverreviewvisible; DNC/optoutstillreviewvisible; hidenoisefilterscorrect,partial_see_README
+read-status,Setread_at; move lateststatusqueued; restorestatus,Unreadcountupdates; queuedlatestremovedandnexteligiblechosen; restoreback,partial_see_README
+expiry-scheduler,As-ofequalearliestrecentcreated+2160hours then+1us,Firstsnapshotincludesboundary; secondrecomputeslatest/count/property; deadline+1us required,partial_see_README
+empty-invalid,Missing scope and NULL organization tested; NULL conversation/as-of remain planned,Missingreturnskeyedtombstone; NULLinputreturnserrorinvalid_compute_scope,partial_org_NULL_tested_other_NULL_args_pending
+source-parity,AtfixedcutoffcalllegacyRPCall/dispo withhidenoisetrue/falseonuniqueorg,Compareexistingrawfields/visibility; requesterfilterscomputeddownstream; latestIDseparatelyderivecanonicalorder,executed_see_evidence

@@ -1,0 +1,96 @@
+{
+  "status": "PASS",
+  "at": "2026-09-13T12:31:31Z",
+  "setup_sha256": "6f2f384f2579cd0d94fdee60280469f773d70edd7bfc7841d531108cf978e596",
+  "runner_sha256": "e65c64f86dc53ba144867ce23f3fbf234cb1ef8c6cceb7c52e1fc7984db5bf66",
+  "org": "809db5ec-f83f-44e8-890a-7767a6ce08cf",
+  "other_org": "6edeb400-839b-428a-b811-c7d790347f57",
+  "as_of": "2026-09-13 12:31:28.492847+00",
+  "checks": [
+    {
+      "name": "private compute SQL compiles on canonical fixture",
+      "passed": true
+    },
+    {
+      "name": "recent row fields and existing needs-outcome predicate",
+      "passed": true
+    },
+    {
+      "name": "exact90day boundary and one-microsecond expiry",
+      "passed": true
+    },
+    {
+      "name": "old pending review exception independent of recent window",
+      "passed": true
+    },
+    {
+      "name": "closing old review produces keyed tombstone",
+      "passed": true
+    },
+    {
+      "name": "pending review joins only selected property",
+      "passed": true
+    },
+    {
+      "name": "recent propertyless review fallback",
+      "passed": true
+    },
+    {
+      "name": "recent cohort ignores old unread while pending review exists",
+      "passed": true
+    },
+    {
+      "name": "queued paused contactless and email rows excluded",
+      "passed": true
+    },
+    {
+      "name": "latest outbound route and narrow120-character preview",
+      "passed": true
+    },
+    {
+      "name": "shared property preserves separate conversation identities",
+      "passed": true
+    },
+    {
+      "name": "same conversation UUID in two organizations stays scoped",
+      "passed": true
+    },
+    {
+      "name": "assignment lead boundary and raw owner preserved",
+      "passed": true
+    },
+    {
+      "name": "latest consent tie ordering and contact optout precedence",
+      "passed": true
+    },
+    {
+      "name": "DNC remains reviewable but test traffic never does",
+      "passed": true
+    },
+    {
+      "name": "existing authenticated Inbox RPC field and visibility parity",
+      "passed": true,
+      "compared_rows": 25,
+      "filters": [
+        "all/show-noise",
+        "all/hide-noise",
+        "dispo/show-noise",
+        "dispo/hide-noise"
+      ]
+    },
+    {
+      "name": "session timezone does not alter elapsed-window membership",
+      "passed": true
+    },
+    {
+      "name": "private compute denies authenticated and service roles with42501",
+      "passed": true
+    }
+  ],
+  "limits": [
+    "Synthetic small cohorts; no bounded-scan or production workload claim",
+    "RPC uses simulated DB auth claims for own fixture membership; no JWT or external API verification",
+    "Compute remains worker-private and is not integrated with generation/CAS or dirty fanout",
+    "Case plan has additional scenarios not yet executed; use actual check list as evidence"
+  ]
+}
