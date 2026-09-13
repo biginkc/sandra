@@ -3,7 +3,7 @@ import { parseInboxWorksetRequest } from "./workset-request";
 
 const orgId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const replacesScopeId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-const request = { orgId, filter: {}, cursor: null, limit: 500 };
+const request = { orgId, filter: { view: "active" }, cursor: null, limit: 500 };
 
 describe("workset request envelope", () => {
   it("preserves optional explicit replacement without implicitly replacing another scope", () => {

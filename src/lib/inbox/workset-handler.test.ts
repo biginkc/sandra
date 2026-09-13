@@ -4,7 +4,7 @@ import type { DurableInboxScope, InboxWorksetRepository } from "./sync-gateway";
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 function fixture() {
   const scope: DurableInboxScope = { id, orgId: id, userId: id, sessionId: id, accessEpoch: "1", generation: "1", expiresAt: 5000, targets: [{ kind: "known_conversation", id }], handles: [null] };
-  const repo: InboxWorksetRepository = { authenticate: vi.fn(async () => ({ userId: id, sessionId: id, expiresAt: 10000 })), createScope: vi.fn(async () => scope), getScope: vi.fn(async () => scope), getAccess: vi.fn(async () => ({ sessionActive: true, activeMembershipCount: 1, status: "active" as const, epoch: "1", expiresAt: null, deletionPrepared: false })), bindHandle: vi.fn(async () => true) };
+  const repo: InboxWorksetRepository = { authenticate: vi.fn(async () => ({ userId: id, sessionId: id, expiresAt: 10000 })), createScope: vi.fn(async () => ({ ...scope, createdAt: 1000, nextCursor: null, refreshed: false })), getScope: vi.fn(async () => scope), getAccess: vi.fn(async () => ({ sessionActive: true, activeMembershipCount: 1, status: "active" as const, epoch: "1", expiresAt: null, deletionPrepared: false })), bindHandle: vi.fn(async () => true) };
   const make = () => createInboxWorksetHandler(repo, () => 1000);
   const request = (body = JSON.stringify({ orgId: id, filter: { view: "active" }, cursor: null, limit: 100, replacesScopeId: id })) => new Request("https://example.com/api/inbox/worksets", { method: "POST", headers: { "content-type": "application/json" }, body });
   return { scope, repo, make, request };
@@ -13,14 +13,23 @@ describe("bounded workset HTTP boundary", () => {
   it("forwards explicit replacement only to the durable creation transaction", async () => {
     const f = fixture(), response = await f.make()(f.request());
     expect(response.status).toBe(201); expect(response.headers.get("cache-control")).toBe("private, no-store");
-    expect(await response.json()).toEqual({ scopeId: id, orgId: id, requesterId: id, sessionId: id, accessEpoch: "1", generation: "1", expiresAt: 5000, orderedIds: [JSON.stringify([id, "conversation", id])] });
+    expect(await response.json()).toEqual({ scopeId: id, orgId: id, requesterId: id, sessionId: id, accessEpoch: "1", generation: "1", expiresAt: 5000, createdAt: 1000, nextCursor: null, refreshed: false, orderedIds: [JSON.stringify([id, "conversation", id])] });
     expect(f.repo.createScope).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ replacesScopeId: id }), expect.any(AbortSignal));
   });
   it("accepts a full SQL TTL when creation finishes after the request starts", async () => {
     const f = fixture(); let now = 1000;
-    f.repo.createScope = async () => { now = 4000; f.scope.expiresAt = now + 900000; return f.scope; };
+    f.repo.createScope = async () => { now = 4000; f.scope.expiresAt = now + 900000; return { ...f.scope, createdAt: now, nextCursor: null, refreshed: false }; };
     f.repo.authenticate = async () => ({ userId: id, sessionId: id, expiresAt: 1000000 });
     expect((await createInboxWorksetHandler(f.repo, () => now)(f.request())).status).toBe(201);
+  });
+  it("validates canonical TTL without rejecting positive database clock skew", async () => {
+    const f = fixture();
+    f.repo.authenticate = async () => ({ userId: id, sessionId: id, expiresAt: 1000000 });
+    f.scope.expiresAt = 901084;
+    f.repo.createScope = async () => ({ ...f.scope, createdAt: 1084, nextCursor: null, refreshed: false });
+    expect((await f.make()(f.request())).status).toBe(201);
+    f.scope.expiresAt++;
+    expect((await f.make()(f.request())).status).toBe(503);
   });
   it("rejects oversized bodies before creating any scope", async () => {
     const f = fixture(); expect((await f.make()(f.request(" ".repeat(16385)))).status).toBe(413);

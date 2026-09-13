@@ -35,6 +35,14 @@ describe("bounded workspace synchronization lifecycle",()=> {
     expect(signals.every(signal => signal.aborted)).toBe(true);
   });
 
+  it("bounds local cache lifetime despite a database clock ahead of the browser", async () => {
+    vi.useFakeTimers();
+    const now = Date.now(), fetcher = vi.fn<typeof fetch>(() => new Promise<Response>(() => {}));
+    const { sync } = setup(fetcher);
+    sync.replace({ ...scope, scopeId: "77777777-7777-4777-8777-777777777777", createdAt: now + 84, expiresAt: now + 900084 });
+    await vi.advanceTimersByTimeAsync(900000);
+    expect(sync.getSnapshot()).toEqual({ state: "resync_required", rows: [] });
+  });
   it("permits unknown unread null on the wire while keeping known unread mandatory",async()=> {
     expect(()=>summaryRow({...summary,unread:null})).toThrow("Invalid unread flag");
     let calls=0;
