@@ -1,7 +1,7 @@
 # Maria Dialpad pilot
 
-This is a gated integration under development. No live calling UI is mounted and
-the webhook and workers are disabled by default. Passing fixtures is not evidence
+This is a gated integration under development. The embedded panel, webhook and
+workers are disabled by default. Lead call dispatch is not connected to the panel. Passing fixtures is not evidence
 that Maria's recording downloads or CTI access work.
 
 ## Implemented path
@@ -114,3 +114,20 @@ pilot rep and matching persisted call activity, and sends exact-call hangup.
 It never releases transport ownership or treats request acceptance as terminal
 evidence. Unbound starts still cannot be controlled through this action. No live
 hangup has been validated.
+
+
+## Embedded browser panel (disabled)
+
+The dashboard layout retains Maria's CTI panel across child navigation and collapse
+when `DIALPAD_CTI_ENABLED=true` and `DIALPAD_CTI_CLIENT_ID` contains a provisioned
+client ID. The server limits it to the configured active Maria member in BMH and
+sends no API credentials to the browser. Exact origin and frame checks precede
+message parsing. Trusted logout or account switching revokes authenticated UI
+state. Selecting the tab sends only `enable_current_tab`; it does not prove audio
+readiness, place a CRM call, or create activity credit.
+
+Keep this flag disabled until Dialpad approves the client/origin and the native
+manual-dialing behavior has been evaluated: native calls may bypass Sandra's lead
+checks. The panel does not yet integrate guarded start, mute/hold/DTMF parity,
+call wrap, or live Coach. Unit/RTL proof of frame persistence and message handling
+is not provider login, media, navigation-audio, or end-to-end calling proof.
