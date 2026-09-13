@@ -1,0 +1,60 @@
+{
+  "at": "2026-09-13T11:38:40.758Z",
+  "surface": "isolated local synthetic100-row runtime",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "checks": [
+    {
+      "name": "single click and Shift-click toggle without opening",
+      "passed": true
+    },
+    {
+      "name": "explicit Open preserves selected group",
+      "passed": true
+    },
+    {
+      "name": "Shift-drag rectangle immediately selects rows; Shift-click removes an exception",
+      "passed": true
+    },
+    {
+      "name": "click action reaches Restate, canonical SQL, Electric and list without refresh; exactly four updates",
+      "passed": true
+    },
+    {
+      "name": "drag selected row to same action executes and synchronizes",
+      "passed": true
+    },
+    {
+      "name": "lost acknowledgement keeps immutable request despite changed selection, then resolves same operation",
+      "passed": true
+    },
+    {
+      "name": "view filter preserves selection",
+      "passed": true
+    },
+    {
+      "name": "quiet session renews bounded workset and preserves selected IDs",
+      "passed": true
+    },
+    {
+      "name": "live canonical update still reaches UI after quiet session and replacement",
+      "passed": true
+    },
+    {
+      "name": "no uncaught browser exceptions",
+      "passed": true
+    }
+  ],
+  "operations": [
+    "4f61e6c1-51df-44ed-8539-25061eea60c2",
+    "8ed214c0-6587-4c59-9d97-f94564ae56b8",
+    "44cfbb78-27b0-4b74-8b1d-b66e61756888"
+  ],
+  "limits": [
+    "No production latency claim",
+    "No real auth or provider sends",
+    "Not complete Inbox UI parity"
+  ]
+}
