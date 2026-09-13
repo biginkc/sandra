@@ -10,7 +10,7 @@ CREATE TABLE inbox_t2_bridge.worksets (
 );
 CREATE INDEX worksets_session ON inbox_t2_bridge.worksets(user_id,session_id,created_at DESC);
 CREATE FUNCTION inbox_t2_bridge.scope_json(w inbox_t2_bridge.worksets) RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path='' AS $$
- SELECT jsonb_build_object('id',w.id,'org_id',w.org_id,'user_id',w.user_id,'session_id',w.session_id,'access_epoch',w.access_epoch::text,'generation',w.generation::text,'expires_at',w.expires_at,'targets',w.targets,'handles',w.handles);
+ SELECT jsonb_build_object('id',w.id,'org_id',w.org_id,'user_id',w.user_id,'session_id',w.session_id,'access_epoch',w.access_epoch::text,'generation',w.generation::text,'created_at',w.created_at,'expires_at',w.expires_at,'targets',w.targets,'handles',w.handles);
 $$;
 CREATE FUNCTION inbox_t2_bridge.create_scope(o uuid,f jsonb,n integer,replaces uuid DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 DECLARE a jsonb;u uuid;sid uuid;e bigint;now_at timestamptz;prior inbox_t2_bridge.worksets;created inbox_t2_bridge.worksets;ids jsonb;gen bigint;last_at timestamptz;view_name text;

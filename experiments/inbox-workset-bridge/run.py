@@ -24,7 +24,7 @@ bootstrap="BEGIN; CREATE TABLE auth.sessions(id uuid PRIMARY KEY,user_id uuid NO
 r=subprocess.run(D+['exec','-i',N,'psql','-XqAt','-U','supabase_admin','-d','postgres','-v','ON_ERROR_STOP=1'],input=bootstrap,text=True,capture_output=True,timeout=30)
 need(r.returncode==0,r.stderr)
 # Install all files atomically; embedded BEGIN/COMMIT removed for the outer transaction.
-files=['projection.sql','auth.sql','worksets.sql','public-api.sql','parity-v2.sql']
+files=['projection.sql','auth.sql','worksets.sql','public-api.sql','../inbox-workset-performance/typed-filters.sql','parity-v2.sql']
 sql('BEGIN;'+''.join((P/f).read_text().replace('BEGIN;\n','',1).rsplit('COMMIT;',1)[0] for f in files)+'COMMIT;')
 (P/'install-evidence.json').write_text(json.dumps({'installed':True,'hashes':{f:hashlib.sha256((P/f).read_bytes()).hexdigest() for f in files}},indent=2)+'\n')
 print('Owned canonical bridge installation passed')

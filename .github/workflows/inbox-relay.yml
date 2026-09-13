@@ -1,0 +1,29 @@
+name: Inbox relay checks
+on:
+  pull_request:
+    paths:
+      - 'services/inbox-sync-relay/**'
+      - 'deployment/inbox/**'
+      - '.github/workflows/inbox-relay.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'services/inbox-sync-relay/**'
+      - 'deployment/inbox/**'
+      - '.github/workflows/inbox-relay.yml'
+permissions:
+  contents: read
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: node --test services/inbox-sync-relay/server.test.mjs
+      - run: python3 services/inbox-sync-relay/verify.py
