@@ -112,7 +112,9 @@ export default async function MessagesPage({
         hideNoise: hideDnc,
         page: effectiveInboxPage,
       }),
-      listQueuedPage(null),
+      activeTab === "outbox"
+        ? listQueuedPage(null)
+        : Promise.resolve({ ok: true as const, data: { rows: [], hasMore: false } }),
       canonicalThreadId
         ? fetchInboxDetail(supabase, canonicalThreadId)
         : Promise.resolve(null),

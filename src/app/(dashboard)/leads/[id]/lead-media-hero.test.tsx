@@ -1,10 +1,12 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import Link from "next/link";
+import { Suspense, use, useState } from "react";
 import { hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { LeadMediaHero } from "./lead-media-hero";
+import { LeadMediaHero, LeadMediaLoading, LeadMediaVisual } from "./lead-media-hero";
+import { getLeadMediaFlatFallback, type LeadMediaPresentation } from "./lead-media";
 
 const shared = {
   address: "123 Main St",
@@ -437,4 +439,103 @@ describe("<LeadMediaHero />", () => {
 
     expect(screen.getByTestId("lead-media-street-view")).toBeInTheDocument();
   });
+});
+
+function DraftAction() {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  return <>
+    <button onClick={() => setOpen(true)}>Write message</button>
+    {open ? <div role="dialog" aria-label="Message draft">
+      <label>Message<textarea value={draft} onChange={(event) => setDraft(event.target.value)} /></label>
+    </div> : null}
+  </>;
+}
+
+function DeferredMedia({ promise }: { promise: Promise<LeadMediaPresentation> }) {
+  return <LeadMediaVisual media={use(promise)} address={shared.address} />;
+}
+
+describe("streaming lead imagery", () => {
+  it.each(["streetView", "aerial", "flat"] as const)(
+    "preserves an open draft and focus when delayed imagery resolves to %s",
+    async (kind) => {
+      let resolveMedia!: (media: LeadMediaPresentation) => void;
+      const promise = new Promise<LeadMediaPresentation>((resolve) => { resolveMedia = resolve; });
+      await act(async () => {
+        render(
+          <LeadMediaHero {...shared} actions={<DraftAction />}>
+            <Suspense fallback={<LeadMediaLoading />}>
+              <DeferredMedia promise={promise} />
+            </Suspense>
+          </LeadMediaHero>,
+        );
+      });
+      const loadingFrame = screen.getByTestId("lead-media-image-frame");
+      expect(loadingFrame).toHaveAttribute("aria-busy", "true");
+      expect(loadingFrame).toHaveClass("h-[210px]", "sm:h-[230px]", "lg:h-[250px]");
+      expect(screen.queryByText(/Street View unavailable/)).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Write message" }));
+      const draft = screen.getByRole("textbox", { name: "Message" });
+      fireEvent.change(draft, { target: { value: "Please call me tomorrow" } });
+      draft.focus();
+
+      await act(async () => {
+        resolveMedia(kind === "streetView" ? {
+          kind, images: streetImages, aerialImages, aerialResolvedBy: "address", heading: null, panoramaId: "pano-1",
+        } : kind === "aerial" ? {
+          kind, images: aerialImages, resolvedBy: "address", fallbackReason: "no-coverage",
+        } : { kind, reason: "missing-location" });
+        await promise;
+      });
+
+      expect(screen.getByRole("dialog", { name: "Message draft" })).toBeVisible();
+      expect(screen.getByRole("textbox", { name: "Message" })).toBe(draft);
+      expect(draft).toHaveValue("Please call me tomorrow");
+      expect(draft).toHaveFocus();
+      if (kind === "flat") {
+        expect(screen.queryByTestId("lead-media-image-frame")).toBeNull();
+        expect(screen.getByText(/Street View unavailable/)).toBeVisible();
+      } else {
+        const imageFrame = screen.getByTestId("lead-media-image-frame");
+        expect(imageFrame).not.toHaveAttribute("aria-busy", "true");
+        expect(imageFrame).toHaveClass("h-[210px]", "sm:h-[230px]", "lg:h-[250px]");
+        fireEvent.error(screen.getByTestId("lead-media-image"));
+        if (kind === "streetView") fireEvent.error(screen.getByTestId("lead-media-image"));
+        expect(screen.queryByTestId("lead-media-image-frame")).toBeNull();
+        expect(screen.getByRole("textbox", { name: "Message" })).toBe(draft);
+        expect(draft).toHaveValue("Please call me tomorrow");
+        expect(draft).toHaveFocus();
+      }
+    },
+  );
+});
+
+
+describe("immediately unavailable lead imagery", () => {
+  it.each(["missing-static-key", "missing-signing-secret", "missing-location"] as const)(
+    "renders the compact flat header in the initial server HTML for %s",
+    (reason) => {
+      const media = getLeadMediaFlatFallback({
+        lat: null, lon: null,
+        address: reason === "missing-location" ? null : "123 Main St",
+        city: "Kansas City", state: "MO", zip: "64111",
+      }, {
+        staticKey: reason === "missing-static-key" ? "" : "test-key",
+        signingSecret: reason === "missing-signing-secret" ? "" : "test-secret",
+      });
+      expect(media).toEqual({ kind: "flat", reason });
+      // renderToString runs no effects: this catches a shell that only
+      // becomes flat after hydration, which an ordinary RTL render misses.
+      const html = renderToString(<LeadMediaHero {...shared} media={media ?? undefined} />);
+      const container = document.createElement("div");
+      container.innerHTML = html;
+      const initial = within(container);
+      expect(initial.getByTestId("lead-media-flat")).toHaveClass("bg-card");
+      expect(initial.queryByTestId("lead-media-image-frame")).toBeNull();
+      expect(initial.queryByTestId("lead-media-loading")).toBeNull();
+      expect(initial.getByText(/Street View unavailable/)).not.toBeNull();
+      expect(initial.getByRole("button", { name: "Book appointment" })).not.toBeNull();
+    },
+  );
 });

@@ -193,6 +193,25 @@ describe("MessagesPage filter-count boundary", () => {
     mocks.canonicalizeThreadId.mockResolvedValue(null);
   });
 
+  it("does not load Outbox rows while browsing the Inbox", async () => {
+    mocks.listThreads.mockResolvedValue([]);
+    await MessagesPage({ searchParams: Promise.resolve({}) });
+    expect(mocks.listQueuedPage).not.toHaveBeenCalled();
+    expect(mocks.getQueueStats).toHaveBeenCalled();
+    await MessagesPage({ searchParams: Promise.resolve({ tab: "outbox" }) });
+    expect(mocks.listQueuedPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves the cockpit identity across filter and DNC server navigations", async () => {
+    mocks.listThreads.mockResolvedValue([]);
+    const initial = await MessagesPage({ searchParams: Promise.resolve({}) });
+    const filtered = await MessagesPage({ searchParams: Promise.resolve({ filter: "unread" }) });
+    const showingDnc = await MessagesPage({ searchParams: Promise.resolve({ filter: "unread", hideDnc: "0" }) });
+    expect(filtered.type).toBe(initial.type);
+    expect(filtered.key).toBe(initial.key);
+    expect(showingDnc.key).toBe(initial.key);
+  });
+
   it("passes counts and threads from the same visible non-noise inbox set", async () => {
     mocks.listThreads.mockResolvedValue([
       makeThread({

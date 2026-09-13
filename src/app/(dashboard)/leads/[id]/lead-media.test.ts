@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   calculateDistanceMeters,
   calculateHeading,
+  getLeadMediaFlatFallback,
   resolveLeadMediaPresentation,
   type LeadMediaImages,
   type LeadMediaLocation,
@@ -335,5 +336,26 @@ describe("resolveLeadMediaPresentation", () => {
     });
     expect(result).toMatchObject({ kind: "streetView", heading: 0 });
     expect(calculateDistanceMeters(39, -94, 39, -94)).toBe(0);
+  });
+});
+
+
+describe("getLeadMediaFlatFallback", () => {
+  it.each([
+    { reason: "missing-static-key", location, options: { ...resolverKeys, staticKey: "" } },
+    { reason: "missing-signing-secret", location, options: { ...resolverKeys, signingSecret: "" } },
+    { reason: "missing-location", location: { lat: null, lon: null, address: null, city: null, state: null, zip: null }, options: resolverKeys },
+  ])("resolves $reason synchronously using the asynchronous resolver's validation", async ({ reason, location: target, options }) => {
+    const fetcher = vi.fn<typeof fetch>();
+    const immediate = getLeadMediaFlatFallback(target, { ...options, fetcher });
+    expect(immediate).toEqual({ kind: "flat", reason });
+    expect(await resolveLeadMediaPresentation(target, { ...options, fetcher })).toEqual(immediate);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("leaves valid imagery for the asynchronous resolver without starting a request", () => {
+    const fetcher = vi.fn<typeof fetch>();
+    expect(getLeadMediaFlatFallback(location, { ...resolverKeys, fetcher })).toBeNull();
+    expect(fetcher).not.toHaveBeenCalled();
   });
 });

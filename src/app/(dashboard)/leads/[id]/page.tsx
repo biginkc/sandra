@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
@@ -69,8 +70,8 @@ import { TagsSection } from "./tags-section";
 import type { MotivationLevel } from "../actions";
 import type { TagRow } from "../tags-actions";
 import type { Database } from "@/lib/supabase/types";
-import { LeadMediaHero } from "./lead-media-hero";
-import { resolveLeadMediaPresentation } from "./lead-media";
+import { LeadMediaHero, LeadMediaLoading, LeadMediaVisual } from "./lead-media-hero";
+import { getLeadMediaFlatFallback, resolveLeadMediaPresentation } from "./lead-media";
 import { LeadActivityTimeline } from "./lead-activity";
 import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
@@ -188,9 +189,13 @@ export default async function LeadDetailPage({
     );
   }
   const training = lead.is_training;
-  const esign: Awaited<ReturnType<typeof loadLeadEsignPageModel>> = training
-    ? { blockers: ["sending_disabled"], contracts: [], files: [], contractsError: null, filesError: null }
-    : await loadLeadEsignPageModel(lead.id);
+  const [esign, { prevId, nextId }, { data: { user: sessionUser } }] = await Promise.all([
+    training
+      ? Promise.resolve({ blockers: ["sending_disabled"], contracts: [], files: [], contractsError: null, filesError: null } as Awaited<ReturnType<typeof loadLeadEsignPageModel>>)
+      : loadLeadEsignPageModel(lead.id),
+    getPropertyNeighbors(id, lead.status === "prospect" ? "prospect" : "lead"),
+    supabase.auth.getUser(),
+  ]);
   const homeownerSmsChoice = selectBestSmsPhone(lead.homeowner);
   const homeownerSmsPhone = homeownerSmsChoice?.phone ?? null;
   const homeownerContactId = lead.homeowner?.id ?? null;
@@ -259,16 +264,6 @@ export default async function LeadDetailPage({
     .eq("related_property_id", lead.id)
     .eq("status", "open")
     .order("due_at", { ascending: true });
-
-  const { prevId, nextId } = await getPropertyNeighbors(
-    id,
-    lead.status === "prospect" ? "prospect" : "lead",
-  );
-
-  // Current user — for "me" labeling in assignee + note-author displays.
-  const {
-    data: { user: sessionUser },
-  } = await supabase.auth.getUser();
 
   // Viewer's own saved timezone (same user_integration_prefs.timezone
   // source TasksPanel's fetchMyTasks reads) — LeadAppointmentsSection
@@ -573,14 +568,13 @@ export default async function LeadDetailPage({
     state: lead.state,
     zip: lead.zip,
   });
-  const mediaPresentation = await resolveLeadMediaPresentation({
-    lat: lead.lat,
-    lon: lead.lon,
-    address: lead.address,
-    city: lead.city,
-    state: lead.state,
-    zip: lead.zip,
-  });
+
+  const mediaLocation = {
+    lat: lead.lat, lon: lead.lon, address: lead.address,
+    city: lead.city, state: lead.state, zip: lead.zip,
+  };
+  const flatMedia = getLeadMediaFlatFallback(mediaLocation);
+
   const homeownerName = lead.homeowner
     ? lead.homeowner.contact_type === "entity"
       ? lead.homeowner.entity_name
@@ -715,12 +709,19 @@ export default async function LeadDetailPage({
   return (
     <Page className="gap-0 p-0">
       <LeadMediaHero
-        media={mediaPresentation}
+        key={lead.id}
+        media={flatMedia ?? undefined}
         address={lead.address}
         locationLine={locationLine}
         homeownerName={homeownerName}
         actions={heroActions}
-      />
+      >
+        {flatMedia ? null : (
+          <Suspense fallback={<LeadMediaLoading />}>
+            <LeadMediaSection location={mediaLocation} address={lead.address} />
+          </Suspense>
+        )}
+      </LeadMediaHero>
       <DealSnapshotStrip lead={lead} />
       {training ? <Badge variant="secondary">Internal training · Fictional homeowner</Badge> : null}
 
@@ -1501,4 +1502,12 @@ function formatDate(iso: string | null | undefined): string | null {
 function formatBool(v: boolean | null | undefined): string | null {
   if (v == null) return null;
   return v ? "Yes" : "No";
+}
+
+async function LeadMediaSection({ location, address }: {
+  location: Parameters<typeof resolveLeadMediaPresentation>[0];
+  address: string;
+}) {
+  const media = await resolveLeadMediaPresentation(location);
+  return <LeadMediaVisual media={media} address={address} />;
 }
