@@ -48,10 +48,7 @@ export function stagePages(snapshot:QueueSnapshot):Record<MyLeadStage,MyLeadStag
   return {not_contacted:build('not_contacted'),contacted:build('contacted'),needs_offer:build('needs_offer'),offer_sent:build('offer_sent'),under_contract:build('under_contract')};
 }
 export function kpiTiles(kpis:AcquisitionKpis):MyLeadsKpis {
-  const ratio=(n:number,d:number)=>d?`${Math.round(n/d*100)}% (${n}/${d})`:null;
-  return {attempts:kpis.attempts,contactRateLabel:ratio(kpis.reached,kpis.attempts),
-    assignToFirstCallLabel:kpis.firstCallSamples&&kpis.firstCallElapsedSeconds!==null?`${Math.round(kpis.firstCallElapsedSeconds/60)} min elapsed`:null,
-    appointmentsKeptLabel:ratio(kpis.appointmentsHeld,kpis.appointmentsDue),offersSent:kpis.offersSent,staleLeads:kpis.staleLeads};
+  return {...kpis};
 }
 export function detailView(detail:AcquisitionDetail,roster:AcquisitionRoster):MyLeadDetail {
   const actor=(id:string|null)=>roster.members.find(m=>m.id===id)?.label??'Team member';

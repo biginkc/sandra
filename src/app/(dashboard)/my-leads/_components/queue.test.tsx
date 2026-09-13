@@ -58,18 +58,9 @@ function buildProps(overrides: Partial<MyLeadsQueueProps> = {}): MyLeadsQueuePro
 
   return {
     stages,
-    kpis: {
-      attempts: 12,
-      contactRateLabel: "50%",
-      assignToFirstCallLabel: "2h 10m",
-      appointmentsKeptLabel: "3 / 4",
-      offersSent: 2,
-      staleLeads: 1,
-    },
+    kpis: {attempts: 12, reached: 6, offersSent: 2, contactWithoutFollowUp: 2, needsOffers: 3, appointmentsOverdue: 4, lastAttemptAt: null, asOf: "2026-09-11T14:00:00Z", missingRecordings: 1, recordingExpectationUnknown: 0, averageTalkSeconds: 180, talkTimeSamples: 1, talkTimeUnknown: 0, conversationsOverFiveMinutes: 0,},
     search: "",
     selectedRepId: "maria",
-    selectedPeriod: "week",
-    selectedDateRange: null,
     repOptions: [
       { id: "maria", label: "Maria" },
       { id: "jarrad", label: "Jarrad" },
@@ -78,8 +69,6 @@ function buildProps(overrides: Partial<MyLeadsQueueProps> = {}): MyLeadsQueuePro
     canSelectRep: true,
     onSearchChange: vi.fn(),
     onRepChange: vi.fn(),
-    onPeriodChange: vi.fn(),
-    onDateRangeChange: vi.fn(),
     onLoadMore: vi.fn(),
     onLoadDetail: vi.fn(async () => ({ ok: true as const, detail: EMPTY_DETAIL })),
     onStageAction: vi.fn(),
@@ -120,20 +109,22 @@ describe("MyLeadsQueue", () => {
     expect(onLoadDetail).toHaveBeenCalledTimes(1)
   })
 
-  it("renders the five PRD sections and the six KPI tiles in order", () => {
+  it("renders the five PRD sections and the nine KPI tiles in order", () => {
     render(<MyLeadsQueue {...buildProps()} />)
 
     expect(screen.getByRole("heading", { name: "My Leads" })).toBeInTheDocument()
     expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual([
+      "Needs attention · Includes previous days",
+      "Today’s activity · Central time",
       "Not contacted",
       "Contacted",
       "Needs offer / Interested",
       "Offer Sent",
       "Under Contract",
     ])
-    expect(screen.getByTestId("kpi-attempts")).toHaveTextContent("Attempts12")
-    expect(screen.getByTestId("kpi-contact-rate")).toHaveTextContent("Contact rate50%")
-    expect(screen.getByTestId("kpi-stale-leads")).toHaveTextContent("Stale leads1")
+    expect(screen.getByTestId("kpi-contacts")).toHaveTextContent("Contacts6 / 12")
+    expect(screen.getByTestId("kpi-average-talk-time")).toHaveTextContent("Average talk time3m 0s")
+    expect(screen.getByTestId("kpi-missing-recordings")).toHaveTextContent("Missing recordings1")
   })
 
   it("refreshes only the text group when a new reply or delivery update arrives", async () => {
@@ -198,33 +189,24 @@ describe("MyLeadsQueue", () => {
     expect(screen.getByRole("button", { name: "Load more Offer Sent" })).toBeInTheDocument()
   })
 
-  it("passes search, member, period, date range, and stage actions to typed callbacks", async () => {
+  it("passes search, member, and stage actions to typed callbacks", async () => {
     const user = userEvent.setup()
     const props = buildProps({
       onSearchChange: vi.fn(),
       onRepChange: vi.fn(),
-      onPeriodChange: vi.fn(),
-      onDateRangeChange: vi.fn(),
       onStageAction: vi.fn(),
     })
-    const { rerender } = render(<MyLeadsQueue {...props} />)
+    render(<MyLeadsQueue {...props} />)
 
     fireEvent.change(screen.getByRole("textbox", { name: "Search My Leads" }), {
       target: { value: "oak" },
     })
     await user.selectOptions(screen.getByRole("combobox", { name: "Acquisitions member" }), "jarrad")
-    await user.selectOptions(screen.getByRole("combobox", { name: "KPI period" }), "custom")
-    rerender(<MyLeadsQueue {...props} selectedPeriod="custom" />)
-    fireEvent.change(screen.getByLabelText("KPI start date"), {
-      target: { value: "2026-09-01" },
-    })
     await user.click(screen.getByRole("button", { name: "Show details for 2 Main Street" }))
     await user.click(screen.getByRole("button", { name: "Ready to make an offer" }))
 
     expect(props.onSearchChange).toHaveBeenLastCalledWith("oak")
     expect(props.onRepChange).toHaveBeenCalledWith("jarrad")
-    expect(props.onPeriodChange).toHaveBeenCalledWith("custom")
-    expect(props.onDateRangeChange).toHaveBeenCalled()
     expect(props.onStageAction).toHaveBeenCalledWith("ready-for-offer", expect.objectContaining({ queueStage: "contacted" }))
   })
 

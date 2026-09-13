@@ -83,15 +83,10 @@ export type MyLeadStagePage = {
   isLoadingMore?: boolean
 }
 
-/** Labels are preformatted by the query adapter so this component does no date math. */
-export type MyLeadsKpis = {
-  attempts: number
-  contactRateLabel: string | null
-  assignToFirstCallLabel: string | null
-  appointmentsKeptLabel: string | null
-  offersSent: number
-  staleLeads: number
-}
+export type MyLeadsKpis = Pick<import("@/lib/my-leads/queries").AcquisitionKpis,
+  "attempts" | "reached" | "offersSent" | "contactWithoutFollowUp" | "needsOffers" | "appointmentsOverdue" |
+  "lastAttemptAt" | "asOf" | "missingRecordings" | "recordingExpectationUnknown" | "averageTalkSeconds" |
+  "talkTimeSamples" | "talkTimeUnknown" | "conversationsOverFiveMinutes">
 
 export type MyLeadRepOption = {
   id: string
@@ -224,8 +219,6 @@ export type MyLeadsQueueProps = {
   kpis: MyLeadsKpis
   search: string
   selectedRepId: string
-  selectedPeriod: MyLeadsPeriod
-  selectedDateRange: MyLeadDateRange | null
   repOptions: readonly MyLeadRepOption[]
   selectedRepLabel?: string | null
   canSelectRep?: boolean
@@ -233,8 +226,6 @@ export type MyLeadsQueueProps = {
   onReviewingChange?: (active: boolean) => void
   onSearchChange: (value: string) => void
   onRepChange: (repId: string) => void
-  onPeriodChange: (period: MyLeadsPeriod) => void
-  onDateRangeChange: (range: MyLeadDateRange) => void
   onLoadMore: (stage: MyLeadStage) => void | Promise<void>
   onLoadDetail: (propertyId: string) => Promise<MyLeadDetailResult>
   onLoadDetailPage?: (

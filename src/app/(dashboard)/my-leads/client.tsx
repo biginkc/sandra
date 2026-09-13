@@ -11,31 +11,18 @@ import { AcquisitionAttemptDialog } from './_components/attempt-dialog';
 import { AcquisitionReadinessDialog } from './_components/readiness-dialog';
 import { AcquisitionOfferDialog } from './_components/offer-dialog';
 import { AcquisitionLifecycleDialog } from './_components/lifecycle-dialog';
-import type { MyLeadAction,MyLeadStage,MyLeadsPeriod,MyLeadDateRange,AcquisitionLifecycleMode } from './_components/types';
+import type { MyLeadAction,MyLeadStage,AcquisitionLifecycleMode } from './_components/types';
 import { detailView,kpiTiles,stagePages } from './adapter';
 import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,submitMyLeadCommand,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
 
 type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null};
 
-type CustomRangeStatus = 'incomplete'|'invalid'|'ready';
 const REFRESH_INTERVAL_MS = 30_000;
 const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
-
-function customRangeStatus(range:MyLeadDateRange|null):CustomRangeStatus {
-  if(!range?.startDate||!range.endDate)return 'incomplete';
-  const isDate=(value:string)=>{
-    if(!/^\d{4}-\d{2}-\d{2}$/.test(value))return false;
-    const parsed=new Date(`${value}T00:00:00.000Z`);
-    return !Number.isNaN(parsed.getTime())&&parsed.toISOString().slice(0,10)===value;
-  };
-  if(!isDate(range.startDate)||!isDate(range.endDate)||range.startDate>range.endDate)return 'invalid';
-  return 'ready';
-}
 
 export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis}:Props) {
   const router=useRouter();const softphone=useOptionalSoftphone();
   const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState('');
-  const [period,setPeriod]=useState<MyLeadsPeriod>('today');const [range,setRange]=useState<MyLeadDateRange|null>(null);
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
   const [lastCheckedAt,setLastCheckedAt]=useState(initialSnapshot?.snapshotAt??null);
   const reviewingDetails=useRef(false);
@@ -49,14 +36,13 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [detailRevision,setDetailRevision]=useState(0);
   const [recipient,setRecipient]=useState(roster.settings.recipientId??'');const [settingsBusy,setSettingsBusy]=useState(false);
   const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<{hash:string;key:string}|null>(null);
-  const selectedRangeStatus=period==='custom'?customRangeStatus(range):'ready';
-  const serverScopeKey=JSON.stringify([member,period,range?.startDate,range?.endDate]);
+  const serverScopeKey=member;
   const previousServerScope=useRef(serverScopeKey);
   const refresh=useCallback(async(background=false)=>{
-    if(!roster.settings.enabled||selectedRangeStatus!=='ready') return;
+    if(!roster.settings.enabled) return;
     const id=++request.current;
     try {
-      const result=await loadMyLeads({memberId:member,search,period,startDate:range?.startDate,endDate:range?.endDate});
+      const result=await loadMyLeads({memberId:member,search,period:'today'});
       if(id!==request.current)return;
       if(result.ok){
         // Replacing a paginated/reordered queue can unmount its recording player.
@@ -68,21 +54,16 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     } catch {
       if(id===request.current)setRefreshError('My Leads could not refresh.');
     }
-  },[member,search,period,range,roster.settings.enabled,selectedRangeStatus]);
+  },[member,search,roster.settings.enabled]);
   useEffect(()=>{
     if(initialEffect.current){initialEffect.current=false;return;}
     const scopeChanged=previousServerScope.current!==serverScopeKey;
     previousServerScope.current=serverScopeKey;
-    if(selectedRangeStatus!=='ready'){
-      ++request.current;
-      setError(selectedRangeStatus==='invalid'?'Choose a valid date range with the start date on or before the end date.':null);
-      return;
-    }
     ++request.current;
     if(scopeChanged){setSnapshot(null);setKpis(null);}
     const timer=setTimeout(()=>void refresh(),250);
     return()=>{clearTimeout(timer);};
-  },[refresh,selectedRangeStatus,serverScopeKey]);
+  },[refresh,serverScopeKey]);
   useEffect(()=>{
     if(!roster.settings.enabled)return;
     const delay=Math.min(REFRESH_INTERVAL_MS,Math.max(1000,snapshot?.nextWarningAt?Date.parse(snapshot.nextWarningAt)-Date.now():REFRESH_INTERVAL_MS));
@@ -145,14 +126,12 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
     {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis?<p role="status">Loading My Leads…</p>:<>
-      {lastCheckedAt&&<p className="mb-2 text-sm text-muted-foreground">Counts update every 30 seconds while this page is visible. Last successful check: <time dateTime={lastCheckedAt}>{refreshTime.format(new Date(lastCheckedAt))}</time>.{reviewing?' The lead list stays in place while details are open.':''}</p>}
-      {search&&<p className="mb-2 text-sm text-muted-foreground">Section counts match your search. KPIs cover the selected rep.</p>}
-      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={kpiTiles(kpis)} search={search} selectedRepId={member} selectedPeriod={period} selectedDateRange={range}
+      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={kpiTiles(kpis)} search={search} selectedRepId={member}
         onReviewingChange={onReviewingChange}
         detailRevision={detailRevision}
         repOptions={roster.members.filter(m=>m.acquisitionsEnabled||m.hasHistory||m.id===viewer.userId).map(m=>({id:m.id,label:m.label+(m.acquisitionsEnabled?'':' — Acquisitions disabled')}))}
         selectedRepLabel={roster.members.find(m=>m.id===member)?.label}
-        onSearchChange={setSearch} onRepChange={setMember} onPeriodChange={setPeriod} onDateRangeChange={setRange}
+        onSearchChange={setSearch} onRepChange={setMember}
         onLoadMore={async stage=>{
           const cursor=snapshot?.stages[stage]?.cursor;if(!cursor||loadingStages.has(stage))return;
           const id=request.current;setLoadingStages(previous=>new Set(previous).add(stage));
@@ -172,6 +151,8 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
         }}
         onLeadChanged={()=>{void refresh();router.refresh();}} onStageAction={(kind,row)=>action(kind,row.propertyId)}/>
 
+      {lastCheckedAt&&<p className="mb-2 text-sm text-muted-foreground">Counts update every 30 seconds while this page is visible. Last successful check: <time dateTime={lastCheckedAt}>{refreshTime.format(new Date(lastCheckedAt))}</time>.{reviewing?' The lead list stays in place while details are open.':''}</p>}
+      {search&&<p className="mb-2 text-sm text-muted-foreground">Section counts match your search. KPIs cover the selected rep.</p>}
       <p className="mt-3 text-xs text-muted-foreground">{kpis.firstCallPending} first calls pending · {kpis.pendingOutcomes} call outcomes pending{kpis.orgAppointmentsUnattributed?` · ${kpis.orgAppointmentsUnattributed} appointments in this organization have unknown historical attribution`:''}</p>
     </>}
     {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} key={dialog.row.propertyId} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]} callReferencesLoading={!callOptions} callReferencesError={callOptions?.error} onRetryCallReferences={()=>setCallRetry(value=>value+1)}/>}
