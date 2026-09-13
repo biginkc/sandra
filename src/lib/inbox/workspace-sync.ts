@@ -14,7 +14,7 @@ export type WorkspaceSummary = {
   time_label: string;
   outcome_label: string;
   assigned_label: string;
-  unread: boolean;
+  unread: boolean | null;
 }
 export interface WorkspaceScope {
   scopeId: string;
@@ -41,12 +41,12 @@ export function summaryRow(r: WorkspaceSummary): WorkspaceRow {
   for (const key of ["name", "context", "preview", "time_label", "outcome_label", "assigned_label"] as const) {
     if (typeof r[key] !== "string" || r[key].length > 2000) throw Error("Invalid bounded summary text");
   }
-  if (typeof r.unread !== "boolean") throw Error("Invalid unread flag");
+  if (typeof r.unread !== "boolean" && !(r.target_kind === "unknown_sender" && r.unread === null)) throw Error("Invalid unread flag");
   return { target: r.target_kind === "known_conversation"
     ? { kind: "conversation", orgId: r.org_id, conversationId: r.target_id }
     : { kind: "unknown_sender_group", orgId: r.org_id, senderGroupId: r.target_id },
     name: r.name, context: r.context, preview: r.preview, timeLabel: r.time_label,
-    outcomeLabel: r.outcome_label, assignedLabel: r.assigned_label, unread: r.unread };
+    outcomeLabel: r.outcome_label, assignedLabel: r.assigned_label, unread: r.unread ?? undefined };
 }
 
 /** Keep per-request cancellation independent from the workset lifetime. */

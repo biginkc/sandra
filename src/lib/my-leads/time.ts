@@ -12,7 +12,7 @@ function valid(date: Date): void {
   if (!Number.isFinite(date.getTime())) throw new RangeError("Invalid instant");
 }
 
-function workWindow(day: Date): { start: number; end: number } | null {
+export function acquisitionWorkWindow(day: Date): { start: number; end: number } | null {
   const parts = Object.fromEntries(calendar.formatToParts(day).map(p => [p.type, p.value]));
   const date = `${parts.year}-${parts.month}-${parts.day}`;
   const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
@@ -30,7 +30,7 @@ export function workingMinutesBetween(start: Date, end: Date): number {
   let day = getDayBoundsInZone(start, ACQUISITION_TIME_ZONE).dayStart;
   let milliseconds = 0;
   while (day < end) {
-    const window = workWindow(day);
+    const window = acquisitionWorkWindow(day);
     if (window) milliseconds += Math.max(0, Math.min(end.getTime(), window.end) - Math.max(start.getTime(), window.start));
     day = addDaysInZone(day, 1, ACQUISITION_TIME_ZONE);
   }
@@ -44,7 +44,7 @@ export function workingDeadline(start: Date, minutes = FIRST_CALL_WORKING_MINUTE
   let remaining = minutes * MINUTE;
   let day = getDayBoundsInZone(start, ACQUISITION_TIME_ZONE).dayStart;
   for (;;) {
-    const window = workWindow(day);
+    const window = acquisitionWorkWindow(day);
     if (window) {
       const from = Math.max(start.getTime(), window.start);
       const available = Math.max(0, window.end - from);
