@@ -85,26 +85,6 @@ afterEach(() => {
 });
 
 describe("isPublicPath", () => {
-  it.each(["/signing-complete", "/signing-complete.html"])("serves %s without auth, cookies, or private query data", async (path) => {
-    const response = await updateSession(new NextRequest(`https://sandra.bmhgroupkc.com${path}`));
-    expect(response.headers.get("x-middleware-next")).toBe("1");
-    expect(response.headers.get("set-cookie")).toBeNull();
-    expect(createServerClient).not.toHaveBeenCalled();
-
-    const redirected = await updateSession(new NextRequest(`https://sandra.bmhgroupkc.com${path}?email=private@example.com&request_id=private`));
-    expect(redirected.headers.get("location")).toBe(`https://sandra.bmhgroupkc.com${path}`);
-    expect(redirected.headers.get("referrer-policy")).toBe("no-referrer");
-    expect(createServerClient).not.toHaveBeenCalled();
-  });
-
-  it("does not exempt adjacent signing paths", async () => {
-    const getUser = vi.fn().mockResolvedValue({ data: { user: null } });
-    createServerClient.mockReturnValue({ auth: { getUser } });
-    const response = await updateSession(new NextRequest("https://sandra.bmhgroupkc.com/signing-complete/private"));
-    expect(getUser).toHaveBeenCalled();
-    expect(new URL(response.headers.get("location")!).pathname).toBe("/login");
-  });
-
   it("keeps browser-session OAuth routes behind Sandra membership", () => {
     expect(isPublicPath("/api/oauth/google/start")).toBe(false);
     expect(isPublicPath("/api/oauth/google/callback")).toBe(false);

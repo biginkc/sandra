@@ -24,16 +24,6 @@ export function isPublicPath(path: string): boolean {
 }
 
 export async function updateSession(request: NextRequest) {
-  // This standalone document must not initialize auth or refresh cookies.
-  // Match only these exact paths so adjacent CRM routes remain protected.
-  if (["/signing-complete", "/signing-complete.html"].includes(request.nextUrl.pathname)) {
-    if (request.nextUrl.search) {
-      const url = request.nextUrl.clone();
-      url.search = "";
-      return NextResponse.redirect(url, { headers: { "Referrer-Policy": "no-referrer" } });
-    }
-    return NextResponse.next();
-  }
   let supabaseResponse = NextResponse.next({ request });
   const writtenCookieNames = new Set<string>();
 

@@ -417,7 +417,7 @@ describe("Dropbox Sign provider", () => {
       mergeValues: { property_address: "Private property" },
     });
     expect(sdk.send).toHaveBeenLastCalledWith(expect.objectContaining({
-      signingRedirectUrl: "https://sandra.bmhgroupkc.com/signing-complete",
+      signingRedirectUrl: "https://bmhgroupkc.com/signing-complete",
       testMode,
     }));
   });
