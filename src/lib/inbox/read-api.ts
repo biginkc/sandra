@@ -27,6 +27,7 @@ function timestamp(value: unknown): string { requireValue(typeof value === "stri
 function nullableTimestamp(value: unknown): string | null { return value === null ? null : timestamp(value); }
 function fail(error: { code?: string; message?: string } | null): void {
   if (!error) return;
+  if (error.code === "PGRST301" || error.code === "PGRST303") throw new InboxReadError(401);
   const message = error.message;
   if (error.code === "42501" && ["INBOX_AUTH_REQUIRED", "INBOX_SESSION_EXPIRED", "INBOX_SESSION_REVOKED"].includes(message ?? "")) throw new InboxReadError(401);
   if (error.code === "42501" && ["INBOX_READ_NOT_FOUND", "INBOX_ACCESS_DENIED", "INBOX_ORG_DENIED", "INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING"].includes(message ?? "")) throw new InboxReadError(404);
