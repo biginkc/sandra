@@ -7,6 +7,7 @@ on:
       - "experiments/inbox-projection/**"
       - "experiments/inbox-post-render-read/**"
       - "experiments/inbox-history-paging/**"
+      - "experiments/inbox-unknown-history/**"
       - ".github/workflows/inbox-stack.yml"
   push:
     branches: [main]
@@ -15,6 +16,7 @@ on:
       - "experiments/inbox-projection/**"
       - "experiments/inbox-post-render-read/**"
       - "experiments/inbox-history-paging/**"
+      - "experiments/inbox-unknown-history/**"
       - ".github/workflows/inbox-stack.yml"
 
 permissions:
@@ -33,6 +35,7 @@ jobs:
       - run: python3 experiments/inbox-projection/verify_sources.py
       - run: python3 experiments/inbox-post-render-read/verify.py
       - run: python3 experiments/inbox-history-paging/verify.py
+      - run: python3 experiments/inbox-unknown-history/verify.py
       - run: python3 experiments/inbox-projection/fixture/transaction_envelope.py
       - run: python3 -O experiments/inbox-projection/fixture/guards_test.py
       # Canonical database/concurrency proofs require the explicit owned fixture.
