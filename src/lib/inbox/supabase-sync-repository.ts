@@ -44,6 +44,7 @@ function scope(value: unknown): DurableInboxScope | null {
  * Missing RPCs/grants throw; there is no local scope cache, service-role retry or invented epoch.
  */
 export interface InboxDataRepository extends InboxWorksetRepository {
+  getContext(signal: AbortSignal): Promise<{ userId: string; sessionId: string; orgId: string; accessEpoch: string; expiresAt: number }>;
   getCounts(session: InboxSession, orgId: string, filter: InboxFilter, signal: AbortSignal): Promise<InboxCounts>;
 }
 export function createSupabaseInboxRepository(client: InboxRpcClient): InboxDataRepository {
@@ -58,6 +59,7 @@ export function createSupabaseInboxRepository(client: InboxRpcClient): InboxData
   }
   const same = (actual: InboxSession, expected: InboxSession) => actual.userId === expected.userId && actual.sessionId === expected.sessionId;
   return {
+    async getContext(signal) { const value = await authorize(null, signal); return { userId: value.userId, sessionId: value.sessionId, orgId: value.orgId, accessEpoch: value.epoch, expiresAt: value.expiresAt }; },
     async authenticate(_request, signal) { return authorize(null, signal); },
     async getAccess(session, orgId, signal) {
       const current = await authorize(orgId, signal);
