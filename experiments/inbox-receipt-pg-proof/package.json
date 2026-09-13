@@ -1,0 +1,1 @@
+{"name":"inbox-receipt-pg-proof","private":true,"type":"module","scripts":{"test":"tsx run.ts"},"dependencies":{"pg":"8.21.0","tsx":"4.21.0"}}
