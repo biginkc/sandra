@@ -20,8 +20,11 @@ export function StickyMyLeadsMetrics({ kpis, expandedRef, repLabel }: {
     if (!expanded || !strip || typeof IntersectionObserver === "undefined") return
     const observe = () => {
       const inset = Number.parseFloat(getComputedStyle(strip).top)
-      return new IntersectionObserver(([entry]) => {
-        setVisible(entry.boundingClientRect.bottom <= inset)
+      return new IntersectionObserver((entries) => {
+        const entry = entries[entries.length - 1]
+        // Edge adjacency is intersecting even with zero area. Hide there;
+        // moving farther into view need not produce another observation.
+        if (entry) setVisible(!entry.isIntersecting && entry.boundingClientRect.bottom <= inset)
       }, { rootMargin: `-${inset}px 0px 0px 0px` })
     }
     let observer = observe()
