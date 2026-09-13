@@ -1,0 +1,50 @@
+{
+  "passed": true,
+  "timestamp": "2026-09-13T21:23:48.348Z",
+  "sourceSha256": "5ad96a96947482c8f4d6d4229c85718fc5fa88cf7257df4dbc628e4d2b813b9f",
+  "checks": [
+    "actual SSR cookie client to PostgREST JWT signature verification and canonical session authorization",
+    "actual v2 workset HTTP core returns canonical typed membership",
+    "independent canonical counts over real authenticated RPC",
+    "forged signature rejected by PostgREST before canonical RPC",
+    "expired JWT rejected by PostgREST before canonical RPC",
+    "cross organization denied by canonical wrapper",
+    "revoked canonical session rejects still cryptographically valid JWT"
+  ],
+  "transportStatuses": [
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    401,
+    401,
+    403,
+    403
+  ],
+  "denialCodes": [
+    "PGRST301",
+    "PGRST303"
+  ],
+  "fixtures": {
+    "org": "e15b0dcc-10fb-419c-938d-8226499d85a4",
+    "foreign": "63fbb203-6444-4718-bc6a-fc82d61c3abc",
+    "user": "b75599e4-f4bb-47d4-a7a6-6d9a695af661",
+    "owner": "6880211e-63db-4377-a6c1-b759216bc033",
+    "session": "632650a1-ec49-4189-b9b4-f289c3682ef2",
+    "target": "8b062433-be09-4813-ba18-c34576de28af"
+  },
+  "cleanup": {
+    "postgrestContainerRemoved": true,
+    "loginRoleRemoved": true
+  },
+  "limitations": [
+    "Dedicated fixture SSR cookie adapter, not a running Next.js page",
+    "Synthetic source rows retained in isolated T2 for evidence; no production data",
+    "No production JWT or provider credentials used"
+  ]
+}

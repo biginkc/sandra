@@ -56,7 +56,7 @@ export function createInboxWorksetHandler(repository: InboxWorksetRepository, no
       const scope = structuredClone(stored);
       guard();
       if (!validScope(scope) || scope.orgId !== input.orgId || scope.userId !== session.userId || scope.sessionId !== session.sessionId ||
-          scope.expiresAt <= now() || scope.expiresAt > now() + 900_000 || scope.targets.length > input.limit || session.expiresAt <= now()) return error(503);
+          scope.expiresAt <= now() || (!Number.isFinite(scope.createdAt) || scope.expiresAt < scope.createdAt || scope.expiresAt - scope.createdAt > 900_000) || scope.targets.length > input.limit || session.expiresAt <= now()) return error(503);
       // Last authority check closes create-to-response revocation; scope visibility is also rechecked.
       const access = await repository.getAccess(session, scope.orgId, signal);
       guard();
@@ -67,7 +67,7 @@ export function createInboxWorksetHandler(repository: InboxWorksetRepository, no
           !current || !sameScope(scope, current) || session.expiresAt <= now() || scope.expiresAt <= now()) return error(403);
       return Response.json({
         scopeId: scope.id, orgId: scope.orgId, requesterId: scope.userId, sessionId: scope.sessionId,
-        accessEpoch: scope.accessEpoch, generation: scope.generation, expiresAt: scope.expiresAt,
+        accessEpoch: scope.accessEpoch, generation: scope.generation, expiresAt: scope.expiresAt, createdAt: scope.createdAt, nextCursor: scope.nextCursor, refreshed: scope.refreshed,
         orderedIds: scope.targets.map(target => workspaceId(target.kind === "known_conversation" ? { kind: "conversation", orgId: scope.orgId, conversationId: target.id } : { kind: "unknown_sender_group", orgId: scope.orgId, senderGroupId: target.id })),
       }, { status: 201, headers });
     } catch (failure) {

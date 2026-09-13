@@ -6,7 +6,7 @@ export type InboxSession = { userId: string; sessionId: string; expiresAt: numbe
 export type InboxAccess = { sessionActive: boolean; activeMembershipCount: number; status: "active" | "suspended" | "revoked"; epoch: string; expiresAt: number | null; deletionPrepared: boolean };
 export interface DurableInboxScope {
   id: string; orgId: string; userId: string; sessionId: string; accessEpoch: string;
-  generation: string; expiresAt: number; targets: readonly InboxSyncTarget[];
+  generation: string; expiresAt: number; createdAt?: number; targets: readonly InboxSyncTarget[];
   handles: (string | null)[];
 }
 /** Implement with durable database state. No process-local fallback is permitted.
@@ -34,6 +34,7 @@ export type InboxWorksetRequest = {
   /** Optional old generation to replace atomically; must belong to this same org/user/session. */
   replacesScopeId?: string;
 };
+export interface CreatedInboxWorkset extends DurableInboxScope { createdAt: number; nextCursor: string | null; refreshed: boolean }
 export interface InboxWorksetRepository extends InboxSyncRepository {
   /** One consistent DB operation: reauthorize current session + exactly one global active
    * membership, validate canonical filter/cursor binding, resolve <=500 ordered typed IDs,
@@ -41,7 +42,7 @@ export interface InboxWorksetRepository extends InboxSyncRepository {
    * at most two live generations, and <=15min scope TTL. No arbitrary client-selected IDs.
    * Creation must never invent an epoch when permission-writer coverage is unavailable.
    */
-  createScope(session: InboxSession, request: InboxWorksetRequest, signal: AbortSignal): Promise<DurableInboxScope>;
+  createScope(session: InboxSession, request: InboxWorksetRequest, signal: AbortSignal): Promise<CreatedInboxWorkset>;
 }
 export interface InboxGatewayOptions {
   repository: InboxSyncRepository;
@@ -91,14 +92,14 @@ export function createInboxSyncGateway(options: InboxGatewayOptions) {
       const stored=await repository.getScope(scopeId,signal);guard();
       const scope=stored ? {...stored,handles:Array.isArray(stored.handles)?[...stored.handles]:stored.handles,targets:Array.isArray(stored.targets)?stored.targets.map(target=>({...target})):stored.targets} : null;
       if(!scope||scope.id!==scopeId||!uuid.test(scope.orgId)||scope.userId!==session.userId||scope.sessionId!==session.sessionId)throw new Denied(403);
-      if(!scope.generation||!scope.accessEpoch||!Number.isFinite(scope.expiresAt)||scope.expiresAt<=now())throw new Denied(410);
+      if(!scope.generation||!scope.accessEpoch||!Number.isFinite(scope.expiresAt)||scope.expiresAt<=now() || (scope.createdAt!==undefined && (!Number.isFinite(scope.createdAt) || scope.expiresAt<scope.createdAt || scope.expiresAt-scope.createdAt>900000)))throw new Denied(410);
       if(!validTargets(scope.targets) || !Array.isArray(scope.handles) || scope.handles.length !== Math.max(1,Math.ceil(scope.targets.length/100)) || scope.handles.some(handle=>handle!==null && (typeof handle!=="string" || handle.length>256)))throw new Denied(503);
       // Copy repository-owned membership so an adapter cannot mutate the predicate during awaits.
       const targets=scope.targets.map(target=>({...target}));
       const authorize=async()=> {
         guard();
         const currentScope=await repository.getScope(scope.id,signal);guard();
-        if(!currentScope || ["id","orgId","userId","sessionId","accessEpoch","generation","expiresAt"].some(key=>currentScope[key as keyof DurableInboxScope]!==scope[key as keyof DurableInboxScope]) || JSON.stringify(currentScope.targets)!==JSON.stringify(targets))throw new Denied(403);
+        if(!currentScope || ["id","orgId","userId","sessionId","accessEpoch","generation","expiresAt","createdAt"].some(key=>currentScope[key as keyof DurableInboxScope]!==scope[key as keyof DurableInboxScope]) || JSON.stringify(currentScope.targets)!==JSON.stringify(targets))throw new Denied(403);
         if(session.expiresAt<=now())throw new Denied(401);
         if(scope.expiresAt<=now())throw new Denied(410);
         const access=await repository.getAccess(session,scope.orgId,signal);guard();

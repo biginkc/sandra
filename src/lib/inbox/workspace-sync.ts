@@ -24,6 +24,8 @@ export interface WorkspaceScope {
   /** Local authenticated session identity; never a bearer token. */
   sessionId: string;
   expiresAt: number;
+  /** Canonical creation time permits TTL validation without comparing different server clocks. */
+  createdAt?: number;
   orderedIds: readonly WorkspaceId[];
 }
 export type SyncState = "loading" | "live" | "resync_required" | "permission_lost" | "closed";
@@ -79,7 +81,7 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
     // Invalid replacement cannot leave a previous tenant's rows visible.
     const authChanged = !!current && ["orgId", "requesterId", "sessionId", "accessEpoch"].some(k => current![k as keyof WorkspaceScope] !== scope[k as keyof WorkspaceScope]);
     stop("loading", authChanged);
-    if (!uuid.test(scope.scopeId) || !uuid.test(scope.orgId) || !uuid.test(scope.requesterId) || !scope.sessionId || !scope.accessEpoch || !Number.isFinite(scope.expiresAt) || scope.expiresAt <= Date.now() || scope.expiresAt > Date.now() + 900_000 || scope.orderedIds.length > 500 || new Set(scope.orderedIds).size !== scope.orderedIds.length) {
+    if (!uuid.test(scope.scopeId) || !uuid.test(scope.orgId) || !uuid.test(scope.requesterId) || !scope.sessionId || !scope.accessEpoch || !Number.isFinite(scope.expiresAt) || scope.expiresAt <= Date.now() || (scope.createdAt === undefined ? scope.expiresAt > Date.now() + 900_000 : !Number.isFinite(scope.createdAt) || scope.expiresAt < scope.createdAt || scope.expiresAt - scope.createdAt > 900_000) || scope.orderedIds.length > 500 || new Set(scope.orderedIds).size !== scope.orderedIds.length) {
       stop("resync_required"); throw Error("Invalid or expired bounded workset");
     }
     for (const id of scope.orderedIds) {
@@ -87,6 +89,7 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
       try { parts = JSON.parse(id); } catch { stop("resync_required"); throw Error("Invalid workset identity"); }
       if (!Array.isArray(parts) || parts.length !== 3 || parts[0] !== scope.orgId || !["conversation", "unknown_sender_group"].includes(parts[1]) || typeof parts[2] !== "string" || !uuid.test(parts[2]) || JSON.stringify(parts) !== id) { stop("resync_required"); throw Error("Invalid workset identity"); }
     }
+    const localDeadline = scope.createdAt === undefined ? scope.expiresAt : Math.min(scope.expiresAt, Date.now() + scope.expiresAt - scope.createdAt);
     current = scope;
     const token = generation;
     const active = () => token === generation;
@@ -94,7 +97,7 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
     const fail = (state: SyncState) => { if (active()) stop(state, state === "permission_lost"); };
     const authorizedNow = () => {
       if (!active()) return false;
-      if (Date.now() >= scope.expiresAt) { fail("resync_required"); return false; }
+      if (Date.now() >= localDeadline) { fail("resync_required"); return false; }
       return true;
     };
     const partitions: { data: () => WorkspaceSummary[]; ready: () => boolean; cleanup: () => void }[] = [];
@@ -109,7 +112,7 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
         emit({ state: complete && partitions.every(part => part.ready()) ? "live" : "loading", rows: scope.orderedIds.flatMap(id => indexed.has(id) ? [indexed.get(id)!] : []) });
       } catch { fail("resync_required"); }
     };
-    const expiry = setTimeout(() => fail("resync_required"), scope.expiresAt - Date.now());
+    const expiry = setTimeout(() => fail("resync_required"), localDeadline - Date.now());
     dispose = () => { controller.abort(); clearTimeout(expiry); for (const part of partitions) part.cleanup(); };
     for (let partition = 0; partition < Math.max(1, Math.ceil(scope.orderedIds.length / 100)); partition++) {
       if (!active()) break;
