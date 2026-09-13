@@ -14,6 +14,27 @@ function setup(fetcher: typeof fetch) {
 }
 const tick = () => new Promise(resolve=>setTimeout(resolve,20));
 describe("bounded workspace synchronization lifecycle",()=> {
+  it("hydrates five bounded partitions without claiming full readiness early and revokes all", async () => {
+    const rows = Array.from({ length: 500 }, (_, i) => ({ ...summary, target_id: `00000000-0000-4000-8000-${i.toString(16).padStart(12,"0")}` }));
+    const calls = new Map<number, number>(), signals: AbortSignal[] = [];
+    let finishLast: (() => void) | undefined;
+    const fetcher = vi.fn<typeof fetch>((input, init) => {
+      const partition = Number(new URL(String(input)).searchParams.get("partition"));
+      signals.push(init!.signal!); calls.set(partition, (calls.get(partition) ?? 0) + 1);
+      if (calls.get(partition)! > 1) return new Promise<Response>(() => {});
+      const response = () => new Response(JSON.stringify([...rows.slice(partition*100, (partition+1)*100).map(value => ({ key: value.target_id, headers: { operation: "insert" }, value })), { headers: { control: "up-to-date", global_last_seen_lsn: "0" } }]), { headers: { "content-type": "application/json", "electric-handle": `partition-${partition}`, "electric-offset": "0_0", "electric-schema": JSON.stringify({ unread: { type: "bool" } }), "electric-cursor": "1" } });
+      return partition === 4 ? new Promise<Response>(resolve => { finishLast = () => resolve(response()); }) : Promise.resolve(response());
+    });
+    const { sync } = setup(fetcher);
+    sync.replace({ ...scope, scopeId: "99999999-9999-4999-8999-999999999999", orderedIds: rows.map(row => workspaceId({ kind: "conversation", orgId: org, conversationId: row.target_id })) });
+    await vi.waitFor(() => expect(sync.getSnapshot().rows).toHaveLength(400));
+    expect(sync.getSnapshot().state).toBe("loading"); expect(calls.size).toBe(5);
+    finishLast!(); await vi.waitFor(() => expect(sync.getSnapshot().state).toBe("live"));
+    expect(sync.getSnapshot().rows).toHaveLength(500);
+    sync.revoke(); expect(sync.getSnapshot()).toEqual({ state: "permission_lost", rows: [] });
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+  });
+
   it("permits unknown unread null on the wire while keeping known unread mandatory",async()=> {
     expect(()=>summaryRow({...summary,unread:null})).toThrow("Invalid unread flag");
     let calls=0;

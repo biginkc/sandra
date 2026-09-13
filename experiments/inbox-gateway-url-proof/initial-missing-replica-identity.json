@@ -1,0 +1,28 @@
+{
+  "timestamp": "2026-09-13T20:59:10.096Z",
+  "purpose": "Real Electric HTTP URL feasibility only; repository authority is synthetic and not JWT proof",
+  "sourceSha256": "d38718dea1c823517258437a35d096cf4cc604fd78d59afd92ba8289243ff532",
+  "results": [
+    {
+      "requestedTargets": 500,
+      "urlBytes": 31226,
+      "upstreamStatus": 414,
+      "gatewayStatus": 503,
+      "returnedRows": 0,
+      "passed": false
+    },
+    {
+      "requestedTargets": 100,
+      "urlBytes": 6426,
+      "upstreamStatus": 503,
+      "gatewayStatus": 503,
+      "returnedRows": 0,
+      "passed": false
+    }
+  ],
+  "cleanup": {
+    "ownedSchemaRemoved": true,
+    "publicationRestored": true,
+    "databaseClientClosed": true
+  }
+}
