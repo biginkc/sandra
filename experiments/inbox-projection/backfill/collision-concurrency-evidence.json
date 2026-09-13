@@ -1,0 +1,14 @@
+{
+  "at": "2026-09-13 19:55:15.525042+00",
+  "checks": [
+    {
+      "name": "inspector waits after one-thread source probe; concurrent second thread increments generation; old acknowledgement leaves new work pending and subsequent inspection reports exact duplicate pair",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "d7ff8e2f2c39328a8b25e04fdde9e6fe201ea5f721158789ef4d37820e9ed4d0",
+  "runner_sha256": "7d2ab411690f0e5cd60edadcbd4e40085945e974effaf07e441998fbdac1c33c",
+  "limits": [
+    "Real independent sessions and observed lock wait; one scoped collision interleaving, not production performance or exhaustive concurrency proof"
+  ]
+}
