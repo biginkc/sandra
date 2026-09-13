@@ -1,0 +1,117 @@
+{
+  "base_commit": "c0e8f546",
+  "depends_on": [
+    577
+  ],
+  "namespace_replace": {
+    "inbox_t2_": "inbox_"
+  },
+  "components": [
+    {
+      "id": "heads",
+      "path": "experiments/inbox-projection/sql/001-inbound-heads.sql",
+      "sha256": "ccc77911ab769d1dd43d3c96023fb56199feaf24b673a4886aa00b5004fea08a"
+    },
+    {
+      "id": "known_summary",
+      "path": "experiments/inbox-projection/summary-contract/compute.sql",
+      "sha256": "f24712b35916307cdd0050017e01860cc7ee8939e32fb183ab2158822d43be30"
+    },
+    {
+      "id": "unknown_summary",
+      "path": "experiments/inbox-projection/unknown-summary-contract/compute.sql",
+      "sha256": "e8604e26e0032b17fd1226da93b8717926cedd824b4bab08434ac58c305b7769"
+    },
+    {
+      "id": "detail_v1",
+      "path": "experiments/inbox-projection/authenticated-detail/setup.sql",
+      "sha256": "8e13aaea327dafa55bac4185ead4024099b467e52f6a65908331018df810d8c6"
+    },
+    {
+      "id": "detail_v2",
+      "path": "experiments/inbox-projection/authenticated-detail/setup-v2.sql",
+      "sha256": "bee0520f65816a19b211d6962cabad836a8e21d632b648af838c1d3840987620"
+    },
+    {
+      "id": "capture_boundary",
+      "path": "experiments/inbox-projection/capture-boundary-integration/setup.sql",
+      "sha256": "4284a90214179ca2e7148d697d42a2951cbb7c87f4afea3a679f6d1cd3dda4c7"
+    },
+    {
+      "id": "message_capture",
+      "path": "experiments/inbox-projection/message-capture-integration/setup.sql",
+      "sha256": "8b26dab36039731397c30220c0b3ad77db1b2a82983c63533c305ec8dc064b04"
+    },
+    {
+      "id": "maintained",
+      "path": "experiments/inbox-projection/maintained-model/setup.sql",
+      "sha256": "256ea6fe951440b6879acfec0502698b9a3a8203be04aa68bf09e15274133966"
+    },
+    {
+      "id": "queue",
+      "path": "experiments/inbox-projection/maintained-model/queue.sql",
+      "sha256": "cb4c12d07ff3f3aef6ccb20fff1894d8e59c89d94586cf250ed0b451b7d79ca2"
+    },
+    {
+      "id": "parent_capture",
+      "path": "experiments/inbox-projection/parent-capture/setup.sql",
+      "sha256": "841dd151a0a5e2ea623d4ac2c936e097d45af190383e906ad1184fb6d58c53b3"
+    },
+    {
+      "id": "safety_capture",
+      "path": "experiments/inbox-projection/safety-capture/setup.sql",
+      "sha256": "0e42f835e29d3aa34e41ead32fa5daf80eb5d59e1aa182b547bd5cde2e0cbbc5"
+    },
+    {
+      "id": "backfill",
+      "path": "experiments/inbox-projection/backfill/setup.sql",
+      "sha256": "d7ff8e2f2c39328a8b25e04fdde9e6fe201ea5f721158789ef4d37820e9ed4d0"
+    },
+    {
+      "id": "policy",
+      "path": "experiments/inbox-projection/policy-versions/setup.sql",
+      "sha256": "ae524b76ebbd24295e6145c33fe100208299523b5145c61019e132a19f01d4d1"
+    },
+    {
+      "id": "projection",
+      "path": "experiments/inbox-workset-bridge/projection.sql",
+      "sha256": "57cdc34ad11830ef5a0785f1b0a6b328505dfb5b96b959a8aee0481a0e2ac3e4"
+    },
+    {
+      "id": "auth",
+      "path": "experiments/inbox-workset-bridge/auth.sql",
+      "sha256": "cf675f9e1e034022f4dbadb591395b71814b856ed476a7a6a8cba4e1359dca1e"
+    },
+    {
+      "id": "worksets",
+      "path": "experiments/inbox-workset-bridge/worksets.sql",
+      "sha256": "52ecaf8d217f2f5554dc733305b81de646fb81cf721b9e044c4d2aa21c1fd3bb"
+    },
+    {
+      "id": "public_api",
+      "path": "experiments/inbox-workset-bridge/public-api.sql",
+      "sha256": "fda8ba3148d4da43e821137980dc286789b8041ed93062f4b4d3a583b89429aa"
+    },
+    {
+      "id": "typed_filters",
+      "path": "experiments/inbox-workset-performance/typed-filters.sql",
+      "sha256": "2525cd7bf1a62c9c2426002e29d2d7b5a5f63a3c1c7c8c5add369006e9de33f3"
+    },
+    {
+      "id": "parity",
+      "path": "experiments/inbox-workset-bridge/parity-v2.sql",
+      "sha256": "c0af18a7c18171b5847dc53820c0e2494069ea5d4705247ee596749a2bfb2399"
+    },
+    {
+      "id": "outcomes",
+      "path": "experiments/inbox-outcome-facets/setup.sql",
+      "sha256": "fc365e47abf71613744e9f9aa8b8cb7c937cdf2042e655d689d83f0ce793a299"
+    }
+  ],
+  "external_dependencies": {
+    "read": "Reviewed PR579/db852ee9 pinned companion compiled and installed in owned full-Auth fixture; separate companion manifest and evidence",
+    "operations": "Operations-owned durable acceptance/domain/provider final reviewed source pending",
+    "electric": "Server-private Electric role/publication/runtime configuration pending; REPLICA IDENTITY FULL is required",
+    "worker": "Continuous bounded worker process/service and health/restart controls pending"
+  }
+}

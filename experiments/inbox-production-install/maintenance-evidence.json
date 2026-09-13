@@ -1,0 +1,53 @@
+{
+  "passed": true,
+  "checks": [
+    "modeled historical member with no session receives baseline epoch",
+    "existing epoch 73 preserved",
+    "baseline checkpoint probe entirely rolled back",
+    "natural deadline without canonical update wakes queue and removes summary",
+    "serving gate preserved",
+    "2001 cursor rows pruned across three bounded calls",
+    "only cursor table references worksets in installed catalog"
+  ],
+  "worker_passes": [
+    {
+      "rounds": 4,
+      "processed": {
+        "baseline": 4,
+        "backfill": 0,
+        "parent": 5,
+        "summary": 4,
+        "expiry": 0
+      },
+      "readiness": {
+        "due_expiry": false,
+        "baseline_done": true,
+        "queue_pending": false,
+        "parent_pending": false,
+        "serving_enabled": true,
+        "backfill_pending": false,
+        "collisions_unresolved": false
+      }
+    },
+    {
+      "rounds": 4,
+      "processed": {
+        "baseline": 4,
+        "backfill": 0,
+        "parent": 0,
+        "summary": 1,
+        "expiry": 1
+      },
+      "readiness": {
+        "due_expiry": false,
+        "baseline_done": true,
+        "queue_pending": false,
+        "parent_pending": false,
+        "serving_enabled": true,
+        "backfill_pending": false,
+        "collisions_unresolved": false
+      }
+    }
+  ],
+  "scope": "Owned fixture; historical gap deliberately modeled, not a second pre-install database; natural expiry is actual wall-clock execution"
+}

@@ -1,0 +1,15 @@
+[
+  "inbox_control",
+  "inbox_summary_contract",
+  "inbox_unknown_summary",
+  "inbox_authenticated_detail",
+  "inbox_capture_boundary",
+  "inbox_message_capture",
+  "inbox_maintained",
+  "inbox_parent",
+  "inbox_safety",
+  "inbox_backfill",
+  "inbox_policy",
+  "inbox_bridge",
+  "inbox_read"
+]

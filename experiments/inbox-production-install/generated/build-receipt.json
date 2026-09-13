@@ -1,0 +1,116 @@
+{
+  "components": [
+    {
+      "component": "heads",
+      "source_sha256": "ccc77911ab769d1dd43d3c96023fb56199feaf24b673a4886aa00b5004fea08a",
+      "compiled_sha256": "d8b9e5474ca67ad4228f22fc00eff20ab30d7551b8fb276526481fb19b082d9b"
+    },
+    {
+      "component": "known_summary",
+      "source_sha256": "f24712b35916307cdd0050017e01860cc7ee8939e32fb183ab2158822d43be30",
+      "compiled_sha256": "ae14e1efa1680d60907d150c9fa962574ffb43da8b9312791e1940d4a45a8ac0"
+    },
+    {
+      "component": "unknown_summary",
+      "source_sha256": "e8604e26e0032b17fd1226da93b8717926cedd824b4bab08434ac58c305b7769",
+      "compiled_sha256": "4e28717957d935228166baa1ddb61b05aff350147ae8180c344c53c4dd6b9693"
+    },
+    {
+      "component": "detail_v1",
+      "source_sha256": "8e13aaea327dafa55bac4185ead4024099b467e52f6a65908331018df810d8c6",
+      "compiled_sha256": "ff103fc70e2c06ee3c5d32c58cabfd0427f9dc892c8b742b367fa016f9c543a8"
+    },
+    {
+      "component": "detail_v2",
+      "source_sha256": "bee0520f65816a19b211d6962cabad836a8e21d632b648af838c1d3840987620",
+      "compiled_sha256": "a24f0ecb80c0e9dc67f0a0b4d92f7266e06e0d90bf05ce5e2b799cc87febcdc1"
+    },
+    {
+      "component": "capture_boundary",
+      "source_sha256": "4284a90214179ca2e7148d697d42a2951cbb7c87f4afea3a679f6d1cd3dda4c7",
+      "compiled_sha256": "d34a9825582717372d8727deb9c69b399a8bcbdbb9ef0afcf7addf624c1f075a"
+    },
+    {
+      "component": "message_capture",
+      "source_sha256": "8b26dab36039731397c30220c0b3ad77db1b2a82983c63533c305ec8dc064b04",
+      "compiled_sha256": "53f84e69fdb9d47369c731dc16ae602b8fa6ae0ed82410d4b4114ca43447363f"
+    },
+    {
+      "component": "maintained",
+      "source_sha256": "256ea6fe951440b6879acfec0502698b9a3a8203be04aa68bf09e15274133966",
+      "compiled_sha256": "bf6930ef4cac139bae10a77ffae974987d87ccfa05086cd6157581f6d460c073"
+    },
+    {
+      "component": "queue",
+      "source_sha256": "cb4c12d07ff3f3aef6ccb20fff1894d8e59c89d94586cf250ed0b451b7d79ca2",
+      "compiled_sha256": "d61f3fc3f10b2a76912dd80955a639bc6a6d4deda9686c19ababc5c9d1f770b9"
+    },
+    {
+      "component": "parent_capture",
+      "source_sha256": "841dd151a0a5e2ea623d4ac2c936e097d45af190383e906ad1184fb6d58c53b3",
+      "compiled_sha256": "bcc41d74d1e44f3f661fd2d4139afe796d95ec32dcfd89dfffe431c78373de8c"
+    },
+    {
+      "component": "safety_capture",
+      "source_sha256": "0e42f835e29d3aa34e41ead32fa5daf80eb5d59e1aa182b547bd5cde2e0cbbc5",
+      "compiled_sha256": "56f81a889ea789bb7d14b0dfedc9d394abc49c4e221fc056a02409b1efa99a41"
+    },
+    {
+      "component": "backfill",
+      "source_sha256": "d7ff8e2f2c39328a8b25e04fdde9e6fe201ea5f721158789ef4d37820e9ed4d0",
+      "compiled_sha256": "be211a8bdaec0ee7cbe2c6aa0e443c7104fda8ea486f64ee51debafb3b16f5c0"
+    },
+    {
+      "component": "policy",
+      "source_sha256": "ae524b76ebbd24295e6145c33fe100208299523b5145c61019e132a19f01d4d1",
+      "compiled_sha256": "6bd18eb1a46584ec3ff84726a1aa2ea1eba01e75e38bb1beed72226445dd6ac1"
+    },
+    {
+      "component": "projection",
+      "source_sha256": "57cdc34ad11830ef5a0785f1b0a6b328505dfb5b96b959a8aee0481a0e2ac3e4",
+      "compiled_sha256": "0f67039f39001ef00b82af826d70298d6696deecf9f124b3908c674963d44d3a"
+    },
+    {
+      "component": "auth",
+      "source_sha256": "cf675f9e1e034022f4dbadb591395b71814b856ed476a7a6a8cba4e1359dca1e",
+      "compiled_sha256": "88115752bb8f7d0aee8a204a0efb09250ad450beda26391ebbde26ab12bf3533"
+    },
+    {
+      "component": "worksets",
+      "source_sha256": "52ecaf8d217f2f5554dc733305b81de646fb81cf721b9e044c4d2aa21c1fd3bb",
+      "compiled_sha256": "673599f75955fcfe317f9e8111f4726e52d6e1146aab175e22d356846f180334"
+    },
+    {
+      "component": "public_api",
+      "source_sha256": "fda8ba3148d4da43e821137980dc286789b8041ed93062f4b4d3a583b89429aa",
+      "compiled_sha256": "0edb48e6f4db41c5b79e13ada3608acbef9fb468d663183ebc98cc463237a82f"
+    },
+    {
+      "component": "typed_filters",
+      "source_sha256": "2525cd7bf1a62c9c2426002e29d2d7b5a5f63a3c1c7c8c5add369006e9de33f3",
+      "compiled_sha256": "b713f1fe1c26356aebef992fe291fa3fc78e1763a6886d831231e92d6e9c0460"
+    },
+    {
+      "component": "parity",
+      "source_sha256": "c0af18a7c18171b5847dc53820c0e2494069ea5d4705247ee596749a2bfb2399",
+      "compiled_sha256": "16237ad46d3e1485346068da0eb88d4c4a67db5033aaa9eedc405b43a210937d"
+    },
+    {
+      "component": "outcomes",
+      "source_sha256": "fc365e47abf71613744e9f9aa8b8cb7c937cdf2042e655d689d83f0ce793a299",
+      "compiled_sha256": "a2b5486e47c841ff1661bcf80b2c53751f68107970ff4f1d2d2709020e563d8d"
+    }
+  ],
+  "canonical_concurrent_indexes": 7,
+  "serving_enabled": false,
+  "compiler_sha256": "18df1292862df552fc90639a0f18797007a229bd8a4dc554de04267c4bf87ff5",
+  "runtime_sha256": "9fe0f76c653fa431c664285009f091491f723ede2749bfcd25201bf767790920",
+  "hardening_sha256": "4a1d6a89d263ff2b40949e313b14d90529eba69c38a9839b6fb3d0820f99944a",
+  "foundation_sha256": "9dbda65aa4c9b810bb94968a97c97d04f19d9744a76b642f47fa625c858fb938",
+  "external_dependencies": {
+    "read": "Reviewed PR579/db852ee9 pinned companion compiled and installed in owned full-Auth fixture; separate companion manifest and evidence",
+    "operations": "Operations-owned durable acceptance/domain/provider final reviewed source pending",
+    "electric": "Server-private Electric role/publication/runtime configuration pending; REPLICA IDENTITY FULL is required",
+    "worker": "Continuous bounded worker process/service and health/restart controls pending"
+  }
+}

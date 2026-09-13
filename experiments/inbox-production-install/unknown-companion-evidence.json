@@ -1,0 +1,8 @@
+{
+  "installed": true,
+  "indexes": [
+    "inbox_unknown_history_page"
+  ],
+  "upgrade_sha256": "a77c8479c6e4ec0788e6be4caa47f8d0bd9a472fe95ab94a6b8dfa925c20eabe",
+  "scope": "Owned fixture incremental install; serving state preserved"
+}

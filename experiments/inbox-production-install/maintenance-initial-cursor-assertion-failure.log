@@ -1,0 +1,13 @@
+Traceback (most recent call last):
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-production-install/experiments/inbox-production-install/maintenance-test.py", line 33, in <module>
+    retention=sql(f"""BEGIN;
+    INSERT INTO inbox_bridge.worksets(id,org_id,user_id,session_id,access_epoch,generation,created_at,expires_at,filter,targets,handles)
+    ...<7 lines>...
+    END $$;
+    SELECT 'cursor_budget_passed';ROLLBACK;""")
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-production-install/experiments/inbox-production-install/fixture_db.py", line 11, in sql
+    if not retry or not any(code in r.stderr for code in ['40P01','40001','55P03']) or attempt==2:raise RuntimeError(r.stderr)
+                                                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: ERROR:  P0001: First cursor deletion exceeded budget
+CONTEXT:  PL/pgSQL function inline_code_block line 2 at RAISE
+LOCATION:  exec_stmt_raise, pl_exec.c:3911

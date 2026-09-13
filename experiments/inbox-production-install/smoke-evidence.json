@@ -1,0 +1,72 @@
+{
+  "passed": true,
+  "org": "6c160ffd-ed06-41f2-acad-740a28540006",
+  "checks": [
+    "canonical message capture through durable worker",
+    "canonical owner assignment",
+    "property outcome/unassignment fanout",
+    "authenticated known/unknown outcome facets",
+    "canonical timestamp expiry removal",
+    "API enablement assertion rolled back"
+  ],
+  "worker_passes": [
+    {
+      "rounds": 10,
+      "processed": {
+        "baseline": 10,
+        "backfill": 6,
+        "parent": 3,
+        "summary": 4,
+        "expiry": 0
+      },
+      "readiness": {
+        "due_expiry": false,
+        "baseline_done": true,
+        "queue_pending": false,
+        "parent_pending": false,
+        "serving_enabled": false,
+        "backfill_pending": false,
+        "collisions_unresolved": false
+      }
+    },
+    {
+      "rounds": 10,
+      "processed": {
+        "baseline": 10,
+        "backfill": 0,
+        "parent": 2,
+        "summary": 1,
+        "expiry": 0
+      },
+      "readiness": {
+        "due_expiry": false,
+        "baseline_done": true,
+        "queue_pending": false,
+        "parent_pending": false,
+        "serving_enabled": false,
+        "backfill_pending": false,
+        "collisions_unresolved": false
+      }
+    },
+    {
+      "rounds": 10,
+      "processed": {
+        "baseline": 10,
+        "backfill": 0,
+        "parent": 0,
+        "summary": 1,
+        "expiry": 0
+      },
+      "readiness": {
+        "due_expiry": false,
+        "baseline_done": true,
+        "queue_pending": false,
+        "parent_pending": false,
+        "serving_enabled": false,
+        "backfill_pending": false,
+        "collisions_unresolved": false
+      }
+    }
+  ],
+  "scope": "Owned synthetic DB only; does not prove production throughput or human display-name updates"
+}
