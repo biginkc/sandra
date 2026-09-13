@@ -1,0 +1,21 @@
+{
+  "at": "2026-09-13T11:11:14.160Z",
+  "status": "FAIL",
+  "results": [
+    {
+      "name": "unauthenticated rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "scope and bounds request tamper rejected",
+      "status": "PASS"
+    }
+  ],
+  "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n414 !== 200\n",
+  "stats": {
+    "forwardedRows": 0,
+    "upstreamRequests": 1,
+    "maxUpstreamUrlBytes": 31102,
+    "denied": 4
+  }
+}

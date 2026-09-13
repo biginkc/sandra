@@ -1,0 +1,36 @@
+name: Inbox stack isolated checks
+
+on:
+  pull_request:
+    paths:
+      - "experiments/inbox-stack/**"
+      - ".github/workflows/inbox-stack.yml"
+  push:
+    branches: [main]
+    paths:
+      - "experiments/inbox-stack/**"
+      - ".github/workflows/inbox-stack.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: Pinned packages and selection invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: experiments/inbox-stack
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: experiments/inbox-stack/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run test:selection
+      # Runtime fault/browser proofs use the separately owned local fixture.
+      # This job does not certify Electric/Restate availability or production.
