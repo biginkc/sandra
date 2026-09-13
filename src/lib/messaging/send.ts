@@ -6,6 +6,7 @@ import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import type { Database, Json } from "@/lib/supabase/types";
 import { reconcileStoredStatusEvents } from "./status-events";
+import { retryReceiptTransaction } from "./receipt-persistence";
 import { getConsentState, type ConsentState } from "./consent";
 import { checkQuietHours, type QuietHoursCheck } from "./quiet-hours";
 import {
@@ -145,7 +146,7 @@ export type SendSmsOutcome =
     }
   | { status: "contact_not_found" }
   | { status: "property_not_found" }
-  | { status: "db_error"; error: string };
+  | { status: "db_error"; error: string; messageId?: string; externalId?: string };
 
 export type SendSmsInput = {
   /**
@@ -444,13 +445,17 @@ export async function sendSmsToContact(
     }
   }
 
-  // 6. Send.
+  // 6. Send. Keep accepted-provider errors outside provider failure handling.
+  let acceptedExternalId: string | undefined;
+  let providerAccepted = false;
   try {
     const result = await provider.sendSms({
       to: destination.phone,
       body: input.body,
       from: fromAddress ?? undefined,
     });
+    providerAccepted = true;
+    acceptedExternalId = result.externalId;
     const updates: MessagesUpdate = {
       status: "sent",
       external_id: result.externalId,
@@ -461,12 +466,22 @@ export async function sendSmsToContact(
         raw: result.raw,
       } as Json,
     };
-    const { error: updateError } = await supabase
-      .from("messages")
-      .update(updates)
-      .eq("id", pending.id);
-    if (updateError) {
-      return { status: "db_error", error: updateError.message };
+    const { data: updated, error: updateError } = await retryReceiptTransaction(() =>
+      supabase
+        .from("messages")
+        .update(updates)
+        .eq("id", pending.id)
+        .eq("status", "pending")
+        .select("id")
+        .maybeSingle(),
+    );
+    if (updateError || !updated) {
+      return {
+        status: "db_error",
+        messageId: pending.id,
+        externalId: result.externalId,
+        error: updateError?.message ?? "message changed while marking sent",
+      };
     }
     await reconcileStoredStatusEvents(
       supabase,
@@ -480,6 +495,15 @@ export async function sendSmsToContact(
     };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    // Receipt/reconciliation failures cannot change provider acceptance into failure.
+    if (providerAccepted) {
+      return {
+        status: "db_error",
+        messageId: pending.id,
+        externalId: acceptedExternalId,
+        error: message,
+      };
+    }
     await supabase
       .from("messages")
       .update({
@@ -1023,6 +1047,8 @@ export async function releaseQueuedMessage(
     }
   }
 
+  let providerAccepted = false;
+  let acceptedExternalId: string | undefined;
   try {
     // Accepted race: an operator-triggered catalog sync can deactivate this
     // sender in the milliseconds after validation and before the provider call.
@@ -1032,31 +1058,36 @@ export async function releaseQueuedMessage(
       body: msg.body,
       from: msg.from_address ?? undefined,
     });
-    const { data: updated, error: updateError } = await supabase
-      .from("messages")
-      .update({
-        status: "sent",
-        external_id: result.externalId,
-        sent_at: new Date().toISOString(),
-        failed_at: null,
-        error_message: null,
-        metadata: {
-          ...(currentMetadata ?? {}),
-          providerStatus: result.providerStatus,
-          raw: result.raw,
-        } as Json,
-      })
-      .eq("id", msg.id)
-      .eq("status", "pending")
-      .select("id")
-      .maybeSingle();
-    if (updateError) {
-      return { status: "db_error", error: updateError.message };
-    }
-    if (!updated) {
+    providerAccepted = true;
+    acceptedExternalId = result.externalId;
+    // Freeze this payload once; retries persist the same accepted provider result.
+    const updates: MessagesUpdate = {
+      status: "sent",
+      external_id: result.externalId,
+      sent_at: new Date().toISOString(),
+      failed_at: null,
+      error_message: null,
+      metadata: {
+        ...(currentMetadata ?? {}),
+        providerStatus: result.providerStatus,
+        raw: result.raw,
+      } as Json,
+    };
+    const { data: updated, error: updateError } = await retryReceiptTransaction(() =>
+      supabase
+        .from("messages")
+        .update(updates)
+        .eq("id", msg.id)
+        .eq("status", "pending")
+        .select("id")
+        .maybeSingle(),
+    );
+    if (updateError || !updated) {
       return {
         status: "db_error",
-        error: "queued message changed while marking sent",
+        messageId: msg.id,
+        externalId: result.externalId,
+        error: updateError?.message ?? "queued message changed while marking sent",
       };
     }
     await reconcileStoredStatusEvents(
@@ -1071,6 +1102,14 @@ export async function releaseQueuedMessage(
     };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    if (providerAccepted) {
+      return {
+        status: "db_error",
+        messageId: msg.id,
+        externalId: acceptedExternalId,
+        error: message,
+      };
+    }
     const retry = buildProviderRetryUpdate(e, currentMetadata);
     if (retry.defer) {
       const pauseForRetry = await campaignIsPaused(supabase, msg.campaign_id);

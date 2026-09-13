@@ -228,7 +228,7 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
       properties: [{ data: PROPERTY_ROW, error: null }],
       messages: [
         { data: { id: "msg-2" }, error: null }, // pending insert
-        { data: null, error: null }, // sent-status update
+        { data: { id: "msg-2" }, error: null }, // sent-status CAS result
       ],
       webhook_events: [{ data: [], error: null }], // status-event reconciliation
     });
