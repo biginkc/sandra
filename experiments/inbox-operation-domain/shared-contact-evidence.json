@@ -1,0 +1,31 @@
+{
+  "checks": [
+    {
+      "name": "two properties share one contact safety effect and both complete",
+      "passed": true
+    },
+    {
+      "name": "external shared contact edit still conflicts",
+      "passed": true
+    },
+    {
+      "name": "different original scope cannot reuse safety receipt",
+      "passed": true
+    },
+    {
+      "name": "one consent event and one immutable safety receipt",
+      "passed": true
+    },
+    {
+      "name": "both active enrollments stopped",
+      "passed": true
+    }
+  ],
+  "source_hashes": {
+    "restrictive-scope.sql": "8b21a491160fedfb84ef85d1156fcede5ffdb8f56855786d430faed1784776d9",
+    "restrictive-effect.sql": "766f2a6069184ded2aac765a8a06d3a56cdd94202c709ca6cf573a1b6868595e",
+    "restrictive-apply.sql": "b0d463a1828dc96074a8510e7bca3f2550d3ba199965cea9ba613c4bf19d0978"
+  },
+  "runner_sha256": "d87c48481ae27cdceb460a51d40026e36b6ea93063fbca838b9b878cbacc9a56",
+  "fixture_operation_id": "c4f0b2e2-80f5-4295-b3fa-36b88f509b01"
+}

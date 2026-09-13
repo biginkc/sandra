@@ -1,0 +1,27 @@
+{
+  "checks": [
+    {
+      "name": "committed concurrent enrollment insert invalidates prepared scope after actual wait",
+      "passed": true
+    },
+    {
+      "name": "canonical property guard makes new enrollment wait for effect transaction commit",
+      "passed": true
+    },
+    {
+      "name": "sibling homeowner reparent invalidates prepared scope under actual contention",
+      "passed": true
+    }
+  ],
+  "runner_sha256": "0251be5b46eea6970d165ca1bd1618ead160685de1ec33f84104818933e324a8",
+  "source_hashes": {
+    "restrictive-scope.sql": "8b21a491160fedfb84ef85d1156fcede5ffdb8f56855786d430faed1784776d9",
+    "restrictive-effect.sql": "766f2a6069184ded2aac765a8a06d3a56cdd94202c709ca6cf573a1b6868595e",
+    "restrictive-apply.sql": "b0d463a1828dc96074a8510e7bca3f2550d3ba199965cea9ba613c4bf19d0978"
+  },
+  "fixture_operation_ids": [
+    "f4c5612f-56ea-4286-9835-605652288e75",
+    "6890a7d9-fde6-4d64-b959-f875a1c144ea",
+    "c8568b2f-f292-4d59-bfc2-c75303985772"
+  ]
+}
