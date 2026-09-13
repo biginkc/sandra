@@ -1,0 +1,4 @@
+{
+  "error": "ERROR:  P0001: FINAL_OWNER_GUARD\nCONTEXT:  PL/pgSQL function hugo_membership_owner_guard() line 42 at RAISE\nLOCATION:  exec_stmt_raise, pl_exec.c:3911\n",
+  "checks": []
+}
