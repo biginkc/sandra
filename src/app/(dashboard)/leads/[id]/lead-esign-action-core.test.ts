@@ -229,8 +229,8 @@ describe("lead eSign action orchestration", () => {
     const result = await h.core.send(sendInput);
     expect(result.ok).toBe(true);
     expect(h.provider.sendWithTemplate).toHaveBeenCalledWith(expect.objectContaining({
-      subject: "TEST — Purchase agreement",
-      message: expect.stringContaining("Prepared by Maria Unkovich for BMH Acquisitions."),
+      subject: "TEST | BMH Group | Purchase agreement for 123 Main St",
+      message: expect.stringContaining("Prepared by Maria Unkovich for BMH Group."),
     }));
     expect(h.provider.sendWithTemplate.mock.calls[0][0].message).not.toContain("Someone Else");
   });

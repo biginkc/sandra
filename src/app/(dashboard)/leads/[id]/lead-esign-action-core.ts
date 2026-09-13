@@ -6,6 +6,7 @@ import { ValidationError } from "@/lib/errors/classes";
 import { reportError } from "@/lib/errors/report";
 import { err, ok, type Result } from "@/lib/errors/result";
 import { isValidEsignEmail } from "@/lib/esign/email";
+import { buildEsignInvitation } from "@/lib/esign/invitation";
 import {
   getEsignFieldSchema,
   type EsignDeliveryState,
@@ -581,15 +582,11 @@ async function dispatchClaimed(
         providerTemplateId: request.template.providerTemplateId,
         signers: request.signers,
         mergeValues: request.mergeValues,
-        subject: `${request.testMode ? "TEST — " : ""}${request.template.name}`,
-        message: [
-          request.testMode ? "INTERNAL TEST — not legally binding." : null,
-          request.createdByLabel
-            ? `Prepared by ${request.createdByLabel} for BMH Acquisitions.`
-            : "Prepared by the BMH Acquisitions team.",
-          "Please review the agreement and complete the indicated signatures.",
-          "For questions, email acquisitions@bmhgroupkc.com.",
-        ].filter(Boolean).join("\n\n"),
+        ...buildEsignInvitation({
+          propertyAddress: request.mergeValues.property_address,
+          createdByLabel: request.createdByLabel,
+          testMode: request.testMode,
+        }),
         signal,
       }),
     );
