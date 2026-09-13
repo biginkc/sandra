@@ -34,6 +34,20 @@ def main() -> None:
     for record in records:
         verify_file(licenses, record["file"], record["sha256"])
 
+    # Current maintained-model receipts bind the tested SQL and harness sources.
+    maintained = ROOT / "maintained-model"
+    if maintained.exists():
+        for receipt, bindings in (
+            ("evidence.json", {"setup.sql": "setup_sha256", "run.py": "runner_sha256"}),
+            ("queue-evidence.json", {"queue.sql": "queue_sql_sha256", "queue-proof.py": "runner_sha256"}),
+        ):
+            recorded = json.loads((maintained / receipt).read_text())
+            for name, key in bindings.items():
+                verify_file(maintained, name, recorded[key])
+        expiry = json.loads((maintained / "expiry-evidence.json").read_text())
+        for name, digest in expiry["source_hashes"].items():
+            verify_file(maintained, name, digest)
+
     python_files = list(ROOT.rglob("*.py"))
     for path in python_files:
         ast.parse(path.read_text(), filename=str(path))
