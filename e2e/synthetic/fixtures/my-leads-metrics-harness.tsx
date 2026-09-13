@@ -2,8 +2,9 @@ import { useRef } from "react"
 import { createRoot } from "react-dom/client"
 import { MyLeadsMetrics } from "@/app/(dashboard)/my-leads/_components/metrics"
 import { StickyMyLeadsMetrics } from "@/app/(dashboard)/my-leads/_components/sticky-metrics"
-const now = new Date().toISOString()
-const kpis = { attempts: 25, reached: 8, offersSent: 3, contactWithoutFollowUp: 12, needsOffers: 8, appointmentsOverdue: 5, lastAttemptAt: new Date(Date.now() - 872000).toISOString(), asOf: now, missingRecordings: 2, recordingExpectationUnknown: 4, averageTalkSeconds: 222, talkTimeSamples: 6, talkTimeUnknown: 2, conversationsOverFiveMinutes: 4 }
+const scenario = new URLSearchParams(window.location.search).get("clock")
+const now = scenario === "working" ? "2026-09-14T15:00:00Z" : "2026-09-13T15:00:00Z"
+const kpis = { attempts: 25, reached: 8, offersSent: 3, contactWithoutFollowUp: 12, needsOffers: 8, appointmentsOverdue: 5, lastAttemptAt: scenario === "working" ? "2026-09-14T14:59:00Z" : "2026-09-12T17:00:00Z", lastAttemptClockVersion: 1, asOf: now, missingRecordings: 2, recordingExpectationUnknown: 4, averageTalkSeconds: 222, talkTimeSamples: 6, talkTimeUnknown: 2, conversationsOverFiveMinutes: 4 }
 function Harness() {
   const expandedRef = useRef<HTMLDivElement>(null)
   return <>
