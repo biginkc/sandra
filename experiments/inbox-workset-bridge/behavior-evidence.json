@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "checks": [
+    "canonical session and single membership",
+    "cross tenant denied",
+    "invalid filter denied",
+    "oversize denied",
+    "typed same UUID membership without foreign tenant",
+    "handle CAS",
+    "creation throttle",
+    "atomic explicit replacement accepts expired same-context predecessor and revokes it",
+    "suspension denied",
+    "restored access does not revive old scope",
+    "global membership ambiguity denied",
+    "session expiry denied",
+    "authenticated RPC allowed; anonymous RPC and direct private reads denied",
+    "actual maintained publication trigger and tombstone remove narrow row"
+  ],
+  "limitations": [
+    "SQL claims are preverified test input, not JWT signature verification",
+    "No actual Electric replication in this test",
+    "No cursor/search implementation yet"
+  ]
+}
