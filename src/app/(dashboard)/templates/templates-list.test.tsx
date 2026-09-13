@@ -171,6 +171,9 @@ describe("<TemplatesList />", () => {
 
     await user.click(screen.getByTestId("templates-category-select"));
     const allOpt = await screen.findByTestId("templates-category-option-all");
+    // Wait for the popup's initial focus before moving the pointer to another
+    // option; mounting alone can precede Base UI's selected-item focus.
+    await waitFor(() => expect(screen.getByTestId("templates-category-option-Probate")).toHaveFocus());
     await user.click(allOpt);
 
     await waitFor(() => expect(routerReplace).toHaveBeenCalledTimes(1));
