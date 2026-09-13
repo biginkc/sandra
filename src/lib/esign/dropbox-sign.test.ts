@@ -404,6 +404,24 @@ describe("Dropbox Sign provider", () => {
     });
   });
 
+  it.each([true, false])("uses a fixed per-signer redirect without private data (test mode: %s)", async (testMode) => {
+    const provider = createDropboxSignProvider({
+      apiKey: new EsignSecret("api-key"),
+      clientId: "client-id",
+    });
+    await provider.sendWithTemplate({
+      localRequestId: "private-request-id",
+      templateId: "provider-template",
+      testMode,
+      signers: [{ role: "Seller", name: "Private Seller", emailAddress: "seller@example.com" }],
+      mergeValues: { property_address: "Private property" },
+    });
+    expect(sdk.send).toHaveBeenLastCalledWith(expect.objectContaining({
+      signingRedirectUrl: "https://sandra.bmhgroupkc.com/signing-complete",
+      testMode,
+    }));
+  });
+
   it("forces test mode and preserves local/provider identifiers separately", async () => {
     const provider = createDropboxSignProvider({
       apiKey: new EsignSecret("api-key"),

@@ -264,6 +264,9 @@ export function createDropboxSignProvider(input: {
         subject: request.subject,
         message: request.message,
         testMode: request.testMode,
+        // Per-signer completion redirect, independent of all_signed callbacks.
+        // Keep this fixed: never put signer, lead, or request data in the URL.
+        signingRedirectUrl: "https://sandra.bmhgroupkc.com/signing-complete",
       };
       try {
         const response =
