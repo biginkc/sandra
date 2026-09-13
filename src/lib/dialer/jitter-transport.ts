@@ -225,6 +225,9 @@ export class JitterCallTransport implements CallTransport {
   private rejectRegistration: ((error: unknown) => void) | null = null;
   private registrationTimer: ReturnType<typeof setTimeout> | null = null;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private liveProviderProofTimer: ReturnType<typeof setTimeout> | null = null;
+  private liveProviderProofGeneration = 0;
+  private liveProviderProofInFlight = false;
   private providerProofRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private providerProofInFlight = false;
   private providerProofGeneration = 0;
@@ -1108,6 +1111,7 @@ export class JitterCallTransport implements CallTransport {
       if (!this.currentCall) return;
       const firstLive = this.liveAt === null;
       if (firstLive) this.liveAt = this.dependencies.now();
+      this.scheduleLiveProviderProof();
       if (firstLive) void this.applyDesiredControls(call);
       if (firstLive) void this.acceptActiveCall(call);
       if (firstLive) this.startAudioHealth();
@@ -1159,6 +1163,47 @@ export class JitterCallTransport implements CallTransport {
       return;
     }
     if (mapped === "connecting") this.emit("connecting");
+  }
+
+  // Provider termination can arrive without a terminal SDK notification.
+  // This independent observer never changes healthy audio for missing proof.
+  private scheduleLiveProviderProof(): void {
+    if (this.liveProviderProofTimer || this.liveProviderProofInFlight ||
+      !this.callId || this.liveAt === null || this.terminal || this.hangupRequested) return;
+    const callId = this.callId;
+    const generation = this.liveProviderProofGeneration;
+    this.liveProviderProofTimer = setTimeout(() => {
+      this.liveProviderProofTimer = null;
+      void this.pollLiveProviderProof(callId, generation);
+    }, 10_000);
+  }
+
+  private async pollLiveProviderProof(callId: string, generation: number): Promise<void> {
+    if (this.callId !== callId || this.liveProviderProofGeneration !== generation ||
+      this.terminal || this.hangupRequested || this.liveProviderProofInFlight) return;
+    // Existing SDK/recovery proof loops already observe this same authority.
+    if (this.providerProofInFlight) { this.scheduleLiveProviderProof(); return; }
+    this.liveProviderProofInFlight = true;
+    try {
+      const result = await this.dependencies.getProviderStatus(callId);
+      if (this.callId !== callId || this.liveProviderProofGeneration !== generation ||
+        this.terminal || this.hangupRequested) return;
+      if (result.ok && result.data.state === "terminal") {
+        this.terminal = result.data.outcome ?? "ended";
+        this.terminalAt ??= this.dependencies.now();
+        this.lastTeardownConfirmed = true;
+        this.terminalAuthorityConfirmed = true;
+        this.emit(this.terminal);
+        this.destroyRtc();
+      }
+    } catch {
+      // Transient errors and absent proof do not authorize media teardown.
+    } finally {
+      if (this.liveProviderProofGeneration === generation) {
+        this.liveProviderProofInFlight = false;
+        this.scheduleLiveProviderProof();
+      }
+    }
   }
 
   private async reconcileLocalSdkTerminal(
@@ -1741,6 +1786,10 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private destroyRtc(preservePageHideListener = false): void {
+    this.liveProviderProofGeneration += 1;
+    this.liveProviderProofInFlight = false;
+    if (this.liveProviderProofTimer) clearTimeout(this.liveProviderProofTimer);
+    this.liveProviderProofTimer = null;
     this.lifecycleGeneration += 1;
     this.recoverySetupGeneration += 1;
     this.stopAudioHealth?.();
