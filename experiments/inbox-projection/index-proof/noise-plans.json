@@ -1,0 +1,250 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Limit",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 3.79,
+      "Total Cost": 30.69,
+      "Plan Rows": 50,
+      "Plan Width": 268,
+      "Actual Startup Time": 4.971,
+      "Actual Total Time": 4.979,
+      "Actual Rows": 50,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 20127,
+      "Shared Read Blocks": 0,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0,
+      "WAL Records": 703,
+      "WAL FPI": 0,
+      "WAL Bytes": 55150,
+      "Plans": [
+        {
+          "Node Type": "Incremental Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 3.79,
+          "Total Cost": 46016.34,
+          "Plan Rows": 85539,
+          "Plan Width": 268,
+          "Actual Startup Time": 4.97,
+          "Actual Total Time": 4.976,
+          "Actual Rows": 50,
+          "Actual Loops": 1,
+          "Sort Key": [
+            "created_at DESC",
+            "id DESC"
+          ],
+          "Presorted Key": [
+            "created_at"
+          ],
+          "Full-sort Groups": {
+            "Group Count": 2,
+            "Sort Methods Used": [
+              "quicksort"
+            ],
+            "Sort Space Memory": {
+              "Average Sort Space Used": 45,
+              "Peak Sort Space Used": 45
+            }
+          },
+          "Shared Hit Blocks": 20127,
+          "Shared Read Blocks": 0,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "WAL Records": 703,
+          "WAL FPI": 0,
+          "WAL Bytes": 55150,
+          "Plans": [
+            {
+              "Node Type": "Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Scan Direction": "Forward",
+              "Index Name": "idx_messages_created",
+              "Relation Name": "messages",
+              "Alias": "messages",
+              "Startup Cost": 0.29,
+              "Total Cost": 43518.07,
+              "Plan Rows": 85539,
+              "Plan Width": 268,
+              "Actual Startup Time": 4.924,
+              "Actual Total Time": 4.94,
+              "Actual Rows": 52,
+              "Actual Loops": 1,
+              "Filter": "((org_id = '35210142-b51b-4428-828e-987feede99bf'::uuid) AND (conversation_id = 'f291c854-9488-46cd-82a3-626da799a0a3'::uuid) AND (channel = 'sms'::text))",
+              "Rows Removed by Filter": 10617,
+              "Shared Hit Blocks": 20118,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "WAL Records": 703,
+              "WAL FPI": 0,
+              "WAL Bytes": 55150
+            }
+          ]
+        }
+      ]
+    },
+    "Planning": {
+      "Shared Hit Blocks": 534,
+      "Shared Read Blocks": 0,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    "Planning Time": 0.66,
+    "Triggers": [],
+    "Execution Time": 5.006
+  },
+  {
+    "Plan": {
+      "Node Type": "Limit",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 3.79,
+      "Total Cost": 30.69,
+      "Plan Rows": 50,
+      "Plan Width": 268,
+      "Actual Startup Time": 4.155,
+      "Actual Total Time": 4.163,
+      "Actual Rows": 50,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 20051,
+      "Shared Read Blocks": 0,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0,
+      "WAL Records": 0,
+      "WAL FPI": 0,
+      "WAL Bytes": 0,
+      "Plans": [
+        {
+          "Node Type": "Incremental Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 3.79,
+          "Total Cost": 46016.34,
+          "Plan Rows": 85539,
+          "Plan Width": 268,
+          "Actual Startup Time": 4.155,
+          "Actual Total Time": 4.16,
+          "Actual Rows": 50,
+          "Actual Loops": 1,
+          "Sort Key": [
+            "created_at DESC",
+            "id DESC"
+          ],
+          "Presorted Key": [
+            "created_at"
+          ],
+          "Full-sort Groups": {
+            "Group Count": 2,
+            "Sort Methods Used": [
+              "quicksort"
+            ],
+            "Sort Space Memory": {
+              "Average Sort Space Used": 45,
+              "Peak Sort Space Used": 45
+            }
+          },
+          "Shared Hit Blocks": 20051,
+          "Shared Read Blocks": 0,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "WAL Records": 0,
+          "WAL FPI": 0,
+          "WAL Bytes": 0,
+          "Plans": [
+            {
+              "Node Type": "Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Scan Direction": "Forward",
+              "Index Name": "idx_messages_created",
+              "Relation Name": "messages",
+              "Alias": "messages",
+              "Startup Cost": 0.29,
+              "Total Cost": 43518.07,
+              "Plan Rows": 85539,
+              "Plan Width": 268,
+              "Actual Startup Time": 4.11,
+              "Actual Total Time": 4.126,
+              "Actual Rows": 52,
+              "Actual Loops": 1,
+              "Filter": "((org_id = '35210142-b51b-4428-828e-987feede99bf'::uuid) AND (conversation_id = 'f291c854-9488-46cd-82a3-626da799a0a3'::uuid) AND (channel = 'sms'::text))",
+              "Rows Removed by Filter": 10617,
+              "Shared Hit Blocks": 20042,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "WAL Records": 0,
+              "WAL FPI": 0,
+              "WAL Bytes": 0
+            }
+          ]
+        }
+      ]
+    },
+    "Planning": {
+      "Shared Hit Blocks": 532,
+      "Shared Read Blocks": 0,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    "Planning Time": 0.699,
+    "Triggers": [],
+    "Execution Time": 4.186
+  }
+]

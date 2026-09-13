@@ -1,0 +1,71 @@
+{
+  "at": "2026-09-13T12:08:55Z",
+  "status": "PASS",
+  "container_id": "603c10117cb7ef6a07d81448dd1a25b0c1ee2787a59f75871015c4a416cac557",
+  "source_revision": "c2b46ff6f45ada359e9b448b8d6682a2a94ae952",
+  "setup_sha256": "b3231350bf9be3d5698fc1a003b41de665ea84173a472630c2c1bf88600988c9",
+  "checks": [
+    {
+      "name": "nested head self-update yields one dirty generation and snapshot sees final positive stamp",
+      "passed": true,
+      "generation": "1",
+      "stamp": "1"
+    },
+    {
+      "name": "delayed older snapshot cannot overwrite newer projected generation",
+      "passed": true
+    },
+    {
+      "name": "older valid snapshot may commit while newer dirty generation stays pending",
+      "passed": true,
+      "state": {
+        "ack": 3,
+        "count": 1,
+        "stamp": 1,
+        "unread": 1,
+        "preview": "intermediate",
+        "revision": 2,
+        "generation": 4,
+        "source_generation": 3
+      }
+    },
+    {
+      "name": "projection revision CAS rejects equal-generation stale worker",
+      "passed": true
+    },
+    {
+      "name": "NULL candidate revisions fail closed before lock/commit",
+      "passed": true
+    },
+    {
+      "name": "identity move dirties old and new keys despite nested destination revision stamp",
+      "passed": true
+    },
+    {
+      "name": "read mutation updates unread projection without new arrival allocation",
+      "passed": true
+    },
+    {
+      "name": "deletion leaves persistent empty projection and dirty counter",
+      "passed": true
+    },
+    {
+      "name": "source rollback also rolls back dirty generation",
+      "passed": true
+    },
+    {
+      "name": "private commit completes while canonical message row is independently locked",
+      "passed": true
+    },
+    {
+      "name": "ordinary and service roles cannot directly access private rehearsal projection",
+      "passed": true
+    }
+  ],
+  "limits": [
+    "Minimal SMS message-derived projection only; no contact/property/consent fanout, authorization reader, worker service or production performance proof",
+    "No canonical FK in private commit tables; future triggers/FKs require fresh lock review",
+    "Capture does not certify TRUNCATE, trigger-disabled imports or privileged bypass coverage",
+    "Snapshot message counts scan the one fixture conversation; no large-history query budget claim"
+  ]
+}

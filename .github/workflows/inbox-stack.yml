@@ -4,17 +4,33 @@ on:
   pull_request:
     paths:
       - "experiments/inbox-stack/**"
+      - "experiments/inbox-projection/**"
       - ".github/workflows/inbox-stack.yml"
   push:
     branches: [main]
     paths:
       - "experiments/inbox-stack/**"
+      - "experiments/inbox-projection/**"
       - ".github/workflows/inbox-stack.yml"
 
 permissions:
   contents: read
 
 jobs:
+  fixture-sources:
+    name: Fixture source integrity and isolation guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 experiments/inbox-projection/verify_sources.py
+      - run: python3 experiments/inbox-projection/fixture/transaction_envelope.py
+      - run: python3 -O experiments/inbox-projection/fixture/guards_test.py
+      # Canonical database/concurrency proofs require the explicit owned fixture.
+      # Source checks do not rerun or certify those recorded runtime results.
   contracts:
     name: Pinned packages and selection invariants
     runs-on: ubuntu-latest

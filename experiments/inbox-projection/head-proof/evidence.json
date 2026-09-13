@@ -1,0 +1,207 @@
+{
+  "at": "2026-09-13T11:56:58Z",
+  "source_revision": "c2b46ff6f45ada359e9b448b8d6682a2a94ae952",
+  "container_id": "603c10117cb7ef6a07d81448dd1a25b0c1ee2787a59f75871015c4a416cac557",
+  "candidate_sha256": "ccc77911ab769d1dd43d3c96023fb56199feaf24b673a4886aa00b5004fea08a",
+  "checks": [
+    {
+      "name": "held source writer causes bounded install failure with no partial column/head schema",
+      "passed": true
+    },
+    {
+      "name": "constant default installation preserves heap filenode and defers check validation",
+      "passed": true,
+      "install_client_ms": 49.44366700510727
+    },
+    {
+      "name": "existing inbound baseline zero installed with capture",
+      "passed": true,
+      "baseline_message": "ff4769a7-2137-48ef-825f-229e5ee53a96"
+    },
+    {
+      "name": "canonical BEFORE identity stamping captured by AFTER allocator",
+      "passed": true
+    },
+    {
+      "name": "AFTER stamp is absent from INSERT RETURNING but present in following snapshot",
+      "passed": true,
+      "returning_revision": "0",
+      "final_revision_text": "1"
+    },
+    {
+      "name": "same-conversation waiter blocks and rollback does not allocate committed revision",
+      "passed": true,
+      "observed_wait_ms": 196.283
+    },
+    {
+      "name": "multiple inserts in one transaction receive ordered revisions",
+      "passed": true
+    },
+    {
+      "name": "organization/conversation/channel/direction re-entry and delete/reinsert allocate fresh destination revisions",
+      "passed": true
+    },
+    {
+      "name": "read/body/route/no-op revision updates do not create arrivals or recurse",
+      "passed": true
+    },
+    {
+      "name": "canonical row-before-head deadlock aborts one transaction; whole-transaction retry preserves exact stamps",
+      "passed": true,
+      "deadlock_observed": true
+    },
+    {
+      "name": "revision above2^53 survives explicit text transport",
+      "passed": true,
+      "revision_text": "9007199254740993"
+    },
+    {
+      "name": "authenticated cannot directly read heads",
+      "passed": true
+    },
+    {
+      "name": "service_role cannot directly read heads",
+      "passed": true
+    },
+    {
+      "name": "service-role direct revision forgery denied",
+      "passed": true
+    },
+    {
+      "name": "service-role direct revision forgery denied",
+      "passed": true
+    },
+    {
+      "name": "authenticated direct INSERT revision forgery denied",
+      "passed": true
+    },
+    {
+      "name": "service_role direct head UPDATE denied despite BYPASSRLS",
+      "passed": true
+    },
+    {
+      "name": "ordinary roles cannot assume allocator owner",
+      "passed": true,
+      "authenticated_can_assume_allocator_owner": false,
+      "service_role_can_assume_allocator_owner": false
+    }
+  ],
+  "measurements": {
+    "baseline_100_insert_client_ms": [
+      40.95145899918862,
+      35.89454099710565,
+      33.244375001231674
+    ],
+    "capture_100_insert_client_ms": [
+      49.069874999986496,
+      47.32670800149208,
+      50.14341700007208
+    ]
+  },
+  "allocator_owner": "postgres",
+  "privileged_message_referencing_definers": [
+    {
+      "function": "apply_campaign_cadence_reschedule(uuid,integer,integer,boolean)",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": true
+    },
+    {
+      "function": "campaign_kpis_hugo_unchecked(uuid)",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": false
+    },
+    {
+      "function": "compute_sendillo_sms_health()",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": true
+    },
+    {
+      "function": "delete_contact_hugo_unchecked(uuid,text)",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": false
+    },
+    {
+      "function": "ensure_sms_conversation_id_hugo_unchecked(uuid,uuid)",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": false
+    },
+    {
+      "function": "fn_apply_ai_disposition_with_review(uuid,uuid,uuid,text,text)",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": true
+    },
+    {
+      "function": "fn_book_appointment_base_20260816(uuid,uuid,timestamp with time zone,timestamp with time zone,text,text,uuid,uuid,text,uuid)",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": true
+    },
+    {
+      "function": "guard_training_customer_action()",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": true
+    },
+    {
+      "function": "inbox_capture_inbound_head()",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": false
+    },
+    {
+      "function": "merge_duplicate_properties_hugo_unchecked(uuid,uuid)",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": false
+    },
+    {
+      "function": "pause_campaign_queue(uuid,boolean)",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": true
+    },
+    {
+      "function": "preview_campaign_cadence_reschedule_hugo_unchecked(uuid,integer,integer)",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": false
+    },
+    {
+      "function": "reset_tenant_tables()",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": true
+    },
+    {
+      "function": "resume_campaign_queue(uuid,integer,integer,boolean)",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": true
+    },
+    {
+      "function": "search_global(text,integer)",
+      "owner": "postgres",
+      "authenticated_execute": true,
+      "service_execute": true
+    },
+    {
+      "function": "sms_conversation_id_mint(uuid,uuid,uuid)",
+      "owner": "postgres",
+      "authenticated_execute": false,
+      "service_execute": true
+    }
+  ],
+  "limits": [
+    "Offline canonical migration rehearsal only; no deployed schema or production volume claim",
+    "Client timings include Docker/psql startup and synthetic local contention",
+    "Head counter orders only one conversation; multi-key legacy transactions may deadlock and require retry",
+    "Allocator owner and other owner SECURITY DEFINER writers are privileged; no superuser protection claim",
+    "Body/route reply dependency version is a separate projection contract, not implemented here"
+  ]
+}

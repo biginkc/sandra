@@ -1,0 +1,22 @@
+{
+  "status": "passed",
+  "containerId": "603c10117cb7ef6a07d81448dd1a25b0c1ee2787a59f75871015c4a416cac557",
+  "role": "postgres",
+  "runner_sha256": "ed84c6b547ac4dc8ef37cf9acce90b5f64e66ef81609872b1734bf9377df62c5",
+  "alternative_sha256": "689654bca45db61a903ced8e001408a612ab779410ba016eb9f78c235784b482",
+  "checks": [
+    "baseline absence is zero",
+    "membership entry allocates one",
+    "body edit preserves arrival",
+    "move allocates destination revision",
+    "return allocates fresh revision",
+    "channel exit clears mapping",
+    "channel reentry allocates fresh revision",
+    "delete clears mapping retains head",
+    "reinsert same id gets fresh revision",
+    "savepoint rollback restores mapping and head",
+    "outer rollback removes alternative schema and restores candidate trigger",
+    "missing-row NULL expression raises expected exception"
+  ],
+  "supersedes": "Correctness assertions in earlier evidence.json used IF NOT(condition), which could silently accept NULL. Timings remain historical observations; this receipt replaces only that provisional correctness result."
+}
