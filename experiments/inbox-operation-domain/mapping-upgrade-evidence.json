@@ -1,0 +1,8 @@
+{
+  "prior_function_sha256": "060aeb08590b960fb8666aa748a4aa59c631e3cee6bffcd582aaa45a318b3444",
+  "source_sha256": "cd7c919a7aa16d42913eba6429f0b11c564b33f39436029020942f8d503aaa3c",
+  "limits": [
+    "Previous installed body preserved; canonical triggers added only to owned T2 fixture",
+    "Historical target-version baselines are not seeded by this upgrade"
+  ]
+}

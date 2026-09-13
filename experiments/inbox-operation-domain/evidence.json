@@ -1,0 +1,55 @@
+{
+  "checks": [
+    {
+      "name": "canonical outcome/followup/review supersession and dependent assignment",
+      "passed": true
+    },
+    {
+      "name": "external edit conflict",
+      "passed": true
+    },
+    {
+      "name": "canonical effect/event/receipt transaction rollback",
+      "passed": true
+    },
+    {
+      "name": "current requester revocation",
+      "passed": true
+    },
+    {
+      "name": "completed replay retains one event",
+      "passed": true
+    },
+    {
+      "name": "zero mappings denied",
+      "passed": true
+    },
+    {
+      "name": "message reparent changes target dependency",
+      "passed": true
+    },
+    {
+      "name": "global ambiguous requester denied",
+      "passed": true
+    },
+    {
+      "name": "ordering changes conflict",
+      "passed": true
+    },
+    {
+      "name": "canonical recompute rejects rebased wrong property",
+      "passed": true
+    },
+    {
+      "name": "read/delivery do not invalidate metadata target",
+      "passed": true
+    },
+    {
+      "name": "recent conversation outcome then assignment",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "b7ca70de5cfe321ad3996b98de2f6097ba9b0545e7e2eb7bb0c955e9cc2a35ff",
+  "runner_sha256": "7089c3a67656e1e692706784ea54d30e719906edddabd0379d4008bd8128b6b0",
+  "fixture_operation_id": "67b2292d-80d9-4bb4-bd5b-6d560ff08771"
+}
