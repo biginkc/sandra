@@ -66,3 +66,11 @@ it('retains Sandra call identity for authenticated playback without an external 
   detail.groups.attempts!.rows[0].source='dialpad';
   expect(detailView(detail,{members:[]} as unknown as AcquisitionRoster).attempts.rows[0].callActivityId).toBeNull();
 });
+
+it('displays authorized historical labels without adding historical actors to the member selector',()=>{
+ const roster={members:[{id:'rep',label:'Current rep'}]} as AcquisitionRoster;
+ const fact={id:'fact',at:'2026-09-13T12:00:00Z',actorId:'colleague',actorLabel:'Former colleague'};
+ const detail={groups:{notes:{rows:[{...fact,body:'Note'}]},attempts:{rows:[{...fact,outcome:'reached'}]},history:{rows:[{...fact,kind:'live'}]}}} as unknown as AcquisitionDetail;
+ const rendered=detailView(detail,roster);
+ expect(rendered.notes.rows[0].authorLabel).toBe('Former colleague');expect(rendered.attempts.rows[0].actorLabel).toBe('Former colleague');expect(rendered.history.rows[0].label).toBe('Assigned to Former colleague');expect(roster.members.map(m=>m.id)).toEqual(['rep']);
+});

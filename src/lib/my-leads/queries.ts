@@ -1,5 +1,6 @@
 import 'server-only';
 import { createClient } from '@/lib/supabase/server';
+import { loadOrgTeamMembers } from '@/lib/auth/team-roster';
 import { getCallerMemberships } from '@/lib/auth/memberships';
 import type { Json } from '@/lib/supabase/types';
 import type { QueueStage } from './types';
@@ -83,7 +84,7 @@ export async function getAcquisitionBadge(): Promise<number> {
 }
 
 export type DetailGroup = 'notes'|'attempts'|'appointments'|'offers'|'history'|'messages';
-export type DetailFact = { id:string; at:string; actorId:string|null; body?:string; outcome?:string|null; source?:string;
+export type DetailFact = { id:string; at:string; actorId:string|null; actorLabel?:string; body?:string; outcome?:string|null; source?:string;
   direction?:'inbound'|'outbound'; deliveryStatus?:string; attachmentCount?:number;
   recordingUrl?:string|null; callActivityId?:string|null; amountCents?:number; method?:string; title?:string; status?:string; type?:'appointment'|'callback'; lifecycleState?:'past_due'|'upcoming'|null; callbackActionAllowed?:boolean; currentAssigneeId?:string|null; kind?:string; endedAt?:string|null };
 export type AcquisitionDetail = { groups: Partial<Record<DetailGroup,{ rows:DetailFact[];cursor:string|null;hasMore:boolean }>> };
@@ -161,6 +162,21 @@ export async function getAcquisitionDetail(input: {memberId:string;propertyId:st
     // valid group to authorize every messages page without passing it an SMS cursor.
     p_group:messagesOnly?'history':input.group??null,p_cursor:messagesOnly?null:input.cursor??null,
   });
+  // Only IDs returned by the authorized, tenant/assignment-scoped detail RPC
+  // may drive privileged historical identity lookup. These display labels never
+  // enter the acquisition roster or grant queue/assignment selection rights.
+  if(!messagesOnly){
+    const actorIds=[...new Set(Object.values(detail.groups??{}).flatMap(group=>group?.rows.map(row=>row.actorId).filter((id):id is string=>Boolean(id))??[]))];
+    if(actorIds.length){
+      let members;
+      try{members=await loadOrgTeamMembers(viewer.orgId,{historicalAssigneeIds:actorIds,allowMissingIdentityLabels:true});}
+      catch{throw new MyLeadsReadError('READ_FAILED','Historical authors could not load. Please retry.');}
+      const labels=new Map(members.filter(member=>actorIds.includes(member.id)).map(member=>[member.id,member.displayName??member.email??'Team member']));
+      for(const group of Object.values(detail.groups))for(const row of group?.rows??[]){
+        if(row.actorId)row.actorLabel=labels.get(row.actorId)??'Team member';
+      }
+    }
+  }
   if(input.group&&!messagesOnly) return detail;
   const messages=await readAcquisitionSmsHistory(viewer,{orgId:viewer.orgId,memberId:input.memberId,propertyId:input.propertyId},messagesOnly?input.cursor:null);
   return {groups:messagesOnly?{messages}:{...detail.groups,messages}};
