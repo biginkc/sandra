@@ -1,0 +1,19 @@
+{
+  "source_sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+  "runner_sha256": "e71efbe55f8bd71ea65f89b9d1ed180970a2a92603aa06da25e9c07792f57d99",
+  "checks": [
+    "sender sync metadata does not invalidate route",
+    "sender status ABA and deletion/reinsert retain monotonic revisions",
+    "tenant move-out/back captures both identities",
+    "organization name and property market changes captured",
+    "missing/foreign sources allocate no counters",
+    "historical baseline insert-once and current snapshot",
+    "private effective grants denied",
+    "entire schema and canonical test data rolled back"
+  ],
+  "limitations": [
+    "No actual concurrent snapshot wait proof yet",
+    "No production schema or reply activation",
+    "Dispatch eligibility and sender provider contract remain separate gates"
+  ]
+}
