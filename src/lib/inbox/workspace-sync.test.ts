@@ -14,6 +14,17 @@ function setup(fetcher: typeof fetch) {
 }
 const tick = () => new Promise(resolve=>setTimeout(resolve,20));
 describe("bounded workspace synchronization lifecycle",()=> {
+  it("permits unknown unread null on the wire while keeping known unread mandatory",async()=> {
+    expect(()=>summaryRow({...summary,unread:null})).toThrow("Invalid unread flag");
+    let calls=0;
+    const fetcher=vi.fn<typeof fetch>(()=>{
+      if(++calls>1)return new Promise<Response>(()=>{});
+      return Promise.resolve(new Response(JSON.stringify([{key:"unknown",headers:{operation:"insert"},value:{...summary,target_kind:"unknown_sender",unread:null}},{headers:{control:"up-to-date",global_last_seen_lsn:"0"}}]),{headers:{"content-type":"application/json","electric-handle":"unknown-null","electric-offset":"0_0","electric-schema":JSON.stringify({unread:{type:"bool"}}),"electric-cursor":"1"}}));
+    });
+    const {sync}=setup(fetcher);sync.replace({...scope,scopeId:"ffffffff-ffff-4fff-8fff-ffffffffffff",orderedIds:[workspaceId({kind:"unknown_sender_group",orgId:org,senderGroupId:target})]});
+    await vi.waitFor(()=>expect(sync.getSnapshot().state).toBe("live"));
+    expect(sync.getSnapshot().rows[0].unread).toBeUndefined();
+  });
   it("lets Electric parse wire booleans before full presentation validation",async()=> {
     let requests=0;
     const fetcher=vi.fn<typeof fetch>(()=> {
