@@ -1,0 +1,36 @@
+{
+  "at": "2026-09-13 19:39:30.546906+00",
+  "checks": [
+    {
+      "name": "relevant consent insert/time reorder/delete advances parent and exact compute reflects latest state",
+      "passed": true
+    },
+    {
+      "name": "unrelated fields/help excluded; relevant-type entry, channel exit and old/new tenant/contact identities captured",
+      "passed": true
+    },
+    {
+      "name": "thread consumed state changes and old/new tenant/conversation moves/deletion captured; reason/timestamp excluded",
+      "passed": true
+    },
+    {
+      "name": "bounded route fanout, source edge moved behind cursor, old/new suppression identity, rollback/replay and captured-generation ack",
+      "passed": true
+    },
+    {
+      "name": "suppression tenant move and deletion retain both route generations",
+      "passed": true
+    },
+    {
+      "name": "source transaction rollback and private role access restrictions verified",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "0e42f835e29d3aa34e41ead32fa5daf80eb5d59e1aa182b547bd5cde2e0cbbc5",
+  "runner_sha256": "6bdd8ec41e43d8ba22f89736c407f373107b59bb76979a35830568f8fc515a9a",
+  "limits": [
+    "Private summary invalidation only; no command policy versions or production changes",
+    "Route edges contain post-capture fixture writes; no production backfill proof",
+    "No performance targets, process crash, generic writer retry or provider recovery proof"
+  ]
+}
