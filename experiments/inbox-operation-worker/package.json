@@ -1,0 +1,1 @@
+{"name":"sandra-inbox-operation-worker","private":true,"type":"module","scripts":{"test":"node --test core.test.mjs","start":"node server.mjs"},"dependencies":{"@restatedev/restate-sdk":"1.17.0","pg":"8.21.0"}}
