@@ -184,3 +184,9 @@ export function compareInboxActionIdentity(existingHash: string, requestedHash: 
   valid(/^[a-f0-9]{64}$/.test(existingHash) && /^[a-f0-9]{64}$/.test(requestedHash));
   return existingHash === requestedHash ? "reuse_existing" : "conflict";
 }
+
+/** Acceptance carries immutable references only; no fresh action data. */
+export function parseInboxActionAcceptance(raw: string) {
+  const request = object(wire(raw), ["preparationId", "idempotencyKey"]);
+  return freeze({ preparationId: uuid(request.preparationId), idempotencyKey: uuid(request.idempotencyKey) });
+}
