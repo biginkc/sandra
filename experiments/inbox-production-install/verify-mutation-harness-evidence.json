@@ -1,0 +1,84 @@
+{
+  "passed": true,
+  "cases": [
+    {
+      "case": "rollout_serving_default_true",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column default drift inbox_control.rollout.serving_enabled: expected 'false' live 'true'",
+      "restored_pass": true
+    },
+    {
+      "case": "disable_capture_trigger",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Installed trigger disabled: zzzzz_inbox_message_direct on public.messages (tgenabled=D)",
+      "restored_pass": true
+    },
+    {
+      "case": "index_recreated_different_columns",
+      "drift_caught": true,
+      "drift_error": "  live=    createindexsummary_orderoninbox_bridge.summariesorg_id,target_kind",
+      "restored_pass": true
+    },
+    {
+      "case": "disable_row_level_security",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Row level security disabled on installed table: inbox_control.rollout",
+      "restored_pass": true
+    },
+    {
+      "case": "trigger_retimed",
+      "drift_caught": true,
+      "drift_error": "  live def=CREATE TRIGGER zzz_inbox_guard_inbound_revision_insert AFTER INSERT ON public.messages FOR EACH ROW EXECUTE FUNCTION inbox_guard_inbound_revision()",
+      "restored_pass": true
+    },
+    {
+      "case": "column_default_flip",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column default drift inbox_control.rollout.backfill_complete: expected 'false' live 'true'",
+      "restored_pass": true
+    },
+    {
+      "case": "weakened_check_constraint",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Constraint definition drift on inbox_parent.work: expected fragment not found live (exact match required): 'CHECK (ack>=0 AND ack<=generation)' (live remaining=[{'def': 'CHECK ((ack >= 0))', 'table': 'inbox_parent.work', 'valid': True}, {'def': \"CHECK ((stream = ANY (ARRAY['messages'::text, 'reviews'::text])))\", 'table': 'inbox_parent.work', 'valid': True}, {'def': 'CHECK (((claim_token IS NULL) = (lease_until IS NULL)))', 'table': 'inbox_parent.work', 'valid': True}, {'def': 'CHECK (((scan_generation IS NULL) = (stream IS NULL)))', 'table': 'inbox_parent.work', 'valid': True}, {'def': 'CHECK (((scan_generation IS NULL) OR ((scan_generation > ack) AND (scan_generation <= generation))))', 'table': 'inbox_parent.work', 'valid': True}, {'def': 'PRIMARY KEY (org_id, kind, entity_id)', 'table': 'inbox_parent.work', 'valid': True}])",
+      "restored_pass": true
+    },
+    {
+      "case": "fk_on_delete_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Constraint definition drift on inbox_bridge.cursors: expected fragment not found live (exact match required): 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id)' (live remaining=[{'def': 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id) ON DELETE CASCADE', 'table': 'inbox_bridge.cursors', 'valid': True}])",
+      "restored_pass": true
+    },
+    {
+      "case": "extra_view_in_companion_schema",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Extra relations (table/view/matview/sequence) in private schemas: {'inbox_read.zz_harness_extra_view': 'v'}",
+      "restored_pass": true
+    },
+    {
+      "case": "extra_domain_in_companion_schema",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Extra types/domains in private schemas: [{'name': 'zz_harness_domain', 'schema': 'inbox_read'}]",
+      "restored_pass": true
+    },
+    {
+      "case": "function_overload_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Conflicting overload(s) installed for inbox_read.detail: ['o uuid, c uuid', 'o uuid, c uuid, extra text']",
+      "restored_pass": true
+    },
+    {
+      "case": "search_path_public",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: search_path drift on inbox_bridge.authorize: expected empty search_path, live='search_path=public'",
+      "restored_pass": true
+    },
+    {
+      "case": "index_packet_injection_ignored",
+      "drift_caught": true,
+      "drift_error": "  live=    createindexsummary_orderoninbox_bridge.summariesorg_id,target_kind",
+      "restored_pass": true
+    }
+  ],
+  "scope": "Owned fixture only; each case: apply drift, verify.py --installed FAILS with the drift-specific error, restore, verify.py --installed PASSES again"
+}
