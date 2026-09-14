@@ -236,6 +236,7 @@ class PublisherTests(unittest.TestCase):
 
     def test_http_failures_are_classified_without_provider_body_leak(self):
         for status, expected_kind, retry_after in (
+            (401, "auth", None),
             (403, "forbidden", None),
             (422, "validation", None),
             (429, "rate_limited", 17),
@@ -266,6 +267,13 @@ class PublisherTests(unittest.TestCase):
                 outbox = self.store.list_github_outbox()[0]
                 self.assertEqual(outbox["status"], "failed")
                 self.assertNotIn("private provider response", outbox["last_error"])
+                if status in {401, 403, 422}:
+                    self.assertEqual(outbox["next_attempt_at"], 161.0)
+                    self.assertIsNone(
+                        GitHubPublisher(
+                            self.store, GitHubClient(opener=opener), owner="publisher"
+                        ).publish_one(now=160)
+                    )
                 if status == 429:
                     self.assertEqual(outbox["next_attempt_at"], 118.0)
                     self.assertIsNone(
@@ -273,6 +281,88 @@ class PublisherTests(unittest.TestCase):
                             self.store, GitHubClient(opener=opener), owner="publisher"
                         ).publish_one(now=110)
                     )
+
+    def test_persistent_auth_failures_back_off_and_do_not_starve_newer_jobs(self):
+        self.store.close()
+        self.store = RepairStore(":memory:", clock=lambda: 100.0)
+        self.store.ingest_issues(
+            "bmh-group",
+            "sandra",
+            "vercel-production",
+            [IssueInput(100), IssueInput(101)],
+            cursor=None,
+            retrieved_at=100,
+        )
+        enqueue_candidate(
+            self.store,
+            organization="bmh-group",
+            project="sandra",
+            environment="vercel-production",
+            issue_number=100,
+            now=100,
+        )
+        enqueue_candidate(
+            self.store,
+            organization="bmh-group",
+            project="sandra",
+            environment="vercel-production",
+            issue_number=101,
+            now=100,
+        )
+        created = []
+
+        def opener(request, *, timeout):
+            if request.method == "GET":
+                return search_response([])
+            body = json.loads(request.data.decode("utf-8"))
+            created.append(body)
+            if len(created) == 1:
+                return Response({"message": "private auth response"}, status=403)
+            return Response(valid_issue(7 + len(created), body=body["body"]))
+
+        publisher = GitHubPublisher(
+            self.store,
+            GitHubClient(opener=opener),
+            owner="publisher",
+        )
+        first = publisher.publish_one(now=101)
+        self.assertEqual(first.action, "failed")
+        self.assertEqual(first.reason, "forbidden")
+        self.assertEqual(self.store.list_github_outbox()[0]["next_attempt_at"], 161.0)
+        second = publisher.publish_one(now=102)
+        self.assertEqual(second.action, "created")
+        self.assertEqual(publisher.publish_one(now=160), None)
+        retry = publisher.publish_one(now=161)
+        self.assertEqual(retry.action, "created")
+        outbox = self.store.list_github_outbox()
+        self.assertEqual([row["status"] for row in outbox], ["published", "published"])
+
+    def test_github_client_renews_installation_token_after_401(self):
+        class Provider:
+            def __init__(self):
+                self.tokens = iter(("expired-installation-token", "fresh-installation-token"))
+                self.invalidated = []
+
+            def get_token(self):
+                return next(self.tokens)
+
+            def invalidate(self, token=None):
+                self.invalidated.append(token)
+
+        provider = Provider()
+        calls = []
+
+        def opener(request, *, timeout):
+            calls.append(request)
+            if len(calls) == 1:
+                return Response({"message": "rejected"}, status=401)
+            return Response(valid_issue(7))
+
+        issue = GitHubClient(token_provider=provider, opener=opener).read_issue(7)
+        self.assertEqual(issue.number, 7)
+        self.assertEqual(provider.invalidated, ["expired-installation-token"])
+        self.assertEqual(calls[0].headers["Authorization"], "Bearer expired-installation-token")
+        self.assertEqual(calls[1].headers["Authorization"], "Bearer fresh-installation-token")
 
     def test_malformed_search_and_create_responses_fail_closed(self):
         self.enqueue()

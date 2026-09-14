@@ -18,6 +18,8 @@ from typing import Any, Callable, Iterable, Mapping
 
 
 MAX_ATTEMPTS = 2
+GITHUB_FAILURE_BACKOFF_BASE_SECONDS = 60
+GITHUB_FAILURE_BACKOFF_MAX_SECONDS = 86_400
 FULL_SHA_RE = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 SAFE_GIT_CONFIG = (
     "-c",
@@ -998,10 +1000,24 @@ class RepairStore:
             raise ValueError("retry_after must be non-negative")
         current = self._now(now)
         safe_error = error.strip()[:500]
-        next_attempt = current + min(int(retry_after), 86_400) if retry_after is not None else None
         self.db.execute("BEGIN IMMEDIATE")
         try:
             row = self._assert_github_outbox_owner_locked(dedupe_key, owner, now=current)
+            if retry_after is not None:
+                next_attempt = current + min(int(retry_after), GITHUB_FAILURE_BACKOFF_MAX_SECONDS)
+            else:
+                # A persistent 401/403/422 (or a malformed local response)
+                # must not be immediately reclaimable.  Without this durable
+                # delay the oldest row can consume every publisher iteration
+                # in a slot and starve newer incidents. Attempts is incremented
+                # when the lease is claimed, so the first failure waits one
+                # minute and later failures back off up to one day.
+                attempt_number = max(1, int(row["attempts"]))
+                delay = min(
+                    GITHUB_FAILURE_BACKOFF_MAX_SECONDS,
+                    GITHUB_FAILURE_BACKOFF_BASE_SECONDS * (2 ** min(attempt_number - 1, 10)),
+                )
+                next_attempt = current + delay
             self.db.execute(
                 """UPDATE github_outbox SET status='failed',lease_owner=NULL,lease_until=NULL,
                    next_attempt_at=?,last_error=?,updated_at=? WHERE dedupe_key=?""",
@@ -1079,6 +1095,32 @@ class RepairStore:
                 "SELECT * FROM github_outbox ORDER BY created_at, dedupe_key"
             )
         ]
+
+    def github_publisher_health(self) -> dict[str, int]:
+        """Return the durable publication backlog by safety-relevant state.
+
+        ``failed`` jobs are retryable and ``create_unknown`` jobs require
+        marker reconciliation before another create is allowed.  Both states
+        must keep the controller degraded until their own rows are resolved;
+        a successful publication for a different issue cannot clear them.
+        """
+
+        counts = {
+            "failed": 0,
+            "create_unknown": 0,
+        }
+        rows = self.db.execute(
+            """SELECT status, COUNT(*) AS count
+               FROM github_outbox
+               WHERE status IN ('failed', 'create_unknown')
+               GROUP BY status"""
+        ).fetchall()
+        for row in rows:
+            status = str(row["status"])
+            if status in counts:
+                counts[status] = int(row["count"])
+        counts["outstanding"] = counts["failed"] + counts["create_unknown"]
+        return counts
 
     def get_cursor(self, organization: str, project: str, environment: str) -> str | None:
         row = self.db.execute(
@@ -1221,6 +1263,37 @@ class RepairStore:
             (organization, project, environment, issue_number),
         ).fetchone()
         return None if row is None else dict(row)
+
+    def list_issues(
+        self,
+        organization: str,
+        project: str,
+        environment: str,
+        *,
+        statuses: Iterable[str] = ("new", "unresolved"),
+    ) -> list[dict[str, Any]]:
+        """Return current issue state for one scoped controller poll.
+
+        The runner uses this after an atomic Sentry snapshot to discover
+        candidates for the durable GitHub outbox. Keeping the query here
+        makes the source and status filters explicit and avoids a caller
+        reaching into SQLite with an unscoped query.
+        """
+
+        status_values = tuple(str(status) for status in statuses)
+        if not status_values:
+            return []
+        if any(not re.fullmatch(r"[a-z_]{1,40}", value) for value in status_values):
+            raise ValueError("issue status is invalid")
+        placeholders = ",".join("?" for _ in status_values)
+        rows = self.db.execute(
+            f"""SELECT * FROM issues
+                WHERE organization=? AND project=? AND environment=?
+                  AND status IN ({placeholders})
+                ORDER BY updated_at DESC, issue_number ASC""",
+            (organization, project, environment, *status_values),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def claim_attempt(
         self,
@@ -2165,6 +2238,37 @@ class RepairStore:
         except Exception:
             self.db.execute("ROLLBACK")
             raise
+
+    def get_scheduler_slot(self, slot_id: str) -> dict[str, Any] | None:
+        """Read one slot state without changing its claim."""
+
+        if not isinstance(slot_id, str) or not slot_id.strip():
+            raise ValueError("slot_id is required")
+        row = self.db.execute(
+            "SELECT * FROM scheduler_slots WHERE slot_id=?", (slot_id,)
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def complete_scheduler_slot(self, slot_id: str, *, now: float | None = None) -> None:
+        """Mark a claimed slot complete after its intake transaction finishes."""
+
+        current = self._now(now)
+        self.db.execute(
+            "UPDATE scheduler_slots SET status='completed' WHERE slot_id=? AND status='claimed'",
+            (slot_id,),
+        )
+
+    def fail_scheduler_slot(
+        self, slot_id: str, *, error: str, now: float | None = None
+    ) -> None:
+        """Mark a slot terminal after its bounded retry budget is exhausted."""
+
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("scheduler failure type is required")
+        self.db.execute(
+            "UPDATE scheduler_slots SET status='failed' WHERE slot_id=? AND status='claimed'",
+            (slot_id,),
+        )
 
     def list_outbox(self) -> list[dict[str, Any]]:
         return [

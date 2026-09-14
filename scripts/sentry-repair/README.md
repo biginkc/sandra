@@ -2,7 +2,10 @@
 
 This is a small, stdlib-only controller for deterministic Sentry intake and
 bounded repair state. It is intentionally an operator-facing building block.
-It does not install a scheduler, start workers, send Slack messages, merge PRs,
+The `runner.py` entry point supplies the long-lived intake and optional GitHub
+outbox process used by the Railway deployment artifact; this repository change
+does not create Railway infrastructure, provision a volume, or install a
+service automatically. The controller does not send Slack messages, merge PRs,
 or deploy releases.
 
 The canonical source is Sentry organization bmh-group, project sandra,
@@ -24,6 +27,31 @@ The database defaults to XDG_STATE_HOME/sandra-sentry-repair/repair.db, or
 outside a checkout. Sentry issues are keyed by their positive numeric id;
 short IDs such as SANDRA-A are evidence only and are never the idempotency
 key.
+
+## Long-lived Railway runner
+
+`runner.py` requires `SANDRA_REPAIR_VOLUME_PATH` to name a writable mounted
+directory and `SANDRA_REPAIR_DB_PATH` to name an absolute file below that
+directory. Set them to `/data` and `/data/repair.db` on Railway; the process
+checks the mount boundary and refuses image storage, in-memory state, or a
+path outside the volume. `SENTRY_AUTH_TOKEN` is required for live intake.
+GitHub publication remains disabled unless
+`SANDRA_GITHUB_PUBLISH_ENABLED=true` and controller-only GitHub App settings
+(`SANDRA_GITHUB_APP_ID`, `SANDRA_GITHUB_INSTALLATION_ID`, and an unencrypted
+`SANDRA_GITHUB_APP_PRIVATE_KEY`) are provided through the service environment.
+The provider mints short-lived installation tokens in memory and renews them
+before expiry. The runner never places credentials in argv, logs, health
+responses, or worker environments.
+
+The process claims the current America/Chicago slot once in SQLite, performs a
+fresh Sentry snapshot, and optionally drains a bounded number of GitHub outbox
+jobs. A failed intake is retried a bounded number of times with capped
+exponential delay. `/healthz` and `/readyz` expose sanitized process state.
+`deployment/sentry-repair/` contains the Dockerfile and startup script;
+`.railway/railway.ts` is the explicit Railway service configuration and
+`deployment/sentry-repair/README.md` contains the volume/secret setup notes.
+`SANDRA_REPAIR_DISPATCH_ENABLED` must remain false;
+the repair-dispatch gate is reserved for a separately reviewed rollout.
 
 Use observe (the default) for intake and reporting. investigate permits a
 bounded investigation dispatch, while repair permits a bounded patch
