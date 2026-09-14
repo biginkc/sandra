@@ -5321,6 +5321,10 @@ export type Database = {
       }
     }
     Functions: {
+      allow_esign_canary_provider_dispatch: {
+        Args: { p_org_id: string; p_request_id: string }
+        Returns: boolean
+      }
       fn_set_acquisition_designation: {
         Args: {
           p_enabled: boolean
