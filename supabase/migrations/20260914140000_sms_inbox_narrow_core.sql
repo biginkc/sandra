@@ -1,4 +1,5 @@
--- Sandra Messages inbox query latency fix (Implementation Spec v6, FABLE-RULINGS.md S18).
+-- Sandra Messages inbox query latency fix (Implementation Spec v6 + S19/S19.5
+-- join-strategy round, FABLE-RULINGS.md S18/S19/S19.5).
 --
 -- Replaces the function defined at
 -- supabase/migrations/20260909080000_messages_search.sql:8-469. That
@@ -8,37 +9,68 @@
 -- output, including display-only strings). EVIDENCE-RESULTS-S17.md
 -- (auto_explain capture against the real function, real auth context)
 -- showed this costs ~164MB of temp: ~116MB (71%) is a hash-join spill
--- over the FULL contacts (308k rows) and properties (184k rows) tables
--- because the probe side (`grouped`, materialized and wide once joined
--- into `core`) gives the planner bad row-width/cardinality estimates;
+-- over the FULL contacts (308k rows) and properties (184k rows) tables;
 -- ~48MB (29%) is the same ~64,643-row wide result being materialized
 -- three times over (`core`, `ready`, `classified`).
 --
--- Fix (S18.1 + S18.2): collapse `core`/`ready`/`classified` into ONE
--- narrow `AS MATERIALIZED` CTE (`classified_narrow` below) that carries
--- only the columns needed by the verbatim predicates, the `counts`/
--- `active_*` filter CTEs, `ORDER BY`, and the `page_rows` join keys —
--- plus the boolean `is_test_traffic` (computed here, pre-pagination,
--- from the verbatim `contact_name`/`property_address` `like` predicates
--- per FABLE-RULINGS.md AB1, then the strings themselves are discarded).
--- Display-only strings (`contact_name`, `property_address`,
--- `needs_human_attention`, `last_ai_escalation_reason`, the AI
--- disposition review's `reason`/`created_at`/`source_inbound_message_id`)
--- are reconstructed only for the page's <=200 rows in `page_rows`, via
--- org-scoped, cardinality-preserving LEFT JOINs (AB2) that hydrate the
--- EXACT `ai_disposition_review_id` already selected upstream (never
--- re-derived).
+-- Round 1 fix (S18.1 + S18.2, PR #604 first pass): collapsed
+-- `core`/`ready`/`classified` into one narrow `classified_narrow` CTE.
+-- GATE-RESULTS.md showed this alone is INSUFFICIENT: temp 17,370 blk /
+-- 1,000ms (down from 20,958 / 1,538, ~35% faster) but contacts/properties
+-- were STILL hash-built from the full 308k/184k tables (contacts
+-- Batches: 8, properties Batches: 4; Hash Left Join est 5,118 rows vs
+-- actual 64,642 — a 12x misestimate). GATE-RESULTS.md also caught a
+-- migration bug (this file previously referenced a nonexistent
+-- `p.property_status` column; the base `properties` table column is
+-- `status`, aliased `as property_status` — fixed below, S19.0).
 --
--- Non-negotiable bounds carried forward unchanged (S17b/S18/AB3):
+-- Round 2 fix (S19.3 E1 + S19.5.2/S19.5.3 E2, this migration):
+--
+-- E1 (S19.3, "narrow the join input"): the join's PROBE side was still
+-- `grouped` itself (wide relative to what contacts/properties joins
+-- need, and the UNION ALL of recent_grouped/old_review_grouped gives the
+-- planner a bad row-count estimate for it). A new `keys` MATERIALIZED CTE
+-- is introduced between `grouped` and the contacts/properties join,
+-- projecting ONLY: org_id, conversation_id, contact_id, property_id,
+-- last_message_direction, last_message_at, latest_from, latest_to,
+-- unread_count, has_inbound, has_recent. The ONE column of `grouped`
+-- dropped here is `last_message_id` — it is not needed by any
+-- classification predicate, count, filter, or ORDER BY key; it is only
+-- ever used to join back to `public.messages` for `last_message_body`,
+-- so it is now hydrated AFTER paging, in `page_rows`, via a join back to
+-- `grouped` (already materialized) on (org_id, conversation_id) — the
+-- same org-scoped, cardinality-preserving pattern used for the other
+-- page-time joins.
+--
+-- E2 (S19.5.2/S19.5.3, "share the single contacts access"): the OLD
+-- search predicate filtered directly inside the CTE that performs the
+-- contacts join (`... or c.search_text ilike ... or exists(...)`), i.e.
+-- a filter on the nullable side of a LEFT JOIN, sitting inside the same
+-- CTE. Astra/Fable's diagnosis: this both misleads the row-estimate and
+-- can block the planner from choosing a narrow-build hash/side-swap.
+-- Fix: `classified_narrow` now only PROJECTS a boolean `contact_hit`
+-- column from that same single contacts join (no filtering there); the
+-- actual search filter (`p_search is null OR contact_hit OR
+-- exists(messages FTS)`) is applied one CTE downstream, in `classified`.
+-- A missing/RLS-invisible contact yields `contact_hit = null`, which
+-- behaves as `false` in the `OR` chain and falls through correctly to
+-- the messages EXISTS check — contacts are still accessed exactly once
+-- on every path (search or not), matching S19.4's "at most once" rule.
+-- The escaping (`escape E'\\'`), ≥3-digit phone rule, `channel = 'sms'`
+-- restriction, FTS scope, and the ABSENCE of a recent-cutoff on the
+-- message FTS subquery are copied character-for-character from
+-- 20260909080000_messages_search.sql:282-293 (S19.5.3).
+--
+-- Non-negotiable bounds carried forward unchanged (S17b/S18/S19/AB3):
 -- function signature and JSON document/shape unchanged; exact counts
 -- (S7, no bounded/floor counts); ORDER BY `last_message_at DESC,
 -- conversation_id` restated verbatim in both `page_core` and the
 -- `jsonb_agg` (non-blocking fix 2); every existing SET clause plus
--- SECURITY INVOKER re-declared verbatim (full CREATE OR REPLACE per the
--- S17-plan Astra review); no #521 files touched; no changes to
--- src/lib/messages/list-threads.ts or inbox-detail-data.ts (S18.4 is a
--- separate PR); no planner GUC hacks (no `enable_hashjoin`, no
--- `plan_cache_mode` per S16.3).
+-- SECURITY INVOKER re-declared verbatim (full CREATE OR REPLACE); no
+-- #521 files touched; no changes to src/lib/messages/list-threads.ts or
+-- inbox-detail-data.ts (S18.4 is a separate PR); no planner GUC hacks
+-- (no `enable_hashjoin`, `enable_seqscan`, no `plan_cache_mode` per
+-- S16.3, S18.1, S19 architect notes).
 --
 -- BLOCKING (Fable spec review, v6): the header below is the VERBATIM
 -- named-argument, DEFAULT-bearing signature from
@@ -49,20 +81,21 @@
 -- compile and pass a naive equivalence test while silently breaking
 -- every real call site that omits an argument.
 --
--- work_mem: NOT added in this migration. S18.3 requires the ascending
--- 8/16/24/32 MiB ladder be run AFTER this rewrite lands, on the
--- sandra-query-evidence-20260914 fixture, and only ships a `work_mem`
--- SET if the rewrite alone does not already clear `temp_bytes` delta 0
--- at the Postgres default. That measurement could not be completed in
--- this environment (no local Postgres/Docker stack available — see PR
--- description); if measurement later shows a need, ship it as a
--- follow-up `ALTER FUNCTION ... SET work_mem = '<measured>'` migration,
--- per S18.3's ceiling (32 MiB) and RAM-computation requirements.
+-- work_mem: NOT added in this migration. S18.3/S19.1 require the
+-- ascending 8/16/24/32 MiB ladder be run AFTER this rewrite lands and
+-- proves out in the nested plan, on the fixture, and only ships a
+-- `work_mem` SET if the rewrite alone does not already clear
+-- `temp_bytes` delta 0 at the Postgres default. That measurement is the
+-- orchestrator's job (S19.3/S19.5.4 fixture matrix), not this author's
+-- (no database access here) — this migration ships no `work_mem` line.
 --
 -- Reviewability: see the companion migration
--- 20260914140000_sms_inbox_narrow_core.test.ts for the
+-- 20260914140000_sms_inbox_narrow_core.integration.test.ts for the
 -- pg_get_function_arguments(oid) pre/post equality assertion, the
--- per-setting proconfig assertion, and the rehearsed-rollback test.
+-- per-setting proconfig assertion, the rehearsed-rollback test, and the
+-- S19.5.5 equivalence/mutation coverage (missing/RLS-invisible contact,
+-- old body-only FTS match, inner-search-join / cutoff-on-FTS /
+-- escape-dropped / is_test_traffic-deferred mutation kills).
 
 set lock_timeout = '5s';
 set statement_timeout = '120s';
@@ -280,43 +313,70 @@ AS $function$
       )
     end as ambiguity_count
   ),
-  -- S18.1 + S18.2: ONE narrow MATERIALIZED CTE replacing the old
-  -- `core` / `ready` / `classified` trio. Carries only:
-  --   - join keys / ids needed downstream (org_id, conversation_id,
-  --     contact_id, property_id, last_message_id)
-  --   - columns the verbatim predicates, counts/active_* filters,
-  --     ORDER BY, or page_rows join keys reference: has_recent,
-  --     has_inbound, unread_count, last_message_direction,
-  --     last_message_at, do_not_contact, sms_opted_out,
-  --     property_status, outreach_dispo, is_dnc_locked,
-  --     assigned_user_id, ai_responder_status, latest_consent_event,
-  --     is_phone_suppressed, ai_disposition_review_id/status/
-  --     disposition (NOT reason/created_at/source_inbound_message_id
-  --     -- those are display-only, hydrated in page_rows)
-  --   - thread_customer_phone / thread_business_phone (returned JSON
-  --     fields, not display-only per the spec floor list)
-  --   - the boolean is_test_traffic, is_opted_out, is_noise,
-  --     needs_outcome (computed here, verbatim predicates, so the
-  --     underlying display strings can be discarded)
-  -- Contact_name/property_address are read here ONLY to derive
-  -- is_test_traffic, then dropped from the projection. The search
-  -- predicate stays inside this same CTE (S18.1) so contacts remains
-  -- joined for `search_text`/`phone_digits` search semantics.
-  classified_narrow as materialized (
+  -- S19.3 E1: the join's probe/build side, narrowed to ONLY the columns
+  -- the contacts/properties join, classification, counts, ORDER BY, and
+  -- page_rows join keys need. Dropped from `grouped`: `last_message_id`
+  -- (name it explicitly per S19.5.1 — it is the only column of `grouped`
+  -- not carried forward here; it is not read by any predicate/count/
+  -- filter/ORDER BY, only by the page-time message-body join, which now
+  -- hydrates it after paging via a join back to `grouped` in page_rows).
+  keys as materialized (
     select
       g.org_id,
       g.conversation_id,
       g.contact_id,
       g.property_id,
-      g.last_message_id,
-      g.unread_count,
-      g.has_inbound,
-      g.has_recent,
       g.last_message_direction,
       g.last_message_at,
-      case when g.last_message_direction = 'inbound' then g.latest_from else g.latest_to end as thread_customer_phone,
-      case when g.last_message_direction = 'inbound' then g.latest_to else g.latest_from end as thread_business_phone,
-      p.property_status,
+      g.latest_from,
+      g.latest_to,
+      g.unread_count,
+      g.has_inbound,
+      g.has_recent
+    from grouped g
+  ),
+  -- S18.1/S18.2/S19.3 E1: ONE narrow MATERIALIZED CTE, joined from
+  -- `keys` (not `grouped` directly, per E1) to contacts/properties/
+  -- message_threads/consent/suppression/pending_reviews. Carries only:
+  --   - join keys / ids needed downstream (org_id, conversation_id,
+  --     contact_id, property_id)
+  --   - columns the verbatim predicates, counts/active_* filters,
+  --     ORDER BY, or page_rows join keys reference: has_recent,
+  --     has_inbound, unread_count, last_message_direction,
+  --     last_message_at, property_status, outreach_dispo, is_dnc_locked,
+  --     assigned_user_id, ai_responder_status, ai_disposition_review_id/
+  --     status/disposition (NOT reason/created_at/
+  --     source_inbound_message_id -- those are display-only, hydrated in
+  --     page_rows)
+  --   - thread_customer_phone / thread_business_phone (returned JSON
+  --     fields, not display-only per the spec floor list)
+  --   - the boolean is_test_traffic, is_opted_out (computed here,
+  --     verbatim predicates, so the underlying display strings
+  --     `contact_name`/`property_address` can be read and discarded
+  --     without leaving the narrow projection)
+  --   - S19.5.2 E2: the boolean `contact_hit` (the contact-side search
+  --     match), PROJECTED here (not filtered here) from the SAME single
+  --     contacts join used for is_test_traffic/is_opted_out -- contacts
+  --     are still accessed exactly once, on every path.
+  -- Contact_name/property_address are read here ONLY to derive
+  -- is_test_traffic and contact_hit, then dropped from the projection.
+  -- No WHERE clause filters on the nullable (contacts) side of any join
+  -- in this CTE (S19.5.2) -- the search filter is applied one CTE
+  -- downstream, in `classified`.
+  classified_narrow as materialized (
+    select
+      k.org_id,
+      k.conversation_id,
+      k.contact_id,
+      k.property_id,
+      k.unread_count,
+      k.has_inbound,
+      k.has_recent,
+      k.last_message_direction,
+      k.last_message_at,
+      case when k.last_message_direction = 'inbound' then k.latest_from else k.latest_to end as thread_customer_phone,
+      case when k.last_message_direction = 'inbound' then k.latest_to else k.latest_from end as thread_business_phone,
+      p.status as property_status,
       p.outreach_dispo,
       p.is_dnc_locked,
       p.assigned_user_id,
@@ -334,20 +394,24 @@ AS $function$
         lower(trim(coalesce(coalesce(c.entity_name, nullif(concat_ws(' ', c.first_name, c.last_name), '')), ''))) like 'canary canary-%%'
         or lower(trim(coalesce(nullif(concat_ws(', ', p.address, p.city, p.state), ''), ''))) like 'jitter %%'
         or lower(trim(coalesce(nullif(concat_ws(', ', p.address, p.city, p.state), ''), ''))) like 'jitter-%%'
-      ) as is_test_traffic
-    from grouped g
-    left join public.contacts c on c.id = g.contact_id and c.org_id = g.org_id
-    left join public.properties p on p.id = g.property_id and p.org_id = g.org_id
+      ) as is_test_traffic,
+      (
+        c.search_text ilike '%' || search.q_like || '%' escape E'\\'
+        or (length(search.digits) >= 3 and c.phone_digits ilike '%' || search.digits || '%')
+      ) as contact_hit
+    from keys k
+    left join public.contacts c on c.id = k.contact_id and c.org_id = k.org_id
+    left join public.properties p on p.id = k.property_id and p.org_id = k.org_id
     left join pending_reviews review
-      on review.org_id = g.org_id
-      and review.conversation_id = g.conversation_id
-      and review.property_id = g.property_id
-    left join public.message_threads mt on mt.conversation_id = g.conversation_id and mt.org_id = g.org_id
+      on review.org_id = k.org_id
+      and review.conversation_id = k.conversation_id
+      and review.property_id = k.property_id
+    left join public.message_threads mt on mt.conversation_id = k.conversation_id and mt.org_id = k.org_id
     left join lateral (
       select consent.event_type
       from public.consent_events consent
-      where consent.contact_id = g.contact_id
-        and consent.org_id = g.org_id
+      where consent.contact_id = k.contact_id
+        and consent.org_id = k.org_id
         and consent.channel = 'sms'
         and consent.event_type in (
           'opt_in_marketing_written',
@@ -369,7 +433,7 @@ AS $function$
       end as phone_e164
       from (
         select regexp_replace(
-          coalesce(case when g.last_message_direction = 'inbound' then g.latest_from else g.latest_to end, ''),
+          coalesce(case when k.last_message_direction = 'inbound' then k.latest_from else k.latest_to end, ''),
           '[^0-9]',
           '',
           'g'
@@ -377,26 +441,40 @@ AS $function$
       ) phone
     ) normalized_phone on true
     left join public.sms_phone_suppressions suppression
-      on suppression.org_id = g.org_id
+      on suppression.org_id = k.org_id
       and suppression.channel = 'sms'
       and suppression.phone_e164 = normalized_phone.phone_e164
     cross join search_bounds search
-    where (
-      search.q is null
-      or c.search_text ilike '%' || search.q_like || '%' escape E'\\'
-      or (length(search.digits) >= 3 and c.phone_digits ilike '%' || search.digits || '%')
-      or exists (
-        select 1 from public.messages matching_message
-        where matching_message.org_id = g.org_id
-          and matching_message.conversation_id = g.conversation_id
-          and matching_message.channel = 'sms'
-          and matching_message.fts @@ search.tsq
-      )
-    ) -- messages_search_predicate
   ),
+  -- S19.5.2 E2: the search filter applied here, one CTE downstream of the
+  -- single contacts join. `contact_hit` is null when the contacts join
+  -- missed (missing/RLS-invisible contact org-scoped mismatch), which
+  -- behaves as false in the OR chain and falls through to the messages
+  -- EXISTS check -- exactly the OLD function's per-row semantics, just
+  -- evaluated downstream instead of as a join-side filter.
   classified as materialized (
     select
-      n.*,
+      n.org_id,
+      n.conversation_id,
+      n.contact_id,
+      n.property_id,
+      n.unread_count,
+      n.has_inbound,
+      n.has_recent,
+      n.last_message_direction,
+      n.last_message_at,
+      n.thread_customer_phone,
+      n.thread_business_phone,
+      n.property_status,
+      n.outreach_dispo,
+      n.is_dnc_locked,
+      n.assigned_user_id,
+      n.ai_responder_status,
+      n.ai_disposition_review_id,
+      n.ai_disposition_review_status,
+      n.ai_disposition_review_disposition,
+      n.is_opted_out,
+      n.is_test_traffic,
       n.property_id is not null
         and n.has_inbound
         and n.outreach_dispo is null
@@ -404,6 +482,18 @@ AS $function$
         and n.property_status in ('prospect', 'new_lead', 'contacted') as needs_outcome,
       coalesce(n.is_dnc_locked, false) or n.is_opted_out or n.is_test_traffic as is_noise
     from classified_narrow n
+    cross join search_bounds search
+    where (
+      search.q is null
+      or n.contact_hit
+      or exists (
+        select 1 from public.messages matching_message
+        where matching_message.org_id = n.org_id
+          and matching_message.conversation_id = n.conversation_id
+          and matching_message.channel = 'sms'
+          and matching_message.fts @@ search.tsq
+      )
+    ) -- messages_search_predicate (E2: downstream of the single contacts join, S19.5.2)
   ),
   counts as (
     select
@@ -469,11 +559,13 @@ AS $function$
     limit (select page_limit from effective_page)
     offset (select page_offset from effective_page)
   ),
-  -- Join-back for display strings (S18.1/AB2): org-scoped,
+  -- Join-back for display strings (S18.1/AB2) AND for `last_message_id`
+  -- (S19.3 E1 -- dropped from `keys`, hydrated here instead): org-scoped,
   -- cardinality-preserving LEFT JOINs only, for the page's <=200 rows.
-  -- The AI disposition review join hydrates the EXACT
-  -- ai_disposition_review_id already selected in classified_narrow
-  -- (never re-derived independently here).
+  -- The `grouped` join-back is 1:1 on (org_id, conversation_id) since
+  -- `grouped` is itself grouped by that pair. The AI disposition review
+  -- join hydrates the EXACT ai_disposition_review_id already selected in
+  -- classified_narrow (never re-derived independently here).
   page_rows as (
     select
       page.*,
@@ -490,13 +582,14 @@ AS $function$
       thread.ai_last_delivery_status,
       thread.ai_last_delivery_error
     from page_core page
+    left join grouped g2 on g2.org_id = page.org_id and g2.conversation_id = page.conversation_id
     left join public.contacts c on c.id = page.contact_id and c.org_id = page.org_id
     left join public.properties p on p.id = page.property_id and p.org_id = page.org_id
     left join pending_reviews review
       on review.id = page.ai_disposition_review_id
       and review.org_id = page.org_id
     join public.messages last_message
-      on last_message.id = page.last_message_id
+      on last_message.id = g2.last_message_id
       and last_message.org_id = page.org_id
       and last_message.conversation_id = page.conversation_id
     left join public.message_threads thread

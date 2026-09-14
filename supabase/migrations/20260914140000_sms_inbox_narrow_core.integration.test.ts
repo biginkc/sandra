@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestClient } from "@tests/integration/client";
-import { BMH_ORG_ID, clientForUser, createOrgUser, seedTwoOrgs } from "@tests/integration/fixtures/multi-user";
+import { BMH_ORG_ID, TEST_ORG_B_ID, clientForUser, createOrgUser, seedTwoOrgs } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 // Implementation Spec v6 (FABLE-RULINGS.md S17b/S18/AB1-AB3): the equivalence
@@ -109,6 +109,69 @@ async function assertEquivalent(userId: string, args: Record<string, unknown>) {
   expect(newDoc).toEqual(oldDoc);
 }
 
+/**
+ * S19.5.5 mutation-kill harness: apply a MUTATED copy of the real function
+ * body inside an open transaction (under the REAL name, shadowing the
+ * correct rewrite for the duration of the callback), run assertions against
+ * it, then always roll back so the correct rewrite is restored for every
+ * other test in this file. Never mutates the old oracle.
+ */
+async function withMutant(mutatedSql: string, fn: () => Promise<void>) {
+  await db.query("begin");
+  try {
+    await db.query(mutatedSql);
+    await fn();
+  } finally {
+    await db.query("rollback");
+  }
+}
+
+function mustReplace(source: string, target: string, replacement: string): string {
+  if (!source.includes(target)) {
+    throw new Error(`mutation target not found in migration SQL (source drifted?): ${target.slice(0, 80)}...`);
+  }
+  return source.replace(target, replacement);
+}
+
+// Mutation 1 (S19.5.5): the single contacts join in `classified_narrow`
+// turned INNER — must drop any thread whose contact is missing/org-scoped
+// invisible, which the correct LEFT JOIN keeps (with contact_hit/is_test_traffic
+// falling back to null/false).
+const innerSearchJoinMutant = mustReplace(
+  newSql,
+  "left join public.contacts c on c.id = k.contact_id and c.org_id = k.org_id",
+  "join public.contacts c on c.id = k.contact_id and c.org_id = k.org_id",
+);
+
+// Mutation 2 (S19.5.5): add a recent-cutoff to the messages FTS subquery in
+// `classified` — must break search for a conversation whose ONLY matching
+// message is older than p_cutoff (the real function has NO such cutoff on
+// message search, per S19.5.3, verbatim from the old function).
+const ftsCutoffMutant = mustReplace(
+  newSql,
+  `          and matching_message.fts @@ search.tsq
+      )
+    ) -- messages_search_predicate (E2: downstream of the single contacts join, S19.5.2)`,
+  `          and matching_message.fts @@ search.tsq
+          and matching_message.created_at >= (select cutoff from bounds)
+      )
+    ) -- messages_search_predicate (E2: downstream of the single contacts join, S19.5.2)`,
+);
+
+// Mutation 4 (S19.5.5): is_test_traffic "deferred" -- simulate the AB1 bug
+// (computed as if the display strings were unavailable pre-pagination) by
+// hardcoding it false in the narrow CTE. Must break dispo_count/is_noise/
+// the dispo filter for the canary/jitter seeded threads.
+const isTestTrafficDeferredMutant = mustReplace(
+  newSql,
+  `      (
+        lower(trim(coalesce(coalesce(c.entity_name, nullif(concat_ws(' ', c.first_name, c.last_name), '')), ''))) like 'canary canary-%%'
+        or lower(trim(coalesce(nullif(concat_ws(', ', p.address, p.city, p.state), ''), ''))) like 'jitter %%'
+        or lower(trim(coalesce(nullif(concat_ws(', ', p.address, p.city, p.state), ''), ''))) like 'jitter-%%'
+      ) as is_test_traffic,`,
+  `      false as is_test_traffic,`,
+);
+
 describe("sms_inbox_thread_page_snapshot narrow-core rewrite (Spec v6, S18)", () => {
   let userId: string;
   let readThreadId: string;
@@ -117,6 +180,8 @@ describe("sms_inbox_thread_page_snapshot narrow-core rewrite (Spec v6, S18)", ()
   let jitterSpaceThreadId: string;
   let jitterDashThreadId: string;
   let nullNameThreadId: string;
+  let crossOrgContactThreadId: string;
+  let oldFtsOnlyThreadId: string;
 
   beforeAll(async () => {
     await db.connect();
@@ -230,6 +295,48 @@ describe("sms_inbox_thread_page_snapshot narrow-core rewrite (Spec v6, S18)", ()
         created_at: new Date().toISOString(), body: "null name msg", from_address: "+18160000006", to_address: "+18169999999",
       });
     }
+
+    // Case 5 (S19.5.5): a thread whose contact_id points at a contact that
+    // exists but belongs to a DIFFERENT org (TEST_ORG_B_ID). The FK on
+    // messages.contact_id only requires the contact id to exist somewhere,
+    // not that it match the message's org, so this is the schema-safe way
+    // to reproduce what the org-scoped `c.org_id = k.org_id` join condition
+    // treats identically to a missing or RLS-invisible contact: the join
+    // misses, contact_hit/is_test_traffic/contact_name all fall back to
+    // null/false, and the thread still appears (LEFT JOIN, not INNER).
+    crossOrgContactThreadId = randomUUID();
+    {
+      const foreignContactId = randomUUID();
+      const { error: contactError } = await service.from("contacts").insert({
+        id: foreignContactId, org_id: TEST_ORG_B_ID, first_name: "Foreign", last_name: "OrgB",
+      });
+      if (contactError) throw contactError;
+      await seedMessage({
+        contact_id: foreignContactId, conversation_id: crossOrgContactThreadId, direction: "inbound",
+        created_at: new Date().toISOString(), body: "cross-org contact msg", from_address: "+18160000007", to_address: "+18169999999",
+      });
+    }
+
+    // Case 6 (S19.5.5): a body-only FTS match OLDER than the 90-day cutoff.
+    // The conversation is IN the recent window (a fresh, unrelated message
+    // keeps it in `grouped`), but the ONLY message whose body matches the
+    // search term is older than CUTOFF. The old function's message-FTS
+    // subquery has no recent-cutoff (S19.5.3, copied verbatim) and queries
+    // `public.messages` directly (not the cutoff-filtered `recent_eligible`),
+    // so this thread must still be found by that search term.
+    oldFtsOnlyThreadId = randomUUID();
+    {
+      const contactId = await seedContact({ first_name: "Zephyr", last_name: "OldFts" });
+      const oldCreatedAt = new Date(Date.now() - 300 * 86400000).toISOString();
+      await seedMessage({
+        contact_id: contactId, conversation_id: oldFtsOnlyThreadId, direction: "inbound",
+        created_at: oldCreatedAt, body: "zephyrqueryterm mentioned only here", from_address: "+18160000008", to_address: "+18169999999",
+      });
+      await seedMessage({
+        contact_id: contactId, conversation_id: oldFtsOnlyThreadId, direction: "outbound",
+        created_at: new Date().toISOString(), body: "unrelated recent follow-up", from_address: "+18169999999", to_address: "+18160000008",
+      });
+    }
   }, 120000);
 
   afterAll(async () => {
@@ -278,6 +385,26 @@ describe("sms_inbox_thread_page_snapshot narrow-core rewrite (Spec v6, S18)", ()
     );
   });
 
+  it("REQUIRED case 5 (S19.5.5): org-scoped-missing contact still appears via LEFT JOIN, contact_hit falls back to false", async () => {
+    const oldDoc = await callOldViaSession(userId, { p_filter: "all", p_hide_noise: false });
+    const newDoc = await callNewViaSession(userId, { p_filter: "all", p_hide_noise: false });
+    expect(newDoc).toEqual(oldDoc);
+    const row = newDoc.rows.find(r => r.thread_id === crossOrgContactThreadId);
+    expect(row).toBeTruthy();
+    expect(row?.contact_name === null || row?.contact_name === "").toBe(true);
+    // Search must NOT surface this thread via a term that would only match
+    // via a real contact_hit -- the join miss must behave as false, not
+    // throw or wrongly match.
+    const searchDoc = await callNewViaSession(userId, { p_filter: "all", p_hide_noise: false, p_search: "Foreign" });
+    expect(searchDoc.rows.some(r => r.thread_id === crossOrgContactThreadId)).toBe(false);
+  });
+
+  it("REQUIRED case 6 (S19.5.5): body-only FTS match older than the cutoff is still found (no recent-cutoff on message search)", async () => {
+    await assertEquivalent(userId, { p_filter: "all", p_hide_noise: false, p_search: "zephyrqueryterm" });
+    const newDoc = await callNewViaSession(userId, { p_filter: "all", p_hide_noise: false, p_search: "zephyrqueryterm" });
+    expect(newDoc.rows.some(r => r.thread_id === oldFtsOnlyThreadId)).toBe(true);
+  });
+
   it.each(["all", "unread", "mine", "unassigned", "escalated", "dispo", "needs_outcome"] as const)(
     "matches the old oracle exactly for filter=%s (both noise settings, page 1)",
     async (filter) => {
@@ -308,6 +435,55 @@ describe("sms_inbox_thread_page_snapshot narrow-core rewrite (Spec v6, S18)", ()
     expect(Array.isArray(doc.rows)).toBe(true);
     expect(typeof doc.total).toBe("number");
     expect(doc.rows.some(r => r.thread_id === readThreadId)).toBe(true);
+  });
+
+  // S19.5.5 mutation-kill demos. Each test shadows the correct function
+  // with a MUTATED copy inside an open transaction, proves the seeded
+  // assertion now FAILS to hold, then rolls back so the correct rewrite is
+  // restored for every other test in this file. A green test that survives
+  // any of these mutations is not accepted.
+
+  it("mutation 1 (S19.5.5): inner-joining contacts drops the org-scoped-missing-contact thread", async () => {
+    await withMutant(innerSearchJoinMutant, async () => {
+      const mutatedDoc = await callNewViaSession(userId, { p_filter: "all", p_hide_noise: false });
+      expect(mutatedDoc.rows.some(r => r.thread_id === crossOrgContactThreadId)).toBe(false);
+    });
+  });
+
+  it("mutation 2 (S19.5.5): adding a recent-cutoff to the messages FTS subquery loses the old body-only match", async () => {
+    await withMutant(ftsCutoffMutant, async () => {
+      const mutatedDoc = await callNewViaSession(userId, { p_filter: "all", p_hide_noise: false, p_search: "zephyrqueryterm" });
+      expect(mutatedDoc.rows.some(r => r.thread_id === oldFtsOnlyThreadId)).toBe(false);
+    });
+  });
+
+  it("mutation 3 (S19.5.5): dropping the ILIKE escape clause removes an explicit defense-in-depth guard (structural check)", () => {
+    // Postgres's LIKE/ILIKE default escape character is already backslash,
+    // so this specific drop has no observable behavioral difference under
+    // default settings -- there is no safe way to demonstrate a behavioral
+    // kill without changing server-level LIKE escape defaults. Assert the
+    // clause is present in the shipped migration (regression guard against
+    // silently dropping it in a future edit) instead.
+    expect(newSql).toContain("escape E'\\\\'");
+    const mutated = newSql.replaceAll("escape E'\\\\'", "");
+    expect(mutated).not.toContain("escape E'\\\\'");
+  });
+
+  it("mutation 4 (S19.5.5): deferring is_test_traffic to false corrupts is_test_traffic/is_noise for canary/jitter threads", async () => {
+    await withMutant(isTestTrafficDeferredMutant, async () => {
+      const mutatedDoc = await callNewViaSession(userId, { p_filter: "all", p_hide_noise: false });
+      for (const id of [canaryThreadId, jitterSpaceThreadId, jitterDashThreadId]) {
+        const row = mutatedDoc.rows.find(r => r.thread_id === id);
+        expect(row).toBeTruthy();
+        // Correct behavior (REQUIRED case 3, above) is `true` for every one
+        // of these seeded rows; the mutation must flip it to `false`,
+        // proving is_test_traffic (and everything downstream: is_noise,
+        // dispo_count, the dispo filter) was computed pre-pagination from
+        // the verbatim predicates, not deferred past the point those
+        // consumers need it.
+        expect(row?.is_test_traffic).toBe(false);
+      }
+    });
   });
 });
 
