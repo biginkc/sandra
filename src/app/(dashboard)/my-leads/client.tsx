@@ -1,5 +1,5 @@
 'use client';
-import { useCallback,useEffect,useRef,useState } from 'react';
+import { useCallback,useEffect,useMemo,useRef,useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { useOptionalSoftphone } from '@/components/softphone/softphone-provider';
@@ -25,6 +25,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const router=useRouter();const softphone=useOptionalSoftphone();
   const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState('');
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
+  const tiles=useMemo(()=>kpis?kpiTiles(kpis):null,[kpis]);
   const [lastCheckedAt,setLastCheckedAt]=useState(initialSnapshot?.snapshotAt??null);
   const reviewingDetails=useRef(false);
   const [reviewing,setReviewing]=useState(false);
@@ -217,8 +218,8 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     </details>}
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
     {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
-    {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis?<p role="status">Loading My Leads…</p>:<>
-      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={kpiTiles(kpis)} search={search} selectedRepId={member}
+    {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
+      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={tiles} search={search} selectedRepId={member}
         onReviewingChange={onReviewingChange}
         detailRevision={detailRevision}
         repOptions={roster.members.filter(m=>m.acquisitionsEnabled||m.hasHistory||m.id===viewer.userId).map(m=>({id:m.id,label:m.label+(m.acquisitionsEnabled?'':' — Acquisitions disabled')}))}

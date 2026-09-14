@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as React from "react"
+import { DailyCallClock } from "./_components/daily-call-clock"
 
 const mocks = vi.hoisted(() => ({
   routerRefresh: vi.fn(),
@@ -46,7 +47,7 @@ vi.mock("./_components/queue", () => ({
     kpis: tiles,
   }: {
     onReviewingChange?: (active:boolean)=>void
-    kpis: { attempts: number }
+    kpis: AcquisitionKpis
     stages: { not_contacted?: { rows: Array<{ address: string; propertyId: string }> } }
     search: string
     onStageAction: (kind: string, row: { propertyId: string }) => void
@@ -61,6 +62,7 @@ vi.mock("./_components/queue", () => ({
     return (
       <section aria-label="Mock My Leads queue">
         <span data-testid="attempt-count">{tiles.attempts}</span>
+        <DailyCallClock kpis={tiles} />
         <button onClick={() => row && onStageAction("log-attempt", row)}>Log attempt</button>
         <button onClick={() => row && onStageAction("log-offer", row)}>Log offer</button>
         <button onClick={() => row && onStageAction("start-call", row)}>Start call</button>
@@ -530,3 +532,19 @@ describe("current metadata for rapid workflow openings",()=>{
     expect(await screen.findByRole("dialog")).toBeVisible();expect(screen.queryByLabelText("Motivation")).not.toBeInTheDocument();expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
   });
 });
+
+
+it("keeps elapsed call time advancing when opening a workflow dialog", () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] })
+  try {
+    const clockKpis = { ...kpis, lastAttemptClockVersion: 1, asOf: "2026-09-14T15:00:00Z", lastAttemptAt: "2026-09-14T14:59:00Z" }
+    const view = render(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId="rep-1" initialSnapshot={snapshot("Clock Fixture Lane")} initialKpis={clockKpis} />)
+    act(() => vi.advanceTimersByTime(5000))
+    expect(screen.getByText("1m 5s")).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "Log attempt" }))
+    expect(screen.getByText("1m 5s")).toBeInTheDocument()
+    act(() => vi.advanceTimersByTime(1000))
+    expect(screen.getByText("1m 6s")).toBeInTheDocument()
+    view.unmount()
+  } finally { vi.useRealTimers() }
+})
