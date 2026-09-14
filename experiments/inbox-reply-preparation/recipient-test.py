@@ -112,6 +112,15 @@ BEGIN
  r:=inbox_reply_preparation.destination_policy(o,'+18165550300',canonical,false);
  IF r->>'exclusion' IS DISTINCT FROM NULL THEN RAISE EXCEPTION 'Baseline eligible destination excluded (non-strict): %',r;END IF;
 
+ -- New (round 5): a destination NO contact in the org has ever saved on any
+ -- slot must fail closed under strict — bool_or over the empty slot-set is
+ -- NULL, not false, so this is the case that catches a vacuous fail-open in
+ -- the strict guard (coalesce(any_non_mobile,true)). This is exactly the
+ -- shape the acceptance re-run (E4) hits for a destination cleared/deleted
+ -- between capture and accept.
+ r:=inbox_reply_preparation.destination_policy(o,'+18165559999',canonical,true);
+ IF r->>'exclusion' IS DISTINCT FROM 'unclassified_phone' THEN RAISE EXCEPTION 'Strict must fail closed on an unsaved destination (no affirmative mobile evidence): %',r;END IF;
+
  -- Step 1: explicit sms_phone_suppressions row.
  INSERT INTO sms_phone_suppressions(org_id,phone_e164,source) VALUES(o,'+18165550300','owned_policy_test');
  r:=inbox_reply_preparation.destination_policy(o,'+18165550300',canonical,true);
@@ -139,8 +148,11 @@ BEGIN
  -- carries no suppression flag. (do_not_contact is deliberately excluded
  -- from this round-trip: contacts_true_dnc_lock_guard makes it a one-way
  -- lock once set, matching real compliance behavior — proven separately as
- -- insertion-only below, not toggled off.)
- INSERT INTO contacts(id,org_id,phone_2,phone_2_type,sms_opted_out) VALUES(third,o,'+18165550300','mobile',true);
+ -- insertion-only below, not toggled off.) Saved with a non-E.164 spelling
+ -- (round 5) — byte-identical to the queried destination would never
+ -- exercise inbox_reply_preparation.phone() normalization on this
+ -- cross-contact match path; a passing match here PROVES normalization.
+ INSERT INTO contacts(id,org_id,phone_2,phone_2_type,sms_opted_out) VALUES(third,o,'816-555-0300','mobile',true);
  r:=inbox_reply_preparation.destination_policy(o,'+18165550300',canonical,true);
  IF r->>'exclusion' IS DISTINCT FROM 'sms_suppressed' THEN RAISE EXCEPTION 'Step 3 cross-contact sms_opted_out bleed not enforced: %',r;END IF;
  UPDATE contacts SET sms_opted_out=false WHERE id=third;
@@ -186,5 +198,5 @@ ROLLBACK;
 """
 sql(context.removesuffix('COMMIT;\n')+recipient.removesuffix('COMMIT;\n').replace('\nBEGIN;\n','\n',1)+batch.removesuffix('COMMIT;\n').replace('\nBEGIN;\n','\n',1)+test)
 if sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamespace('inbox_reply_preparation') IS NULL")!='t':raise RuntimeError('Rollback failed')
-(P/'recipient-evidence.json').write_text(json.dumps({'source_sha256':hashlib.sha256(recipient.encode()).hexdigest(),'batch_sha256':hashlib.sha256(batch.encode()).hexdigest(),'context_sha256':hashlib.sha256(context.encode()).hexdigest(),'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'checks':['canonical contact, normalized saved destination, sender inventory and variables','read status leaves known-reply content revision unchanged','edited inbound advances reply revision','foreign and missing target denied without head allocation','landline and unsaved destination excluded','never-classified line type fails closed (unclassified_phone), not silently eligible','conflicting duplicate save (same destination saved as mobile AND landline) fails closed on every matching slot, not just the first by ordinal','inactive inventory sender excluded','canonical consent opt-out excluded','saved mobile with zero consent history fails closed (no_consent), not silently eligible','private API grants denied; whole proof rolled back','same destination flags every affected conversation; no silent deduplication','duplicate/null/empty target rejection','winter opening and closing boundaries','summer DST, territory and unknown state policy','51 canonical destinations blocked, 50 after one opt-out exclusion retained in review','501 target envelope rejected','destination_policy() E1-E4 convergence matrix: sms_phone_suppressions, global_phone_dnc_registry with no contact-level flag (round-4 case b), cross-contact do_not_contact/sms_opted_out bleed, cross-contact landline/unclassified slot on a SECOND contact (round-4 case a), and both strict-only gates (unclassified-phone, canonical no-consent) each independently inserted-and-excluded then removed-and-eligible-again'],'limits':['Private recipient capture only; not public preparation or dispatch authorization','Batch limit signal is not acceptance enforcement; immutable approval and actual dispatch still required','No provider call or production change']},indent=2)+'\n')
+(P/'recipient-evidence.json').write_text(json.dumps({'source_sha256':hashlib.sha256(recipient.encode()).hexdigest(),'batch_sha256':hashlib.sha256(batch.encode()).hexdigest(),'context_sha256':hashlib.sha256(context.encode()).hexdigest(),'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'checks':['canonical contact, normalized saved destination, sender inventory and variables','read status leaves known-reply content revision unchanged','edited inbound advances reply revision','foreign and missing target denied without head allocation','landline and unsaved destination excluded','never-classified line type fails closed (unclassified_phone), not silently eligible','conflicting duplicate save (same destination saved as mobile AND landline) fails closed on every matching slot, not just the first by ordinal','inactive inventory sender excluded','canonical consent opt-out excluded','saved mobile with zero consent history fails closed (no_consent), not silently eligible','private API grants denied; whole proof rolled back','same destination flags every affected conversation; no silent deduplication','duplicate/null/empty target rejection','winter opening and closing boundaries','summer DST, territory and unknown state policy','51 canonical destinations blocked, 50 after one opt-out exclusion retained in review','501 target envelope rejected','destination_policy() E1-E4 convergence matrix: sms_phone_suppressions, global_phone_dnc_registry with no contact-level flag (round-4 case b), cross-contact do_not_contact/sms_opted_out bleed, cross-contact landline/unclassified slot on a SECOND contact saved with a non-E.164 spelling to prove phone() normalization on the cross-contact match path (round-4 case a), both strict-only gates (unclassified-phone, canonical no-consent) each independently inserted-and-excluded then removed-and-eligible-again, and (round 5) a destination NO contact has ever saved on any slot failing closed under strict (empty slot-set, bool_or NULL coalesced to true — the vacuous fail-open the acceptance re-run path would hit without recipient()\'s own masks)'],'limits':['Private recipient capture only; not public preparation or dispatch authorization','Batch limit signal is not acceptance enforcement; immutable approval and actual dispatch still required','No provider call or production change']},indent=2)+'\n')
 print('Eighteen actual canonical recipient/batch groups passed; all new schema/data rolled back')

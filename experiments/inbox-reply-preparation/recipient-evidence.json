@@ -1,8 +1,8 @@
 {
-  "source_sha256": "3740a1b620901bbf1d67f76926666d96884d62f1aa3c56c82e0a3ecff3cfd255",
+  "source_sha256": "dccc07b5e3cfa8aa844206e77fc68794253b6b69de363491f4e7c5f75a50c3b4",
   "batch_sha256": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
   "context_sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
-  "runner_sha256": "afce44a84706fca36764279de1fd977c1743f33072f53a6dc366429b23a77155",
+  "runner_sha256": "5a0ab19e0fe39be9b67063d1a532c102de6afcca2dd43f4aa6b305dbd1c33a81",
   "checks": [
     "canonical contact, normalized saved destination, sender inventory and variables",
     "read status leaves known-reply content revision unchanged",
@@ -21,7 +21,7 @@
     "summer DST, territory and unknown state policy",
     "51 canonical destinations blocked, 50 after one opt-out exclusion retained in review",
     "501 target envelope rejected",
-    "destination_policy() E1-E4 convergence matrix: sms_phone_suppressions, global_phone_dnc_registry with no contact-level flag (round-4 case b), cross-contact do_not_contact/sms_opted_out bleed, cross-contact landline/unclassified slot on a SECOND contact (round-4 case a), and both strict-only gates (unclassified-phone, canonical no-consent) each independently inserted-and-excluded then removed-and-eligible-again"
+    "destination_policy() E1-E4 convergence matrix: sms_phone_suppressions, global_phone_dnc_registry with no contact-level flag (round-4 case b), cross-contact do_not_contact/sms_opted_out bleed, cross-contact landline/unclassified slot on a SECOND contact saved with a non-E.164 spelling to prove phone() normalization on the cross-contact match path (round-4 case a), both strict-only gates (unclassified-phone, canonical no-consent) each independently inserted-and-excluded then removed-and-eligible-again, and (round 5) a destination NO contact has ever saved on any slot failing closed under strict (empty slot-set, bool_or NULL coalesced to true \u2014 the vacuous fail-open the acceptance re-run path would hit without recipient()'s own masks)"
   ],
   "limits": [
     "Private recipient capture only; not public preparation or dispatch authorization",

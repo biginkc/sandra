@@ -81,7 +81,12 @@ BEGIN
  WHERE ct.org_id=o AND inbox_reply_preparation.phone(slots.phone)=destination;
  IF any_landline THEN RETURN jsonb_build_object('exclusion','landline');END IF;
  IF strict THEN
-  IF any_non_mobile THEN RETURN jsonb_build_object('exclusion','unclassified_phone');END IF;
+  -- coalesce: bool_or over an empty matching slot-set is NULL, not false. A
+  -- destination no contact in the org has ever saved as mobile (including
+  -- one cleared/deleted between capture and accept) must fail closed here,
+  -- not fall through as eligible for lack of evidence either way — strict
+  -- means "affirmatively saved mobile", never "no evidence" (Fable ruling).
+  IF coalesce(any_non_mobile,true) THEN RETURN jsonb_build_object('exclusion','unclassified_phone');END IF;
   SELECT ce.event_type INTO canonical_consent FROM public.consent_events ce WHERE ce.org_id=o AND ce.contact_id=canonical_contact AND ce.channel='sms' AND ce.event_type IN ('opt_in_marketing_written','opt_in_confirmed','opt_in_informational','opt_out','provider_auto_opt_out') ORDER BY ce.occurred_at DESC,(ce.event_type IN ('opt_out','provider_auto_opt_out')) DESC,ce.id DESC LIMIT 1;
   IF canonical_consent IS DISTINCT FROM 'opt_in_marketing_written' AND canonical_consent IS DISTINCT FROM 'opt_in_confirmed' AND canonical_consent IS DISTINCT FROM 'opt_in_informational' THEN RETURN jsonb_build_object('exclusion','no_consent');END IF;
  END IF;
