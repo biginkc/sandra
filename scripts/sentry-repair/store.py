@@ -96,25 +96,38 @@ class RepairStore:
         *,
         clock: Callable[[], float] | None = None,
         allowed_worktree_root: str | Path | None = None,
+        read_only: bool = False,
     ) -> None:
         self.path = str(path)
         self._uri = self.path.startswith("file:")
+        self.read_only = read_only
         self.clock = clock or time.time
         self.allowed_worktree_root = (
             Path(allowed_worktree_root).expanduser().resolve()
             if allowed_worktree_root
             else None
         )
-        if self.path != ":memory:":
+        if self.read_only and self.path == ":memory:":
+            raise ValueError("read-only repair store requires an existing database path")
+        if self.path != ":memory:" and not self.read_only:
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        if self.read_only:
+            resolved = Path(self.path).expanduser().resolve()
+            # SQLite URI fragments are meaningful.  Use a proper file URI so
+            # literal `#`, `?`, and spaces in an operator-selected path cannot
+            # redirect a purported read-only open to another writable file.
+            self.path = f"{resolved.as_uri()}?mode=ro"
+            self._uri = True
         self.db = sqlite3.connect(
             self.path, timeout=10, isolation_level=None, uri=self._uri
         )
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
-        self.db.execute("PRAGMA journal_mode = WAL")
+        if not self.read_only:
+            self.db.execute("PRAGMA journal_mode = WAL")
         self.db.execute("PRAGMA busy_timeout = 10000")
-        self._migrate()
+        if not self.read_only:
+            self._migrate()
 
     def close(self) -> None:
         self.db.close()
@@ -247,6 +260,26 @@ class RepairStore:
                 body_json TEXT NOT NULL,
                 created_at REAL NOT NULL,
                 sent_at REAL
+            );
+            CREATE TABLE IF NOT EXISTS github_links (
+                organization TEXT NOT NULL,
+                project TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                issue_number INTEGER NOT NULL,
+                generation INTEGER NOT NULL,
+                repository TEXT NOT NULL,
+                github_issue_number INTEGER,
+                node_id TEXT,
+                html_url TEXT,
+                marker_version INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL CHECK(status IN (
+                    'pending_create','create_unknown','created','readback_failed','closed_pending_sentry_verification'
+                )),
+                last_error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (organization,project,environment,issue_number,generation),
+                UNIQUE(repository, github_issue_number)
             );
             CREATE TABLE IF NOT EXISTS scheduler_slots (
                 slot_id TEXT PRIMARY KEY,
@@ -482,6 +515,20 @@ class RepairStore:
         if not isinstance(issue_number, int) or isinstance(issue_number, bool) or issue_number <= 0:
             raise ValueError("issue_number must be a positive numeric Sentry issue id")
         return organization, project, environment, issue_number
+
+    def get_github_link(
+        self, organization: str, project: str, environment: str, issue_number: int
+    ) -> sqlite3.Row | None:
+        """Return the current-generation GitHub link without changing state."""
+
+        self._issue_key(organization, project, environment, issue_number)
+        return self.db.execute(
+            """SELECT links.* FROM github_links AS links
+               JOIN issues USING (organization,project,environment,issue_number)
+               WHERE links.organization=? AND links.project=? AND links.environment=?
+                 AND links.issue_number=? AND links.generation=issues.generation""",
+            (organization, project, environment, issue_number),
+        ).fetchone()
 
     def get_cursor(self, organization: str, project: str, environment: str) -> str | None:
         row = self.db.execute(

@@ -4,6 +4,7 @@ import hashlib
 import os
 import sys
 import signal
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -29,6 +30,7 @@ from dispatch import (  # noqa: E402
     _review_record,
     SubprocessExecutor,
 )
+from github import github_dry_run  # noqa: E402
 from cli import parser as cli_parser  # noqa: E402
 from prompts import build_investigation_prompt, build_review_prompt  # noqa: E402
 from schedule import CHICAGO, cadence_minutes, due_slot, iter_slots, slot_identity  # noqa: E402
@@ -389,6 +391,111 @@ class ControllerTests(unittest.TestCase):
             intake_from_sentry(self.store, client)
         self.assertEqual(self.store.get_cursor("bmh-group", "sandra", "vercel-production"), "c0")
         self.assertEqual(client.calls, [None, "page-two"])
+
+    def test_sentry_intake_uses_scoped_organization_endpoint(self):
+        requests = []
+
+        class Response:
+            headers = {"Link": ""}
+
+            @staticmethod
+            def read():
+                return b"[]"
+
+        def opener(request, *, timeout):
+            requests.append((request.full_url, timeout))
+            return Response()
+
+        SentryClient(token="token", opener=opener).fetch_page()
+        url, timeout = requests[0]
+        self.assertEqual(timeout, 20)
+        self.assertIn("/api/0/organizations/bmh-group/issues/", url)
+        self.assertIn("project=sandra", url)
+        self.assertIn("environment=vercel-production", url)
+        self.assertNotIn("/api/0/projects/", url)
+
+    def test_github_dry_run_is_sanitized_and_non_mutating(self):
+        self.store.ingest_issues(
+            "bmh-group", "sandra", "vercel-production",
+            [IssueInput(501, title="customer@example.com should never reach GitHub", level="customer@example.com", release="a" * 40, payload={
+                "count": "12", "userCount": "2", "culprit": "private-value",
+                "tags": [
+                    {"key": "surface", "value": "cron_sweep"},
+                    {"key": "email", "value": "customer@example.com"},
+                ],
+            })],
+            cursor=None,
+        )
+        before = self.store.db.execute("SELECT COUNT(*) FROM github_links").fetchone()[0]
+        report = github_dry_run(self.store, "bmh-group", "sandra", "vercel-production", 501)
+        after = self.store.db.execute("SELECT COUNT(*) FROM github_links").fetchone()[0]
+        self.assertEqual(report.action, "would_create")
+        self.assertEqual(before, after)
+        self.assertIn("issue_id=501", report.body)
+        self.assertIn("`surface`", report.body)
+        self.assertIn("`" + "a" * 40 + "`", report.body)
+        self.assertIn("- Level: `unknown`", report.body)
+        self.assertNotIn("customer@example.com", report.body)
+        self.assertNotIn("private-value", report.body)
+
+    def test_read_only_store_never_creates_or_migrates_a_database(self):
+        missing = Path(self.tmp.name) / "missing-repair.db"
+        with self.assertRaises(sqlite3.OperationalError):
+            RepairStore(missing, read_only=True)
+        self.assertFalse(missing.exists())
+
+    def test_read_only_store_escapes_reserved_uri_path_characters(self):
+        path = Path(self.tmp.name) / "state#one?.db"
+        writable = RepairStore(path)
+        writable.close()
+        readonly = RepairStore(path, read_only=True)
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                readonly.db.execute("CREATE TABLE must_not_be_written (id INTEGER)")
+        finally:
+            readonly.close()
+        self.assertTrue(path.exists())
+        self.assertFalse((Path(self.tmp.name) / "state").exists())
+
+    def test_github_dry_run_suppresses_only_explicit_controlled_canary(self):
+        self.store.ingest_issues(
+            "bmh-group", "sandra", "vercel-production",
+            [IssueInput(502, payload={"tags": [
+                {"key": "kind", "value": "controlled"},
+                {"key": "surface", "value": "preview_canary"},
+            ]})],
+            cursor=None,
+        )
+        report = github_dry_run(self.store, "bmh-group", "sandra", "vercel-production", 502)
+        self.assertEqual(report.action, "suppress")
+        self.assertIn("controlled canary", report.reason)
+
+    def test_github_dry_run_does_not_suppress_partial_canary_marker(self):
+        self.store.ingest_issues(
+            "bmh-group", "sandra", "vercel-production",
+            [IssueInput(503, payload={"tags": [
+                {"key": "kind", "value": "controlled"},
+                {"key": "surface", "value": "workflow"},
+            ]})],
+            cursor=None,
+        )
+        report = github_dry_run(self.store, "bmh-group", "sandra", "vercel-production", 503)
+        self.assertEqual(report.action, "would_create")
+
+    def test_github_dry_run_suppresses_resolved_and_reconciles_unknown_link(self):
+        self.store.ingest_issues("bmh-group", "sandra", "vercel-production", [IssueInput(504)], cursor=None)
+        self.store.db.execute("UPDATE issues SET status='resolved' WHERE issue_number=504")
+        resolved = github_dry_run(self.store, "bmh-group", "sandra", "vercel-production", 504)
+        self.assertEqual(resolved.action, "suppress")
+        self.store.db.execute("UPDATE issues SET status='new' WHERE issue_number=504")
+        self.store.db.execute(
+            """INSERT INTO github_links(
+               organization,project,environment,issue_number,generation,repository,status,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            ("bmh-group", "sandra", "vercel-production", 504, 1, "biginkc/sandra", "create_unknown", 1, 1),
+        )
+        unknown = github_dry_run(self.store, "bmh-group", "sandra", "vercel-production", 504)
+        self.assertEqual(unknown.action, "reconcile")
 
     def test_sentry_success_commits_terminal_cursor(self):
         client = PagingClient([

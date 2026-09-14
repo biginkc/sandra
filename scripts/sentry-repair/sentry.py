@@ -78,13 +78,17 @@ class SentryClient:
 
     def fetch_page(self, cursor: str | None = None) -> SentryPage:
         query = {
+            "project": self.config.project,
             "environment": self.config.environment,
             "query": "is:unresolved",
             "limit": "100",
         }
         if cursor:
             query["cursor"] = cursor
-        path = f"/api/0/projects/{urllib.parse.quote(self.config.organization, safe='')}/{urllib.parse.quote(self.config.project, safe='')}/issues/"
+        # The project issue endpoint is deprecated.  Keep the project as an
+        # explicit filter on the organization endpoint so an organization-wide
+        # token cannot accidentally intake another BMH project.
+        path = f"/api/0/organizations/{urllib.parse.quote(self.config.organization, safe='')}/issues/"
         url = f"{self.config.base_url.rstrip('/')}{path}?{urllib.parse.urlencode(query)}"
         request = urllib.request.Request(
             url,

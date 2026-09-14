@@ -28,6 +28,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from dispatch import SubprocessExecutor, dispatch_attempt, dispatch_review  # noqa: E402
+from github import github_dry_run  # noqa: E402
 from schedule import due_slot  # noqa: E402
 from sentry import SentryClient, SentryConfig, intake_from_sentry, numeric_issue_key  # noqa: E402
 from store import IssueInput, RepairStore, default_db_path  # noqa: E402
@@ -171,6 +172,12 @@ def parser() -> argparse.ArgumentParser:
     slot.add_argument("--at", required=True, help="timezone-aware ISO timestamp")
 
     sub.add_parser("outbox", help="show deduplicated notifications (no sending)")
+
+    github_dry_run_command = sub.add_parser(
+        "github-dry-run",
+        help="render a sanitized GitHub-incident proposal without any network or state mutation",
+    )
+    github_dry_run_command.add_argument("--issue", type=int, required=True)
     return root
 
 
@@ -178,7 +185,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.command == "claim" and args.mode != "observe" and not args.worktree_root:
         raise ValueError("--worktree-root or SANDRA_REPAIR_WORKTREE_ROOT is required for repair claims")
-    store = RepairStore(args.db, allowed_worktree_root=args.worktree_root)
+    store = RepairStore(
+        args.db,
+        allowed_worktree_root=args.worktree_root,
+        # A dry run must neither initialize nor migrate durable state.  An
+        # absent or unreadable database is therefore a fail-closed error.
+        read_only=args.command == "github-dry-run",
+    )
     try:
         if args.command == "init":
             print(json.dumps({"db": str(Path(args.db).expanduser())}))
@@ -329,6 +342,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "outbox":
             print(json.dumps(store.list_outbox(), sort_keys=True))
+            return 0
+        if args.command == "github-dry-run":
+            report = github_dry_run(
+                store,
+                SentryConfig().organization,
+                SentryConfig().project,
+                SentryConfig().environment,
+                args.issue,
+            )
+            print(json.dumps(report.__dict__, sort_keys=True))
             return 0
         raise AssertionError(args.command)
     finally:
