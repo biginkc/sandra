@@ -265,6 +265,7 @@ class SubprocessExecutor:
             try:
                 process = subprocess.Popen(
                     command,
+                    stdin=subprocess.DEVNULL,
                     stdout=stdout_file,
                     stderr=stderr_file,
                     cwd=self.worktree,
@@ -301,6 +302,12 @@ class SubprocessExecutor:
                         termination_signals.append(signal.SIGHUP)
                     for signum in termination_signals:
                         try:
+                            # Preserve nohup/launchd's inherited ignore
+                            # disposition. Overriding SIG_IGN would turn an
+                            # intentionally detached controller into one that
+                            # unexpectedly exits on terminal hangup.
+                            if signal.getsignal(signum) == signal.SIG_IGN:
+                                continue
                             previous_handlers[signum] = signal.signal(signum, stop_child_on_signal)
                         except (OSError, ValueError):
                             continue
@@ -482,11 +489,24 @@ def _fresh_review_checkout(worktree: str, expected_sha: str):
                 raise StateError(f"unable to create independent review checkout: {cloned.stderr.strip()}")
             detached = _git_capture(checkout, "checkout", "--quiet", "--detach", str(expected_sha))
             cloned_head = _git_capture(checkout, "rev-parse", "HEAD")
+            if detached.returncode != 0 or cloned_head.stdout.strip().lower() != str(expected_sha).lower():
+                raise StateError("independent review checkout is not at immutable reviewed SHA")
+            project_config = Path(checkout) / ".codex" / "config.toml"
+            if project_config.exists() or project_config.is_symlink():
+                if not project_config.is_file() and not project_config.is_symlink():
+                    raise StateError("project Codex config must not enter independent review")
+                # A committed project config can change model policy, tools,
+                # or approvals. Remove it from the ephemeral review checkout
+                # before launching the reviewer.
+                project_config.unlink()
+                masked = _git_capture(
+                    checkout, "update-index", "--skip-worktree", ".codex/config.toml"
+                )
+                if masked.returncode != 0:
+                    raise StateError("unable to mask project Codex config in review checkout")
             cloned_clean = _git_capture(
                 checkout, "status", "--porcelain=v1", "--untracked-files=all"
             )
-            if detached.returncode != 0 or cloned_head.stdout.strip().lower() != str(expected_sha).lower():
-                raise StateError("independent review checkout is not at immutable reviewed SHA")
             if cloned_clean.returncode != 0 or cloned_clean.stdout:
                 raise StateError("independent review checkout is not clean")
             yield checkout

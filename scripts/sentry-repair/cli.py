@@ -108,6 +108,11 @@ def parser() -> argparse.ArgumentParser:
     _add_fencing_input(finish_investigation)
     finish_investigation.add_argument("--evidence", required=True)
 
+    fail = sub.add_parser("fail", help="explicitly terminalize a failed or rejected repair")
+    fail.add_argument("--attempt-id", required=True)
+    _add_fencing_input(fail)
+    fail.add_argument("--reason", required=True)
+
     heartbeat = sub.add_parser("heartbeat", help="extend one active lease without shortening it")
     heartbeat.add_argument("--attempt-id", required=True)
     _add_fencing_input(heartbeat)
@@ -244,6 +249,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.attempt_id, _fencing_token(args), evidence=args.evidence
             )
             print(json.dumps({"investigation_finished": args.attempt_id}))
+            return 0
+        if args.command == "fail":
+            store.fail_attempt(
+                args.attempt_id, _fencing_token(args), reason=args.reason
+            )
+            print(json.dumps({"failed": args.attempt_id}))
             return 0
         if args.command == "heartbeat":
             lease_until = store.heartbeat(

@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -140,6 +142,7 @@ class RepairStore:
                 last_seen_identity TEXT,
                 last_regression_identity TEXT,
                 regression_verified_at REAL,
+                regression_evidence TEXT,
                 payload_json TEXT NOT NULL DEFAULT '{}',
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
@@ -193,6 +196,7 @@ class RepairStore:
                 environment TEXT NOT NULL,
                 deployed_sha TEXT NOT NULL,
                 provider TEXT,
+                ancestry_verified INTEGER NOT NULL DEFAULT 0 CHECK(ancestry_verified IN (0,1)),
                 recorded_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS verifications (
@@ -266,6 +270,38 @@ class RepairStore:
         ):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE reviews ADD COLUMN {name} {ddl}")
+        issue_columns = {
+            row["name"]
+            for row in self.db.execute("PRAGMA table_info(issues)").fetchall()
+        }
+        if "regression_evidence" not in issue_columns:
+            self.db.execute("ALTER TABLE issues ADD COLUMN regression_evidence TEXT")
+        deployment_columns = {
+            row["name"]
+            for row in self.db.execute("PRAGMA table_info(deployments)").fetchall()
+        }
+        if "ancestry_verified" not in deployment_columns:
+            self.db.execute(
+                "ALTER TABLE deployments ADD COLUMN ancestry_verified INTEGER NOT NULL DEFAULT 0"
+            )
+        for row in self.db.execute(
+            "SELECT attempt_id,evidence_snapshot_json FROM reviews "
+            "WHERE evidence_snapshot_json IS NOT NULL"
+        ).fetchall():
+            try:
+                parsed = json.loads(row["evidence_snapshot_json"])
+                canonical = json.dumps(
+                    self._canonical_snapshot(parsed),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            except (TypeError, ValueError):
+                continue
+            if canonical != row["evidence_snapshot_json"]:
+                self.db.execute(
+                    "UPDATE reviews SET evidence_snapshot_json=? WHERE attempt_id=?",
+                    (canonical, row["attempt_id"]),
+                )
         # Legacy controller databases stored the random token itself. Convert
         # that representation once; current rows store only its digest.
         for table in ("attempts", "active_lease"):
@@ -281,6 +317,40 @@ class RepairStore:
 
     def _now(self, now: float | None = None) -> float:
         return float(self.clock()) if now is None else float(now)
+
+    @staticmethod
+    def _canonical_snapshot(value: Any) -> Any:
+        """Remove storage timestamps from immutable review evidence."""
+
+        if isinstance(value, Mapping):
+            return {
+                str(key): RepairStore._canonical_snapshot(item)
+                for key, item in value.items()
+                if key != "recorded_at"
+            }
+        if isinstance(value, list):
+            return [RepairStore._canonical_snapshot(item) for item in value]
+        return value
+
+    @staticmethod
+    def _observed_timestamp(value: Any) -> float:
+        """Parse an evidence observation timestamp into UTC epoch seconds."""
+
+        if isinstance(value, bool):
+            raise ValueError("observation timestamp cannot be boolean")
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("observation timestamp is required")
+        if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", text):
+            return float(text)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            raise ValueError("observation timestamp must include a timezone")
+        return parsed.astimezone(timezone.utc).timestamp()
 
     @staticmethod
     def _fence_digest(token: str) -> str:
@@ -387,8 +457,8 @@ class RepairStore:
                         """INSERT INTO issues(
                            organization,project,environment,issue_number,generation,status,title,level,
                            release,event_id,first_seen,last_seen,last_seen_identity,last_regression_identity,
-                           regression_verified_at,payload_json,created_at,updated_at)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           regression_verified_at,regression_evidence,payload_json,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             organization,
                             project,
@@ -405,6 +475,7 @@ class RepairStore:
                             identity,
                             identity if item.regression_verified else None,
                             now if item.regression_verified else None,
+                            item.regression_evidence if item.regression_verified else None,
                             json.dumps(payload, sort_keys=True, separators=(",", ":")),
                             now,
                             now,
@@ -431,6 +502,7 @@ class RepairStore:
                            first_seen=COALESCE(first_seen,?),last_seen=?,last_seen_identity=?,
                            last_regression_identity=CASE WHEN ? THEN ? ELSE last_regression_identity END,
                            regression_verified_at=CASE WHEN ? THEN ? ELSE regression_verified_at END,
+                           regression_evidence=CASE WHEN ? THEN ? ELSE regression_evidence END,
                            payload_json=?,updated_at=?
                            WHERE organization=? AND project=? AND environment=? AND issue_number=?""",
                         (
@@ -447,6 +519,8 @@ class RepairStore:
                             identity,
                             1 if regression else 0,
                             now,
+                            1 if regression else 0,
+                            item.regression_evidence,
                             json.dumps(payload, sort_keys=True, separators=(",", ":")),
                             now,
                             organization,
@@ -670,6 +744,8 @@ class RepairStore:
             raise StateError("review requires successful persisted CI evidence")
         if deployment is None or not deployment["deployed_sha"]:
             raise StateError("review requires persisted deployment evidence")
+        if int(deployment["ancestry_verified"] or 0) != 1:
+            raise StateError("review requires a verified deployment target ancestry")
         functional = verifications.get("functional_probe")
         if not isinstance(functional, Mapping):
             raise StateError("review requires persisted functional probe evidence")
@@ -685,6 +761,16 @@ class RepairStore:
             raise StateError("review requires persisted Sentry no-regression evidence")
         if not str(sentry.get("query_window") or "").strip() or not str(sentry.get("observed_at") or "").strip():
             raise StateError("review requires Sentry query window and observation timestamp")
+        try:
+            deployment_recorded_at = float(deployment["recorded_at"])
+            functional_observed_at = self._observed_timestamp(functional["observed_at"])
+            sentry_observed_at = self._observed_timestamp(sentry["observed_at"])
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise StateError("review evidence timestamps must be timezone-aware") from exc
+        if functional_observed_at < deployment_recorded_at:
+            raise StateError("functional observation must be at or after deployment")
+        if sentry_observed_at < deployment_recorded_at:
+            raise StateError("Sentry observation must be at or after deployment")
         snapshot = {
             "reviewed_head_sha": str(pr["head_sha"]),
             "reviewed_ci_run_id": str(pr["ci_run_id"]),
@@ -697,9 +783,9 @@ class RepairStore:
             "reviewed_sentry_observed_at": sentry.get("observed_at"),
             "evidence_snapshot_json": json.dumps(
                 {
-                    "pull_request": dict(pr),
-                    "deployment": dict(deployment),
-                    "verifications": verifications,
+                    "pull_request": self._canonical_snapshot(dict(pr)),
+                    "deployment": self._canonical_snapshot(dict(deployment)),
+                    "verifications": self._canonical_snapshot(verifications),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -933,23 +1019,71 @@ class RepairStore:
     ) -> None:
         if not environment or not deployed_sha:
             raise ValueError("deployment environment and deployed SHA are required")
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", str(deployed_sha)):
+            raise ValueError("deployed SHA must be a git SHA")
         self.db.execute("BEGIN IMMEDIATE")
         try:
             attempt = self._fenced_attempt_locked(attempt_id, fencing_token)
             if str(environment) != str(attempt["environment"]):
                 raise StateError("deployment environment must match attempt environment")
             self._ensure_evidence_mutable_locked(attempt_id)
+            pull_request = self.db.execute(
+                "SELECT head_sha FROM pull_requests WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if pull_request is None:
+                raise StateError("deployment requires persisted pull request evidence")
+            pr_head = str(pull_request["head_sha"])
+            ancestry_verified = self._verify_deployment_ancestry(
+                attempt, pr_head, str(deployed_sha)
+            )
             self.db.execute(
-                """INSERT INTO deployments(attempt_id,environment,deployed_sha,provider,recorded_at)
-                   VALUES(?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
+                """INSERT INTO deployments(attempt_id,environment,deployed_sha,provider,
+                   ancestry_verified,recorded_at)
+                   VALUES(?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
                    environment=excluded.environment,deployed_sha=excluded.deployed_sha,
-                   provider=excluded.provider,recorded_at=excluded.recorded_at""",
-                (attempt_id, environment, deployed_sha, provider, self._now()),
+                   provider=excluded.provider,ancestry_verified=excluded.ancestry_verified,
+                   recorded_at=excluded.recorded_at""",
+                (
+                    attempt_id,
+                    environment,
+                    deployed_sha,
+                    provider,
+                    1 if ancestry_verified else 0,
+                    self._now(),
+                ),
             )
             self.db.execute("COMMIT")
         except Exception:
             self.db.execute("ROLLBACK")
             raise
+
+    @staticmethod
+    def _verify_deployment_ancestry(
+        attempt: Mapping[str, Any], pr_head_sha: str, deployed_sha: str
+    ) -> bool:
+        """Verify that a deployed target contains the reviewed PR head."""
+
+        if pr_head_sha.lower() == deployed_sha.lower():
+            return True
+        try:
+            worktree = str(attempt["worktree"] or "")
+        except (KeyError, IndexError, TypeError):
+            worktree = ""
+        if not worktree:
+            raise StateError("merge deployment requires the owned worktree for ancestry verification")
+        try:
+            result = subprocess.run(
+                ["git", "-C", worktree, "merge-base", "--is-ancestor", pr_head_sha, deployed_sha],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise StateError("unable to verify deployed commit ancestry") from exc
+        if result.returncode != 0:
+            raise StateError("deployed commit does not descend from PR head")
+        return True
 
     def finish_investigation(
         self,

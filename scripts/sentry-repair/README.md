@@ -38,6 +38,8 @@ its evidence is collected, the operator must run
 `finish-investigation --attempt-id ID --evidence TEXT` with the fencing token.
 That explicit transition closes the attempt and releases the global lease;
 letting the lease expire instead requires normal stale-lease reconciliation.
+Use the fenced `fail --attempt-id ID --reason TEXT` transition when a repair is
+rejected or otherwise cannot safely complete.
 
 Investigate and repair claims require an existing absolute Git worktree (and
 optionally an exact branch). The controller verifies it is a linked worktree,
@@ -82,9 +84,10 @@ secrets are removed. A repair attempt admits one worker dispatch and one
 execution session; later dispatches are rejected.
 
 Completion requires an exact evidence record tying together the PR head SHA,
-successful CI run and SHA, deployed SHA, passing functional probe, Sentry
-no-regression observation, and independent Astra approval. Status labels alone
-are rejected. The outbox is persisted and deduplicated for a future notifier;
+successful CI run and SHA, a production deployment target whose commit is the
+PR head or a verified descendant, passing functional probe and Sentry
+no-regression observations recorded after deployment, and independent Astra
+approval. Status labels alone are rejected. The outbox is persisted and deduplicated for a future notifier;
 this package intentionally has no Slack sender.
 
 The schedule helper evaluates America/Chicago local day/night boundaries:

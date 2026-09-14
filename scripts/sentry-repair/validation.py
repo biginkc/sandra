@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 
@@ -40,6 +41,39 @@ def _positive_int(value: Any, label: str) -> int:
     if parsed <= 0:
         raise CompletionError(f"{label} must be a positive integer")
     return parsed
+
+
+def _timestamp(value: Any, label: str) -> float:
+    if isinstance(value, bool):
+        raise CompletionError(f"{label} must be a timestamp")
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip()
+    if not text:
+        raise CompletionError(f"{label} must be a timestamp")
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", text):
+        return float(text)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise CompletionError(f"{label} must be an ISO timestamp") from exc
+    if parsed.tzinfo is None:
+        raise CompletionError(f"{label} must include a timezone")
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
+def _canonical_snapshot(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_snapshot(item)
+            for key, item in value.items()
+            if key != "recorded_at"
+        }
+    if isinstance(value, list):
+        return [_canonical_snapshot(item) for item in value]
+    return value
 
 
 def validate_completion_record(
@@ -99,8 +133,13 @@ def validate_completion_record(
         raise CompletionError("deployment environment does not match persisted deployment")
     if _sha(deployment.get("deployed_sha"), "deployment.deployed_sha").lower() != str(deployment_persisted["deployed_sha"]).lower():
         raise CompletionError("deployed SHA does not match persisted deployment")
-    if str(deployment.get("deployed_sha")).lower() != head_sha.lower():
-        raise CompletionError("deployed SHA must equal PR head SHA")
+    if str(deployment.get("deployed_sha")).lower() != head_sha.lower() and int(
+        deployment_persisted.get("ancestry_verified") or 0
+    ) != 1:
+        raise CompletionError("deployed SHA must equal PR head or have verified ancestry")
+    deployment_recorded_at = _timestamp(
+        deployment_persisted.get("recorded_at"), "persisted deployment.recorded_at"
+    )
 
     functional = _mapping(record.get("functional_probe"), "functional_probe")
     if str(functional.get("status", "")).lower() not in {"pass", "passed", "success"}:
@@ -130,6 +169,8 @@ def validate_completion_record(
         raise CompletionError("functional probe evidence id does not match persisted evidence")
     if functional.get("observed_at") != persisted_functional.get("observed_at"):
         raise CompletionError("functional probe timestamp does not match persisted evidence")
+    if _timestamp(persisted_functional.get("observed_at"), "functional_probe.observed_at") < deployment_recorded_at:
+        raise CompletionError("functional observation must be at or after deployment")
 
     observation = _mapping(record.get("sentry_observation"), "sentry_observation")
     if observation.get("no_regression") is not True:
@@ -146,6 +187,8 @@ def validate_completion_record(
         raise CompletionError("Sentry query window does not match persisted evidence")
     if observation.get("observed_at") != persisted_observation.get("observed_at"):
         raise CompletionError("Sentry observed_at does not match persisted evidence")
+    if _timestamp(persisted_observation.get("observed_at"), "sentry_observation.observed_at") < deployment_recorded_at:
+        raise CompletionError("Sentry observation must be at or after deployment")
     persisted_review = _mapping(context.get("review"), "persisted independent review")
     if persisted_review.get("model") != "gpt-6-astra" or persisted_review.get("effort") != "medium":
         raise CompletionError("Astra medium review evidence is required")
@@ -194,9 +237,12 @@ def validate_completion_record(
     if not isinstance(snapshot, Mapping):
         raise CompletionError("reviewed evidence snapshot is invalid")
     if (
-        snapshot.get("pull_request") != dict(pr_persisted)
-        or snapshot.get("deployment") != dict(deployment_persisted)
-        or snapshot.get("verifications") != dict(context.get("verifications", {}))
+        _canonical_snapshot(snapshot.get("pull_request"))
+        != _canonical_snapshot(dict(pr_persisted))
+        or _canonical_snapshot(snapshot.get("deployment"))
+        != _canonical_snapshot(dict(deployment_persisted))
+        or _canonical_snapshot(snapshot.get("verifications"))
+        != _canonical_snapshot(dict(context.get("verifications", {})))
     ):
         raise CompletionError("reviewed evidence snapshot no longer matches persisted evidence")
 
