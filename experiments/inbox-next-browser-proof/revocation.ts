@@ -1,0 +1,11 @@
+import assert from "node:assert/strict";
+import {chromium} from "@playwright/test";
+import {readFile,writeFile} from "node:fs/promises";
+import {execFileSync} from "node:child_process";
+async function main(){assert(process.argv.includes("--run-owned-revocation-proof"));const config=JSON.parse(await readFile("experiments/inbox-next-browser-proof/application-evidence.json","utf8"));const browser=await chromium.launch({headless:true});const page=await browser.newPage();try{
+ await page.goto(`${config.authOrigin}/__fixture/login?return=${encodeURIComponent(config.nextOrigin+"/inbox")}`);await page.getByRole("button",{name:"Open Inbox Ada",exact:true}).waitFor();await page.getByRole("checkbox",{name:"Select Inbox Ada",exact:true}).click();const ack=page.waitForResponse(r=>new URL(r.url()).pathname==="/api/inbox/read-acknowledgments");await page.getByRole("button",{name:"Open Inbox Ada",exact:true}).click();assert.equal((await ack).status(),200);
+ const sql="BEGIN;DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-production-candidate-owned-synthetic') THEN RAISE EXCEPTION 'Owned fixture required';END IF;END $$;DELETE FROM auth.sessions WHERE user_id IN(SELECT id FROM auth.users WHERE email LIKE 'inbox-fixture-%@bmhgroupkc.com');COMMIT;";
+ execFileSync("docker",["--host","unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock","exec","-i","sandra-inbox-projection-t2-db","psql","-XqAt","-U","supabase_admin","-d",config.database,"-v","ON_ERROR_STOP=1"],{input:sql,stdio:["pipe","ignore","ignore"]});
+ await page.waitForTimeout(18000);const detailVisible=await page.getByRole("region",{name:"Conversation history"}).isVisible(),rows=await page.getByRole("checkbox",{name:"Select Inbox Ada",exact:true}).count();await writeFile("experiments/inbox-next-browser-proof/revocation-evidence.json",JSON.stringify({detailVisible,rows,text:await page.locator("body").innerText(),passed:!detailVisible&&rows===0},null,2)+"\n");assert(!detailVisible&&rows===0,"Revoked session must clear detail and rows");console.log("Actual revoked session clears private browser state");
+ }finally{await browser.close();}}
+void main().catch(error=>{console.error(error instanceof Error?error.message:"Owned revocation proof failed");process.exitCode=1;});

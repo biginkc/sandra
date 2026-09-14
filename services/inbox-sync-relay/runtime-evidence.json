@@ -1,0 +1,34 @@
+{
+  "checks": [
+    "built nonroot/read-only/capped relay reaches actual pinned Electric readiness",
+    "unauthenticated real shape request denied",
+    "authenticated actual Electric shape returns exact owned canonical projection row",
+    "configured8000ms idle poll completes below relay14s deadline"
+  ],
+  "image_id": "sha256:e6fefd846083155d368005ef91e135d0408318a83f7be1dc5aeb5d3a99e5da68",
+  "node_version": "v22.23.2",
+  "source_sha256": "7c8e7d73dd69045676bce17aaad6479739ef129b89157a02b144b7207c9f5e2b",
+  "dockerfile_sha256": "1e33ec793747bee85f0e390017074658da88b027a273c944faeda6625b0e5bbe",
+  "runner_sha256": "a65654113005b34c99111574b3ed9b480aa49d8f8b15ff64badb9847565c2f7a",
+  "rows": [
+    {
+      "assigned_label": "Unassigned",
+      "context": "Owned",
+      "name": "Synthetic relay proof",
+      "org_id": "4e517ca1-7860-4c47-9a5d-97b7559ddb49",
+      "outcome_label": "None",
+      "preview": "Hello",
+      "target_id": "c79c5835-3a9d-4f62-be9a-5344dfd2449b",
+      "target_kind": "known_conversation",
+      "time_label": "Now",
+      "unread": "true"
+    }
+  ],
+  "idle_poll_seconds": 8.009,
+  "idle_poll_status": 200,
+  "limits": [
+    "owned T1 fixture only; no Railway provision or production proof",
+    "no end-to-end browser latency claim"
+  ],
+  "cleanup": "Exact owned relay/Electric containers, slot/publication and synthetic table/schema removed; existing Electric and DB preserved"
+}

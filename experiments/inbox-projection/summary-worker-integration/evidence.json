@@ -1,0 +1,143 @@
+{
+  "at": "2026-09-13T12:49:48Z",
+  "checks": [
+    {
+      "name": "one compute snapshot captures actual summary/G/R; full JSON and CAS metadata publish atomically",
+      "passed": true
+    },
+    {
+      "name": "older captured generation can publish while a newer message generation remains pending",
+      "passed": true
+    },
+    {
+      "name": "new publication rejects stale revision peer and older generation without changing stored JSON",
+      "passed": true
+    },
+    {
+      "name": "full JSON write failure rolls back installed CAS and dirty acknowledgment; complete retry succeeds",
+      "passed": true
+    },
+    {
+      "name": "covered message read/body changes publish real unread and preview fields",
+      "passed": true
+    },
+    {
+      "name": "negative coverage proof: contact/property/route/status updates do not dirty current trigger despite changed real summary",
+      "passed": true
+    },
+    {
+      "name": "explicit covered event recomputes and persists changed contact/property/route fields",
+      "passed": true
+    },
+    {
+      "name": "negative coverage proof: expiry requires scheduling; time alone does not dirty or replace stored summary",
+      "passed": true
+    },
+    {
+      "name": "deletion publishes full keyed tombstone and retains monotonic projection metadata",
+      "passed": true
+    },
+    {
+      "name": "delete/reinsert restores summary with fresh generation/revision; stale tombstone rejected",
+      "passed": true
+    },
+    {
+      "name": "worker-private snapshot denies authenticated/service roles",
+      "passed": true
+    },
+    {
+      "name": "all existing dirty/CAS/compute definitions preserved",
+      "passed": true
+    }
+  ],
+  "observations": {
+    "uncovered_dependency_gap": {
+      "dirty_generation": "5",
+      "stored_exists": true,
+      "fresh_compute_exists": false,
+      "updates": [
+        "contact name",
+        "property status",
+        "message from_address",
+        "message status"
+      ]
+    },
+    "expiry_gap": {
+      "stored_exists": true,
+      "fresh_future_compute_exists": false,
+      "generation_unchanged": true
+    }
+  },
+  "org": "996cf1d3-21f2-43a1-b3fc-c5e9c8c64e4d",
+  "conversation": "b474e447-f30e-4864-b6be-dfb056920aa2",
+  "as_of": "2026-09-13 12:49:46.243037+00",
+  "dependency_hashes": {
+    "inbox_t2_summary_contract.compute(uuid,uuid,timestamptz)": "580a6c1adba5fb6b15bbd6c52a285a1e",
+    "inbox_t2_projection_proof.snapshot(uuid,uuid)": "09382288b201875dde751567f14efbed",
+    "inbox_t2_projection_proof.commit_candidate(jsonb)": "7039b895deb02ef6bd06390483fcbde5",
+    "inbox_t2_projection_proof.capture_dirty()": "081f62e7e45ac115bf745db859977c9c"
+  },
+  "setup_sha256": "d0d4ade9f4ea9d3da0e84b95fc73236aee11c68919c662b512489236e95084d4",
+  "final_state": {
+    "ack": "8",
+    "summary": {
+      "as_of": "2026-09-13T12:49:46.243037+00:00",
+      "cutoff": "2026-06-15T12:49:46.243037+00:00",
+      "exists": true,
+      "org_id": "996cf1d3-21f2-43a1-b3fc-c5e9c8c64e4d",
+      "is_noise": false,
+      "contact_id": "d375fd4a-e766-47ac-8d5e-dada50f54d5d",
+      "has_recent": true,
+      "has_inbound": true,
+      "property_id": "f2f5c761-f0a8-4c16-b8c0-2e0b4c4a260b",
+      "target_kind": "known_conversation",
+      "contact_name": "Changed Initial",
+      "is_opted_out": false,
+      "unread_count": 1,
+      "is_dnc_locked": false,
+      "needs_outcome": true,
+      "sms_opted_out": false,
+      "do_not_contact": false,
+      "outreach_dispo": null,
+      "visible_review": false,
+      "conversation_id": "b474e447-f30e-4864-b6be-dfb056920aa2",
+      "is_test_traffic": false,
+      "last_message_at": "2026-09-13T12:49:46.243037+00:00",
+      "last_message_id": "90728df1-e53b-4e46-8397-857145143266",
+      "property_status": "prospect",
+      "assigned_user_id": null,
+      "property_address": "Synthetic worker f2f5c761-f0a8-4c16-b8c0-2e0b4c4a260b, MO",
+      "next_window_expiry": "2026-12-12T12:49:46.243037+00:00",
+      "ai_responder_status": null,
+      "assignment_eligible": false,
+      "is_phone_suppressed": false,
+      "last_message_status": "received",
+      "last_message_preview": "returned",
+      "needs_human_attention": false,
+      "thread_business_phone": null,
+      "thread_customer_phone": null,
+      "last_message_direction": "inbound",
+      "visible_all_hide_noise": true,
+      "visible_all_show_noise": true,
+      "ai_disposition_review_id": null,
+      "visible_unread_hide_noise": true,
+      "ai_disposition_review_status": null,
+      "visible_escalated_hide_noise": false,
+      "ai_disposition_review_created_at": null,
+      "visible_needs_outcome_hide_noise": true,
+      "ai_disposition_review_disposition": null,
+      "ai_disposition_review_source_inbound_message_id": null
+    },
+    "revision": "8",
+    "generation": "8",
+    "full_revision": "8",
+    "full_generation": "8",
+    "source_generation": "8"
+  },
+  "limits": [
+    "Private worker fixture only; owner-computed candidate is trusted, not client input",
+    "Existing dirty trigger lacks complete dependency fanout and expiry scheduling; explicit negative proofs recorded",
+    "Side table must only be published through this wrapper for these keys; old direct CAS does not update full JSON",
+    "No production migration/routes/auth/queue delivery or load guarantee"
+  ]
+}

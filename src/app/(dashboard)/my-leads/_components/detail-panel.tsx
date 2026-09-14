@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { AlertCircle, CalendarClock, FileText, History, Play, PhoneCall, RefreshCw } from "lucide-react"
 
+import { MyLeadCallArtifacts } from "./call-artifacts"
 import { AddNoteComposer } from "@/app/(dashboard)/leads/[id]/notes-feed"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -17,11 +18,12 @@ import type {
 } from "./types"
 
 type DetailPagingState = Partial<
-  Record<MyLeadDetailGroupName, { loading: boolean; error: string | null }>
+  Record<MyLeadDetailGroupName, { loading: boolean; error: string | null; cursor: string | null }>
 >
 
 export function MyLeadDetailPanel({
   state,
+  visible = true,
   propertyId,
   onRetry,
   onChanged,
@@ -53,9 +55,9 @@ export function MyLeadDetailPanel({
   }
 
   const { detail } = state
-  const loadGroup = async (group: MyLeadDetailGroupName, cursor: string) => {
+  const loadGroup = async (group: MyLeadDetailGroupName, cursor: string | null) => {
     if (!onLoadDetailPage) return
-    setPaging((previous) => ({ ...previous, [group]: { loading: true, error: null } }))
+    setPaging((previous) => ({ ...previous, [group]: { loading: true, error: null, cursor } }))
     let result: MyLeadDetailPageResult
     try {
       result = await onLoadDetailPage(group, cursor)
@@ -63,13 +65,14 @@ export function MyLeadDetailPanel({
       result = { ok: false, message: "Unable to load more detail." }
     }
     if (result.ok && result.group === group) {
-      setPaging((previous) => ({ ...previous, [group]: { loading: false, error: null } }))
+      setPaging((previous) => ({ ...previous, [group]: { loading: false, error: null, cursor } }))
       return
     }
     setPaging((previous) => ({
       ...previous,
       [group]: {
         loading: false,
+        cursor,
         error: result.ok ? "The detail page did not match this group." : result.message,
       },
     }))
@@ -104,7 +107,9 @@ export function MyLeadDetailPanel({
                   {attempt.sourceLabel}
                 </span>
               )}
-              {attempt.recordingUrl ? (
+              {attempt.callActivityId ? (
+                <span>Call details below</span>
+              ) : attempt.recordingUrl ? (
                 <a
                   href={attempt.recordingUrl}
                   target="_blank"
@@ -115,10 +120,11 @@ export function MyLeadDetailPanel({
                   Recording
                 </a>
               ) : (
-                <span className="text-[11.5px] font-medium text-muted-foreground italic">no recording</span>
+                <span className="text-[11.5px] font-medium text-muted-foreground italic">No recording link added</span>
               )}
               <span className="font-mono text-[10.5px] text-muted-foreground">{attempt.occurredLabel}</span>
             </div>
+            {visible && attempt.callActivityId && <MyLeadCallArtifacts key={attempt.callActivityId} callActivityId={attempt.callActivityId} />}
           </div>
         )}
       />
@@ -134,7 +140,12 @@ export function MyLeadDetailPanel({
             <AddNoteComposer
               propertyId={propertyId}
               compact
-              onSaved={() => onChanged?.("notes")}
+              onSaved={() => {
+                // Notes do not change queue rank or KPIs. Refresh only this group
+                // so a successful save cannot remove an appended queue page.
+                if (onLoadDetailPage) void loadGroup("notes", null)
+                else onChanged?.("notes")
+              }}
             />
           ) : undefined
         }
@@ -228,8 +239,8 @@ function DetailList<T extends { id: string }>({
   count?: number
   page: MyLeadDetailGroup<T>
   emptyLabel: string
-  paging?: { loading: boolean; error: string | null }
-  onLoadMore?: (cursor: string) => void
+  paging?: { loading: boolean; error: string | null; cursor: string | null }
+  onLoadMore?: (cursor: string | null) => void
   footer?: React.ReactNode
   renderRow: (row: T) => React.ReactNode
 }) {
@@ -256,14 +267,13 @@ function DetailList<T extends { id: string }>({
           >
             {paging?.loading ? "Loading…" : `Load more ${title.toLowerCase()}`}
           </Button>
-          {paging?.error && (
-            <div className="flex items-center gap-2 text-xs text-destructive" role="alert">
-              <span>{paging.error}</span>
-              <Button type="button" variant="link" size="xs" onClick={() => onLoadMore(page.nextCursor as string)}>
-                Retry
-              </Button>
-            </div>
-          )}
+
+        </div>
+      )}
+      {onLoadMore && paging?.error && (
+        <div className="flex items-center gap-2 text-xs text-destructive" role="alert">
+          <span>{paging.error}</span>
+          <Button type="button" variant="link" size="xs" disabled={paging.loading} onClick={() => onLoadMore(paging.cursor)}>Retry</Button>
         </div>
       )}
     </section>

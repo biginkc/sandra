@@ -12,7 +12,7 @@ import {
   seedSenderCatalog,
 } from "@tests/integration/delivery";
 
-import { DRAIN_BATCH_SIZE, runSequenceTick } from "./route";
+import { DRAIN_BATCH_SIZE, runSequenceTick } from "./handlers";
 import type { Json } from "@/lib/supabase/types";
 
 const supabase = createTestClient();

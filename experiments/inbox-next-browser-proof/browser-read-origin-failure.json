@@ -1,0 +1,43 @@
+{
+  "message": "locator.waitFor: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByText('Browser Ada message 1', { exact: true }) to be visible\u001b[22m\n",
+  "url": "http://127.0.0.1:52582/inbox",
+  "text": "SANDRA\n← Back to Inbox overview\nInbox workspace\nAll\nYour access has changed. Reload to continue.",
+  "calls": [
+    {
+      "path": "/api/inbox/counts",
+      "status": 200,
+      "durationMs": 454.741708
+    },
+    {
+      "path": "/api/inbox/worksets",
+      "status": 201,
+      "durationMs": 500.76979200000005
+    },
+    {
+      "path": "/api/inbox/sync/0430e035-1724-478e-957d-9256c430598b",
+      "status": 200,
+      "durationMs": 1211.4671250000006
+    },
+    {
+      "path": "/api/inbox/sync/0430e035-1724-478e-957d-9256c430598b",
+      "status": 200,
+      "durationMs": 562.4881249999999
+    },
+    {
+      "path": "/api/inbox/conversations/1db63bbc-21c5-484d-bc97-6aa3ffa278d4/detail",
+      "status": 200,
+      "durationMs": 792.6696670000001
+    },
+    {
+      "path": "/api/inbox/conversations/1db63bbc-21c5-484d-bc97-6aa3ffa278d4/detail",
+      "status": 200,
+      "durationMs": 247.10766700000022
+    },
+    {
+      "path": "/api/inbox/read-acknowledgments",
+      "status": 403,
+      "durationMs": 300.29012499999953
+    }
+  ],
+  "errors": []
+}

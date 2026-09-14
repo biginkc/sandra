@@ -11,7 +11,7 @@ vi.mock("workflow/api", () => ({
   start,
 }));
 
-import { runSweep } from "./route";
+import { runSweep } from "./handlers";
 
 const supabase = createTestClient();
 

@@ -46,7 +46,7 @@ const KNOWN_WEBSITE_TEMPLATE_ERRORS: Record<string, string> = {
   signer_role_mismatch:
     "Dropbox Sign signer roles must be exactly Seller then Buyer.",
   merge_field_mismatch:
-    "Dropbox Sign Sender merge fields must be exactly seller_name, property_address, offer_price, closing_date, and earnest_money.",
+    "Dropbox Sign Sender merge fields must match either the five basic contract fields or all thirteen residential purchase agreement fields.",
   template_field_mismatch:
     "Dropbox Sign must include required signature fields for Seller and Buyer.",
 };

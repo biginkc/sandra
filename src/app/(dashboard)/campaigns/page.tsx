@@ -26,7 +26,7 @@ export const metadata = {
 
 const PAGE_SIZE = 50;
 
-export const CAMPAIGNS_SORTABLE_COLUMNS = [
+const CAMPAIGNS_SORTABLE_COLUMNS = [
   "name",
   "status",
   "created_at",

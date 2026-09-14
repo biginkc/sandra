@@ -8,7 +8,7 @@ import type { QueueStage } from '@/lib/my-leads/types';
 
 export async function loadMyLeads(input:{memberId:string;search:string;period:'today'|'week'|'month'|'custom';startDate?:string;endDate?:string}) {
   try {
-    const [snapshot,kpis]=await Promise.all([getAcquisitionQueue(input),getAcquisitionKpis(input)]);
+    const [snapshot,kpis]=await Promise.all([getAcquisitionQueue(input),getAcquisitionKpis({memberId:input.memberId,period:'today'})]);
     return {ok:true as const,snapshot,kpis};
   } catch(error) {return {ok:false as const,message:error instanceof Error?error.message:'Could not load My Leads.'};}
 }
@@ -16,7 +16,7 @@ export async function loadMyLeadsStage(input:{memberId:string;search:string;stag
   try {return {ok:true as const,snapshot:await getAcquisitionQueue(input)};}
   catch(error){return {ok:false as const,message:error instanceof Error?error.message:'Could not load this section.'};}
 }
-export async function loadMyLeadDetail(input:{memberId:string;propertyId:string;group?:DetailGroup;cursor?:string}) {
+export async function loadMyLeadDetail(input:{memberId:string;propertyId:string;group?:DetailGroup;cursor?:string|null}) {
   try {return {ok:true as const,detail:await getAcquisitionDetail(input)};}
   catch(error){return {ok:false as const,message:error instanceof Error?error.message:'Could not load lead details.'};}
 }
@@ -34,7 +34,9 @@ export async function submitMyLeadCommand(command:keyof typeof commands,input:Re
   const {data,error}=await (client as unknown as {rpc(name:string,args:{p_input:Json}):Promise<{data:Json|null;error:{message?:string}|null}>}).rpc(command==='log-attempt'&&input.source==='sandra'?'fn_finalize_acquisition_attempt':commands[command],{p_input:input});
   if(error) {
     const message=error.message??'';
-    return {ok:false as const,message:message.includes('STALE_')?'This lead changed. Refresh before trying again.':message.includes('MOTIVATION')?'Specify motivation or choose No motivation provided.':message.includes('PENDING_OFFER')?'Resolve the current pending offer first.':message.includes('RECIPIENT')?'The handoff recipient is unavailable. Ask the owner to update settings.':'The update could not be saved. Check the fields and retry.'};
+    if(message==='FORBIDDEN') return {ok:false as const,code:'FORBIDDEN' as const,message:'This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.'};
+    if(message.includes('STALE_')) return {ok:false as const,code:'STALE_STATE' as const,message:'This lead changed. Refresh before trying again.'};
+    return {ok:false as const,message:message.includes('MOTIVATION')?'Specify motivation or choose No motivation provided.':message.includes('PENDING_OFFER')?'Resolve the current pending offer first.':message.includes('RECIPIENT')?'The handoff recipient is unavailable. Ask the owner to update settings.':'The update could not be saved. Check the fields and retry.'};
   }
   if(!data||typeof data!=='object'||Array.isArray(data)||data.ok!==true) return {ok:false as const,message:'The update was not confirmed. Retry with the same form.'};
   revalidatePath('/my-leads');revalidatePath('/leads');

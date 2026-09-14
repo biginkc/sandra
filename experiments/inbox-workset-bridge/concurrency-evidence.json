@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "observed_database_blocking": true,
+  "live_generations": 2,
+  "claim": "Per-actor creation serialized across actual concurrent connections; at most two live generations",
+  "limitations": [
+    "No JWT server",
+    "No Electric transport in this test"
+  ]
+}

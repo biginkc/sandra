@@ -1,0 +1,22 @@
+{
+  "checks": [
+    "exact50/50/0 pages preserve raw microsecond and UUID order",
+    "same raw sender cross-org, different raw string and email excluded",
+    "matched/dismissed and legacy from-address outbound preserved without read acknowledgment",
+    "other-session/wrong-group/unknown cursor denied",
+    "anon and service_role denied",
+    "expired cursor and revoked session denied"
+  ],
+  "source_sha256": "41a88203f264f42256be7a3b96b71620802574a53189b2beafa357463b1d5f98",
+  "runner_sha256": "4a585e14e6d871a00ac3c0ae33f1d975738b5b4b11a96cf95724f125560cbba4",
+  "page_sizes": [
+    50,
+    50,
+    0
+  ],
+  "limits": [
+    "Owned canonical SQL claims; not browser JWT transport",
+    "Legacy raw from_address history; no new to_address stitching",
+    "Live keyset pages; cursor retention/admission release dependency"
+  ]
+}

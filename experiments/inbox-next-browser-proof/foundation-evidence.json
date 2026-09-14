@@ -1,0 +1,17 @@
+{
+  "database": "sandra_inbox_install_20260913",
+  "marker": "sandra-inbox-production-candidate-owned-synthetic",
+  "origin": "http://127.0.0.1:49579",
+  "authContainer": "inbox_browser_auth_1789337752130-service",
+  "apiContainer": "inbox_browser_api_1789337752130-service",
+  "authRole": "inbox_browser_auth_1789337752130",
+  "apiRole": "inbox_browser_api_1789337752130",
+  "authImage": "public.ecr.aws/supabase/gotrue@sha256:c0c25187a6b835e65a6f6e6c6b39d090e832d40e6de5186f2c038e0411944232",
+  "restImage": "public.ecr.aws/supabase/postgrest@sha256:5922bde07147b82b1c9d8f749e48c1e5b99ebb233f3888bb7ab65f07cf4ac82d",
+  "authTables": 23,
+  "helpersVerified": true,
+  "authVersion": "20260625000000",
+  "sourceSha256": "80dfc2283163275b4e51593dc49e45f949fd94532c7a8e255967c3724ef8f14d",
+  "processId": 96886,
+  "note": "Real GoTrue foundation; app/Inbox installer pending. Secrets only in process memory."
+}

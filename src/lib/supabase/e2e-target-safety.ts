@@ -71,6 +71,10 @@ export function assertSafeE2ESupabaseTargetFromEnvironment(
   rawUrl: string,
   environment: E2ETargetEnvironment = process.env,
 ): void {
+  if (environment.E2E_DISPOSABLE_DATABASE === "1") {
+    assertDisposableE2EDatabaseEnvironment(rawUrl, environment);
+    return;
+  }
   const isCi =
     environment.GITHUB_ACTIONS === "true" ||
     environment.CI === "1" ||
@@ -80,4 +84,17 @@ export function assertSafeE2ESupabaseTargetFromEnvironment(
     expectedProjectRef: environment.E2E_CI_SUPABASE_PROJECT_REF,
     requireExpectedProjectRef: isCi,
   });
+}
+
+/** Explicit disposable CI mode must bind both API traffic and the lock to loopback. */
+export function assertDisposableE2EDatabaseEnvironment(
+  rawUrl: string,
+  environment: E2ETargetEnvironment = process.env,
+): void {
+  if (environment.E2E_DISPOSABLE_DATABASE !== "1" ||
+      rawUrl !== "http://127.0.0.1:54321" ||
+      environment.E2E_CI_SUPABASE_DB_URL !== "postgresql://postgres:postgres@127.0.0.1:54322/postgres" ||
+      environment.E2E_CI_SUPABASE_PROJECT_REF) {
+    throw new Error("Disposable E2E requires exact loopback API and database endpoints without a hosted project ref.");
+  }
 }

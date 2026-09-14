@@ -1,0 +1,18 @@
+{
+  "suite": "selection state machine",
+  "passed": 11,
+  "cases": [
+    "ordinary click replaces; shift click adds and removes individual skipped rows",
+    "shift rectangle engages by movement, accumulates touched IDs, ignores arrivals",
+    "movement under threshold remains a click without any hold delay",
+    "ordinary drag of selected row preserves group; unselected row drags alone",
+    "cancel and lost capture restore baseline, not a partially assembled selection",
+    "unmounted/filter/page rows retain selection; authoritative removal survives cancel",
+    "newly mounted row from frozen workset participates; new record does not",
+    "removed pointer target cannot be resurrected by pointerup",
+    "explicit Open is independent of selected targets and target kinds do not collide",
+    "keyboard toggles and input controls are ignored by row selection handlers",
+    "Escape overlay first, gesture cancel, selection clear, then inspection close"
+  ],
+  "visualVerification": false
+}

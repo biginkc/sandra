@@ -1,0 +1,22 @@
+{
+  "checks": [
+    "missing target baseline concurrent message reparent: waiting preparation recomputes actual new property",
+    "missing property identity baseline concurrent deletion writer: waiting preparation excludes current row",
+    "missing SMS scope baseline concurrent active enrollment insert: waiting preparation captures new enrollment",
+    "actual worker transaction blocks overlapping preparation; after commit new preparation accepts current revisions"
+  ],
+  "source_hashes": {
+    "worker.sql": "5ddff6ea035d79a59d2396b825eb87bd9d4a75669588a5edd32fe7d4254a6a12",
+    "setup.sql": "6b026f678bf72ffdf82e1daf02d4e6305781435abb8004b91aa438165ee39e00",
+    "accept.sql": "ddc2714337cc5aa813bd51b63af9b20047148a0bb9a5f7e467a1c5825d6552bc",
+    "setup-before-runtime-fix.sql": "1d16fc352a4694ae02dcc2b076cd99a78eb3756ea5a4377ac2d185bfb9860feb",
+    "public-api.sql": "45bafaf0f48c30c9cb98e1bd808b9d2112b7c191c692ee6de4302f1f624bc768"
+  },
+  "runner_sha256": "7549b27dc8066695e71597af794b51ee5ea44529347a7e823dc3c509e3664ad7",
+  "fixture_org": "78b961e7-5f59-481b-a665-ece679878766",
+  "limits": [
+    "No production historical counter deletion",
+    "Missing baselines simulated only by deleting this run synthetic counters",
+    "Actual deadlock victim/retry schedule requires separate proof"
+  ]
+}

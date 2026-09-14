@@ -30,7 +30,22 @@ import {
   useLeadEvents,
 } from "./lead-events";
 
+import {
+  AcquisitionHistoryCard,
+  useAcquisitionHistory,
+} from "./acquisition-history";
+import type {
+  AcquisitionHistoryFact,
+  AcquisitionHistoryResult,
+} from "@/lib/leads/acquisition-history";
+
 export type LeadActivityEvent =
+  | {
+      source: "acquisition";
+      id: string;
+      timestamp: string;
+      row: AcquisitionHistoryFact;
+    }
   | { source: "message"; id: string; timestamp: string; row: Message }
   | { source: "note"; id: string; timestamp: string; row: Note }
   | {
@@ -38,6 +53,7 @@ export type LeadActivityEvent =
       id: string;
       timestamp: string;
       row: CallActivityRollupRow;
+      acquisitionDetails?: AcquisitionHistoryFact[];
     }
   | {
       source: "event";
@@ -55,6 +71,7 @@ type Props = {
   initialNotes: Note[];
   initialCalls: CallActivityRollupRow[];
   initialEvents: LeadEvent[];
+  initialAcquisitionHistory?: AcquisitionHistoryResult;
   messageError: string | null;
   noteError: string | null;
   callError: string | null;
@@ -81,7 +98,9 @@ export function LeadActivityTimeline(props: Props) {
   const [noteSnapshot, setNoteSnapshot] = useState(props.initialNotes);
   const [callSnapshot, setCallSnapshot] = useState(props.initialCalls);
   const [eventSnapshot, setEventSnapshot] = useState(props.initialEvents);
-  const [errors, setErrors] = useState<Record<SourceName, string | null>>({
+  const [errors, setErrors] = useState<
+    Partial<Record<SourceName, string | null>>
+  >({
     message: props.messageError,
     note: props.noteError,
     call: props.callError,
@@ -140,9 +159,30 @@ export function LeadActivityTimeline(props: Props) {
       previous.event ? { ...previous, event: null } : previous,
     );
   }, [eventsReconciled]);
+  const acquisition = useAcquisitionHistory(
+    propertyId,
+    props.initialAcquisitionHistory,
+  );
   const activity = useMemo(
-    () => buildLeadActivitySnapshot(messages, notes, calls, leadEvents, errors),
-    [calls, errors, leadEvents, messages, notes],
+    () =>
+      buildLeadActivitySnapshot(
+        messages,
+        notes,
+        calls,
+        leadEvents,
+        { ...errors, acquisition: acquisition.error },
+        acquisition.page.rows,
+        acquisition.page.hasMore,
+      ),
+    [
+      calls,
+      errors,
+      leadEvents,
+      messages,
+      notes,
+      acquisition.error,
+      acquisition.page,
+    ],
   );
   const events = activity.events;
   const mostRecentOutboundId = [...messages]
@@ -153,6 +193,10 @@ export function LeadActivityTimeline(props: Props) {
     : null;
 
   const retry = async (source: SourceName) => {
+    if (source === "acquisition") {
+      acquisition.retry();
+      return;
+    }
     setRetrying(source);
     const supabase = createClient();
     try {
@@ -243,13 +287,27 @@ export function LeadActivityTimeline(props: Props) {
               key={source}
               source={source}
               detail={detail}
-              pending={retrying === source}
+              pending={
+                source === "acquisition"
+                  ? acquisition.pending
+                  : retrying === source
+              }
               onRetry={retry}
             />
           ))}
         </div>
       ) : null}
 
+      {acquisition.page.hasMore && (
+        <Button
+          variant="outline"
+          disabled={acquisition.pending}
+          onClick={acquisition.loadMore}
+          className="mb-3"
+        >
+          Load older outreach and offers
+        </Button>
+      )}
       {events.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed px-4 py-10 text-center text-sm">
           No messages, notes, calls, or activity yet.
@@ -267,6 +325,26 @@ export function LeadActivityTimeline(props: Props) {
                 0
                 ? " opacity-60"
                 : "";
+            if (event.source === "acquisition")
+              return (
+                <Fragment key={`acquisition:${event.id}`}>
+                  {boundary}
+                  <div className={`relative pb-4 pl-12${muted}`}>
+                    <TimelineDot source="acquisition" />
+                    <AcquisitionHistoryCard
+                      fact={event.row}
+                      actor={
+                        event.row.actorId === currentUserId
+                          ? "you"
+                          : event.row.actorId
+                            ? (liveAuthorEmails[event.row.actorId] ??
+                              "Unknown teammate")
+                            : "System"
+                      }
+                    />
+                  </div>
+                </Fragment>
+              );
             if (event.source === "message") {
               const previous = events[index - 1];
               const next = events[index + 1];
@@ -333,7 +411,23 @@ export function LeadActivityTimeline(props: Props) {
                 {boundary}
                 <div className={`relative pb-4 pl-12${muted}`}>
                   <TimelineDot source="call" />
-                  <CallEventCard row={event.row} jitterHref={jitterHref} />
+                  <CallEventCard row={event.row} jitterHref={jitterHref}>
+                    {event.acquisitionDetails?.map((fact) => (
+                      <AcquisitionHistoryCard
+                        key={fact.id}
+                        fact={fact}
+                        embedded
+                        actor={
+                          fact.actorId === currentUserId
+                            ? "you"
+                            : fact.actorId
+                              ? (liveAuthorEmails[fact.actorId] ??
+                                "Unknown teammate")
+                              : "System"
+                        }
+                      />
+                    ))}
+                  </CallEventCard>
                 </div>
               </Fragment>
             );
@@ -349,6 +443,7 @@ export function normalizeLeadActivityEvents(
   notes: Note[],
   calls: CallActivityRollupRow[],
   leadEvents: LeadEvent[],
+  acquisition: AcquisitionHistoryFact[] = [],
 ): LeadActivityEvent[] {
   const deduplicated = new Map<string, LeadActivityEvent>();
   for (const message of messages) {
@@ -375,7 +470,21 @@ export function normalizeLeadActivityEvents(
       row: call,
     });
   }
+  const loadedOffers = new Set(
+    acquisition.filter((f) => f.kind === "offer").map((f) => f.id),
+  );
   for (const event of leadEvents) {
+    const payload = event.payload;
+    if (
+      event.event_type === "my_leads_workflow" &&
+      payload &&
+      typeof payload === "object" &&
+      !Array.isArray(payload) &&
+      payload.operation === "log_acquisition_offer" &&
+      typeof payload.offerId === "string" &&
+      loadedOffers.has(payload.offerId)
+    )
+      continue;
     deduplicated.set(`event:${event.id}`, {
       source: "event",
       id: event.id,
@@ -384,7 +493,31 @@ export function normalizeLeadActivityEvents(
     });
   }
 
+  const loadedCalls = new Set(calls.map((c) => c.id));
+  for (const fact of acquisition) {
+    if (
+      fact.kind === "attempt" &&
+      fact.source === "sandra" &&
+      fact.callActivityId &&
+      loadedCalls.has(fact.callActivityId)
+    ) {
+      const callEvent = deduplicated.get(`call:${fact.callActivityId}`);
+      if (callEvent?.source === "call")
+        callEvent.acquisitionDetails = [
+          ...(callEvent.acquisitionDetails ?? []),
+          fact,
+        ];
+      continue;
+    }
+    deduplicated.set(`acquisition:${fact.kind}:${fact.id}`, {
+      source: "acquisition",
+      id: `${fact.kind}:${fact.id}`,
+      timestamp: fact.at,
+      row: fact,
+    });
+  }
   const sourceOrder: Record<SourceName, number> = {
+    acquisition: 4,
     message: 0,
     note: 1,
     call: 2,
@@ -417,10 +550,21 @@ export function buildLeadActivitySnapshot(
   notes: Note[],
   calls: CallActivityRollupRow[],
   leadEvents: LeadEvent[],
-  errors: Record<SourceName, string | null>,
+  errors: Partial<Record<SourceName, string | null>>,
+  acquisition: AcquisitionHistoryFact[] = [],
+  acquisitionHasMore = false,
 ) {
-  const sourceOrder: SourceName[] = ["message", "note", "call", "event"];
+  const sourceOrder: SourceName[] = [
+    "message",
+    "note",
+    "call",
+    "event",
+    "acquisition",
+  ];
   const boundedCutoffs = [
+    acquisitionHasMore
+      ? acquisition.map((f) => f.at).sort(compareActivityTimestamps)[0]
+      : null,
     messages.length >= 200 ? messages[0]?.created_at : null,
     notes.length >= 200 ? notes[0]?.created_at : null,
     calls.length >= 20
@@ -448,6 +592,7 @@ export function buildLeadActivitySnapshot(
     notes,
     calls,
     leadEvents,
+    acquisition,
   );
   return {
     events,
@@ -517,7 +662,9 @@ function ActivitySourceFailure({
         ? "Notes"
         : source === "call"
           ? "Calls"
-          : "Activity";
+          : source === "acquisition"
+            ? "Outreach and offers"
+            : "Activity";
   return (
     <div
       className="border-destructive/40 bg-destructive/5 flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between"

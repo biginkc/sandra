@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": false,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "esModuleInterop": true
+  },
+  "include": [
+    "shared/**/*.ts",
+    "sync/**/*.ts",
+    "bulk/**/*.ts",
+    "ui/**/*.ts",
+    "ui/**/*.tsx",
+    "browser/**/*.ts",
+    "browser/**/*.tsx"
+  ]
+}

@@ -1,13 +1,14 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ChevronDown, Search } from "lucide-react"
+import { ChevronDown, ChevronRight, Search } from "lucide-react"
 
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import { MyLeadQueueRow, STAGE_COLORS, STAGE_NEXT } from "./queue-row"
+import { MyLeadsMetrics } from "./metrics"
+import { StickyMyLeadsMetrics } from "./sticky-metrics"
+import { MyLeadQueueRow, STAGE_NEXT } from "./queue-row"
 import {
   MY_LEAD_STAGE_LABELS,
   MY_LEAD_STAGE_ORDER,
@@ -19,45 +20,47 @@ import {
   type MyLeadDetailState,
   type MyLeadQueueRow as MyLeadQueueRowDto,
   type MyLeadStage,
-  type MyLeadsPeriod,
   type MyLeadsQueueProps,
 } from "./types"
 
-const KPI_LABELS = [
-  ["attempts", "Attempts"],
-  ["contact-rate", "Contact rate"],
-  ["assign-to-first-call", "Assign → first call"],
-  ["appointments-kept", "Appointments kept"],
-  ["offers-sent", "Offers sent"],
-  ["stale-leads", "Stale leads"],
-] as const
+// Solid section colors for the collapsible header bar. Each shade is chosen to
+// clear WCAG AA (≥4.5:1) against the white bar text.
+const STAGE_BAR: Record<MyLeadStage, string> = {
+  not_contacted: "bg-blue-600",
+  contacted: "bg-teal-700",
+  needs_offer: "bg-amber-700",
+  offer_sent: "bg-violet-600",
+  under_contract: "bg-green-700",
+}
 
 export function MyLeadsQueue({
   stages,
   kpis,
   search,
   selectedRepId,
-  selectedPeriod,
-  selectedDateRange,
   repOptions,
   canSelectRep = false,
+  onReviewingChange,
   selectedRepLabel,
   onSearchChange,
   onRepChange,
-  onPeriodChange,
-  onDateRangeChange,
   onLoadMore,
   onLoadDetail,
   onLoadDetailPage,
+  detailRevision = 0,
   onLeadChanged,
   onStageAction,
 }: MyLeadsQueueProps) {
-  const scopeKey = JSON.stringify([search, selectedPeriod, selectedRepId, selectedDateRange?.startDate, selectedDateRange?.endDate])
+  const expandedMetricsRef = useRef<HTMLDivElement>(null)
+  const scopeKey = JSON.stringify([search, selectedRepId])
   const [expansionScope, setExpansionScope] = useState(scopeKey)
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
+  const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<MyLeadStage>>(new Set())
   const [detailStates, setDetailStates] = useState<
     Readonly<Record<string, MyLeadDetailState>>
   >({})
+  const expandedIdsRef = useRef<ReadonlySet<string>>(new Set())
+  expandedIdsRef.current = expandedIds
   const requestIds = useRef<Record<string, number>>({})
   const detailPageRequestIds = useRef<Record<string, number>>({})
   const detailGeneration = useRef(0)
@@ -67,6 +70,10 @@ export function MyLeadsQueue({
   const requestedDetails = useRef(new Set<string>())
   const activeDetails = useRef(0)
   const [detailTick, setDetailTick] = useState(0)
+
+  useEffect(() => {
+    onReviewingChange?.(expandedIds.size > 0)
+  }, [expandedIds, onReviewingChange])
 
   useEffect(() => {
     mounted.current = true
@@ -84,6 +91,23 @@ export function MyLeadsQueue({
     requestedDetails.current.clear()
     detailPageRequestIds.current = {}
   }, [scopeKey])
+
+  useEffect(() => {
+    if (detailRevision === 0) return
+    detailGeneration.current += 1
+    requestedDetails.current.clear()
+    requestIds.current = {}
+    detailPageRequestIds.current = {}
+    setDetailStates((previous) => {
+      const next = { ...previous }
+      for (const propertyId of Object.keys(next)) {
+        if (expandedIdsRef.current.has(propertyId)) next[propertyId] = { status: "loading" }
+        else delete next[propertyId]
+      }
+      return next
+    })
+    setDetailTick((tick) => tick + 1)
+  }, [detailRevision])
 
   const loadDetails = useCallback(async (propertyId: string) => {
     requestedDetails.current.add(propertyId)
@@ -160,7 +184,7 @@ export function MyLeadsQueue({
   const loadDetailPage = async (
     propertyId: string,
     group: MyLeadDetailGroupName,
-    cursor: string
+    cursor: string | null
   ): Promise<MyLeadDetailPageResult> => {
     if (!onLoadDetailPage) return { ok: false, message: "More detail is unavailable." }
     const requestKey = `${propertyId}:${group}`
@@ -182,7 +206,9 @@ export function MyLeadsQueue({
           ...previous,
           [propertyId]: {
             status: "ready",
-            detail: appendDetailPage(current.detail, group, result.page),
+            detail: cursor === null
+              ? { ...current.detail, [group]: result.page }
+              : appendDetailPage(current.detail, group, result.page),
           },
         }
       })
@@ -220,68 +246,12 @@ export function MyLeadsQueue({
           </span>
 
           </>}
-          <label className="sr-only" htmlFor="my-leads-period">
-            KPI period
-          </label>
-          <span className="relative inline-flex max-w-full min-w-0">
-            <select
-              id="my-leads-period"
-              aria-label="KPI period"
-              value={selectedPeriod}
-              onChange={(event) => onPeriodChange(event.target.value as MyLeadsPeriod)}
-              className="h-9 max-w-full min-w-0 appearance-none rounded-[10px] border border-border bg-card py-2 pr-7 pl-3 text-[12.5px] font-semibold text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-            >
-              <option value="today">Today</option>
-              <option value="week">This week</option>
-              <option value="month">This month</option>
-              <option value="custom">Custom range</option>
-            </select>
-            <ChevronDown className="pointer-events-none absolute top-1/2 right-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-          </span>
 
-          {selectedPeriod === "custom" && (
-            <div className="grid w-full gap-2 sm:grid-cols-2">
-              <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                <span>From</span>
-                <Input
-                  aria-label="KPI start date"
-                  type="date"
-                  value={selectedDateRange?.startDate || ""}
-                  onChange={(event) =>
-                    onDateRangeChange({
-                      startDate: event.target.value,
-                      endDate: selectedDateRange?.endDate || "",
-                    })
-                  }
-                />
-              </label>
-              <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                <span>To</span>
-                <Input
-                  aria-label="KPI end date"
-                  type="date"
-                  value={selectedDateRange?.endDate || ""}
-                  onChange={(event) =>
-                    onDateRangeChange({
-                      startDate: selectedDateRange?.startDate || "",
-                      endDate: event.target.value,
-                    })
-                  }
-                />
-              </label>
-            </div>
-          )}
         </div>
       </header>
 
-      <section aria-label="Acquisitions KPIs" className="grid grid-cols-2 gap-px overflow-hidden rounded-[16px] border border-border bg-border lg:grid-cols-6">
-        {KPI_LABELS.map(([id, label]) => (
-          <div key={id} data-testid={`kpi-${id}`} className="min-w-0 space-y-1.5 bg-card px-4 py-3.5">
-            <p className="text-[10px] font-extrabold uppercase tracking-widest text-muted-foreground">{label}</p>
-            <p className={cn("break-words text-[23px] font-extrabold tracking-tight tabular-nums", id === "stale-leads" && kpis.staleLeads > 0 ? "text-amber-700 dark:text-amber-300" : "text-foreground")}>{kpiValue(id, kpis)}</p>
-          </div>
-        ))}
-      </section>
+      <div ref={expandedMetricsRef}><MyLeadsMetrics kpis={kpis} /></div>
+      <StickyMyLeadsMetrics kpis={kpis} expandedRef={expandedMetricsRef} repLabel={selectedRepLabel} />
 
       <div className="flex flex-wrap items-center justify-between gap-3" aria-label="Queue controls">
         <label className="relative block w-full sm:max-w-xs">
@@ -300,6 +270,15 @@ export function MyLeadsQueue({
             key={stage}
             stage={stage}
             page={stages[stage]}
+            collapsed={collapsedSections.has(stage)}
+            onToggleSection={() =>
+              setCollapsedSections((previous) => {
+                const next = new Set(previous)
+                if (next.has(stage)) next.delete(stage)
+                else next.add(stage)
+                return next
+              })
+            }
             expandedIds={expandedIds}
             detailStates={detailStates}
             onToggleDetails={toggleDetails}
@@ -318,6 +297,8 @@ export function MyLeadsQueue({
 function MyLeadStageSection({
   stage,
   page,
+  collapsed,
+  onToggleSection,
   expandedIds,
   detailStates,
   onToggleDetails,
@@ -329,6 +310,8 @@ function MyLeadStageSection({
 }: {
   stage: MyLeadStage
   page: MyLeadsQueueProps["stages"][MyLeadStage]
+  collapsed: boolean
+  onToggleSection: () => void
   expandedIds: ReadonlySet<string>
   detailStates: Readonly<Record<string, MyLeadDetailState>>
   onToggleDetails: (propertyId: string) => void
@@ -337,68 +320,85 @@ function MyLeadStageSection({
   onLoadDetailPage?: (
     propertyId: string,
     group: MyLeadDetailGroupName,
-    cursor: string
+    cursor: string | null
   ) => Promise<MyLeadDetailPageResult>
   onLoadMore: MyLeadsQueueProps["onLoadMore"]
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRowDto) => void
 }) {
   const label = MY_LEAD_STAGE_LABELS[stage]
+  const ChevronIcon = collapsed ? ChevronRight : ChevronDown
 
   return (
     <section className="space-y-2" data-testid={`my-leads-section-${stage}`} aria-labelledby={`my-leads-heading-${stage}`}>
-      <div className="flex flex-wrap items-center gap-2.5">
-        <div className="flex items-center gap-2.5">
-          <h2 id={`my-leads-heading-${stage}`} className={cn("text-xs font-extrabold uppercase tracking-widest", STAGE_COLORS[stage])}>
-            {label}
-          </h2>
-          <Badge variant="secondary" aria-label={`${page.totalCount} ${label} leads`} className="rounded-full border border-border bg-muted font-mono text-[11px] font-semibold text-muted-foreground">
-            {page.totalCount}
-          </Badge>
-        </div>
-        <span className="h-px min-w-8 flex-1 bg-border" aria-hidden="true" />
-        <p className="max-w-full text-[11.5px] text-muted-foreground">{STAGE_NEXT[stage]}</p>
-        {page.totalCount > page.rows.length && (
-          <span className="text-xs text-muted-foreground">
-            Showing {page.rows.length} of {page.totalCount}
-          </span>
+      <h2 id={`my-leads-heading-${stage}`} className="sr-only">{label}</h2>
+      <button
+        type="button"
+        onClick={onToggleSection}
+        aria-expanded={!collapsed}
+        aria-controls={`my-leads-rows-${stage}`}
+        className={cn(
+          "flex w-full items-center gap-2.5 rounded-[10px] px-4 py-2.5 text-left text-white outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white",
+          STAGE_BAR[stage]
         )}
-      </div>
-
-      {page.rows.length === 0 ? (
-        <div className="rounded-xl border border-dashed px-4 py-5 text-sm text-muted-foreground">
-          No leads in this section.
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {page.rows.map((row) => (
-            <MyLeadQueueRow
-              key={row.propertyId}
-              row={row}
-              detailsOpen={expandedIds.has(row.propertyId)}
-              detailState={detailStates[row.propertyId]}
-              onToggleDetails={() => onToggleDetails(row.propertyId)}
-              onRetryDetails={() => onRetryDetails(row.propertyId)}
-              onDetailChanged={() => onDetailChanged(row.propertyId)}
-              onLoadDetailPage={onLoadDetailPage
-                ? (group, cursor) => onLoadDetailPage(row.propertyId, group, cursor)
-                : undefined}
-              onStageAction={onStageAction}
-            />
-          ))}
-        </div>
-      )}
-
-      {page.hasMore && (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={page.isLoadingMore}
-          onClick={() => void onLoadMore(stage)}
+      >
+        <ChevronIcon className="size-4 shrink-0" aria-hidden="true" />
+        <span className="text-xs font-bold uppercase tracking-widest text-white">{label}</span>
+        <span
+          aria-label={`${page.totalCount} leads`}
+          className="inline-flex min-w-[22px] items-center justify-center rounded-full bg-black/20 px-2 py-0.5 font-mono text-[11px] font-semibold text-white"
         >
-          {page.isLoadingMore ? "Loading…" : `Load more ${label}`}
-        </Button>
-      )}
+          {page.totalCount}
+        </span>
+        <span className="ml-auto hidden max-w-full truncate pl-3 text-[11.5px] text-white sm:block">{STAGE_NEXT[stage]}</span>
+      </button>
+
+      <div id={`my-leads-rows-${stage}`} hidden={collapsed}>
+        {/* Keep loaded rows mounted so collapsing a stage preserves local drafts. */}
+          <div className="space-y-2">
+            {page.totalCount > page.rows.length && (
+              <p className="px-1 text-xs text-muted-foreground">
+                Showing {page.rows.length} of {page.totalCount}
+              </p>
+            )}
+
+            {page.rows.length === 0 ? (
+              <div className="rounded-xl border border-dashed px-4 py-5 text-sm text-muted-foreground">
+                No leads in this section.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {page.rows.map((row) => (
+                  <MyLeadQueueRow
+                    key={row.propertyId}
+                    row={row}
+                    detailsOpen={expandedIds.has(row.propertyId)}
+                    sectionVisible={!collapsed}
+                    detailState={detailStates[row.propertyId]}
+                    onToggleDetails={() => onToggleDetails(row.propertyId)}
+                    onRetryDetails={() => onRetryDetails(row.propertyId)}
+                    onDetailChanged={() => onDetailChanged(row.propertyId)}
+                    onLoadDetailPage={onLoadDetailPage
+                      ? (group, cursor) => onLoadDetailPage(row.propertyId, group, cursor)
+                      : undefined}
+                    onStageAction={onStageAction}
+                  />
+                ))}
+              </div>
+            )}
+
+            {page.hasMore && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={page.isLoadingMore}
+                onClick={() => void onLoadMore(stage)}
+              >
+                {page.isLoadingMore ? "Loading…" : `Load more ${label}`}
+              </Button>
+            )}
+          </div>
+      </div>
     </section>
   )
 }
@@ -412,24 +412,4 @@ function appendDetailPage(
   const existingIds = new Set(current.rows.map((row) => row.id))
   const rows = [...current.rows, ...page.rows.filter((row) => !existingIds.has(row.id))]
   return { ...detail, [group]: { ...page, rows } } as MyLeadDetail
-}
-
-function kpiValue(id: (typeof KPI_LABELS)[number][0], kpis: MyLeadsQueueProps["kpis"]) {
-  switch (id) {
-    case "attempts":
-      return kpis.attempts
-    case "contact-rate": {
-      const label = kpis.contactRateLabel || "Unavailable"
-      const match = /^(.*\d)(%)$/.exec(label)
-      return match ? <>{match[1]}<small className="text-[13px] font-bold text-muted-foreground">{match[2]}</small></> : label
-    }
-    case "assign-to-first-call":
-      return kpis.assignToFirstCallLabel || "Unavailable"
-    case "appointments-kept":
-      return kpis.appointmentsKeptLabel || "Unavailable"
-    case "offers-sent":
-      return kpis.offersSent
-    case "stale-leads":
-      return kpis.staleLeads
-  }
 }

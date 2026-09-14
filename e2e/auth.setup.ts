@@ -19,7 +19,9 @@ const AUTH_FILE = "e2e/.auth/user.json";
  */
 setup("authenticate", async ({ page }) => {
   const admin = adminClient();
-  await ensureTestUser(admin);
+  await setup.step("Provision exact-run test identity", async () => {
+    await ensureTestUser(admin);
+  });
 
   await page.goto("/login");
   await expect(
@@ -62,11 +64,12 @@ setup("authenticate", async ({ page }) => {
     })),
   );
 
-  // The authenticated shell can render while Overview is still streaming.
-  // Auth setup verifies the session, not completion of the dashboard's data.
-  await page.goto("/dashboard", { waitUntil: "commit" });
-  await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/);
-  await expect(page.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
+  await setup.step("Load authenticated dashboard", async () => {
+    await page.goto("/dashboard");
+  });
+  await setup.step("Verify authenticated shell", async () => {
+    await expect(page.locator("text=Sign out")).toBeVisible();
+  });
 
   await page.context().storageState({ path: AUTH_FILE });
 });

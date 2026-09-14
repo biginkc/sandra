@@ -93,6 +93,12 @@ function contract(overrides: Partial<LeadContractRow> = {}): LeadContractRow {
 }
 
 describe("ContractsCard", () => {
+  it("shows the persisted initiating member separately from contractual signers", () => {
+    render(<ContractsCard contracts={[contract({ createdByLabel: "Maria Unkovich" })]} actions={actionHandlers()} />);
+    expect(screen.getByText("Prepared by Maria Unkovich")).toBeInTheDocument();
+    expect(screen.getByText(/Seller: Seller Owner/)).toBeInTheDocument();
+  });
+
   it("renders a distinct empty state", () => {
     render(<ContractsCard contracts={[]} actions={actionHandlers()} />);
 

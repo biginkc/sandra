@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "ordered_page_comparisons": 80,
+  "maintained_owner_expiry_tombstone": true,
+  "limitations": [
+    "Does not yet prove parent-property writer through entire asynchronous projection pipeline",
+    "Human name propagation unresolved"
+  ]
+}

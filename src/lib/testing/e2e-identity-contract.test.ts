@@ -40,51 +40,44 @@ describe("E2E identity source contract", () => {
     );
   });
 
-  it("retains shared serialization and simulated-provider boundaries", () => {
+  it("retains isolated databases and simulated-provider boundaries", () => {
     const workflow = source(".github/workflows/e2e.yml");
-    // A per-project-ref group was tried and reverted: env-level `vars`
-    // resolves empty at concurrency-evaluation time, and a diverged group
-    // name is exactly what let old and new branches run in parallel
-    // against the same shared database. The static legacy group serializes
-    // every E2E run — old branch or new — against this one database, which
-    // is correct since they all still share it; the DB advisory lock in
-    // e2e/global-setup.ts is the real guard against cross-branch drift.
-    expect(workflow).toContain("group: e2e-shared-test-project");
-    expect(workflow).toContain("cancel-in-progress: false");
+    expect(workflow).toContain("Provision disposable E2E database");
+    expect(workflow).not.toContain("group: e2e-shared-test-project");
     expect(workflow).toContain('NEXT_PUBLIC_SOFTPHONE_TRANSPORT: "simulated"');
     expect(workflow).toContain('SKIP_INTENT_GATE: "1"');
   });
 
-  it("binds only the dedicated e2e-ci environment and credentials", () => {
+  it("provisions locally before identity checks and destroys after guarded cleanup", () => {
     const workflow = source(".github/workflows/e2e.yml");
-    expect(workflow).toContain("environment: e2e-ci");
-    expect(workflow).toContain(
-      "E2E_CI_SUPABASE_PROJECT_REF: ${{ vars.E2E_CI_SUPABASE_PROJECT_REF }}",
-    );
-    expect(workflow).toContain(
-      "TEST_SUPABASE_URL: ${{ secrets.E2E_CI_SUPABASE_URL }}",
-    );
-    expect(workflow).toContain(
-      "TEST_SUPABASE_ANON_KEY: ${{ secrets.E2E_CI_SUPABASE_ANON_KEY }}",
-    );
-    expect(workflow).toContain(
-      "TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.E2E_CI_SUPABASE_SERVICE_ROLE_KEY }}",
-    );
-    const runtimeSecretBindings = [
-      ...workflow.matchAll(
-        /TEST_SUPABASE_(URL|ANON_KEY|SERVICE_ROLE_KEY):\s*\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}/g,
-      ),
-    ].map((match) => [match[1], match[2]]);
-    expect(runtimeSecretBindings).toEqual([
-      ["URL", "E2E_CI_SUPABASE_URL"],
-      ["SERVICE_ROLE_KEY", "E2E_CI_SUPABASE_SERVICE_ROLE_KEY"],
-      ["URL", "E2E_CI_SUPABASE_URL"],
-      ["ANON_KEY", "E2E_CI_SUPABASE_ANON_KEY"],
-      ["SERVICE_ROLE_KEY", "E2E_CI_SUPABASE_SERVICE_ROLE_KEY"],
-      ["URL", "E2E_CI_SUPABASE_URL"],
-      ["SERVICE_ROLE_KEY", "E2E_CI_SUPABASE_SERVICE_ROLE_KEY"],
-    ]);
-    expect(workflow).not.toMatch(/secrets\.TEST_SUPABASE_/);
+    expect(workflow).not.toMatch(/environment:\s*e2e-ci|secrets\.|vars\.E2E_CI_SUPABASE_PROJECT_REF/);
+    const provision = workflow.indexOf("node scripts/provision-e2e-local-database.mjs");
+    const emit = workflow.indexOf("e2e-identity-lifecycle.ts emit");
+    const cleanup = workflow.indexOf("e2e-identity-lifecycle.ts cleanup");
+    const destroy = workflow.indexOf('supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup');
+    expect(provision).toBeGreaterThan(-1);
+    expect(emit).toBeGreaterThan(provision);
+    expect(destroy).toBeGreaterThan(cleanup);
+    expect(workflow).toMatch(/Destroy disposable E2E database\n\s+if: always\(\) && env\.E2E_LOCAL_WORKDIR != ''/);
+    expect(workflow).toMatch(/Clean up exact-run E2E identities and verify browser-QA isolation\n\s+if: always\(\)/);
+  });
+
+  it("confines the provisioner's baseline owner to the new local stack", () => {
+    const provision = source("scripts/provision-e2e-local-database.mjs");
+    expect(provision).toContain("process.env.GITHUB_ACTIONS !== 'true'");
+    expect(provision).toContain("mkdtempSync(path.join(process.env.RUNNER_TEMP, 'sandra-e2e-'))");
+    expect(provision).toContain("cpSync('supabase/migrations'");
+    expect(provision).toContain("run('start', '--workdir', workdir)");
+    expect(provision).toContain("status.API_URL !== 'http://127.0.0.1:54321'");
+    expect(provision).toContain("status.DB_URL !== 'postgresql://postgres:postgres@127.0.0.1:54322/postgres'");
+    expect(provision.indexOf("Unexpected disposable stack endpoints")).toBeLessThan(provision.indexOf("admin.auth.admin.createUser"));
+    expect(provision.match(/\.createUser\(/g)).toHaveLength(1);
+    expect(provision).toContain("purpose: 'disposable-e2e-baseline'");
+    expect(provision).toContain("org_id: '00000000-0000-0000-0000-000000000bbb'");
+    expect(provision).toContain("email: `e2e-baseline-${randomUUID()}@example.invalid`");
+    expect(provision).not.toMatch(/updateUserById|deleteUser|supabase\s+link/);
+    expect(provision.indexOf("publish('E2E_LOCAL_WORKDIR', workdir)")).toBeLessThan(provision.indexOf("run('start'"));
+    expect(provision.indexOf("::add-mask::${status[key]}")).toBeLessThan(provision.indexOf("publish('TEST_SUPABASE_SERVICE_ROLE_KEY'"));
   });
 
   it("does not expose Supabase credentials to install or browser checks", () => {

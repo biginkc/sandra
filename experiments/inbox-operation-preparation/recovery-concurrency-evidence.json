@@ -1,0 +1,16 @@
+{
+  "checks": [
+    "actual acceptance holds original key lock before commit; simultaneous recovery waits for that transaction",
+    "after commit recovery returns exact durable accepted identity instead of null"
+  ],
+  "operation": {
+    "accepted_at": "2026-09-13T23:05:09.74129+00:00",
+    "operation_id": "0c37e349-1fe8-4c63-95fb-c0d1e099b1b9"
+  },
+  "source_hashes": {
+    "setup.sql": "cf3e5c61c81643b8386b3d5e361966f31200c08a3698c513ca08c36f4b75b377",
+    "accept.sql": "fdd19c945b24f40057ed1fe63e90833ef27217462e977bb8d14945163cae24a9",
+    "review.sql": "faae82983465db8dd5624cd8fcc8bf5f44916fb2994afa30460f1e6832695eab"
+  },
+  "runner_sha256": "1325ebe6aebc76150b1d7dfb1750a80626e9b08fb8c9e3269727df315dba4b46"
+}

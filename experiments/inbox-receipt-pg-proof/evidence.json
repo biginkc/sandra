@@ -1,0 +1,23 @@
+{
+  "status": "passed",
+  "attempts": 2,
+  "simulatedProviderCalls": 1,
+  "abortCodes": [
+    "40001"
+  ],
+  "persisted": [
+    {
+      "id": 1,
+      "revision": 1,
+      "status": "sent",
+      "external_id": "owned-synthetic-receipt"
+    }
+  ],
+  "limits": "Actual helper and PostgreSQL serialization rollback/retry. Fake provider, no sendSmsToContact or PostgREST integration; no deadlock/process-death proof.",
+  "cleanup": "verified schema absent",
+  "at": "2026-09-13T20:07:09.763Z",
+  "sourceHashes": {
+    "harness": "707eeccd56d523fa648badd722677aeb4fc74d30ec782e88f3031099521f8ffb",
+    "helper": "621ea6376fe3312fe7142284321ebc547a1584c20c46f4bad73d737c1c8dccd6"
+  }
+}

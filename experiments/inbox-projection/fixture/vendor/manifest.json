@@ -1,0 +1,86 @@
+[
+  {
+    "file": "storage-foundation.sql",
+    "url": "https://raw.githubusercontent.com/supabase/storage/e89d526fa3e3e7600b6a22cedf43aa058924d19a/migrations/tenant/0002-storage-schema.sql",
+    "commit": "e89d526fa3e3e7600b6a22cedf43aa058924d19a",
+    "sha256": "19562682ff1b77cda9ba096671b873e7e226b10f0b0564bd4823e6c1754393b6"
+  },
+  {
+    "file": "0007-add-rls-to-buckets.sql",
+    "url": "https://raw.githubusercontent.com/supabase/storage/e89d526fa3e3e7600b6a22cedf43aa058924d19a/migrations/tenant/0007-add-rls-to-buckets.sql",
+    "commit": "e89d526fa3e3e7600b6a22cedf43aa058924d19a",
+    "sha256": "c87aa8ea3c6509171728880538cc26e7233896a8f927af3bc5b351a1706610e3"
+  },
+  {
+    "file": "0008-add-public-to-buckets.sql",
+    "url": "https://raw.githubusercontent.com/supabase/storage/e89d526fa3e3e7600b6a22cedf43aa058924d19a/migrations/tenant/0008-add-public-to-buckets.sql",
+    "commit": "e89d526fa3e3e7600b6a22cedf43aa058924d19a",
+    "sha256": "1d881092aea62e83493f1a9c4cb4f101f3035a08d62be84a7e7970ee0c6f0f48"
+  },
+  {
+    "file": "auth-jwt.sql",
+    "url": "https://raw.githubusercontent.com/supabase/auth/3b77d62d71ad810697273a518a48bb0b539be4e6/migrations/20220531120530_add_auth_jwt_function.up.sql",
+    "commit": "3b77d62d71ad810697273a518a48bb0b539be4e6",
+    "sha256": "91d2d5e47f19e65a63ec411f6cbb18755ec1792cb4249694dc261ef59cc78a10"
+  },
+  {
+    "file": "20210909172000_create_identities_table.up.sql",
+    "url": "https://raw.githubusercontent.com/supabase/auth/3b77d62d71ad810697273a518a48bb0b539be4e6/migrations/20210909172000_create_identities_table.up.sql",
+    "commit": "3b77d62d71ad810697273a518a48bb0b539be4e6",
+    "sha256": "4c2d6a94d34d34f98f1fa83537a0068f4813e49a19cfc2fd4e9199e5a941cc84"
+  },
+  {
+    "file": "20230116124412_add_deleted_at.up.sql",
+    "url": "https://raw.githubusercontent.com/supabase/auth/2a2f425554e8eca701722f4aab794ccf3647b27b/migrations/20230116124412_add_deleted_at.up.sql",
+    "commit": "2a2f425554e8eca701722f4aab794ccf3647b27b",
+    "sha256": "144a735e50373686e04d0cd3d46b997262162dda14965870342f65cd0b5a7845"
+  },
+  {
+    "file": "20231117164230_add_id_pkey_identities.up.sql",
+    "url": "https://raw.githubusercontent.com/supabase/auth/d8ec8015e50f6199786a9e5f05589888fa8862be/migrations/20231117164230_add_id_pkey_identities.up.sql",
+    "commit": "d8ec8015e50f6199786a9e5f05589888fa8862be",
+    "sha256": "8822b2807b672d38b212618193efdb6fc2cf787e564a495940c1a8844155d7b0"
+  },
+  {
+    "file": "realtime-role.sql",
+    "url": "https://raw.githubusercontent.com/supabase/realtime/935ddbb25e2bd76c2829fc32b09ba28258ace48e/lib/realtime/tenants/repo/migrations/20240401105812_create_realtime_admin_and_move_ownership.ex",
+    "commit": "935ddbb25e2bd76c2829fc32b09ba28258ace48e",
+    "sha256": "4ccb4651d55fc4113dc0ee937cc8c5d7350b5177cf08f53db26bf286bd44b07e",
+    "upstream_file": "20240401105812_create_realtime_admin_and_move_ownership.ex",
+    "upstream_sha256": "7f3d822d7149205f73d660937a8b4bcc326ec5295b61ad54a1c2b82052873a31",
+    "translation": "Verbatim role-creation SQL and applicable schema/member grants; predecessor tables absent and not altered"
+  },
+  {
+    "file": "realtime-foundation.sql",
+    "url": "https://raw.githubusercontent.com/supabase/realtime/935ddbb25e2bd76c2829fc32b09ba28258ace48e/lib/realtime/tenants/repo/migrations/20240523004032_redefine_authorization_tables.ex",
+    "commit": "935ddbb25e2bd76c2829fc32b09ba28258ace48e",
+    "sha256": "345d6f866982b06e8c3c602335c18dea0fb3b77ee4d8e871219cde34b347d960",
+    "upstream_file": "20240523004032_redefine_authorization_tables.ex",
+    "upstream_sha256": "0a92b1b4d77d3acd054a1c062c7a4372fc5ec5e122d2d934e55ff2e3f6b90830",
+    "translation": "Ecto table/index declarations translated to SQL; obsolete drop_if_exists of absent predecessor tables omitted; no realtime service started"
+  },
+  {
+    "file": "0013-add-bucket-custom-limits.sql",
+    "url": "https://raw.githubusercontent.com/supabase/storage/e89d526fa3e3e7600b6a22cedf43aa058924d19a/migrations/tenant/0013-add-bucket-custom-limits.sql",
+    "commit": "e89d526fa3e3e7600b6a22cedf43aa058924d19a",
+    "sha256": "07d0b1e8299b70eeeda0841969772aecdbd0788eda9dbada7806afdc8ed9d06e"
+  },
+  {
+    "file": "0014-use-bytes-for-max-size.sql",
+    "url": "https://raw.githubusercontent.com/supabase/storage/e89d526fa3e3e7600b6a22cedf43aa058924d19a/migrations/tenant/0014-use-bytes-for-max-size.sql",
+    "commit": "e89d526fa3e3e7600b6a22cedf43aa058924d19a",
+    "sha256": "9e34ab4fc380e1cdd4748bcac368cd628c247962bdd58f8311a44f1b29e918ec"
+  },
+  {
+    "file": "20250623125453_tmp_grant_storage_tables_to_postgres_with_grant_option.sql",
+    "url": "image://supabase/postgres:17.6.1.165/docker-entrypoint-initdb.d/migrations/20250623125453_tmp_grant_storage_tables_to_postgres_with_grant_option.sql",
+    "commit": "image-digest-sha256:28f0e16a019e648089fc1a6d333549a55548f6019c15ae4bd7cd58b989027518",
+    "sha256": "1289f81f7111147fc334fa44ec00c31c871f5ba325c16cc205646ff07507cf04"
+  },
+  {
+    "file": "20220224000811_update_auth_functions.up.sql",
+    "url": "https://raw.githubusercontent.com/supabase/auth/e062eeae0079a6b1a70d5d5da9e5ac5cb8c21194/migrations/20220224000811_update_auth_functions.up.sql",
+    "commit": "e062eeae0079a6b1a70d5d5da9e5ac5cb8c21194",
+    "sha256": "5b72022d73e64a8e474d2122ac42f299bb7ce4d59755cdcc78e72abfe5d47dc0"
+  }
+]
