@@ -1,0 +1,37 @@
+import {execFileSync} from 'node:child_process';
+import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import assert from 'node:assert/strict';
+const dir=mkdtempSync(join(tmpdir(),'dp-connection-'));let started=false;
+const bin=process.env.PG_BIN??execFileSync('pg_config',['--bindir'],{encoding:'utf8'}).trim();
+const run=(name,args)=>execFileSync(join(bin,name),args,{encoding:'utf8',stdio:'pipe'});
+const sql=q=>run('psql',['-h',dir,'-U','postgres','-At','-v','ON_ERROR_STOP=1','-c',q]).trim();
+try {
+ run('initdb',['-D',join(dir,'data'),'-A','trust','-U','postgres']);run('pg_ctl',['-D',join(dir,'data'),'-l',join(dir,'log'),'-o',`-k ${dir} -c listen_addresses=''`,'-w','start']);started=true;
+ sql(`create role anon;create role authenticated;create role service_role bypassrls;create schema extensions;create extension pgcrypto with schema extensions;create table organizations(id uuid primary key);`);
+ sql(readFileSync(new URL('./20260914021149_dialpad_org_connections.sql',import.meta.url),'utf8'));
+ const org='11111111-1111-4111-8111-111111111111',other='22222222-2222-4222-8222-222222222222';
+ sql(`insert into organizations values('${org}'),('${other}');insert into dialpad_org_connections(id,org_id,provider_company_id,credential_reference) values('${org}','${org}','123','env:KEY');update dialpad_org_connections set config_version=2,verified_at=now(),enabled=true;`);
+ sql(readFileSync(new URL('./20260914030350_dialpad_connection_history.sql',import.meta.url),'utf8'));
+ sql(`create table dialpad_voice_event_inbox(id uuid primary key,org_id uuid,envelope_sha256 text,payload jsonb,status text);`);
+ sql(readFileSync(new URL('./20260914034929_dialpad_voice_webhook_sources.sql',import.meta.url),'utf8'));
+ sql(`insert into dialpad_voice_webhook_sources(id,org_id,connection_id,connection_version,webhook_secret_reference) values('${org}','${org}','${org}',2,'env:DIALPAD_SIGNING_A');
+ insert into dialpad_voice_event_inbox values('${org}','${org}','hash','{}','pending','${org}');`);
+ assert.throws(()=>sql(`insert into dialpad_voice_event_inbox values('${other}','${other}','hash','{}','pending','${org}')`));
+ assert.throws(()=>sql(`update dialpad_voice_webhook_sources set webhook_secret_reference='env:DIALPAD_OTHER'`));
+ assert.throws(()=>sql(`delete from dialpad_voice_webhook_sources`));
+ assert.throws(()=>sql(`update dialpad_voice_event_inbox set webhook_source_id=null`));
+ assert.throws(()=>sql(`update dialpad_voice_event_inbox set payload='{"forged":true}'`));
+ sql(`update dialpad_voice_event_inbox set status='processed'`);
+ assert.equal(sql('select status from dialpad_voice_event_inbox'),'processed');
+ sql(`insert into dialpad_voice_event_inbox values('${other}','${org}','oldhash','{}','pending',null)`);
+ assert.throws(()=>sql(`update dialpad_voice_event_inbox set webhook_source_id='${org}' where id='${other}'`));
+ assert.equal(sql(`select webhook_source_id is null from dialpad_voice_event_inbox where id='${other}'`),'t');
+ assert.throws(()=>sql(`insert into dialpad_voice_webhook_sources(org_id,connection_id,connection_version,webhook_secret_reference) values('${org}','${org}',2,'env:DIALPAD_SIGNING_A')`));
+ for(const role of ['anon','authenticated'])assert.equal(sql(`select has_table_privilege('${role}','public.dialpad_voice_webhook_sources','select')`),'f');
+ sql(`update dialpad_org_connections set config_version=3,enabled=false,verified_at=null,credential_reference='env:ROTATED'`);
+ assert.throws(()=>sql(`insert into dialpad_voice_webhook_sources(org_id,connection_id,connection_version,webhook_secret_reference) values('${org}','${org}',3,'env:DIALPAD_UNVERIFIED')`));
+ assert.equal(sql(`select r.provider_company_id from dialpad_voice_webhook_sources s join dialpad_connection_revisions r on r.org_id=s.org_id and r.connection_id=s.connection_id and r.config_version=s.connection_version`),'123');
+ console.log('PASS signed source provenance: tenant FK, immutable source/payload, no backfill, secret-reference uniqueness, private access, historical rotation');
+}finally{if(started)run('pg_ctl',['-D',join(dir,'data'),'-m','immediate','-w','stop']);rmSync(dir,{recursive:true,force:true});}

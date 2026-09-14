@@ -1,0 +1,14 @@
+import {createClient} from '@supabase/supabase-js';
+import {beforeEach,afterEach,it,expect,vi} from 'vitest';
+import type {EventConfigurationDatabase} from './event-configuration-database';
+const h=vi.hoisted(()=>({db:vi.fn()}));vi.mock('./database',()=>({createDialpadVoiceAdminClient:h.db}));
+import {loadDialpadWebhookSource} from './webhook-source';
+const id='11111111-1111-4111-8111-111111111111';
+let source:Record<string,unknown>,revision:Record<string,unknown>;
+beforeEach(()=>{vi.stubEnv('DIALPAD_SIGNED','fixture-secret');source={id,org_id:id,connection_id:id,connection_version:2,webhook_secret_reference:'env:DIALPAD_SIGNED'};revision={org_id:id,connection_id:id,config_version:2,provider_company_id:'123'};h.db.mockReturnValue(createClient<EventConfigurationDatabase>('https://example.test','fixture',{auth:{persistSession:false},global:{fetch:async(input)=>Response.json(String(input).includes('dialpad_voice_webhook_sources')?source:revision)}}));});
+afterEach(()=>vi.unstubAllEnvs());
+it('loads a fixed immutable source instead of current global org/user',async()=>{expect(await loadDialpadWebhookSource(id)).toEqual({sourceId:id,orgId:id,secret:'fixture-secret'});});
+it('rejects mismatched revision tenant',async()=>{revision.org_id='other';await expect(loadDialpadWebhookSource(id)).rejects.toThrow();});
+it('rejects wrong returned source',async()=>{source.id='other';await expect(loadDialpadWebhookSource(id)).rejects.toThrow();});
+it('rejects absent signing credential without fallback',async()=>{vi.stubEnv('DIALPAD_SIGNED','');await expect(loadDialpadWebhookSource(id)).rejects.toThrow();});
+it('rejects arbitrary environment reference',async()=>{source.webhook_secret_reference='env:PATH';await expect(loadDialpadWebhookSource(id)).rejects.toThrow();});

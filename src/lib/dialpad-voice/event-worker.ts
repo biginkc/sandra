@@ -7,12 +7,14 @@ export interface ClaimedVoiceEvent {
   leaseToken: string;
   attemptCount: number;
   payload: unknown;
+  webhookSourceId?: string|null;
 }
 export class DialpadEvidenceRejected extends Error {
   constructor() { super("Dialpad evidence rejected"); }
 }
 export interface VoiceEventWorkerStore {
   claim(): Promise<ClaimedVoiceEvent[]>;
+  authorizeEvent(receipt:ClaimedVoiceEvent,event:DialpadCallEvent):Promise<void>;
   recordEvidence(intentId: string, receiptId: string): Promise<void>;
   enqueueRecordings(receipt: ClaimedVoiceEvent, event: DialpadCallEvent): Promise<void>;
   ingestInsights(receipt: ClaimedVoiceEvent, event: DialpadCallEvent): Promise<void>;
@@ -31,7 +33,7 @@ export interface VoiceEventWorkerStore {
 export async function processDialpadVoiceEvents(options: {
   store: VoiceEventWorkerStore;
   orgId: string;
-  providerUserId: string;
+
   now?: () => number;
 }) {
   const receipts = await options.store.claim();
@@ -41,14 +43,15 @@ export async function processDialpadVoiceEvents(options: {
     try {
       if (receipt.orgId !== options.orgId) throw new DialpadEvidenceRejected();
       const event = normalizeDialpadCallEvent(receipt.payload);
-      if (event.targetId !== options.providerUserId || event.targetType?.trim().toLowerCase() !== "user") {
+      if (event.targetType?.trim().toLowerCase() !== "user") {
         throw new DialpadEvidenceRejected();
       }
+      await options.store.authorizeEvent(receipt,event);
       if (event.direction === "outbound" && event.intentId &&
         ["calling", "ringing", "connected", "hangup", "missed", "recording", "call_transcription"].includes(event.state)) {
         await options.store.recordEvidence(event.intentId, receipt.id);
       }
-      // Inbound and uncorrelated calls can retain audio without acquisition credit.
+      // Only a trusted configured intent may enqueue artifacts.
       // The store must independently resolve any intent link from persisted truth.
       await options.store.enqueueRecordings(receipt, event);
       if (event.state === "call_transcription" || event.state === "recap_summary") {

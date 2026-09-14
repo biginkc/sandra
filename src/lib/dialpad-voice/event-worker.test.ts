@@ -8,10 +8,10 @@ function fixture(payload: object = {}, attemptCount = 1) {
     target: { id: "456", type: "User" }, direction: "outbound", custom_data: intent, ...payload,
   } };
   const store: VoiceEventWorkerStore = {
-    claim: vi.fn().mockResolvedValue([receipt]), recordEvidence: vi.fn().mockResolvedValue(undefined),
+    authorizeEvent:vi.fn().mockResolvedValue(undefined), claim: vi.fn().mockResolvedValue([receipt]), recordEvidence: vi.fn().mockResolvedValue(undefined),
     enqueueRecordings: vi.fn().mockResolvedValue(undefined), ingestInsights: vi.fn().mockResolvedValue(undefined), finish: vi.fn().mockResolvedValue(true),
   };
-  const run = () => processDialpadVoiceEvents({ store, orgId: "org", providerUserId: "456", now: () => 1700000000000 });
+  const run = () => processDialpadVoiceEvents({ store, orgId: "org", now: () => 1700000000000 });
   return { store, receipt, run };
 }
 describe("Dialpad event processing", () => {

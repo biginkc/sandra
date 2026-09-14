@@ -7,8 +7,10 @@ export function createVoiceEventWorkerStore(
   client: SupabaseClient<DialpadVoiceDatabase>,
   orgId: string,
   ingestInsights?: VoiceEventWorkerStore["ingestInsights"],
+  authorizeEvent?:VoiceEventWorkerStore["authorizeEvent"],
 ): VoiceEventWorkerStore {
   return {
+    async authorizeEvent(receipt,event){if(!authorizeEvent)throw new DialpadEvidenceRejected();await authorizeEvent(receipt,event);},
     async ingestInsights(receipt, event) {
       if (!ingestInsights) throw new Error("Voice insights ingestion unavailable");
       await ingestInsights(receipt, event);
@@ -20,7 +22,7 @@ export function createVoiceEventWorkerStore(
       if (error || !data) throw new Error("Voice queue unavailable");
       return data.map((row) => {
         if (!row.lease_token || row.org_id !== orgId) throw new Error("Voice lease invalid");
-        return { id: row.id, orgId: row.org_id, leaseToken: row.lease_token, attemptCount: row.attempt_count, payload: row.payload };
+        return { id: row.id, orgId: row.org_id, leaseToken: row.lease_token, attemptCount: row.attempt_count, payload: row.payload, webhookSourceId:(row as typeof row & {webhook_source_id?:string|null}).webhook_source_id };
       });
     },
     async recordEvidence(intentId, receiptId) {
@@ -69,7 +71,7 @@ export function createVoiceEventWorkerStore(
         processed_at: result.status === "processed" ? new Date().toISOString() : null,
         lease_token: null, lease_expires_at: null,
       }).eq("org_id", orgId).eq("id", receipt.id).eq("status", "processing")
-        .eq("lease_token", receipt.leaseToken).select("id");
+        .eq("lease_token", receipt.leaseToken).gt("lease_expires_at",new Date().toISOString()).select("id");
       if (error) throw new Error("Voice receipt update unavailable");
       return data?.length === 1;
     },

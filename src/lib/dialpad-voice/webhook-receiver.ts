@@ -20,11 +20,11 @@ function providerId(value: unknown): string | null {
  */
 export function createDialpadVoiceReceiver(options: {
   secret: string;
-  providerUserId: string;
+  providerUserId?: string;
   persist: (receipt: DialpadVoiceReceipt) => Promise<void>;
 }) {
   return async function receive(request: Request): Promise<Response> {
-    if (!options.secret.trim() || !providerId(options.providerUserId)) return new Response(null, { status: 503 });
+    if (!options.secret.trim() || (options.providerUserId!==undefined&&!providerId(options.providerUserId))) return new Response(null, { status: 503 });
     if (!request.body) return new Response(null, { status: 400 });
     const reader = request.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -57,7 +57,7 @@ export function createDialpadVoiceReceiver(options: {
       const targetType = typeof targetRecord.type === "string" ? targetRecord.type.trim().toLowerCase() : null;
       // Missing/unknown types and related group legs need reconciliation. Only
       // positively identified other users are outside this single-rep receiver.
-      if (targetId && targetType === "user" && targetId !== options.providerUserId) {
+      if (options.providerUserId && targetId && targetType === "user" && targetId !== options.providerUserId) {
         return new Response(null, { status: 204 });
       }
     }

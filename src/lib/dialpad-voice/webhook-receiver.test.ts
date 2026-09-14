@@ -58,3 +58,5 @@ describe("voice webhook durable acknowledgment", () => {
     expect(persist).not.toHaveBeenCalled();
   });
 });
+
+it('configured company receiver retains both reps after signature verification',async()=>{const persist=vi.fn();const receive=createDialpadVoiceReceiver({secret,persist});for(const id of ['456','789'])expect((await receive(request({...event,target:{id,type:'user'}}))).status).toBe(200);expect(persist).toHaveBeenCalledTimes(2);});
