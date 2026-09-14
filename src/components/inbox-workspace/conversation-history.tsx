@@ -12,8 +12,12 @@ export interface ConversationHistoryProps {
   snapshot: { requestGeneration: number; data: InboxDetailSnapshot } | null;
   visible: boolean;
   onRefresh: () => void;
-  /** Clear the containing Query cache and summary collections on live revocation. */
+  /** Clear the containing Query cache and summary collections on live revocation
+   * (org/membership-scoped denial: 401/403). Latches the whole workspace. */
   onAccessLost: () => void;
+  /** A single item-scoped denial (404: not found / dismissed / purged cursor).
+   * Only this conversation is affected — invalidate and close just this pane. */
+  onUnavailable: (conversationId: string) => void;
   fetch?: typeof fetch;
 }
 type ReadState = { boundary: string; status: "pending" | "complete" | "error" | "expired" | "permission_lost" };
@@ -22,7 +26,7 @@ type ReadState = { boundary: string; status: "pending" | "complete" | "error" | 
  * not this rendered component. SQL receipts make Strict Mode/retry replay safe.
  */
 export function ConversationHistory(props: ConversationHistoryProps) {
-  const { orgId, conversationId, requestGeneration, snapshot, visible, onAccessLost } = props;
+  const { orgId, conversationId, requestGeneration, snapshot, visible, onAccessLost, onUnavailable } = props;
   const data = snapshot?.requestGeneration === requestGeneration && snapshot.data.orgId === orgId &&
     snapshot.data.conversationId === conversationId ? snapshot.data : null;
   const [readState, setReadState] = useState<ReadState | null>(null);
@@ -49,13 +53,19 @@ export function ConversationHistory(props: ConversationHistoryProps) {
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
       });
       if (controller.signal.aborted) return;
-      // 404 from this route is org-access denial (INBOX_ORG_DENIED / INBOX_READ_NOT_FOUND
-      // etc. in read-api.ts) wearing a not-found mask to avoid leaking existence — the
-      // route has no other, distinguishable "legitimately not found" case, so treat it
-      // the same as 401/403 and clear the pane rather than leave stale history visible.
-      if (response.status === 401 || response.status === 403 || response.status === 404) {
+      // 401/403 is org/membership-scoped denial (read-api.ts): the whole workspace
+      // has lost access, so latch permission_lost and let the owner clear everything.
+      if (response.status === 401 || response.status === 403) {
         if (progress.current?.boundary === boundary) progress.current.revoked = true;
         setRevokedBoundary(boundary); setReadState({ boundary, status: "permission_lost" }); controller.abort(); readRequest.current?.abort(); onAccessLost(); return;
+      }
+      // 404 here is item-scoped (INBOX_READ_NOT_FOUND / INBOX_ACCESS_DENIED, or the
+      // server flag being off) — only this conversation is unavailable, not the whole
+      // workspace. Stop this boundary's acknowledgments and let the owner close/invalidate
+      // just this pane instead of latching the entire workspace as access-denied.
+      if (response.status === 404) {
+        if (progress.current?.boundary === boundary) progress.current.revoked = true;
+        setReadState({ boundary, status: "error" }); controller.abort(); readRequest.current?.abort(); onUnavailable(conversationId); return;
       }
       if (response.status === 410) throw Error("Refresh messages to continue through older history.");
       if (!response.ok) throw Error("Older messages could not load. Try again.");
@@ -102,15 +112,24 @@ export function ConversationHistory(props: ConversationHistoryProps) {
                 signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
               });
               if (controller.signal.aborted) return;
-              // Same org-access-denial-wearing-404 mask as the older-page route above;
-              // treat it the same as 401/403 so a live revocation clears the pane instead
-              // of leaving stale history visible.
-              if (response.status === 401 || response.status === 403 || response.status === 404) {
+              // Org/membership-scoped denial: the whole workspace has lost access.
+              if (response.status === 401 || response.status === 403) {
                 current.revoked = true;
                 pagingRequest.current?.abort();
                 setRevokedBoundary(boundary); setReadState({ boundary, status: "permission_lost" });
                 controller.abort();
                 onAccessLost();
+                return;
+              }
+              // Item-scoped denial (this conversation only, or the server flag off).
+              // Stop this boundary's remaining acknowledgments and let the owner
+              // close/invalidate just this pane rather than latch the workspace.
+              if (response.status === 404) {
+                current.revoked = true;
+                pagingRequest.current?.abort();
+                setReadState({ boundary, status: "error" });
+                controller.abort();
+                onUnavailable(conversationId);
                 return;
               }
               if (response.status === 410) { setReadState({ boundary, status: "expired" }); return; }
@@ -134,7 +153,7 @@ export function ConversationHistory(props: ConversationHistoryProps) {
     start();
     document.addEventListener("visibilitychange", start);
     return () => { controller.abort(); if (frame !== undefined) cancelAnimationFrame(frame); document.removeEventListener("visibilitychange", start); };
-  }, [data, visible, requestGeneration, transport, retry, onAccessLost]);
+  }, [data, visible, requestGeneration, transport, retry, onAccessLost, onUnavailable]);
   if (!data || !visible) return null;
   const status = readState?.boundary === data.readBoundary ? readState.status : "pending";
   if (status === "permission_lost" || revokedBoundary === data.readBoundary) return null;

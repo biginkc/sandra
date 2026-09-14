@@ -42,6 +42,14 @@ export function InboxWorkspaceClient({ identity, initialFilter }: { identity: In
     setSelectionNames(new Map()); setSelected([]); activeOpen.current = null; setOpened(null); setCounts(undefined); setReview(false);
     sync.current?.revoke(); setSnapshot({ state: "permission_lost", rows: [] }); setBusy(false);
   }, [cache]);
+  /** A single item-scoped denial (404): only this conversation is affected. Invalidate
+   * its cached detail and close its pane if it is the one currently open — do not
+   * touch the rest of the workspace or latch permission_lost. */
+  const unavailable = useCallback((id: WorkspaceId) => {
+    cache.invalidate("detail", id);
+    setInvalidatedIds(previous => (previous.includes(id) ? previous : [...previous, id]));
+    if (activeOpen.current === id) { sequence.current++; activeOpen.current = null; setOpened(null); }
+  }, [cache]);
   async function json<T>(url: string, init: RequestInit, signal: AbortSignal): Promise<T> {
     const response = await fetch(url, { ...init, signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]), credentials: "same-origin", cache: "no-store", redirect: "error" });
     if (response.status === 401 || response.status === 403) { accessLost(); throw Error("Your access has changed. Reload the workspace."); }
@@ -135,7 +143,7 @@ export function InboxWorkspaceClient({ identity, initialFilter }: { identity: In
         <label><input type="checkbox" checked={filter.hide_noise ?? true} disabled={busy} onChange={event => void load({ ...filter, hide_noise: event.target.checked })} /> Hide DNC and test conversations</label>
         <span role="status">{counts ? `${counts.counts[filter.view === "active" ? "all" : filter.view]} matching · counted ${new Date(counts.asOf).toLocaleTimeString()}` : countsError ? "Counts unavailable" : "Loading counts…"}</span>{countsError && <button type="button" onClick={() => void loadCounts(filter, true)}>Retry counts</button>}</>}
       pageControl={<><span>{snapshot.rows.length} loaded</span><button disabled={busy} onClick={() => void load(filter)}>Refresh view</button><button disabled={busy || !nextCursor} onClick={() => void load(filter, nextCursor)}>Next 500</button></>}
-      detail={opened ? { targetId: opened.id, title: opened.row?.name ?? "Conversation", context: opened.row?.context, state: opened.error ? "error" : opened.data ? "ready" : "loading", error: opened.error, onRetry: () => void open(opened.id, true), content: opened.data ? <ConversationHistory orgId={identity.orgId} conversationId={opened.data.conversationId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.data }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} /> : undefined } : undefined}
+      detail={opened ? { targetId: opened.id, title: opened.row?.name ?? "Conversation", context: opened.row?.context, state: opened.error ? "error" : opened.data ? "ready" : "loading", error: opened.error, onRetry: () => void open(opened.id, true), content: opened.data ? <ConversationHistory orgId={identity.orgId} conversationId={opened.data.conversationId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.data }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} onUnavailable={() => unavailable(opened.id)} /> : undefined } : undefined}
       activity={<p>Bulk actions and remaining individual tools are being connected.</p>} />
     <Dialog open={review} onOpenChange={setReview}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>{selected.length} selected conversations</DialogTitle><DialogDescription>Remove any conversations that do not belong in this group, including those outside the current view.</DialogDescription><ul>{selected.map(id => <li className="flex items-center justify-between gap-4 py-2" key={id}>{selectionNames.get(id)}<button onClick={() => select(selected.filter(value => value !== id))}>Remove</button></li>)}</ul></DialogContent></Dialog>
   </QueryClientProvider>;
