@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "checks": [
+    "snapshot",
+    "partition handle CAS",
+    "stale handle classified conflict",
+    "typed target identity change denial",
+    "extra partition denial",
+    "unchanged handle success",
+    "suspension",
+    "session deletion",
+    "replacement",
+    "public/private grants"
+  ],
+  "scope": "Actual authenticated public wrappers in marked owned full-Auth database; test mutations rolled back."
+}

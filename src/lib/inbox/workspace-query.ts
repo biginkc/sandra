@@ -1,8 +1,8 @@
 import { QueryClient } from "@tanstack/react-query";
 
 export interface InboxQueryIdentity { orgId: string; userId: string; sessionId: string; accessEpoch: string }
-export type InboxQueryResource = "detail" | "counts" | "receipt";
-const limits: Record<InboxQueryResource, number> = { detail: 20, counts: 1, receipt: 10 };
+export type InboxQueryResource = "detail" | "counts" | "receipt" | "context";
+const limits: Record<InboxQueryResource, number> = { detail: 20, counts: 1, receipt: 10, context: 4 };
 /** Dedicated, memory-only cache. Summary rows belong exclusively to TanStack DB.
  * Detail responses are bounded by the server to 50 messages per page; older-page
  * support must preserve a two-page cap rather than accumulating the transcript.
@@ -13,7 +13,7 @@ export function createInboxQueryCache(identity: InboxQueryIdentity) {
     retry: false, staleTime: 30_000, gcTime: 300_000,
     refetchOnWindowFocus: false, refetchOnReconnect: false,
   }, mutations: { retry: false } } });
-  const recent = { detail: new Map<string, true>(), counts: new Map<string, true>(), receipt: new Map<string, true>() };
+  const recent = { detail: new Map<string, true>(), counts: new Map<string, true>(), receipt: new Map<string, true>(), context: new Map<string, true>() };
   let generation = 0;
   let closed = false;
   const key = (resource: InboxQueryResource, id: string) => [...prefix, resource, id];
