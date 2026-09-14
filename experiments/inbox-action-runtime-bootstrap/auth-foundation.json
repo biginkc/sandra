@@ -1,0 +1,11 @@
+{
+  "source_database": "sandra_inbox_install_20260913",
+  "target_database": "sandra_inbox_action_runtime_20260913",
+  "schema_sha256": "d2cf32d6d8d830cdaf0263b179586ae0e50fd6098dc87c89722ede25fee7ffca",
+  "vendor_ledger_sha256": "1b1a04c0bcb679db8ffdaf56ca518966cb7928af0520582aa27cb131af9aad3e",
+  "excluded_inbox_triggers": 2,
+  "copied_data_tables": [
+    "auth.schema_migrations"
+  ],
+  "user_session_job_data_copied": false
+}

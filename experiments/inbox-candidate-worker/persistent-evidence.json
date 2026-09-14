@@ -1,0 +1,33 @@
+{
+  "running": true,
+  "container": "sandra-inbox-persistent-projector-20260913",
+  "database": "sandra_inbox_install_20260913",
+  "pool": {
+    "backend_ids": [
+      253371
+    ],
+    "connections": 1
+  },
+  "health": {
+    "healthy": true,
+    "lastSuccess": 1789341614394,
+    "counts": {
+      "baseline": 1,
+      "backfill": 0,
+      "parent": 0,
+      "expiry": 0,
+      "summary": 0,
+      "stale": 0
+    },
+    "poolConnections": 1
+  },
+  "direct_privileges": {
+    "read_auth": false,
+    "modify_control": false,
+    "select_messages": false,
+    "update_messages": false
+  },
+  "memory_bytes": 268435456,
+  "cpu_limit": 0.5,
+  "scope": "Owned isolated candidate sidecar; no production deployment, original comparison runner paused"
+}

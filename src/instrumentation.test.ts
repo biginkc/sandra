@@ -22,7 +22,9 @@ describe("Next server request error hook", () => {
   it("captures an unhandled error with safe route classification and awaits delivery", async () => {
     const error = new Error("private customer detail");
     await onRequestError(error, {}, { routePath: "/api/leads/[id]", routeType: "route" });
-    expect(mocks.capture).toHaveBeenCalledWith(error);
+    expect(mocks.capture).toHaveBeenCalledWith(error, {
+      mechanism: { handled: false, type: "auto.function.nextjs.on_request_error" },
+    });
     expect(mocks.tag).toHaveBeenCalledWith("surface", "server_request");
     expect(mocks.tag).toHaveBeenCalledWith("errorClass", "unexpected");
     expect(mocks.tag).toHaveBeenCalledWith("routePattern", "/api/leads/[id]");

@@ -14,7 +14,9 @@ export const onRequestError = async (error: unknown, _request: unknown, context:
     scope.setTag("errorClass", "unexpected");
     scope.setTag("routePattern", context.routePath);
     scope.setTag("routeType", context.routeType);
-    Sentry.captureException(error);
+    Sentry.captureException(error, {
+      mechanism: { handled: false, type: "auto.function.nextjs.on_request_error" },
+    });
   });
   await Sentry.flush(2_000);
 };

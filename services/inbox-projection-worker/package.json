@@ -1,0 +1,1 @@
+{"name":"sandra-inbox-projection-worker","private":true,"type":"module","scripts":{"test":"node --test core.test.mjs server.test.mjs config.test.mjs","start":"node server.mjs"},"dependencies":{"pg":"8.21.0"}}

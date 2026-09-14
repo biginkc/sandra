@@ -38,4 +38,12 @@ describe("reportError Sentry diagnostics", () => {
     expect(sentry.setTag).toHaveBeenCalledWith("surface", "sms_send");
     expect(sentry.setTag).not.toHaveBeenCalledWith("operation", expect.anything());
   });
+
+  it("keeps a known numeric PostgreSQL timeout code as a safe classification", () => {
+    reportError({ code: "57014", message: "customer@example.com query timeout" }, {
+      errorClass: "database", tags: { surface: "inbox_read", operation: "load" },
+    });
+    expect((sentry.captureException.mock.calls[0][0] as Error).message).toBe("database:57014");
+    expect(sentry.setTag).toHaveBeenCalledWith("code", "57014");
+  });
 });

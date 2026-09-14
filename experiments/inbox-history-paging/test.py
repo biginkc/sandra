@@ -55,6 +55,30 @@ need(ack['changed']==153 and ack['completed'],'Original captured read set wrong'
 need(sql(f"SELECT read_at IS NULL FROM messages WHERE id='{late}'")=='t','Late inbound incorrectly acknowledged')
 sql(f"UPDATE inbox_t2_read.boundaries SET expires_at=clock_timestamp()-interval '1 second' WHERE id='{first['read_boundary']}'")
 denied=sql(auth()+call(first['next_cursor']),True);need(denied.returncode!=0 and 'INBOX_READ_EXPIRED' in denied.stderr,'Expired cursor served')
-checks=['four exact pages 50/50/50/3 with microsecond/tied timestamp order','unchanged cursor repeat is stable; all pages preserve original read boundary','same-user other-session, wrong-conversation and unknown cursor denied','anon/service_role direct execution denied','late backdated arrival visible in older history but excluded from original acknowledgment','expired history cursor denied']
+
+# Mutation control for history_page()'s boundary.session_id/access_epoch clause: the
+# cursor-level session/epoch check above (line 44) can never itself be bypassed via the
+# public API (a cursor is only ever created under its own boundary's session/epoch), so
+# it alone never exercises the SEPARATE boundary-level clause. Fabricate the decoupled
+# state directly (a cursor whose own session/epoch matches the caller but whose
+# boundary_id points at a DIFFERENT session's boundary) to prove that second clause is
+# independently load-bearing, not merely redundant with the first.
+fresh=json.loads(sql(auth(s1)+f"SELECT inbox_t2_read.detail('{o}','{c}')"))
+fab_boundary=fresh['read_boundary'];fab_cursor=str(uuid.uuid4())
+sql(f"INSERT INTO inbox_t2_read.history_cursors(id,boundary_id,session_id,access_epoch,before_at,before_id) VALUES('{fab_cursor}','{fab_boundary}','{s2}',(SELECT access_epoch FROM inbox_t2_read.boundaries WHERE id='{fab_boundary}'),now(),gen_random_uuid())")
+denied=sql(auth(s2)+call(fab_cursor),True);need(denied.returncode!=0 and 'INBOX_READ_NOT_FOUND' in denied.stderr,'Fabricated cross-session cursor should be rejected by boundary.session_id clause')
+correct_body=re.search(r"CREATE FUNCTION inbox_t2_read\.history_page\(.*?AS \$\$(.*?)\$\$;",source,re.S).group(1)
+target="OR boundary.session_id IS DISTINCT FROM (a->>'session_id')::uuid OR boundary.access_epoch IS DISTINCT FROM (a->>'access_epoch')::bigint THEN"
+replacement="THEN"
+need(target in correct_body,'Expected boundary session_id/access_epoch clause not found in source')
+mutated_body=correct_body.replace(target,replacement,1);need(mutated_body!=correct_body,'Mutation did not change history_page body')
+sql("CREATE OR REPLACE FUNCTION inbox_t2_read.history_page(o uuid,c uuid,before_cursor uuid DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$"+mutated_body+"$$;")
+mres=sql(auth(s2)+call(fab_cursor),True)
+need(mres.returncode==0,'MUTATION CONTROL FAILED: removing the boundary session_id/access_epoch clause did not let the fabricated cross-session cursor wrongly succeed')
+sql("CREATE OR REPLACE FUNCTION inbox_t2_read.history_page(o uuid,c uuid,before_cursor uuid DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$"+correct_body+"$$;")
+need(sql("SELECT prosrc FROM pg_proc WHERE oid='inbox_t2_read.history_page(uuid,uuid,uuid)'::regprocedure")==correct_body.strip(),'Restored history_page body does not match source')
+denied=sql(auth(s2)+call(fab_cursor),True);need(denied.returncode!=0 and 'INBOX_READ_NOT_FOUND' in denied.stderr,'Post-restore fabricated cross-session cursor should be rejected again')
+
+checks=['four exact pages 50/50/50/3 with microsecond/tied timestamp order','unchanged cursor repeat is stable; all pages preserve original read boundary','same-user other-session, wrong-conversation and unknown cursor denied','anon/service_role direct execution denied','late backdated arrival visible in older history but excluded from original acknowledgment','expired history cursor denied','mutation control: fabricated cursor with matching session but a different session\'s boundary is rejected by the boundary.session_id/access_epoch clause; removing that clause lets it wrongly succeed, restoring it rejects again']
 (P/'evidence.json').write_text(json.dumps({'checks':checks,'source_sha256':hashlib.sha256(source.encode()).hexdigest(),'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'first_page':first,'second_page':second,'limitations':['SQL claims, not JWT transport','Live keyset traversal, not an immutable history snapshot','50-row exact terminal page can require one empty final request','Cursor retention/admission still requires release design']},indent=2)+'\n')
 print('Passed '+str(len(checks))+' actual history paging groups')

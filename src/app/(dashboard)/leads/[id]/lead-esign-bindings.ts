@@ -732,6 +732,17 @@ export async function providerForOrg(
       message,
       signal,
     }) => {
+      if (process.env.PROD_CANARY_ESIGN_ORG_ID === orgId) {
+        try {
+          const { data, error } = await createAdminClient().rpc(
+            "allow_esign_canary_provider_dispatch",
+            { p_org_id: orgId, p_request_id: localRequestId },
+          );
+          if (error || data !== true) return { outcome: "canary_lease_blocked" };
+        } catch {
+          return { outcome: "canary_lease_blocked" };
+        }
+      }
       try {
         const output = await provider.sendWithTemplate({
           localRequestId,

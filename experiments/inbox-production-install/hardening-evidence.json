@@ -1,0 +1,10 @@
+{
+  "applied": true,
+  "correction": "exact private grants revocation and bounded cursor retention",
+  "foundation_sha256": "9dbda65aa4c9b810bb94968a97c97d04f19d9744a76b642f47fa625c858fb938",
+  "companion_sha256": "fcceda1313d886c650bac168503168cb25ac57c4b6bc85d866bfdd7d82d400a9",
+  "hardening_sha256": "4a1d6a89d263ff2b40949e313b14d90529eba69c38a9839b6fb3d0820f99944a",
+  "preserved_serving_gate": true,
+  "disabled_public_gate_verified": true,
+  "scope": "Private grants and retention forward correction after recorded initial installation; not a fresh reinstallation"
+}

@@ -1,0 +1,86 @@
+{
+  "checks": [
+    "actual configured SDK rejects unsigned discovery and callback; registered signed endpoint and real readiness available",
+    "real authoritative acceptance survives stopped worker and closed original session; signed callback applies outcome and assignment once",
+    "worker restart after first canonical receipt resumes blocked second step without duplicate events",
+    "worker and persistent Restate restart after first canonical receipt resumes blocked second step without duplicate events",
+    "idle engine outage reports503, restart recovers200, action pool remains within two connections",
+    "real HTTP response destroyed after durable acceptance; natural lease expiry retries the same event as PreviouslyAccepted, with one canonical effect per step",
+    "actual concurrent authoritative prepare/worker deadlock: worker40P01 victim retries same operation/step, one event, then signed Restate reconciles receipt"
+  ],
+  "operations": [
+    {
+      "operation_id": "522af72c-8ada-4c03-a76e-3fed1e9b0ef5",
+      "property_id": "ced0e684-2765-432e-9fa7-570a8b574026",
+      "states": [
+        "succeeded",
+        "succeeded"
+      ]
+    },
+    {
+      "operation_id": "cc7dfb66-8cd5-4dfb-92ac-a18d4e6a62cd",
+      "property_id": "36a85b97-f955-40f9-af26-d2547e9faa4a",
+      "states": [
+        "succeeded",
+        "succeeded"
+      ]
+    },
+    {
+      "operation_id": "aea07e7b-b36e-4e87-8279-31c8e762b671",
+      "property_id": "1314d539-ca90-4bc9-a030-ee7f410a414d",
+      "states": [
+        "succeeded",
+        "succeeded"
+      ]
+    },
+    {
+      "operation_id": "73defed1-d478-4791-bf20-788070abe3da",
+      "property_id": "5784eb4f-efa5-4165-9c01-a2bbf0b9bfb2",
+      "states": [
+        "succeeded",
+        "succeeded"
+      ]
+    },
+    {
+      "operation_id": "80941af1-9146-4b33-bedf-3dac02f1db87",
+      "property_id": "9eefb9b9-b5c8-4c63-b217-be8080f3f724",
+      "states": [
+        "succeeded",
+        "succeeded"
+      ],
+      "deadlock_retry": {
+        "result": {
+          "stepId": "b1dbcfb0-90a4-4b2d-b8de-c6c4b47ee2e2",
+          "state": "succeeded"
+        },
+        "aborted": [
+          {
+            "code": "40P01",
+            "args": [
+              "1fb8de3b-c060-4b16-9d93-3870cfa2f5fb",
+              "80941af1-9146-4b33-bedf-3dac02f1db87",
+              "b1dbcfb0-90a4-4b2d-b8de-c6c4b47ee2e2"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "organization_id": "1fb8de3b-c060-4b16-9d93-3870cfa2f5fb",
+  "worker_image": "sha256:c8bb149b52f4f1c76c5dd2474cbd73e443ec6e20d9aa98b35f40ed3f272d99df",
+  "restate_image": "docker.restate.dev/restatedev/restate@sha256:675b85e7bf674f9dfda04a391fa33e850650d57e464b694ca8df5866acad95cc",
+  "connections": 1,
+  "source_hashes": {
+    "core.mjs": "c12b7ae5fdfc5aaffcbcca6b2df80a402a5b3fff5c6556e8b47381e9e4f4a955",
+    "server.mjs": "cdde01d18962dec67f68324bce668ea1be326ba17ec69acd658a0bbf4b71343c",
+    "runtime-proof.py": "3cb46484116ba24295202be8b9073b35e182e7df5b2fdfd50b139ca20b44babe",
+    "runtime-control.py": "855205b186afdd5828f6358095513f0e0481ad2141c34ec2ec91d9eab82ce58c",
+    "fixture-companion.sql": "5fd578c67b401fcaa45d6ca6f5fba3e7022b6ad76b60ca3b3c8c6987daf2b090",
+    "lost-response.mjs": "b52495c2bec8304ef2e57056f4fac96c3e963e1c16a5bd791b4b208d54f0b2a6",
+    "deadlock-step.mjs": "1ac4fbe30ba4f9a5f2606fc57ad883d25863b2f5fa463d766ca91b3e244ea6d8"
+  },
+  "limits": [
+    "Owned full-schema fixture; no production/provider calls",
+    "Synthetic SQL JWT claims; separate browser JWT proof still applies"
+  ]
+}

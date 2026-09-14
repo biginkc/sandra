@@ -5,12 +5,23 @@ import { scrubSentryEvent } from "./sentry-privacy";
 describe("scrubSentryEvent", () => {
   it("retains only static route patterns and exception type for unhandled requests", () => {
     const event = { tags: { surface: "server_request", routePattern: "/leads/[id]", routeType: "render" },
-      exception: { values: [{ type: "TypeError", value: "customer@example.com" }] } } as unknown as ErrorEvent;
+      exception: { values: [{ type: "TypeError", value: "customer@example.com",
+        mechanism: { handled: false, type: "auto.function.nextjs.on_request_error", data: { secret: "customer@example.com" } } }] } } as unknown as ErrorEvent;
     const scrubbed = scrubSentryEvent(event);
     expect(scrubbed.tags).toMatchObject({ routePattern: "/leads/[id]", routeType: "render" });
     expect(scrubbed.exception?.values?.[0]?.value).toBe("unknown:TypeError");
+    expect(scrubbed.exception?.values?.[0]?.mechanism).toEqual({ handled: false, type: "auto.function.nextjs.on_request_error" });
+    expect(JSON.stringify(scrubbed)).not.toContain("customer@example.com");
     expect(scrubSentryEvent({ ...event, tags: { routePattern: "/leads/customer-12345678", routeType: "unsafe" } }).tags)
       .toEqual({ surface: "unknown", errorClass: "unknown" });
+  });
+  it("retains known SQLSTATE codes without accepting arbitrary five-digit values", () => {
+    const event = { tags: { surface: "inbox_read", errorClass: "database", code: "57014" },
+      exception: { values: [{ type: "Error", value: "private timeout detail" }] } } as unknown as ErrorEvent;
+    const scrubbed = scrubSentryEvent(event);
+    expect(scrubbed.tags?.code).toBe("57014");
+    expect(scrubbed.exception?.values?.[0]?.value).toBe("database:57014");
+    expect(scrubSentryEvent({ ...event, tags: { code: "90210" } }).tags?.code).toBeUndefined();
   });
   it("groups state anomalies by safe signal and outcome without retaining entity fingerprints", () => {
     const event = {

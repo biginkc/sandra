@@ -13,6 +13,10 @@ const authMocks = vi.hoisted(() => ({
 const supabaseMocks = vi.hoisted(() => ({
   createAdminClient: vi.fn(),
 }));
+const dispatchMocks = vi.hoisted(() => ({
+  getEsignCredentials: vi.fn(),
+  createDropboxSignProvider: vi.fn(),
+}));
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/auth/memberships", () => ({
@@ -20,6 +24,12 @@ vi.mock("@/lib/auth/memberships", () => ({
 }));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: supabaseMocks.createAdminClient,
+}));
+vi.mock("@/lib/esign/credentials", () => ({
+  getEsignCredentials: dispatchMocks.getEsignCredentials,
+}));
+vi.mock("@/lib/esign/dropbox-sign", () => ({
+  createDropboxSignProvider: dispatchMocks.createDropboxSignProvider,
 }));
 
 import {
@@ -29,7 +39,38 @@ import {
   isConsumedRetryConstraint,
   mapAtomicSendBlocker,
   mapProviderMutationClaimOutcome,
+  providerForOrg,
 } from "./lead-esign-bindings";
+
+describe("dedicated eSign canary provider dispatch fence", () => {
+  it("refuses provider dispatch when the current lease check is not allowed", async () => {
+    const originalOrg = process.env.PROD_CANARY_ESIGN_ORG_ID;
+    process.env.PROD_CANARY_ESIGN_ORG_ID = "canary-org";
+    const providerSend = vi.fn();
+    const rpc = vi.fn().mockResolvedValue({ data: false, error: null });
+    dispatchMocks.getEsignCredentials.mockResolvedValue({
+      apiKey: "test", clientId: "test", sendingEnabled: true,
+    });
+    dispatchMocks.createDropboxSignProvider.mockReturnValue({ sendWithTemplate: providerSend });
+    supabaseMocks.createAdminClient.mockReturnValue({ rpc });
+    try {
+      const provider = await providerForOrg("canary-org");
+      expect(provider).not.toBeNull();
+      const result = await provider!.sendWithTemplate({
+        localRequestId: "request-1", testMode: true, providerTemplateId: "template-1",
+        signers: [], mergeValues: {} as never, signal: new AbortController().signal,
+      });
+      expect(result).toEqual({ outcome: "canary_lease_blocked" });
+      expect(rpc).toHaveBeenCalledWith("allow_esign_canary_provider_dispatch", {
+        p_org_id: "canary-org", p_request_id: "request-1",
+      });
+      expect(providerSend).not.toHaveBeenCalled();
+    } finally {
+      if (originalOrg === undefined) delete process.env.PROD_CANARY_ESIGN_ORG_ID;
+      else process.env.PROD_CANARY_ESIGN_ORG_ID = originalOrg;
+    }
+  });
+});
 
 describe("lead eSign actor membership gate", () => {
   it("resolves a single active membership into the eSign actor", async () => {

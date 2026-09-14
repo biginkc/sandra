@@ -1,0 +1,7 @@
+{
+  "foundation_sha256": "9dbda65aa4c9b810bb94968a97c97d04f19d9744a76b642f47fa625c858fb938",
+  "installed_function_bodies": 67,
+  "private_helper_exposure_count": 0,
+  "replica_identity": "FULL",
+  "scope": "Read-only owned fixture catalog proof; excludes runtime throughput and production schema equivalence"
+}

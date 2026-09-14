@@ -5363,6 +5363,19 @@ export type Database = {
       }
     }
     Functions: {
+      ack_sentry_anomaly: {
+        Args: {
+          p_signal_kind: string
+          p_source_id: string
+          p_claim_token: string
+          p_delivered: boolean
+        }
+        Returns: boolean
+      }
+      allow_esign_canary_provider_dispatch: {
+        Args: { p_org_id: string; p_request_id: string }
+        Returns: boolean
+      }
       list_unobserved_esign_sentry_anomalies: {
         Args: { p_limit?: number }
         Returns: {
@@ -5378,15 +5391,6 @@ export type Database = {
           p_observed_at?: string
         }
         Returns: Json
-      }
-      ack_sentry_anomaly: {
-        Args: {
-          p_signal_kind: string
-          p_source_id: string
-          p_claim_token: string
-          p_delivered: boolean
-        }
-        Returns: boolean
       }
       fn_set_acquisition_designation: {
         Args: {

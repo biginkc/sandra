@@ -3,9 +3,12 @@ import type { ErrorEvent } from "@sentry/nextjs";
 const SAFE_TAGS = new Set(["surface", "operation", "kind", "phase", "outcome", "errorClass", "code", "httpStatus", "routePattern", "routeType"]);
 const SAFE_TOKEN = /^[a-zA-Z][a-zA-Z0-9_:-]{0,79}$/;
 const SAFE_CODE = /^[a-zA-Z][a-zA-Z0-9_:-]{0,39}$/;
+// Observed PostgreSQL SQLSTATEs. Avoid accepting arbitrary five-digit values
+// that may be business identifiers or ZIP codes in an upstream error object.
+const SAFE_SQLSTATES = new Set(["57014", "42501", "22023", "55000", "23505", "23503"]);
 
 export function safeDiagnosticToken(value: unknown, code = false): string | undefined {
-  if (typeof value !== "string" || !(code ? SAFE_CODE : SAFE_TOKEN).test(value)) return undefined;
+  if (typeof value !== "string" || !(code ? (SAFE_CODE.test(value) || SAFE_SQLSTATES.has(value)) : SAFE_TOKEN.test(value))) return undefined;
   // Reject common opaque record IDs even when they happen to match the token
   // grammar. Tags are for classifications, never correlation to a business row.
   if (/\d{8,}|[a-f0-9]{16,}/i.test(value)) return undefined;
@@ -95,6 +98,10 @@ export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
     result.exception = { values: event.exception.values.map((exception) => ({
       type: safeDiagnosticToken(exception.type) ?? "Error",
       value: `${tags.errorClass ?? "unknown"}:${code}`,
+      ...(exception.mechanism?.handled === false
+        && exception.mechanism.type === "auto.function.nextjs.on_request_error"
+        ? { mechanism: { handled: false, type: "auto.function.nextjs.on_request_error" } }
+        : {}),
       ...(exception.stacktrace ? { stacktrace: {
         frames: (exception.stacktrace.frames ?? []).map((frame) => ({
           ...(safeFrameLocation(frame.filename) ? { filename: safeFrameLocation(frame.filename) } : {}),
