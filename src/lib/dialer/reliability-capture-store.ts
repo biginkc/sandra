@@ -1,9 +1,10 @@
 import type { BrowserCaptureChunk, BrowserCaptureEvent } from "./reliability-browser-capture";
+import type { ReliabilityTimingMarker } from "./reliability-timing";
 import type { CallTarget } from "./transport";
 
 export const RELIABILITY_CAPTURE_CONFIG_KEY = "sandra:reliability-capture:v1";
 export const RELIABILITY_CAPTURE_DB_NAME = "sandra-reliability-capture-v2";
-const RELIABILITY_CAPTURE_DB_VERSION = 2;
+const RELIABILITY_CAPTURE_DB_VERSION = 3;
 const MAX_CONFIG_LIFETIME_MS = 2 * 60 * 60 * 1_000;
 
 export type ReliabilityCaptureConfig = {
@@ -51,6 +52,7 @@ type CaptureStoreRecord = {
 export type CaptureStore = {
   writeChunk(chunk: BrowserCaptureChunk): Promise<void>;
   writeEvent(event: BrowserCaptureEvent): Promise<void>;
+  writeTiming(marker: ReliabilityTimingMarker): Promise<void>;
   close(): void;
 };
 
@@ -65,6 +67,8 @@ export type StoredCaptureEvent = CaptureStoreRecord & {
   readonly detail?: string;
 };
 
+export type StoredReliabilityTiming = CaptureStoreRecord & ReliabilityTimingMarker;
+
 function openDatabase(databaseFactory: IDBFactory): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = databaseFactory.open(RELIABILITY_CAPTURE_DB_NAME, RELIABILITY_CAPTURE_DB_VERSION);
@@ -76,6 +80,8 @@ function openDatabase(databaseFactory: IDBFactory): Promise<IDBDatabase> {
         ? request.transaction!.objectStore("events")
         : database.createObjectStore("events", { autoIncrement: true });
       if (!events.indexNames.contains("byCall")) events.createIndex("byCall", ["runId", "callId"]);
+      if (!database.objectStoreNames.contains("timings"))
+        database.createObjectStore("timings", { keyPath: ["runId", "callId", "sequence"] });
     };
     request.onblocked = () => reject(new Error("Capture database upgrade blocked"));
     request.onerror = () => reject(request.error ?? new Error("Capture database open failed"));
@@ -91,7 +97,7 @@ export function openReliabilityCaptureStore(
   nowEpochMs: () => number = () => Date.now(),
 ): Promise<CaptureStore> {
   return openDatabase(databaseFactory).then((database) => {
-      const write = (storeName: "chunks" | "events", value: Record<string, unknown>) =>
+      const write = (storeName: "chunks" | "events" | "timings", value: Record<string, unknown>) =>
         new Promise<void>((done, fail) => {
           let transaction: IDBTransaction;
           try { transaction = database.transaction(storeName, "readwrite"); }
@@ -113,6 +119,12 @@ export function openReliabilityCaptureStore(
           ...base(event.atMonotonicMs), kind: event.kind,
           ...(event.detail ? { detail: event.detail } : {}),
         }),
+        writeTiming: (marker) => write("timings", {
+          ...base(marker.atMonotonicMs), sequence: marker.sequence,
+          stage: marker.stage, atEpochMs: marker.atEpochMs,
+          clockUncertaintyMs: marker.clockUncertaintyMs,
+          ...(marker.detail ? { detail: marker.detail } : {}),
+        }),
         close: () => database.close(),
       };
   });
@@ -122,9 +134,13 @@ export async function readReliabilityCapture(
   runId: string,
   callId: string,
   databaseFactory: IDBFactory = indexedDB,
-): Promise<{ readonly chunks: readonly StoredCaptureChunk[]; readonly events: readonly StoredCaptureEvent[] }> {
+): Promise<{
+  readonly chunks: readonly StoredCaptureChunk[];
+  readonly events: readonly StoredCaptureEvent[];
+  readonly timings: readonly StoredReliabilityTiming[];
+}> {
   const database = await openDatabase(databaseFactory);
-  const read = <T>(storeName: "chunks" | "events", range: IDBKeyRange, indexName?: string) =>
+    const read = <T>(storeName: "chunks" | "events" | "timings", range: IDBKeyRange, indexName?: string) =>
     new Promise<T[]>((resolve, reject) => {
       const transaction = database.transaction(storeName, "readonly");
       const store = transaction.objectStore(storeName);
@@ -133,13 +149,16 @@ export async function readReliabilityCapture(
       request.onerror = () => reject(request.error ?? new Error("Capture read failed"));
     });
   try {
-    const [chunks, events] = await Promise.all([
+    const [chunks, events, timings] = await Promise.all([
       read<StoredCaptureChunk>("chunks", IDBKeyRange.bound(
         [runId, callId, 0, 0], [runId, callId, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
       )),
       read<StoredCaptureEvent>("events", IDBKeyRange.only([runId, callId]), "byCall"),
+      read<StoredReliabilityTiming>("timings", IDBKeyRange.bound(
+        [runId, callId, 0], [runId, callId, Number.MAX_SAFE_INTEGER],
+      )),
     ]);
-    return { chunks, events };
+    return { chunks, events, timings };
   } finally {
     database.close();
   }

@@ -46,6 +46,11 @@ import {
   isSoftphoneTransportEnabled,
 } from "@/lib/dialer/transport-selection";
 import { transitionSoftphoneState, type SoftphoneState } from "@/lib/dialer/state-machine";
+import {
+  createReliabilityTimingSession,
+  publishPendingReliabilityTiming,
+  type ReliabilityTimingSession,
+} from "@/lib/dialer/reliability-timing";
 
 export type SoftphoneLead = {
   id: string;
@@ -470,12 +475,16 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   const startTarget = useCallback(async (
     prepare: () => Promise<{ ok: true; data: SoftphoneTarget } | { ok: false; error: string }>,
     provisionalTarget?: SoftphoneTarget,
+    suppliedTiming?: ReliabilityTimingSession,
   ) => {
     if (!callingEnabled) {
       setError("Calling not yet enabled");
       return;
     }
     if (startInFlightRef.current) return;
+    const reliabilityTiming = suppliedTiming ?? createReliabilityTimingSession();
+    if (!suppliedTiming) reliabilityTiming.mark("ui_click");
+    reliabilityTiming.mark("ui_handler");
     startInFlightRef.current = true;
     terminalHandledRef.current = false;
     teardownWarningRef.current = false;
@@ -532,6 +541,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     }
     let result: { ok: true; data: SoftphoneTarget } | { ok: false; error: string };
     try {
+      reliabilityTiming.mark("preparation_started");
       result = await prepare();
     } catch {
       if (provisionalTarget?.propertyId) {
@@ -548,6 +558,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       setError("Could not prepare the call. Try again.");
       return;
     }
+    if (result.ok) reliabilityTiming.mark("preparation_completed");
     setPending(false);
     if (!result.ok) {
       startInFlightRef.current = false;
@@ -570,6 +581,10 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     const callToken = startIntent?.callToken ?? crypto.randomUUID();
     const intentCapability = startIntent?.intentCapability;
     setWrapToken(callToken);
+    // Keep the pre-call markers in memory until the transport has validated
+    // the exact QA destination/caller pair. The browser-only timing session
+    // never crosses the Server Action serialization boundary.
+    if (jitterTransport) publishPendingReliabilityTiming(reliabilityTiming);
     const transport = transportFactory();
     transportRef.current = transport;
     let terminalPromise: Promise<void> | null = null;
@@ -785,6 +800,8 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
 
   const openLead = useCallback((lead: SoftphoneLead) => {
     if (!callingEnabled || startInFlightRef.current) return;
+    const reliabilityTiming = createReliabilityTimingSession();
+    reliabilityTiming.mark("ui_click");
     const phoneE164 = lead.phones[0] ?? "";
     void startTarget(() => prepareLeadCall(lead.id), {
       propertyId: lead.id,
@@ -795,7 +812,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       address: lead.address,
       state: lead.state,
       startedAt: new Date().toISOString(),
-    });
+    }, reliabilityTiming);
   }, [callingEnabled, startTarget]);
 
   const openIdle = useCallback(() => {
@@ -1010,9 +1027,21 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
                 callerIdReady={callerIdReady}
                 onCallerIdChange={selectCallerId}
                 onRetryCallerIds={() => { void loadCallerIds(); }}
-                onLead={(suggestion) => void startTarget(() => prepareLeadCall(suggestion.propertyId))}
-                onRecent={(recent) => void startTarget(() => recent.propertyId ? prepareLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164))}
-                onManual={() => void startTarget(() => prepareManualCall(manualDigits))}
+                onLead={(suggestion) => {
+                  const reliabilityTiming = createReliabilityTimingSession();
+                  reliabilityTiming.mark("ui_click");
+                  void startTarget(() => prepareLeadCall(suggestion.propertyId), undefined, reliabilityTiming);
+                }}
+                onRecent={(recent) => {
+                  const reliabilityTiming = createReliabilityTimingSession();
+                  reliabilityTiming.mark("ui_click");
+                  void startTarget(() => recent.propertyId ? prepareLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164), undefined, reliabilityTiming);
+                }}
+                onManual={() => {
+                  const reliabilityTiming = createReliabilityTimingSession();
+                  reliabilityTiming.mark("ui_click");
+                  void startTarget(() => prepareManualCall(manualDigits), undefined, reliabilityTiming);
+                }}
                 onDigit={enterManualDigit}
                 onBackspace={() => { const next = dialInputRef.current.slice(0, -1); dialInputRef.current = next; setDialInput(next); }}
                 error={error}

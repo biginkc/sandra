@@ -15,8 +15,10 @@ node scripts/export-reliability-browser-capture.mjs \
   --cdp=http://127.0.0.1:9222 \
   --origin=https://YOUR-SANDRA-ORIGIN \
   --run=EXACT_RUN_ID \
-  --call=EXACT_CALL_UUID \
+  --call=EXACT_BROWSER_CALL_REFERENCE \
   --out=/absolute/path/to/new-empty-export-directory
 ```
 
-The exporter reads the exact run/call key without clicking the page or clearing IndexedDB. It refuses missing/error events and incomplete or noncontiguous segments, then writes one media file per segment plus a manifest with event/chunk clocks and SHA-256 hashes. The output directory must not already exist. A successful export proves that the stored browser-side media can be recovered; decoding the audio and scoring unique probes still require the independent receiver and emission evidence. A failed or interrupted export has no completed manifest and cannot be scored.
+The exporter reads the exact run/call key without clicking the page or clearing IndexedDB. `EXACT_BROWSER_CALL_REFERENCE` is the browser-held sealed call reference (`v1.<payload>.<signature>`) used as the IndexedDB key; a raw provider UUID is also accepted for seeded/rehearsal captures. The provider UUID remains server-side. The exporter refuses missing/error events and incomplete or noncontiguous segments, then writes one media file per segment plus a manifest with event/chunk clocks and SHA-256 hashes. The output directory must not already exist. A successful export proves that the stored browser-side media can be recovered; decoding the audio and scoring unique probes still require the independent receiver and emission evidence. A failed or interrupted export has no completed manifest and cannot be scored.
+
+The same exact-call manifest includes `timings`, a startup timeline recorded in the browser. Markers cover `ui_click`, `ui_handler`, target and microphone preparation, `backend_accepted`, RTC registration, provider-observed `operator_ringing` and `operator_live`, and browser playback start/readiness. Each marker contains monotonic and epoch milliseconds plus `clockUncertaintyMs`, which is the local clock-pair sampling window. `operator_live` is a provider call-update observation; it is intentionally not labeled as a provider answer or remote-party answer. Startup deltas may be compared within this browser timeline. Comparisons with provider/webhook timestamps must retain their separate clock source and uncertainty.

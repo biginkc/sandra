@@ -37,6 +37,10 @@ import {
   RELIABILITY_CAPTURE_CONFIG_KEY,
   type ReliabilityCaptureConfig,
 } from "./reliability-capture-store";
+import {
+  takePendingReliabilityTiming,
+  type ReliabilityTimingSession,
+} from "./reliability-timing";
 
 const TELNYX_REGISTER_TIMEOUT_MS = 25_000;
 const JITTER_START_ACTION_ATTEMPTS = 2;
@@ -253,6 +257,7 @@ export class JitterCallTransport implements CallTransport {
   private qaCaptureAudio: HTMLAudioElement | null = null;
   private qaCaptureHandle: BrowserCaptureHandle | null = null;
   private qaCaptureSegment = 0;
+  private reliabilityTiming: ReliabilityTimingSession | null = null;
   private removeRemoteAudioDiagnostics: (() => void) | null = null;
   private stopAudioHealth: (() => void) | null = null;
   private audioHealthControllerId = newControllerId();
@@ -642,6 +647,7 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private async startInternal(target: CallTarget): Promise<CallHandle> {
+    this.reliabilityTiming = takePendingReliabilityTiming();
     // QA recording is opt-in, short-lived and bound to the exact target pair.
     // Consume the configuration once so a later ordinary call cannot inherit it.
     try {
@@ -660,10 +666,15 @@ export class JitterCallTransport implements CallTransport {
       // answer timeout, which can terminate the leg as busy before the user
       // has a chance to grant access. Do not provision anything until audio
       // capture is proven available.
+      this.reliabilityTiming?.mark("microphone_preparation_started");
       await this.dependencies.prepareMicrophone();
+      this.reliabilityTiming?.mark("microphone_preparation_completed");
       const started = await this.startCallWithLostResponseRecovery(target);
       this.startOutcomeAmbiguous = started.ambiguous === true;
       if (!started.ok) throw proxyError(started);
+      this.reliabilityTiming?.mark("backend_accepted", {
+        source: "server_action_response",
+      });
       if (this.hangupRequested || this.terminal || this.cancelPromise) {
         // The operator may have ended the attempt while the start response was
         // in flight. Treat that response as ambiguous and never resurrect a
@@ -673,6 +684,8 @@ export class JitterCallTransport implements CallTransport {
         throw new Error("Call start was canceled.");
       }
       this.callId = started.data.callId;
+      if (this.reliabilityTiming && this.qaCaptureConfig)
+        this.reliabilityTiming.bind(this.qaCaptureConfig.runId, this.callId);
       this.removePageHideListener = this.dependencies.subscribePageHide(() =>
         this.onPageHide(),
       );
@@ -770,6 +783,9 @@ export class JitterCallTransport implements CallTransport {
       .on("telnyx.ready", () => {
         if (this.rtcClient !== client) return;
         if (this.liveAt === null) this.clearRecoveryTimer();
+        this.reliabilityTiming?.mark("rtc_registered", {
+          phase: this.liveAt === null ? "initial" : "recovery",
+        });
         this.finishRegistration();
       })
       .on("telnyx.socket.close", () => {
@@ -817,6 +833,9 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private async registerRtc(client: TelnyxRtcLike): Promise<void> {
+    this.reliabilityTiming?.mark("rtc_registration_started", {
+      phase: this.liveAt === null ? "initial" : "recovery",
+    });
     const registration = new Promise<void>((resolve, reject) => {
       this.resolveRegistration = resolve;
       this.rejectRegistration = reject;
@@ -1111,6 +1130,10 @@ export class JitterCallTransport implements CallTransport {
     this.currentCall = call;
     this.currentCallId = call.id ?? "incoming-call";
     this.expectedIncoming = false;
+    this.reliabilityTiming?.mark("operator_ringing", {
+      source: "provider_call_update",
+      providerState: call.state?.trim().toLowerCase() ?? null,
+    });
     this.emit("ringing");
     if (this.answerStarted) return;
     this.answerStarted = true;
@@ -1127,7 +1150,14 @@ export class JitterCallTransport implements CallTransport {
     if (mapped === "live") {
       if (!this.currentCall) return;
       const firstLive = this.liveAt === null;
-      if (firstLive) this.liveAt = this.dependencies.now();
+      if (firstLive) {
+        this.liveAt = this.dependencies.now();
+        this.reliabilityTiming?.mark("operator_live", {
+          source: "provider_call_update",
+          providerState: call.state?.trim().toLowerCase() ?? null,
+          sipCode: call.sipCode ?? null,
+        });
+      }
       if (firstLive) void this.applyDesiredControls(call);
       if (firstLive) void this.acceptActiveCall(call);
       if (firstLive) this.startAudioHealth();
@@ -1544,8 +1574,19 @@ export class JitterCallTransport implements CallTransport {
   private async markAudioRecovered(call: TelnyxCallLike): Promise<boolean> {
     const peer = call.peer?.instance ?? null;
     try {
-      const playback = this.remoteAudio?.play?.();
-      if (playback) await playback;
+      const audio = this.remoteAudio;
+      if (audio) {
+        this.reliabilityTiming?.mark("playback_start", {
+          source: "browser_media_element",
+        });
+        const playback = audio.play?.();
+        if (playback) await playback;
+        this.reliabilityTiming?.mark("playback_ready", {
+          source: "browser_media_element",
+          paused: audio.paused,
+          muted: audio.muted,
+        });
+      }
     } catch (error) {
       this.requireAudioReconnect(error);
       return false;
@@ -1593,6 +1634,10 @@ export class JitterCallTransport implements CallTransport {
         store.close();
         return;
       }
+      this.reliabilityTiming?.setWriteErrorHandler((error) =>
+        fail(error instanceof Error ? error.message : "timing marker write failed"),
+      );
+      await this.reliabilityTiming?.attach(store);
       const pendingEvents = new Set<Promise<void>>();
       const capture = startBrowserPlaybackCapture({
         audio,
@@ -1620,6 +1665,7 @@ export class JitterCallTransport implements CallTransport {
       } else {
         fail("browser playback capture did not start");
         await Promise.all([...pendingEvents]);
+        this.reliabilityTiming?.detach();
         store.close();
       }
     } catch (error) {
@@ -1628,6 +1674,7 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private stopQaBrowserCapture(): void {
+    this.reliabilityTiming?.detach();
     const capture = this.qaCaptureHandle;
     this.qaCaptureHandle = null;
     this.qaCaptureAudio = null;

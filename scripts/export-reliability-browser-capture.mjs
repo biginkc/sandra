@@ -10,16 +10,18 @@ const args = Object.fromEntries(process.argv.slice(2).map((part) => {
   if (separator < 3 || !part.startsWith('--')) throw new Error('Arguments must be --name=value');
   return [part.slice(2, separator), part.slice(separator + 1)];
 }));
+const validCallReference = (value) =>
+  /^[0-9a-f-]{36}$/i.test(value) || /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
 if (!args.cdp || !args.origin || !args.run || !args.call || !args.out ||
     !/^[a-zA-Z0-9_-]{8,80}$/.test(args.run) ||
-    !/^[0-9a-f-]{36}$/i.test(args.call)) {
-  throw new Error('Usage: --cdp=http://127.0.0.1:9222 --origin=https://sandra.example --run=RUN_ID --call=CALL_UUID --out=/absolute/empty/directory');
+    !validCallReference(args.call)) {
+  throw new Error('Usage: --cdp=http://127.0.0.1:9222 --origin=https://sandra.example --run=RUN_ID --call=EXACT_BROWSER_CALL_REFERENCE --out=/absolute/empty/directory');
 }
 const cdp = new URL(args.cdp);
 const origin = new URL(args.origin);
 if (!['127.0.0.1', 'localhost'].includes(cdp.hostname) || !['http:', 'ws:'].includes(cdp.protocol) ||
     origin.protocol !== 'https:' || origin.pathname !== '/' || origin.search || origin.hash ||
-    !args.out.startsWith('/') || !args.call.match(/^[0-9a-f-]{36}$/i)) {
+    !args.out.startsWith('/') || !validCallReference(args.call)) {
   throw new Error('Invalid local CDP endpoint, HTTPS origin, output path, or call ID');
 }
 
@@ -32,13 +34,14 @@ try {
   const page = pages[0];
   const capture = await page.evaluate(async ({ runId, callId }) => {
     const database = await new Promise((ok, fail) => {
-      const request = indexedDB.open('sandra-reliability-capture-v2', 2);
+      const request = indexedDB.open('sandra-reliability-capture-v2', 3);
       request.onerror = () => fail(request.error ?? new Error('IndexedDB open failed'));
       request.onblocked = () => fail(new Error('IndexedDB open blocked'));
       request.onsuccess = () => ok(request.result);
     });
     try {
-      if (!database.objectStoreNames.contains('chunks') || !database.objectStoreNames.contains('events'))
+      if (!database.objectStoreNames.contains('chunks') || !database.objectStoreNames.contains('events') ||
+          !database.objectStoreNames.contains('timings'))
         throw new Error('No QA capture stores in this tab');
       const chunks = await new Promise((ok, fail) => {
         const results = [];
@@ -63,11 +66,27 @@ try {
         request.onerror = () => fail(request.error ?? new Error('Event read failed'));
         request.onsuccess = () => ok(request.result);
       });
+      const timings = await new Promise((ok, fail) => {
+        const transaction = database.transaction('timings', 'readonly');
+        const range = IDBKeyRange.bound(
+          [runId, callId, 0], [runId, callId, Number.MAX_SAFE_INTEGER],
+        );
+        const request = transaction.objectStore('timings').openCursor(range);
+        const results = [];
+        request.onerror = () => fail(request.error ?? new Error('Timing cursor failed'));
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) return ok(results);
+          results.push(cursor.value);
+          cursor.continue();
+        };
+      });
       const captureError = sessionStorage.getItem(`sandra:reliability-capture-error:${runId}:${callId}`);
-      return { chunks, events, captureError };
+      return { chunks, events, timings, captureError };
     } finally { database.close(); }
   }, { runId: args.run, callId: args.call });
   if (!capture.chunks.length || !capture.events.length) throw new Error('Named QA capture is empty');
+  if (!capture.timings.length) throw new Error('Named QA capture has no startup timing markers');
   if (capture.captureError) throw new Error('Named QA capture has a browser-side failure marker');
   if (capture.events.some((event) => ['error', 'unsupported', 'no_audio_track'].includes(event.kind)))
     throw new Error('Named QA capture contains a recorder or playback failure');
@@ -109,7 +128,7 @@ try {
       for (const chunk of info.chunks) {
         const base64 = await page.evaluate(async ({ runId, callId, segment, sequence }) => {
           const database = await new Promise((ok, fail) => {
-            const request = indexedDB.open('sandra-reliability-capture-v2', 2);
+            const request = indexedDB.open('sandra-reliability-capture-v2', 3);
             request.onerror = () => fail(request.error ?? new Error('IndexedDB open failed'));
             request.onsuccess = () => ok(request.result);
           });
@@ -144,8 +163,8 @@ try {
     files.push({ filename, segment, mimeType: info.mimeType, chunks: info.chunks.length,
       bytes, sha256: hash.digest('hex') });
   }
-  const manifest = { schemaVersion: 1, runId: args.run, callId: args.call, origin: origin.origin,
-    exportedAt: new Date().toISOString(), files, events: capture.events,
+  const manifest = { schemaVersion: 2, runId: args.run, callId: args.call, origin: origin.origin,
+    exportedAt: new Date().toISOString(), files, events: capture.events, timings: capture.timings,
     chunks: capture.chunks.map(({ segment, sequence, size, atMonotonicMs, atEpochMs }) =>
       ({ segment, sequence, size, atMonotonicMs, atEpochMs })) };
   await writeFile(`${output}/browser-receive-manifest.json`, JSON.stringify(manifest, null, 2), { flag: 'wx' });
