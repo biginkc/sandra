@@ -9,7 +9,7 @@ const frameQueue = new Map<number, FrameRequestCallback>();
 let frameId = 0;
 function props(overrides: Partial<ConversationHistoryProps> = {}): ConversationHistoryProps {
   return { orgId, conversationId, requestGeneration: 1, visible: true, onRefresh: vi.fn(), onAccessLost: vi.fn(), snapshot: { requestGeneration: 1, data: {
-    requesterId: orgId, orgId, conversationId, headRevision: "1", readBoundary, boundaryExpiresAt: "2030-01-01T00:00:00Z", captureGeneration: orgId,
+    requesterId: orgId, orgId, conversationId, headRevision: "1", readBoundary, boundaryExpiresAt: "2030-01-01T00:00:00Z", nextCursor: null, captureGeneration: orgId,
     history: [{ id: orgId, createdAtRaw: "2026-09-13 12:00:00.123456+00", body: "Visible conversation", direction: "inbound", readAtRaw: null, inboundRevision: "1" }],
   } }, ...overrides };
 }
@@ -110,4 +110,45 @@ describe("render-bound conversation read acknowledgment", () => {
     await act(async () => resolve(receipt(0, false)));
     expect(transport).toHaveBeenCalledOnce();
   });
+  it("pages older history without accumulating the transcript or changing the read boundary", async () => {
+    const value = props(); value.snapshot!.data.nextCursor = conversationId;
+    const older = { ...value.snapshot!.data, nextCursor: orgId, history: [{ ...value.snapshot!.data.history[0], id: conversationId, body: "Older page" }] };
+    const oldest = { ...older, nextCursor: null, history: [{ ...older.history[0], id: readBoundary, body: "Oldest page" }] };
+    const transport = vi.fn<typeof fetch>().mockResolvedValueOnce(receipt()).mockResolvedValueOnce(Response.json(older)).mockResolvedValueOnce(Response.json(oldest));
+    render(<ConversationHistory {...value} fetch={transport} />);
+    await paint();
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    await screen.findByText("Older page");
+    expect(screen.queryByText("Visible conversation")).not.toBeInTheDocument();
+    expect(String(transport.mock.calls[1][0])).toContain(`before=${conversationId}`);
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    await screen.findByText("Oldest page");
+    expect(screen.queryByText("Older page")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load older messages" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back to latest messages" }));
+    expect(screen.getByText("Visible conversation")).toBeInTheDocument();
+    expect(transport.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(1);
+  });
+  it("rejects mismatched older history and allows retrying its same cursor", async () => {
+    const value = props(); value.snapshot!.data.nextCursor = conversationId;
+    const transport = vi.fn<typeof fetch>().mockResolvedValueOnce(receipt()).mockResolvedValueOnce(Response.json({ ...value.snapshot!.data, conversationId: orgId }));
+    render(<ConversationHistory {...value} fetch={transport} />); await paint();
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    await screen.findByRole("alert");
+    expect(screen.getByText("Visible conversation")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load older messages" })).toBeEnabled();
+  });
+
+  it("cannot redisplay revoked history when an earlier acknowledgment resolves late", async () => {
+    let finish!: (response: Response) => void;
+    const value = props(); value.snapshot!.data.nextCursor = conversationId;
+    const transport = vi.fn<typeof fetch>().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })).mockResolvedValueOnce(new Response(null, { status: 401 }));
+    render(<ConversationHistory {...value} fetch={transport} />); await paint();
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    await waitFor(() => expect(value.onAccessLost).toHaveBeenCalledOnce());
+    await act(async () => { finish(receipt()); });
+    expect(transport.mock.calls[0][1]!.signal!.aborted).toBe(true);
+    expect(screen.queryByText("Visible conversation")).not.toBeInTheDocument();
+  });
+
 });

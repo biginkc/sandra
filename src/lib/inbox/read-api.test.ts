@@ -17,13 +17,13 @@ function client(responses: unknown[]) {
 const receipt = { boundary_id: boundary, batch: 0, changed: 200, completed: false };
 const snapshot = {
   requester_id: boundary, org_id: org, conversation_id: conversation, head_revision: "9007199254740993",
-  read_boundary: boundary, boundary_expires_at: "2030-01-01T00:00:00Z", capture_generation: boundary,
+  read_boundary: boundary, boundary_expires_at: "2030-01-01T00:00:00Z", capture_generation: boundary, next_cursor: null,
   history: [{ id: boundary, created_at_raw: "2026-09-13 12:00:00.123456+00", body: "Owned test", direction: "inbound", read_at_raw: null, inbound_revision: "9007199254740993" }],
 };
 describe("canonical Inbox read RPC repository", () => {
   it("decodes retained real canonical mixed-history and receipt scalars (mock HTTP transport)", async () => {
     const raw = wrapperEvidence.scalar_detail;
-    const { repository } = client([{ data: raw, error: null }, { data: wrapperEvidence.scalar_acknowledgment, error: null }]);
+    const { repository } = client([{ data: { ...raw, next_cursor: null }, error: null }, { data: wrapperEvidence.scalar_acknowledgment, error: null }]);
     const detail = await repository.detail(raw.org_id, raw.conversation_id, signal());
     expect(detail.history.map(row => [row.direction, row.inboundRevision])).toEqual([["inbound", "1"], ["outbound", "0"]]);
     expect((await repository.acknowledge(raw.read_boundary, 0, signal())).changed).toBe(1);
@@ -34,7 +34,14 @@ describe("canonical Inbox read RPC repository", () => {
     expect(result.history[0].createdAtRaw).toBe(snapshot.history[0].created_at_raw);
     expect(result.headRevision).toBe("9007199254740993");
     expect(rpc).toHaveBeenCalledOnce();
-    expect(rpc).toHaveBeenCalledWith("inbox_read_detail", { org_id: org, conversation_id: conversation });
+    expect(rpc).toHaveBeenCalledWith("inbox_history_page", { org_id: org, conversation_id: conversation });
+  });
+  it("sends only an opaque cursor and validates the next cursor", async () => {
+    const { repository, rpc } = client([{ data: { ...snapshot, next_cursor: org }, error: null }]);
+    expect((await repository.detail(org, conversation, signal(), boundary)).nextCursor).toBe(org);
+    expect(rpc).toHaveBeenCalledWith("inbox_history_page", { org_id: org, conversation_id: conversation, before_cursor: boundary });
+    await expect(client([]).repository.detail(org, conversation, signal(), "arbitrary-date")).rejects.toMatchObject({ status: 400 });
+    await expect(client([{ data: { ...snapshot, next_cursor: "bad" }, error: null }]).repository.detail(org, conversation, signal())).rejects.toMatchObject({ status: 503 });
   });
   it("rejects cross-conversation results and oversized history", async () => {
     for (const value of [{ ...snapshot, conversation_id: org }, { ...snapshot, history: Array(51).fill(snapshot.history[0]) }]) {
