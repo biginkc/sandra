@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-const m = vi.hoisted(() => ({ roster: vi.fn(), viewer: vi.fn(), replay: vi.fn(), admin: vi.fn(), from: vi.fn(), rpc: vi.fn(), member: vi.fn(), verify: vi.fn(), client: vi.fn(), eq: vi.fn(), is: vi.fn(), single: vi.fn() }));
+const m = vi.hoisted(() => ({ users: vi.fn(), grants: vi.fn(), roster: vi.fn(), viewer: vi.fn(), replay: vi.fn(), admin: vi.fn(), from: vi.fn(), rpc: vi.fn(), member: vi.fn(), verify: vi.fn(), client: vi.fn(), eq: vi.fn(), is: vi.fn(), single: vi.fn() }));
 vi.mock('@/lib/my-leads/queries', () => ({ getAcquisitionRoster: m.roster, myLeadsViewer: m.viewer }));
 vi.mock('./database', () => ({ createDialpadVoiceAdminClient: m.admin }));
-vi.mock('./client', () => ({ DialpadVoiceClient: class { constructor(key: string) { m.client(key); } } }));
+vi.mock('./client', () => ({ DialpadVoiceClient: class { constructor(key: string) { m.client(key); } listUsersByEmail(email: string, cursor?: string) { return m.users(email,cursor); } } }));
 vi.mock('./verified-inventory', () => ({ verifyDialpadInventory: m.verify }));
 import { loadDialpadMemberCallerOptions, saveDialpadMemberCallerAssignment } from './configuration';
 const id = (n: number) => `11111111-1111-4111-8111-${String(n).padStart(12, '0')}`;
@@ -14,8 +14,9 @@ const connection = () => ({ id: connectionId, org_id: org, provider_company_id: 
 beforeEach(() => {
  vi.resetAllMocks(); vi.unstubAllEnvs(); vi.stubEnv('DIALPAD_TEST_API_KEY', 'test-key');
  const query = { select: vi.fn().mockReturnThis(), eq: m.eq, is: m.is, maybeSingle: m.single };
- m.eq.mockReturnValue(query); m.is.mockReturnValue(query); m.from.mockReturnValue(query);
- m.single.mockResolvedValueOnce({ data: connection(), error: null }).mockResolvedValue({ data: { revision: 1 }, error: null });
+ m.eq.mockReturnValue(query); m.is.mockReturnValue(query); m.from.mockImplementation((table: string) => table === 'dialpad_number_grants' ? { select: vi.fn().mockReturnThis(), eq: vi.fn().mockReturnThis(), is: m.grants } : query);
+ m.grants.mockResolvedValue({data:[office],error:null}); m.users.mockResolvedValue({items:[{id:'201',company_id:'101',state:'active',emails:['REP@example.test']}],cursor:null});
+ m.single.mockResolvedValueOnce({ data: connection(), error: null }).mockResolvedValue({ data: { id: id(6), provider_user_id: '201', revision: 1 }, error: null });
  m.viewer.mockResolvedValue(roster().viewer); m.replay.mockResolvedValue({data:null,error:null});
  m.roster.mockResolvedValue(roster()); m.admin.mockReturnValue({ from: m.from, rpc: (name: string, args: unknown) => name === 'fn_replay_dialpad_member_configuration' ? m.replay(name,args) : m.rpc(name,args), auth: { admin: { getUserById: m.member } } });
  m.member.mockResolvedValue({ data: { user: { id: member, email: 'rep@example.test' } }, error: null });
@@ -23,8 +24,30 @@ beforeEach(() => {
  m.rpc.mockResolvedValue({ data: { bindingId: id(6), bindingRevision: 2 }, error: null });
 });
 describe('owner Dialpad configuration actions', () => {
+ it('discovers member provider ID using complete email-filtered pages', async () => {
+  m.users.mockResolvedValueOnce({items:[],cursor:'next'}).mockResolvedValueOnce({items:[{id:'201',company_id:'101',state:'active',emails:['REP@example.test']}],cursor:''});
+  const result = await loadDialpadMemberCallerOptions({memberId:member});
+  expect(result).toMatchObject({ok:true,providerUserId:'201',selectedCallers:[office]});
+  expect(m.users.mock.calls).toEqual([['rep@example.test',undefined],['rep@example.test','next']]);
+ });
+ it.each(['ambiguous','wrong_company','wrong_email','inactive','malformed','cycle','limit'])('rejects unsafe discovery %s', async kind => {
+  const user={id:'201',company_id:'101',state:'active',emails:['rep@example.test']};
+  if(kind==='ambiguous') m.users.mockResolvedValue({items:[user,{...user,id:'202'}]});
+  if(kind==='wrong_company') m.users.mockResolvedValue({items:[{...user,company_id:'999'}]});
+  if(kind==='wrong_email') m.users.mockResolvedValue({items:[{...user,emails:['rep@example.test.evil']}]});
+  if(kind==='inactive') m.users.mockResolvedValue({items:[{...user,state:'suspended'}]});
+  if(kind==='malformed') m.users.mockResolvedValue({items:[{...user,id:201}]});
+  if(kind==='cycle') m.users.mockResolvedValue({items:[user],cursor:'same'});
+  if(kind==='limit') m.users.mockImplementation(async()=>({items:[user],cursor:String(m.users.mock.calls.length)}));
+  expect(await loadDialpadMemberCallerOptions({memberId:member})).toEqual({ok:false,error:'configuration_unavailable'});
+  expect(m.verify).not.toHaveBeenCalled(); expect(m.users.mock.calls.length).toBeLessThanOrEqual(20);
+ });
+ it('preselects only exact still-authorized active grant identities', async () => {
+  m.grants.mockResolvedValue({data:[{...office,provider_identity_id:'302'}],error:null});
+  expect(await loadDialpadMemberCallerOptions({memberId:member})).toMatchObject({ok:true,selectedCallers:[]});
+ });
  it('loads fresh persona options using server member email and org company', async () => {
-  expect(await loadDialpadMemberCallerOptions(input())).toEqual({ ok: true, connectionVersion: 2, bindingRevision: 1, callers: [office] });
+  expect(await loadDialpadMemberCallerOptions(input())).toEqual({ ok: true, connectionVersion: 2, providerUserId: '201', bindingRevision: 1, callers: [office], selectedCallers: [office] });
   expect(m.verify).toHaveBeenCalledWith(expect.anything(), { orgId: org, providerCompanyId: '101', providerUserId: '201', memberEmail: 'rep@example.test' });
   expect(m.eq).toHaveBeenCalledWith('org_id', org); expect(m.member).toHaveBeenCalledWith(member);
   expect(m.client).toHaveBeenCalledWith('test-key'); expect(m.rpc).not.toHaveBeenCalled();

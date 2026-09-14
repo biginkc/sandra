@@ -12,6 +12,15 @@ function setup(response: () => Promise<Response> = async () => json({})) {
 }
 
 describe("DialpadVoiceClient", () => {
+  it("filters user discovery by exact email and active state, encoding cursors", async () => {
+    const {client,fetcher}=setup();
+    await client.listUsersByEmail("rep+sales@example.test", "next&email=other");
+    const url=new URL(String(fetcher.mock.calls[0][0]));
+    expect(url.pathname).toBe("/api/v2/users");
+    expect(Object.fromEntries(url.searchParams)).toEqual({email:"rep+sales@example.test",state:"active",cursor:"next&email=other"});
+    expect(()=>client.listUsersByEmail("bad")).toThrow(DialpadVoiceError);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it("always scopes call pages to the supplied user and encodes opaque cursors", async () => {
     const { client, fetcher } = setup(async () => json({ items: [], cursor: "next" }));
     await expect(client.listCalls(userId, { cursor: "a&target_id=other", startedAfter: 1, startedBefore: 10 })).resolves.toEqual({ items: [], cursor: "next" });

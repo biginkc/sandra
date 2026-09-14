@@ -55,6 +55,12 @@ export class DialpadVoiceClient {
     return this.request("GET", `/users/${id(userId)}/caller_id`);
   }
 
+  listUsersByEmail(email: string, cursor?: string) {
+    if (typeof email !== "string" || !email.includes("@") || email.trim() !== email || /[\r\n]/.test(email)
+      || (cursor !== undefined && (typeof cursor !== "string" || !cursor || cursor.length > 4096))) throw new DialpadVoiceError("invalid_input");
+    return this.request("GET", "/users", { email, state: "active", ...(cursor ? { cursor } : {}) });
+  }
+
   getUser(userId: string) {
     return this.request("GET", `/users/${id(userId)}`);
   }

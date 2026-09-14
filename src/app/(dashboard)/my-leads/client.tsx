@@ -8,6 +8,7 @@ import type { Json } from '@/lib/supabase/types';
 import type { AcquisitionKpis,AcquisitionRoster,QueueSnapshot,QueueRow } from '@/lib/my-leads/queries';
 import { WorkflowRecoveryContext } from './_components/workflow-form';
 import { MyLeadsQueue } from './_components/queue';
+import { DialpadMemberAssignment } from './_components/dialpad-member-assignment';
 import { AcquisitionAttemptDialog } from './_components/attempt-dialog';
 import { AcquisitionReadinessDialog } from './_components/readiness-dialog';
 import { AcquisitionOfferDialog } from './_components/offer-dialog';
@@ -211,9 +212,9 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       <Button type="button" variant="ghost" onClick={cancelOpening}>Cancel opening</Button>
     </div>}
     {viewer.isOwner&&<details className="mb-4 rounded-lg border p-4"><summary className="cursor-pointer font-medium">Manage Acquisitions</summary>
-      <div className="mt-3 space-y-3">{roster.members.filter(m=>m.active).map(m=><label key={m.id} className="flex items-center gap-2">
+      <div className="mt-3 space-y-3">{roster.members.filter(m=>m.active).map(m=><div key={m.id}><label className="flex items-center gap-2">
         <input type="checkbox" checked={m.acquisitionsEnabled} disabled={settingsBusy} onChange={async()=>{setSettingsBusy(true);try{const result=await changeAcquisitionDesignation({orgId:viewer.orgId,userId:m.id,enabled:!m.acquisitionsEnabled,expectedEnabled:m.acquisitionsEnabled,idempotencyKey:crypto.randomUUID()});if(!result.ok)setError(result.message);else router.refresh();}finally{setSettingsBusy(false);}}}/>{m.label}
-      </label>)}<label className="block">Needs sequence recipient<select className="ml-2 rounded border p-2" value={recipient} onChange={e=>setRecipient(e.target.value)}><option value="">Choose recipient</option>{roster.members.filter(m=>m.active).map(m=><option key={m.id} value={m.id}>{m.label}</option>)}</select></label>
+      </label>{m.acquisitionsEnabled&&<DialpadMemberAssignment memberId={m.id} memberLabel={m.label}/>}</div>)}<label className="block">Needs sequence recipient<select className="ml-2 rounded border p-2" value={recipient} onChange={e=>setRecipient(e.target.value)}><option value="">Choose recipient</option>{roster.members.filter(m=>m.active).map(m=><option key={m.id} value={m.id}>{m.label}</option>)}</select></label>
       <Button disabled={!recipient||settingsBusy} onClick={async()=>{setSettingsBusy(true);try{const result=await changeAcquisitionSettings({orgId:viewer.orgId,needsSequenceOwnerId:recipient,expectedSettingsRevision:roster.settings.revision,idempotencyKey:crypto.randomUUID()});if(!result.ok)setError(result.message);else router.refresh();}finally{setSettingsBusy(false);}}}>Save recipient</Button></div>
     </details>}
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}

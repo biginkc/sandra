@@ -9,12 +9,12 @@ import { verifyDialpadInventory } from './verified-inventory';
 const uuid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 const providerId = (value: unknown): value is string => typeof value === 'string' && /^[1-9]\d*$/.test(value);
 type Caller = { identity_type: string; provider_identity_id: string; number_e164: string };
-type Input = { memberId: string; providerUserId: string };
-type SaveInput = Input & { connectionVersion: number; expectedBindingRevision: number; requestId: string; selectedCallers: Caller[] };
+type Input = { memberId: string; providerUserId?: string };
+type SaveInput = Input & { providerUserId: string; connectionVersion: number; expectedBindingRevision: number; requestId: string; selectedCallers: Caller[] };
 const failure = (error: string) => ({ ok: false as const, error });
 
 async function verifiedContext(input: Input) {
-  if (!input || !uuid(input.memberId) || !providerId(input.providerUserId)) throw Error('invalid_input');
+  if (!input || !uuid(input.memberId) || (input.providerUserId !== undefined && !providerId(input.providerUserId))) throw Error('invalid_input');
   const { viewer, roster } = await getAcquisitionRoster();
   if (!viewer.isOwner || !roster.isOwner || !roster.settings.enabled
     || !roster.members.some(member => member.id === input.memberId && member.active && member.acquisitionsEnabled)) throw Error('forbidden');
@@ -31,14 +31,16 @@ async function verifiedContext(input: Input) {
   if (!key) throw Error('connection_unavailable');
   const member = await db.auth.admin.getUserById(input.memberId);
   if (member.error || member.data.user?.id !== input.memberId || !member.data.user.email) throw Error('member_unavailable');
-  const result = await verifyDialpadInventory(new DialpadVoiceClient(key), {
+  const provider = new DialpadVoiceClient(key);
+  const providerUserId = input.providerUserId ?? await discoverProviderUser(provider, member.data.user.email, c.provider_company_id);
+  const result = await verifyDialpadInventory(provider, {
     orgId: viewer.orgId, providerCompanyId: c.provider_company_id,
-    providerUserId: input.providerUserId, memberEmail: member.data.user.email,
+    providerUserId, memberEmail: member.data.user.email,
   });
   const callers: Caller[] = result.inventory.callers.map(caller => ({
     identity_type: caller.identity.type, provider_identity_id: caller.identity.id, number_e164: caller.number,
   }));
-  return { db, viewer, connection: c, result, callers };
+  return { db, viewer, connection: c, result, callers, providerUserId };
 }
 
 /** Owner-only discovery. Browser-supplied provider identity is verified against
@@ -46,11 +48,19 @@ async function verifiedContext(input: Input) {
 export async function loadDialpadMemberCallerOptions(input: Input) {
   try {
     const context = await verifiedContext(input);
-    const binding = await context.db.from('dialpad_member_bindings').select('revision')
+    const binding = await context.db.from('dialpad_member_bindings').select('id,revision,provider_user_id')
       .eq('org_id', context.viewer.orgId).eq('member_user_id', input.memberId).is('revoked_at', null).maybeSingle();
     if (binding.error) return failure('configuration_unavailable');
-    return { ok: true as const, connectionVersion: context.connection.config_version,
-      bindingRevision: binding.data?.revision ?? 0, callers: context.callers };
+    let selectedCallers: Caller[] = [];
+    if (binding.data && binding.data.provider_user_id === context.providerUserId) {
+      const grants = await context.db.from('dialpad_number_grants').select('identity_type,provider_identity_id,number_e164')
+        .eq('org_id', context.viewer.orgId).eq('binding_id', binding.data.id).is('revoked_at', null);
+      if (grants.error || !Array.isArray(grants.data)) return failure('configuration_unavailable');
+      selectedCallers = context.callers.filter(caller => grants.data.some(grant => grant.identity_type === caller.identity_type
+        && grant.provider_identity_id === caller.provider_identity_id && grant.number_e164 === caller.number_e164));
+    }
+    return { ok: true as const, connectionVersion: context.connection.config_version, providerUserId: context.providerUserId,
+      bindingRevision: binding.data?.revision ?? 0, callers: context.callers, selectedCallers };
   } catch { return failure('configuration_unavailable'); }
 }
 
@@ -98,4 +108,28 @@ function savedResult(data: unknown) {
   if (!data || typeof data !== 'object' || Array.isArray(data) || !('bindingId' in data) || !uuid(data.bindingId)
     || !('bindingRevision' in data) || typeof data.bindingRevision !== 'number' || !Number.isSafeInteger(data.bindingRevision) || data.bindingRevision < 1) return failure('configuration_save_unconfirmed');
   return { ok: true as const, bindingId: data.bindingId, bindingRevision: data.bindingRevision };
+}
+
+async function discoverProviderUser(provider: DialpadVoiceClient, email: string, companyId: string): Promise<string> {
+  const matches = new Set<string>();
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const response = await provider.listUsersByEmail(email, cursor);
+    if (!Array.isArray(response.items)) throw Error('member_unavailable');
+    for (const raw of response.items) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw Error('member_unavailable');
+      const user = raw as Record<string, unknown>;
+      if (!providerId(user.id) || !providerId(user.company_id) || typeof user.state !== 'string'
+        || !Array.isArray(user.emails) || !user.emails.every(value => typeof value === 'string')) throw Error('member_unavailable');
+      if (user.company_id === companyId && user.state === 'active' && user.emails.some(value => value.toLowerCase() === email.toLowerCase())) matches.add(user.id);
+    }
+    if (response.cursor === undefined || response.cursor === null || response.cursor === '') {
+      if (matches.size !== 1) throw Error('member_unavailable');
+      return [...matches][0];
+    }
+    if (typeof response.cursor !== 'string' || seen.has(response.cursor)) throw Error('member_unavailable');
+    seen.add(response.cursor); cursor = response.cursor;
+  }
+  throw Error('member_unavailable');
 }

@@ -11,8 +11,11 @@ export type DialpadConfigurationDatabase = Omit<DialpadVoiceDatabase, 'public'> 
         id: string; org_id: string; provider_company_id: string; enabled: boolean;
         config_version: number; verified_at: string | null; credential_reference: string;
       }>;
+      dialpad_number_grants: ReadTable<{
+        id: string; org_id: string; binding_id: string; identity_type: string; provider_identity_id: string; number_e164: string; revoked_at: string | null;
+      }>;
       dialpad_member_bindings: ReadTable<{
-        id: string; org_id: string; member_user_id: string; revision: number; revoked_at: string | null;
+        id: string; org_id: string; member_user_id: string; provider_user_id: string; revision: number; revoked_at: string | null;
       }>;
     };
     Functions: DialpadVoiceDatabase['public']['Functions'] & {
