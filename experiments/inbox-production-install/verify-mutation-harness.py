@@ -137,6 +137,43 @@ run_case('extra_composite_type_in_companion_schema',
  lambda: sql("DROP TYPE IF EXISTS inbox_read.zz_harness_composite"),
  'extra relations')
 
+# 8d-8h. Composite-type ATTRIBUTE drift (the G2/#585 gap): verify.py's columns
+# snapshot used to be keyed only on CREATE TABLE names, so an ALTER TYPE ...
+# DROP/ADD/ALTER/RENAME ATTRIBUTE (or a collation change) on a declared
+# composite type -- inbox_bridge.cursor_context -- passed verify.py silently.
+# Each case below is asserted by BOTH exit code (via run_case) and an error
+# message naming the type (checked below via fail_substr).
+
+# 8d. Drop the last declared attribute.
+run_case('composite_attribute_dropped',
+ lambda: sql("ALTER TYPE inbox_bridge.cursor_context DROP ATTRIBUTE cursor_target"),
+ lambda: sql("ALTER TYPE inbox_bridge.cursor_context ADD ATTRIBUTE cursor_target uuid"),
+ 'column set drift on inbox_bridge.cursor_context')
+
+# 8e. Add an attribute the source does not declare.
+run_case('composite_attribute_added',
+ lambda: sql("ALTER TYPE inbox_bridge.cursor_context ADD ATTRIBUTE zz_harness_extra text"),
+ lambda: sql("ALTER TYPE inbox_bridge.cursor_context DROP ATTRIBUTE zz_harness_extra"),
+ 'column set drift on inbox_bridge.cursor_context')
+
+# 8f. Change an attribute's type (boolean -> integer).
+run_case('composite_attribute_type_changed',
+ lambda: sql("ALTER TYPE inbox_bridge.cursor_context ALTER ATTRIBUTE revoked TYPE integer"),
+ lambda: sql("ALTER TYPE inbox_bridge.cursor_context ALTER ATTRIBUTE revoked TYPE boolean"),
+ 'column type drift inbox_bridge.cursor_context.revoked')
+
+# 8g. Rename an attribute (name changes, type/position do not).
+run_case('composite_attribute_renamed',
+ lambda: sql("ALTER TYPE inbox_bridge.cursor_context RENAME ATTRIBUTE cursor_kind TO cursor_kind_renamed"),
+ lambda: sql("ALTER TYPE inbox_bridge.cursor_context RENAME ATTRIBUTE cursor_kind_renamed TO cursor_kind"),
+ 'column set drift on inbox_bridge.cursor_context')
+
+# 8h. Give a text attribute an explicit non-default collation.
+run_case('composite_attribute_collation_changed',
+ lambda: sql('ALTER TYPE inbox_bridge.cursor_context ALTER ATTRIBUTE cursor_kind TYPE text COLLATE "C"'),
+ lambda: sql("ALTER TYPE inbox_bridge.cursor_context ALTER ATTRIBUTE cursor_kind TYPE text"),
+ 'column collation drift inbox_bridge.cursor_context.cursor_kind')
+
 # 9. Conflicting function overload: a second inbox_read.detail(uuid,uuid,text).
 run_case('function_overload_added',
  lambda: sql("CREATE FUNCTION inbox_read.detail(o uuid,c uuid,extra text) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_read.detail(o,c) $$"),

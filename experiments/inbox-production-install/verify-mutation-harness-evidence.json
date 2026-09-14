@@ -86,6 +86,36 @@
       "restored_pass": true
     },
     {
+      "case": "composite_attribute_dropped",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column set drift on inbox_bridge.cursor_context: expected=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id'] live=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id']",
+      "restored_pass": true
+    },
+    {
+      "case": "composite_attribute_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column set drift on inbox_bridge.cursor_context: expected=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id'] live=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id', 'zz_harness_extra']",
+      "restored_pass": true
+    },
+    {
+      "case": "composite_attribute_type_changed",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column type drift inbox_bridge.cursor_context.revoked: expected 'boolean' live 'integer'",
+      "restored_pass": true
+    },
+    {
+      "case": "composite_attribute_renamed",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column set drift on inbox_bridge.cursor_context: expected=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id'] live=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind_renamed', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id']",
+      "restored_pass": true
+    },
+    {
+      "case": "composite_attribute_collation_changed",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column collation drift inbox_bridge.cursor_context.cursor_kind: expected the type's default collation, live has an explicit non-default COLLATE",
+      "restored_pass": true
+    },
+    {
       "case": "function_overload_added",
       "drift_caught": true,
       "drift_error": "RuntimeError: Conflicting overload(s) installed for inbox_read.detail: ['o uuid, c uuid', 'o uuid, c uuid, extra text']",
