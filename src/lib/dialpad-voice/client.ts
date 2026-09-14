@@ -47,6 +47,10 @@ export class DialpadVoiceClient {
     }
   }
 
+  getCompany() {
+    return this.request("GET", "/company");
+  }
+
   listUserDevices(userId: string, cursor?: string) {
     return this.request("GET", "/userdevices", { user_id: id(userId), ...(cursor ? { cursor } : {}) });
   }

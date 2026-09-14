@@ -16,6 +16,19 @@ it('replay never redials',async()=>{h.old={id,property_id:id,status:'initiation_
 it('denies non-acquisitions caller',async()=>{h.roster.mockResolvedValue({viewer:{orgId:id,userId:id},roster:{settings:{enabled:true},members:[]}});expect((await startConfiguredDialpadCall(input)).ok).toBe(false);expect(h.initiate).not.toHaveBeenCalled();});
 it('changed quiet-hours eligibility releases undispatched pause',async()=>{h.inspect.mockResolvedValueOnce({ok:true,data:{propertyId:id,phoneE164:'+12025550199'}}).mockResolvedValueOnce({ok:false});expect(await startConfiguredDialpadCall(input)).toMatchObject({status:'failed'});expect(h.initiate).not.toHaveBeenCalled();});
 it('lost dispatch response never sends HTTP or releases claim',async()=>{const original=h.rpc.getMockImplementation()!;h.rpc.mockImplementation((name,...args)=>name==='fn_dispatch_configured_dialpad_intent'?Promise.resolve({error:{code:'timeout'}}):original(name,...args));expect(await startConfiguredDialpadCall(input)).toMatchObject({status:'initiation_unconfirmed'});expect(h.initiate).not.toHaveBeenCalled();expect(h.rpc.mock.calls.some(c=>c[0]==='fn_release_dialpad_start')).toBe(false);});
+it.each(['42501','23514','22023'])('confirmed SQL rejection %s releases only the undispatched reservation',async code=>{
+ const original=h.rpc.getMockImplementation()!;
+ h.rpc.mockImplementation((name,...args)=>name==='fn_dispatch_configured_dialpad_intent'?Promise.resolve({error:{code}}):original(name,...args));
+ expect(await startConfiguredDialpadCall(input)).toMatchObject({status:'failed'});
+ expect(h.initiate).not.toHaveBeenCalled();
+ expect(h.rpc).toHaveBeenCalledWith('fn_release_dialpad_start',{p_intent_id:id});
+});
+it('failed cleanup after confirmed rejection keeps uncertainty',async()=>{
+ const original=h.rpc.getMockImplementation()!;
+ h.rpc.mockImplementation((name,...args)=>name==='fn_dispatch_configured_dialpad_intent'?Promise.resolve({error:{code:'42501'}}):name==='fn_release_dialpad_start'?Promise.reject(Error('timeout')):original(name,...args));
+ expect(await startConfiguredDialpadCall(input)).toMatchObject({status:'initiation_unconfirmed'});
+ expect(h.initiate).not.toHaveBeenCalled();
+});
 it('uncertain HTTP retains intent and never retries',async()=>{h.initiate.mockRejectedValue(new Error('timeout'));expect(await startConfiguredDialpadCall(input)).toMatchObject({status:'initiation_unconfirmed'});expect(h.initiate).toHaveBeenCalledTimes(1);});
 
 it('retains exact API response candidate without credit',async()=>{await startConfiguredDialpadCall(input);expect(h.rpc).toHaveBeenCalledWith('fn_record_dialpad_dispatch_response',{p_org_id:id,p_actor_id:id,p_intent_id:id,p_candidate_call_id:'123'});});

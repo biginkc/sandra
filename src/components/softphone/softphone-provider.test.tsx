@@ -18,6 +18,12 @@ const { completeSoftphoneCall, loadCallerIds, loadDialerRecents, mintStartIntent
   jitterEnabled: vi.fn(),
 }));
 
+const dp = vi.hoisted(()=>({active:vi.fn(),options:vi.fn(),devices:vi.fn(),start:vi.fn(),status:vi.fn()}));
+vi.mock("@/lib/dialpad-voice/rep-callers", () => ({loadMyDialpadCallerOptions: dp.options}));
+vi.mock("@/lib/dialpad-voice/call-status", () => ({getMyDialpadCallStatus: dp.status,getMyActiveDialpadCall:dp.active}));
+vi.mock("@/lib/dialpad-voice/configured-start", () => ({startConfiguredDialpadCall: dp.start}));
+vi.mock("@/lib/dialpad-voice/configured-hangup",()=>({hangupConfiguredDialpadCall:vi.fn()}));
+vi.mock("@/lib/dialpad-voice/configured-desktop", () => ({listMyDialpadDesktopDevices: dp.devices}));
 vi.mock("@/lib/dialer/actions", () => ({
   completeSoftphoneCall,
   loadDialerRecents,
@@ -85,6 +91,7 @@ import { SoftphoneHeaderButton, SoftphoneProvider } from "./softphone-provider";
 
 describe("SoftphoneProvider transport gate", () => {
   beforeEach(() => {
+    dp.active.mockReset().mockResolvedValue({ok:true,call:null}); dp.options.mockReset().mockResolvedValue({ok:true,options:[]}); dp.devices.mockReset(); dp.start.mockReset(); dp.status.mockReset();
     completeSoftphoneCall.mockReset();
     inspectLeadCall.mockReset();
     prepareManualCall.mockReset();
@@ -136,6 +143,38 @@ describe("SoftphoneProvider transport gate", () => {
     });
     window.localStorage.clear();
     window.sessionStorage.clear();
+  });
+
+  it("recovers an existing call before new starts even after grants disappear", async () => {
+    dp.active.mockResolvedValue({ok:true,call:{intentId:'recovered',propertyId:'property-1',status:'linked'}});
+    dp.status.mockResolvedValue({ok:true,intentId:'recovered',status:'linked'});
+    const user=userEvent.setup();render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await waitFor(()=>expect(screen.getByTestId('header-dialer-button')).toBeEnabled());await user.click(screen.getByTestId('header-dialer-button'));
+    expect(await screen.findByText(/Call status is not confirmed here/)).toBeVisible();expect(dp.devices).not.toHaveBeenCalled();expect(dp.start).not.toHaveBeenCalled();expect(mintStartIntent).not.toHaveBeenCalled();
+  });
+  it("recovery errors block starts instead of masquerading as no existing call", async () => {
+    vi.stubEnv('NEXT_PUBLIC_SOFTPHONE_TRANSPORT','simulated');dp.active.mockResolvedValue({ok:false,error:'unavailable'});
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Existing calls could not be checked');expect(screen.getByTestId('header-dialer-button')).toHaveAttribute('title','Calling not yet enabled');expect(dp.start).not.toHaveBeenCalled();expect(createTransport).not.toHaveBeenCalled();
+  });
+  it("routes a selected exact Dialpad persona before all Jitter work and retains request when hidden", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    const option={provider:'dialpad',grantId:'grant1',grantRevision:1,bindingRevision:1,connectionVersion:1,phoneE164:'+12025550101',identity:{type:'office',id:'301'}};
+    dp.options.mockResolvedValue({ok:true,options:[option,{...option,grantId:'grant2',identity:{type:'office',id:'302'}}]});
+    dp.devices.mockResolvedValue({ok:true,devices:[{id:'native',label:'Dialpad desktop 1',type:'native',readiness:'unproven'}]});
+    dp.start.mockResolvedValue({ok:true,intentId:'intent',status:'initiation_unconfirmed'});dp.status.mockResolvedValue({ok:true,intentId:'intent',status:'initiation_unconfirmed'});
+    const user=userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /><SoftphoneLeadButton lead={{id:'property-1',contactId:null,firstName:'Test',name:'Test',address:'Test',state:'MO',phones:['+12025550199'],dncLocked:false,contactDnc:false,callable:true}} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId('header-dialer-button'));
+    const selection=await screen.findByLabelText('Call from');await user.selectOptions(selection,'dialpad:grant2');
+    expect(screen.getAllByRole('option').filter(option=>option.textContent?.includes('Dialpad'))).toHaveLength(2);
+    await user.click(screen.getByLabelText('Close dialer'));await user.click(screen.getByTestId('call-lead-button'));
+    await user.selectOptions(await screen.findByLabelText('Dialpad desktop'),'native');await user.click(screen.getByRole('button',{name:'Call with Dialpad'}));
+    await screen.findByText(/Call status is not confirmed here/);
+    expect(dp.start).toHaveBeenCalledWith(expect.objectContaining({grantId:'grant2',propertyId:'property-1'}));
+    expect(mintStartIntent).not.toHaveBeenCalled();expect(inspectLeadCall).not.toHaveBeenCalled();expect(createTransport).not.toHaveBeenCalled();expect(prepareManualCall).not.toHaveBeenCalled();
+    await user.click(screen.getByLabelText('Close dialer'));await user.click(screen.getByTestId('header-dialer-button'));
+    expect(screen.getByText(/Call status is not confirmed here/)).toBeVisible();expect(dp.start).toHaveBeenCalledTimes(1);expect(screen.queryByRole('button',{name:'Call with Dialpad'})).toBeNull();
   });
 
   it("shows one company caller ID read-only and sends it with the call", async () => {

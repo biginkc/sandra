@@ -12,6 +12,13 @@ function setup(response: () => Promise<Response> = async () => json({})) {
 }
 
 describe("DialpadVoiceClient", () => {
+  it("reads credential company through the fixed authenticated API path", async () => {
+    const {client,fetcher}=setup(async()=>json({id:"201"}));
+    await expect(client.getCompany()).resolves.toEqual({id:"201"});
+    expect(new URL(String(fetcher.mock.calls[0][0])).pathname).toBe("/api/v2/company");
+    expect(fetcher.mock.calls[0][1]?.method).toBe("GET");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it("filters user discovery by exact email and active state, encoding cursors", async () => {
     const {client,fetcher}=setup();
     await client.listUsersByEmail("rep+sales@example.test", "next&email=other");

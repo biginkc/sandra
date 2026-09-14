@@ -53,6 +53,11 @@ export async function startConfiguredDialpadCall(input:Input):Promise<Result>{
    const recheck=await inspectLeadCall(input.propertyId);if(!recheck.ok||recheck.data.propertyId!==input.propertyId||recheck.data.phoneE164!==eligible.data.phoneE164)throw Error('eligibility_changed');
    dispatchClaimAttempted=true;
    const claim=await db.rpc('fn_dispatch_configured_dialpad_intent',{p_org_id:viewer.orgId,p_actor_id:viewer.userId,p_intent_id:intentId});const d=claim.data;
+   // These PostgreSQL errors prove the statement rejected the claim. Scoped
+   // release still checks durable dispatch state; transport errors stay unknown.
+   if(claim.error&&['42501','23514','22023'].includes(claim.error.code)){
+    return{ok:true,intentId,status:await release()?'failed':'initiation_unconfirmed'};
+   }
    if(claim.error||!object(d)||d.dispatched!==true)return{ok:true,intentId,status:'initiation_unconfirmed'};
    if(d.intentId!==intentId||d.connectionId!==c.id||d.connectionVersion!==c.config_version||d.credentialReference!==c.credential_reference||d.providerCompanyId!==c.provider_company_id||d.providerUserId!==b.provider_user_id||d.deviceId!==input.deviceId||d.phoneNumber!==eligible.data.phoneE164||d.outboundCallerId!==g.number_e164||d.identityType!==g.identity_type||d.identityId!==g.provider_identity_id||d.customData!==intentId)throw Error('claim_mismatch');
    const group=g.identity_type==='user'?undefined:{id:g.provider_identity_id,type:g.identity_type as 'office'|'department'|'callcenter'};

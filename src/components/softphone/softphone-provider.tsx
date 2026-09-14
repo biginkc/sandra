@@ -32,6 +32,9 @@ import {
   loadJitterSoftphoneCallerIds,
   mintJitterStartIntent,
 } from "@/lib/dialer/jitter-actions";
+import { getMyActiveDialpadCall } from "@/lib/dialpad-voice/call-status";
+import { loadMyDialpadCallerOptions } from "@/lib/dialpad-voice/rep-callers";
+import { DialpadDesktopPanel, type DialpadCallerOption } from "./dialpad-desktop-panel";
 import type { JitterCallerId } from "@/lib/dialer/jitter-contract";
 import { maskPhone } from "@/lib/phone-format";
 import { KeyedCoachLiveView } from "@/components/coach/keyed-coach-live-view";
@@ -202,7 +205,32 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   const [callerIdState, setCallerIdState] = useState<CallerIdState>("loading");
   const [selectedCallerId, setSelectedCallerId] = useState<string | null>(null);
   const [callerIdError, setCallerIdError] = useState<string | null>(null);
-  const [callingEnabled] = useState(() => isSoftphoneTransportEnabled());
+  const [jitterCallingEnabled] = useState(() => isSoftphoneTransportEnabled());
+  const [dialpadCallers, setDialpadCallers] = useState<DialpadCallerOption[]>([]);
+  const [selectedDialpadGrant, setSelectedDialpadGrant] = useState<string | null>(null);
+  const [dialpadSession, setDialpadSession] = useState<{propertyId:string; caller?:DialpadCallerOption; name:string; initialCall?:{intentId:string;status:string}} | null>(null);
+  const [dialpadRecoveryReady,setDialpadRecoveryReady]=useState(false);
+  const [dialpadRecoveryError,setDialpadRecoveryError]=useState(false);
+  const recoverDialpadCall=useCallback(async()=>{
+    setDialpadRecoveryError(false);
+    try{const result=await getMyActiveDialpadCall();
+      if(!result.ok){setDialpadRecoveryError(true);setPhone("idle");return;}
+      if(result.call)setDialpadSession({propertyId:result.call.propertyId,name:"Existing Dialpad call",initialCall:{intentId:result.call.intentId,status:result.call.status}});
+      setDialpadRecoveryReady(true);
+    }catch{setDialpadRecoveryError(true);setPhone("idle");}
+  },[]);
+  useEffect(()=>{void recoverDialpadCall();},[recoverDialpadCall]);
+  const callingEnabled = dialpadRecoveryReady && (jitterCallingEnabled || dialpadCallers.length > 0 || !!dialpadSession);
+  useEffect(() => {
+    let active = true;
+    void loadMyDialpadCallerOptions().then(result => {
+      if (active && result.ok) {
+        setDialpadCallers(result.options);
+        if (!jitterCallingEnabled && result.options.length === 1) setSelectedDialpadGrant(result.options[0].grantId);
+      }
+    }).catch(() => { /* Existing calling inventory remains independent. */ });
+    return () => { active = false; };
+  }, [jitterCallingEnabled]);
   const [coachUiEnabled] = useState(() => isCoachUiEnabled());
   const [coachPreference, setCoachPreference] = useState<CoachPreference>(readCoachPreference);
   const updateCoachPreference = useCallback((preference: CoachPreference) => {
@@ -306,8 +334,8 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   }, []);
 
   useEffect(() => {
-    if (callingEnabled) void loadCallerIds();
-  }, [callingEnabled, loadCallerIds]);
+    if (jitterCallingEnabled) void loadCallerIds();
+  }, [jitterCallingEnabled, loadCallerIds]);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -470,7 +498,20 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   const startTarget = useCallback(async (
     prepare: () => Promise<{ ok: true; data: SoftphoneTarget } | { ok: false; error: string }>,
     provisionalTarget?: SoftphoneTarget,
+    linkedPropertyId?: string,
   ) => {
+    if (!dialpadRecoveryReady) { setPhone("idle"); return; }
+    if (dialpadSession) { setPhone("idle"); return; }
+    if (selectedDialpadGrant) {
+      const caller = dialpadCallers.find(option => option.grantId === selectedDialpadGrant);
+      const propertyId = linkedPropertyId ?? provisionalTarget?.propertyId;
+      if (!caller || !propertyId) { setError("Select a lead to call with your assigned Dialpad number."); setPhone("idle"); return; }
+      if (startInFlightRef.current || transportRef.current) return;
+      setDialpadSession({propertyId,caller,name:provisionalTarget?.name ?? "Selected lead"});
+      setPhone("idle");
+      return;
+    }
+    if (!jitterCallingEnabled) { setError("Choose an available calling number."); setPhone("idle"); return; }
     if (!callingEnabled) {
       setError("Calling not yet enabled");
       return;
@@ -781,7 +822,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
         : "The call failed. Add a note to log the outcome.";
       if (!terminalHandledRef.current) await finishTerminal("failed");
     }
-  }, [callingEnabled, coachPreference.enabled, loadCallerIds, showToast, transition, transportFactory]);
+  }, [callingEnabled, jitterCallingEnabled, dialpadRecoveryReady, dialpadSession, selectedDialpadGrant, dialpadCallers, coachPreference.enabled, loadCallerIds, showToast, transition, transportFactory]);
 
   const openLead = useCallback((lead: SoftphoneLead) => {
     if (!callingEnabled || startInFlightRef.current) return;
@@ -868,15 +909,21 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     && /^\d{10}$/.test(manualDigits);
   const callName = target?.name ?? "";
   const isOnCall = phone === "live" || phone === "held";
-  const callerIdReady = callerIdState === "ready" && Boolean(selectedCallerId);
+  const callerIdReady = Boolean(selectedDialpadGrant) || (callerIdState === "ready" && Boolean(selectedCallerId));
 
   const selectCallerId = useCallback((phoneE164: string) => {
+    if (phoneE164.startsWith("dialpad:")) {
+      const grant = phoneE164.slice(8);
+      if (dialpadCallers.some(option => option.grantId === grant)) setSelectedDialpadGrant(grant);
+      return;
+    }
     if (!E164.test(phoneE164) || !callerIdsRef.current.some((item) => item.phone_e164 === phoneE164))
       return;
+    setSelectedDialpadGrant(null);
     selectedCallerIdRef.current = phoneE164;
     setSelectedCallerId(phoneE164);
     rememberCallerId(phoneE164);
-  }, []);
+  }, [dialpadCallers]);
 
   const enterManualDigit = useCallback((digit: DtmfDigit) => {
     if (digit === "*" || digit === "#") return;
@@ -984,34 +1031,38 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
           document.body,
         )
         : null}
-      {typeof document !== "undefined" && phone !== "closed" && !(coachUiEnabled && isOnCall && wrapToken && !coachCollapsed)
+      {typeof document !== "undefined" && (phone !== "closed" || dialpadSession) && !(coachUiEnabled && isOnCall && wrapToken && !coachCollapsed)
         ? createPortal(
         <>
-          <button type="button" aria-label="Close dialer overlay" className="fixed inset-0 top-16 z-50 bg-stone-950/35 backdrop-blur-[3px] md:left-64" onClick={() => { if (phone === "idle") { resetIdle(); setPhone("closed"); } }} />
-          <div data-testid="softphone-popover" role="dialog" aria-label="Dialer" className="fixed top-20 left-1/2 z-[60] w-[min(480px,calc(100vw-24px))] -translate-x-1/2 overflow-hidden rounded-2xl border border-[#e5e1df] bg-white text-[#1c1917] shadow-[0_20px_60px_rgba(28,25,23,0.3)]">
-            <button type="button" aria-label="Close dialer" className="absolute top-2.5 right-2.5 z-10 rounded-md p-1.5 text-[#78716c] hover:bg-[#f0eeec]" onClick={() => { if (phone === "idle") { resetIdle(); setPhone("closed"); } }}><XIcon className="size-3.5" /></button>
-            {phone === "idle" ? (
+          <button hidden={phone === "closed"} type="button" aria-label="Close dialer overlay" className="fixed inset-0 top-16 z-50 bg-stone-950/35 backdrop-blur-[3px] md:left-64" onClick={() => { if (phone === "idle") { if (!dialpadSession) resetIdle(); setPhone("closed"); } }} />
+          <div hidden={phone === "closed"} data-testid="softphone-popover" role="dialog" aria-label="Dialer" className="fixed top-20 left-1/2 z-[60] w-[min(480px,calc(100vw-24px))] -translate-x-1/2 overflow-hidden rounded-2xl border border-[#e5e1df] bg-white text-[#1c1917] shadow-[0_20px_60px_rgba(28,25,23,0.3)]">
+            <button type="button" aria-label="Close dialer" className="absolute top-2.5 right-2.5 z-10 rounded-md p-1.5 text-[#78716c] hover:bg-[#f0eeec]" onClick={() => { if (phone === "idle") { if (!dialpadSession) resetIdle(); setPhone("closed"); } }}><XIcon className="size-3.5" /></button>
+            {!dialpadRecoveryReady ? <div className="p-5"><p role={dialpadRecoveryError?"alert":"status"}>{dialpadRecoveryError?"Existing calls could not be checked. New calls are paused until recovery succeeds.":"Checking for an existing call…"}</p>{dialpadRecoveryError&&<button type="button" onClick={()=>void recoverDialpadCall()}>Check existing calls</button>}</div> : dialpadSession ? (
+              <DialpadDesktopPanel propertyId={dialpadSession.propertyId} caller={dialpadSession.caller} leadName={dialpadSession.name} initialCall={dialpadSession.initialCall}
+                onCancel={() => setDialpadSession(null)} />
+            ) : phone === "idle" ? (
               <IdleView
-                coachUiEnabled={coachUiEnabled}
+                coachUiEnabled={coachUiEnabled && !selectedDialpadGrant}
                 coachPreference={coachPreference}
                 onCoachPreferenceChange={updateCoachPreference}
                 dialInput={dialInput}
                 setDialInput={(value) => { dialInputRef.current = value; setDialInput(value); }}
                 suggestions={visibleSuggestions}
                 recents={recents}
-                manualReady={manualReady}
+                manualReady={manualReady && !selectedDialpadGrant}
                 manualDigits={manualDigits}
                 pending={pending}
                 callingEnabled={callingEnabled}
                 callerIds={callerIds}
+                dialpadCallers={dialpadCallers}
                 callerIdState={callerIdState}
                 callerIdError={callerIdError}
-                selectedCallerId={selectedCallerId}
+                selectedCallerId={selectedDialpadGrant ? `dialpad:${selectedDialpadGrant}` : selectedCallerId}
                 callerIdReady={callerIdReady}
                 onCallerIdChange={selectCallerId}
                 onRetryCallerIds={() => { void loadCallerIds(); }}
-                onLead={(suggestion) => void startTarget(() => inspectLeadCall(suggestion.propertyId))}
-                onRecent={(recent) => void startTarget(() => recent.propertyId ? inspectLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164))}
+                onLead={(suggestion) => void startTarget(() => inspectLeadCall(suggestion.propertyId), undefined, suggestion.propertyId)}
+                onRecent={(recent) => void startTarget(() => recent.propertyId ? inspectLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164), undefined, recent.propertyId ?? undefined)}
                 onManual={() => void startTarget(() => prepareManualCall(manualDigits))}
                 onDigit={enterManualDigit}
                 onBackspace={() => { const next = dialInputRef.current.slice(0, -1); dialInputRef.current = next; setDialInput(next); }}
@@ -1053,13 +1104,13 @@ function formatFull(digits: string): string {
   return digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : digits;
 }
 
-function IdleView({ coachUiEnabled, coachPreference, onCoachPreferenceChange, dialInput, setDialInput, suggestions, recents, manualReady, manualDigits, pending, callingEnabled, callerIds, callerIdState, callerIdError, selectedCallerId, callerIdReady, onCallerIdChange, onRetryCallerIds, onLead, onRecent, onManual, onDigit, onBackspace, error }: {
+function IdleView({ coachUiEnabled, coachPreference, onCoachPreferenceChange, dialInput, setDialInput, suggestions, recents, manualReady, manualDigits, pending, callingEnabled, callerIds, dialpadCallers, callerIdState, callerIdError, selectedCallerId, callerIdReady, onCallerIdChange, onRetryCallerIds, onLead, onRecent, onManual, onDigit, onBackspace, error }: {
   coachUiEnabled: boolean; coachPreference: CoachPreference; onCoachPreferenceChange: (preference: CoachPreference) => void;
-  dialInput: string; setDialInput: (value: string) => void; suggestions: DialerSearchResult[]; recents: DialerRecent[]; manualReady: boolean; manualDigits: string; pending: boolean; callingEnabled: boolean; callerIds: JitterCallerId[]; callerIdState: CallerIdState; callerIdError: string | null; selectedCallerId: string | null; callerIdReady: boolean; onCallerIdChange: (phoneE164: string) => void; onRetryCallerIds: () => void; onLead: (suggestion: DialerSearchResult) => void; onRecent: (recent: DialerRecent) => void; onManual: () => void; onDigit: (digit: DtmfDigit) => void; onBackspace: () => void; error: string | null;
+  dialInput: string; setDialInput: (value: string) => void; suggestions: DialerSearchResult[]; recents: DialerRecent[]; manualReady: boolean; manualDigits: string; pending: boolean; callingEnabled: boolean; callerIds: JitterCallerId[]; dialpadCallers: DialpadCallerOption[]; callerIdState: CallerIdState; callerIdError: string | null; selectedCallerId: string | null; callerIdReady: boolean; onCallerIdChange: (phoneE164: string) => void; onRetryCallerIds: () => void; onLead: (suggestion: DialerSearchResult) => void; onRecent: (recent: DialerRecent) => void; onManual: () => void; onDigit: (digit: DtmfDigit) => void; onBackspace: () => void; error: string | null;
 }) {
   return <div className="p-4 pb-[18px]">
     {!callingEnabled ? <div role="status" className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">Calling not yet enabled</div> : null}
-    {callingEnabled ? <CallerIdControl callerIds={callerIds} state={callerIdState} error={callerIdError} selected={selectedCallerId} onChange={onCallerIdChange} onRetry={onRetryCallerIds} /> : null}
+    {callingEnabled ? <CallerIdControl callerIds={callerIds} dialpadCallers={dialpadCallers} state={callerIdState} error={callerIdError} selected={selectedCallerId} onChange={onCallerIdChange} onRetry={onRetryCallerIds} /> : null}
     {callingEnabled && coachUiEnabled ? <CoachPreferenceControl preference={coachPreference} onChange={onCoachPreferenceChange} /> : null}
     <input autoFocus data-testid="dialer-input" value={/^\d{10}$/.test(dialInput) ? formatFull(dialInput) : dialInput} onKeyDown={(event) => { if (/^[0-9]$/.test(event.key)) { event.preventDefault(); onDigit(event.key as DtmfDigit); } }} onChange={(event) => setDialInput(event.target.value)} placeholder="Type a name or number…" className="w-full rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-[15px] font-semibold outline-none" />
     {suggestions.length > 0 ? <div className="mt-2 flex max-h-42 flex-col gap-0.5 overflow-auto">{suggestions.map((suggestion) => <button type="button" disabled={!callingEnabled || !callerIdReady} title={!callingEnabled ? "Calling not yet enabled" : !callerIdReady ? "Choose an available company number" : undefined} data-testid="dialer-suggestion" key={suggestion.propertyId} onClick={() => onLead(suggestion)} className="flex w-full items-center gap-2.5 rounded-lg border-0 bg-transparent px-2 py-2 text-left hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"><span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#f0eeec] text-[11px] font-extrabold text-[#57534e]">{initials(suggestion.name)}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold">{suggestion.name}</span><span className="block truncate text-[11px] text-[#78716c]">{suggestion.detail}</span></span><PhoneIcon className="size-3.5 shrink-0 text-emerald-600" /></button>)}</div> : null}
@@ -1106,13 +1157,13 @@ function CoachPreferenceControl({ preference, onChange }: { preference: CoachPre
   </Collapsible.Root>;
 }
 
-function CallerIdControl({ callerIds, state, error, selected, onChange, onRetry }: { callerIds: JitterCallerId[]; state: CallerIdState; error: string | null; selected: string | null; onChange: (phoneE164: string) => void; onRetry: () => void }) {
+function CallerIdControl({ callerIds, dialpadCallers, state, error, selected, onChange, onRetry }: { callerIds: JitterCallerId[]; dialpadCallers: DialpadCallerOption[]; state: CallerIdState; error: string | null; selected: string | null; onChange: (phoneE164: string) => void; onRetry: () => void }) {
   return <div className="mb-3 rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-left">
     <div className="mb-1 text-[10px] font-extrabold uppercase tracking-[0.1em] text-[#78716c]">Call from</div>
-    {state === "loading" ? <div role="status" className="text-xs font-semibold text-[#78716c]">Loading company numbers…</div> : null}
-    {state === "ready" && callerIds.length === 1 ? <div data-testid="caller-id-readonly" className="text-sm font-bold">{callerIds[0].label} · {maskPhone(callerIds[0].phone_e164)}</div> : null}
-    {state === "ready" && callerIds.length > 1 ? <select aria-label="Call from" value={selected ?? ""} onChange={(event) => onChange(event.target.value)} className="w-full rounded-md border border-[#d6d1ce] bg-white px-2 py-1.5 text-sm font-semibold outline-none">{callerIds.map((callerId) => <option key={callerId.phone_e164} value={callerId.phone_e164}>{callerId.label} · {maskPhone(callerId.phone_e164)}</option>)}</select> : null}
-    {state === "error" || state === "empty" ? <div><div role="alert" className="text-xs font-semibold text-red-700">{error ?? "No company calling numbers are available."}</div><button type="button" data-testid="retry-caller-ids" onClick={onRetry} className="mt-1.5 rounded-md border border-red-200 bg-white px-2 py-1 text-xs font-bold text-red-700">Retry</button></div> : null}
+    {dialpadCallers.length === 0 && state === "loading" ? <div role="status" className="text-xs font-semibold text-[#78716c]">Loading company numbers…</div> : null}
+    {dialpadCallers.length === 0 && state === "ready" && callerIds.length === 1 ? <div data-testid="caller-id-readonly" className="text-sm font-bold">{callerIds[0].label} · {maskPhone(callerIds[0].phone_e164)}</div> : null}
+    {(dialpadCallers.length > 0 || (state === "ready" && callerIds.length > 1)) ? <select aria-label="Call from" value={selected ?? ""} onChange={(event) => onChange(event.target.value)} className="w-full rounded-md border border-[#d6d1ce] bg-white px-2 py-1.5 text-sm font-semibold outline-none">{!selected && <option value="">Choose a calling number</option>}{callerIds.map((callerId) => <option key={callerId.phone_e164} value={callerId.phone_e164}>{callerId.label} · {maskPhone(callerId.phone_e164)}</option>)}{dialpadCallers.map(caller => <option key={`dialpad:${caller.grantId}`} value={`dialpad:${caller.grantId}`}>Dialpad · {maskPhone(caller.phoneE164)} · {caller.identity.type} {caller.identity.id}</option>)}</select> : null}
+    {dialpadCallers.length === 0 && (state === "error" || state === "empty") ? <div><div role="alert" className="text-xs font-semibold text-red-700">{error ?? "No company calling numbers are available."}</div><button type="button" data-testid="retry-caller-ids" onClick={onRetry} className="mt-1.5 rounded-md border border-red-200 bg-white px-2 py-1 text-xs font-bold text-red-700">Retry</button></div> : null}
   </div>;
 }
 
