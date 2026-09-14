@@ -40,9 +40,6 @@ async function postCanary(request: Request) {
       async () => mode === "cron_error",
     );
   }
-  if (mode === "unhandled" && process.env.VERCEL_ENV === "preview") {
-    throw new Error("Controlled Sentry canary unhandled route failure");
-  }
   if (mode !== "server") return NextResponse.json({ error: "Invalid canary mode" }, { status: 400 });
   if (!ensureSentryServerClient()) return NextResponse.json({ error: "Sentry client inactive" }, { status: 503 });
   let eventId = "";
