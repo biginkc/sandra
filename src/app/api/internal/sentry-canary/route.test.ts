@@ -58,6 +58,12 @@ describe("secret-gated Sentry canary", () => {
     expect(mocks.capture).toHaveBeenCalledWith(expect.objectContaining({ message: "Controlled Sentry canary server failure" }));
     expect(mocks.flush).toHaveBeenCalledWith(2_000);
   });
+  it("throws an unhandled error only for an authorized preview request", async () => {
+    expect((await POST(request("unhandled"))).status).toBe(404);
+    await expect(POST(request("unhandled", "owned-canary-secret"))).rejects.toThrow(
+      "Controlled Sentry canary unhandled route failure",
+    );
+  });
 
   it("starts the real Workflow entry point only for an authorized preview request", async () => {
     mocks.start.mockResolvedValue({ runId: "canary-run" });
