@@ -20,18 +20,18 @@ function request(mode: string, secret?: string) {
 
 describe("preview-only Sentry canary", () => {
   const priorEnv = process.env.VERCEL_ENV;
-  const priorSecret = process.env.CRON_SECRET;
+  const priorSecret = process.env.SENTRY_CANARY_SECRET;
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.VERCEL_ENV = "preview";
-    process.env.CRON_SECRET = "owned-canary-secret";
+    process.env.SENTRY_CANARY_SECRET = "owned-canary-secret";
     mocks.client.mockReturnValue({});
     mocks.capture.mockReturnValue("safe-event-id");
     mocks.flush.mockResolvedValue(true);
   });
   afterEach(() => {
     if (priorEnv === undefined) delete process.env.VERCEL_ENV; else process.env.VERCEL_ENV = priorEnv;
-    if (priorSecret === undefined) delete process.env.CRON_SECRET; else process.env.CRON_SECRET = priorSecret;
+    if (priorSecret === undefined) delete process.env.SENTRY_CANARY_SECRET; else process.env.SENTRY_CANARY_SECRET = priorSecret;
   });
 
   it("never starts a Workflow or captures an event without preview and the exact secret", async () => {

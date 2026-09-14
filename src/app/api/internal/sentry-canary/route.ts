@@ -7,15 +7,16 @@ import { CANARY_COOKIE, canaryCookieValue } from "@/lib/errors/preview-canary-ac
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  if (process.env.VERCEL_ENV !== "preview" || !process.env.CRON_SECRET
-    || request.headers.get("x-sandra-canary-secret") !== process.env.CRON_SECRET) {
+  const secret = process.env.SENTRY_CANARY_SECRET;
+  if (process.env.VERCEL_ENV !== "preview" || !secret
+    || request.headers.get("x-sandra-canary-secret") !== secret) {
     return new Response(null, { status: 404 });
   }
   const input: unknown = await request.json().catch(() => null);
   const mode = input && typeof input === "object" && "mode" in input ? input.mode : null;
   if (mode === "session") {
     const response = NextResponse.json({ ready: true });
-    response.cookies.set(CANARY_COOKIE, canaryCookieValue(process.env.CRON_SECRET), {
+    response.cookies.set(CANARY_COOKIE, canaryCookieValue(secret), {
       httpOnly: true, secure: true, sameSite: "strict", path: "/sentry-canary", maxAge: 300,
     });
     return response;
