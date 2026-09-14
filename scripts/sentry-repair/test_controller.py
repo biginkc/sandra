@@ -7,6 +7,7 @@ import signal
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from dispatch import (  # noqa: E402
     dispatch_attempt,
     dispatch_review,
     kill_process_group,
+    _review_record,
     SubprocessExecutor,
 )
 from cli import parser as cli_parser  # noqa: E402
@@ -130,6 +132,14 @@ class ControllerTests(unittest.TestCase):
         kwargs.setdefault("worktree", self.worktree)
         return self.store.claim_attempt(*args, **kwargs)
 
+    def head_sha(self) -> str:
+        return subprocess.run(
+            ["git", "-C", str(self.worktree), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
     def make_worktree(self, name: str) -> Path:
         """Create a real linked worktree so tests reject ordinary checkouts."""
 
@@ -160,7 +170,8 @@ class ControllerTests(unittest.TestCase):
         )
         return worktree
 
-    def seed_review_evidence(self, attempt, *, sha="a" * 40):
+    def seed_review_evidence(self, attempt, *, sha=None):
+        sha = sha or self.head_sha()
         self.store.record_pull_request(
             attempt.attempt_id,
             attempt.fencing_token,
@@ -500,8 +511,129 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(plan["argv"][plan["argv"].index("--sandbox") + 1], "read-only")
         self.assertNotIn("--skip-git-repo-check", plan["argv"])
 
+    def test_dispatch_refuses_second_worker_for_one_attempt(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair"
+        )
+        executor = FakeExecutor(
+            ProcessResult("available"),
+            ProcessResult("success", stdout="done", session_id="worker-session"),
+        )
+        dispatch_attempt(
+            self.store, attempt.attempt_id, attempt.fencing_token,
+            executor=executor, execute=True,
+        )
+        with self.assertRaises(StateError):
+            dispatch_attempt(
+                self.store, attempt.attempt_id, attempt.fencing_token,
+                executor=FakeExecutor(ProcessResult("available")), execute=True,
+            )
+        self.assertEqual(len(executor.run_calls), 1)
+
+    def test_execution_session_cannot_be_overwritten(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair"
+        )
+        self.store.mark_running(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            model=SPARK_MODEL,
+            effort="low",
+            session_id="first-session",
+        )
+        with self.assertRaises(StateError):
+            self.store.update_session(
+                attempt.attempt_id,
+                attempt.fencing_token,
+                session_id="second-session",
+            )
+
+    def test_review_rejects_dirty_or_mismatched_worker_checkout(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair"
+        )
+        self.store.mark_running(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            model=SPARK_MODEL,
+            effort="low",
+            session_id="repair-session",
+        )
+        self.seed_review_evidence(attempt)
+        (self.worktree / "untracked-review-input.txt").write_text("unsafe", encoding="utf-8")
+        try:
+            with self.assertRaises(StateError):
+                dispatch_review(
+                    self.store, attempt.attempt_id, attempt.fencing_token,
+                    executor=FakeExecutor(ProcessResult("available")), execute=True,
+                )
+        finally:
+            (self.worktree / "untracked-review-input.txt").unlink(missing_ok=True)
+
+        changed = subprocess.run(
+            [
+                "git", "-C", str(self.worktree), "-c",
+                "user.email=controller-test@example.invalid", "-c",
+                "user.name=Controller Test", "commit", "--quiet", "--allow-empty",
+                "-m", "worker changed head",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(changed.returncode, 0, changed.stderr)
+        with self.assertRaises(StateError):
+            dispatch_review(
+                self.store, attempt.attempt_id, attempt.fencing_token,
+                executor=FakeExecutor(ProcessResult("available")), execute=True,
+            )
+
+    def test_subprocess_review_uses_fresh_clean_checkout_and_ignores_rules(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair"
+        )
+        self.store.mark_running(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            model=SPARK_MODEL,
+            effort="low",
+            session_id="repair-session",
+        )
+        self.seed_review_evidence(attempt)
+        executor = SubprocessExecutor(worktree=str(self.worktree))
+        observed: dict[str, str] = {}
+
+        def capture_run(argv, *, timeout_seconds):
+            observed["worktree"] = str(executor.worktree)
+            observed["head"] = subprocess.run(
+                ["git", "-C", str(executor.worktree), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            observed["status"] = subprocess.run(
+                ["git", "-C", str(executor.worktree), "status", "--porcelain=v1", "--untracked-files=all"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            observed["rules"] = "--ignore-rules" if "--ignore-rules" in argv else ""
+            return ProcessResult("error", stderr="review intentionally not run")
+
+        executor.run = capture_run
+        result = dispatch_review(
+            self.store, attempt.attempt_id, attempt.fencing_token,
+            executor=executor, execute=True,
+        )
+        self.assertIn("review_error", result)
+        self.assertNotEqual(observed["worktree"], str(self.worktree))
+        self.assertEqual(observed["head"], self.head_sha())
+        self.assertEqual(observed["status"], "")
+        self.assertEqual(observed["rules"], "--ignore-rules")
+        self.assertEqual(executor.worktree, str(self.worktree))
+
     def test_persisted_ci_and_functional_evidence_cannot_be_overridden(self):
-        sha = "b" * 40
+        sha = self.head_sha()
         attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
         self.store.mark_running(attempt.attempt_id, attempt.fencing_token, model=SPARK_MODEL, effort="low", session_id="repair-session")
         self.store.record_pull_request(attempt.attempt_id, attempt.fencing_token, number=43, url="https://github.com/bmh-group/sandra/pull/43", head_sha=sha, ci_run_id="run-10", ci_status="success", ci_sha=sha)
@@ -510,7 +642,7 @@ class ControllerTests(unittest.TestCase):
         self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="sentry_observation", evidence={"no_regression": True, "query_window": "10m", "observed_at": "now"})
         review_executor = FakeExecutor(
             ProcessResult("available"),
-            ProcessResult("success", stdout='{"type":"thread.started","thread_id":"review-session"}\n{"type":"item.completed","item":{"text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"independent review\\"}"}}', session_id="review-session"),
+            ProcessResult("success", stdout='{"type":"thread.started","thread_id":"review-session"}\n{"type":"item.completed","item":{"type":"agent_message","text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"independent review\\"}"}}', session_id="review-session"),
         )
         dispatch_review(self.store, attempt.attempt_id, attempt.fencing_token, executor=review_executor, execute=True)
         with self.assertRaises(CompletionError):
@@ -530,7 +662,7 @@ class ControllerTests(unittest.TestCase):
                 },
             )
 
-    def test_schedule_day_night_dst_and_once_only_catchup(self):
+    def test_schedule_day_night_dst_and_once_only_current_slot(self):
         day = datetime(2026, 9, 14, 12, 7, tzinfo=CHICAGO)
         night = datetime(2026, 9, 14, 21, 7, tzinfo=CHICAGO)
         self.assertEqual(cadence_minutes(day), 15)
@@ -637,13 +769,13 @@ class ControllerTests(unittest.TestCase):
             effort="low",
             session_id="repair-session",
         )
-        sha = "e" * 40
+        sha = self.head_sha()
         self.seed_review_evidence(attempt, sha=sha)
         executor = FakeExecutor(
             ProcessResult("available"),
             ProcessResult(
                 "success",
-                stdout='{"type":"thread.started","thread_id":"review-frozen"}\n{"type":"item.completed","item":{"text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"frozen scope\\"}"}}',
+                stdout='{"type":"thread.started","thread_id":"review-frozen"}\n{"type":"item.completed","item":{"type":"agent_message","text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"frozen scope\\"}"}}',
                 session_id="review-frozen",
             ),
         )
@@ -682,7 +814,7 @@ class ControllerTests(unittest.TestCase):
             session_id="repair-session",
         )
         self.seed_review_evidence(attempt)
-        output = '{"type":"item.completed","item":{"text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"text session\\",\\"session_id\\":\\"model-claimed-session\\"}"}}'
+        output = '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"text session\\",\\"session_id\\":\\"model-claimed-session\\"}"}}'
         result = dispatch_review(
             self.store,
             attempt.attempt_id,
@@ -692,6 +824,21 @@ class ControllerTests(unittest.TestCase):
         )
         self.assertIn("review_error", result)
         self.assertIsNone(self.store.db.execute("SELECT * FROM reviews").fetchone())
+
+    def test_review_parser_ignores_verdict_shaped_tool_text(self):
+        output = (
+            '{"type":"thread.started","thread_id":"review-session"}\n'
+            '{"type":"item.completed","item":{"type":"tool_result","text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"tool text\\"}"}}'
+        )
+        self.assertIsNone(_review_record(output))
+
+    def test_review_parser_does_not_fall_back_to_earlier_agent_message(self):
+        output = (
+            '{"type":"thread.started","thread_id":"review-session"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"earlier\\"}"}}\n'
+            '{"type":"item.completed","item":{"type":"agent_message","text":"final prose"}}'
+        )
+        self.assertIsNone(_review_record(output))
 
     def test_review_rejects_adapter_session_that_disagrees_with_thread_event(self):
         attempt = self.claim(
@@ -735,15 +882,69 @@ class ControllerTests(unittest.TestCase):
                 "SENTRY_AUTH_TOKEN": "sentry-secret",
                 "VERCEL_TOKEN": "vercel-secret",
                 "DATABASE_URL": "postgres://secret",
+                "GITLAB_TOKEN": "gitlab-secret",
+                "SLACK_BOT_TOKEN": "slack-secret",
+                "CUSTOM_FENCING_SECRET": "fence-secret",
                 "CODEX_HOME": "/tmp/codex",
             },
             clear=False,
         ):
-            environment = SubprocessExecutor._worker_environment()
+            executor = SubprocessExecutor(fencing_env_name="CUSTOM_FENCING_SECRET")
+            environment = executor._subprocess_environment()
         self.assertNotIn("SENTRY_AUTH_TOKEN", environment)
         self.assertNotIn("VERCEL_TOKEN", environment)
         self.assertNotIn("DATABASE_URL", environment)
+        self.assertNotIn("GITLAB_TOKEN", environment)
+        self.assertNotIn("SLACK_BOT_TOKEN", environment)
+        self.assertNotIn("CUSTOM_FENCING_SECRET", environment)
         self.assertEqual(environment["CODEX_HOME"], "/tmp/codex")
+
+    def test_subprocess_retries_transient_heartbeat_before_killing(self):
+        calls = [0]
+
+        def heartbeat():
+            calls[0] += 1
+            if calls[0] < 3:
+                raise RuntimeError("temporary state-store outage")
+
+        executor = SubprocessExecutor(sys.executable, worktree=str(self.worktree))
+        result = executor._run(
+            [sys.executable, "-c", "import time; time.sleep(1.5)"],
+            timeout_seconds=4,
+            heartbeat=heartbeat,
+            heartbeat_interval_seconds=0.1,
+        )
+        self.assertEqual(result.status, "success")
+        self.assertGreaterEqual(calls[0], 3)
+
+    def test_subprocess_cleanup_runs_for_unhandled_exception(self):
+        pid_file = self.worktree / "controller-child.pid"
+        code = (
+            "from pathlib import Path; import os, time; "
+            "Path('controller-child.pid').write_text(str(os.getpid())); time.sleep(30)"
+        )
+
+        def interrupt():
+            raise KeyboardInterrupt()
+
+        executor = SubprocessExecutor(sys.executable, worktree=str(self.worktree))
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                executor._run(
+                    [sys.executable, "-c", code],
+                    timeout_seconds=10,
+                    heartbeat=interrupt,
+                    heartbeat_interval_seconds=0.1,
+                )
+            deadline = time.monotonic() + 2
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(pid_file.exists())
+            child_pid = int(pid_file.read_text(encoding="utf-8"))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
+        finally:
+            pid_file.unlink(missing_ok=True)
 
     def test_cli_exposes_fenced_heartbeat_without_token_argv(self):
         args = cli_parser().parse_args(
@@ -875,7 +1076,7 @@ class ControllerTests(unittest.TestCase):
         )
 
     def test_completion_requires_actual_evidence_and_review_gate(self):
-        sha = "a" * 40
+        sha = self.head_sha()
         attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
         self.store.mark_running(attempt.attempt_id, attempt.fencing_token, model=SPARK_MODEL, effort="low", session_id="repair-session")
         self.store.record_pull_request(attempt.attempt_id, attempt.fencing_token, number=42, url="https://github.com/bmh-group/sandra/pull/42", head_sha=sha, ci_run_id="run-9", ci_status="success", ci_sha=sha)
@@ -890,7 +1091,7 @@ class ControllerTests(unittest.TestCase):
             ),
             ProcessResult(
                 "success",
-                stdout='{"type":"thread.started","thread_id":"astra-session"}\n{"type":"item.completed","item":{"text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"reviewed patch, CI, deployed SHA, and probe\\"}"}}',
+                stdout='{"type":"thread.started","thread_id":"astra-session"}\n{"type":"item.completed","item":{"type":"agent_message","text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"reviewed patch, CI, deployed SHA, and probe\\"}"}}',
                 session_id="astra-session",
             ),
         )
@@ -926,7 +1127,7 @@ class ControllerTests(unittest.TestCase):
         self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="sentry_observation", evidence={"no_regression": True, "query_window": "10m", "observed_at": "now"})
         review_executor = FakeExecutor(
             ProcessResult("available"),
-            ProcessResult("success", stdout='{"type":"thread.started","thread_id":"review-session-2"}\n{"type":"item.completed","item":{"text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"review\\"}"}}', session_id="review-session-2"),
+            ProcessResult("success", stdout='{"type":"thread.started","thread_id":"review-session-2"}\n{"type":"item.completed","item":{"type":"agent_message","text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"review\\"}"}}', session_id="review-session-2"),
         )
         with self.assertRaises(StateError):
             dispatch_review(self.store, attempt.attempt_id, attempt.fencing_token, executor=review_executor, execute=True)

@@ -244,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
                 store,
                 args.attempt_id,
                 _fencing_token(args),
-                executor=SubprocessExecutor(),
+                executor=SubprocessExecutor(fencing_env_name=args.fencing_token_env),
                 spark_effort=args.spark_effort,
                 timeout_seconds=args.timeout_seconds,
                 heartbeat_interval_seconds=args.heartbeat_interval_seconds,
@@ -257,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
                 store,
                 args.attempt_id,
                 _fencing_token(args),
-                executor=SubprocessExecutor(),
+                executor=SubprocessExecutor(fencing_env_name=args.fencing_token_env),
                 timeout_seconds=args.timeout_seconds,
                 execute=args.execute,
             )

@@ -1,15 +1,19 @@
-"""Bounded codex exec dispatch with preflight model selection and no retries."""
+"""Bounded codex exec dispatch with preflight selection and model no-retry policy."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from prompts import build_investigation_prompt, build_review_prompt
@@ -39,9 +43,53 @@ _PRODUCTION_SECRET_ENV = frozenset(
         "GITHUB_TOKEN",
         "GH_TOKEN",
         "NPM_TOKEN",
+        "GITLAB_TOKEN",
+        "BITBUCKET_TOKEN",
+        "AZURE_DEVOPS_EXT_PAT",
+        "RAILWAY_TOKEN",
+        "FLY_API_TOKEN",
+        "HEROKU_API_KEY",
+        "CLOUDFLARE_API_TOKEN",
+        "STRIPE_SECRET_KEY",
+        "STRIPE_API_KEY",
+        "RESEND_API_KEY",
+        "SLACK_BOT_TOKEN",
+        "SLACK_TOKEN",
+        "DISCORD_TOKEN",
+        "TELEGRAM_BOT_TOKEN",
+        "TWILIO_AUTH_TOKEN",
+        "FIREBASE_TOKEN",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "DOCKER_PASSWORD",
         "SANDRA_FENCING_TOKEN",
     }
 )
+_WORKER_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "COLORTERM",
+        "NO_COLOR",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "TZ",
+        "CODEX_HOME",
+        "CODEX_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+    }
+)
+MAX_HEARTBEAT_RETRIES = 2
 
 
 def kill_process_group(process) -> None:
@@ -50,7 +98,10 @@ def kill_process_group(process) -> None:
     try:
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
     except (AttributeError, OSError, ProcessLookupError):
-        process.kill()
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -100,19 +151,35 @@ def codex_argv(
 class SubprocessExecutor:
     """Real CLI adapter; callers must opt into execute mode explicitly."""
 
-    def __init__(self, executable: str = "codex", worktree: str | None = None) -> None:
+    def __init__(
+        self,
+        executable: str = "codex",
+        worktree: str | None = None,
+        fencing_env_name: str | None = None,
+    ) -> None:
         self.executable = executable
         self.worktree = worktree
+        self.fencing_env_name = fencing_env_name
 
     @staticmethod
-    def _worker_environment() -> dict[str, str]:
-        """Keep model auth while excluding provider and production secrets."""
+    def _worker_environment(
+        *, scrub_names: set[str] | frozenset[str] | None = None
+    ) -> dict[str, str]:
+        """Build a small environment with model auth and no repo secrets."""
 
+        scrub = set(_PRODUCTION_SECRET_ENV)
+        scrub.update(scrub_names or ())
         return {
             key: value
             for key, value in os.environ.items()
-            if key not in _PRODUCTION_SECRET_ENV
+            if key in _WORKER_ENV_ALLOWLIST and key not in scrub
         }
+
+    def _subprocess_environment(self) -> dict[str, str]:
+        scrub_names = set()
+        if self.fencing_env_name:
+            scrub_names.add(self.fencing_env_name)
+        return self._worker_environment(scrub_names=scrub_names)
 
     def probe(self, model: str, effort: str) -> ProcessResult:
         probe_prompt = (
@@ -184,6 +251,7 @@ class SubprocessExecutor:
             raise ValueError("heartbeat_interval_seconds must be positive")
         started = time.monotonic()
         next_heartbeat = started + heartbeat_interval_seconds
+        heartbeat_failures = 0
         # Files avoid a pipe-buffer deadlock if a worker emits a large JSONL
         # trace while the controller is polling for heartbeats.
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file, tempfile.TemporaryFile(
@@ -201,7 +269,7 @@ class SubprocessExecutor:
                     stderr=stderr_file,
                     cwd=self.worktree,
                     start_new_session=True,
-                    env=self._worker_environment(),
+                    env=self._subprocess_environment(),
                 )
             except OSError as exc:
                 return ProcessResult("error", "", str(exc), -1)
@@ -213,47 +281,98 @@ class SubprocessExecutor:
                 stderr_file.seek(0)
                 return stdout_file.read(), stderr_file.read()
 
-            while process.poll() is None:
-                now = time.monotonic()
-                if now - started >= timeout_seconds:
-                    kill_process_group(process)
-                    process.wait()
-                    stdout, stderr = collect()
-                    return ProcessResult(
-                        "timeout",
-                        stdout,
-                        stderr,
-                        process.returncode if process.returncode is not None else -1,
-                        self._session_id(stdout),
-                    )
-                if heartbeat is not None and now >= next_heartbeat:
-                    try:
-                        heartbeat()
-                    except Exception as exc:
-                        # Reconciliation can fence a worker while its child
-                        # is still running. Kill it before returning.
+            previous_handlers: dict[int, Any] = {}
+
+            def stop_child_on_signal(signum, _frame):
+                kill_process_group(process)
+                raise SystemExit(128 + signum)
+
+            # A normal Python exception is handled by the finally block below.
+            # For CLI termination signals, install a short-lived handler so
+            # the child group is also fenced before the controller exits.
+            try:
+                if threading.current_thread() is threading.main_thread():
+                    for signum in (signal.SIGINT, signal.SIGTERM):
+                        try:
+                            previous_handlers[signum] = signal.signal(signum, stop_child_on_signal)
+                        except (OSError, ValueError):
+                            continue
+                while process.poll() is None:
+                    now = time.monotonic()
+                    if now - started >= timeout_seconds:
                         kill_process_group(process)
                         process.wait()
                         stdout, stderr = collect()
                         return ProcessResult(
-                            "stale" if isinstance(exc, FencingError) else "error",
+                            "timeout",
                             stdout,
-                            f"{stderr}\nheartbeat {'fenced' if isinstance(exc, FencingError) else 'failed'}: {exc}",
+                            stderr,
                             process.returncode if process.returncode is not None else -1,
                             self._session_id(stdout),
                         )
-                    next_heartbeat = now + heartbeat_interval_seconds
-                time.sleep(min(0.25, max(0.01, timeout_seconds - (now - started))))
-            process.wait()
-            stdout, stderr = collect()
-            status = "success" if process.returncode == 0 else "error"
-            return ProcessResult(
-                status,
-                stdout,
-                stderr,
-                process.returncode or 0,
-                self._session_id(stdout),
-            )
+                    if heartbeat is not None and now >= next_heartbeat:
+                        try:
+                            heartbeat()
+                            heartbeat_failures = 0
+                            next_heartbeat = now + heartbeat_interval_seconds
+                        except FencingError as exc:
+                            # Reconciliation can fence a worker while its
+                            # child is still running. Fencing is immediate.
+                            kill_process_group(process)
+                            process.wait()
+                            stdout, stderr = collect()
+                            return ProcessResult(
+                                "stale",
+                                stdout,
+                                f"{stderr}\nheartbeat fenced: {exc}",
+                                process.returncode if process.returncode is not None else -1,
+                                self._session_id(stdout),
+                            )
+                        except Exception as exc:
+                            heartbeat_failures += 1
+                            if heartbeat_failures <= MAX_HEARTBEAT_RETRIES:
+                                # Retry transient state-store failures quickly
+                                # but with a hard bound before killing the
+                                # worker and terminalizing its attempt.
+                                next_heartbeat = now + min(1.0, heartbeat_interval_seconds)
+                            else:
+                                kill_process_group(process)
+                                process.wait()
+                                stdout, stderr = collect()
+                                return ProcessResult(
+                                    "error",
+                                    stdout,
+                                    f"{stderr}\nheartbeat failed after {heartbeat_failures} attempts: {exc}",
+                                    process.returncode if process.returncode is not None else -1,
+                                    self._session_id(stdout),
+                                )
+                    time.sleep(min(0.25, max(0.01, timeout_seconds - (now - started))))
+                process.wait()
+                stdout, stderr = collect()
+                status = "success" if process.returncode == 0 else "error"
+                return ProcessResult(
+                    status,
+                    stdout,
+                    stderr,
+                    process.returncode or 0,
+                    self._session_id(stdout),
+                )
+            finally:
+                for signum, handler in previous_handlers.items():
+                    try:
+                        signal.signal(signum, handler)
+                    except (OSError, ValueError):
+                        pass
+                # Covers KeyboardInterrupt, SystemExit, unexpected adapter
+                # errors, and exceptions from output collection. The child
+                # group must never outlive the controller invocation.
+                if process.poll() is None:
+                    kill_process_group(process)
+                    try:
+                        process.wait(timeout=5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        process.kill()
+                        process.wait()
 
 
 def choose_execution_model(
@@ -285,6 +404,89 @@ def _terminalize_failure(store, attempt_id: str, fencing_token: str, reason: str
     return None
 
 
+def _heartbeat_with_retries(store, attempt_id: str, fencing_token: str, *, lease_seconds: int) -> float:
+    """Retry transient state-store errors without ever retrying a fence."""
+
+    for retry in range(MAX_HEARTBEAT_RETRIES + 1):
+        try:
+            return store.heartbeat(
+                attempt_id, fencing_token, lease_seconds=lease_seconds
+            )
+        except FencingError:
+            raise
+        except Exception:
+            if retry >= MAX_HEARTBEAT_RETRIES:
+                raise
+    raise AssertionError("unreachable heartbeat retry state")
+
+
+def _git_capture(worktree: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run a fixed-argument Git inspection without invoking a shell."""
+
+    return subprocess.run(
+        ["git", "-C", worktree, *arguments],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+
+@contextmanager
+def _fresh_review_checkout(worktree: str, expected_sha: str):
+    """Yield a clean detached checkout of the exact reviewed commit.
+
+    The worker checkout is checked before cloning, so a patch or instruction
+    file left behind by the repair worker cannot become review input. The
+    temporary clone is a sibling of that checkout and is removed before the
+    review dispatch returns.
+    """
+
+    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", str(expected_sha or "")):
+        raise StateError("review requires a full immutable commit SHA")
+    source = str(Path(worktree).expanduser().resolve())
+    if not (Path(source) / ".git").is_file():
+        raise StateError("review source must be an isolated linked Git worktree")
+    try:
+        head = _git_capture(source, "rev-parse", "HEAD")
+        clean = _git_capture(source, "status", "--porcelain=v1", "--untracked-files=all")
+        exists = _git_capture(source, "cat-file", "-e", f"{expected_sha}^{{commit}}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise StateError("unable to inspect review worktree") from exc
+    if head.returncode != 0 or head.stdout.strip().lower() != str(expected_sha).lower():
+        raise StateError("review worktree HEAD does not match immutable reviewed SHA")
+    if clean.returncode != 0 or clean.stdout:
+        raise StateError("review worktree must be clean before independent review")
+    if exists.returncode != 0:
+        raise StateError("reviewed commit is not present in the worker repository")
+
+    parent = str(Path(source).parent)
+    try:
+        with tempfile.TemporaryDirectory(prefix=".sandra-review-", dir=parent) as temporary:
+            checkout = str(Path(temporary) / "checkout")
+            cloned = subprocess.run(
+                ["git", "clone", "--no-local", "--quiet", source, checkout],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if cloned.returncode != 0:
+                raise StateError(f"unable to create independent review checkout: {cloned.stderr.strip()}")
+            detached = _git_capture(checkout, "checkout", "--quiet", "--detach", str(expected_sha))
+            cloned_head = _git_capture(checkout, "rev-parse", "HEAD")
+            cloned_clean = _git_capture(
+                checkout, "status", "--porcelain=v1", "--untracked-files=all"
+            )
+            if detached.returncode != 0 or cloned_head.stdout.strip().lower() != str(expected_sha).lower():
+                raise StateError("independent review checkout is not at immutable reviewed SHA")
+            if cloned_clean.returncode != 0 or cloned_clean.stdout:
+                raise StateError("independent review checkout is not clean")
+            yield checkout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise StateError("unable to create independent review checkout") from exc
+
+
 def dispatch_attempt(
     store,
     attempt_id: str,
@@ -307,6 +509,10 @@ def dispatch_attempt(
     if isinstance(executor, SubprocessExecutor):
         executor.worktree = worktree
     store.assert_fenced(attempt_id, fencing_token)
+    if attempt.get("status") != "leased" or attempt.get("session_id"):
+        raise StateError("attempt already has a dispatched worker")
+    if context.get("review") is not None:
+        raise StateError("attempt already has a review and cannot dispatch another worker")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     if heartbeat_interval_seconds <= 0:
@@ -365,7 +571,8 @@ def dispatch_attempt(
     # while the real subprocess is running. The subprocess adapter kills its
     # child at the deadline and returns a terminal timeout result.
     try:
-        store.heartbeat(
+        _heartbeat_with_retries(
+            store,
             attempt_id,
             fencing_token,
             lease_seconds=max(900, timeout_seconds + heartbeat_interval_seconds + 60),
@@ -389,7 +596,8 @@ def dispatch_attempt(
             result = executor.run_with_heartbeat(
                 plan["argv"],
                 timeout_seconds=timeout_seconds,
-                heartbeat=lambda: store.heartbeat(
+                heartbeat=lambda: _heartbeat_with_retries(
+                    store,
                     attempt_id,
                     fencing_token,
                     lease_seconds=max(900, timeout_seconds + heartbeat_interval_seconds + 60),
@@ -465,11 +673,16 @@ def dispatch_attempt(
 
 
 def review_argv(prompt: str) -> list[str]:
-    return codex_argv(ASTRA_REVIEW_MODEL, "medium", prompt, sandbox="read-only")
+    # Reviews run in a fresh detached checkout and ignore repository/user
+    # execpolicy rules so a reviewee-controlled instruction file cannot grant
+    # commands or approvals to the reviewer.
+    argv = codex_argv(ASTRA_REVIEW_MODEL, "medium", prompt, sandbox="read-only")
+    argv.insert(-1, "--ignore-rules")
+    return argv
 
 
 def _review_record(stdout: str) -> tuple[str, str, str] | None:
-    """Parse an explicit model review JSON result, never invent a decision."""
+    """Parse only the final agent message from a Codex JSONL stream."""
 
     session_id_from_stream: str | None = None
     events: list[dict[str, Any]] = []
@@ -484,26 +697,35 @@ def _review_record(stdout: str) -> tuple[str, str, str] | None:
                 candidate_session = event.get("session_id") or event.get("thread_id")
                 if isinstance(candidate_session, str) and candidate_session.strip():
                     session_id_from_stream = session_id_from_stream or candidate_session.strip()
-    for payload in reversed(events):
-        candidate = payload.get("review") if isinstance(payload.get("review"), dict) else payload
-        item = payload.get("item")
-        if isinstance(item, dict) and isinstance(item.get("text"), str):
-            try:
-                candidate = json.loads(item["text"])
-            except (TypeError, ValueError):
-                candidate = payload
-        if not isinstance(candidate, dict) or set(candidate) != {"decision", "evidence"}:
-            continue
-        decision = candidate.get("decision")
-        evidence = candidate.get("evidence")
-        if (
-            decision in {"approved", "rejected", "needs_changes"}
-            and isinstance(evidence, str)
-            and evidence.strip()
-            and isinstance(session_id_from_stream, str)
-            and session_id_from_stream.strip()
-        ):
-            return decision, evidence.strip(), session_id_from_stream.strip()
+    agent_messages = [
+        event["item"]
+        for event in events
+        if event.get("type") == "item.completed"
+        and isinstance(event.get("item"), dict)
+        and event["item"].get("type") == "agent_message"
+        and isinstance(event["item"].get("text"), str)
+    ]
+    if not agent_messages:
+        return None
+    # Tool output, turn metadata, and earlier agent messages are evidence
+    # only. Parse exactly the last completed agent_message as the final model
+    # response; do not fall back to an earlier verdict-shaped event.
+    try:
+        candidate = json.loads(agent_messages[-1]["text"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(candidate, dict) or set(candidate) != {"decision", "evidence"}:
+        return None
+    decision = candidate.get("decision")
+    evidence = candidate.get("evidence")
+    if (
+        decision in {"approved", "rejected", "needs_changes"}
+        and isinstance(evidence, str)
+        and evidence.strip()
+        and isinstance(session_id_from_stream, str)
+        and session_id_from_stream.strip()
+    ):
+        return decision, evidence.strip(), session_id_from_stream.strip()
     return None
 
 
@@ -525,8 +747,6 @@ def dispatch_review(
     worktree = context["attempt"].get("worktree")
     if not worktree:
         raise StateError("review requires a persisted owned worktree")
-    if isinstance(executor, SubprocessExecutor):
-        executor.worktree = worktree
     prompt = build_review_prompt(
         context["issue"] or {}, context["attempt"], context
     )
@@ -545,23 +765,41 @@ def dispatch_review(
     snapshot = store.review_snapshot(attempt_id)
     # A review does not replace the repair model/session on the attempt. Its
     # independent session is persisted in reviews after actual output parses.
-    try:
-        store.heartbeat(
-            attempt_id, fencing_token, lease_seconds=max(900, timeout_seconds + 60)
+    # First inspect and clone the exact clean commit. Checkout failures are
+    # operator-visible state errors and never consume the repair attempt.
+    result: ProcessResult
+    original_worktree = executor.worktree if isinstance(executor, SubprocessExecutor) else None
+    with _fresh_review_checkout(worktree, snapshot["reviewed_head_sha"]) as review_worktree:
+        if isinstance(executor, SubprocessExecutor):
+            executor.worktree = review_worktree
+        review_attempt = dict(context["attempt"])
+        review_attempt["worktree"] = review_worktree
+        review_prompt = build_review_prompt(
+            context["issue"] or {}, review_attempt, context
         )
-        result = executor.run(argv, timeout_seconds=timeout_seconds)
-    except FencingError:
-        plan.update({"executed": True, "fenced_result": "FencingError"})
-        return plan
-    except Exception as exc:
-        plan.update(
-            {
-                "executed": True,
-                "result": {"status": "error", "returncode": -1, "stdout": "", "stderr": str(exc)},
-                "review_error": f"Astra review execution failed: {exc}",
-            }
-        )
-        return plan
+        argv = review_argv(review_prompt)
+        plan["argv"] = argv
+        try:
+            _heartbeat_with_retries(
+                store,
+                attempt_id, fencing_token, lease_seconds=max(900, timeout_seconds + 60)
+            )
+            result = executor.run(argv, timeout_seconds=timeout_seconds)
+        except FencingError:
+            plan.update({"executed": True, "fenced_result": "FencingError"})
+            return plan
+        except Exception as exc:
+            plan.update(
+                {
+                    "executed": True,
+                    "result": {"status": "error", "returncode": -1, "stdout": "", "stderr": str(exc)},
+                    "review_error": f"Astra review execution failed: {exc}",
+                }
+            )
+            return plan
+        finally:
+            if isinstance(executor, SubprocessExecutor):
+                executor.worktree = original_worktree
     plan["executed"] = True
     plan["result"] = {
         "status": result.status,

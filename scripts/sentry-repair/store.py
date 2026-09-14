@@ -774,7 +774,9 @@ class RepairStore:
     ) -> None:
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            self._fenced_attempt_locked(attempt_id, fencing_token)
+            row = self._fenced_attempt_locked(attempt_id, fencing_token)
+            if row["status"] != "leased" or row["session_id"]:
+                raise StateError("attempt has already been dispatched")
             self.db.execute(
                 "UPDATE attempts SET status='running',model=?,effort=?,session_id=?,prompt_hash=? WHERE attempt_id=?",
                 (model, effort, session_id, prompt_hash, attempt_id),
@@ -791,7 +793,9 @@ class RepairStore:
             raise ValueError("session_id cannot be empty")
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            self._fenced_attempt_locked(attempt_id, fencing_token)
+            row = self._fenced_attempt_locked(attempt_id, fencing_token)
+            if row["session_id"] and row["session_id"] != session_id:
+                raise StateError("execution session cannot be overwritten")
             self.db.execute(
                 "UPDATE attempts SET session_id=? WHERE attempt_id=?",
                 (session_id.strip() if session_id else None, attempt_id),

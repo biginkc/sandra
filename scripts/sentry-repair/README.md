@@ -34,10 +34,11 @@ reconciliation evidence. A stale worker's token cannot mutate state after
 reconciliation.
 
 Investigate and repair claims require an existing absolute Git worktree (and
-optionally an exact branch). The controller verifies it with git before
-claiming and launches Codex with that worktree as cwd. The fencing token is
-hashed in SQLite and is controller-only authorization; it is never put in
-worker/reviewer prompts or completion payloads.
+optionally an exact branch). The controller verifies it is a linked worktree,
+not the main checkout, before claiming and launches Codex with that worktree as
+cwd. The fencing token is hashed in SQLite and is controller-only
+authorization; it is never put in worker/reviewer prompts or completion
+payloads.
 
 Attempt history is bounded to two attempts per issue generation. A resolved
 issue does not create another generation merely because its lastSeen changed.
@@ -58,13 +59,20 @@ Claude CLI and is never sent to Codex.
 The review command is also dry-run by default. With --execute, it requires an
 existing repair session plus persisted PR/CI, deployment, functional-probe,
 and Sentry evidence. It invokes an explicit Astra medium Codex command in
-read-only mode, parses a strict raw JSON decision from JSONL, obtains the
-session ID from a real thread event, and only then persists an immutable
-evidence snapshot for the independent review gate. Review execution and
-format failures leave the repair attempt running for retry; they do not burn
-an attempt. Manual record-review writes are disabled. Use `heartbeat` with
+read-only mode from a fresh clean detached checkout at the persisted PR SHA,
+ignores repository execpolicy rules, parses a strict raw JSON decision only
+from a final `agent_message`, obtains the session ID from a real thread event,
+and only then persists an immutable evidence snapshot for the independent
+review gate. Review execution and format failures leave the repair attempt
+running for retry; they do not burn an attempt. Manual record-review writes
+are disabled. Use `heartbeat` with
 the fencing token file/env to extend the lease while CI, deployment, and
 post-deployment observation finish.
+
+Codex workers receive a strict environment allowlist containing only process
+basics and model-auth variables; Sentry, repository, provider, and fencing
+secrets are removed. A repair attempt admits one worker dispatch and one
+execution session; later dispatches are rejected.
 
 Completion requires an exact evidence record tying together the PR head SHA,
 successful CI run and SHA, deployed SHA, passing functional probe, Sentry
@@ -75,7 +83,8 @@ this package intentionally has no Slack sender.
 The schedule helper evaluates America/Chicago local day/night boundaries:
 15-minute slots from 06:00 inclusive through 21:00 exclusive, and 30-minute
 slots overnight. Slot IDs are UTC instants, so repeated DST-fallback wall times
-remain distinct. schedule claims the current/catch-up slot at most once.
+remain distinct. schedule claims only the current slot at most once after
+restart; missed historical slots are not replayed.
 
 Each poll starts from Sentry's current snapshot. The terminal page cursor is
 stored as retrieval evidence only and is never used as the next poll's starting

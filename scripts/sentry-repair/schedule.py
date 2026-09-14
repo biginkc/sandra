@@ -1,4 +1,4 @@
-"""America/Chicago schedule with UTC slot identity and once-only catch-up."""
+"""America/Chicago schedule with UTC slot identity and once-only claims."""
 
 from __future__ import annotations
 
@@ -53,11 +53,14 @@ def iter_slots(start: datetime, end: datetime) -> list[datetime]:
 
 
 def due_slot(value: datetime, store) -> tuple[str, datetime] | None:
-    """Claim the current slot once; callers can then run bounded intake."""
+    """Claim the current slot once; callers can then run bounded intake.
+
+    A caller that resumes after downtime intentionally claims only the current
+    slot. Missed historical slots are not replayed.
+    """
 
     slot = current_slot(value)
     identity = slot_identity(slot)
     if store.claim_scheduler_slot(identity, slot.timestamp(), now=as_utc(value).timestamp()):
         return identity, slot
     return None
-
