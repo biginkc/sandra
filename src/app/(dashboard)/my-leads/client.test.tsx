@@ -535,6 +535,7 @@ describe("current metadata for rapid workflow openings",()=>{
 
 
 it("keeps elapsed call time advancing when opening a workflow dialog", () => {
+  mocks.loadMyLeadCallReferences.mockResolvedValue({ ok: true, options: [] })
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] })
   try {
     const clockKpis = { ...kpis, lastAttemptClockVersion: 1, asOf: "2026-09-14T15:00:00Z", lastAttemptAt: "2026-09-14T14:59:00Z" }
@@ -542,6 +543,7 @@ it("keeps elapsed call time advancing when opening a workflow dialog", () => {
     act(() => vi.advanceTimersByTime(5000))
     expect(screen.getByText("1m 5s")).toBeInTheDocument()
     fireEvent.click(screen.getByRole("button", { name: "Log attempt" }))
+    expect(screen.getByRole("dialog")).toBeInTheDocument()
     expect(screen.getByText("1m 5s")).toBeInTheDocument()
     act(() => vi.advanceTimersByTime(1000))
     expect(screen.getByText("1m 6s")).toBeInTheDocument()
