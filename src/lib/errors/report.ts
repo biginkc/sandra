@@ -1,5 +1,6 @@
 import type { ErrorClass } from "./classes";
 import * as Sentry from "@sentry/nextjs";
+import { safeDiagnosticToken, safeSentryTags } from "./sentry-privacy";
 
 export type ReportContext = {
   errorClass?: ErrorClass;
@@ -20,10 +21,24 @@ export function reportError(err: unknown, context: ReportContext = {}): void {
   };
   console.error("[reportError]", payload);
   if (Sentry.getClient()) {
+    const fields = err !== null && typeof err === "object" ? err as Record<string, unknown> : {};
+    const code = safeDiagnosticToken(fields.code, true)
+      ?? safeDiagnosticToken(fields.name)
+      ?? (err instanceof Error ? safeDiagnosticToken(err.name) : undefined);
+    const httpStatus = typeof fields.status === "number" ? fields.status : fields.statusCode;
+    const safeTags = safeSentryTags({ ...context.tags,
+      ...(context.errorClass ? { errorClass: context.errorClass } : {}),
+      ...(code ? { code } : {}),
+      ...(httpStatus != null ? { httpStatus } : {}),
+    });
+    const normalized = err instanceof Error ? err : new Error(
+      `${context.errorClass ?? "unknown"}:${code ?? "unclassified"}`,
+    );
+    if (!(err instanceof Error)) normalized.name = "StructuredError";
     Sentry.withScope((scope) => {
-      if (context.errorClass) scope.setTag("errorClass", context.errorClass);
-      scope.setTag("surface", "handled");
-      Sentry.captureException(err instanceof Error ? err : new Error(String(err)));
+      scope.setTag("surface", safeTags.surface ?? "handled");
+      for (const [key, value] of Object.entries(safeTags)) scope.setTag(key, value);
+      Sentry.captureException(normalized);
     });
   }
 }

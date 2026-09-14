@@ -1,6 +1,7 @@
 import "server-only";
 import { parseInboxFilter } from "./filter-contract";
 import { InboxHttpError } from "./http-error";
+import { reportInboxFailure } from "./report-failure";
 import type { InboxDataRepository } from "./supabase-sync-repository";
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
@@ -30,6 +31,8 @@ export function createInboxCountsHandler(repository: InboxDataRepository, now = 
       if (session.expiresAt <= now()) throw new InboxHttpError(401);
       return Response.json({ ...counts, updating: null }, { headers });
     } catch (error) {
+      if (!request.signal.aborted && !(error instanceof InboxHttpError))
+        reportInboxFailure("inbox_counts", controller.signal.aborted ? "timeout" : "unexpected_failure");
       controller.abort();
       return Response.json({ error: "Inbox counts unavailable" }, { status: error instanceof InboxHttpError ? error.status : 503, headers });
     } finally { clearTimeout(timer); }

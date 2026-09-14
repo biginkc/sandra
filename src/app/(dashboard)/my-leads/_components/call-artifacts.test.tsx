@@ -1,9 +1,11 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+const report = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/errors/report", () => ({ reportError: report }));
 import { MyLeadCallArtifacts } from "./call-artifacts";
 const base = { recordingStatus: "available", durationSeconds: 51, transcriptStatus: "available", transcript: "Seller transcript", summaryStatus: "failed", summary: null as string | null };
 const response = (data = base) => ({ ok: true, json: async () => data }) as Response;
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); report.mockReset(); });
 describe("independent call artifacts", () => {
   it("shows available audio and transcript despite a failed summary, then refreshes recovered summary", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(response()).mockResolvedValueOnce(response({ ...base, summaryStatus: "available", summary: "Seller wants a callback" }));
@@ -15,6 +17,8 @@ describe("independent call artifacts", () => {
     expect(await screen.findByText("Seller wants a callback")).toBeVisible();
     expect(screen.queryByText(/Summary unavailable/)).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(report).toHaveBeenCalledOnce();
+    expect(report.mock.calls[0][1]).toEqual({ errorClass: "provider", tags: { surface: "client", operation: "call_artifacts", kind: "summary" } });
   });
   it.each([["pending", "Recording processing"], ["failed", "Recording unavailable. Please reach out to an admin."], ["none", "No recording captured"]])("distinguishes %s without a playback request", async (state, label) => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(response({ ...base, recordingStatus: state }));

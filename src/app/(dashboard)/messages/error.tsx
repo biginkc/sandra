@@ -1,17 +1,29 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { AlertCircleIcon, RotateCwIcon } from "lucide-react";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
+import { reportError } from "@/lib/errors/report";
 
 export default function MessagesError({
+  error,
   reset,
 }: {
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  const reportedError = useRef<Error | null>(null);
+  useEffect(() => {
+    if (reportedError.current === error) return;
+    reportedError.current = error;
+    reportError(error, {
+      tags: { operation: "messages_route_render", surface: "messages_page" },
+    });
+  }, [error]);
+
   return (
     <Page>
       <PageHeader

@@ -44,6 +44,39 @@ describe("eSign send reconciliation cron", () => {
     expect(response.status).toBe(401);
   });
 
+  it("observes a stale state missed by the recovery query after an unrelated update", async () => {
+    const rpc = vi.fn(async (name: string) => {
+      if (name === "list_unobserved_esign_sentry_anomalies") {
+        return { data: [{ request_id: "old-unknown", state: "send_unknown" }], error: null };
+      }
+      return { data: null, error: null };
+    });
+    vi.mocked(createAdminClient).mockReturnValue({
+      from: vi.fn((table: string) => table === "sentry_anomaly_ledger"
+        ? {
+            select: vi.fn().mockReturnThis(),
+            eq: vi.fn().mockReturnThis(),
+            order: vi.fn().mockReturnThis(),
+            limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+          }
+        : candidateQuery([])),
+      rpc,
+    } as never);
+
+    const response = await GET(new Request(
+      "https://sandra.test/api/cron/esign-send-reconciliation",
+      { headers: { authorization: "Bearer cron-test-secret" } },
+    ));
+
+    expect(response.status).toBe(200);
+    expect(rpc).toHaveBeenCalledWith("list_unobserved_esign_sentry_anomalies", { p_limit: 10 });
+    expect(rpc).toHaveBeenCalledWith("observe_sentry_anomaly", {
+      p_signal_kind: "esign_send_unknown_stale",
+      p_source_id: "old-unknown",
+      p_is_active: true,
+    });
+  });
+
   it("surfaces lookup exceptions separately from index deferrals", async () => {
     vi.mocked(getEsignCredentials).mockResolvedValue(null);
     vi.mocked(createAdminClient).mockReturnValue({
@@ -69,6 +102,9 @@ describe("eSign send reconciliation cron", () => {
       deferred: 0,
       lookupErrors: 1,
       errors: 0,
+      observed_sending_stale: 1,
+      observed_send_unknown_stale: 0,
+      observation_capped: false,
     });
     expect(reportError).toHaveBeenCalledWith(expect.any(Error), {
       tags: { surface: "cron_esign_send_reconciliation_lookup" },
@@ -186,6 +222,7 @@ describe("eSign send reconciliation cron", () => {
       checked: 1,
       failed: 1,
       unknown: 0,
+      observed_send_unknown_stale: 1,
     });
     expect(rpc).toHaveBeenCalledWith("resolve_esign_send_unknown_not_sent", {
       p_org_id: "org-1",

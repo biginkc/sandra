@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import * as Sentry from "@sentry/nextjs";
 
 import { getEsignCredentials } from "@/lib/esign/credentials";
 import { createDropboxSignProvider } from "@/lib/esign/dropbox-sign";
@@ -11,6 +12,7 @@ import {
   type StuckEsignSend,
 } from "@/lib/esign/stuck-send-reconciliation";
 import { reportError } from "@/lib/errors/report";
+import { cronResponseFailed, runMonitoredCron } from "@/lib/errors/cron-monitor";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types";
 
@@ -18,6 +20,84 @@ export const maxDuration = 60;
 const PROVIDER_LOOKUP_TIMEOUT_MS = 10_000;
 const RECONCILIATION_BUDGET_MS = 45_000;
 const ZERO_RESULT_EVENT_TYPE = "esign_send_provider_zero_result";
+const ESIGN_SENDING_SIGNAL = "esign_sending_stale";
+const ESIGN_UNKNOWN_SIGNAL = "esign_send_unknown_stale";
+const OBSERVATION_LIMIT = 10;
+
+async function observeEsignSignal(
+  admin: ReturnType<typeof createAdminClient>,
+  kind: string,
+  sourceId: string,
+  active: boolean,
+) {
+  const { data, error } = await admin.rpc("observe_sentry_anomaly", {
+    p_signal_kind: kind, p_source_id: sourceId, p_is_active: active,
+  });
+  if (error) throw error;
+  const claim = data && typeof data === "object" && !Array.isArray(data)
+    ? data as { decision?: unknown; claim_token?: unknown } : null;
+  if (!claim || typeof claim.claim_token !== "string") return;
+  let delivered = false;
+  try {
+    if (Sentry.getClient()) {
+      if (claim.decision === "recovered") {
+        reportError(new Error(`Sandra operational state recovered: ${kind}`), {
+          tags: { surface: "cron_esign_state_observer", kind: "state", operation: kind, outcome: "recovered" },
+        });
+      } else {
+        reportError(new Error(`Sandra operational state: ${kind}`), {
+          tags: { surface: "cron_esign_state_observer", kind: "state", operation: kind, outcome: "active" },
+        });
+      }
+      delivered = await Sentry.flush(2_000);
+    }
+  } finally {
+    const { error: ackError } = await admin.rpc("ack_sentry_anomaly", {
+      p_signal_kind: kind, p_source_id: sourceId,
+      p_claim_token: claim.claim_token, p_delivered: delivered,
+    });
+    if (ackError) throw ackError;
+  }
+}
+
+async function observeEsignStates(
+  admin: ReturnType<typeof createAdminClient>,
+  observerDeadline: number,
+) {
+  // Scan active claims first; a capped recovery list cannot prove absence.
+  for (const [kind, state, age] of [
+    [ESIGN_SENDING_SIGNAL, "sending", ESIGN_STUCK_SEND_MIN_AGE_MS],
+    [ESIGN_UNKNOWN_SIGNAL, "send_unknown", ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS],
+  ] as const) {
+    const { data: rows, error } = await admin.from("sentry_anomaly_ledger")
+      .select("source_id").eq("signal_kind", kind).eq("is_active", true)
+      .order("last_observed_at", { ascending: true }).limit(OBSERVATION_LIMIT);
+    if (error) throw error;
+    for (const row of rows ?? []) {
+      if (Date.now() >= observerDeadline) return;
+      const { data: request, error: requestError } = await admin.from("esign_requests")
+        .select("delivery_state,delivery_state_entered_at,sign_request_id")
+        .eq("id", row.source_id).maybeSingle();
+      if (requestError) throw requestError;
+      const active = !!request && request.delivery_state === state
+        && !request.sign_request_id
+        && Date.parse(request.delivery_state_entered_at) < Date.now() - age;
+      // Active observations rotate the last_observed_at cursor, preventing
+      // the first page from starving later incidents or recoveries.
+      await observeEsignSignal(admin, kind, row.source_id, active);
+    }
+  }
+  if (Date.now() >= observerDeadline) return;
+  const { data: unobserved, error: unobservedError } = await admin.rpc(
+    "list_unobserved_esign_sentry_anomalies", { p_limit: OBSERVATION_LIMIT },
+  );
+  if (unobservedError) throw unobservedError;
+  for (const row of unobserved ?? []) {
+    if (Date.now() >= observerDeadline) return;
+    const kind = row.state === "sending" ? ESIGN_SENDING_SIGNAL : ESIGN_UNKNOWN_SIGNAL;
+    await observeEsignSignal(admin, kind, row.request_id, true);
+  }
+}
 
 async function handle(request: Request) {
   const secret = process.env.CRON_SECRET;
@@ -30,9 +110,20 @@ async function handle(request: Request) {
   if (request.headers.get("authorization") !== `Bearer ${secret}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  return runMonitoredCron(
+    "sandra-esign-send-reconciliation",
+    { schedule: { type: "crontab", value: "3-59/5 * * * *" }, checkinMargin: 2, maxRuntime: 1 },
+    async () => {
   try {
     const deadline = Date.now() + RECONCILIATION_BUDGET_MS;
     const admin = createAdminClient();
+    // Observation uses the same capped, read-only candidate query as recovery.
+    // Keep these counts separate from provider outcomes: a lookup can fail or
+    // time out while the ambiguous business state remains unresolved.
+    let observedSending = 0;
+    let observedUnknown = 0;
+    let observationCapped = false;
+    const observedCandidates: { id: string; state: string; updatedAt: string }[] = [];
     const summary = await reconcileStuckEsignSends({
       listCandidates: async ({ staleBefore, limit }) => {
         const unknownStaleBefore = new Date(
@@ -54,6 +145,12 @@ async function handle(request: Request) {
           .order("updated_at", { ascending: true })
           .limit(limit);
         if (error) throw error;
+        observedSending = (data ?? []).filter((row) => row.delivery_state === "sending").length;
+        observedUnknown = (data ?? []).filter((row) => row.delivery_state === "send_unknown").length;
+        observationCapped = (data ?? []).length >= limit;
+        for (const row of data ?? []) observedCandidates.push({
+          id: row.id, state: row.delivery_state, updatedAt: row.updated_at,
+        });
         return (data ?? []).flatMap((row) => {
           if (
             row.delivery_state !== "sending" &&
@@ -202,9 +299,37 @@ async function handle(request: Request) {
       }),
       shouldContinue: () => Date.now() < deadline,
     });
+    // Observe after reconciliation so successfully repaired rows do not alert.
+    try {
+      // Reserve five seconds for the response and platform teardown. A
+      // timeout leaves unacked leases retryable at the next cron invocation.
+      const observerDeadline = deadline + 10_000;
+      for (const candidate of observedCandidates) {
+        if (Date.now() >= observerDeadline) break;
+        const kind = candidate.state === "sending" ? ESIGN_SENDING_SIGNAL : ESIGN_UNKNOWN_SIGNAL;
+        const age = candidate.state === "sending"
+          ? ESIGN_STUCK_SEND_MIN_AGE_MS : ESIGN_UNKNOWN_SEND_RESOLUTION_MIN_AGE_MS;
+        const { data: current, error } = await admin.from("esign_requests")
+          .select("delivery_state,delivery_state_entered_at,sign_request_id")
+          .eq("id", candidate.id).maybeSingle();
+        if (error) throw error;
+        if (current?.delivery_state === candidate.state && !current.sign_request_id
+          && Date.parse(current.delivery_state_entered_at) < Date.now() - age) {
+          await observeEsignSignal(admin, kind, candidate.id, true);
+        }
+      }
+      if (Date.now() < observerDeadline) {
+        await observeEsignStates(admin, observerDeadline);
+      }
+    } catch (observerError) {
+      reportError(observerError, { tags: { surface: "cron_esign_state_observer_failure" } });
+    }
     return NextResponse.json({
       ok: summary.lookupErrors === 0 && summary.errors === 0,
       ...summary,
+      observed_sending_stale: observedSending,
+      observed_send_unknown_stale: observedUnknown,
+      observation_capped: observationCapped,
     });
   } catch (error) {
     reportError(error, { tags: { surface: "cron_esign_send_reconciliation" } });
@@ -213,6 +338,9 @@ async function handle(request: Request) {
       { status: 500 },
     );
   }
+    },
+    cronResponseFailed,
+  );
 }
 
 async function withLookupTimeout<T>(
