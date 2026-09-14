@@ -51,6 +51,12 @@ then confirms both directions in `/messages` after reload. A signed webhook is
 an integration check, **not proof that an owned handset received or replied**;
 receiver-side evidence is still required before claiming that full journey.
 
+`canary-browser-freshness.yml` checks for a completed successful scheduled
+run of each browser workflow on a specified UTC date. It stays dispatch-only
+until both browser schedules are live. Its failing GitHub Action is a visible
+missing-run signal, but an independent external monitor is still needed to
+detect a GitHub-wide schedule outage that also prevents this check from running.
+
 Canary data must be tagged with `PROD-CANARY <run_id>`, and cleanup must only
 target data created by the active canary run.
 
