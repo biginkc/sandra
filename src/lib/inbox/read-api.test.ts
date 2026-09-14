@@ -75,6 +75,9 @@ describe("canonical Inbox read RPC repository", () => {
   });
   it.each([
     ["42501", "INBOX_SESSION_REVOKED", 401], ["42501", "INBOX_READ_NOT_FOUND", 404],
+    ["42501", "INBOX_ACCESS_DENIED", 404],
+    ["42501", "INBOX_ORG_DENIED", 403], ["42501", "INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", 403],
+    ["42501", "INBOX_ACCESS_BASELINE_MISSING", 503],
     ["55000", "INBOX_READ_EXPIRED", 410], ["55000", "INBOX_READ_BATCH_CONFLICT", 409],
     ["42501", "permission denied for function", 503], ["PGRST202", "Missing schema", 503],
     ["PGRST301", "JWT invalid", 401], ["PGRST303", "JWT expired", 401],

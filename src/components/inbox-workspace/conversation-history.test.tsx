@@ -8,7 +8,7 @@ const readBoundary = "33333333-3333-3333-3333-333333333333";
 const frameQueue = new Map<number, FrameRequestCallback>();
 let frameId = 0;
 function props(overrides: Partial<ConversationHistoryProps> = {}): ConversationHistoryProps {
-  return { orgId, conversationId, requestGeneration: 1, visible: true, onRefresh: vi.fn(), onAccessLost: vi.fn(), snapshot: { requestGeneration: 1, data: {
+  return { orgId, conversationId, requestGeneration: 1, visible: true, onRefresh: vi.fn(), onAccessLost: vi.fn(), onUnavailable: vi.fn(), snapshot: { requestGeneration: 1, data: {
     requesterId: orgId, orgId, conversationId, headRevision: "1", readBoundary, boundaryExpiresAt: "2030-01-01T00:00:00Z", nextCursor: null, captureGeneration: orgId,
     history: [{ id: orgId, createdAtRaw: "2026-09-13 12:00:00.123456+00", body: "Visible conversation", direction: "inbound", readAtRaw: null, inboundRevision: "1" }],
   } }, ...overrides };
@@ -85,6 +85,24 @@ describe("render-bound conversation read acknowledgment", () => {
     expect(screen.queryByText("Visible conversation")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
+  it("signals a benign item-scoped 404 as onUnavailable, not a workspace-wide access loss", async () => {
+    const value = props({ fetch: vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 404 })) });
+    render(<ConversationHistory {...value} />);
+    await paint();
+    await waitFor(() => expect(value.onUnavailable).toHaveBeenCalledExactlyOnceWith(conversationId));
+    expect(value.onAccessLost).not.toHaveBeenCalled();
+    expect(screen.getByText("This conversation is no longer available.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+  it("stops acknowledging this boundary after a 404 during a batch, without latching permission_lost", async () => {
+    const transport = vi.fn<typeof fetch>().mockResolvedValueOnce(receipt(0, false)).mockResolvedValueOnce(new Response(null, { status: 404 }));
+    const value = props({ fetch: transport });
+    render(<ConversationHistory {...value} />);
+    await paint();
+    await waitFor(() => expect(value.onUnavailable).toHaveBeenCalledExactlyOnceWith(conversationId));
+    expect(value.onAccessLost).not.toHaveBeenCalled();
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
   it("does not revive a revoked boundary when the owner's callback changes", async () => {
     const transport = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 403 }));
     const value = props({ fetch: transport });
@@ -149,6 +167,15 @@ describe("render-bound conversation read acknowledgment", () => {
     await act(async () => { finish(receipt()); });
     expect(transport.mock.calls[0][1]!.signal!.aborted).toBe(true);
     expect(screen.queryByText("Visible conversation")).not.toBeInTheDocument();
+  });
+
+  it("signals onUnavailable, not onAccessLost, on a benign 404 while loading an older page", async () => {
+    const value = props(); value.snapshot!.data.nextCursor = conversationId;
+    const transport = vi.fn<typeof fetch>().mockResolvedValueOnce(receipt()).mockResolvedValueOnce(new Response(null, { status: 404 }));
+    render(<ConversationHistory {...value} fetch={transport} />); await paint();
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    await waitFor(() => expect(value.onUnavailable).toHaveBeenCalledExactlyOnceWith(conversationId));
+    expect(value.onAccessLost).not.toHaveBeenCalled();
   });
 
 });

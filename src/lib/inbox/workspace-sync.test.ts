@@ -8,12 +8,18 @@ const summary = { org_id: org, target_kind: "known_conversation" as const, targe
 const cleaners: (()=>void)[] = [];
 afterEach(()=> { cleaners.splice(0).forEach(fn=>fn()); vi.useRealTimers(); });
 function setup(fetcher: typeof fetch) {
-  const boundary = vi.fn(); const change = vi.fn();
-  const sync = createWorkspaceSync({origin:"https://sandra.example",fetch:fetcher,onAccessBoundary:boundary,onChange:change});
-  cleaners.push(sync.close); return {sync,boundary,change};
+  const boundary = vi.fn(); const change = vi.fn(); const invalidated = vi.fn();
+  const sync = createWorkspaceSync({origin:"https://sandra.example",fetch:fetcher,onAccessBoundary:boundary,onChange:change,onInvalidated:invalidated});
+  cleaners.push(sync.close); return {sync,boundary,change,invalidated};
 }
 const tick = () => new Promise(resolve=>setTimeout(resolve,20));
 describe("bounded workspace synchronization lifecycle",()=> {
+  it("rejects a DELETE outside the authorized partition rather than invalidating an arbitrary identity", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([{ key: "foreign", headers: { operation: "delete" }, value: { ...summary, target_id: "99999999-9999-4999-8999-999999999999" } }]), { headers: { "content-type": "application/json", "electric-handle": "scope", "electric-offset": "0_0", "electric-schema": "{}" } }));
+    const { sync, invalidated, boundary } = setup(fetcher); sync.replace(scope);
+    await vi.waitFor(() => expect(sync.getSnapshot().state).toBe("permission_lost"));
+    expect(invalidated).not.toHaveBeenCalled(); expect(boundary).toHaveBeenCalledTimes(1);
+  });
   it("hydrates five bounded partitions without claiming full readiness early and revokes all", async () => {
     const rows = Array.from({ length: 500 }, (_, i) => ({ ...summary, target_id: `00000000-0000-4000-8000-${i.toString(16).padStart(12,"0")}` }));
     const calls = new Map<number, number>(), signals: AbortSignal[] = [];
@@ -102,16 +108,18 @@ describe("bounded workspace synchronization lifecycle",()=> {
       if(++requests===1) return Promise.resolve(response([{key:"row-one",headers:{operation:"insert"},value:summary}],"0_0"));
       return new Promise<Response>(resolve=>{next=resolve;});
     });
-    const {sync}=setup(fetcher); sync.replace(scope);
+    const {sync,invalidated}=setup(fetcher); sync.replace(scope);
     await vi.waitFor(()=>expect(sync.getSnapshot().state).toBe("live"));
     await vi.waitFor(()=>expect(next).toBeDefined());
     const update=next!; next=undefined;
     update(response([{key:"row-one",headers:{operation:"update"},value:{org_id:org,target_id:target,target_kind:"known_conversation",preview:"Updated"}}],"1_0"));
     await vi.waitFor(()=>expect(sync.getSnapshot().rows[0].preview).toBe("Updated"));
     expect(sync.getSnapshot().rows[0].name).toBe("Name");
+    expect(invalidated).not.toHaveBeenCalled();
     await vi.waitFor(()=>expect(next).toBeDefined());
     next!(response([{key:"row-one",headers:{operation:"delete"},value:{org_id:org,target_id:target,target_kind:"known_conversation"}}],"2_0"));
     await vi.waitFor(()=>expect(sync.getSnapshot().rows).toEqual([]));
+    expect(invalidated).toHaveBeenCalledExactlyOnceWith(scope.orderedIds);
   });
   it("hydrates through actual Electric and TanStack collection then clears on reset",async()=> {
     let requests=0;

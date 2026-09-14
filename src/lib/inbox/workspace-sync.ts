@@ -34,6 +34,8 @@ export interface WorkspaceSyncOptions {
   origin: string;
   fetch?: typeof fetch;
   onChange: (snapshot: SyncSnapshot) => void;
+  /** Authoritative DELETE messages only; never infer deletion from paging/filter absence. */
+  onInvalidated?: (ids: readonly WorkspaceId[]) => void;
   /** Synchronously clear detail/query caches and selection on an auth boundary. */
   onAccessBoundary: () => void;
 }
@@ -136,12 +138,15 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
         const messages: unknown = await response.clone().json();
         if (!authorizedNow()) throw new DOMException("Obsolete workset", "AbortError");
         if (!Array.isArray(messages) || messages.length > 2000) { fail("resync_required"); throw Error("Unbounded sync batch"); }
+        const removed: WorkspaceId[] = [];
         for (const message of messages) {
           if (message?.headers?.control === "must-refetch") { fail("resync_required"); throw Error("Snapshot reset required"); }
           // Electric parses PostgreSQL wire strings (including boolean) using its schema.
           // Validate identity here; validate complete typed rows only after parsing/merge.
           if (message?.headers?.operation === "insert") key(message.value);
+          if (message?.headers?.operation === "delete") removed.push(key(message.value));
         }
+        if (removed.length && authorizedNow()) options.onInvalidated?.([...new Set(removed)]);
       }
       return response;
     };

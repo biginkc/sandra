@@ -10,6 +10,11 @@ function fixture() {
   return { rpc, signals, repo: createSupabaseInboxRepository({ rpc } as unknown as InboxRpcClient), signal: new AbortController().signal };
 }
 describe("cookie client durable Inbox RPC repository", () => {
+  it("bootstraps canonical identity in one authenticated RPC without a legacy membership fallback", async () => {
+    const f = fixture();
+    await expect(f.repo.getContext(f.signal)).resolves.toEqual({ userId: user, sessionId: id, orgId: org, accessEpoch: "2", expiresAt: Date.parse(authority.expires_at) });
+    expect(f.rpc.mock.calls).toEqual([["inbox_authorize_sync", { org_id: null }]]);
+  });
   it("uses confirmed RPC arguments without a client actor or privileged fallback", async () => {
     const f = fixture();
     const created = await f.repo.createScope(session, { orgId: org, filter: { view: "active" }, cursor: null, limit: 100, replacesScopeId: id }, f.signal);
