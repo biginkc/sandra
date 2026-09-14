@@ -70,6 +70,15 @@ describe("DialpadVoiceClient", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it("reads complete callable personas for the selected user without caller-ID filtering", async () => {
+    const payload = { items: [{ id: userId, type: "user", phone_numbers: [input.outboundCallerId] }, { id: "42", type: "office", phone_numbers: ["+12025550102"] }] };
+    const { client, fetcher } = setup(async () => json(payload));
+    await expect(client.listUserPersonas(userId)).resolves.toEqual(payload);
+    expect(new URL(String(fetcher.mock.calls[0][0])).pathname).toBe(`/api/v2/users/${userId}/personas`);
+    expect(() => client.listUserPersonas("123/../456")).toThrow(DialpadVoiceError);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects unsafe numeric identifiers, missing device/correlation and invalid caller numbers before dispatch", () => {
     const { client, fetcher } = setup();
     for (const patch of [{ userId: "9007199254740993" }, { deviceId: "" }, { customData: "" }, { outboundCallerId: "blocked" }]) {

@@ -59,6 +59,11 @@ export class DialpadVoiceClient {
     return this.request("GET", `/users/${id(userId)}`);
   }
 
+  /** Callable identities, including shared numbers omitted by caller_id. */
+  listUserPersonas(userId: string) {
+    return this.request("GET", `/users/${id(userId)}/personas`);
+  }
+
   getCall(callId: string) {
     return this.request("GET", `/call/${id(callId)}`);
   }
