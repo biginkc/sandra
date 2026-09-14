@@ -32,12 +32,17 @@ it("recovery admits one exact key query and assignees admit no overrides", async
 
 it("accepts browser Host authority through Next internal hostname while retaining cross-site and query checks", async () => {
  const headers = { "content-type": "application/json", host: "127.0.0.1:52582", origin: "http://127.0.0.1:52582", "sec-fetch-site": "same-origin" };
+ // Without Sec-Fetch-Site, same-origin proof falls back to Origin/Host agreement — the
+ // browser never sends both a forged Host and a truthful Sec-Fetch-Site: same-origin, so
+ // these two forged-Host cases must omit it to exercise that fallback path.
+ const { "sec-fetch-site": _omitSecFetchSite, ...headersNoSecFetchSite } = headers;
  const make = (path = "", override = {}) => new Request(`http://localhost:52582/api/inbox/actions/prepare${path}`, { method: "POST", headers: { ...headers, ...override }, body: "{}" });
+ const makeFallback = (path = "", override = {}) => new Request(`http://localhost:52582/api/inbox/actions/prepare${path}`, { method: "POST", headers: { ...headersNoSecFetchSite, ...override }, body: "{}" });
  expect((await prepare(make())).status).toBe(200);
  expect(mocks.prepare).toHaveBeenCalledTimes(1);
  expect((await prepare(make("", { "sec-fetch-site": "cross-site" }))).status).toBe(403);
  expect((await prepare(make("?organization=other"))).status).toBe(403);
- expect((await prepare(make("", { host: "foreign.invalid" }))).status).toBe(403);
- expect((await prepare(make("", { host: "localhost:52582", "x-forwarded-host": "127.0.0.1:52582" }))).status).toBe(403);
+ expect((await prepare(makeFallback("", { host: "foreign.invalid" }))).status).toBe(403);
+ expect((await prepare(makeFallback("", { host: "localhost:52582", "x-forwarded-host": "127.0.0.1:52582" }))).status).toBe(403);
  expect(mocks.prepare).toHaveBeenCalledTimes(1);
 });
