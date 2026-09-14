@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
-import { scrubSentryEvent } from "./src/lib/errors/sentry-privacy";
+import { scrubSentryEvent } from "./lib/errors/sentry-privacy";
 
 if (process.env.NEXT_PUBLIC_SENTRY_DSN) {
   Sentry.init({

@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
-import { ensureSentryServerClient } from "./src/lib/errors/sentry-server-client";
+import { ensureSentryServerClient } from "./lib/errors/sentry-server-client";
 
 export async function register() {
   if (process.env.VERCEL_ENV === "preview") console.info("[sentry-instrumentation] register", process.env.NEXT_RUNTIME);
