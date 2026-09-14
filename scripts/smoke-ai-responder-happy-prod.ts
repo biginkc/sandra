@@ -177,12 +177,16 @@ async function main(): Promise<void> {
     if (!aiReply.from_address || !aiReply.to_address) {
       throw new Error("AI outbound row missing from/to addresses.");
     }
+    if (aiReply.from_address !== CRM_NUMBER || aiReply.to_address !== RECEIVER_PHONE) {
+      throw new Error("AI outbound route does not match the owned canary sender/receiver.");
+    }
 
     const receiverLogRow = await pollUntil<{ id: string }>(
       async () => {
         const { data } = await supabase
           .from("test_sms_log")
           .select("id, received_at")
+          .eq("provider", "twilio")
           .eq("from_number", aiReply.from_address!)
           .eq("to_number", aiReply.to_address!)
           .eq("signature_verified", true)

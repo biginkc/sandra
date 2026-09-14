@@ -154,6 +154,7 @@ async function main(): Promise<void> {
         const { data: rows } = await supabase
           .from("test_sms_log")
           .select("id")
+          .eq("provider", "twilio")
           .eq("from_number", outbound.from_address)
           .eq("to_number", outbound.to_address)
           .eq("signature_verified", true)
