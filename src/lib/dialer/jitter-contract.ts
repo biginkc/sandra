@@ -1,6 +1,9 @@
 import { createHmac } from "node:crypto";
 
 const JITTER_REQUEST_TIMEOUT_MS = 15_000;
+// Exact cancel cleanup on Jitter may spend up to 20 seconds stopping all
+// run-owned provider legs before it returns the durable teardown receipt.
+const JITTER_CANCEL_REQUEST_TIMEOUT_MS = 25_000;
 const JITTER_START_ATTEMPTS = 2;
 
 export const JITTER_SOFTPHONE_PATHS = {
@@ -178,6 +181,7 @@ export async function requestJitterSoftphone<T>(args: {
   body?: JsonObject;
   idempotencyKey?: string;
   ambiguousOnNetworkError?: boolean;
+  timeoutMs?: number;
   validate: ResponseValidator<T>;
   fetchImpl?: typeof fetch;
 }): Promise<JitterProxyResult<T>> {
@@ -194,7 +198,7 @@ export async function requestJitterSoftphone<T>(args: {
         method,
         cache: "no-store",
         redirect: "error",
-        signal: AbortSignal.timeout(JITTER_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(args.timeoutMs ?? JITTER_REQUEST_TIMEOUT_MS),
         headers: {
           authorization: `Bearer ${config.serviceToken}`,
           "X-Jitter-Signature": signJitterSoftphoneBody(
@@ -340,6 +344,7 @@ export function requestJitterCancel(
   return requestJitterSoftphone({
     path: JITTER_SOFTPHONE_PATHS.cancel,
     body: { call_id: callId, reason },
+    timeoutMs: JITTER_CANCEL_REQUEST_TIMEOUT_MS,
     validate: isCancelResponse,
     fetchImpl,
   });
@@ -353,6 +358,7 @@ export function requestJitterCancelByIdempotencyKey(
   return requestJitterSoftphone({
     path: JITTER_SOFTPHONE_PATHS.cancel,
     body: { idempotency_key: idempotencyKey, reason },
+    timeoutMs: JITTER_CANCEL_REQUEST_TIMEOUT_MS,
     validate: isCancelResponse,
     fetchImpl,
   });

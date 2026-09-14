@@ -810,6 +810,8 @@ describe("SoftphoneProvider transport gate", () => {
         startedAt: "2026-08-21T15:00:00.000Z",
       },
     });
+    let resolveHangup!: (result: { durationSeconds: number; outcome: "failed" }) => void;
+    let resolveRetry!: (result: { durationSeconds: number; outcome: "failed" }) => void;
     createTransport.mockImplementation(() => {
       let listener: ((state: "connecting" | "live" | "ended" | "teardown_unconfirmed" | "teardown_confirmed") => void) | null = null;
       let hangupAttempts = 0;
@@ -822,10 +824,18 @@ describe("SoftphoneProvider transport gate", () => {
         }),
         mute: vi.fn(),
         hold: vi.fn(async () => true),
-        hangup: vi.fn(async () => {
+        hangup: vi.fn(() => {
           hangupAttempts += 1;
-          listener?.(hangupAttempts === 1 ? "teardown_unconfirmed" : "teardown_confirmed");
-          return { durationSeconds: 2, outcome: "failed" as const };
+          if (hangupAttempts === 1) {
+            listener?.("teardown_unconfirmed");
+            return new Promise((resolve) => { resolveHangup = resolve; });
+          }
+          return new Promise((resolve) => {
+            resolveRetry = (result) => {
+              listener?.("teardown_confirmed");
+              resolve(result);
+            };
+          });
         }),
       };
     });
@@ -852,12 +862,19 @@ describe("SoftphoneProvider transport gate", () => {
     await user.click(screen.getByTestId("call-lead-button"));
     await waitFor(() => expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"));
     await user.click(screen.getByTestId("call-hangup"));
+    expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Ending call…");
+    expect(screen.getByTestId("call-hangup")).toBeDisabled();
+    expect(createTransport.mock.results[0].value.hangup).toHaveBeenCalledTimes(1);
+    act(() => { resolveHangup({ durationSeconds: 2, outcome: "failed" }); });
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Jitter could not confirm that the call ended. Do not start another call yet",
     );
     await user.type(screen.getByTestId("dispo-notes"), "Left voicemail");
     expect(screen.getByTestId("dispo-not-interested")).toBeDisabled();
     await user.click(screen.getByTestId("retry-jitter-teardown"));
+    expect(screen.getByTestId("retry-jitter-teardown")).toBeDisabled();
+    expect(screen.getByTestId("retry-jitter-teardown")).toHaveTextContent("Retrying…");
+    act(() => { resolveRetry({ durationSeconds: 2, outcome: "failed" }); });
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
     expect(screen.getByTestId("dispo-not-interested")).toBeEnabled();
   });
@@ -1276,6 +1293,48 @@ describe("SoftphoneProvider coach UI flag", () => {
     await user.click(screen.getByTestId("call-lead-button"));
     await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
     expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument();
+  });
+
+  it("shows pending feedback and ignores duplicate hangup clicks in the full-screen coach view", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    let resolveHangup!: (result: { durationSeconds: number; outcome: "connected_human" }) => void;
+    const hangup = vi.fn(() => new Promise<{ durationSeconds: number; outcome: "connected_human" }>((resolve) => {
+      resolveHangup = resolve;
+    }));
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "connecting" | "live" | "ended") => void) | null = null;
+      return {
+        onStateChange: vi.fn((cb) => { listener = cb; }),
+        start: vi.fn(async () => {
+          listener?.("connecting");
+          listener?.("live");
+          return { id: "deferred-coach-session" };
+        }),
+        mute: vi.fn(),
+        hold: vi.fn(async () => true),
+        sendDigit: vi.fn(async () => true),
+        hangup,
+      };
+    });
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+
+    await user.click(screen.getByTestId("coach-hangup"));
+    expect(screen.getByTestId("coach-hangup")).toBeDisabled();
+    expect(screen.getByTestId("coach-hangup")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByTestId("coach-hangup")).toHaveTextContent("Ending call…");
+    await user.click(screen.getByTestId("coach-hangup"));
+    expect(hangup).toHaveBeenCalledTimes(1);
+
+    act(() => resolveHangup({ durationSeconds: 2, outcome: "connected_human" }));
+    await waitFor(() => expect(screen.getByTestId("dispo-notes")).toBeInTheDocument());
   });
 
   it("keeps the prepared homeowner and address in the script when live context loading fails", async () => {
