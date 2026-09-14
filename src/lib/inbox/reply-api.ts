@@ -129,11 +129,13 @@ function item(value: unknown, expectedBody: Map<string, string>, replayed: boole
     const recipient = record(row.recipient);
     const renderedBody = recipient.renderedBody;
     need(typeof renderedBody === "string" && renderedBody.trim().length > 0 && renderedBody.length <= 1600);
-    // Fresh-render body equality (B2) applies only when this is NOT a replay
-    // of an already-frozen preparation. On replay we trust the immutable row
-    // structurally (every other check in this function still applies) but
-    // never compare it against a fresh render, which is discarded before it
-    // ever reaches here — see prepare() below.
+    // Frozen items are operator-authored intent at the same trust level as
+    // the template: an authenticated caller can freeze a literal body via
+    // the public RPC directly, so this equality is a coordinator self-check
+    // against a broken/altered freeze response on a fresh freeze — NOT proof
+    // of server rendering. Send safety never depends on body provenance;
+    // routes/eligibility/dependencies are SQL-canonical and rechecked at
+    // accept and claim (E4/D1/D5).
     if (!replayed) {
         const expected = expectedBody.get(target.id);
         need(expected !== undefined && expected === renderedBody);
