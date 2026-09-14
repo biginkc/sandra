@@ -62,7 +62,7 @@
     }
   ],
   "compiled_sha256": "5fd578c67b401fcaa45d6ca6f5fba3e7022b6ad76b60ca3b3c8c6987daf2b090",
-  "runner_sha256": "6c68c01f69461b922289597f0586ebe7edffb6f4be68d40fb4c6634afe79595e",
+  "runner_sha256": "88159f03bb4d43628d5414958f9bca80cba8c032029c415e81a2ff75c4d0ae88",
   "limits": [
     "Owned full-schema fixture only; no production installation",
     "No worker started by this installer"

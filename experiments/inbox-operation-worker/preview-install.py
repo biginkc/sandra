@@ -7,7 +7,7 @@ P=Path(__file__).resolve().parent;E=P.parent
 sys.path.insert(0,str(E/'inbox-projection/fixture'))
 from guards import validate_container,validate_cron
 from transaction_envelope import normalize
-if sys.argv[1:] not in (['--compile'],['--install-owned']):raise SystemExit('Use --compile or --install-owned')
+if sys.argv[1:] not in (['--compile'],['--install-owned'],['--reload-owned-schema']):raise SystemExit('Use --compile, --install-owned or --reload-owned-schema')
 D=['docker','--host','unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock'];N='sandra-inbox-projection-t2-db';DB='sandra_inbox_install_20260913';MARKER='sandra-inbox-production-candidate-owned-synthetic'
 paths=['inbox-operation-acceptance/setup.sql','inbox-operation-domain/setup.sql','inbox-operation-domain/restrictive-scope.sql','inbox-operation-domain/restrictive-effect.sql','inbox-operation-domain/restrictive-apply.sql']+[f'inbox-operation-preparation/{name}.sql' for name in ['setup','worker','accept','public-api','review','worker-role']]
 parts=[];manifest=[];functions={};triggers=[]
@@ -39,6 +39,15 @@ validate_cron(sql('SHOW cron.launch_active_jobs','postgres'))
 need(sql('SELECT marker FROM inbox_t2_fixture.identity','postgres')=='sandra-inbox-projection-t2-owned-synthetic','Container marker mismatch')
 need(sql('SELECT marker FROM install_fixture.identity')==MARKER,'Fresh full-schema fixture marker mismatch')
 need(sql("SELECT stage='done' FROM inbox_control.baseline_progress WHERE singleton")=='t','Canonical capture baseline incomplete')
+if sys.argv[1:] == ['--reload-owned-schema']:
+ need(hashlib.sha256(compiled.encode()).hexdigest()==json.loads((P/'fixture-companion-manifest.json').read_text())['compiled_sha256'],'Reload source differs from proven companion')
+ for fn,source in functions.items():
+  query="SELECT prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname||'.'||p.proname="+lit(fn)
+  need(sql(query).strip()==source.strip(),'Reload function body mismatch '+fn)
+ sql("NOTIFY pgrst,'reload schema'")
+ (P/'preview-cache-reload-evidence.json').write_text(json.dumps({'database':DB,'marker':MARKER,'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'compiled_sha256':hashlib.sha256(compiled.encode()).hexdigest(),'verified_functions':len(functions),'schema_reload_notified':True,'limits':['Notification issued; actual authenticated HTTP cache visibility verified separately by browser harness']},indent=2)+'\n')
+ print('Owned preview schema cache reload notified after exact function verification')
+ raise SystemExit(0)
 need(sql("SELECT to_regnamespace('inbox_action_api') IS NULL AND to_regnamespace('inbox_operations') IS NULL AND to_regnamespace('inbox_operation_domain') IS NULL")=='t','Companion namespaces already exist; no reset/reinstall')
 # Verify actual authoritative prerequisite bodies, not merely table presence.
 checks=[]
@@ -71,6 +80,7 @@ for table,fn in triggers:
  need(sql(f"SELECT count(*) FROM pg_trigger WHERE tgrelid='{table}'::regclass AND tgfoid='{fn}()'::regprocedure AND tgtype=29 AND tgenabled IN('O','A') AND tgqual IS NULL AND NOT tgisinternal")=='1','Unconditional capture missing '+fn)
 need(sql('SELECT inbox_action_api.worker_readiness()')=='t','Real baseline readiness failed')
 need(sql('SELECT count(*) FROM inbox_operations.operations')=='0','New preview companion unexpectedly has accepted jobs')
-receipt.update({'installed':True,'verified_functions':len(functions),'verified_triggers':len(triggers),'prerequisite_functions':checks,'empty_accepted_operations':True})
+sql("NOTIFY pgrst,'reload schema'")
+receipt.update({'schema_reload_notified':True,'installed':True,'verified_functions':len(functions),'verified_triggers':len(triggers),'prerequisite_functions':checks,'empty_accepted_operations':True})
 (P/'preview-install-evidence.json').write_text(json.dumps(receipt,indent=2)+'\n')
 print('Existing preview companion installed; exact proven source, gate, Auth/canonical counts, captures and worker authority checked')
