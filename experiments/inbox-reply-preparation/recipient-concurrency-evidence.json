@@ -1,0 +1,13 @@
+{
+  "source_sha256": "ff7f64387872fd12283ce00909e9a2e11e6062a10cfdf0cd57e147a83cd9275a",
+  "context_sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+  "runner_sha256": "0b8b82ef223e1c712544ab227ce85e0992c3a7c36e70709f0f11baf57128bdcc",
+  "checks": [
+    "Actual pg_stat_activity Lock wait at sender context; natural 90-day expiry during wait excluded at capture completion"
+  ],
+  "owned_org_id": "de1f968a-3e19-4726-8f14-0c6a1308d646",
+  "cleanup": "Private reply schemas and triggers removed; uniquely marked synthetic source rows retained in owned fixture",
+  "limitations": [
+    "Single recipient expiry proof; no public preparation, acceptance or provider call"
+  ]
+}

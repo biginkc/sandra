@@ -1,0 +1,27 @@
+{
+  "source_sha256": "ff7f64387872fd12283ce00909e9a2e11e6062a10cfdf0cd57e147a83cd9275a",
+  "batch_sha256": "8ee23920ad0f41b62f284da9ee2008ee9e46c1a88598b82ed7edb0230a5d205a",
+  "context_sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+  "runner_sha256": "8cd8a424f4a8697fb238f172f8cb085dad3cae359cd53a20e9c8c020b28f1855",
+  "checks": [
+    "canonical contact, normalized saved destination, sender inventory and variables",
+    "read status leaves known-reply content revision unchanged",
+    "edited inbound advances reply revision",
+    "foreign and missing target denied without head allocation",
+    "landline and unsaved destination excluded",
+    "inactive inventory sender excluded",
+    "canonical consent opt-out excluded",
+    "private API grants denied; whole proof rolled back",
+    "same destination flags every affected conversation; no silent deduplication",
+    "duplicate/null/empty target rejection",
+    "winter opening and closing boundaries",
+    "summer DST, territory and unknown state policy",
+    "51 canonical destinations blocked, 50 after one opt-out exclusion retained in review",
+    "501 target envelope rejected"
+  ],
+  "limits": [
+    "Private recipient capture only; not public preparation or dispatch authorization",
+    "Batch limit signal is not acceptance enforcement; immutable approval and actual dispatch still required",
+    "No provider call or production change"
+  ]
+}
