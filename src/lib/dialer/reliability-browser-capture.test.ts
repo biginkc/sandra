@@ -4,8 +4,10 @@ import { startBrowserPlaybackCapture, type BrowserCaptureEvent } from "./reliabi
 class FakeRecorder extends EventTarget {
   state: RecordingState = "inactive";
   timeslice?: number;
+  beforeStop?: () => void;
   start(timeslice: number) { this.state = "recording"; this.timeslice = timeslice; }
   stop() {
+    this.beforeStop?.();
     this.state = "inactive";
     this.dispatchEvent(new Event("stop"));
   }
@@ -56,6 +58,31 @@ describe("browser playback capture", () => {
     recorder.chunk(new Blob(["still encoded"]));
     await handle?.stop();
     expect(events.filter((event) => event.detail === "remote playback muted")).toHaveLength(1);
+  });
+
+  it("does not report DOM-removal pause during intentional teardown", async () => {
+    const recorder = new FakeRecorder();
+    const events: BrowserCaptureEvent[] = [];
+    const audioState = Object.assign(new EventTarget(), {
+      paused: false, muted: false, volume: 1,
+      captureStream: () => ({ getAudioTracks: () => [{}] }),
+    });
+    const audio = audioState as unknown as HTMLAudioElement;
+    const handle = startBrowserPlaybackCapture({
+      audio,
+      recorderFactory: () => recorder as unknown as MediaRecorder,
+      onChunk: () => {},
+      onEvent: (event) => events.push(event),
+    });
+    recorder.beforeStop = () => {
+      audioState.paused = true;
+      audio.dispatchEvent(new Event("pause"));
+    };
+
+    await handle?.stop();
+
+    expect(events.map((event) => event.kind)).toEqual(["started", "stopped"]);
+    expect(events.some((event) => event.detail === "remote playback paused")).toBe(false);
   });
 
   it("timestamps and delivers chunks, including sink failures as visible errors", async () => {

@@ -67,8 +67,10 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
   }
   let sequence = 0;
   const pending = new Set<Promise<void>>();
+  let stopRequested = false;
   let playbackFaultReported = false;
   const reportPlaybackFault = () => {
+    if (stopRequested) return;
     const fault = playbackFault();
     if (fault && !playbackFaultReported) {
       playbackFaultReported = true;
@@ -93,7 +95,9 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
     void write.finally(() => pending.delete(write));
     report("chunk");
   });
-  recorder.addEventListener("error", () => report("error", "MediaRecorder error"));
+  recorder.addEventListener("error", () => {
+    if (!stopRequested) report("error", "MediaRecorder error");
+  });
   try {
     recorder.start(options.timesliceMs ?? 1_000);
   } catch (error) {
@@ -105,6 +109,10 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
   report("started");
   return {
     stop: async () => {
+      // Teardown can pause the media element before MediaRecorder emits stop.
+      // Mark the intentional stop first so DOM removal is not reported as a
+      // playback fault in the evidence stream.
+      stopRequested = true;
       if (recorder.state !== "inactive") {
         await new Promise<void>((resolve) => {
           recorder.addEventListener("stop", () => resolve(), { once: true });
