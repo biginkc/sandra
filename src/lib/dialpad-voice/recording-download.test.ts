@@ -42,6 +42,35 @@ describe("downloadDialpadRecording", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fetchImpl.mock.calls[0][1]).toMatchObject({ redirect: "manual", cache: "no-store", headers: { Authorization: `Bearer ${apiKey}` } });
   });
+  it("follows the proven same-host chain and cancels redirect bodies", async () => {
+    const cancel = vi.fn();
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(new ReadableStream({ cancel }), { status: 302, headers: { location: "/secureblob/callrecording/segment" } }))
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "/blob-server/segment?signature=opaque" } }))
+      .mockResolvedValueOnce(audio());
+    expect((await downloadDialpadRecording({ url: "https://dialpad.com/r/segment", apiKey, decode, fetchImpl })).ok).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(3); expect(cancel).toHaveBeenCalled();
+    expect(fetchImpl.mock.calls.every(([target]) => new URL(String(target)).hostname === "dialpad.com")).toBe(true);
+  });
+  it.each(["/r/../blob-server/x", "/r/%2e%2e/blob-server/x", "https://dialpad.com:443/r/x", "/blob-server/x#secret", "https://user@dialpad.com/r/x"])("rejects unsafe redirect %s", async location => {
+    const h = run(new Response(null, { status: 302, headers: { location } }));
+    expect(await h.result).toEqual({ ok: false, reason: "redirect_rejected" }); expect(h.fetchImpl).toHaveBeenCalledTimes(1);
+  });
+  it("rejects loops and bounds the chain to three redirects", async () => {
+    const loop = run(new Response(null, { status: 302, headers: { location: url } }));
+    expect(await loop.result).toEqual({ ok: false, reason: "redirect_rejected" });
+    let n = 0;
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => new Response(null, { status: 302, headers: { location: `/blob-server/${++n}` } }));
+    expect(await downloadDialpadRecording({ url, apiKey, decode, fetchImpl })).toEqual({ ok: false, reason: "redirect_rejected" });
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+  it("keeps a single timeout budget across redirected requests", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "/blob-server/x" } }))
+      .mockImplementationOnce(() => new Promise(() => {}));
+    expect(await downloadDialpadRecording({ url, apiKey, decode, fetchImpl, timeoutMs: 10 })).toEqual({ ok: false, reason: "timeout" });
+    expect(fetchImpl.mock.calls[0][1]?.signal).toBe(fetchImpl.mock.calls[1][1]?.signal);
+    expect(fetchImpl.mock.calls[1][1]?.signal?.aborted).toBe(true);
+  });
   it.each(["text/html", "audio/wav"])("rejects HTML even with %s", async (mime) => {
     expect(await run(new Response("<!doctype html><html>login</html>", { headers: { "content-type": mime } })).result).toEqual({ ok: false, reason: "html_response" });
   });

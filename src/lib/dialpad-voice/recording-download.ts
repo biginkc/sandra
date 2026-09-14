@@ -38,8 +38,8 @@ const MIME_TYPES: Record<AudioFormat, string[]> = {
 
 /** Retrieves and decodes bytes in memory. This is NOT durable storage or proof
  * of provider entitlement. Only pass URLs obtained from authenticated call data.
- * No redirects are followed: a future signed-storage redirect needs a separately
- * reviewed, credential-free fetch policy. Errors never echo URLs or credentials. */
+ * At most three exact same-host recording redirects are followed. External
+ * storage redirects remain rejected. Errors never echo URLs or credentials. */
 export async function downloadDialpadRecording(options: {
   url: string;
   apiKey: string;
@@ -54,11 +54,22 @@ export async function downloadDialpadRecording(options: {
   if (!options.apiKey.trim() || /[\r\n]/.test(options.apiKey) || typeof options.decode !== "function" ||
       !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 128 * 1024 * 1024 ||
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) return fail("invalid_configuration");
-  let url: URL;
-  try { url = new URL(options.url); } catch { return fail("invalid_url"); }
-  if (url.protocol !== "https:" || url.hostname !== "dialpad.com" || url.port ||
-      url.username || url.password || url.hash ||
-      !/^\/(?:secureblob|blob)\/(?:callrecording|adminrecording)\/[A-Za-z0-9_./~-]+$/.test(url.pathname)) return fail("invalid_url");
+  const safeUrl = (raw: string, base?: URL): URL | null => {
+    // Check before URL canonicalization, which otherwise hides dot traversal.
+    const rawPath = raw.split(/[?#]/, 1)[0];
+    if (/^(?:https?:)?\/\/[^/]*:[0-9]+(?:\/|$)/i.test(rawPath)) return null;
+    if (rawPath.includes("\\") || /%(?:2e|2f|5c)/i.test(rawPath) ||
+      /(?:^|\/)\.{1,2}(?:\/|$)/.test(rawPath) || /[\u0000-\u0020]/.test(raw)) return null;
+    try {
+      const parsed = new URL(raw, base);
+      if (parsed.protocol !== "https:" || parsed.hostname !== "dialpad.com" || parsed.port ||
+        parsed.username || parsed.password || parsed.hash ||
+        !/^\/(?:r|blob-server|(?:secureblob|blob)\/(?:callrecording|adminrecording))\/[A-Za-z0-9_./~-]+$/.test(parsed.pathname)) return null;
+      return parsed;
+    } catch { return null; }
+  };
+  const url = safeUrl(options.url);
+  if (!url) return fail("invalid_url");
   const controller = new AbortController();
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -67,15 +78,29 @@ export async function downloadDialpadRecording(options: {
   });
   const work = async (): Promise<RecordingDownloadResult> => {
     try {
-      const response = await (options.fetchImpl ?? fetch)(url.href, {
-        headers: { Authorization: `Bearer ${options.apiKey}`, "Accept-Encoding": "identity" },
-        redirect: "manual", cache: "no-store", signal: controller.signal,
-      });
-      reader = response.body?.getReader();
-      if (response.status >= 300 && response.status < 400) {
-        let login = false;
-        try { login = new URL(response.headers.get("location") ?? "", url).pathname === "/login"; } catch { /* reject all redirects */ }
-        return fail(login ? "login_required" : "redirect_rejected");
+      let current = url;
+      const visited = new Set<string>();
+      let response: Response;
+      for (let redirects = 0; ; redirects += 1) {
+        if (controller.signal.aborted) return fail("timeout");
+        visited.add(current.href);
+        response = await (options.fetchImpl ?? fetch)(current.href, {
+          headers: { Authorization: `Bearer ${options.apiKey}`, "Accept-Encoding": "identity" },
+          redirect: "manual", cache: "no-store", signal: controller.signal,
+        });
+        reader = response.body?.getReader();
+        if (response.status < 300 || response.status >= 400) break;
+        void reader?.cancel().catch(() => undefined);
+        reader = undefined;
+        const location = response.headers.get("location");
+        if (!location) return fail("redirect_rejected");
+        try {
+          const destination = new URL(location, current);
+          if (destination.origin === "https://dialpad.com" && destination.pathname === "/login") return fail("login_required");
+        } catch { return fail("redirect_rejected"); }
+        const next = safeUrl(location, current);
+        if (!next || redirects >= 3 || visited.has(next.href)) return fail("redirect_rejected");
+        current = next;
       }
       if (response.status !== 200) return fail("http_error");
       const mime = (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
