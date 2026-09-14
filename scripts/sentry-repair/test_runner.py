@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -186,6 +187,7 @@ class RunnerTests(unittest.TestCase):
             fake_github = FakeGitHub()
             runner = ControllerRunner(config, store=store, sentry_client=fake_sentry, github_client=fake_github)
             self.assertEqual(runner.run_once(RUN_AT).status, "completed")
+            self.assertTrue(runner.health.payload()["ready"])
             self.assertEqual(store.list_github_outbox(), [])
             self.assertEqual(fake_github.find_calls, 0)
             self.assertEqual(fake_github.create_calls, 0)
@@ -302,6 +304,101 @@ class RunnerTests(unittest.TestCase):
             self.assertFalse(persisted_payload["ready"])
             self.assertEqual(persisted_payload["publisher_outstanding_count"], 1)
             restarted.close()
+
+    def test_readiness_stays_false_while_publishing_and_after_failed_backlog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "repair.db"
+
+            class TwoIssueSentry(FakeSentry):
+                def retrieve_all(self, _cursor=None):
+                    self.calls += 1
+                    return [IssueInput(100, title="first"), IssueInput(101, title="second")], "terminal-cursor"
+
+            class BlockingAfterFailureGitHub(FakeGitHub):
+                def __init__(self):
+                    super().__init__()
+                    self.second_started = threading.Event()
+                    self.release_second = threading.Event()
+
+                def create_issue(self, title, body, labels):
+                    self.create_calls += 1
+                    if self.create_calls == 1:
+                        from github_publisher import GitHubTransportError
+
+                        raise GitHubTransportError("temporary", kind="server")
+                    self.second_started.set()
+                    if not self.release_second.wait(timeout=5):
+                        raise AssertionError("test did not release the blocked publisher")
+                    return GitHubIssue(
+                        number=9,
+                        html_url="https://github.com/biginkc/sandra/issues/9",
+                        node_id="node-9",
+                        title=title,
+                        body=body,
+                        labels=tuple(labels),
+                    )
+
+            config = RunnerConfig(
+                db_path=path,
+                sentry_token="sentry-token-value",
+                github_publish_enabled=True,
+                github_app_id=1,
+                github_installation_id=1,
+                max_publishes_per_cycle=2,
+                health_port=0,
+            )
+            github = BlockingAfterFailureGitHub()
+            health = HealthState(started_at=RUN_AT)
+            holder: dict[str, object] = {}
+            server_started = threading.Event()
+            outcome: dict[str, object] = {}
+
+            def run_cycle():
+                store = RepairStore(path)
+                runner = ControllerRunner(
+                    config,
+                    store=store,
+                    health=health,
+                    sentry_client=TwoIssueSentry(),
+                    github_client=github,
+                    github_token_provider=FakeTokenProvider(),
+                )
+                holder["runner"] = runner
+                holder["server"] = runner.start_health_server()
+                server_started.set()
+                try:
+                    outcome["result"] = runner.run_once(RUN_AT)
+                except BaseException as exc:  # pragma: no cover - surfaced below
+                    outcome["error"] = exc
+                finally:
+                    runner.close()
+
+            worker = threading.Thread(target=run_cycle)
+            worker.start()
+            self.assertTrue(server_started.wait(timeout=2))
+            runner = holder["runner"]
+            host, port = holder["server"]
+            self.assertTrue(github.second_started.wait(timeout=2))
+            self.assertFalse(runner.health.payload()["ready"])
+            with self.assertRaisesRegex(HTTPError, "HTTP Error 503") as not_ready:
+                urlopen(f"http://{host}:{port}/readyz", timeout=2)
+            not_ready.exception.close()
+
+            github.release_second.set()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertNotIn("error", outcome)
+            self.assertEqual(outcome["result"].status, "completed")
+            final_payload = runner.health.payload()
+            self.assertFalse(final_payload["ready"])
+            self.assertTrue(final_payload["publisher_degraded"])
+            self.assertEqual(final_payload["publisher_outstanding_count"], 1)
+            store = RepairStore(path)
+            self.assertEqual(
+                store.github_publisher_health(),
+                {"failed": 1, "create_unknown": 0, "outstanding": 1},
+            )
+            store.close()
 
     def test_failed_slot_retries_with_bounded_delay_and_never_logs_secret(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -317,6 +317,7 @@ class HealthState:
     publisher_outstanding_count: int = 0
     intake_succeeded: bool = False
     publisher_degraded: bool = False
+    publisher_reconciliation_pending: bool = False
     stopping: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -331,14 +332,22 @@ class HealthState:
             self.last_slot_id = slot_id
             self.last_error_type = None
 
+    def begin_publisher_reconciliation(self) -> None:
+        """Keep readiness false until this cycle's durable backlog is read."""
+
+        with self._lock:
+            self.publisher_reconciliation_pending = True
+
     def record_publisher_failure(self, error_type: str, observed_at: float | None = None) -> None:
         with self._lock:
+            self.publisher_reconciliation_pending = False
             self.publisher_degraded = True
             self.last_publisher_error_type = error_type[:120]
             self.last_publisher_failure_at = time.time() if observed_at is None else float(observed_at)
 
     def record_publisher_success(self, observed_at: float | None = None) -> None:
         with self._lock:
+            self.publisher_reconciliation_pending = False
             self.publisher_degraded = False
             self.publisher_outstanding_count = 0
             self.last_publisher_error_type = None
@@ -364,6 +373,7 @@ class HealthState:
         outstanding = failed + create_unknown
         observed = time.time() if observed_at is None else float(observed_at)
         with self._lock:
+            self.publisher_reconciliation_pending = False
             was_degraded = self.publisher_degraded
             self.publisher_outstanding_count = outstanding
             if outstanding:
@@ -389,7 +399,13 @@ class HealthState:
     def payload(self, now: float | None = None) -> dict[str, Any]:
         current = time.time() if now is None else float(now)
         with self._lock:
-            ready = self.intake_succeeded and not self.publisher_degraded and not self.last_error_type and not self.stopping
+            ready = (
+                self.intake_succeeded
+                and not self.publisher_reconciliation_pending
+                and not self.publisher_degraded
+                and not self.last_error_type
+                and not self.stopping
+            )
             if self.stopping:
                 status = "stopping"
             elif ready:
@@ -414,6 +430,7 @@ class HealthState:
                 "publisher_outstanding_count": self.publisher_outstanding_count,
                 "intake_succeeded": self.intake_succeeded,
                 "publisher_degraded": self.publisher_degraded,
+                "publisher_reconciliation_pending": self.publisher_reconciliation_pending,
                 "ready": ready,
             }
 
@@ -658,6 +675,7 @@ class ControllerRunner:
         return due_slot(current, self.store)
 
     def _run_claimed_slot(self, slot_id: str, slot: datetime, now: float) -> CycleResult:
+        self.health.begin_publisher_reconciliation()
         changed = intake_from_sentry(self.store, self.sentry, retrieved_at=now)
         self.health.record_success(slot_id, now)
         queued = 0
@@ -689,7 +707,10 @@ class ControllerRunner:
                     published += 1
                 elif result.action in {"failed", "create_unknown", "awaiting_marker", "reconcile_required"}:
                     publisher_failures += 1
-            self._refresh_publisher_health(now)
+        # A successful intake must not make /readyz healthy until the durable
+        # publisher state has been reconciled. This also clears the in-flight
+        # hold for fresh cycles when publishing is disabled or has no work.
+        self._refresh_publisher_health(now)
         _log(
             "slot_completed",
             slot_id=slot_id,
