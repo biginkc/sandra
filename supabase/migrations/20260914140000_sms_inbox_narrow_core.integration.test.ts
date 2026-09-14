@@ -139,8 +139,8 @@ function mustReplace(source: string, target: string, replacement: string): strin
 // falling back to null/false).
 const innerSearchJoinMutant = mustReplace(
   newSql,
-  "left join public.contacts c on c.id = k.contact_id and c.org_id = k.org_id",
-  "join public.contacts c on c.id = k.contact_id and c.org_id = k.org_id",
+  "left join contacts_in_window c on c.id = k.contact_id and c.org_id = k.org_id",
+  "join contacts_in_window c on c.id = k.contact_id and c.org_id = k.org_id",
 );
 
 // Mutation 2 (S19.5.5): add a recent-cutoff to the messages FTS subquery in
@@ -519,15 +519,21 @@ describe("sms_inbox_thread_page_snapshot signature/config safety net (BLOCKING, 
     expect(mutated).not.toBe(expected);
   });
 
-  it("proconfig carries search_path='', statement_timeout='15s', and no unexplained settings", async () => {
+  it("proconfig carries search_path='', statement_timeout='15s', work_mem='32MB', and the function is SECURITY INVOKER (S20.1/S21.1 E5)", async () => {
     const { rows } = await db.query(
-      `select proconfig from pg_proc where proname = 'sms_inbox_thread_page_snapshot'`,
+      `select proconfig, prosecdef from pg_proc where proname = 'sms_inbox_thread_page_snapshot'`,
     );
     const config: string[] = rows[0].proconfig ?? [];
-    expect(config).toEqual(expect.arrayContaining(["search_path=", "statement_timeout=15s"]));
+    const isSecurityDefiner: boolean = rows[0].prosecdef;
+    expect(config).toEqual(expect.arrayContaining(["search_path=", "statement_timeout=15s", "work_mem=32MB"]));
+    // SECURITY INVOKER means prosecdef is false (prosecdef = true is SECURITY DEFINER).
+    expect(isSecurityDefiner).toBe(false);
     // Mutation-kill demo: dropping search_path must fail this assertion.
-    const mutated = config.filter(c => !c.startsWith("search_path"));
-    expect(mutated).not.toEqual(expect.arrayContaining(["search_path="]));
+    const mutatedSearchPath = config.filter(c => !c.startsWith("search_path"));
+    expect(mutatedSearchPath).not.toEqual(expect.arrayContaining(["search_path="]));
+    // Mutation-kill demo: dropping work_mem must fail this assertion.
+    const mutatedWorkMem = config.filter(c => !c.startsWith("work_mem"));
+    expect(mutatedWorkMem).not.toEqual(expect.arrayContaining(["work_mem=32MB"]));
   });
 
   it("rehearsed rollback: re-applying the old body+config restores the pre-migration signature/config", async () => {
