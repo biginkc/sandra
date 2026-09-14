@@ -157,6 +157,16 @@ describe("SoftphoneProvider transport gate", () => {
     render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
     expect(await screen.findByRole('alert')).toHaveTextContent('Existing calls could not be checked');expect(screen.getByTestId('header-dialer-button')).toHaveAttribute('title','Calling not yet enabled');expect(dp.start).not.toHaveBeenCalled();expect(createTransport).not.toHaveBeenCalled();
   });
+  it("shows the searched lead name and address before requesting a Dialpad call", async () => {
+    dp.options.mockResolvedValue({ok:true,options:[{provider:'dialpad',grantId:'grant1',grantRevision:1,bindingRevision:1,connectionVersion:1,phoneE164:'+12025550101',identity:{type:'office',id:'301'}}]});
+    dp.devices.mockResolvedValue({ok:true,devices:[]});
+    searchDialerLeads.mockResolvedValue({ok:true,data:[{propertyId:'property-1',contactId:'contact-1',name:'Fictional Homeowner',detail:'123 Fixture Avenue',address:'123 Fixture Avenue',state:'MO',phoneE164:'+12025550199'}]});
+    const user=userEvent.setup();render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await waitFor(()=>expect(dp.options).toHaveBeenCalled());await user.click(screen.getByTestId('header-dialer-button'));
+    await user.type(screen.getByTestId('dialer-input'),'Fictional');await user.click(await screen.findByTestId('dialer-suggestion'));
+    expect(await screen.findByRole('heading',{name:'Call Fictional Homeowner'})).toBeVisible();expect(screen.getByText('123 Fixture Avenue')).toBeVisible();
+    expect(dp.start).not.toHaveBeenCalled();expect(mintStartIntent).not.toHaveBeenCalled();expect(inspectLeadCall).not.toHaveBeenCalled();
+  });
   it("routes a selected exact Dialpad persona before all Jitter work and retains request when hidden", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     const option={provider:'dialpad',grantId:'grant1',grantRevision:1,bindingRevision:1,connectionVersion:1,phoneE164:'+12025550101',identity:{type:'office',id:'301'}};

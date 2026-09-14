@@ -208,7 +208,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   const [jitterCallingEnabled] = useState(() => isSoftphoneTransportEnabled());
   const [dialpadCallers, setDialpadCallers] = useState<DialpadCallerOption[]>([]);
   const [selectedDialpadGrant, setSelectedDialpadGrant] = useState<string | null>(null);
-  const [dialpadSession, setDialpadSession] = useState<{propertyId:string; caller?:DialpadCallerOption; name:string; initialCall?:{intentId:string;status:string}} | null>(null);
+  const [dialpadSession, setDialpadSession] = useState<{propertyId:string; caller?:DialpadCallerOption; name:string; address?:string; initialCall?:{intentId:string;status:string}} | null>(null);
   const [dialpadRecoveryReady,setDialpadRecoveryReady]=useState(false);
   const [dialpadRecoveryError,setDialpadRecoveryError]=useState(false);
   const recoverDialpadCall=useCallback(async()=>{
@@ -499,6 +499,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     prepare: () => Promise<{ ok: true; data: SoftphoneTarget } | { ok: false; error: string }>,
     provisionalTarget?: SoftphoneTarget,
     linkedPropertyId?: string,
+    display?: {name:string;address?:string},
   ) => {
     if (!dialpadRecoveryReady) { setPhone("idle"); return; }
     if (dialpadSession) { setPhone("idle"); return; }
@@ -507,7 +508,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       const propertyId = linkedPropertyId ?? provisionalTarget?.propertyId;
       if (!caller || !propertyId) { setError("Select a lead to call with your assigned Dialpad number."); setPhone("idle"); return; }
       if (startInFlightRef.current || transportRef.current) return;
-      setDialpadSession({propertyId,caller,name:provisionalTarget?.name ?? "Selected lead"});
+      setDialpadSession({propertyId,caller,name:display?.name ?? provisionalTarget?.name ?? "Selected lead",address:display?.address ?? provisionalTarget?.address ?? undefined});
       setPhone("idle");
       return;
     }
@@ -1038,7 +1039,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
           <div hidden={phone === "closed"} data-testid="softphone-popover" role="dialog" aria-label="Dialer" className="fixed top-20 left-1/2 z-[60] w-[min(480px,calc(100vw-24px))] -translate-x-1/2 overflow-hidden rounded-2xl border border-[#e5e1df] bg-white text-[#1c1917] shadow-[0_20px_60px_rgba(28,25,23,0.3)]">
             <button type="button" aria-label="Close dialer" className="absolute top-2.5 right-2.5 z-10 rounded-md p-1.5 text-[#78716c] hover:bg-[#f0eeec]" onClick={() => { if (phone === "idle") { if (!dialpadSession) resetIdle(); setPhone("closed"); } }}><XIcon className="size-3.5" /></button>
             {!dialpadRecoveryReady ? <div className="p-5"><p role={dialpadRecoveryError?"alert":"status"}>{dialpadRecoveryError?"Existing calls could not be checked. New calls are paused until recovery succeeds.":"Checking for an existing call…"}</p>{dialpadRecoveryError&&<button type="button" onClick={()=>void recoverDialpadCall()}>Check existing calls</button>}</div> : dialpadSession ? (
-              <DialpadDesktopPanel propertyId={dialpadSession.propertyId} caller={dialpadSession.caller} leadName={dialpadSession.name} initialCall={dialpadSession.initialCall}
+              <DialpadDesktopPanel propertyId={dialpadSession.propertyId} caller={dialpadSession.caller} leadName={dialpadSession.name} leadAddress={dialpadSession.address} initialCall={dialpadSession.initialCall}
                 onCancel={() => setDialpadSession(null)} />
             ) : phone === "idle" ? (
               <IdleView
@@ -1061,8 +1062,8 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
                 callerIdReady={callerIdReady}
                 onCallerIdChange={selectCallerId}
                 onRetryCallerIds={() => { void loadCallerIds(); }}
-                onLead={(suggestion) => void startTarget(() => inspectLeadCall(suggestion.propertyId), undefined, suggestion.propertyId)}
-                onRecent={(recent) => void startTarget(() => recent.propertyId ? inspectLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164), undefined, recent.propertyId ?? undefined)}
+                onLead={(suggestion) => void startTarget(() => inspectLeadCall(suggestion.propertyId), undefined, suggestion.propertyId, {name:suggestion.name,address:suggestion.address})}
+                onRecent={(recent) => void startTarget(() => recent.propertyId ? inspectLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164), undefined, recent.propertyId ?? undefined, {name:recent.name})}
                 onManual={() => void startTarget(() => prepareManualCall(manualDigits))}
                 onDigit={enterManualDigit}
                 onBackspace={() => { const next = dialInputRef.current.slice(0, -1); dialInputRef.current = next; setDialInput(next); }}

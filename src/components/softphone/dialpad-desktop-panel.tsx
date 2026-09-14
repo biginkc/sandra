@@ -9,7 +9,7 @@ export type DialpadCallerOption = Readonly<{provider:'dialpad';grantId:string;gr
 type Device={id:string;label:string;type:'native';readiness:'unproven'};
 /** Desktop owns audio and call controls. This view never infers connection or
  * tracking credit from a successful start request. */
-export function DialpadDesktopPanel({propertyId,caller,leadName,onCancel,initialCall}:{propertyId:string;caller?:DialpadCallerOption;leadName:string;onCancel:()=>void;initialCall?:{intentId:string;status:string}}) {
+export function DialpadDesktopPanel({propertyId,caller,leadName,leadAddress,onCancel,initialCall}:{propertyId:string;caller?:DialpadCallerOption;leadName:string;leadAddress?:string;onCancel:()=>void;initialCall?:{intentId:string;status:string}}) {
  const [devices,setDevices]=useState<Device[]>([]),[deviceId,setDeviceId]=useState('');
  const [loading,setLoading]=useState(!initialCall),[error,setError]=useState<string|null>(null);
  const [status,setStatus]=useState<string|null>(initialCall?.status ?? null),[pending,setPending]=useState(false);
@@ -51,6 +51,7 @@ export function DialpadDesktopPanel({propertyId,caller,leadName,onCancel,initial
  };
  return <section className="p-5" aria-label="Dialpad desktop call">
   <h2 className="text-base font-bold">Call {leadName}</h2>
+  {leadAddress&&<p className="mt-1 text-sm text-stone-600">{leadAddress}</p>}
   <p className="mt-2 text-sm">Your Dialpad desktop app handles audio and call controls. Open it and select your signed-in device below.</p>
   <p className="mt-2 text-xs text-stone-600">Keep Dialpad open on the selected computer. Live coaching is not available in this integration yet.</p>
   {!status&&!pending&&<>
