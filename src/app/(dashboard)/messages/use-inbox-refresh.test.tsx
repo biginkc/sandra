@@ -266,6 +266,64 @@ it("a suppressed ambient event that arrives while hidden arms no trailing timer"
   }
 });
 
+// --- Astra's final finding on 4fca996f (2026-09-14): the suppressed-event
+// arm check only looked at visibility, so an event ineligible for any OTHER
+// reason (disabled, stale scope, Unread-pin URL mismatch) could still arm a
+// trailing timer that later fires a no-op (wasting it, and potentially
+// delaying a later genuinely-eligible event behind it). Fixed by factoring
+// reconcile's full eligibility check into `isEligibleToDispatch` and gating
+// the arm on that instead of a bare visibility check. These assert
+// construction directly (setTimeout must not be called at all), the same
+// discipline as the no-re-arm test above — a bug here wouldn't necessarily
+// show up in fetch-call counts alone.
+it("a suppressed event while disabled arms no trailing timer", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+  try {
+    fetchMock.mockResolvedValue(response(5));
+    const { rerender } = renderHook(
+      ({ enabled }) => useInboxRefresh(initial, "filter=all", enabled),
+      { initialProps: { enabled: true } },
+    );
+    act(() => { fireEvent.focus(window); }); // t=0: leading edge, dispatches while enabled
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    rerender({ enabled: false }); // ineligible from here on
+    setTimeoutSpy.mockClear();
+    act(() => { vi.advanceTimersByTime(5_000); }); // t=5, inside the window
+    act(() => { fireEvent(window, new Event("online")); }); // suppressed AND disabled — must arm nothing
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    await act(async () => { vi.advanceTimersByTime(5_000); }); // t=10 — a wrongly-armed timer would fire here
+    expect(fetchMock).toHaveBeenCalledTimes(1); // still just the leading-edge dispatch
+  } finally {
+    setTimeoutSpy.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
+it("a suppressed event with an Unread-pin URL mismatch arms no trailing timer", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+  try {
+    window.history.replaceState(null, "", "/messages?filter=unread&thread=a");
+    fetchMock.mockResolvedValue(response(5));
+    renderHook(() => useInboxRefresh(initial, "filter=unread", true, "a", "a"));
+    act(() => { fireEvent.focus(window); }); // t=0: leading edge, dispatches — URL thread matches selection
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    window.history.replaceState(null, "", "/messages?filter=unread&thread=b"); // now mismatches the pinned selection
+    setTimeoutSpy.mockClear();
+    act(() => { vi.advanceTimersByTime(5_000); }); // t=5, inside the window
+    act(() => { fireEvent(window, new Event("online")); }); // suppressed AND pin-mismatched — must arm nothing
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    await act(async () => { vi.advanceTimersByTime(5_000); }); // t=10
+    expect(fetchMock).toHaveBeenCalledTimes(1); // still just the leading-edge dispatch
+  } finally {
+    setTimeoutSpy.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
 it("a disabled ambient event does not burn the window for the next enabled event", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
   try {

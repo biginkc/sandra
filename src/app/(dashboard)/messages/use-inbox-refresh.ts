@@ -45,6 +45,20 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
       pending.current = null;
     };
   }, [scope]);
+  // Single source of truth for "would a call to `refresh()` right now
+  // actually do anything?" — shared by reconcile's own guard and by the
+  // ambient focus/online cooldown below, so a suppressed event can check
+  // eligibility before arming a trailing timer rather than only checking
+  // visibility. An event that isn't eligible for ANY reason (hidden,
+  // disabled, stale/obsolete scope, or an Unread-pin URL mismatch) must
+  // not arm a timer — arming one for an event that could never dispatch
+  // wastes it and can also delay a later, genuinely eligible event behind
+  // a no-op window.
+  const isEligibleToDispatch = useCallback((): boolean => {
+    if (activeScope.current !== scope || !enabled || document.visibilityState !== "visible") return false;
+    if (pinSelection && new URLSearchParams(window.location.search).get("thread") !== selectedThreadId) return false;
+    return true;
+  }, [scope, enabled, pinSelection, selectedThreadId]);
   // Returns whether this call was an effective dispatch — it created a new
   // request, or queued one on top of an in-flight request via `again`
   // (both mean the RPC will run again for this call's sake). False for
@@ -52,8 +66,7 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
   // will be requested. The ambient focus/online cooldown below stamps only
   // on `true`, so a no-op call never burns the throttle window.
   const refresh = useCallback(function reconcile(): boolean {
-    if (activeScope.current !== scope || !enabled || document.visibilityState !== "visible") return false;
-    if (pinSelection && new URLSearchParams(window.location.search).get("thread") !== selectedThreadId) return false;
+    if (!isEligibleToDispatch()) return false;
     if (pending.current) { pending.current.again = true; return true; }
     const request = { abort: new AbortController(), again: false };
     pending.current = request;
@@ -80,7 +93,7 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
       }
     })();
     return true;
-  }, [initial, query, enabled, selectedThreadId, pinSelection, scope]);
+  }, [isEligibleToDispatch, initial, query, enabled, selectedThreadId, pinSelection, scope]);
   const previousSelection = useRef(pinSelection ? serverThreadId : null);
   useEffect(() => {
     if (previousSelection.current === selectedThreadId) return;
@@ -127,11 +140,15 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
         }
         return;
       }
-      // Inside the window. A hidden tab gets no trailing timer at all —
-      // returning to the tab re-fires `focus` (a fresh leading-edge
-      // attempt), and useThrottledRefresh's own visibility reconcile
-      // covers the realtime-driven refresh path independently.
-      if (document.visibilityState !== "visible") return;
+      // Inside the window. An event that isn't currently eligible to
+      // dispatch — hidden, disabled, stale/obsolete scope, or an
+      // Unread-pin URL mismatch — arms nothing at all: a hidden tab
+      // regaining focus re-fires `focus` (a fresh leading-edge attempt),
+      // useThrottledRefresh's own visibility reconcile covers the
+      // realtime-driven refresh path independently, and arming a timer
+      // for an event that could never dispatch would only waste it or
+      // delay a later, genuinely eligible one behind a no-op window.
+      if (!isEligibleToDispatch()) return;
       // Suppressed: arm exactly one trailing refresh for the remainder of
       // the window. Further suppressed events collapse into it — no
       // re-arm, no extension — so a burst still yields at most one
@@ -146,7 +163,7 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
       window.removeEventListener("online", requestAutoRefresh);
       clearAutoRefreshTrailing();
     };
-  }, [refresh]);
+  }, [refresh, isEligibleToDispatch]);
   return { snapshot: result?.source === initial && result.query === query && result.selectedThreadId === selectedThreadId ? result.snapshot : initial,
     failed: failure?.source === initial && failure.query === query && failure.selectedThreadId === selectedThreadId, refresh };
 }
