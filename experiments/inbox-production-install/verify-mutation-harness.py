@@ -48,13 +48,13 @@ print('PASS  baseline (correct install)')
 run_case('rollout_serving_default_true',
  lambda: sql("ALTER TABLE inbox_control.rollout ALTER COLUMN serving_enabled SET DEFAULT true"),
  lambda: sql("ALTER TABLE inbox_control.rollout ALTER COLUMN serving_enabled SET DEFAULT false"),
- 'default drift')
+ 'column default drift inbox_control.rollout.serving_enabled')
 
 # 2. disable_trigger: a named capture trigger disabled.
 run_case('disable_capture_trigger',
  lambda: sql("ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct"),
  lambda: sql("ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct"),
- 'disabled')
+ 'installed trigger disabled: zzzzz_inbox_message_direct')
 
 # 3. index_recreated: same name, different columns.
 run_case('index_recreated_different_columns',
@@ -92,6 +92,27 @@ run_case('fk_on_delete_added',
  lambda: sql("ALTER TABLE inbox_bridge.cursors DROP CONSTRAINT cursors_scope_id_fkey;ALTER TABLE inbox_bridge.cursors ADD CONSTRAINT cursors_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id)"),
  'constraint definition drift')
 
+# 7c. not_valid_readd: an identical CHECK constraint dropped and re-added
+# NOT VALID (the classic "drop, let violating rows slip in, re-add NOT VALID
+# to dodge the validation scan" attack). convalidated must be true.
+run_case('not_valid_readd',
+ lambda: sql("ALTER TABLE public.messages DROP CONSTRAINT messages_inbox_inbound_revision_nonnegative;ALTER TABLE public.messages ADD CONSTRAINT messages_inbox_inbound_revision_nonnegative CHECK (inbox_inbound_revision >= 0) NOT VALID"),
+ lambda: sql("ALTER TABLE public.messages DROP CONSTRAINT messages_inbox_inbound_revision_nonnegative;ALTER TABLE public.messages ADD CONSTRAINT messages_inbox_inbound_revision_nonnegative CHECK (inbox_inbound_revision >= 0)"),
+ 'constraint not validated on public.messages')
+
+# 7d. rls_forced: FORCE ROW LEVEL SECURITY silently added (changes owner/
+# superuser bypass semantics unreviewed).
+run_case('force_row_level_security',
+ lambda: sql("ALTER TABLE inbox_control.rollout FORCE ROW LEVEL SECURITY"),
+ lambda: sql("ALTER TABLE inbox_control.rollout NO FORCE ROW LEVEL SECURITY"),
+ 'unexpected force row level security')
+
+# 7e. function_volatility_changed: STABLE matching() recreated VOLATILE.
+run_case('function_volatility_changed',
+ lambda: sql("ALTER FUNCTION inbox_bridge.matching(uuid,uuid,jsonb) VOLATILE"),
+ lambda: sql("ALTER FUNCTION inbox_bridge.matching(uuid,uuid,jsonb) STABLE"),
+ 'volatility drift on inbox_bridge.matching')
+
 # 8. Unexpected object kind (view) planted in a private companion schema.
 run_case('extra_view_in_companion_schema',
  lambda: sql("CREATE VIEW inbox_read.zz_harness_extra_view AS SELECT 1 AS one"),
@@ -104,6 +125,17 @@ run_case('extra_domain_in_companion_schema',
  lambda: sql("CREATE DOMAIN inbox_read.zz_harness_domain AS text"),
  lambda: sql("DROP DOMAIN IF EXISTS inbox_read.zz_harness_domain"),
  'extra types')
+
+# 8c. Unexpected COMPOSITE TYPE planted in a private companion schema (relkind
+# 'c'/typtype 'c') -- Codex-flagged gap: composite types were excluded from
+# both the relation scan (relkind filter lacked 'c') and the type scan (a
+# naive typtype='c' NOT IN pg_class exclusion, meant to skip every ordinary
+# table's own implicit row type, also excluded real standalone composite
+# types since they too have a matching pg_class row).
+run_case('extra_composite_type_in_companion_schema',
+ lambda: sql("CREATE TYPE inbox_read.zz_harness_composite AS (x integer)"),
+ lambda: sql("DROP TYPE IF EXISTS inbox_read.zz_harness_composite"),
+ 'extra relations')
 
 # 9. Conflicting function overload: a second inbox_read.detail(uuid,uuid,text).
 run_case('function_overload_added',

@@ -2,6 +2,7 @@
   "foundation_sha256": "9dbda65aa4c9b810bb94968a97c97d04f19d9744a76b642f47fa625c858fb938",
   "installed_function_bodies": 78,
   "installed_tables": 26,
+  "installed_composite_types": 1,
   "installed_indexes": 28,
   "installed_triggers": 23,
   "installed_constraints": 68,
@@ -11,5 +12,5 @@
   "private_helper_exposure_count": 0,
   "replica_identity": "FULL",
   "snapshot_isolation": "REPEATABLE READ, READ ONLY, single transaction",
-  "scope": "Read-only owned fixture catalog proof, definition-level (columns incl. defaults/RLS/indexes/trigger full defs/constraints incl. FK actions/extra-objects across all kinds/rollout-default/function signature+search_path) taken from one consistent snapshot, not merely name presence; excludes runtime throughput and production schema equivalence"
+  "scope": "Read-only owned fixture catalog proof, definition-level (columns incl. defaults/identity/generated/collation, RLS incl. FORCE, indexes incl. validity, trigger full defs, constraints incl. convalidated/FK actions, extra-objects across all relkinds/typtypes, rollout-default, function signature/search_path/volatility) taken from one consistent REPEATABLE READ snapshot, not merely name presence; excludes runtime throughput and production schema equivalence"
 }

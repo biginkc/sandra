@@ -40,13 +40,31 @@
     {
       "case": "weakened_check_constraint",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Constraint definition drift on inbox_parent.work: expected fragment not found live (exact match required): 'CHECK (ack>=0 AND ack<=generation)' (live remaining=[{'def': 'CHECK ((ack >= 0))', 'table': 'inbox_parent.work', 'valid': True}, {'def': \"CHECK ((stream = ANY (ARRAY['messages'::text, 'reviews'::text])))\", 'table': 'inbox_parent.work', 'valid': True}, {'def': 'CHECK (((claim_token IS NULL) = (lease_until IS NULL)))', 'table': 'inbox_parent.work', 'valid': True}, {'def': 'CHECK (((scan_generation IS NULL) = (stream IS NULL)))', 'table': 'inbox_parent.work', 'valid': True}, {'def': 'CHECK (((scan_generation IS NULL) OR ((scan_generation > ack) AND (scan_generation <= generation))))', 'table': 'inbox_parent.work', 'valid': True}, {'def': 'PRIMARY KEY (org_id, kind, entity_id)', 'table': 'inbox_parent.work', 'valid': True}])",
+      "drift_error": "RuntimeError: Constraint definition drift on inbox_parent.work: expected fragment not found live (exact match required): 'CHECK (ack>=0 AND ack<=generation)' (live remaining=[{'def': 'CHECK ((ack >= 0))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': \"CHECK ((stream = ANY (ARRAY['messages'::text, 'reviews'::text])))\", 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((claim_token IS NULL) = (lease_until IS NULL)))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((scan_generation IS NULL) = (stream IS NULL)))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((scan_generation IS NULL) OR ((scan_generation > ack) AND (scan_generation <= generation))))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'PRIMARY KEY (org_id, kind, entity_id)', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': True}])",
       "restored_pass": true
     },
     {
       "case": "fk_on_delete_added",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Constraint definition drift on inbox_bridge.cursors: expected fragment not found live (exact match required): 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id)' (live remaining=[{'def': 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id) ON DELETE CASCADE', 'table': 'inbox_bridge.cursors', 'valid': True}])",
+      "drift_error": "RuntimeError: Constraint definition drift on inbox_bridge.cursors: expected fragment not found live (exact match required): 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id)' (live remaining=[{'def': 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id) ON DELETE CASCADE', 'table': 'inbox_bridge.cursors', 'valid': True, 'noinherit': True}])",
+      "restored_pass": true
+    },
+    {
+      "case": "not_valid_readd",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Constraint not validated on public.messages: 'CHECK (inbox_inbound_revision >= 0)' is installed NOT VALID (convalidated=False); legacy-violating rows could be hiding behind it",
+      "restored_pass": true
+    },
+    {
+      "case": "force_row_level_security",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Unexpected FORCE ROW LEVEL SECURITY on installed table: inbox_control.rollout",
+      "restored_pass": true
+    },
+    {
+      "case": "function_volatility_changed",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Volatility drift on inbox_bridge.matching: expected='s' live='v'",
       "restored_pass": true
     },
     {
@@ -59,6 +77,12 @@
       "case": "extra_domain_in_companion_schema",
       "drift_caught": true,
       "drift_error": "RuntimeError: Extra types/domains in private schemas: [{'name': 'zz_harness_domain', 'schema': 'inbox_read'}]",
+      "restored_pass": true
+    },
+    {
+      "case": "extra_composite_type_in_companion_schema",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Extra relations (table/view/matview/sequence) in private schemas: {'inbox_read.zz_harness_composite': 'c'}",
       "restored_pass": true
     },
     {

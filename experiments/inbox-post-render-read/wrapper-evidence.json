@@ -7,37 +7,37 @@
   "public_api_sha256": "26ee2bb0c23ef6223083455f4ff49eca221f2167edea49af00c430f9d7a310b5",
   "runner_sha256": "5823975fe4fd8a9e2204c6d3fd04128966e866b45f6649a192d8b787b520efae",
   "scalar_detail": {
-    "org_id": "e8b88dff-7caa-4754-a81c-1492b26f7aa6",
+    "org_id": "0fd7cd85-7574-41aa-b714-8a51f3ad9158",
     "history": [
       {
-        "id": "5b8e230e-aa69-4f30-9db6-af38150f4a05",
-        "body": "Synthetic outbound",
-        "direction": "outbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-14 04:22:13.318749+00",
-        "inbound_revision": "0"
-      },
-      {
-        "id": "27a9668a-afa2-4d6f-bcc9-2af7cf238bcf",
+        "id": "b7032f89-1204-4b54-a2d0-622e0c267976",
         "body": "Synthetic inbound",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-14 04:22:13.318749+00",
+        "created_at_raw": "2026-09-14 04:42:09.315266+00",
         "inbound_revision": "1"
+      },
+      {
+        "id": "0e846968-c873-4d22-b786-9648045d7fec",
+        "body": "Synthetic outbound",
+        "direction": "outbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-14 04:42:09.315266+00",
+        "inbound_revision": "0"
       }
     ],
-    "requester_id": "703fc0e9-c3c6-4f55-8010-ecdaa4d4f4ee",
+    "requester_id": "158e1009-bd97-4f89-912b-b3fc712707ae",
     "head_revision": "1",
-    "read_boundary": "e7229d0f-8381-4bef-ab36-b180590cad32",
-    "conversation_id": "f7c54f57-fc3e-4160-9241-9659974370d9",
+    "read_boundary": "fb8f4c88-f256-4e13-a932-b6bdc68b23c8",
+    "conversation_id": "826733d3-8f85-44c0-a5c5-936e98ed0143",
     "capture_generation": "9788de28-dfa7-46af-80e0-409f7c383ca1",
-    "boundary_expires_at": "2026-09-14T04:27:13.402835+00:00"
+    "boundary_expires_at": "2026-09-14T04:47:09.393075+00:00"
   },
   "scalar_acknowledgment": {
     "batch": 0,
     "changed": 1,
     "completed": true,
-    "boundary_id": "e7229d0f-8381-4bef-ab36-b180590cad32"
+    "boundary_id": "fb8f4c88-f256-4e13-a932-b6bdc68b23c8"
   },
   "limits": [
     "Trusted SQL claims only; not an HTTP/JWT proof",

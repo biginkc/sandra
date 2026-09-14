@@ -105,20 +105,77 @@ for m in re.finditer(r'ALTER TABLE ([\w.]+) ADD COLUMN (\w+ [^;]+);',s):
  added_cols.setdefault(m.group(1),[]).append(m.group(2))
 all_tables=sorted(set(tables)|set(added_cols.keys()))
 rls_tables=sorted(set(re.findall(r'ALTER TABLE ([\w.]+) ENABLE ROW LEVEL SECURITY',s)))
+composite_types=sorted(set(re.findall(r'CREATE TYPE ([\w.]+) AS \(',s)))
 
 def load_index_manifest(name):
  path=P/'generated'/name
  return json.loads(path.read_text()) if path.exists() else []
 index_texts=list(re.findall(r'CREATE (?:UNIQUE )?INDEX(?: CONCURRENTLY)? \w+ ON [^;]+;',s))
 index_texts+=load_index_manifest('indexes.json')+load_index_manifest('read-indexes.json')
+
+# --- Boolean-expression canonicalizer, shared by index WHERE clauses and CHECK
+# constraints. Postgres re-parenthesizes every AND/OR operand and drops
+# single-operand grouping parens on print, so a raw paren-stripped text diff
+# would false-positive on that formatting alone -- but blanket-stripping ALL
+# parens instead makes semantically DIFFERENT regroupings compare equal, e.g.
+# "(a OR b) AND c" and "a OR (b AND c)" both flatten to "aorbandc". This parses
+# the actual AND/OR tree (order-independent per operand, matching boolean
+# commutativity and Postgres's own reordering) and compares that structure,
+# not raw text.
+def split_top_level_kw(text,keyword):
+ pattern=r'\b'+keyword+r'\b'
+ parts=[];last=0
+ for m in re.finditer(pattern,text,re.I):
+  depth=text.count('(',0,m.start())-text.count(')',0,m.start())
+  if depth==0:parts.append(text[last:m.start()]);last=m.end()
+ parts.append(text[last:])
+ return parts if len(parts)>1 else [text]
+def strip_redundant_outer_parens(expr):
+ expr=expr.strip()
+ while expr.startswith('(') and expr.endswith(')'):
+  depth=0;wraps_all=True
+  for i,c in enumerate(expr):
+   if c=='(':depth+=1
+   elif c==')':
+    depth-=1
+    if depth==0 and i!=len(expr)-1:wraps_all=False;break
+  if not wraps_all:break
+  expr=expr[1:-1].strip()
+ return expr
+def bool_ast(expr):
+ expr=strip_redundant_outer_parens(expr)
+ or_parts=split_top_level_kw(expr,'OR')
+ if len(or_parts)>1:return ('OR',frozenset(bool_ast(p) for p in or_parts))
+ and_parts=split_top_level_kw(expr,'AND')
+ if len(and_parts)>1:return ('AND',frozenset(bool_ast(p) for p in and_parts))
+ leaf=strip_redundant_outer_parens(expr)
+ leaf=re.sub(r'::\w+(\([^)]*\))?','',leaf)
+ leaf=re.sub(r'\s+','',leaf).lower()
+ # A leaf is an atomic comparison/function-call, not a compound AND/OR
+ # expression, so the semantic-regrouping risk that motivates AST-level
+ # comparison above does not apply here: blanket-stripping parens within one
+ # leaf only removes Postgres's redundant arithmetic/argument re-wrapping
+ # (e.g. "(a+99)/100" vs "((a+99)/100)"), while commas and argument/operand
+ # order are still preserved, so a genuine change (different function,
+ # different argument, different grouping between distinct operators) still
+ # produces a text difference.
+ leaf=leaf.replace('(','').replace(')','')
+ return ('LEAF',leaf)
+def bool_ast_repr(node):
+ kind,val=node
+ if kind=='LEAF':return val
+ return kind+'('+','.join(sorted(bool_ast_repr(v) for v in val))+')'
+
 def index_compact(value):
- v=re.sub(r'\s+','',value.replace('CREATE INDEX CONCURRENTLY','CREATE INDEX').replace('CONCURRENTLY ','').replace(' USING btree ',' ').replace('::text','')).lower()
- # pg_get_indexdef re-parenthesizes each AND/NOT operand and drops single-column
- # grouping parens -- purely a formatting difference for this codebase's pure-AND
- # WHERE clauses and single-expression index columns, so drop ALL parens for the
- # comparison. Commas/operand order/argument identity are still preserved, so a
- # genuine expression change (different function, different args, different
- # column order) still produces a text difference.
+ v=value.replace('CREATE INDEX CONCURRENTLY','CREATE INDEX').replace('CONCURRENTLY ','')
+ wm=re.search(r'\bWHERE\b(.*)$',v,re.S|re.I)
+ if wm:
+  prefix=re.sub(r'\s+','',v[:wm.start()].replace(' USING btree ',' ').replace('::text','')).lower()
+  return prefix+'where'+bool_ast_repr(bool_ast(wm.group(1)))
+ # No WHERE clause: just column list/function calls, not a boolean AND/OR tree
+ # (a genuine expression change here -- different function, args, column order
+ # -- still produces a text difference since order/commas are preserved).
+ v=re.sub(r'\s+','',v.replace(' USING btree ',' ').replace('::text','')).lower()
  return v.replace('(','').replace(')','')
 expected_index={}
 for stmt in index_texts:
@@ -155,7 +212,17 @@ def normalize_in_list(expr):
 def normalize_between(expr):
  return re.sub(r'(\w+)\s+BETWEEN\s+(\S+)\s+AND\s+(\S+)',lambda m:f"{m.group(1)} >= {m.group(2)} AND {m.group(1)} <= {m.group(3)}",expr,flags=re.I)
 def constraint_compact(v):
- v=normalize_between(normalize_in_list(v))
+ v=normalize_between(normalize_in_list(v)).strip()
+ # convalidated/NOT VALID is compared separately (via the live 'valid' field),
+ # not through this text -- pg_get_constraintdef appends a literal " NOT
+ # VALID" suffix for a not-yet-validated constraint, which must not affect
+ # whether the constraint's own EXPRESSION matches.
+ v=re.sub(r'\s+NOT\s+VALID\s*$','',v,flags=re.I).strip()
+ # Only CHECK's own predicate is a boolean AND/OR expression that needs
+ # structural (not blanket-paren-stripped) comparison; PRIMARY KEY/UNIQUE/
+ # FOREIGN KEY clauses are column/action lists, handled by the plain compact.
+ m=re.match(r'^CHECK\s*\((.*)\)$',v,re.S|re.I)
+ if m:return 'check('+bool_ast_repr(bool_ast(m.group(1)))+')'
  v=re.sub(r'::\w+','',v)
  return re.sub(r'\s+','',v).lower().replace('(','').replace(')','')
 
@@ -210,7 +277,9 @@ for name in dict(re.findall(r'CREATE (?:OR REPLACE )?FUNCTION ([\w.]+)\(.*?AS \$
   typepart=re.split(r'\bDEFAULT\b',typepart,flags=re.I)[0].strip()
   arg_types.append(norm_type(typepart))
  schema,fname=name.split('.')
- functions_src[(schema,fname)]={'body':body,'arg_types':arg_types,
+ volm=re.search(r'\b(IMMUTABLE|STABLE|VOLATILE)\b',rest)
+ volatility={'IMMUTABLE':'i','STABLE':'s','VOLATILE':'v'}[volm.group(1)] if volm else 'v'  # unspecified defaults to VOLATILE
+ functions_src[(schema,fname)]={'body':body,'arg_types':arg_types,'volatility':volatility,
   'secdef':'SECURITY DEFINER' in rest,'search_path':("search_path=''" in rest or 'search_path TO ' in rest)}
 
 if a.installed:
@@ -242,29 +311,38 @@ if a.installed:
  snapshot_sql=f"""
 BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY;
 SELECT jsonb_build_object(
- 'columns',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'table',c.relname,'column',a.attname,'type',format_type(a.atttypid,a.atttypmod),'notnull',a.attnotnull,'default',pg_get_expr(d.adbin,d.adrelid))),'[]')
+ 'columns',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'table',c.relname,'column',a.attname,'type',format_type(a.atttypid,a.atttypmod),'notnull',a.attnotnull,'default',pg_get_expr(d.adbin,d.adrelid),'identity',a.attidentity,'generated',a.attgenerated,'noncollation',a.attcollation<>0 AND a.attcollation<>t.typcollation)),'[]')
    FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+   JOIN pg_type t ON t.oid=a.atttypid
    LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
    WHERE (n.nspname||'.'||c.relname)=ANY({table_arr}) AND a.attnum>0 AND NOT a.attisdropped),
- 'rls',(SELECT coalesce(jsonb_object_agg(n.nspname||'.'||c.relname,c.relrowsecurity),'{{}}')
+ 'rls',(SELECT coalesce(jsonb_object_agg(n.nspname||'.'||c.relname,jsonb_build_object('enabled',c.relrowsecurity,'forced',c.relforcerowsecurity)),'{{}}')
    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE (n.nspname||'.'||c.relname)=ANY({rls_arr}) AND c.relkind='r'),
- 'indexes',(SELECT coalesce(jsonb_object_agg(n.nspname||'.'||ic.relname,pg_get_indexdef(i.indexrelid)),'{{}}')
+ 'indexes',(SELECT coalesce(jsonb_object_agg(n.nspname||'.'||ic.relname,jsonb_build_object('def',pg_get_indexdef(i.indexrelid),'valid',i.indisvalid)),'{{}}')
    FROM pg_index i JOIN pg_class ic ON ic.oid=i.indexrelid JOIN pg_namespace n ON n.oid=ic.relnamespace
    WHERE (n.nspname||'.'||ic.relname)=ANY({index_arr})),
  'triggers',(SELECT coalesce(jsonb_agg(jsonb_build_object('key',n.nspname||'.'||c.relname||'.'||t.tgname,'def',pg_get_triggerdef(t.oid),'enabled',t.tgenabled::text)),'[]')
    FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
    WHERE NOT t.tgisinternal AND (n.nspname||'.'||c.relname||'.'||t.tgname)=ANY({trigger_arr})),
- 'constraints',(SELECT coalesce(jsonb_agg(jsonb_build_object('table',n.nspname||'.'||c.relname,'def',pg_get_constraintdef(co.oid),'valid',co.convalidated)),'[]')
+ 'constraints',(SELECT coalesce(jsonb_agg(jsonb_build_object('table',n.nspname||'.'||c.relname,'def',pg_get_constraintdef(co.oid),'valid',co.convalidated,'noinherit',co.connoinherit)),'[]')
    FROM pg_constraint co JOIN pg_class c ON c.oid=co.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace
    WHERE (n.nspname||'.'||c.relname)=ANY({constraint_arr})),
  'rollout_default',(SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE n.nspname='inbox_control' AND c.relname='rollout' AND a.attname='serving_enabled'),
- 'functions',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',p.proname,'args',pg_get_function_identity_arguments(p.oid),'prosecdef',p.prosecdef,'search_path',(SELECT x FROM unnest(coalesce(p.proconfig,'{{}}'::text[])) x WHERE x LIKE 'search_path=%'),'prosrc',p.prosrc)),'[]')
+ 'functions',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',p.proname,'args',pg_get_function_identity_arguments(p.oid),'prosecdef',p.prosecdef,'provolatile',p.provolatile,'search_path',(SELECT x FROM unnest(coalesce(p.proconfig,'{{}}'::text[])) x WHERE x LIKE 'search_path=%'),'prosrc',p.prosrc)),'[]')
    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
    WHERE n.nspname=ANY({private_arr}) OR (n.nspname='public' AND p.proname=ANY({public_fn_arr}))),
  'extra_relations',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',c.relname,'kind',c.relkind)),'[]')
-   FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY({private_arr}) AND c.relkind IN ('r','v','m','S')),
+   FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY({private_arr}) AND c.relkind IN ('r','p','v','m','S','c','f')),
  'extra_types',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',t.typname)),'[]')
-   FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname=ANY({private_arr}) AND t.typtype IN ('d','e','r','c') AND t.typname NOT IN (SELECT relname FROM pg_class c2 JOIN pg_namespace n2 ON n2.oid=c2.relnamespace WHERE n2.nspname=n.nspname)),
+   FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+   -- b/d/e/r/m = base/domain/enum/range/multirange, i.e. an actual standalone CREATE TYPE.
+   -- 'c' (composite) is deliberately excluded here: a standalone composite type (CREATE
+   -- TYPE ... AS (...)) always has a matching pg_class row with relkind='c', which is
+   -- caught by extra_relations above -- including it here too would double-count it,
+   -- and naively including EVERY typtype='c' row here (without this exclusion) would
+   -- instead accidentally flag every ordinary TABLE's own implicit row type as "extra"
+   -- since every table also registers a typtype='c' pg_type entry for its row type.
+   WHERE n.nspname=ANY({private_arr}) AND t.typtype IN ('b','d','e','r','m') AND t.typcategory<>'A'),
  'extra_indexes',(SELECT coalesce(jsonb_agg(schemaname||'.'||indexname),'[]') FROM pg_indexes WHERE schemaname=ANY({private_arr})),
  'extra_triggers',(SELECT coalesce(jsonb_agg(n.nspname||'.'||c.relname||'.'||t.tgname),'[]') FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY({private_arr}) AND NOT t.tgisinternal),
  'extra_policies',(SELECT coalesce(jsonb_agg(schemaname||'.'||tablename||'.'||policyname),'[]') FROM pg_policies WHERE schemaname=ANY({private_arr})),
@@ -294,14 +372,18 @@ COMMIT;
   if row['prosrc']!=exp['body']:raise RuntimeError(f'Installed foundation body differs: {schema}.{fname}')
   if row['prosecdef']!=exp['secdef']:raise RuntimeError(f'SECURITY DEFINER drift on {schema}.{fname}: expected={exp["secdef"]} live={row["prosecdef"]}')
   if exp['search_path'] and row['search_path'] not in ('search_path=','search_path=""'):raise RuntimeError(f"search_path drift on {schema}.{fname}: expected empty search_path, live={row['search_path']!r}")
+  if row['provolatile']!=exp['volatility']:raise RuntimeError(f"Volatility drift on {schema}.{fname}: expected={exp['volatility']!r} live={row['provolatile']!r}")
  # any extra installed function (in scope) not declared by this candidate at all
  extra_fn=set(live_fn_by_key)-set(functions_src)
  if extra_fn:raise RuntimeError('Extra installed functions: '+str(sorted(extra_fn)))
 
- # Columns: name + type + nullability + DEFAULT (compared, not merely extracted).
+ # Columns: name + type + nullability + DEFAULT + identity/generated/collation
+ # (compared, not merely extracted). None of this candidate's columns use
+ # GENERATED/IDENTITY/explicit COLLATE, so the expectation is always "none of
+ # those" -- a column silently gaining one of them now fails.
  live_cols={}
  for row in snap['columns']:
-  live_cols.setdefault(f"{row['schema']}.{row['table']}",{})[row['column']]=(row['type'],row['notnull'],row['default'])
+  live_cols.setdefault(f"{row['schema']}.{row['table']}",{})[row['column']]=row
  for t in all_tables:
   cols={}
   if t in tables:
@@ -319,22 +401,31 @@ COMMIT;
   if t in tables and set(lc)!=set(cols):raise RuntimeError(f'Column set drift on {t}: expected={sorted(cols)} live={sorted(lc)}')
   for name,(etype,enn,edef) in cols.items():
    if name not in lc:raise RuntimeError(f'Added column missing: {t}.{name}')
-   ltype,lnn,ldef=lc[name]
-   if etype.lower()!=ltype.lower():raise RuntimeError(f'Column type drift {t}.{name}: expected {etype!r} live {ltype!r}')
-   if enn!=lnn:raise RuntimeError(f'Column nullability drift {t}.{name}: expected notnull={enn} live={lnn}')
-   if default_compact(edef)!=default_compact(ldef):raise RuntimeError(f'Column default drift {t}.{name}: expected {edef!r} live {ldef!r}')
+   row=lc[name]
+   if etype.lower()!=row['type'].lower():raise RuntimeError(f"Column type drift {t}.{name}: expected {etype!r} live {row['type']!r}")
+   if enn!=row['notnull']:raise RuntimeError(f"Column nullability drift {t}.{name}: expected notnull={enn} live={row['notnull']}")
+   if default_compact(edef)!=default_compact(row['default']):raise RuntimeError(f"Column default drift {t}.{name}: expected {edef!r} live {row['default']!r}")
+   if row['identity']!='':raise RuntimeError(f"Column identity drift {t}.{name}: expected no GENERATED ... AS IDENTITY, live attidentity={row['identity']!r}")
+   if row['generated']!='':raise RuntimeError(f"Column generated-expression drift {t}.{name}: expected no GENERATED ... STORED, live attgenerated={row['generated']!r}")
+   if row['noncollation'] is not False:raise RuntimeError(f"Column collation drift {t}.{name}: expected the type's default collation, live has an explicit non-default COLLATE")
 
- # RLS: every ENABLE ROW LEVEL SECURITY table must still have it enabled live.
+ # RLS: every ENABLE ROW LEVEL SECURITY table must still have it enabled live,
+ # and FORCE ROW LEVEL SECURITY must match source (none of this candidate's
+ # tables declare FORCE, so it must stay unforced -- a silently added FORCE
+ # would change owner/superuser bypass semantics unreviewed).
  for t in rls_tables:
   if t not in snap['rls']:raise RuntimeError('RLS table missing from snapshot: '+t)
-  if snap['rls'][t] is not True:raise RuntimeError('Row level security disabled on installed table: '+t)
+  if snap['rls'][t]['enabled'] is not True:raise RuntimeError('Row level security disabled on installed table: '+t)
+  if snap['rls'][t]['forced'] is not False:raise RuntimeError('Unexpected FORCE ROW LEVEL SECURITY on installed table: '+t)
 
- # Indexes: full pg_get_indexdef comparison.
+ # Indexes: full pg_get_indexdef comparison, plus indisvalid (a failed/aborted
+ # CONCURRENTLY build can leave an INVALID index that still matches by name+def).
  for name,(schema,ecompact) in expected_index.items():
   key=f"{schema}.{name}"
-  livedef=snap['indexes'].get(key)
-  if not livedef:raise RuntimeError('Installed index missing: '+name)
-  if index_compact(livedef)!=ecompact:raise RuntimeError(f'Index definition drift: {name}\n  expected={ecompact}\n  live=    {index_compact(livedef)}')
+  live=snap['indexes'].get(key)
+  if not live:raise RuntimeError('Installed index missing: '+name)
+  if index_compact(live['def'])!=ecompact:raise RuntimeError(f"Index definition drift: {name}\n  expected={ecompact}\n  live=    {index_compact(live['def'])}")
+  if live['valid'] is not True:raise RuntimeError(f'Installed index is NOT VALID (failed/aborted build): {name}')
 
  # Triggers: full pg_get_triggerdef (timing/events/OF columns/table/function/args)
  # compared component-wise (Postgres reorders the OR-separated event list into its
@@ -366,13 +457,23 @@ COMMIT;
   if t in tables and len(expected_frags)!=len(rows):raise RuntimeError(f'Constraint count drift on {t}: expected={len(expected_frags)} live={len(rows)}\n  expected={expected_frags}\n  live={rows}')
   remaining=list(rows)
   for frag,valid in expected_frags:
-   # NOT VALID is a transient install-time property (e.g. the deferred
-   # inbound-revision constraint is intentionally validated after foundation
-   # locks release, per README) so it is not compared here; the constraint
-   # EXPRESSION/definition itself (exact match, not substring) is what matters.
+   # NOT VALID in source is only ever a transient install-time property (e.g.
+   # the deferred inbound-revision constraint is added NOT VALID and then
+   # intentionally VALIDATEd after foundation locks release, per README) --
+   # not a comparison against the source's own NOT VALID text. By the time
+   # verify.py --installed runs against the final installed state, EVERY
+   # constraint must be convalidated=true: a constraint re-added identical but
+   # NOT VALID (e.g. after dropping it, inserting rows that violate it, then
+   # re-adding NOT VALID to dodge the validation scan) must fail here.
    ec=constraint_compact(frag)
    hit=next((r for r in remaining if constraint_compact(r['def'])==ec),None)
    if hit is None:raise RuntimeError(f'Constraint definition drift on {t}: expected fragment not found live (exact match required): {frag!r} (live remaining={remaining})')
+   if hit['valid'] is not True:raise RuntimeError(f"Constraint not validated on {t}: {frag!r} is installed NOT VALID (convalidated={hit['valid']!r}); legacy-violating rows could be hiding behind it")
+   # connoinherit is not compared: Postgres sets it per constraint-type default
+   # (true for PRIMARY KEY/UNIQUE/FOREIGN KEY regardless of source DDL, since
+   # this codebase never uses table inheritance) rather than reflecting
+   # anything the source text controls -- captured in the snapshot for
+   # visibility but not asserted on.
    remaining.remove(hit)
 
  # Rollout config: the serving_enabled column DEFAULT must be false -- a changed
@@ -397,7 +498,7 @@ COMMIT;
  # the pre-existing shared app schema (hundreds of unrelated objects, plus other
  # already-merged inbox_-prefixed features this candidate explicitly does not
  # own per README) so it is deliberately NOT scanned for extras here.
- expected_relations={t for t in tables}
+ expected_relations={t for t in tables}|set(composite_types)
  live_relations={f"{r['schema']}.{r['name']}":r['kind'] for r in snap['extra_relations']}
  extra_rel=set(live_relations)-expected_relations
  if extra_rel:raise RuntimeError(f'Extra relations (table/view/matview/sequence) in private schemas: { {k:live_relations[k] for k in extra_rel} }')
@@ -415,7 +516,7 @@ COMMIT;
 
  if snap['replica_identity']!='f':raise RuntimeError('Projection replica identity drift')
  if snap['privilege_exposure']!=0:raise RuntimeError('Private helper exposed to browser/service roles')
- result={'foundation_sha256':digest,'installed_function_bodies':len(functions_src),'installed_tables':len(all_tables),'installed_indexes':len(expected_index),'installed_triggers':len(expected_triggers),'installed_constraints':sum(len(extract_constraints_for_table(t)) for t in constraint_tables),'installed_rls_tables':len(rls_tables),'private_schemas_scanned':len(private_schemas),'rollout_serving_default':rollout_expected,'private_helper_exposure_count':0,'replica_identity':'FULL','snapshot_isolation':'REPEATABLE READ, READ ONLY, single transaction','scope':'Read-only owned fixture catalog proof, definition-level (columns incl. defaults/RLS/indexes/trigger full defs/constraints incl. FK actions/extra-objects across all kinds/rollout-default/function signature+search_path) taken from one consistent snapshot, not merely name presence; excludes runtime throughput and production schema equivalence'}
+ result={'foundation_sha256':digest,'installed_function_bodies':len(functions_src),'installed_tables':len(all_tables),'installed_composite_types':len(composite_types),'installed_indexes':len(expected_index),'installed_triggers':len(expected_triggers),'installed_constraints':sum(len(extract_constraints_for_table(t)) for t in constraint_tables),'installed_rls_tables':len(rls_tables),'private_schemas_scanned':len(private_schemas),'rollout_serving_default':rollout_expected,'private_helper_exposure_count':0,'replica_identity':'FULL','snapshot_isolation':'REPEATABLE READ, READ ONLY, single transaction','scope':'Read-only owned fixture catalog proof, definition-level (columns incl. defaults/identity/generated/collation, RLS incl. FORCE, indexes incl. validity, trigger full defs, constraints incl. convalidated/FK actions, extra-objects across all relkinds/typtypes, rollout-default, function signature/search_path/volatility) taken from one consistent REPEATABLE READ snapshot, not merely name presence; excludes runtime throughput and production schema equivalence'}
  (P/'catalog-evidence.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
 else:
  print('Source syntax, pinned transforms and installation receipt hash verified')

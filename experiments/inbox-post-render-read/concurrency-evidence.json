@@ -1,7 +1,7 @@
 {
   "deadlock_victim": "acknowledgment",
   "aborted_acknowledgment_rollback_proved": true,
-  "at": "2026-09-14 04:22:13.091554+00",
+  "at": "2026-09-14 04:42:09.088825+00",
   "checks": [
     "held message prevents false completion; generation reset actually waits for acknowledgment FOR SHARE",
     "separate writer backdated arrival remains unread under old boundary",
