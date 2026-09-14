@@ -514,7 +514,13 @@ export function SendForSignatureDialog({
                     }
                   >
                     <Label htmlFor={`esign-merge-${field.name}`}>
-                      {field.name === "property_address" && selectedTemplate?.mergeFieldNames.includes("property_city") ? "Property street address" : field.label}
+                      {field.name === "property_address" && selectedTemplate?.mergeFieldNames.includes("property_city")
+                        ? "Property street address"
+                        : field.name === "seller_name" && selectedTemplate?.signerRoles.some((role) => role.name === "Seller 2")
+                          ? "Seller names as written in the agreement"
+                          : field.name === "legal_description" && selectedTemplate?.documentType === "novation_agreement"
+                            ? "Parcel ID / legal description"
+                            : field.label}
                     </Label>
                     {field.multiline ? (
                       <Textarea

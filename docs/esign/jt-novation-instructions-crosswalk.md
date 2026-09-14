@@ -18,11 +18,11 @@ Source: [What Paperwork Do You Need For Novation? transcript](https://drive.goog
 
 ## Current gaps to resolve before registration
 
-- The SANDRA draft and cleaned PDF currently support one Seller signature role. The lesson explicitly describes two sellers throughout the packet. A one-seller and two-seller signing path is needed rather than forcing one configuration onto every deal.
-- The sender field is named `legal_description`, while the lesson says to enter parcel ID in the purchase agreement description area. The UI should make the intended value clear and leave room for a full legal description if needed.
-- The master PDF has fixed special-stipulation bullets and no blank area for transaction-specific stipulations. The lesson expects optional deal-specific stipulations.
+- The draft now includes separate one-seller and two-seller PDFs and SANDRA supports both signer role layouts. Neither PDF has Dropbox Sign fields placed yet. Verify each signature and printed-name placement in every document before registration.
+- The sender field is named `legal_description`, while the lesson says to enter parcel ID in the purchase agreement description area. The draft UI labels it `Parcel ID / legal description` for novation. Confirm the entry has sufficient space in the rendered packet.
+- The cleaned PDFs now provide a blank additional-stipulations line and the sender UI has an optional `additional_terms` value. Its provider field placement and behavior still need verification.
 - The seller closing-cost contribution cap is now blank and fillable. The lesson does not say what amount to use.
 - The lesson does not discuss the printed 15-business-day extension, ten-day lead-paint inspection, one-time power language, 80-100% appraisal statement, 45-60-business-day EBP target, as-is term, buyer-pays-all-closing-costs term, or MLS/listing authorization. It cannot decide whether those legal terms should remain, change, or become fillable.
 - The lesson's suggested 60-day closing window and the printed EBP target of 45-60 **business** days use different time units. Do not equate them or silently make one a default for the other.
 
-Do not register or send the novation template until signer variants, repeated field placements, optional stipulations, and the printed legal terms are resolved and verified.
+Do not send the novation packet until repeated field placements, optional stipulations, signer assignments, and the printed legal terms are resolved and verified. Registration can be used as a non-sending verification step after Dropbox Sign fields are placed.

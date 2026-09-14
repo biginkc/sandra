@@ -510,3 +510,26 @@ it("selects and submits the novation packet's exact fields", async () => {
   expect(new Set(Object.keys(sent.mergeValues))).toEqual(new Set(ESIGN_NOVATION_FIELD_NAMES));
   expect(sent.mergeValues.seller_email).toBe("seller@example.com");
 });
+
+it("requires a separate second seller when the novation template has three roles", async () => {
+  const user = userEvent.setup();
+  const novation: TemplateOption = {
+    ...template,
+    id: "novation-two-sellers",
+    name: "Novation packet, two sellers",
+    documentType: "novation_agreement",
+    signerRoles: [
+      { name: "Seller", order: 0 },
+      { name: "Seller 2", order: 1 },
+      { name: "Buyer", order: 2 },
+    ],
+    mergeFieldNames: ESIGN_NOVATION_FIELD_NAMES,
+  };
+  const api = actions({ ...preflight, templates: [novation] });
+  render(<SendForSignature propertyId="property-1" initialBlockers={[]} {...api} />);
+  await user.click(screen.getByTestId("send-for-signature-trigger"));
+  expect(screen.getByLabelText("Seller names as written in the agreement")).toBeInTheDocument();
+  expect(within(screen.getByTestId("esign-signer-1")).getByLabelText("Name")).toHaveValue("");
+  expect(within(screen.getByTestId("esign-signer-2")).getByLabelText("Name")).toHaveValue("");
+  expect(screen.getByRole("button", { name: "Send for signature" })).toBeDisabled();
+});

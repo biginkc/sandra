@@ -48,7 +48,7 @@ export const ESIGN_NOVATION_FIELD_NAMES = [
   "access_days_per_week", "access_hours_per_visit", "offer_expiration",
   "acceptance_date", "buyer_phone", "seller_phone", "buyer_email",
   "seller_email", "closing_agent_phone", "closing_agent_address",
-  "attorney_in_fact", "release_date",
+  "attorney_in_fact", "release_date", "additional_terms",
 ] as const;
 
 export const ESIGN_FIELD_SCHEMAS = [
@@ -74,6 +74,12 @@ export const ESIGN_TEMPLATE_TITLE_MAX_LENGTH = 160;
 export const ESIGN_TEMPLATE_SIGNER_ROLES = [
   { name: "Seller", order: 0 },
   { name: "Buyer", order: 1 },
+] as const;
+
+export const ESIGN_NOVATION_TWO_SELLER_ROLES = [
+  { name: "Seller", order: 0 },
+  { name: "Seller 2", order: 1 },
+  { name: "Buyer", order: 2 },
 ] as const;
 
 export type EsignMergeFieldName = (typeof ESIGN_RESIDENTIAL_FIELD_NAMES)[number] | (typeof ESIGN_NOVATION_FIELD_NAMES)[number];

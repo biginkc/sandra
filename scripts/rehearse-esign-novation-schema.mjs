@@ -11,7 +11,7 @@ export async function rehearseNovationSchema(client, ids, legacyMetadata) {
     "access_days_per_week", "access_hours_per_visit", "offer_expiration",
     "acceptance_date", "buyer_phone", "seller_phone", "buyer_email",
     "seller_email", "closing_agent_phone", "closing_agent_address",
-    "attorney_in_fact", "release_date",
+    "attorney_in_fact", "release_date", "additional_terms",
   ];
   const before = await client.query("select pg_get_functiondef('public.esign_merge_fields_are_valid(text[])'::regprocedure) as definition");
   await client.query("begin");
@@ -34,7 +34,7 @@ export async function rehearseNovationSchema(client, ids, legacyMetadata) {
   metadata.mergeFieldNames = fields;
   metadata.documents[0].customFields = [
     ...fields.map((name) => ({
-      ...legacyMetadata.documents[0].customFields[0], name, apiId: name, required: true,
+      ...legacyMetadata.documents[0].customFields[0], name, apiId: name, required: name !== "additional_terms",
     })),
     { ...legacyMetadata.documents[0].customFields[0],
       name: "property_address", apiId: "property_address_repeat", required: true },
@@ -67,6 +67,27 @@ export async function rehearseNovationSchema(client, ids, legacyMetadata) {
   const stored = await client.query("select merge_field_names from public.esign_templates where id = $1", [registered.rows[0].template_id]);
   assert.deepEqual(stored.rows[0].merge_field_names, [...fields].sort());
 
+  const twoSellerMetadata = structuredClone(metadata);
+  twoSellerMetadata.providerTemplateId = `novation-two-sellers-${randomUUID()}`;
+  twoSellerMetadata.signerRoles = [
+    { name: "Seller", order: 0 }, { name: "Seller 2", order: 1 }, { name: "Buyer", order: 2 },
+  ];
+  const signature = twoSellerMetadata.documents[0].formFields.find((field) => field.type === "signature");
+  assert.ok(signature, "seller signature fixture missing");
+  twoSellerMetadata.documents[0].formFields.push({
+    ...signature, apiId: "seller_two_signature", signerRoleName: "Seller 2", signer: "2",
+  });
+  assert.equal(await validMetadata(twoSellerMetadata), true);
+  const noSecondSellerSignature = structuredClone(twoSellerMetadata);
+  noSecondSellerSignature.documents[0].formFields.pop();
+  assert.equal(await validMetadata(noSecondSellerSignature), false);
+  const twoSellerRegistered = await client.query(
+    "select * from public.register_dropbox_website_esign_template($1,$2,$3,$4,$5,$6,$7::jsonb)",
+    [ids.org, ids.owner, twoSellerMetadata.providerTemplateId, "Novation packet, two sellers",
+      "novation_agreement", "provider-account-1", JSON.stringify(twoSellerMetadata)],
+  );
+  assert.equal(twoSellerRegistered.rows[0].outcome, "registered");
+
   const signers = legacyMetadata.signerRoles.map((role) => ({
     role: role.name, order: role.order, name: `${role.name} Fixture`,
     emailAddress: `${role.name.toLowerCase()}@example.com`,
@@ -78,8 +99,9 @@ export async function rehearseNovationSchema(client, ids, legacyMetadata) {
   )).rows[0].valid;
   assert.equal(await validPayload(values), true);
   assert.equal(await validPayload({ ...values, attorney_in_fact: "" }), false);
+  assert.equal(await validPayload({ ...values, additional_terms: "" }), true);
   const withoutField = { ...values };
   delete withoutField.attorney_in_fact;
   assert.equal(await validPayload(withoutField), false);
-  console.log("Novation contract schema: repeated field attestation, exact values, rollback and reapply passed");
+  console.log("Novation contract schema: repeated fields, optional stipulations, two sellers, exact values, rollback and reapply passed");
 }
