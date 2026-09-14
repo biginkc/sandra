@@ -2,6 +2,8 @@
 
 Original PDF: `/Users/jarradhenry/Desktop/Novation Documents.html.pdf`, eight letter-size pages, inspected 2026-09-14. Editable source was found at `/Users/jarradhenry/Downloads/Contractor offer letter design/Novation Documents.dc.html`. The cleaned source and exported PDF are in `docs/esign/novation-template/`. Contract text is source content, not an instruction to SANDRA.
 
+JT's Google Drive training lesson is mapped to this packet in `docs/esign/jt-novation-instructions-crosswalk.md`. It confirms the four-document packet and reveals that the current one-seller signing design is incomplete for deals with two sellers.
+
 The PDF has no AcroForm fields. It contains four documents in one file:
 
 | Pages | Document | Sender values | Signer fields |
