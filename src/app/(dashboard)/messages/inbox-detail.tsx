@@ -59,7 +59,7 @@ type Props = {
   onBackToList?: () => void;
   nowMs?: number;
   onRevalidate?: () => void;
-  onReplySent?: (messageId: string) => void;
+  onReplySent?: (messageId: string, threadId: string) => void;
   revalidationPending?: boolean;
 };
 
@@ -945,7 +945,7 @@ export function InboxDetail({
                   phoneUnavailableMessage={replyPhoneUnavailableMessage}
                   routeRefreshPending={replyRefreshPending}
                   suspended={isSmsRestricted}
-                  onSent={onReplySent}
+                  onSent={onReplySent ? (messageId) => onReplySent(messageId, data.threadId) : undefined}
                 />
               </div>
             ) : !isSmsRestricted ? (

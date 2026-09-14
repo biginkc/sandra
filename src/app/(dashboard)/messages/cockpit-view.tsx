@@ -137,16 +137,19 @@ export function CockpitView({
   const refreshInbox = inbox.refresh;
   // A send can finish after the operator switched conversations (or the
   // Unread scope changed). The composer that started it captured an older
-  // callback, so always dispatch through the refreshers of the current scope.
-  const latestRefresh = useRef({ refreshSelectedDetail, refreshInbox });
+  // callback, so dispatch through the refreshers of the current scope. The
+  // inbox always reconciles; detail refreshes only when the sent thread is
+  // still the selected one, so a late A result never refetches B.
+  const latestRefresh = useRef({ refreshSelectedDetail, refreshInbox, selectedThreadId });
   useLayoutEffect(() => {
     // Layout timing: the ref must point at the new scope before any send
     // completion can observe the committed selection.
-    latestRefresh.current = { refreshSelectedDetail, refreshInbox };
-  }, [refreshSelectedDetail, refreshInbox]);
-  const handleReplySent = useCallback(() => {
-    latestRefresh.current.refreshSelectedDetail();
-    latestRefresh.current.refreshInbox();
+    latestRefresh.current = { refreshSelectedDetail, refreshInbox, selectedThreadId };
+  }, [refreshSelectedDetail, refreshInbox, selectedThreadId]);
+  const handleReplySent = useCallback((_messageId: string, sentThreadId: string) => {
+    const latest = latestRefresh.current;
+    if (sentThreadId === latest.selectedThreadId) latest.refreshSelectedDetail();
+    latest.refreshInbox();
     setQueueStatsRefreshSignal(value => value + 1);
   }, []);
   if (lastServerQueueStatsFailed !== queueStatsFailed) {

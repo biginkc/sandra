@@ -286,9 +286,10 @@ describe("<CockpitView /> URL deep-linking", () => {
     vi.mocked(sendSmsFromLead).mockImplementationOnce(() => new Promise(resolve => { finishSend = resolve; }));
     const threads = [makeThread({ contactId: "a", unreadCount: 1 }), makeThread({ contactId: "b", unreadCount: 1 })];
     const inboxRefreshCalls: string[] = [];
+    let bDetailFetches = 0;
     vi.mocked(fetch).mockImplementation((input) => {
       const url = String(input);
-      if (url.includes("thread-detail?thread=conv-b")) return Promise.resolve({ ok: true, json: async () => ({ detail: makeDetail("b", "Message B") }) } as Response);
+      if (url.includes("thread-detail?thread=conv-b")) { bDetailFetches += 1; return Promise.resolve({ ok: true, json: async () => ({ detail: makeDetail("b", "Message B") }) } as Response); }
       if (url.includes("inbox-refresh?")) {
         inboxRefreshCalls.push(url);
         return Promise.resolve({ ok: true, json: async () => ({
@@ -307,9 +308,12 @@ describe("<CockpitView /> URL deep-linking", () => {
     await screen.findByText("Message B");
     await waitFor(() => expect(inboxRefreshCalls.some(url => url.includes("thread=conv-b"))).toBe(true));
     const before = inboxRefreshCalls.length;
+    const bDetailBefore = bDetailFetches;
     await act(async () => finishSend({ ok: true, data: { outcome: { status: "sent", messageId: "sent-a", externalId: "test-provider" } } } as Awaited<ReturnType<typeof sendSmsFromLead>>));
     await waitFor(() => expect(inboxRefreshCalls.length).toBeGreaterThan(before));
     expect(inboxRefreshCalls[inboxRefreshCalls.length - 1]).toContain("thread=conv-b");
+    // A's late result must never refetch B's detail (B's scroll/draft stay put).
+    expect(bDetailFetches).toBe(bDetailBefore);
     expect(navigationMocks.refresh).not.toHaveBeenCalled();
   });
 
