@@ -16,11 +16,13 @@ doc-page:not(:defined){visibility:hidden}
 a{color:#D9634A;text-decoration:none}
 a:hover{color:#B84F38;text-decoration:underline}
 .fill{display:inline-block;border-bottom:1.5px solid #262220;min-width:60px;height:1.15em;vertical-align:baseline}
-.sec{font:800 24px 'Bricolage Grotesque',sans-serif;color:#262220;margin:0 0 7px}
-.body{font:400 15.5px/1.6 'Nunito Sans',sans-serif;color:#403A35;margin:0 0 14px}
+.sec{font:800 22px 'Bricolage Grotesque',sans-serif;color:#262220;margin:0 0 5px}
+.body{font:400 15px/1.52 'Nunito Sans',sans-serif;color:#403A35;margin:0 0 10px}
 .lbl{font:700 11px 'Nunito Sans',sans-serif;letter-spacing:.13em;text-transform:uppercase;color:#7A716A}
 .doctitle{font:800 34px/1.05 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;color:#262220;margin:0 0 10px;text-wrap:balance}
-.eyebrow{font:700 12px 'Nunito Sans',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:#D9634A;margin:18px 0 12px}
+.late-clauses .body{line-height:1.75;margin-bottom:16px}
+.late-clauses .sec{margin-top:6px}
+.eyebrow{font:700 12px 'Nunito Sans',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:#D9634A;margin:15px 0 9px}
 </style>
 </helmet>
 
@@ -31,8 +33,13 @@ a:hover{color:#B84F38;text-decoration:underline}
   <span style="font:700 11px 'Nunito Sans',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:#7A716A">Purchase &amp; sale · Novation package</span>
 </div>
 
-<div slot="footer" style="display:flex;align-items:center;justify-content:space-between;gap:20px;padding-top:9px;border-top:2.5px solid #262220;font:400 11px 'Nunito Sans',sans-serif;color:#7A716A">
+<div slot="footer" style="display:grid;grid-template-columns:1fr 2fr 1fr;align-items:center;gap:12px;padding-top:9px;border-top:2.5px solid #262220;font:400 10px 'Nunito Sans',sans-serif;color:#7A716A">
   <span>BMH Group</span>
+  <span style="display:flex;flex-wrap:wrap;justify-content:center;gap:4px 9px;text-align:center">
+    <a href="https://bmhgroupkc.com" style="color:#7A716A">bmhgroupkc.com</a>
+    <a href="tel:+18168920833" style="color:#7A716A">(816) 892-0833</a>
+  </span>
+  <span aria-hidden="true"></span>
 </div>
 
 <!-- ============ DOC 1: PURCHASE AND SALE AGREEMENT ============ -->
@@ -99,7 +106,7 @@ a:hover{color:#B84F38;text-decoration:underline}
 <div class="body"><span class="fill" style="min-width:200px"></span> is to close this transaction; contact information provided below.</div>
 
 <!-- ============ TITLE ============ -->
-<div class="eyebrow" style="color:#7A716A;margin-top:20px;break-before:page">Title</div>
+<div class="eyebrow" style="color:#7A716A;margin-top:20px">Title</div>
 
 <h2 class="sec">9. Warranty</h2>
 <p class="body">Seller warrants that, at the time of closing, Seller will convey good and marketable title to said Property by General Warranty Deed.</p>
@@ -118,6 +125,7 @@ a:hover{color:#B84F38;text-decoration:underline}
 <h2 class="sec">12. Binding effect, entire agreement, modification, assignment</h2>
 <p class="body">This agreement shall be for the benefit of, and be binding upon Buyer and Seller, their heirs, successors, and legal representatives. This Agreement constitutes the sole and entire agreement between the parties hereto. Buyer reserves the right to close escrow in the entity of its choosing.</p>
 
+<div class="late-clauses">
 <h2 class="sec">13. Survival of agreement</h2>
 <p class="body">All conditions or stipulations not fulfilled at the time of closing shall survive the closing until such time as the conditions or stipulations are fulfilled.</p>
 
@@ -141,6 +149,7 @@ a:hover{color:#B84F38;text-decoration:underline}
 <h2 class="sec">19. Consent of continued involvement</h2>
 <p class="body">Seller consents to the licensee's continued involvement as a buyer in the subject transaction. Buyers are licensed real estate professionals.</p>
 
+</div>
 <h2 class="sec" style="margin-top:8px;break-before:page">20. Exhibits and addenda</h2>
 <p class="body">All exhibits and/or addenda attached hereto, listed below, or referenced herein are made a part of this Agreement. If any such exhibit or addendum conflicts with any preceding paragraph, said exhibit or addendum shall control.</p>
 
