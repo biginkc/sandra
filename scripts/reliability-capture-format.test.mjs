@@ -16,5 +16,9 @@ test('preserves unsupported or malformed MIME values for exporter rejection', ()
 
 test('exporter aborts a read-only upgrade before it can create an empty database', async () => {
   const source = await readFile(new URL('./export-reliability-browser-capture.mjs', import.meta.url), 'utf8');
-  assert.match(source, /request\.onupgradeneeded\s*=\s*\(\)\s*=>\s*request\.transaction\?\.abort\(\)/);
+  assert.equal(
+    source.match(/request\.onupgradeneeded\s*=\s*\(\)\s*=>\s*request\.transaction\?\.abort\(\)/g)?.length,
+    2,
+    'both exporter database reads must abort upgrades',
+  );
 });

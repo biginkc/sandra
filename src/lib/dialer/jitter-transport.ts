@@ -1720,12 +1720,16 @@ export class JitterCallTransport implements CallTransport {
     this.qaCaptureHandle = null;
     this.qaCaptureAudio = null;
     this.qaCaptureGeneration += 1;
+    const continuationGeneration = this.qaCaptureGeneration;
     this.reliabilityTiming?.detach();
     void capture.stop().then(() => {
       if (
+        this.qaCaptureGeneration === continuationGeneration &&
         this.currentCall === call &&
         this.callId === callId &&
         this.remoteAudio === audio &&
+        this.qaCaptureHandle === null &&
+        this.qaCaptureAudio === null &&
         !this.terminal &&
         !this.hangupRequested &&
         this.qaCaptureConfig
@@ -1788,6 +1792,9 @@ export class JitterCallTransport implements CallTransport {
       };
     }
     this.hangupRequested = true;
+    // Invalidate and stop QA capture before SDK hangup can detach the media
+    // element and emit teardown pause events.
+    this.stopQaBrowserCapture();
     if (!this.callId && this.startPromise) this.startOutcomeAmbiguous = true;
     this.expectedIncoming = false;
     this.terminalAt ??= this.dependencies.now();

@@ -138,6 +138,9 @@ try {
         const base64 = await page.evaluate(async ({ runId, callId, segment, sequence }) => {
           const database = await new Promise((ok, fail) => {
             const request = indexedDB.open('sandra-reliability-capture-v2', 3);
+            // A disappearing or uninitialized database must not be recreated
+            // by this per-chunk read; leave initialization to the app.
+            request.onupgradeneeded = () => request.transaction?.abort();
             request.onerror = () => fail(request.error ?? new Error('IndexedDB open failed'));
             request.onsuccess = () => ok(request.result);
           });
