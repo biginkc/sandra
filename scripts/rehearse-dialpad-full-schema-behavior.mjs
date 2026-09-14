@@ -18,7 +18,7 @@ const receipt={scope:'Genuine local full-schema synthetic behavior; rollback onl
 let step='connect';
 try {
  await client.connect();await client.query('begin');
- const org='00000000-0000-0000-0000-000000000bbb',foreign=randomUUID(),rep=randomUUID(),owner=randomUUID(),contact=randomUUID(),lead=randomUUID(),intent=randomUUID();
+ const org=randomUUID(),foreign=randomUUID(),rep=randomUUID(),owner=randomUUID(),contact=randomUUID(),lead=randomUUID(),intent=randomUUID();
  step='real constraints seed';
  await client.query("insert into organizations(id,name) values($1,$3),($2,$4) on conflict(id) do nothing",[org,foreign,'Dialpad local fixture '+org,'Dialpad foreign fixture '+foreign]);
  await client.query("insert into auth.users(id,email,raw_user_meta_data) values($1,$2,$3)",[rep,'dialpad-'+rep+'@example.invalid',{fixture_owner:'dialpad-full-schema-local'}]);
@@ -83,6 +83,13 @@ try {
  await client.query('select fn_finalize_acquisition_attempt($1)',[wrap]);await client.query('select fn_finalize_acquisition_attempt($1)',[wrap]);await client.query('reset role');await apply(ended);
  const attempts=(await client.query('select outcome,actor_user_id from acquisition_attempts where org_id=$1',[org])).rows;assert.equal(attempts.length,1);assert.equal(attempts[0].outcome,'reached');assert.equal(attempts[0].actor_user_id,rep);
  receipt.checks.push('rep-selected wrap repeated twice plus replay leaves one attempt and immutable actor');
+ step='recording claim waits for intent link';
+ await client.query("insert into dialpad_recording_artifacts(org_id,provider_call_id,provider_recording_id,recording_kind,status) values($1,$2,'delayed-rehearsal-segment','admincallrecording','pending')",[org,body.call_id]);
+ await client.query("update dialpad_detail_api_budget set next_allowed_at='-infinity' where org_id=$1",[org]);
+ assert.equal((await asService('select count(*)::int n from fn_claim_dialpad_recording($1,180)',[org])).rows[0].n,0);
+ await client.query("update dialpad_recording_artifacts set intent_id=$1 where org_id=$2 and provider_recording_id='delayed-rehearsal-segment'",[intent,org]);
+ assert.equal((await asService('select count(*)::int n from fn_claim_dialpad_recording($1,180)',[org])).rows[0].n,1);
+ receipt.checks.push('early recording remains pending until verified intent link, then becomes claimable');
  step='wrong org receipt';const bad=await store({...body,event_timestamp:now+1},foreign);await client.query('savepoint bad_org');await client.query('set local role service_role');
  await assert.rejects(client.query('select fn_record_dialpad_acquisition_call_start($1,$2)',[intent,bad]),/DIALPAD/);await client.query('rollback to savepoint bad_org');await client.query('reset role');
  assert.equal((await client.query('select count(*)::int n from acquisition_attempts where org_id=$1',[foreign])).rows[0].n,0);receipt.checks.push('wrong-org receipt rejected with zero foreign credit');
