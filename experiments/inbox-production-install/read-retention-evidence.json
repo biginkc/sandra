@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "checks": [
+    "total child and parent row budget",
+    "partial expired receipt cleanup resumes",
+    "future expiry preserved",
+    "future execution deadline preserved",
+    "seven-day grace preserved",
+    "actual held boundary skipped then deleted after release"
+  ],
+  "scope": "Owned synthetic candidate; operations and safety receipts untouched"
+}

@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "checks": [
+    "1001 expired unknown cursors require two bounded calls",
+    "active cursor preserved",
+    "seven-day grace cursor preserved",
+    "probe entirely rolled back"
+  ]
+}

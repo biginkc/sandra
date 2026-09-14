@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-production-install/experiments/inbox-production-install/maintenance-test.py", line 13, in <module>
+    baseline=sql(f"""BEGIN;
+    INSERT INTO organizations(id,name) VALUES('{o}','Baseline proof');
+    ...<13 lines>...
+    END $$;
+    SELECT 'historical_epoch_and_preservation_passed';ROLLBACK;""")
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-production-install/experiments/inbox-production-install/fixture_db.py", line 11, in sql
+    if not retry or not any(code in r.stderr for code in ['40P01','40001','55P03']) or attempt==2:raise RuntimeError(r.stderr)
+                                                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: ERROR:  23514: new row for relation "memberships" violates check constraint "memberships_role_check"
+DETAIL:  Failing row contains (b72bdde1-8a73-4175-9059-85a2ea63bd21, bdbe7bb5-9229-4bd9-be81-b0f167a84e34, 105d9c90-6ae9-4450-af17-be478c5a3c21, admin, 2026-09-13 22:41:07.900275+00, active, {}, null, null, null, f, 0).
+SCHEMA NAME:  public
+TABLE NAME:  memberships
+CONSTRAINT NAME:  memberships_role_check
+LOCATION:  ExecConstraints, execMain.c:2033
