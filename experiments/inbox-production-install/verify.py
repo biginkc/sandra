@@ -107,6 +107,31 @@ all_tables=sorted(set(tables)|set(added_cols.keys()))
 rls_tables=sorted(set(re.findall(r'ALTER TABLE ([\w.]+) ENABLE ROW LEVEL SECURITY',s)))
 composite_types=sorted(set(re.findall(r'CREATE TYPE ([\w.]+) AS \(',s)))
 
+def parse_composite_attr(seg):
+ # A CREATE TYPE ... AS (...) attribute is just "name type" -- composite type
+ # members cannot carry NOT NULL, DEFAULT, or table-style constraints at all
+ # (Postgres rejects those in this position), so there is no boundary-keyword
+ # split to do here the way parse_column needs for a CREATE TABLE column.
+ seg=seg.strip();toks=seg.split(None,1)
+ name=toks[0];type_txt=norm_type(toks[1] if len(toks)>1 else '')
+ return name,type_txt
+
+# All this candidate's composite-type attributes, keyed the same way table
+# columns are ((name)->(type,notnull,default)) so they can share the exact
+# comparison path below (notnull/default are always False/None: a composite
+# type attribute has neither). Every relation this snapshot must check the
+# real attributes of -- tables (existing behaviour) AND composite types (the
+# gap this closes) -- is unioned into one name set for the live-catalog query.
+composite_cols={}
+for ctype in composite_types:
+ body=find_paren_body(s,r'CREATE TYPE '+re.escape(ctype)+r' AS\s*\(')
+ if body is None:raise RuntimeError('Could not locate CREATE TYPE body in source: '+ctype)
+ cols={}
+ for seg in [x.strip() for x in split_top_level(body) if x.strip()]:
+  name,type_txt=parse_composite_attr(seg)
+  cols[name]=(type_txt,False,None)
+ composite_cols[ctype]=cols
+
 def load_index_manifest(name):
  path=P/'generated'/name
  return json.loads(path.read_text()) if path.exists() else []
@@ -286,7 +311,14 @@ if a.installed:
  from fixture_db import guard,sql
  guard()
  private_arr='ARRAY['+','.join("'"+x+"'" for x in private_schemas)+']::text[]'
- table_keys=sorted(set(all_tables))
+ # Composite types (pg_class.relkind='c') go into the SAME name-matched columns
+ # snapshot as tables -- the query below matches purely by qualified relation
+ # name, so a composite type's own pg_class row (relkind='c') is picked up
+ # exactly like a table's (relkind='r'); it is NOT reached via pg_type.typtype,
+ # which is the trap documented at the extra_types query below (that generic
+ # typtype='c' filter would ALSO match every ordinary table's implicit row
+ # type). This is a plain name-set union, so no such double-match risk here.
+ table_keys=sorted(set(all_tables)|set(composite_types))
  table_arr='ARRAY['+','.join("'"+t+"'" for t in table_keys)+']::text[]' if table_keys else "ARRAY[]::text[]"
  index_keys=sorted(f"{schema}.{name}" for name,(schema,_) in expected_index.items())
  index_arr='ARRAY['+','.join("'"+x+"'" for x in index_keys)+']::text[]' if index_keys else "ARRAY[]::text[]"
@@ -311,7 +343,7 @@ if a.installed:
  snapshot_sql=f"""
 BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY;
 SELECT jsonb_build_object(
- 'columns',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'table',c.relname,'column',a.attname,'type',format_type(a.atttypid,a.atttypmod),'notnull',a.attnotnull,'default',pg_get_expr(d.adbin,d.adrelid),'identity',a.attidentity,'generated',a.attgenerated,'noncollation',a.attcollation<>0 AND a.attcollation<>t.typcollation)),'[]')
+ 'columns',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'table',c.relname,'column',a.attname,'type',format_type(a.atttypid,a.atttypmod),'notnull',a.attnotnull,'default',pg_get_expr(d.adbin,d.adrelid),'identity',a.attidentity,'generated',a.attgenerated,'noncollation',a.attcollation<>0 AND a.attcollation<>t.typcollation,'attnum',a.attnum)),'[]')
    FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
    JOIN pg_type t ON t.oid=a.atttypid
    LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
@@ -384,7 +416,7 @@ COMMIT;
  live_cols={}
  for row in snap['columns']:
   live_cols.setdefault(f"{row['schema']}.{row['table']}",{})[row['column']]=row
- for t in all_tables:
+ for t in sorted(set(all_tables)|set(composite_types)):
   cols={}
   if t in tables:
    body=find_paren_body(s,r'CREATE TABLE (?:IF NOT EXISTS )?'+re.escape(t)+r'\s*\(')
@@ -396,9 +428,24 @@ COMMIT;
   for coldef in added_cols.get(t,[]):
    name,type_txt,notnull,default=parse_column(coldef)
    cols[name]=(type_txt,notnull,default)
+  if t in composite_types:cols=dict(composite_cols[t])
   lc=live_cols.get(t)
   if lc is None:raise RuntimeError('Installed table missing: '+t)
-  if t in tables and set(lc)!=set(cols):raise RuntimeError(f'Column set drift on {t}: expected={sorted(cols)} live={sorted(lc)}')
+  # Attribute-set drift (added or dropped) is asserted for BOTH ordinary
+  # tables (existing behaviour) and composite types (the gap this closes) --
+  # a composite type declares its complete attribute list in one CREATE TYPE
+  # statement (no ALTER-added columns), so its expected set is always exact,
+  # the same way a plain CREATE TABLE's is.
+  if (t in tables or t in composite_types) and set(lc)!=set(cols):raise RuntimeError(f'Column set drift on {t}: expected={sorted(cols)} live={sorted(lc)}')
+  if t in composite_types:
+   # A composite type's attribute order is part of its identity (it is the
+   # binary layout other code reads by position), unlike an ordinary table
+   # column's order which this verifier does not otherwise assert -- so only
+   # composite types get an explicit attnum-order check, keyed off the exact
+   # declaration order in the source CREATE TYPE statement.
+   expected_order=[name for name in cols]
+   live_order=sorted(lc,key=lambda n:lc[n]['attnum'])
+   if live_order!=expected_order:raise RuntimeError(f'Attribute order drift on {t}: expected={expected_order} live={live_order}')
   for name,(etype,enn,edef) in cols.items():
    if name not in lc:raise RuntimeError(f'Added column missing: {t}.{name}')
    row=lc[name]
