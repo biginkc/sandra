@@ -90,6 +90,27 @@ no-regression observations recorded after deployment, and independent Astra
 approval. Status labels alone are rejected. The outbox is persisted and deduplicated for a future notifier;
 this package intentionally has no Slack sender.
 
+GitHub engineering-queue publication is controller-only and dry-run by
+default. Preview one candidate without changing state:
+
+    python3 scripts/sentry-repair/cli.py --db /var/lib/sandra/repair.db \
+      github-publish --issue 123
+
+An explicit publisher invocation requires a controller-only token in the
+environment variable named by `--token-env` (default `GITHUB_TOKEN`) and
+never accepts a token as a command-line argument:
+
+    GITHUB_TOKEN=... python3 scripts/sentry-repair/cli.py \
+      --db /var/lib/sandra/repair.db github-publish --issue 123 --execute
+
+The publisher writes a generation-keyed GitHub outbox row and source link in
+one transaction, searches for the exact body marker before creating an issue,
+and validates the marker, labels, numeric issue number, and HTTPS URL on every
+readback. A lost or malformed create response changes the job to
+`create_unknown`; only a later marker reconciliation can close it, so a
+transport retry never blindly creates a duplicate. GitHub API error bodies are
+discarded and credentials are held only by the controller process.
+
 The schedule helper evaluates America/Chicago local day/night boundaries:
 15-minute slots from 06:00 inclusive through 21:00 exclusive, and 30-minute
 slots overnight. Slot IDs are UTC instants, so repeated DST-fallback wall times

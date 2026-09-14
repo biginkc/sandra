@@ -281,6 +281,32 @@ class RepairStore:
                 PRIMARY KEY (organization,project,environment,issue_number,generation),
                 UNIQUE(repository, github_issue_number)
             );
+            CREATE TABLE IF NOT EXISTS github_outbox (
+                dedupe_key TEXT PRIMARY KEY,
+                organization TEXT NOT NULL,
+                project TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                issue_number INTEGER NOT NULL,
+                generation INTEGER NOT NULL,
+                repository TEXT NOT NULL,
+                action TEXT NOT NULL CHECK(action IN ('create','reconcile')),
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN (
+                    'pending','publishing','create_unknown','published','failed'
+                )),
+                lease_owner TEXT,
+                lease_until REAL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at REAL,
+                github_issue_number INTEGER,
+                github_html_url TEXT,
+                last_error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(organization,project,environment,issue_number,generation,repository)
+            );
+            CREATE INDEX IF NOT EXISTS github_outbox_claimable
+              ON github_outbox(status, lease_until, created_at, dedupe_key);
             CREATE TABLE IF NOT EXISTS scheduler_slots (
                 slot_id TEXT PRIMARY KEY,
                 scheduled_at REAL NOT NULL,
@@ -332,6 +358,12 @@ class RepairStore:
             self.db.execute(
                 "ALTER TABLE deployments ADD COLUMN ancestry_verified INTEGER NOT NULL DEFAULT 0"
             )
+        github_outbox_columns = {
+            row["name"]
+            for row in self.db.execute("PRAGMA table_info(github_outbox)").fetchall()
+        }
+        if github_outbox_columns and "next_attempt_at" not in github_outbox_columns:
+            self.db.execute("ALTER TABLE github_outbox ADD COLUMN next_attempt_at REAL")
         for row in self.db.execute(
             "SELECT attempt_id,evidence_snapshot_json FROM reviews "
             "WHERE evidence_snapshot_json IS NOT NULL"
@@ -529,6 +561,399 @@ class RepairStore:
                  AND links.issue_number=? AND links.generation=issues.generation""",
             (organization, project, environment, issue_number),
         ).fetchone()
+
+    def get_github_outbox(self, dedupe_key: str) -> sqlite3.Row | None:
+        """Return one GitHub publication job without changing its lifecycle."""
+
+        if not isinstance(dedupe_key, str) or not dedupe_key.strip():
+            raise ValueError("dedupe_key must be a non-empty string")
+        return self.db.execute(
+            "SELECT * FROM github_outbox WHERE dedupe_key=?", (dedupe_key,)
+        ).fetchone()
+
+    def enqueue_github_outbox(
+        self,
+        organization: str,
+        project: str,
+        environment: str,
+        issue_number: int,
+        *,
+        generation: int,
+        repository: str,
+        dedupe_key: str,
+        action: str,
+        payload: Mapping[str, Any],
+        now: float | None = None,
+    ) -> bool:
+        """Atomically persist a generation link and GitHub publication job.
+
+        The caller must provide an already-sanitized payload.  This method is
+        deliberately unaware of GitHub credentials and never performs I/O.
+        A primary key and a source-generation uniqueness constraint make
+        repeated scheduler polls and concurrent publishers converge on one
+        job.
+        """
+
+        self._issue_key(organization, project, environment, issue_number)
+        if not isinstance(generation, int) or isinstance(generation, bool) or generation <= 0:
+            raise ValueError("generation must be a positive integer")
+        if action not in {"create", "reconcile"}:
+            raise ValueError("GitHub outbox action must be create or reconcile")
+        if not isinstance(repository, str) or not repository.strip():
+            raise ValueError("repository must be non-empty")
+        if not isinstance(dedupe_key, str) or not dedupe_key.strip():
+            raise ValueError("dedupe_key must be non-empty")
+        if not isinstance(payload, Mapping):
+            raise ValueError("GitHub outbox payload must be an object")
+        current = self._now(now)
+        payload_json = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"))
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            issue = self.db.execute(
+                """SELECT generation FROM issues
+                   WHERE organization=? AND project=? AND environment=? AND issue_number=?""",
+                (organization, project, environment, issue_number),
+            ).fetchone()
+            if issue is None:
+                raise StateError("cannot enqueue GitHub issue before Sentry intake")
+            if int(issue["generation"]) != generation:
+                raise StateError("GitHub outbox generation is not current")
+            link = self.db.execute(
+                """SELECT * FROM github_links
+                   WHERE organization=? AND project=? AND environment=?
+                     AND issue_number=? AND generation=? AND repository=?""",
+                (organization, project, environment, issue_number, generation, repository),
+            ).fetchone()
+            if link is not None and link["status"] == "created":
+                self.db.execute("COMMIT")
+                return False
+            if link is None:
+                self.db.execute(
+                    """INSERT INTO github_links(
+                       organization,project,environment,issue_number,generation,repository,
+                       status,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?, ?, ?)""",
+                    (
+                        organization,
+                        project,
+                        environment,
+                        issue_number,
+                        generation,
+                        repository,
+                        "pending_create" if action == "create" else "create_unknown",
+                        current,
+                        current,
+                    ),
+                )
+            elif action == "reconcile" and link["status"] != "create_unknown":
+                self.db.execute(
+                    "UPDATE github_links SET status='create_unknown',updated_at=? WHERE organization=? AND project=? AND environment=? AND issue_number=? AND generation=? AND repository=?",
+                    (current, organization, project, environment, issue_number, generation, repository),
+                )
+            before = self.db.total_changes
+            self.db.execute(
+                """INSERT OR IGNORE INTO github_outbox(
+                   dedupe_key,organization,project,environment,issue_number,generation,
+                   repository,action,payload_json,status,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    dedupe_key,
+                    organization,
+                    project,
+                    environment,
+                    issue_number,
+                    generation,
+                    repository,
+                    action,
+                    payload_json,
+                    "pending" if action == "create" else "create_unknown",
+                    current,
+                    current,
+                ),
+            )
+            inserted = self.db.total_changes > before
+            self.db.execute("COMMIT")
+            return inserted
+        except Exception:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def claim_github_outbox(
+        self, *, owner: str, lease_seconds: int = 120, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """Claim one publication job, fencing abandoned publishers.
+
+        A create job whose publisher lease expired is moved to
+        ``create_unknown`` before another publisher can claim it.  This is
+        the critical exactly-once boundary: a crashed process cannot lead to
+        a blind second POST.
+        """
+
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("publisher owner must be non-empty")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        current = self._now(now)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            expired = self.db.execute(
+                """SELECT * FROM github_outbox
+                   WHERE status='publishing' AND lease_until IS NOT NULL AND lease_until<=?
+                   ORDER BY updated_at, dedupe_key LIMIT 1""",
+                (current,),
+            ).fetchone()
+            if expired is not None:
+                self.db.execute(
+                    """UPDATE github_outbox SET status='create_unknown',lease_owner=NULL,
+                       lease_until=NULL,next_attempt_at=NULL,last_error=?,updated_at=? WHERE dedupe_key=?""",
+                    ("publisher lease expired; marker reconciliation required", current, expired["dedupe_key"]),
+                )
+                self.db.execute(
+                    """UPDATE github_links SET status='create_unknown',last_error=?,updated_at=?
+                       WHERE organization=? AND project=? AND environment=? AND issue_number=?
+                         AND generation=? AND repository=? AND status IN ('pending_create','readback_failed')""",
+                    (
+                        "publisher lease expired; marker reconciliation required",
+                        current,
+                        expired["organization"],
+                        expired["project"],
+                        expired["environment"],
+                        expired["issue_number"],
+                        expired["generation"],
+                        expired["repository"],
+                    ),
+                )
+            row = self.db.execute(
+                """SELECT * FROM github_outbox
+                   WHERE (status IN ('pending','failed')
+                          OR (status='create_unknown' AND action='reconcile'))
+                     AND (lease_until IS NULL OR lease_until<=?)
+                     AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+                   ORDER BY created_at, dedupe_key LIMIT 1""",
+                (current, current),
+            ).fetchone()
+            if row is None:
+                self.db.execute("COMMIT")
+                return None
+            lease_until = current + lease_seconds
+            self.db.execute(
+                """UPDATE github_outbox SET status='publishing',lease_owner=?,lease_until=?,
+                   next_attempt_at=NULL,attempts=attempts+1,updated_at=? WHERE dedupe_key=?""",
+                (owner, lease_until, current, row["dedupe_key"]),
+            )
+            claimed = self.db.execute(
+                "SELECT * FROM github_outbox WHERE dedupe_key=?", (row["dedupe_key"],)
+            ).fetchone()
+            self.db.execute("COMMIT")
+            return dict(claimed) if claimed is not None else None
+        except Exception:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def _assert_github_outbox_owner_locked(
+        self, dedupe_key: str, owner: str, *, now: float | None = None
+    ) -> sqlite3.Row:
+        row = self.db.execute(
+            "SELECT * FROM github_outbox WHERE dedupe_key=?", (dedupe_key,)
+        ).fetchone()
+        if (
+            row is None
+            or row["status"] != "publishing"
+            or row["lease_owner"] != owner
+            or row["lease_until"] is None
+            or float(row["lease_until"]) <= self._now(now)
+        ):
+            raise StateError("GitHub outbox lease is not active for this owner")
+        return row
+
+    def complete_github_outbox(
+        self,
+        dedupe_key: str,
+        *,
+        owner: str,
+        github_issue_number: int,
+        html_url: str,
+        node_id: str | None = None,
+        now: float | None = None,
+    ) -> None:
+        """Atomically mark the job and its source-generation link published."""
+
+        if not isinstance(github_issue_number, int) or isinstance(github_issue_number, bool) or github_issue_number <= 0:
+            raise ValueError("GitHub issue number must be positive")
+        if not isinstance(html_url, str) or not html_url.startswith("https://"):
+            raise ValueError("GitHub issue URL must use HTTPS")
+        current = self._now(now)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._assert_github_outbox_owner_locked(dedupe_key, owner, now=current)
+            self.db.execute(
+                """UPDATE github_outbox SET status='published',lease_owner=NULL,lease_until=NULL,
+                   next_attempt_at=NULL,github_issue_number=?,github_html_url=?,last_error=NULL,updated_at=?
+                   WHERE dedupe_key=?""",
+                (github_issue_number, html_url, current, dedupe_key),
+            )
+            self.db.execute(
+                """UPDATE github_links SET status='created',github_issue_number=?,html_url=?,
+                   node_id=COALESCE(?,node_id),last_error=NULL,updated_at=?
+                   WHERE organization=? AND project=? AND environment=? AND issue_number=?
+                     AND generation=? AND repository=?""",
+                (
+                    github_issue_number,
+                    html_url,
+                    node_id,
+                    current,
+                    row["organization"],
+                    row["project"],
+                    row["environment"],
+                    row["issue_number"],
+                    row["generation"],
+                    row["repository"],
+                ),
+            )
+            self.db.execute("COMMIT")
+        except Exception:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def mark_github_create_unknown(
+        self, dedupe_key: str, *, owner: str, error: str, now: float | None = None
+    ) -> None:
+        """Quarantine an ambiguous POST until a marker readback resolves it."""
+
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("an ambiguous-create reason is required")
+        current = self._now(now)
+        safe_error = error.strip()[:500]
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._assert_github_outbox_owner_locked(dedupe_key, owner, now=current)
+            self.db.execute(
+                """UPDATE github_outbox SET status='create_unknown',lease_owner=NULL,
+                   lease_until=NULL,next_attempt_at=NULL,last_error=?,updated_at=? WHERE dedupe_key=?""",
+                (safe_error, current, dedupe_key),
+            )
+            self.db.execute(
+                """UPDATE github_links SET status='create_unknown',last_error=?,updated_at=?
+                   WHERE organization=? AND project=? AND environment=? AND issue_number=?
+                     AND generation=? AND repository=?""",
+                (
+                    safe_error,
+                    current,
+                    row["organization"],
+                    row["project"],
+                    row["environment"],
+                    row["issue_number"],
+                    row["generation"],
+                    row["repository"],
+                ),
+            )
+            self.db.execute("COMMIT")
+        except Exception:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def fail_github_outbox(
+        self,
+        dedupe_key: str,
+        *,
+        owner: str,
+        error: str,
+        retry_after: int | None = None,
+        now: float | None = None,
+    ) -> None:
+        """Record a known non-ambiguous API failure for bounded retry."""
+
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("a failure reason is required")
+        if retry_after is not None and (isinstance(retry_after, bool) or retry_after < 0):
+            raise ValueError("retry_after must be non-negative")
+        current = self._now(now)
+        safe_error = error.strip()[:500]
+        next_attempt = current + min(int(retry_after), 86_400) if retry_after is not None else None
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._assert_github_outbox_owner_locked(dedupe_key, owner, now=current)
+            self.db.execute(
+                """UPDATE github_outbox SET status='failed',lease_owner=NULL,lease_until=NULL,
+                   next_attempt_at=?,last_error=?,updated_at=? WHERE dedupe_key=?""",
+                (next_attempt, safe_error, current, dedupe_key),
+            )
+            self.db.execute(
+                """UPDATE github_links SET status='pending_create',last_error=?,updated_at=?
+                   WHERE organization=? AND project=? AND environment=? AND issue_number=?
+                     AND generation=? AND repository=? AND ?='create'""",
+                (
+                    safe_error,
+                    current,
+                    row["organization"],
+                    row["project"],
+                    row["environment"],
+                    row["issue_number"],
+                    row["generation"],
+                    row["repository"],
+                    row["action"],
+                ),
+            )
+            self.db.execute(
+                """UPDATE github_links SET status='create_unknown',last_error=?,updated_at=?
+                   WHERE organization=? AND project=? AND environment=? AND issue_number=?
+                     AND generation=? AND repository=? AND ?='reconcile'""",
+                (
+                    safe_error,
+                    current,
+                    row["organization"],
+                    row["project"],
+                    row["environment"],
+                    row["issue_number"],
+                    row["generation"],
+                    row["repository"],
+                    row["action"],
+                ),
+            )
+            self.db.execute("COMMIT")
+        except Exception:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def requeue_github_reconciliation(
+        self, dedupe_key: str, *, now: float | None = None
+    ) -> bool:
+        """Make a quarantined job eligible for marker reconciliation only."""
+
+        current = self._now(now)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute(
+                "SELECT * FROM github_outbox WHERE dedupe_key=?", (dedupe_key,)
+            ).fetchone()
+            if row is None:
+                raise StateError("unknown GitHub outbox job")
+            if row["status"] != "create_unknown":
+                self.db.execute("COMMIT")
+                return False
+            self.db.execute(
+                "UPDATE github_outbox SET status='create_unknown',action='reconcile',next_attempt_at=NULL,updated_at=? WHERE dedupe_key=?",
+                (current, dedupe_key),
+            )
+            self.db.execute("COMMIT")
+            return True
+        except Exception:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def list_github_outbox(self) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT * FROM github_outbox ORDER BY created_at, dedupe_key"
+            )
+        ]
 
     def get_cursor(self, organization: str, project: str, environment: str) -> str | None:
         row = self.db.execute(
