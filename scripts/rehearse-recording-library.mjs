@@ -31,7 +31,7 @@ try {
  insert into call_recordings values ('${uid(200)}','${uid(100)}','available','scope1/audio.mp3',30),('${uid(201)}','${uid(101)}','available','scope2/audio.mp3',60),('${uid(202)}','${uid(102)}','available','old/audio.mp3',10);
  insert into acquisition_attempts values ('${uid(300)}','${org}','${uid(2)}',null,'https://dialpad.com/recording/example','2026-09-02','dialpad','reached',null);
  insert into acquisition_attempts values ('${uid(301)}','${org}','${uid(3)}','${uid(103)}','https://dialpad.com/recording/conflict','2026-09-01','dialpad','reached',null);`);
- sql(readFileSync(new URL('../supabase/migrations/20260914180000_recording_library.sql',import.meta.url),'utf8'));
+ sql(readFileSync(new URL('../supabase/migrations/20260915000100_recording_library.sql',import.meta.url),'utf8'));
  const audio=[{id:uid(100),actorId:uid(2),files:[{id:'audio-a',duration:30,status:'available',matchesSummary:true},{id:'audio-b',duration:80,status:'available',matchesSummary:false}]},{id:uid(101),actorId:uid(3),files:[{id:'audio-c',duration:60,status:'available',matchesSummary:true}]}];
  const literal=x=>`'${JSON.stringify(x).replaceAll("'","''")}'::jsonb`;
  const search=(actor,scope,filter={status:'all'})=>JSON.parse(sql(`set role service_role;select public.fn_recording_library_search('${uid(actor)}','${scope}',${literal(filter)},${literal(audio)});`).split('\n').at(-1));
