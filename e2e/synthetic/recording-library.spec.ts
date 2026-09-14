@@ -9,7 +9,7 @@ test.beforeAll(async()=>{
  const css=(await postcss([tailwindcss()]).process(readFileSync('src/app/globals.css','utf8'),{from:path.resolve('src/app/globals.css')})).css;
  const stub=path.resolve('e2e/synthetic/fixtures/recording-library-stubs.tsx');
  const bundle=esbuild.buildSync({entryPoints:['e2e/synthetic/fixtures/recording-library-harness.tsx'],bundle:true,platform:'browser',format:'iife',jsx:'automatic',alias:{'next/navigation':stub,'next/link':stub,'@/lib/supabase/client':stub,'@':path.resolve('src')},define:{'process.env.NODE_ENV':'"test"'},write:false}).outputFiles[0].text;
- html=`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Recordings visual preview</title><style>${css}</style></head><body><div id="root"></div><script>${bundle.replaceAll('</script','<\\/script')}</script></body></html>`;
+ html=`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Recordings visual preview</title><style>${css}</style></head><body style="font-family:Arial,sans-serif"><div id="root"></div><script>${bundle.replaceAll('</script','<\\/script')}</script></body></html>`;
  if(process.env.RECORDING_PREVIEW_OUTPUT)writeFileSync(process.env.RECORDING_PREVIEW_OUTPUT,html);
 });
 for(const width of [390,1440])test(`recording filters and files work at ${width}px`,async({page})=>{

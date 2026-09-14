@@ -10,6 +10,7 @@ import { TIME_ZONE } from '@/lib/recordings/filters';
 const field = 'mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm';
 const button = 'rounded-lg border px-4 py-2 text-sm font-medium hover:bg-muted disabled:opacity-50';
 const labels: Record<string,string> = { available: 'Available', pending: 'Processing', failed: 'Failed', missing: 'Missing', external: 'External / unresolved', partial: 'Partial', all: 'All statuses' };
+function label(value: string) { return ({ sandra_softphone: 'Sandra phone', jitter: 'Jitter', twilio: 'Twilio', dialpad: 'Dialpad', connected_human: 'Connected with person' } as Record<string,string>)[value] ?? value.replaceAll('_', ' ').replace(/^./, c => c.toUpperCase()); }
 function length(seconds: number | null) { return seconds === null ? 'Length unknown' : `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`; }
 function Player({ file, scope }: { file: LibraryFile; scope: RecordingScope }) {
   const [url, setUrl] = useState<string | null>(null);
@@ -53,9 +54,9 @@ function CallCard({ call, scope }: { call: LibraryCall; scope: RecordingScope })
   return <article className="rounded-xl border bg-card p-5 shadow-sm">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><h2 className="font-semibold">{call.contact}</h2><p className="text-sm text-muted-foreground">{call.address}</p>{call.phone && <p className="text-sm">{call.phone}</p>}</div>
-      <div className="text-sm md:text-right"><p>{date} CT</p><p className="text-muted-foreground">{scope === 'owner' ? `${call.actor_name} · ` : ''}{call.direction} · {call.source}</p></div>
+      <div className="text-sm md:text-right"><p>{date} CT</p><p className="text-muted-foreground">{scope === 'owner' ? `${call.actor_name} · ` : ''}{label(call.direction)} · {label(call.source)}</p></div>
     </div>
-    <div className="my-3 flex flex-wrap gap-2 text-xs text-muted-foreground"><span>{call.outcome}</span><span>· {labels[call.status]}</span><span>· {call.purpose.replaceAll('_',' ')}</span>{call.transcript && <span>· Transcript available</span>}{call.summary && <span>· Summary available</span>}</div>
+    <div className="my-3 flex flex-wrap gap-2 text-xs text-muted-foreground"><span>{label(call.outcome)}</span><span>· {labels[call.status]}</span><span>· {call.purpose.replaceAll('_',' ')}</span>{call.transcript && <span>· Transcript available</span>}{call.summary && <span>· Summary available</span>}</div>
     {call.conflicting && <p className="mb-3 text-sm text-amber-700">Caller attribution conflicts. This call is restricted to owners in the recording library.</p>}
     <details><summary className="cursor-pointer text-sm font-medium">{call.files.length} recording {call.files.length === 1 ? 'file' : 'files'}</summary>
       <div className="mt-3 space-y-3">{call.files.map(f => <Player key={f.id} file={f} scope={scope} />)}{!call.files.length && <p className="text-sm text-muted-foreground">No recording file is linked to this call.</p>}</div>
@@ -100,8 +101,8 @@ export function RecordingLibrary({ result, scope, values }: { result: LibraryRes
         <label className="text-sm">Maximum file length (seconds)<input type="number" name="max" min="0" max="604800" className={field} defaultValue={value('max')} /></label>
       </div>
       <details><summary className="cursor-pointer text-sm font-medium">More filters</summary><div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {select('source','Recording source',[['','All sources'],...result.sources.map(x => [x,x] as [string,string])],'')}
-        {select('outcome','Call outcome / disposition',[['','All outcomes'],...result.outcomes.map(x => [x,x] as [string,string])],'')}
+        {select('source','Recording source',[['','All sources'],...result.sources.map(x => [x,label(x)] as [string,string])],'')}
+        {select('outcome','Call outcome / disposition',[['','All outcomes'],...result.outcomes.map(x => [x,label(x)] as [string,string])],'')}
         {select('direction','Direction',[['all','All directions'],['outbound','Outbound'],['inbound','Inbound'],['unknown','Unknown']])}
         {select('purpose','Call purpose',[['all','All calls'],['customer','Customer'],['internal_training','Training'],['unknown','Unknown']])}
         {select('transcript','Transcript',[['all','Any transcript status'],['yes','Available'],['no','Unavailable']])}
