@@ -49,5 +49,5 @@
       }
     }
   ],
-  "scope": "Owned fixture; historical gap deliberately modeled, not a second pre-install database; natural expiry is actual wall-clock execution"
+  "scope": "Owned fixture; historical gap deliberately modeled, not a second pre-install database; natural expiry is actual wall-clock execution. worker_passes[].readiness.serving_enabled reflects this owned fixture database only (separately authorized per README, \"Browser fixture enablement is separately authorized and does not change production defaults\") and is not a live production serving-gate enable."
 }

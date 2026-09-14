@@ -2,7 +2,7 @@
   "applied": true,
   "correction": "exact private grants revocation and bounded cursor retention",
   "foundation_sha256": "9dbda65aa4c9b810bb94968a97c97d04f19d9744a76b642f47fa625c858fb938",
-  "companion_sha256": "09ad2dd733b9789ca08d2af750627f3d809d6fd6b0331f9828ec9593e522c139",
+  "companion_sha256": "9112d20c7bf22c5f330b6af3fcdf63af6c3bacf328c1b336ab650d983d361674",
   "hardening_sha256": "4a1d6a89d263ff2b40949e313b14d90529eba69c38a9839b6fb3d0820f99944a",
   "preserved_serving_gate": true,
   "disabled_public_gate_verified": true,

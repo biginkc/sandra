@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Fresh canonical schema in a separate owned database; never recreates T2 or touches its postgres DB."""
 from pathlib import Path
-import argparse,hashlib,json,re,subprocess,sys
+import argparse,hashlib,json,os,re,subprocess,sys
 P=Path(__file__).resolve().parent;ROOT=P.parent.parent;F=P.parent/'inbox-projection/fixture'
 sys.path.insert(0,str(F));from guards import validate_container,validate_cron
 from transaction_envelope import normalize
 ap=argparse.ArgumentParser();ap.add_argument('--resume-full-auth',action='store_true');a=ap.parse_args()
 if not a.resume_full_auth:raise SystemExit('Explicit existing full-Auth fixture mode required')
-D=['docker','--host','unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock'];N='sandra-inbox-projection-t2-db';DB='sandra_inbox_install_20260913';MARKER='sandra-inbox-production-candidate-owned-synthetic'
+SOCKET=os.environ.get('INBOX_T2_DOCKER_SOCKET','unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock')
+D=['docker','--host',SOCKET];N='sandra-inbox-projection-t2-db';DB='sandra_inbox_install_20260913';MARKER='sandra-inbox-production-candidate-owned-synthetic'
 validate_container(json.loads(subprocess.check_output(D+['inspect',N],text=True))[0])
 def sql(q,db=DB):
  r=subprocess.run(D+['exec','-i',N,'psql','-XqAt','-U','supabase_admin','-d',db,'-v','ON_ERROR_STOP=1'],input=q,text=True,capture_output=True,timeout=90)

@@ -1,9 +1,10 @@
 """Connection guard shared by candidate fixture tests; never accepts a remote DSN."""
-import json,subprocess,sys,time
+import json,os,subprocess,sys,time
 from pathlib import Path
 P=Path(__file__).resolve().parent
 sys.path.insert(0,str(P.parent/'inbox-projection/fixture'));from guards import validate_container,validate_cron
-D=['docker','--host','unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock'];N='sandra-inbox-projection-t2-db';DB='sandra_inbox_install_20260913'
+SOCKET=os.environ.get('INBOX_T2_DOCKER_SOCKET','unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock')
+D=['docker','--host',SOCKET];N='sandra-inbox-projection-t2-db';DB='sandra_inbox_install_20260913'
 def sql(q,role='postgres',retry=False):
  for attempt in range(3 if retry else 1):
   r=subprocess.run(D+['exec','-i',N,'psql','-XqAt','-U',role,'-d',DB,'-v','ON_ERROR_STOP=1','-v','VERBOSITY=verbose'],input="SET statement_timeout='30s';SET lock_timeout='2s';"+q,text=True,capture_output=True,timeout=40)
