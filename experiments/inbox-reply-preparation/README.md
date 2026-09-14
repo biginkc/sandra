@@ -15,19 +15,35 @@ predicate," not a new hole in a new caller. `recipient()` calls it once per
 candidate; nothing else in this file (or any future caller) re-derives
 eligibility on its own.
 
-Evaluated in order, first hit wins (tie prefers opt-out) — steps 1-4 run
+Evaluated in order, first hit wins (tie prefers opt-out) — steps 1-5 run
 under **both** `strict` values:
 1. `sms_phone_suppressions` exact E.164 match — parity with
    `src/lib/messaging/send.ts`'s `isSmsPhoneSuppressed`
    (`opt-out-phone.ts`).
 2. `global_phone_dnc_registry` exact E.164 match — closes a real gap:
    production `src/` code never reads this table for send-eligibility today.
-3. **Cross-contact bleed** — ANY contact in the org (not just the one tied to
+3. **Canonical-keyed suppression** (round 6) — the CANONICAL contact's own
+   `do_not_contact`/`sms_opted_out`/latest opt-out, looked up directly by id,
+   independent of whether its phone slot still normalizes to this
+   destination. Closes a reproduced fail-open: a canonical contact whose slot
+   was cleared (number edited/changed) while opted out returned eligible,
+   because step 4 below only matches contacts whose slot **currently**
+   normalizes to the destination, and some other org contact kept the number
+   alive on its own slot. A canonical id that does not resolve to a contact
+   in this org (deleted, or foreign) returns the new fail-closed
+   `contact_unavailable` label here instead of falling through eligible for
+   lack of evidence.
+4. **Cross-contact bleed** — ANY contact in the org (not just the one tied to
    this conversation) with a phone slot normalizing to this destination that
    is `do_not_contact`/`sms_opted_out`, or whose latest sms consent event is
    an opt-out.
-4. **Cross-contact landline** — ANY matching slot on ANY matching contact is
+5. **Cross-contact landline** — ANY matching slot on ANY matching contact is
    `'landline'`.
+
+Steps 3 and 4, and the strict no-consent gate below, all call one
+`inbox_reply_preparation.latest_sms_consent(o, contact)` helper — extracted,
+not changed, so the ORDER BY/tie-break/event-type set cannot drift between
+the three call sites.
 
 `strict` (default `true`, fail-closed) additionally requires EVERY matching
 slot across every matching contact to be `'mobile'` (else
@@ -81,11 +97,11 @@ Run the actual rollback-only proof against the marked owned fixture:
 python3 experiments/inbox-reply-preparation/recipient-test.py --run-owned-fixture
 ```
 
-Eighteen groups cover canonical route/personalization, read-only versus content changes, foreign/missing identities, saved phone/landline/unclassified-phone, a conflicting duplicate save (mobile + landline on the same normalized destination) failing closed across every matching slot, inventory, consent opt-out AND no-consent, private grants, duplicate destinations, malformed target sets, winter/summer/territory quiet hours, 51 recipients becoming 50 only after a canonical exclusion, and the full `destination_policy()` E1-E4 convergence matrix.
+Nineteen groups cover canonical route/personalization, read-only versus content changes, foreign/missing identities, saved phone/landline/unclassified-phone, a conflicting duplicate save (mobile + landline on the same normalized destination) failing closed across every matching slot, inventory, consent opt-out AND no-consent, private grants, duplicate destinations, malformed target sets, winter/summer/territory quiet hours, 51 recipients becoming 50 only after a canonical exclusion, the full `destination_policy()` E1-E4 convergence matrix, and (round 6) the canonical-keyed suppression cases R0-R4 that close the cleared-slot fail-open.
 
 Every fail-closed assertion in `recipient-test.py` compares `exclusion` with `IS DISTINCT FROM`, not `<>` — with `<>`, a broken guard that lets `exclusion` fall through as SQL `NULL` makes the comparison itself evaluate to `NULL`, and `IF NULL THEN RAISE` silently does not raise. `IS DISTINCT FROM` treats `NULL` as a real, comparable value, so the assertion actually fires when the guard is gone.
 
-Every fail-closed guard in `destination_policy()` was mutation-checked by hand for real, not just insert/remove-the-fact within the test: each of the 6 guards (steps 1-4, plus the two strict-only checks) was fully removed from `recipient.sql`, the exact expected failure was confirmed, then the guard was restored. Round-3's three guards (line-type, consent, the single-contact multi-slot duplicate check) were re-confirmed the same way. Source hashes and limitations are in `recipient-evidence.json`. The runner removes the new schemas and all test data in the same rollback.
+Every fail-closed guard in `destination_policy()` was mutation-checked by hand for real, not just insert/remove-the-fact within the test: each of the 7 guards (steps 1-5, plus the two strict-only checks) was fully removed from `recipient.sql`, the exact expected failure was confirmed, then the guard was restored. Round-3's three guards (line-type, consent, the single-contact multi-slot duplicate check) were re-confirmed the same way. Round 6's mutation: with step 3 (canonical-keyed suppression) removed from `recipient.sql`, R1 and R3 fail (return eligible instead of `sms_suppressed`) in **both** `strict` values, and R2 fails in non-strict — confirming those cases actually exercise the hole before the fix restores step 3 and the full proof goes green. The same mutation pass also caught a real bug in the `latest_sms_consent()` extraction itself: naming its second parameter `contact_id` collided with the `ce.contact_id` column inside the function body, silently turning the WHERE clause into a tautology and returning the org's latest consent event for any contact; the parameter was renamed to `for_contact`. Source hashes and limitations are in `recipient-evidence.json`. The runner removes the new schemas and all test data in the same rollback.
 
 A separate real-connection proof in `recipient-concurrency.py` observes the reader waiting on a sender-context lock, crosses natural 90-day expiry while it waits, and verifies exclusion at completion. Temporary schemas/triggers are removed; uniquely marked synthetic source rows remain in the owned fixture. **Not re-run as part of this pass** — `recipient-concurrency-evidence.json` now declares a `stale_pending_rerun` marker on its `source_sha256` key (the only field affected by the `recipient.sql` fail-closed changes above); `verify.py` prints a warning for that specific declared key and still exits 0, rather than either hard-failing or silently dropping the binding. Any OTHER unexpected drift (the context source or the runner itself) still hard-fails `verify.py`. Re-run this proof and remove the marker once the Lane-2 isolated fixture rebuild lands, same as the `inbox-reply-review` concurrency proof.
 

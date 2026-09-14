@@ -16,6 +16,23 @@ $$;
 CREATE FUNCTION inbox_reply_preparation.recipient_limit() RETURNS integer LANGUAGE sql IMMUTABLE SET search_path='' AS $$
  SELECT 50
 $$;
+-- Single source of truth for "what is this contact's latest sms consent
+-- state" — used by destination_policy()'s canonical-keyed step, its
+-- slot-keyed cross-contact scan, and its strict no-consent gate. Extracted
+-- (round 6), not changed: the ORDER BY / tie-break / event-type set is
+-- byte-identical to what was previously inlined in three places, so no
+-- caller's observable behavior differs from this extraction alone.
+-- Parameter deliberately NOT named contact_id: a same-named parameter would
+-- shadow-collide with the ce.contact_id column reference inside this SQL
+-- function body, silently turning the WHERE clause into a tautology
+-- (ce.contact_id=ce.contact_id) and returning the org's latest consent event
+-- for ANY contact instead of this one — caught by mutation testing (round 6).
+CREATE FUNCTION inbox_reply_preparation.latest_sms_consent(o uuid,for_contact uuid) RETURNS text LANGUAGE sql STABLE SET search_path='' AS $$
+ SELECT ce.event_type FROM public.consent_events ce
+  WHERE ce.org_id=o AND ce.contact_id=for_contact AND ce.channel='sms'
+    AND ce.event_type IN ('opt_in_marketing_written','opt_in_confirmed','opt_in_informational','opt_out','provider_auto_opt_out')
+  ORDER BY ce.occurred_at DESC,(ce.event_type IN ('opt_out','provider_auto_opt_out')) DESC,ce.id DESC LIMIT 1
+$$;
 -- E1-E4 (Fable round 4): the SOLE eligibility authority for the reply lane.
 -- Previously, eligibility was re-derived ad hoc inside recipient() from just
 -- the canonical (conversation's) contact row, which is how three separate
@@ -32,19 +49,32 @@ $$;
 --  2. global_phone_dnc_registry exact match — production code in src/ never
 --     reads this table for send-eligibility today; this closes that gap for
 --     the reply lane specifically.
---  3. ANY contact in the org with a phone slot normalizing to this
+--  3. Canonical-keyed suppression (round 6): the CANONICAL contact's own
+--     do_not_contact/sms_opted_out/latest-opt-out, looked up directly by id
+--     — independent of whether its phone slot still normalizes to this
+--     destination. Closes a reproduced fail-open: a canonical contact whose
+--     slot was cleared (number edited/changed) while opted out returned
+--     eligible, because step 4 below only matches contacts whose slot
+--     CURRENTLY normalizes to the destination, and some other org contact
+--     kept the number alive on its own slot. A canonical id that does not
+--     resolve to a contact in this org (deleted, or foreign) returns the
+--     fail-closed 'contact_unavailable' label here instead of falling
+--     through eligible for lack of evidence.
+--  4. ANY contact in the org with a phone slot normalizing to this
 --     destination that is do_not_contact/sms_opted_out, or whose latest sms
 --     consent event is an opt-out — closes cross-contact bleed (the same
 --     number saved under a second contact record with a suppression flag
 --     the canonical contact doesn't carry).
---  4. ANY matching slot across those contacts is 'landline' — hard block.
+--  5. ANY matching slot across those contacts is 'landline' — hard block.
 -- `strict` (default true, fail-closed) additionally requires EVERY matching
 -- slot to be 'mobile' (else 'unclassified_phone') and the CANONICAL
 -- contact's latest sms consent event to be an affirmative opt-in (else
--- 'no_consent'). Steps 1-4 run under both strict values; only the two extra
+-- 'no_consent'). Steps 1-5 run under both strict values; only the two extra
 -- checks are strict-gated. Flipping strict to false (production parity with
 -- send.ts/bulk-queue.ts) is Jarrad's call, and is a single argument change,
--- not a rewrite.
+-- not a rewrite. Steps 3 and 4 (and the strict no-consent gate) all share
+-- one latest_sms_consent(o,contact) helper so the tie-break rule cannot
+-- drift between them.
 --
 -- PLACEMENT (E4, not built in this PR): capture/freeze (this file, PR-A)
 -- calls this once per candidate and freezes the result. Acceptance (PR C/E)
@@ -56,7 +86,7 @@ $$;
 -- provider attempt, never a silent send. Neither of those call sites exists
 -- yet; this is the contract they must honor when built.
 CREATE FUNCTION inbox_reply_preparation.destination_policy(o uuid,destination text,canonical_contact uuid,strict boolean DEFAULT true) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
-DECLARE any_landline boolean;any_non_mobile boolean;canonical_consent text;
+DECLARE any_landline boolean;any_non_mobile boolean;canonical_consent text;canonical_dnc boolean;canonical_opted_out boolean;
 BEGIN
  IF o IS NULL OR destination IS NULL OR canonical_contact IS NULL OR strict IS NULL THEN RAISE EXCEPTION 'Invalid destination policy input';END IF;
  -- 1. Explicit phone-level suppression (org-scoped exact E.164 match).
@@ -64,7 +94,16 @@ BEGIN
  -- 2. Global DNC registry (org-scoped exact E.164 match) — never checked by
  -- production send.ts/bulk-queue.ts today.
  IF EXISTS(SELECT 1 FROM public.global_phone_dnc_registry WHERE org_id=o AND phone_e164=destination) THEN RETURN jsonb_build_object('exclusion','sms_suppressed');END IF;
- -- 3. Cross-contact bleed: ANY org contact sharing this destination across
+ -- 3. Canonical-keyed suppression (round 6): the canonical contact's OWN
+ -- do_not_contact/sms_opted_out/latest opt-out, checked directly by id —
+ -- independent of whether its slot still normalizes to `destination`. Closes
+ -- the fail-open where step 4 below only matches contacts whose slot
+ -- CURRENTLY matches, so a cleared-slot opted-out canonical fell through as
+ -- eligible whenever some other org contact still saved the number.
+ SELECT ct.do_not_contact,ct.sms_opted_out INTO canonical_dnc,canonical_opted_out FROM public.contacts ct WHERE ct.id=canonical_contact AND ct.org_id=o;
+ IF NOT FOUND THEN RETURN jsonb_build_object('exclusion','contact_unavailable');END IF;
+ IF canonical_dnc IS TRUE OR canonical_opted_out IS TRUE OR inbox_reply_preparation.latest_sms_consent(o,canonical_contact) IN ('opt_out','provider_auto_opt_out') THEN RETURN jsonb_build_object('exclusion','sms_suppressed');END IF;
+ -- 4. Cross-contact bleed: ANY org contact sharing this destination across
  -- any of its saved slots, flagged suppressed or opted out — not just the
  -- canonical contact for this conversation.
  IF EXISTS(
@@ -72,10 +111,10 @@ BEGIN
    AND EXISTS(SELECT 1 FROM (VALUES(ct.phone_1),(ct.phone_2),(ct.phone_3)) slots(phone) WHERE inbox_reply_preparation.phone(phone)=destination)
    AND (
      ct.do_not_contact IS TRUE OR ct.sms_opted_out IS TRUE
-     OR (SELECT ce.event_type FROM public.consent_events ce WHERE ce.org_id=o AND ce.contact_id=ct.id AND ce.channel='sms' AND ce.event_type IN ('opt_in_marketing_written','opt_in_confirmed','opt_in_informational','opt_out','provider_auto_opt_out') ORDER BY ce.occurred_at DESC,(ce.event_type IN ('opt_out','provider_auto_opt_out')) DESC,ce.id DESC LIMIT 1) IN ('opt_out','provider_auto_opt_out')
+     OR inbox_reply_preparation.latest_sms_consent(o,ct.id) IN ('opt_out','provider_auto_opt_out')
    )
  ) THEN RETURN jsonb_build_object('exclusion','sms_suppressed');END IF;
- -- 4. Landline across every matching slot on every matching org contact.
+ -- 5. Landline across every matching slot on every matching org contact.
  SELECT bool_or(t='landline'),bool_or(t IS DISTINCT FROM 'mobile') INTO any_landline,any_non_mobile
  FROM public.contacts ct,LATERAL (VALUES(ct.phone_1,ct.phone_1_type),(ct.phone_2,ct.phone_2_type),(ct.phone_3,ct.phone_3_type)) slots(phone,t)
  WHERE ct.org_id=o AND inbox_reply_preparation.phone(slots.phone)=destination;
@@ -87,7 +126,7 @@ BEGIN
   -- not fall through as eligible for lack of evidence either way — strict
   -- means "affirmatively saved mobile", never "no evidence" (Fable ruling).
   IF coalesce(any_non_mobile,true) THEN RETURN jsonb_build_object('exclusion','unclassified_phone');END IF;
-  SELECT ce.event_type INTO canonical_consent FROM public.consent_events ce WHERE ce.org_id=o AND ce.contact_id=canonical_contact AND ce.channel='sms' AND ce.event_type IN ('opt_in_marketing_written','opt_in_confirmed','opt_in_informational','opt_out','provider_auto_opt_out') ORDER BY ce.occurred_at DESC,(ce.event_type IN ('opt_out','provider_auto_opt_out')) DESC,ce.id DESC LIMIT 1;
+  canonical_consent:=inbox_reply_preparation.latest_sms_consent(o,canonical_contact);
   IF canonical_consent IS DISTINCT FROM 'opt_in_marketing_written' AND canonical_consent IS DISTINCT FROM 'opt_in_confirmed' AND canonical_consent IS DISTINCT FROM 'opt_in_informational' THEN RETURN jsonb_build_object('exclusion','no_consent');END IF;
  END IF;
  RETURN jsonb_build_object('exclusion',NULL);

@@ -194,9 +194,86 @@ BEGIN
  r:=inbox_reply_preparation.destination_policy(o,'+18165550300',canonical,true);
  IF r->>'exclusion' IS DISTINCT FROM 'sms_suppressed' THEN RAISE EXCEPTION 'Step 3 cross-contact do_not_contact bleed not enforced: %',r;END IF;
 END $policy$;
+-- Round 6: canonical-keyed suppression closes the reproduced fail-open where
+-- a canonical contact's OWN suppression flag/opt-out is invisible because
+-- its phone slot was cleared while a SECOND org contact still saves the
+-- destination on another slot, keeping the cross-contact scan matching (and
+-- therefore eligible) purely on the second contact's clean record.
+DO $canonical$
+DECLARE o uuid:=gen_random_uuid();foreign_org uuid:=gen_random_uuid();canonical uuid:=gen_random_uuid();second uuid:=gen_random_uuid();fresh uuid:=gen_random_uuid();foreign_contact uuid:=gen_random_uuid();dest text:='+18165550400';r jsonb;
+BEGIN
+ INSERT INTO organizations(id,name) VALUES(o,'Owned canonical suppression'),(foreign_org,'Foreign canonical suppression');
+ INSERT INTO contacts(id,org_id,phone_1,phone_1_type) VALUES(canonical,o,dest,'mobile');
+ INSERT INTO consent_events(org_id,contact_id,channel,event_type,source) VALUES(o,canonical,'sms','opt_in_confirmed','owned_canonical_test');
+ -- Second org contact keeps the destination alive on its own slot, clean and
+ -- opted in, so the pre-existing cross-contact scan alone stays satisfied
+ -- throughout R1-R3 below and cannot be the thing masking a failure.
+ INSERT INTO contacts(id,org_id,phone_2,phone_2_type) VALUES(second,o,dest,'mobile');
+ INSERT INTO consent_events(org_id,contact_id,channel,event_type,source) VALUES(o,second,'sms','opt_in_confirmed','owned_canonical_test');
+
+ -- R0 control: slot present, opted in.
+ r:=inbox_reply_preparation.destination_policy(o,dest,canonical,true);
+ IF r->>'exclusion' IS DISTINCT FROM NULL THEN RAISE EXCEPTION 'R0 control excluded (strict): %',r;END IF;
+ r:=inbox_reply_preparation.destination_policy(o,dest,canonical,false);
+ IF r->>'exclusion' IS DISTINCT FROM NULL THEN RAISE EXCEPTION 'R0 control excluded (non-strict): %',r;END IF;
+
+ -- R1: clear the canonical's own slot AND flag it sms_opted_out. Proves the
+ -- FLAG drives the result, not the (now cleared) slot.
+ UPDATE contacts SET phone_1=NULL,sms_opted_out=true WHERE id=canonical;
+ r:=inbox_reply_preparation.destination_policy(o,dest,canonical,true);
+ IF r->>'exclusion' IS DISTINCT FROM 'sms_suppressed' THEN RAISE EXCEPTION 'R1 cleared-slot sms_opted_out canonical admitted (strict): %',r;END IF;
+ r:=inbox_reply_preparation.destination_policy(o,dest,canonical,false);
+ IF r->>'exclusion' IS DISTINCT FROM 'sms_suppressed' THEN RAISE EXCEPTION 'R1 cleared-slot sms_opted_out canonical admitted (non-strict): %',r;END IF;
+ UPDATE contacts SET sms_opted_out=false WHERE id=canonical;
+ r:=inbox_reply_preparation.destination_policy(o,dest,canonical,true);
+ IF r->>'exclusion' IS DISTINCT FROM NULL THEN RAISE EXCEPTION 'R1 flag removal did not restore eligibility (strict): %',r;END IF;
+ r:=inbox_reply_preparation.destination_policy(o,dest,canonical,false);
+ IF r->>'exclusion' IS DISTINCT FROM NULL THEN RAISE EXCEPTION 'R1 flag removal did not restore eligibility (non-strict): %',r;END IF;
+
+ -- R2: slot still cleared (from R1). Insert a consent opt_out. Proves
+ -- "latest", not "any" — a later opt-in must override it.
+ INSERT INTO consent_events(org_id,contact_id,channel,event_type,source) VALUES(o,canonical,'sms','opt_out','owned_canonical_test');
+ r:=inbox_reply_preparation.destination_policy(o,dest,canonical,true);
+ IF r->>'exclusion' IS DISTINCT FROM 'sms_suppressed' THEN RAISE EXCEPTION 'R2 cleared-slot latest opt_out canonical admitted (strict): %',r;END IF;
+ r:=inbox_reply_preparation.destination_policy(o,dest,canonical,false);
+ IF r->>'exclusion' IS DISTINCT FROM 'sms_suppressed' THEN RAISE EXCEPTION 'R2 cleared-slot latest opt_out canonical admitted (non-strict): %',r;END IF;
+ -- occurred_at defaults to now(), fixed for the whole transaction, so both
+ -- events would tie without an explicit later timestamp; the tie-break
+ -- itself prefers opt-out, which would mask this proving "latest" at all.
+ INSERT INTO consent_events(org_id,contact_id,channel,event_type,source,occurred_at) VALUES(o,canonical,'sms','opt_in_confirmed','owned_canonical_test',clock_timestamp()+interval '1 second');
+ r:=inbox_reply_preparation.destination_policy(o,dest,canonical,true);
+ IF r->>'exclusion' IS DISTINCT FROM NULL THEN RAISE EXCEPTION 'R2 later opt-in did not restore eligibility (strict): %',r;END IF;
+ r:=inbox_reply_preparation.destination_policy(o,dest,canonical,false);
+ IF r->>'exclusion' IS DISTINCT FROM NULL THEN RAISE EXCEPTION 'R2 later opt-in did not restore eligibility (non-strict): %',r;END IF;
+
+ -- R3: a FRESH canonical contact. Clear its slot in ONE statement, then set
+ -- do_not_contact in a SEPARATE statement — contacts_true_dnc_lock_guard
+ -- rejects combining them. Insertion-only (do_not_contact is a one-way
+ -- lock), placed LAST.
+ INSERT INTO contacts(id,org_id,phone_3,phone_3_type) VALUES(fresh,o,dest,'mobile');
+ INSERT INTO consent_events(org_id,contact_id,channel,event_type,source) VALUES(o,fresh,'sms','opt_in_confirmed','owned_canonical_test');
+ UPDATE contacts SET phone_3=NULL WHERE id=fresh;
+ UPDATE contacts SET do_not_contact=true WHERE id=fresh;
+ r:=inbox_reply_preparation.destination_policy(o,dest,fresh,true);
+ IF r->>'exclusion' IS DISTINCT FROM 'sms_suppressed' THEN RAISE EXCEPTION 'R3 cleared-slot do_not_contact canonical admitted (strict): %',r;END IF;
+ r:=inbox_reply_preparation.destination_policy(o,dest,fresh,false);
+ IF r->>'exclusion' IS DISTINCT FROM 'sms_suppressed' THEN RAISE EXCEPTION 'R3 cleared-slot do_not_contact canonical admitted (non-strict): %',r;END IF;
+
+ -- R4: a canonical contact id that does not resolve in this org at all —
+ -- nonexistent, and a real contact that exists but in a DIFFERENT org.
+ INSERT INTO contacts(id,org_id,phone_1,phone_1_type) VALUES(foreign_contact,foreign_org,'+18165550401','mobile');
+ r:=inbox_reply_preparation.destination_policy(o,dest,gen_random_uuid(),true);
+ IF r->>'exclusion' IS DISTINCT FROM 'contact_unavailable' THEN RAISE EXCEPTION 'R4 nonexistent canonical contact admitted (strict): %',r;END IF;
+ r:=inbox_reply_preparation.destination_policy(o,dest,gen_random_uuid(),false);
+ IF r->>'exclusion' IS DISTINCT FROM 'contact_unavailable' THEN RAISE EXCEPTION 'R4 nonexistent canonical contact admitted (non-strict): %',r;END IF;
+ r:=inbox_reply_preparation.destination_policy(o,dest,foreign_contact,true);
+ IF r->>'exclusion' IS DISTINCT FROM 'contact_unavailable' THEN RAISE EXCEPTION 'R4 cross-org canonical contact admitted (strict): %',r;END IF;
+ r:=inbox_reply_preparation.destination_policy(o,dest,foreign_contact,false);
+ IF r->>'exclusion' IS DISTINCT FROM 'contact_unavailable' THEN RAISE EXCEPTION 'R4 cross-org canonical contact admitted (non-strict): %',r;END IF;
+END $canonical$;
 ROLLBACK;
 """
 sql(context.removesuffix('COMMIT;\n')+recipient.removesuffix('COMMIT;\n').replace('\nBEGIN;\n','\n',1)+batch.removesuffix('COMMIT;\n').replace('\nBEGIN;\n','\n',1)+test)
 if sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamespace('inbox_reply_preparation') IS NULL")!='t':raise RuntimeError('Rollback failed')
-(P/'recipient-evidence.json').write_text(json.dumps({'source_sha256':hashlib.sha256(recipient.encode()).hexdigest(),'batch_sha256':hashlib.sha256(batch.encode()).hexdigest(),'context_sha256':hashlib.sha256(context.encode()).hexdigest(),'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'checks':['canonical contact, normalized saved destination, sender inventory and variables','read status leaves known-reply content revision unchanged','edited inbound advances reply revision','foreign and missing target denied without head allocation','landline and unsaved destination excluded','never-classified line type fails closed (unclassified_phone), not silently eligible','conflicting duplicate save (same destination saved as mobile AND landline) fails closed on every matching slot, not just the first by ordinal','inactive inventory sender excluded','canonical consent opt-out excluded','saved mobile with zero consent history fails closed (no_consent), not silently eligible','private API grants denied; whole proof rolled back','same destination flags every affected conversation; no silent deduplication','duplicate/null/empty target rejection','winter opening and closing boundaries','summer DST, territory and unknown state policy','51 canonical destinations blocked, 50 after one opt-out exclusion retained in review','501 target envelope rejected','destination_policy() E1-E4 convergence matrix: sms_phone_suppressions, global_phone_dnc_registry with no contact-level flag (round-4 case b), cross-contact do_not_contact/sms_opted_out bleed, cross-contact landline/unclassified slot on a SECOND contact saved with a non-E.164 spelling to prove phone() normalization on the cross-contact match path (round-4 case a), both strict-only gates (unclassified-phone, canonical no-consent) each independently inserted-and-excluded then removed-and-eligible-again, and (round 5) a destination NO contact has ever saved on any slot failing closed under strict (empty slot-set, bool_or NULL coalesced to true — the vacuous fail-open the acceptance re-run path would hit without recipient()\'s own masks)'],'limits':['Private recipient capture only; not public preparation or dispatch authorization','Batch limit signal is not acceptance enforcement; immutable approval and actual dispatch still required','No provider call or production change']},indent=2)+'\n')
-print('Eighteen actual canonical recipient/batch groups passed; all new schema/data rolled back')
+(P/'recipient-evidence.json').write_text(json.dumps({'source_sha256':hashlib.sha256(recipient.encode()).hexdigest(),'batch_sha256':hashlib.sha256(batch.encode()).hexdigest(),'context_sha256':hashlib.sha256(context.encode()).hexdigest(),'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'checks':['canonical contact, normalized saved destination, sender inventory and variables','read status leaves known-reply content revision unchanged','edited inbound advances reply revision','foreign and missing target denied without head allocation','landline and unsaved destination excluded','never-classified line type fails closed (unclassified_phone), not silently eligible','conflicting duplicate save (same destination saved as mobile AND landline) fails closed on every matching slot, not just the first by ordinal','inactive inventory sender excluded','canonical consent opt-out excluded','saved mobile with zero consent history fails closed (no_consent), not silently eligible','private API grants denied; whole proof rolled back','same destination flags every affected conversation; no silent deduplication','duplicate/null/empty target rejection','winter opening and closing boundaries','summer DST, territory and unknown state policy','51 canonical destinations blocked, 50 after one opt-out exclusion retained in review','501 target envelope rejected','destination_policy() E1-E4 convergence matrix: sms_phone_suppressions, global_phone_dnc_registry with no contact-level flag (round-4 case b), cross-contact do_not_contact/sms_opted_out bleed, cross-contact landline/unclassified slot on a SECOND contact saved with a non-E.164 spelling to prove phone() normalization on the cross-contact match path (round-4 case a), both strict-only gates (unclassified-phone, canonical no-consent) each independently inserted-and-excluded then removed-and-eligible-again, and (round 5) a destination NO contact has ever saved on any slot failing closed under strict (empty slot-set, bool_or NULL coalesced to true — the vacuous fail-open the acceptance re-run path would hit without recipient()\'s own masks)','(round 6) canonical-keyed suppression: R0 control eligible both modes; R1 a cleared-slot canonical flagged sms_opted_out excluded both modes purely on the flag (kept eligible by a second org contact still saving the destination), restored on flag removal; R2 the same cleared-slot canonical with a latest consent opt_out excluded both modes, restored by a strictly LATER opt_in_confirmed (proving latest-wins, not any-wins); R3 a fresh canonical with its slot cleared then do_not_contact set in a separate statement (DNC ratchet trigger) excluded both modes, insertion-only; R4 a nonexistent and a cross-org canonical contact id both return the new contact_unavailable fail-closed label, both modes; and the latest_sms_consent(o,for_contact) helper extraction itself caught a real parameter/column name collision bug (ce.contact_id=contact_id resolving to the column, not the argument) via this same mutation pass'],'limits':['Private recipient capture only; not public preparation or dispatch authorization','Batch limit signal is not acceptance enforcement; immutable approval and actual dispatch still required','No provider call or production change']},indent=2)+'\n')
+print('Nineteen actual canonical recipient/batch groups passed; all new schema/data rolled back')

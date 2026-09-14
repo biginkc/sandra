@@ -10,7 +10,7 @@ for key,path in [('source_sha256',p/'recipient.sql'),('batch_sha256',p/'batch.sq
 source=(r/'src/lib/messaging/quiet-hours.ts').read_text()
 expected=hashlib.sha256(source.encode()).hexdigest()
 if f'Source map SHA256: {expected}' not in (p/'batch.sql').read_text():raise SystemExit('Quiet-hours source changed; review map and rerun')
-if len(manifest['checks'])!=18:raise SystemExit('Expected eighteen proof groups')
+if len(manifest['checks'])!=19:raise SystemExit('Expected nineteen proof groups')
 concurrency=json.loads((p/'recipient-concurrency-evidence.json').read_text())
 # A DECLARED stale_pending_rerun marker (not a silent drop of the binding) is
 # the only way a key in this evidence file is allowed to be out of date: the
