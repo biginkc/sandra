@@ -1,0 +1,15 @@
+Seeded 360000 bounded rows
+Traceback (most recent call last):
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-workset-performance/experiments/inbox-workset-performance/run.py", line 48, in <module>
+    counts=json.loads(sql(prefix+f"SELECT inbox_t2_bridge.counts_baseline('{o}','{{\"view\":\"all\"}}')"))['counts'] if args.variant=='baseline' else json.loads(sql(prefix+f"SELECT inbox_t2_bridge.counts_typed('{o}','{u}',inbox_t2_bridge.normalize_filter('{{\"view\":\"all\"}}'))"))
+                      ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-workset-performance/experiments/inbox-workset-performance/run.py", line 14, in sql
+    if r.returncode:raise RuntimeError(r.stderr)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: ERROR:  canceling statement due to statement timeout
+CONTEXT:  SQL function "matching" statement 1
+SQL statement "SELECT jsonb_object_agg(view,total)             FROM (
+ SELECT view,(SELECT count(*) FROM inbox_t2_bridge.matching(org_id,(a->>'user_id')::uuid,f||jsonb_build_object('view',view))) total
+ FROM unnest(ARRAY['all','mine','unassigned','unread','escalated','dispo','needs_outcome','unknown','dismissed'])view) counts"
+PL/pgSQL function inbox_t2_bridge.counts_baseline(uuid,jsonb) line 5 at SQL statement
+

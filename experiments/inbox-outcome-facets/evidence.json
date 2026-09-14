@@ -1,0 +1,48 @@
+{
+  "passed": true,
+  "display_outcomes": [
+    "wrong_number",
+    "bad_number",
+    "not_interested",
+    "opted_out",
+    "dnc",
+    "nurture",
+    "callback_requested",
+    "needs_sequence",
+    "booked_appointment"
+  ],
+  "checks": [
+    "known conservation",
+    "search",
+    "explicit all-view semantics",
+    "unknown isolation",
+    "noise",
+    "anon/service denial"
+  ],
+  "sample": {
+    "as_of": "2026-09-13T21:49:18.636114+00:00",
+    "semantics": {
+      "unit": "conversation",
+      "view": "all",
+      "known": "recent_known_conversations",
+      "search": "Zephyr",
+      "unknown": "active_unknown_ignores_known_search",
+      "hide_noise": false
+    },
+    "known_total": 1,
+    "access_epoch": "8",
+    "unknown_count": 0,
+    "outcome_counts": {
+      "dnc": 0,
+      "nurture": 0,
+      "opted_out": 0,
+      "bad_number": 0,
+      "no_outcome": 0,
+      "wrong_number": 0,
+      "needs_sequence": 0,
+      "not_interested": 0,
+      "booked_appointment": 1,
+      "callback_requested": 0
+    }
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "results": [
+    {
+      "size": 120000,
+      "search": "Needle Name",
+      "variant": "baseline",
+      "samples": [
+        2031.577,
+        1787.128,
+        1662.617,
+        1454.707,
+        980.785
+      ],
+      "max_ms": 2031.577,
+      "exact_target_match": true
+    },
+    {
+      "size": 120000,
+      "search": "Needle Name",
+      "variant": "typed",
+      "samples": [
+        47.638,
+        45.596,
+        43.879,
+        43.849,
+        40.771
+      ],
+      "max_ms": 47.638,
+      "exact_target_match": true
+    },
+    {
+      "size": 120000,
+      "search": "quartzpref",
+      "variant": "baseline",
+      "samples": [
+        1029.331,
+        954.201,
+        864.879,
+        882.868,
+        2776.984
+      ],
+      "max_ms": 2776.984,
+      "exact_target_match": true
+    },
+    {
+      "size": 120000,
+      "search": "quartzpref",
+      "variant": "typed",
+      "samples": [
+        96.12,
+        77.131,
+        124.622,
+        164.609,
+        81.677
+      ],
+      "max_ms": 164.609,
+      "exact_target_match": true
+    },
+    {
+      "size": 360000,
+      "search": "Needle Name",
+      "variant": "baseline",
+      "samples": [
+        1658.451,
+        1783.995,
+        1838.32,
+        2006.676,
+        2032.665
+      ],
+      "max_ms": 2032.665,
+      "exact_target_match": true
+    },
+    {
+      "size": 360000,
+      "search": "Needle Name",
+      "variant": "typed",
+      "samples": [
+        334.002,
+        303.625,
+        248.504,
+        317.122,
+        309.068
+      ],
+      "max_ms": 334.002,
+      "exact_target_match": true
+    },
+    {
+      "size": 360000,
+      "search": "quartzpref",
+      "variant": "baseline",
+      "samples": [
+        1849.28,
+        1843.625,
+        2000.452,
+        1934.029,
+        2080.557
+      ],
+      "max_ms": 2080.557,
+      "exact_target_match": true
+    },
+    {
+      "size": 360000,
+      "search": "quartzpref",
+      "variant": "typed",
+      "samples": [
+        305.409,
+        371.09,
+        337.936,
+        344.416,
+        297.052
+      ],
+      "max_ms": 371.09,
+      "exact_target_match": true
+    }
+  ],
+  "limitation": "Five exploratory samples, one canonical history match beyond firstpage per corpus"
+}

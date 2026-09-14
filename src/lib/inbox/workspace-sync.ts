@@ -14,7 +14,7 @@ export type WorkspaceSummary = {
   time_label: string;
   outcome_label: string;
   assigned_label: string;
-  unread: boolean;
+  unread: boolean | null;
 }
 export interface WorkspaceScope {
   scopeId: string;
@@ -24,6 +24,8 @@ export interface WorkspaceScope {
   /** Local authenticated session identity; never a bearer token. */
   sessionId: string;
   expiresAt: number;
+  /** Canonical creation time permits TTL validation without comparing different server clocks. */
+  createdAt?: number;
   orderedIds: readonly WorkspaceId[];
 }
 export type SyncState = "loading" | "live" | "resync_required" | "permission_lost" | "closed";
@@ -41,12 +43,12 @@ export function summaryRow(r: WorkspaceSummary): WorkspaceRow {
   for (const key of ["name", "context", "preview", "time_label", "outcome_label", "assigned_label"] as const) {
     if (typeof r[key] !== "string" || r[key].length > 2000) throw Error("Invalid bounded summary text");
   }
-  if (typeof r.unread !== "boolean") throw Error("Invalid unread flag");
+  if (typeof r.unread !== "boolean" && !(r.target_kind === "unknown_sender" && r.unread === null)) throw Error("Invalid unread flag");
   return { target: r.target_kind === "known_conversation"
     ? { kind: "conversation", orgId: r.org_id, conversationId: r.target_id }
     : { kind: "unknown_sender_group", orgId: r.org_id, senderGroupId: r.target_id },
     name: r.name, context: r.context, preview: r.preview, timeLabel: r.time_label,
-    outcomeLabel: r.outcome_label, assignedLabel: r.assigned_label, unread: r.unread };
+    outcomeLabel: r.outcome_label, assignedLabel: r.assigned_label, unread: r.unread ?? undefined };
 }
 
 /** Keep per-request cancellation independent from the workset lifetime. */
@@ -54,7 +56,7 @@ export function workspaceRequestSignal(request: RequestInfo | URL, init: Request
   return AbortSignal.any([scopeSignal, ...(init?.signal ? [init.signal] : []), ...(request instanceof Request ? [request.signal] : [])]);
 }
 
-/** One bounded collection at a time. Caller obtains each fresh scope from POST /worksets.
+/** One bounded workset of at most five disjoint 100-row collections at a time. Caller obtains each fresh scope from POST /worksets.
  * No persistence and no optimistic writes. Replacement disposes before opening its successor.
  * Gateway must independently authorize every request and bound response bytes/lease duration.
  */
@@ -79,7 +81,7 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
     // Invalid replacement cannot leave a previous tenant's rows visible.
     const authChanged = !!current && ["orgId", "requesterId", "sessionId", "accessEpoch"].some(k => current![k as keyof WorkspaceScope] !== scope[k as keyof WorkspaceScope]);
     stop("loading", authChanged);
-    if (!uuid.test(scope.scopeId) || !uuid.test(scope.orgId) || !uuid.test(scope.requesterId) || !scope.sessionId || !scope.accessEpoch || !Number.isFinite(scope.expiresAt) || scope.expiresAt <= Date.now() || scope.expiresAt > Date.now() + 900_000 || scope.orderedIds.length > 500 || new Set(scope.orderedIds).size !== scope.orderedIds.length) {
+    if (!uuid.test(scope.scopeId) || !uuid.test(scope.orgId) || !uuid.test(scope.requesterId) || !scope.sessionId || !scope.accessEpoch || !Number.isFinite(scope.expiresAt) || scope.expiresAt <= Date.now() || (scope.createdAt === undefined ? scope.expiresAt > Date.now() + 900_000 : !Number.isFinite(scope.createdAt) || scope.expiresAt < scope.createdAt || scope.expiresAt - scope.createdAt > 900_000) || scope.orderedIds.length > 500 || new Set(scope.orderedIds).size !== scope.orderedIds.length) {
       stop("resync_required"); throw Error("Invalid or expired bounded workset");
     }
     for (const id of scope.orderedIds) {
@@ -87,6 +89,7 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
       try { parts = JSON.parse(id); } catch { stop("resync_required"); throw Error("Invalid workset identity"); }
       if (!Array.isArray(parts) || parts.length !== 3 || parts[0] !== scope.orgId || !["conversation", "unknown_sender_group"].includes(parts[1]) || typeof parts[2] !== "string" || !uuid.test(parts[2]) || JSON.stringify(parts) !== id) { stop("resync_required"); throw Error("Invalid workset identity"); }
     }
+    const localDeadline = scope.createdAt === undefined ? scope.expiresAt : Math.min(scope.expiresAt, Date.now() + scope.expiresAt - scope.createdAt);
     current = scope;
     const token = generation;
     const active = () => token === generation;
@@ -94,10 +97,26 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
     const fail = (state: SyncState) => { if (active()) stop(state, state === "permission_lost"); };
     const authorizedNow = () => {
       if (!active()) return false;
-      if (Date.now() >= scope.expiresAt) { fail("resync_required"); return false; }
+      if (Date.now() >= localDeadline) { fail("resync_required"); return false; }
       return true;
     };
-    const allowed = new Set(scope.orderedIds);
+    const partitions: { data: () => WorkspaceSummary[]; ready: () => boolean; cleanup: () => void }[] = [];
+    const publish = () => {
+      if (!authorizedNow()) return;
+      try {
+        const data = partitions.flatMap(part => part.data());
+        if (data.length > 500) throw Error("Collection overflow");
+        const indexed = new Map(data.map(row => { const rendered = summaryRow(row); return [workspaceId(rendered.target), rendered] as const; }));
+        if (indexed.size !== data.length) throw Error("Duplicate partition membership");
+        const complete = partitions.length === Math.max(1, Math.ceil(scope.orderedIds.length / 100));
+        emit({ state: complete && partitions.every(part => part.ready()) ? "live" : "loading", rows: scope.orderedIds.flatMap(id => indexed.has(id) ? [indexed.get(id)!] : []) });
+      } catch { fail("resync_required"); }
+    };
+    const expiry = setTimeout(() => fail("resync_required"), localDeadline - Date.now());
+    dispose = () => { controller.abort(); clearTimeout(expiry); for (const part of partitions) part.cleanup(); };
+    for (let partition = 0; partition < Math.max(1, Math.ceil(scope.orderedIds.length / 100)); partition++) {
+      if (!active()) break;
+      const allowed = new Set(scope.orderedIds.slice(partition * 100, (partition + 1) * 100));
     const key = (r: WorkspaceSummary) => {
       if (!uuid.test(r.org_id) || !uuid.test(r.target_id) || !["known_conversation", "unknown_sender"].includes(r.target_kind)) { fail("permission_lost"); throw Error("Invalid summary identity"); }
       const id = workspaceId(r.target_kind === "known_conversation"
@@ -108,7 +127,7 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
     };
     const transport: typeof fetch = async (request, init) => {
       const url = new URL(request instanceof Request ? request.url : String(request));
-      if (url.origin !== origin || url.pathname !== `/api/inbox/sync/${scope.scopeId}`) throw Error("Sync request escaped same-origin scope");
+      if (url.origin !== origin || url.pathname !== `/api/inbox/sync/${scope.scopeId}` || url.searchParams.get("partition") !== String(partition)) throw Error("Sync request escaped same-origin scope");
       const response = await (options.fetch ?? fetch)(request, { ...init, signal: workspaceRequestSignal(request, init, controller.signal), credentials: "same-origin", redirect: "error", cache: "no-store" });
       if (!authorizedNow()) throw new DOMException("Obsolete workset", "AbortError");
       if (response.status === 401 || response.status === 403) { fail("permission_lost"); throw Error("Access lost"); }
@@ -127,23 +146,20 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
       return response;
     };
     const collection = createCollection(electricCollectionOptions<WorkspaceSummary>({
-      id: `inbox-${scope.scopeId}-${token}`, getKey: key, syncMode: "eager",
-      shapeOptions: { url: `${origin}/api/inbox/sync/${scope.scopeId}`, signal: controller.signal, fetchClient: transport,
+      id: `inbox-${scope.scopeId}-${token}-${partition}`, getKey: key, syncMode: "eager",
+      shapeOptions: { url: `${origin}/api/inbox/sync/${scope.scopeId}?partition=${partition}`, signal: controller.signal, fetchClient: transport,
         onError: () => { fail("resync_required"); return undefined; } },
     }));
-    const publish = () => {
-      if (!authorizedNow()) return;
-      try {
-        const data = collection.toArray;
-        if (data.length > 500) throw Error("Collection overflow");
-        const indexed = new Map(data.map(r => [key(r), summaryRow(r)]));
-        emit({ state: collection.status === "ready" ? "live" : "loading", rows: scope.orderedIds.flatMap(id => indexed.has(id) ? [indexed.get(id)!] : []) });
-      } catch { fail("resync_required"); }
-    };
     const subscription = collection.subscribeChanges(publish);
-    const expiry = setTimeout(() => fail("resync_required"), scope.expiresAt - Date.now());
-    dispose = () => { controller.abort(); clearTimeout(expiry); subscription.unsubscribe(); void collection.cleanup(); };
+    partitions.push({ data: () => {
+      const rows = collection.toArray;
+      if (rows.length > 100) throw Error("Partition overflow");
+      for (const row of rows) key(row);
+      return rows;
+    }, ready: () => collection.status === "ready", cleanup: () => { subscription.unsubscribe(); void collection.cleanup(); } });
     void collection.preload().then(publish).catch(() => fail("resync_required"));
+    }
+
   }
   return { replace, getSnapshot: () => snapshot,
     reset: () => stop("resync_required"), revoke: () => stop("permission_lost", true),

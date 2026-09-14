@@ -1,0 +1,65 @@
+{
+  "timestamp": "2026-09-13T21:06:37.024Z",
+  "purpose": "Real Electric HTTP URL feasibility only; repository authority is synthetic and not JWT proof",
+  "sourceSha256": "f7a1dd658a2594e895613b81573cc9ddd3a4022cc08a563b2e9bb2c2524a60f2",
+  "gatewaySha256": "a2f265e0d2c64ea853e9c6ec4f7c25acd201770e5bc382efe4bd7872de3bce4d",
+  "results": [
+    {
+      "requestedTargets": 500,
+      "partition": 0,
+      "urlBytes": 6426,
+      "upstreamStatus": 200,
+      "gatewayStatus": 200,
+      "returnedRows": 100,
+      "passed": true
+    },
+    {
+      "requestedTargets": 500,
+      "partition": 1,
+      "urlBytes": 6426,
+      "upstreamStatus": 200,
+      "gatewayStatus": 200,
+      "returnedRows": 100,
+      "passed": true
+    },
+    {
+      "requestedTargets": 500,
+      "partition": 2,
+      "urlBytes": 6426,
+      "upstreamStatus": 200,
+      "gatewayStatus": 200,
+      "returnedRows": 100,
+      "passed": true
+    },
+    {
+      "requestedTargets": 500,
+      "partition": 3,
+      "urlBytes": 6426,
+      "upstreamStatus": 200,
+      "gatewayStatus": 200,
+      "returnedRows": 100,
+      "passed": true
+    },
+    {
+      "requestedTargets": 500,
+      "partition": 4,
+      "urlBytes": 6426,
+      "upstreamStatus": 200,
+      "gatewayStatus": 200,
+      "returnedRows": 100,
+      "passed": true
+    },
+    {
+      "purpose": "longest admitted opaque metadata; stale handle is not a row-read success claim",
+      "urlBytes": 7035,
+      "upstreamStatus": 409,
+      "gatewayStatus": 409,
+      "passed": true
+    }
+  ],
+  "cleanup": {
+    "ownedSchemaRemoved": true,
+    "publicationRestored": true,
+    "databaseClientClosed": true
+  }
+}
