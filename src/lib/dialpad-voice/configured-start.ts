@@ -25,7 +25,17 @@ export async function startConfiguredDialpadCall(input:Input):Promise<Result>{
   const old=await db.from('dialpad_voice_intents').select('id,property_id,status').eq('org_id',viewer.orgId).eq('actor_user_id',viewer.userId).eq('client_idempotency_key',input.idempotencyKey).maybeSingle();
   if(old.error)return{ok:false,error:'intent_read_failed'};
   // A replay never dispatches, even when a prior request stopped before HTTP.
-  if(old.data)return old.data.property_id===input.propertyId?{ok:true,intentId:old.data.id,status:old.data.status}:{ok:false,error:'idempotency_conflict'};
+  if(old.data){
+   const frozen=await db.from('dialpad_intent_configuration').select('grant_id,grant_revision,binding_revision,connection_version,device_id')
+    .eq('org_id',viewer.orgId).eq('intent_id',old.data.id).maybeSingle();
+   if(frozen.error)return{ok:false,error:'intent_read_failed'};
+   const s=frozen.data;
+   if(old.data.property_id!==input.propertyId||!s||s.grant_id!==input.grantId||s.grant_revision!==input.grantRevision
+    ||s.binding_revision!==input.bindingRevision||s.connection_version!==input.connectionVersion||s.device_id!==input.deviceId){
+    return{ok:false,error:'idempotency_conflict'};
+   }
+   return{ok:true,intentId:old.data.id,status:old.data.status};
+  }
   const connection=await db.from('dialpad_org_connections').select('*').eq('org_id',viewer.orgId).maybeSingle();const c=connection.data;
   if(connection.error||!c||c.org_id!==viewer.orgId||!c.enabled||!c.verified_at||c.config_version!==input.connectionVersion||!/^env:DIALPAD_[A-Z0-9_]{1,119}$/.test(c.credential_reference))return{ok:false,error:'configuration_unavailable'};
   const binding=await db.from('dialpad_member_bindings').select('*').eq('org_id',viewer.orgId).eq('member_user_id',viewer.userId).is('revoked_at',null).maybeSingle();const b=binding.data;
