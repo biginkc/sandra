@@ -4,6 +4,20 @@ import type { ThreadPage } from "@/lib/messages/list-threads";
 
 export type InboxRefreshSnapshot = { page: ThreadPage; unknown: number; dismissed: number };
 
+/**
+ * Floor between window `focus`/`online`-triggered auto-refreshes of the
+ * heavy inbox snapshot RPC. These fire on every tab refocus and network
+ * reconnect with no natural rate limit — a rep alt-tabbing (or a flaky
+ * connection reconnecting repeatedly) can retrigger the full inbox
+ * aggregate several times inside a few seconds, on top of whatever the
+ * realtime-driven throttled refresh is already doing (2026-09-14 incident:
+ * the same rep's inbox was re-queried 3x in 14s, pushing the RPC into its
+ * 15s timeout under concurrent load). This only gates the two ambient
+ * triggers below — explicit user actions (filter change, manual retry,
+ * pagination, selection change) always refresh immediately.
+ */
+const AUTO_REFRESH_MIN_INTERVAL_MS = 10_000;
+
 export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, enabled: boolean, currentSelectedThreadId: string | null = null, serverThreadId: string | null = null) {
   // Only Unread uses p_include_thread_id. Ordinary selection must not start
   // another expensive inbox aggregate when its rows/counts are unchanged.
@@ -57,10 +71,17 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
     previousSelection.current = selectedThreadId;
     refresh();
   }, [selectedThreadId, refresh]);
+  const lastAutoRefreshAt = useRef(0);
   useEffect(() => {
-    window.addEventListener("focus", refresh);
-    window.addEventListener("online", refresh);
-    return () => { window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
+    const requestAutoRefresh = () => {
+      const now = Date.now();
+      if (now - lastAutoRefreshAt.current < AUTO_REFRESH_MIN_INTERVAL_MS) return;
+      lastAutoRefreshAt.current = now;
+      refresh();
+    };
+    window.addEventListener("focus", requestAutoRefresh);
+    window.addEventListener("online", requestAutoRefresh);
+    return () => { window.removeEventListener("focus", requestAutoRefresh); window.removeEventListener("online", requestAutoRefresh); };
   }, [refresh]);
   return { snapshot: result?.source === initial && result.query === query && result.selectedThreadId === selectedThreadId ? result.snapshot : initial,
     failed: failure?.source === initial && failure.query === query && failure.selectedThreadId === selectedThreadId, refresh };
