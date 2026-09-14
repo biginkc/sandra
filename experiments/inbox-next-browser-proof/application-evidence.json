@@ -1,0 +1,16 @@
+{
+  "database": "sandra_inbox_install_20260913",
+  "marker": "sandra-inbox-production-candidate-owned-synthetic",
+  "image": "electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139",
+  "container": "inbox_browser_1789338466867-electric",
+  "role": "inbox_browser_repl_1789338466867",
+  "publication": "electric_publication_inbox_browser_1789338466867",
+  "stream": "inbox_browser_1789338466867",
+  "electricUrl": "http://127.0.0.1:52581/v1/shape",
+  "nextOrigin": "http://127.0.0.1:52582",
+  "authOrigin": "http://127.0.0.1:49579",
+  "nextPid": 20601,
+  "processId": 20428,
+  "longPollMs": 8000,
+  "note": "Real local password-test lane; production Hugo OAuth is not proven. Host namespace relay overhead included in timings."
+}
