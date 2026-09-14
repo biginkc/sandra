@@ -2,6 +2,7 @@
 
 import {
   Briefcase,
+  Headphones,
   Calendar,
   ClipboardList,
   Download,
@@ -65,8 +66,12 @@ const ITEMS: readonly Item[] = [
   { href: "/jobs", label: "Jobs", icon: Briefcase },
 ];
 
-function visibleItems(showMyLeads: boolean): readonly Item[] {
-  return showMyLeads ? ITEMS : ITEMS.filter((item) => item.href !== "/my-leads");
+function visibleItems(showMyLeads: boolean, showRecordings: boolean, showMyRecordings: boolean): readonly Item[] {
+  const items = ITEMS.filter(item => item.href !== "/my-leads" || showMyLeads);
+  const recordings: Item[] = [];
+  if (showRecordings) recordings.push({ href: "/owner/recordings", label: "Recordings", icon: Headphones });
+  if (showMyRecordings) recordings.push({ href: "/my-recordings", label: "My Recordings", icon: Headphones });
+  return [...items.slice(0,-1), ...recordings, ...items.slice(-1)];
 }
 
 const ITEM_BASE =
@@ -84,15 +89,19 @@ const MOBILE_ITEM_INACTIVE =
 
 export function DashboardSidebar({
   showMyLeads = true,
+  showRecordings = false,
+  showMyRecordings = false,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
 }: {
   showMyLeads?: boolean;
+  showRecordings?: boolean;
+  showMyRecordings?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
 }) {
   const pathname = usePathname();
-  const items = visibleItems(showMyLeads);
+  const items = visibleItems(showMyLeads, showRecordings, showMyRecordings);
 
   const isActive = (item: Item): boolean => {
     if (pathname === item.href) return true;
@@ -132,15 +141,19 @@ export function DashboardSidebar({
 
 export function DashboardMobileNav({
   showMyLeads = true,
+  showRecordings = false,
+  showMyRecordings = false,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
 }: {
   showMyLeads?: boolean;
+  showRecordings?: boolean;
+  showMyRecordings?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
 }) {
   const pathname = usePathname();
-  const items = visibleItems(showMyLeads);
+  const items = visibleItems(showMyLeads, showRecordings, showMyRecordings);
 
   const isActiveHref = (href: string): boolean =>
     pathname === href || pathname.startsWith(href + "/");

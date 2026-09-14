@@ -71,8 +71,6 @@ export default async function DashboardLayout({
             />
           </Link>
           <DashboardAdminNav showAdmin={showAdmin} />
-          {recordingAccess?.owner && <Link href="/owner/recordings" className="rounded-lg px-3 py-2 text-sm font-semibold text-white">Recordings</Link>}
-          {recordingAccess?.mine && <Link href="/my-recordings" className="rounded-lg px-3 py-2 text-sm font-semibold text-white">My Recordings</Link>}
         </div>
         <div className="flex min-w-0 items-center gap-[14px] text-sm [&>*:not(:first-child)]:shrink-0">
           {/* The provider keeps this client control mounted across route changes. */}
@@ -108,6 +106,8 @@ export default async function DashboardLayout({
         </Link>
         <DashboardSidebar
           showMyLeads={showMyLeads}
+          showRecordings={recordingAccess?.owner}
+          showMyRecordings={recordingAccess?.mine}
           initialAcquisitionBadge={initialAcquisitionBadge}
           onRefreshAcquisitionBadge={refreshMyLeadsBadge}
         />
@@ -122,6 +122,8 @@ export default async function DashboardLayout({
       <div className="nav-field fixed inset-x-0 top-16 z-30 border-b border-white/10 md:hidden">
         <DashboardMobileNav
           showMyLeads={showMyLeads}
+          showRecordings={recordingAccess?.owner}
+          showMyRecordings={recordingAccess?.mine}
           initialAcquisitionBadge={initialAcquisitionBadge}
           onRefreshAcquisitionBadge={refreshMyLeadsBadge}
         />
