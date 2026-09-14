@@ -537,8 +537,12 @@ class ControllerRunner:
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
         self._closed = False
-        if self.publisher is not None:
-            self._refresh_publisher_health(self.clock())
+        # A restart may inherit a completed current slot and must expose
+        # truthful readiness without replaying Sentry intake.  Read the
+        # durable publisher state at startup even when publishing is currently
+        # disabled, so an old failed/create_unknown row cannot be hidden by a
+        # configuration change.
+        self._refresh_publisher_health(self.clock())
 
     def close(self) -> None:
         if self._closed:
@@ -587,8 +591,6 @@ class ControllerRunner:
     def _refresh_publisher_health(self, observed_at: float) -> None:
         """Reconcile readiness with the durable GitHub publication backlog."""
 
-        if self.publisher is None:
-            return
         health = getattr(self.store, "github_publisher_health", None)
         if callable(health):
             counts = health()
@@ -607,6 +609,29 @@ class ControllerRunner:
             create_unknown_count=int(counts.get("create_unknown", 0)),
             observed_at=observed_at,
         )
+
+    def _record_completed_current_slot(self, now: float) -> bool:
+        """Restore readiness evidence for a durably completed current slot.
+
+        ``_claim_slot`` intentionally returns no work for a completed slot,
+        which prevents duplicate Sentry retrieval after a restart.  The
+        completion itself is durable evidence that intake succeeded; restore
+        only that evidence and then re-read the durable publisher backlog so a
+        separate failed or create-unknown job still keeps readiness degraded.
+        """
+
+        current = datetime.fromtimestamp(now, tz=timezone.utc)
+        slot = current_slot(current)
+        slot_id = slot_identity(slot)
+        get_slot = getattr(self.store, "get_scheduler_slot", None)
+        if not callable(get_slot):
+            return False
+        persisted = get_slot(slot_id)
+        if persisted is None or str(persisted.get("status", "")) != "completed":
+            return False
+        self.health.record_success(slot_id, now)
+        self._refresh_publisher_health(now)
+        return True
 
     def _claim_slot(self, now: float) -> tuple[str, datetime] | None:
         current = datetime.fromtimestamp(now, tz=timezone.utc)
@@ -701,6 +726,7 @@ class ControllerRunner:
                 retry_delay_seconds=self.backoff.failure_delay(),
             )
         if claimed is None:
+            self._record_completed_current_slot(observed_at)
             return CycleResult("not_due")
         slot_id, slot = claimed
         try:

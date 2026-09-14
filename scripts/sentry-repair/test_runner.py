@@ -173,6 +173,7 @@ class RunnerTests(unittest.TestCase):
             second = ControllerRunner(config, store=second_store, sentry_client=second_sentry)
             self.assertEqual(second.run_once(RUN_AT).status, "not_due")
             self.assertEqual(second_sentry.calls, 0)
+            self.assertTrue(second.health.payload()["ready"])
             self.assertEqual(len(second_store.list_issues("bmh-group", "sandra", "vercel-production")), 1)
             second.close()
 
@@ -294,6 +295,12 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(restarted_payload["publisher_degraded"])
             self.assertFalse(restarted_payload["ready"])
             self.assertEqual(restarted_payload["publisher_outstanding_count"], 1)
+            self.assertEqual(restarted.run_once(RUN_AT).status, "not_due")
+            self.assertEqual(restarted.sentry.calls, 0)
+            persisted_payload = restarted.health.payload()
+            self.assertTrue(persisted_payload["publisher_degraded"])
+            self.assertFalse(persisted_payload["ready"])
+            self.assertEqual(persisted_payload["publisher_outstanding_count"], 1)
             restarted.close()
 
     def test_failed_slot_retries_with_bounded_delay_and_never_logs_secret(self):
