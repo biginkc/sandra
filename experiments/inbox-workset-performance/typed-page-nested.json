@@ -1,0 +1,83 @@
+[
+  {
+    "Query Text": "SELECT r.target_kind,r.target_id,r.latest_at FROM inbox_t2_bridge.filter_rows r WHERE r.org_id=$1 AND (r.target_kind='known_conversation' AND r.has_recent AND NOT r.is_noise) ORDER BY r.latest_at DESC NULLS LAST,r.target_kind,r.target_id LIMIT $9",
+    "Plan": {
+      "Node Type": "Limit",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 0.42,
+      "Total Cost": 12.08,
+      "Plan Rows": 100,
+      "Plan Width": 42,
+      "Actual Rows": 100,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 100,
+      "Shared Read Blocks": 4,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0,
+      "Plans": [
+        {
+          "Node Type": "Index Only Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Scan Direction": "Forward",
+          "Index Name": "filter_known_visible",
+          "Relation Name": "filter_rows",
+          "Alias": "r",
+          "Startup Cost": 0.42,
+          "Total Cost": 10950.7,
+          "Plan Rows": 93877,
+          "Plan Width": 42,
+          "Actual Rows": 100,
+          "Actual Loops": 1,
+          "Index Cond": "(org_id = 'b06d981c-0ae5-4f7e-b22c-17bf2d57ee66'::uuid)",
+          "Rows Removed by Index Recheck": 0,
+          "Heap Fetches": 100,
+          "Shared Hit Blocks": 100,
+          "Shared Read Blocks": 4,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0
+        }
+      ]
+    }
+  },
+  {
+    "Query Text": "SELECT * FROM inbox_t2_bridge.page('b06d981c-0ae5-4f7e-b22c-17bf2d57ee66','072ecdae-8128-48c3-9304-002a5256cabd',inbox_t2_bridge.normalize_filter('{\"view\":\"all\"}'),NULL,NULL,NULL,false,100);",
+    "Plan": {
+      "Node Type": "Function Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Function Name": "page",
+      "Alias": "page",
+      "Startup Cost": 0.25,
+      "Total Cost": 10.25,
+      "Plan Rows": 1000,
+      "Plan Width": 56,
+      "Actual Rows": 100,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 716,
+      "Shared Read Blocks": 4,
+      "Shared Dirtied Blocks": 0,
+      "Shared Written Blocks": 0,
+      "Local Hit Blocks": 0,
+      "Local Read Blocks": 0,
+      "Local Dirtied Blocks": 0,
+      "Local Written Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    }
+  }
+]

@@ -1,0 +1,23 @@
+{
+  "at": "2026-09-13 19:49:14.616757+00",
+  "checks": [
+    {
+      "name": "source UPDATE holds row before backfill snapshot; observed wait resumes current tuple and never restores old edge",
+      "passed": true
+    },
+    {
+      "name": "source DELETE holds row before backfill snapshot; observed wait skips deleted tuple without edge resurrection",
+      "passed": true
+    },
+    {
+      "name": "old worker blocks on private child after source locks; replaced claim rolls back all seed/checkpoint effects and replacement progresses",
+      "passed": true
+    }
+  ],
+  "setup_sha256": "d7ff8e2f2c39328a8b25e04fdde9e6fe201ea5f721158789ef4d37820e9ed4d0",
+  "runner_sha256": "3287609604d052262f8f3dec274c4221d3931ec5ea5b6f0d293ab95b25a4d265",
+  "limits": [
+    "Real independent sessions and observed lock waits; lease expiry simulated by private fixture update",
+    "No universal deadlock freedom, production workload or crash recovery claim"
+  ]
+}

@@ -20,7 +20,7 @@ export type QueuePage = { rows: QueueRow[]; totalCount: number; filteredCount: n
 export type QueueSnapshot = { stages: Partial<Record<QueueStage, QueuePage>>; snapshotAt: string; nextWarningAt: string | null; search: string };
 export type AcquisitionKpis = {
   contactWithoutFollowUp: number; needsOffers: number; appointmentsOverdue: number;
-  lastAttemptAt: string | null; asOf: string; missingRecordings: number; recordingExpectationUnknown: number;
+  lastAttemptAt: string | null; lastAttemptClockVersion?: number; asOf: string; missingRecordings: number; recordingExpectationUnknown: number;
   averageTalkSeconds: number | null; talkTimeSamples: number; talkTimeUnknown: number; conversationsOverFiveMinutes: number;
   attempts: number; reached: number; pendingOutcomes: number; firstCallSamples: number; firstCallPending: number;
   firstCallElapsedSeconds: number | null; appointmentsDue: number; appointmentsHeld: number;

@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "checks": [
+    "postgres nonowner trigger creation",
+    "auth owner insert triggers postgres definer private write",
+    "postgres DROP TRIGGER denied",
+    "owned function DROP CASCADE removes trigger",
+    "transaction rollback leaves no schema"
+  ],
+  "limitation": "Equivalent fixture privileges, not production DDL execution"
+}

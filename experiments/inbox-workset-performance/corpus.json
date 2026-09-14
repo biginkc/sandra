@@ -1,0 +1,40 @@
+[
+  {
+    "size": 120000,
+    "known": 108000,
+    "org": "b06d981c-0ae5-4f7e-b22c-17bf2d57ee66",
+    "user": "072ecdae-8128-48c3-9304-002a5256cabd",
+    "session": "cb0f8969-3b65-4786-8bbf-408db0cd665a",
+    "seed_seconds": 9.758152333000908,
+    "expected_counts": {
+      "all": 93828,
+      "mine": 26809,
+      "unassigned": 53616,
+      "unread": 8531,
+      "escalated": 3026,
+      "dispo": 2634,
+      "needs_outcome": 4939,
+      "unknown": 6000,
+      "dismissed": 6000
+    }
+  },
+  {
+    "size": 360000,
+    "known": 324000,
+    "org": "be48a45d-effe-4bbd-b8cb-008811b87d88",
+    "user": "ff043f90-2112-4680-b934-45a772ac30ba",
+    "session": "c547b4e0-2eae-49d4-9d36-45d6e732190e",
+    "seed_seconds": 43.27187666599639,
+    "expected_counts": {
+      "all": 281484,
+      "mine": 80425,
+      "unassigned": 160848,
+      "unread": 25590,
+      "escalated": 9079,
+      "dispo": 7902,
+      "needs_outcome": 14815,
+      "unknown": 18000,
+      "dismissed": 18000
+    }
+  }
+]

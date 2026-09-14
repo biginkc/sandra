@@ -1,0 +1,12 @@
+{
+  "source_hashes": {
+    "restrictive-scope.sql": "8b21a491160fedfb84ef85d1156fcede5ffdb8f56855786d430faed1784776d9",
+    "restrictive-effect.sql": "766f2a6069184ded2aac765a8a06d3a56cdd94202c709ca6cf573a1b6868595e",
+    "restrictive-apply.sql": "b0d463a1828dc96074a8510e7bca3f2550d3ba199965cea9ba613c4bf19d0978"
+  },
+  "prior_source_hashes": {
+    "restrictive-effect.sql": "fae7909d87be36a08b98bdb19405c8f3068fb2819ab0b85634b06bb72f5eee3f",
+    "restrictive-apply.sql": "9715287b68d09755ee0c460e2274c29a9b2cba822a4802cc69ebab9dc21f61b5"
+  },
+  "scope": "Private safety receipt table and two function bodies only; no fixture reset"
+}

@@ -1,0 +1,8 @@
+{
+  "auth-privilege-proof.py": "177df6179935cc3a4846bbcbdc16447a9503d7d15aef2f19af51ff5d8273e5cc",
+  "install.py": "955fc5b3f499ed84ef78aabeae58675ad01cf249bed3997b955daa70eaffa463",
+  "scale-proof.py": "bb683ccd5b5381d49d242a03f6a1106314c494a134481f2a1951dce189602ef4",
+  "setup.sql": "fc365e47abf71613744e9f9aa8b8cb7c937cdf2042e655d689d83f0ce793a299",
+  "test.py": "5ed78ea705585e1cccf0e059cdf290cd660d5b79434bf57c0906fcce4c4f78dd",
+  "verify.py": "f7081e54d79c372836c97b6ce2ec3f13e70bbf66150f6d0a5c31b8f935e84d8d"
+}

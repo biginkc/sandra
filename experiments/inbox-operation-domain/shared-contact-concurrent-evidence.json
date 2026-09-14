@@ -1,0 +1,27 @@
+{
+  "checks": [
+    {
+      "name": "two properties share one contact safety effect and both complete",
+      "passed": true
+    },
+    {
+      "name": "concurrent second property waits before source locks and reads committed safety receipt",
+      "passed": true
+    },
+    {
+      "name": "one consent event and one immutable safety receipt",
+      "passed": true
+    },
+    {
+      "name": "both active enrollments stopped",
+      "passed": true
+    }
+  ],
+  "source_hashes": {
+    "restrictive-scope.sql": "8b21a491160fedfb84ef85d1156fcede5ffdb8f56855786d430faed1784776d9",
+    "restrictive-effect.sql": "3e643d1cd5b370f7cea3588a4caf9146a29e25da6eec808b0c4621ca424124df",
+    "restrictive-apply.sql": "c92977a209ead8e9c25e468887ecdc5d4e00a5688ae65128f7980996ed2ccdfa"
+  },
+  "runner_sha256": "f20b7ded494e507e1ef9e539dcbc8f5021c16abc77bdc647a6d45bc8e2333218",
+  "fixture_operation_id": "bd302b01-285e-48cd-8871-8e9c887cace8"
+}

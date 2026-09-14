@@ -1,0 +1,22 @@
+{
+  "checks": [
+    {
+      "name": "bounded claims persist tokens and reject unrelated worker completion",
+      "passed": true
+    },
+    {
+      "name": "expired/reclaimed worker is fenced; fresh claim publishes and removes only caught-up work",
+      "passed": true
+    },
+    {
+      "name": "enqueue is transactional; older publication leaves newer generation durably queued",
+      "passed": true
+    }
+  ],
+  "queue_sql_sha256": "cb4c12d07ff3f3aef6ccb20fff1894d8e59c89d94586cf250ed0b451b7d79ca2",
+  "runner_sha256": "43c008a96f13c201975a1603da757094a4c4accda2b4f5dbe70c6d7061f33ab6",
+  "limits": [
+    "Fixture lease expiry is controlled metadata manipulation, not a wall-clock/process-crash test",
+    "No daemon or production activation; no parent fanout or backfill race proof"
+  ]
+}

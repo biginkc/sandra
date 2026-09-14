@@ -1,0 +1,20 @@
+{
+  "deadlock_victim": "acknowledgment",
+  "aborted_acknowledgment_rollback_proved": true,
+  "at": "2026-09-13 21:05:55.624785+00",
+  "checks": [
+    "held message prevents false completion; generation reset actually waits for acknowledgment FOR SHARE",
+    "separate writer backdated arrival remains unread under old boundary",
+    "actual waiting acknowledgment excludes source moved out and back with fresh revision",
+    "concurrent committed DNC locks deny acknowledgment without a read or receipt",
+    "execution deadline elapses during observed source wait; read, receipt and boundary advancement roll back",
+    "aborted acknowledgment rolls back read/receipt; same boundary/batch retry converges to one receipt"
+  ],
+  "setup_sha256": "d8d13328cd70d0b4e6a0414c9d3560f99f00151928e68a1186693342d87035c7",
+  "runner_sha256": "8e9dd093fa49d49d37f2272a94de1966e36d6b22a1f707809a99813e540f2530",
+  "limits": [
+    "Trusted SQL claims, no JWT transport or browser render proof",
+    "Deadlock victim selection may vary; no general deadlock-freedom claim",
+    "Synthetic owned rows retained; generation-reset transaction rolled back"
+  ]
+}
