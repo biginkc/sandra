@@ -2,7 +2,38 @@
 
 This is a Railway service definition for the long-lived controller process. It
 is a deployment artifact only; it does not create a Railway project, service,
-volume, variable, or secret.
+volume, variable, or secret by itself.
+
+## Explicit Railway deployment
+
+The repository uses Railway Infrastructure as Code at
+`.railway/railway.ts`. Railway's current IaC workflow requires CLI 5.42.1 or
+newer and the `railway` TypeScript SDK. From a directory linked to the target
+Railway project, run the following read-only plan first:
+
+    railway config plan
+
+Review that the plan and deployment details read back exactly one
+`sandra-sentry-repair` service, one `/data` volume mount, the Dockerfile at
+`deployment/sentry-repair/Dockerfile`, the start command
+`/usr/local/bin/sandra-sentry-repair-entrypoint`, and the `/readyz` health
+probe with a 300-second startup window. Apply only after that review:
+
+    railway config apply
+
+Then verify the running service and the deployed configuration from Railway:
+
+    railway service status --json
+    railway deployment list --service sandra-sentry-repair --json
+    railway logs --service sandra-sentry-repair --latest --json
+    railway volume list --json
+
+The IaC file preserves existing secret values without placing them in source.
+Populate missing `SENTRY_AUTH_TOKEN` and, only after the GitHub publication
+gate is approved, the GitHub App values through the Railway variable UI or
+`railway variable set --stdin`; never pass secrets in command arguments or
+commit them. The current live CLI in this checkout may predate IaC support;
+upgrade it before planning and confirm `railway --version` is at least 5.42.1.
 
 Configure the service with a mounted Railway volume at `/data`, set
 `SANDRA_REPAIR_VOLUME_PATH=/data`, and set
@@ -20,7 +51,12 @@ runner mints renewable installation tokens in memory; it does not accept a
 static `GITHUB_TOKEN`.
 
 Railway supplies `PORT`; the runner exposes `/healthz` and `/readyz` on that
-port. The process polls current America/Chicago slots, claims each UTC slot
+port. Railway probes `/readyz`, which remains 503 until the process has
+completed a successful first intake and any persisted failed or
+`create_unknown` GitHub publication backlog is clear. This avoids declaring a
+deployment ready while its durable queue is unhealthy. The 300-second
+healthcheck timeout allows the first bounded Sentry request to complete before
+Railway marks startup failed. The process polls current America/Chicago slots, claims each UTC slot
 once in SQLite, and never replays missed slots after a restart. It retries a
 failed intake within the same slot with a bounded exponential delay and caps
 GitHub publications per cycle.

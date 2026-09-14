@@ -221,6 +221,81 @@ class RunnerTests(unittest.TestCase):
             self.assertNotIn("github-token-value", body)
             runner.close()
 
+    def test_successful_publication_does_not_clear_durable_failure_backlog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "repair.db"
+
+            class TwoIssueSentry(FakeSentry):
+                def retrieve_all(self, _cursor=None):
+                    self.calls += 1
+                    return [
+                        IssueInput(100, title="first"),
+                        IssueInput(101, title="second"),
+                    ], "terminal-cursor"
+
+            class FailFirstGitHub(FakeGitHub):
+                def create_issue(self, title, body, labels):
+                    self.create_calls += 1
+                    if self.create_calls == 1:
+                        from github_publisher import GitHubTransportError
+
+                        raise GitHubTransportError("temporary", kind="server")
+                    return GitHubIssue(
+                        number=9,
+                        html_url="https://github.com/biginkc/sandra/issues/9",
+                        node_id="node-9",
+                        title=title,
+                        body=body,
+                        labels=tuple(labels),
+                    )
+
+            config = RunnerConfig(
+                db_path=path,
+                sentry_token="sentry-token-value",
+                github_publish_enabled=True,
+                github_app_id=1,
+                github_installation_id=1,
+                health_port=0,
+            )
+            store = RepairStore(path)
+            github = FailFirstGitHub()
+            runner = ControllerRunner(
+                config,
+                store=store,
+                sentry_client=TwoIssueSentry(),
+                github_client=github,
+                github_token_provider=FakeTokenProvider(),
+            )
+            result = runner.run_once(RUN_AT)
+            self.assertEqual(result.published, 1)
+            self.assertEqual(result.publisher_failures, 1)
+            payload = runner.health.payload()
+            self.assertTrue(payload["publisher_degraded"])
+            self.assertEqual(payload["publisher_outstanding_count"], 1)
+            self.assertEqual(payload["last_publisher_error_type"], "publisher_failed_backlog")
+            self.assertFalse(payload["ready"])
+            runner.close()
+
+            # The readiness failure is durable: a process restart must not
+            # turn an unresolved outbox row into a healthy deployment.
+            reopened_store = RepairStore(path)
+            self.assertEqual(
+                reopened_store.github_publisher_health(),
+                {"failed": 1, "create_unknown": 0, "outstanding": 1},
+            )
+            restarted = ControllerRunner(
+                config,
+                store=reopened_store,
+                sentry_client=TwoIssueSentry(),
+                github_client=github,
+                github_token_provider=FakeTokenProvider(),
+            )
+            restarted_payload = restarted.health.payload()
+            self.assertTrue(restarted_payload["publisher_degraded"])
+            self.assertFalse(restarted_payload["ready"])
+            self.assertEqual(restarted_payload["publisher_outstanding_count"], 1)
+            restarted.close()
+
     def test_failed_slot_retries_with_bounded_delay_and_never_logs_secret(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "repair.db"
@@ -325,6 +400,18 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('"safe":"ok"', rendered)
         self.assertNotIn("sentry-token-value", rendered)
         self.assertNotIn("github-token-value", rendered)
+
+    def test_railway_iac_wires_explicit_start_readiness_volume_and_dockerfile(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / ".railway" / "railway.ts").read_text()
+        self.assertIn('github("biginkc/sandra"', source)
+        self.assertIn('dockerfilePath: "deployment/sentry-repair/Dockerfile"', source)
+        self.assertIn('start: "/usr/local/bin/sandra-sentry-repair-entrypoint"', source)
+        self.assertIn('healthcheck: "/readyz"', source)
+        self.assertIn("healthcheckTimeout: 300", source)
+        self.assertIn('const data = volume("sandra-repair-data"', source)
+        self.assertIn('"/data": data', source)
+        self.assertFalse((root / "deployment" / "sentry-repair" / "railway.json").exists())
 
 
 if __name__ == "__main__":

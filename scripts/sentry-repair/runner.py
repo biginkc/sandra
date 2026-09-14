@@ -314,6 +314,7 @@ class HealthState:
     last_publisher_error_type: str | None = None
     last_publisher_failure_at: float | None = None
     last_publisher_success_at: float | None = None
+    publisher_outstanding_count: int = 0
     intake_succeeded: bool = False
     publisher_degraded: bool = False
     stopping: bool = False
@@ -339,8 +340,42 @@ class HealthState:
     def record_publisher_success(self, observed_at: float | None = None) -> None:
         with self._lock:
             self.publisher_degraded = False
+            self.publisher_outstanding_count = 0
             self.last_publisher_error_type = None
             self.last_publisher_success_at = time.time() if observed_at is None else float(observed_at)
+
+    def record_publisher_backlog(
+        self,
+        *,
+        failed_count: int,
+        create_unknown_count: int,
+        observed_at: float | None = None,
+    ) -> None:
+        """Apply the persisted publisher state without clearing other jobs.
+
+        The counts come from SQLite, rather than from the last item handled
+        during this process cycle.  This keeps readiness truthful when one
+        item succeeds while another item's failure or create ambiguity is
+        still outstanding.
+        """
+
+        failed = max(0, int(failed_count))
+        create_unknown = max(0, int(create_unknown_count))
+        outstanding = failed + create_unknown
+        observed = time.time() if observed_at is None else float(observed_at)
+        with self._lock:
+            was_degraded = self.publisher_degraded
+            self.publisher_outstanding_count = outstanding
+            if outstanding:
+                self.publisher_degraded = True
+                state = "create_unknown" if create_unknown else "failed"
+                self.last_publisher_error_type = f"publisher_{state}_backlog"
+                if not was_degraded or self.last_publisher_failure_at is None:
+                    self.last_publisher_failure_at = observed
+            else:
+                self.publisher_degraded = False
+                self.last_publisher_error_type = None
+                self.last_publisher_success_at = observed
 
     def record_failure(self, error_type: str) -> None:
         with self._lock:
@@ -376,6 +411,7 @@ class HealthState:
                 "last_publisher_error_type": self.last_publisher_error_type,
                 "last_publisher_failure_at": self.last_publisher_failure_at,
                 "last_publisher_success_at": self.last_publisher_success_at,
+                "publisher_outstanding_count": self.publisher_outstanding_count,
                 "intake_succeeded": self.intake_succeeded,
                 "publisher_degraded": self.publisher_degraded,
                 "ready": ready,
@@ -501,6 +537,8 @@ class ControllerRunner:
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
         self._closed = False
+        if self.publisher is not None:
+            self._refresh_publisher_health(self.clock())
 
     def close(self) -> None:
         if self._closed:
@@ -545,6 +583,30 @@ class ControllerRunner:
             server.server_close()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2)
+
+    def _refresh_publisher_health(self, observed_at: float) -> None:
+        """Reconcile readiness with the durable GitHub publication backlog."""
+
+        if self.publisher is None:
+            return
+        health = getattr(self.store, "github_publisher_health", None)
+        if callable(health):
+            counts = health()
+        else:
+            # Keep test doubles and older local stores safe while the durable
+            # method is rolled out: only these terminally unsafe states count.
+            rows = getattr(self.store, "list_github_outbox", lambda: [])()
+            counts = {
+                "failed": sum(1 for row in rows if row.get("status") == "failed"),
+                "create_unknown": sum(
+                    1 for row in rows if row.get("status") == "create_unknown"
+                ),
+            }
+        self.health.record_publisher_backlog(
+            failed_count=int(counts.get("failed", 0)),
+            create_unknown_count=int(counts.get("create_unknown", 0)),
+            observed_at=observed_at,
+        )
 
     def _claim_slot(self, now: float) -> tuple[str, datetime] | None:
         current = datetime.fromtimestamp(now, tz=timezone.utc)
@@ -600,10 +662,9 @@ class ControllerRunner:
                     break
                 if result.action in {"created", "reconciled"}:
                     published += 1
-                    self.health.record_publisher_success(now)
                 elif result.action in {"failed", "create_unknown", "awaiting_marker", "reconcile_required"}:
                     publisher_failures += 1
-                    self.health.record_publisher_failure(f"publisher_{result.action}", now)
+            self._refresh_publisher_health(now)
         _log(
             "slot_completed",
             slot_id=slot_id,

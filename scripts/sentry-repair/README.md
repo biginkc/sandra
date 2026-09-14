@@ -47,8 +47,10 @@ The process claims the current America/Chicago slot once in SQLite, performs a
 fresh Sentry snapshot, and optionally drains a bounded number of GitHub outbox
 jobs. A failed intake is retried a bounded number of times with capped
 exponential delay. `/healthz` and `/readyz` expose sanitized process state.
-`deployment/sentry-repair/` contains the Dockerfile, Railway config, and
-volume/secret setup notes. `SANDRA_REPAIR_DISPATCH_ENABLED` must remain false;
+`deployment/sentry-repair/` contains the Dockerfile and startup script;
+`.railway/railway.ts` is the explicit Railway service configuration and
+`deployment/sentry-repair/README.md` contains the volume/secret setup notes.
+`SANDRA_REPAIR_DISPATCH_ENABLED` must remain false;
 the repair-dispatch gate is reserved for a separately reviewed rollout.
 
 Use observe (the default) for intake and reporting. investigate permits a

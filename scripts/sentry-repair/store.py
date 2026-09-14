@@ -1096,6 +1096,32 @@ class RepairStore:
             )
         ]
 
+    def github_publisher_health(self) -> dict[str, int]:
+        """Return the durable publication backlog by safety-relevant state.
+
+        ``failed`` jobs are retryable and ``create_unknown`` jobs require
+        marker reconciliation before another create is allowed.  Both states
+        must keep the controller degraded until their own rows are resolved;
+        a successful publication for a different issue cannot clear them.
+        """
+
+        counts = {
+            "failed": 0,
+            "create_unknown": 0,
+        }
+        rows = self.db.execute(
+            """SELECT status, COUNT(*) AS count
+               FROM github_outbox
+               WHERE status IN ('failed', 'create_unknown')
+               GROUP BY status"""
+        ).fetchall()
+        for row in rows:
+            status = str(row["status"])
+            if status in counts:
+                counts[status] = int(row["count"])
+        counts["outstanding"] = counts["failed"] + counts["create_unknown"]
+        return counts
+
     def get_cursor(self, organization: str, project: str, environment: str) -> str | None:
         row = self.db.execute(
             "SELECT cursor FROM source_cursors WHERE organization=? AND project=? AND environment=?",

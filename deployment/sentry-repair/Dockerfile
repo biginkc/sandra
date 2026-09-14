@@ -18,6 +18,6 @@ RUN useradd --create-home --uid 10001 sandra \
 EXPOSE 8080
 
 # Credentials and the durable database path are injected by the Railway
-# service. They are intentionally absent from this image and this command.
-ENTRYPOINT ["/usr/local/bin/sandra-sentry-repair-entrypoint"]
-CMD []
+# service. The executable start command is explicit in the Railway IaC file;
+# retaining it as the image default keeps local image runs equivalent.
+CMD ["/usr/local/bin/sandra-sentry-repair-entrypoint"]
