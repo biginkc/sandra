@@ -7,7 +7,6 @@ vi.mock("@sentry/nextjs", () => ({
   captureCheckIn: mocks.checkIn,
   flush: mocks.flush,
   withScope: (callback: (scope: { setTag: typeof mocks.tag }) => void) => callback({ setTag: mocks.tag }),
-  wrapRouteHandlerWithSentry: (handler: unknown) => handler,
 }));
 vi.mock("workflow/api", () => ({ start: mocks.start }));
 import { POST } from "./route";
@@ -50,10 +49,6 @@ describe("secret-gated Sentry canary", () => {
     expect((await POST(request("cron_error", "owned-canary-secret"))).status).toBe(404);
     expect((await POST(request("server", "owned-canary-secret"))).status).toBe(200);
     expect((await POST(request("unhandled", "owned-canary-secret"))).status).toBe(400);
-  });
-  it("throws only from the authorized preview unhandled-request probe", async () => {
-    await expect(POST(request("unhandled", "owned-canary-secret")))
-      .rejects.toThrow("Controlled Sentry canary unhandled request failure");
   });
 
   it("captures a controlled server event and reports transport outcome", async () => {
