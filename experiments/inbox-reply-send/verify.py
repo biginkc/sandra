@@ -10,7 +10,7 @@ for path in sources:
     key=str(path.relative_to(p.parent))
     if hashlib.sha256(path.read_bytes()).hexdigest()!=manifest['sources'][key]:raise SystemExit(f'Stale run.py evidence: {key}')
 if hashlib.sha256((p/'run.py').read_bytes()).hexdigest()!=manifest['runner_sha256']:raise SystemExit('Stale evidence: run.py')
-if len(manifest['checks'])!=13:raise SystemExit('Expected thirteen run.py proof groups')
+if len(manifest['checks'])!=24:raise SystemExit('Expected twenty-four run.py proof groups')
 
 concurrency=json.loads((p/'concurrency-evidence.json').read_text())
 for path in sources:
@@ -18,10 +18,10 @@ for path in sources:
     if hashlib.sha256(path.read_bytes()).hexdigest()!=concurrency['sources_sha256'][key]:raise SystemExit(f'Stale concurrency.py evidence: {key}')
 if hashlib.sha256((p/'concurrency-setup.sql').read_bytes()).hexdigest()!=concurrency['setup_sha256']:raise SystemExit('Stale evidence: concurrency-setup.sql')
 if hashlib.sha256((p/'concurrency.py').read_bytes()).hexdigest()!=concurrency['runner_sha256']:raise SystemExit('Stale evidence: concurrency.py')
-if len(concurrency['checks'])!=8:raise SystemExit('Expected eight concurrency.py proof groups')
+if len(concurrency['checks'])!=12:raise SystemExit('Expected twelve concurrency.py proof groups')
 
 # Cross-binding: both evidence files must be reporting on the SAME attempts.sql.
 if manifest['sources']['inbox-reply-send/attempts.sql']!=concurrency['sources_sha256']['inbox-reply-send/attempts.sql']:
     raise SystemExit('run.py and concurrency.py evidence disagree on attempts.sql content')
 
-print('PR-D send-attempt ledger evidence (run.py + concurrency.py) matches its exact source; 20 proof groups bound')
+print('PR-D send-attempt ledger evidence (run.py + concurrency.py) matches its exact source; 36 proof groups bound')

@@ -28,16 +28,24 @@ DO $test$
 DECLARE
  o uuid:=gen_random_uuid();u uuid:=gen_random_uuid();sess uuid:=gen_random_uuid();
  s uuid:=gen_random_uuid();
- n integer:=20;i integer;
+ n integer:=24;i integer;
  cids uuid[];pids uuid[];ctids uuid[];
  targets jsonb:='[]';drafts jsonb:='[]';
  capture jsonb;freeze_result jsonb;prep_id uuid;items jsonb;
  op_id uuid:=gen_random_uuid();k uuid:=gen_random_uuid();
- item1 jsonb;item2 jsonb;item3 jsonb;item4 jsonb;item5 jsonb;item6 jsonb;item7 jsonb;item8 jsonb;item9 jsonb;item10 jsonb;item11 jsonb;item12 jsonb;item13 jsonb;item14a jsonb;item14b jsonb;item15 jsonb;item16 jsonb;item17 jsonb;item18 jsonb;item19 jsonb;item20 jsonb;
- att1 uuid;att2 uuid;att3 uuid;att4 uuid;att5 uuid;att6 uuid;att7 uuid;att8 uuid;att9 uuid;att10 uuid;att11 uuid;att12 uuid;att13 uuid;att14a uuid;att14b uuid;att15 uuid;att16 uuid;att17 uuid;att18 uuid;att19 uuid;att20 uuid;
+ item1 jsonb;item2 jsonb;item3 jsonb;item4 jsonb;item5 jsonb;item6 jsonb;item7 jsonb;item8 jsonb;item9 jsonb;item10 jsonb;item11 jsonb;item12 jsonb;item13 jsonb;item14a jsonb;item14b jsonb;item15 jsonb;item16 jsonb;item17 jsonb;item18 jsonb;item19 jsonb;item20 jsonb;item21 jsonb;item22 jsonb;item23 jsonb;item24 jsonb;
+ att1 uuid;att2 uuid;att3 uuid;att4 uuid;att5 uuid;att6 uuid;att7 uuid;att8 uuid;att9 uuid;att10 uuid;att11 uuid;att12 uuid;att13 uuid;att14a uuid;att14b uuid;att15 uuid;att16 uuid;att17 uuid;att18 uuid;att19 uuid;att20 uuid;att21 uuid;att22 uuid;att23 uuid;att24 uuid;
  a jsonb;b jsonb;failed boolean;chosen_state text;dest14 text;tok1 uuid;tok5 uuid;tok15 uuid;att_item7_ord2 uuid;
 BEGIN
- SELECT state INTO STRICT chosen_state FROM (VALUES('MO'),('HI'),('GU'),('PR')) states(state) WHERE inbox_reply_preparation.quiet_hours(state,clock_timestamp())->>'ok'='true' LIMIT 1;
+ -- quiet_hours() gates on wall-clock local time; no single US zone in its
+ -- table keeps 08:00-21:00 local safely inside the UTC hour this harness
+ -- might run in (no offset in that table falls in [-3,+9]). None of the
+ -- 15 proof obligations here concern quiet_hours transitions, so pin it
+ -- to always-open for the duration of this rolled-back transaction only
+ -- (ROLLBACK below restores the real function) rather than chase a magic
+ -- state/time combination.
+ CREATE OR REPLACE FUNCTION inbox_reply_preparation.quiet_hours(state text,at_time timestamptz) RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path='' AS $qh$ SELECT jsonb_build_object('ok',true,'zone','Etc/UTC','local_time','12:00:00') $qh$;
+ chosen_state:='MO';
  INSERT INTO organizations(id,name) VALUES(o,'Owned PR-D send-attempt ledger');
  INSERT INTO auth.users(id,email) VALUES(u,u::text||'@example.invalid');
  INSERT INTO memberships(org_id,user_id,role,access_status) VALUES(o,u,'owner','active');
@@ -88,13 +96,17 @@ BEGIN
  item12:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[12]::text);
  item13:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[13]::text);
  item14a:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[14]::text);
- item14b:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[21]::text);
+ item14b:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[25]::text);
  item15:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[15]::text);
  item16:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[16]::text);
  item17:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[17]::text);
  item18:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[18]::text);
  item19:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[19]::text);
  item20:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[20]::text);
+ item21:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[21]::text);
+ item22:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[22]::text);
+ item23:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[23]::text);
+ item24:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[24]::text);
  IF item1 IS NULL OR item14b IS NULL THEN RAISE EXCEPTION 'Item lookup failed';END IF;
  IF item14a->'recipient'->>'to' IS DISTINCT FROM item14b->'recipient'->>'to' THEN RAISE EXCEPTION 'Expected shared destination for item14a/b: % vs %',item14a->'recipient'->>'to',item14b->'recipient'->>'to';END IF;
 
@@ -520,7 +532,7 @@ BEGIN
   RETURNING id INTO att19;
  PERFORM inbox_reply_send.claim(o,att19);
  CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $mut$
-DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;token uuid;
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;token uuid;cn text;
 BEGIN
  PERFORM inbox_reply_review.require_admission();
  SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
@@ -530,21 +542,28 @@ BEGIN
  frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
  IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
- -- MUTATION: item_current() intentionally not called here.
  IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
   RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
  END IF;
+ -- MUTATION: item_current() intentionally not called here.
  token:=gen_random_uuid();
- UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+ BEGIN
+  UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+ EXCEPTION WHEN unique_violation THEN
+  GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+  IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+  ELSE RAISE;
+  END IF;
+ END;
  RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
 END $mut$;
  a:=inbox_reply_send.start_dispatch(o,att19,1);
  IF a->>'kind'<>'dispatch' THEN RAISE EXCEPTION 'Mutation did not actually let a suppressed item wrongly dispatch: %',a;END IF;
  -- Resolve item19's wrongly-dispatched attempt so it stops holding the
  -- sender lock, then restore the real start_dispatch.
- PERFORM inbox_reply_send.persist(o,att19,(a->>'token')::uuid,jsonb_build_object('kind','not_attempted','reason','test_cleanup'));
+ PERFORM inbox_reply_send.persist(o,att19,(a->>'token')::uuid,jsonb_build_object('kind','not_attempted','reason','cancelled_before_dispatch'));
  CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;cn text;
 BEGIN
  PERFORM inbox_reply_review.require_admission();
  SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
@@ -554,16 +573,23 @@ BEGIN
  frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
  IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
+  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+ END IF;
  ev:=inbox_reply_send.item_current(o,frozen);
  IF ev IS NOT NULL THEN
   UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
   RETURN jsonb_build_object('kind','skipped','reason',ev);
  END IF;
- IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
-  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
- END IF;
  token:=gen_random_uuid();
- UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+ BEGIN
+  UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+ EXCEPTION WHEN unique_violation THEN
+  GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+  IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+  ELSE RAISE;
+  END IF;
+ END;
  RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
 END $$;
  INSERT INTO sms_phone_suppressions(org_id,channel,phone_e164,source) VALUES(o,'sms',item20->'recipient'->>'to','owned_prd_test');
@@ -619,6 +645,357 @@ END $$;
  IF has_schema_privilege('authenticated','inbox_reply_send','USAGE') THEN RAISE EXCEPTION 'Revoke did not restore the closed boundary';END IF;
  RAISE NOTICE '#14 grants OK';
 
+
+ -- === Round 2 additional single-edge mutation-first proofs ===
+ -- B1/#5/B2: persist() vocabulary + not_attempted-reason validation, on a
+ -- real dispatch_started row so the token check passes and these checks are
+ -- actually exercised (not short-circuited by INBOX_REPLY_STALE_TOKEN).
+ INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state)
+  VALUES(o,gen_random_uuid(),op_id,prep_id,(item21->>'id')::uuid,1,(item21->'recipient'->>'contactId')::uuid,item21->'recipient'->>'from',item21->'recipient'->>'to',inbox_reply_send.body_hash(item21->'recipient'->>'renderedBody',item21->'recipient'->>'from',item21->'recipient'->>'to'),'approved')
+  RETURNING id INTO att21;
+ PERFORM inbox_reply_send.claim(o,att21);
+ a:=inbox_reply_send.start_dispatch(o,att21,1);
+ IF a->>'kind'<>'dispatch' THEN RAISE EXCEPTION 'item21 start_dispatch mismatch: %',a;END IF;
+ DECLARE tok21 uuid:=(a->>'token')::uuid;rv21 bigint;
+ BEGIN
+  SELECT receipt_version INTO rv21 FROM inbox_reply_send.attempts WHERE org_id=o AND id=att21;
+  failed:=false;BEGIN PERFORM inbox_reply_send.persist(o,att21,tok21,'{}'::jsonb);EXCEPTION WHEN raise_exception THEN failed:=true;END;
+  IF NOT failed THEN RAISE EXCEPTION 'persist(empty object) was accepted (B1 regression)';END IF;
+  failed:=false;BEGIN PERFORM inbox_reply_send.persist(o,att21,tok21,jsonb_build_object('kind',NULL));EXCEPTION WHEN raise_exception THEN failed:=true;END;
+  IF NOT failed THEN RAISE EXCEPTION 'persist(kind=null) was accepted (B1 regression)';END IF;
+  failed:=false;BEGIN PERFORM inbox_reply_send.persist(o,att21,tok21,jsonb_build_object('kind','rejected'));EXCEPTION WHEN raise_exception THEN failed:=true;END;
+  IF NOT failed THEN RAISE EXCEPTION 'persist(kind=rejected) was accepted (#5)';END IF;
+  failed:=false;BEGIN PERFORM inbox_reply_send.persist(o,att21,tok21,jsonb_build_object('kind','not_attempted','reason','provider_timeout'));EXCEPTION WHEN raise_exception THEN failed:=true;END;
+  IF NOT failed THEN RAISE EXCEPTION 'persist(not_attempted, reason=provider_timeout) was accepted (B2 regression)';END IF;
+  IF (SELECT receipt_version FROM inbox_reply_send.attempts WHERE org_id=o AND id=att21)<>rv21 THEN RAISE EXCEPTION 'A rejected persist() call mutated the row';END IF;
+  RAISE NOTICE 'B1/#5/B2 persist vocabulary + not_attempted-reason proofs OK';
+
+  -- #9: drop token equality from persist(), watch a WRONG token wrongly
+  -- reconcile the row; restore, reverify a wrong token is rejected again.
+  CREATE OR REPLACE FUNCTION inbox_reply_send.persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE row inbox_reply_send.attempts;kind text;reference text;v bigint;
+BEGIN
+ -- MUTATION: token equality dropped — any token (or none) matches.
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_STALE_TOKEN';END IF;
+ kind:=result->>'kind';
+ IF row.state='dispatch_started' AND kind='accepted' THEN
+  reference:=result->>'externalId';
+  UPDATE inbox_reply_send.attempts SET state='provider_accepted',provider_reference=reference,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+  RETURN jsonb_build_object('state','provider_accepted','receipt_version',v::text);
+ END IF;
+ RAISE EXCEPTION 'unused in this proof';
+END $mut$;
+  b:=inbox_reply_send.persist(o,att21,gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','PROV-WRONG-TOKEN'));
+  IF b->>'state'<>'provider_accepted' THEN RAISE EXCEPTION 'Mutation did not actually drop token equality: %',b;END IF;
+CREATE OR REPLACE FUNCTION inbox_reply_send.persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE row inbox_reply_send.attempts;kind text;reference text;reason text;v bigint;
+BEGIN
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR token IS NULL OR row.dispatch_token IS DISTINCT FROM token THEN RAISE EXCEPTION 'INBOX_REPLY_STALE_TOKEN';END IF;
+ IF jsonb_typeof(result) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION 'Invalid dispatch result';END IF;
+ kind:=result->>'kind';
+ IF kind IS NULL OR kind NOT IN ('accepted','not_attempted','uncertain') THEN RAISE EXCEPTION 'Invalid dispatch result';END IF;
+ IF row.state='dispatch_started' THEN
+  IF kind='accepted' THEN
+   reference:=result->>'externalId';
+   IF reference IS NULL OR btrim(reference)='' OR octet_length(reference)>512 THEN RAISE EXCEPTION 'Invalid provider reference';END IF;
+   UPDATE inbox_reply_send.attempts SET state='provider_accepted',provider_reference=reference,provider_status=left(result->>'status',128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','provider_accepted','receipt_version',v::text);
+  ELSIF kind='uncertain' THEN
+   reason:=coalesce(result->>'reason','unknown');
+   UPDATE inbox_reply_send.attempts SET state='uncertain',evidence=left(reason,128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','uncertain','receipt_version',v::text);
+  ELSIF kind='not_attempted' THEN
+   reason:=result->>'reason';
+   IF reason IS NULL OR reason NOT IN ('invalid_input','cancelled_before_dispatch') THEN RAISE EXCEPTION 'Invalid not_attempted reason';END IF;
+   UPDATE inbox_reply_send.attempts SET state='confirmed_not_submitted',evidence=left('local_not_attempted:'||reason,128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','confirmed_not_submitted','receipt_version',v::text);
+  END IF;
+ ELSIF row.state='uncertain' THEN
+  IF kind='accepted' THEN
+   reference:=result->>'externalId';
+   IF reference IS NULL OR btrim(reference)='' OR octet_length(reference)>512 THEN RAISE EXCEPTION 'Invalid provider reference';END IF;
+   UPDATE inbox_reply_send.attempts SET state='provider_accepted',provider_reference=reference,provider_status=left(result->>'status',128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','provider_accepted','receipt_version',v::text);
+  ELSIF kind='uncertain' THEN
+   RETURN jsonb_build_object('state',row.state,'receipt_version',row.receipt_version::text);
+  ELSE
+   RAISE EXCEPTION 'INBOX_REPLY_INVALID_PERSIST_TRANSITION';
+  END IF;
+ ELSIF row.state IN ('provider_accepted','delivered','delivery_failed') THEN
+  IF kind='uncertain' THEN
+   RETURN jsonb_build_object('state',row.state,'receipt_version',row.receipt_version::text);
+  ELSIF kind='accepted' THEN
+   reference:=result->>'externalId';
+   IF reference IS NOT DISTINCT FROM row.provider_reference THEN
+    RETURN jsonb_build_object('state',row.state,'receipt_version',row.receipt_version::text);
+   ELSE
+    RAISE EXCEPTION 'INBOX_REPLY_CONTRADICTORY_RECEIPT';
+   END IF;
+  ELSE
+   RAISE EXCEPTION 'INBOX_REPLY_INVALID_PERSIST_TRANSITION';
+  END IF;
+ ELSE
+  RAISE EXCEPTION 'INBOX_REPLY_INVALID_PERSIST_TRANSITION';
+ END IF;
+END $$;
+  failed:=false;BEGIN PERFORM inbox_reply_send.persist(o,att21,gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','PROV-SHOULD-FAIL'));EXCEPTION WHEN raise_exception THEN IF SQLERRM='INBOX_REPLY_STALE_TOKEN' THEN failed:=true;ELSE RAISE;END IF;END;
+  IF NOT failed THEN RAISE EXCEPTION 'Restored persist() still accepts a wrong token';END IF;
+  RAISE NOTICE '#9 token-equality mutation (dropped, then restored) OK';
+ END;
+
+ -- #10: make dispatch_started re-entry LIE that it re-claimed (return
+ -- {claimed} without touching the row) instead of labelling uncertain.
+ -- Even under that lie, start_dispatch independently re-verifies the row's
+ -- REAL state before issuing anything — proving a second token is
+ -- impossible via this specific lie, in addition to the trigger-level
+ -- guarantee.
+ INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state)
+  VALUES(o,gen_random_uuid(),op_id,prep_id,(item22->>'id')::uuid,1,(item22->'recipient'->>'contactId')::uuid,item22->'recipient'->>'from',item22->'recipient'->>'to',inbox_reply_send.body_hash(item22->'recipient'->>'renderedBody',item22->'recipient'->>'from',item22->'recipient'->>'to'),'approved')
+  RETURNING id INTO att22;
+ PERFORM inbox_reply_send.claim(o,att22);
+ a:=inbox_reply_send.start_dispatch(o,att22,1);
+ IF a->>'kind'<>'dispatch' THEN RAISE EXCEPTION 'item22 start_dispatch mismatch: %',a;END IF;
+ DECLARE tok22 uuid:=(a->>'token')::uuid;
+ BEGIN
+  CREATE OR REPLACE FUNCTION inbox_reply_send.claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE row inbox_reply_send.attempts;new_generation bigint;
+BEGIN
+ IF seconds IS NULL OR seconds NOT BETWEEN 1 AND 300 THEN RAISE EXCEPTION 'Invalid lease';END IF;
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;
+ IF row.state='approved' OR (row.state='claimed' AND row.lease_until<=clock_timestamp() AND row.dispatch_started_at IS NULL) THEN
+  UPDATE inbox_reply_send.attempts SET state='claimed',generation=generation+1,lease_until=clock_timestamp()+make_interval(secs=>seconds) WHERE org_id=o AND id=attempt_id RETURNING generation INTO new_generation;
+  RETURN jsonb_build_object('kind','claimed','generation',new_generation::text);
+ ELSIF row.state='claimed' THEN
+  RETURN jsonb_build_object('kind','busy');
+ ELSIF row.state='dispatch_started' THEN
+  -- MUTATION: lies that it reclaimed, without touching the row.
+  RETURN jsonb_build_object('kind','claimed','generation',row.generation::text);
+ ELSE
+  RETURN jsonb_build_object('kind','existing','state',row.state);
+ END IF;
+END $mut$;
+  b:=inbox_reply_send.claim(o,att22);
+  IF b->>'kind'<>'claimed' THEN RAISE EXCEPTION 'Mutation did not actually make re-entry lie: %',b;END IF;
+  failed:=false;BEGIN PERFORM inbox_reply_send.start_dispatch(o,att22,(b->>'generation')::bigint);EXCEPTION WHEN raise_exception THEN IF SQLERRM='INBOX_REPLY_STALE_CLAIM' THEN failed:=true;ELSE RAISE;END IF;END;
+  IF NOT failed THEN RAISE EXCEPTION 'A lying re-entry produced a second token';END IF;
+  IF (SELECT dispatch_token FROM inbox_reply_send.attempts WHERE org_id=o AND id=att22)<>tok22 THEN RAISE EXCEPTION 'dispatch_token changed under the lying mutation';END IF;
+CREATE OR REPLACE FUNCTION inbox_reply_send.claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE row inbox_reply_send.attempts;new_generation bigint;
+BEGIN
+ IF seconds IS NULL OR seconds NOT BETWEEN 1 AND 300 THEN RAISE EXCEPTION 'Invalid lease';END IF;
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;
+ IF (SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id=o AND operation_id=row.operation_id)>inbox_reply_preparation.recipient_limit() THEN
+  RAISE EXCEPTION 'INBOX_REPLY_RECIPIENT_LIMIT';
+ END IF;
+ IF row.state='approved' OR (row.state='claimed' AND row.lease_until<=clock_timestamp() AND row.dispatch_started_at IS NULL) THEN
+  UPDATE inbox_reply_send.attempts SET state='claimed',generation=generation+1,lease_until=clock_timestamp()+make_interval(secs=>seconds) WHERE org_id=o AND id=attempt_id RETURNING generation INTO new_generation;
+  RETURN jsonb_build_object('kind','claimed','generation',new_generation::text);
+ ELSIF row.state='claimed' THEN
+  RETURN jsonb_build_object('kind','busy');
+ ELSIF row.state='dispatch_started' THEN
+  UPDATE inbox_reply_send.attempts SET state='uncertain',evidence='reentered_without_result',lease_until=NULL,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','existing','state','uncertain');
+ ELSE
+  RETURN jsonb_build_object('kind','existing','state',row.state);
+ END IF;
+END $$;
+  b:=inbox_reply_send.claim(o,att22);
+  IF b->>'kind'<>'existing' OR b->>'state'<>'uncertain' THEN RAISE EXCEPTION 'Restored claim() re-entry mismatch: %',b;END IF;
+  a:=inbox_reply_send.persist(o,att22,tok22,jsonb_build_object('kind','accepted','externalId','PROV-22'));
+  IF a->>'state'<>'provider_accepted' THEN RAISE EXCEPTION 'item22 final persist mismatch: %',a;END IF;
+  RAISE NOTICE '#10 re-entry-lie mutation (second token impossible; restored) OK';
+ END;
+
+ -- #3: drop "AND row.dispatch_started_at IS NULL" from claim()'s reclaim
+ -- predicate. Documented no-op: CHECK((dispatch_started_at IS NULL)=(state
+ -- IN ('approved','claimed','skipped_ineligible'))) already guarantees
+ -- dispatch_started_at IS NULL whenever state='claimed', so this clause is
+ -- structurally redundant — the reclaim behaves identically with or without
+ -- it, because a 'claimed' row can never have dispatch_started_at set in
+ -- the first place.
+ INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state)
+  VALUES(o,gen_random_uuid(),op_id,prep_id,(item23->>'id')::uuid,1,(item23->'recipient'->>'contactId')::uuid,item23->'recipient'->>'from',item23->'recipient'->>'to',inbox_reply_send.body_hash(item23->'recipient'->>'renderedBody',item23->'recipient'->>'from',item23->'recipient'->>'to'),'approved')
+  RETURNING id INTO att23;
+ PERFORM inbox_reply_send.claim(o,att23);
+ UPDATE inbox_reply_send.attempts SET generation=generation+1,lease_until=clock_timestamp()-interval '1 second' WHERE org_id=o AND id=att23;
+ CREATE OR REPLACE FUNCTION inbox_reply_send.claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE row inbox_reply_send.attempts;new_generation bigint;
+BEGIN
+ IF seconds IS NULL OR seconds NOT BETWEEN 1 AND 300 THEN RAISE EXCEPTION 'Invalid lease';END IF;
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;
+ -- MUTATION: dispatch_started_at IS NULL clause dropped from the reclaim predicate.
+ IF row.state='approved' OR (row.state='claimed' AND row.lease_until<=clock_timestamp()) THEN
+  UPDATE inbox_reply_send.attempts SET state='claimed',generation=generation+1,lease_until=clock_timestamp()+make_interval(secs=>seconds) WHERE org_id=o AND id=attempt_id RETURNING generation INTO new_generation;
+  RETURN jsonb_build_object('kind','claimed','generation',new_generation::text);
+ ELSIF row.state='claimed' THEN
+  RETURN jsonb_build_object('kind','busy');
+ ELSIF row.state='dispatch_started' THEN
+  UPDATE inbox_reply_send.attempts SET state='uncertain',evidence='reentered_without_result',lease_until=NULL,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','existing','state','uncertain');
+ ELSE
+  RETURN jsonb_build_object('kind','existing','state',row.state);
+ END IF;
+END $mut$;
+ b:=inbox_reply_send.claim(o,att23);
+ IF b->>'kind'<>'claimed' OR b->>'generation'<>'3' THEN RAISE EXCEPTION 'item23 reclaim under mutated predicate mismatch: %',b;END IF;
+CREATE OR REPLACE FUNCTION inbox_reply_send.claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE row inbox_reply_send.attempts;new_generation bigint;
+BEGIN
+ IF seconds IS NULL OR seconds NOT BETWEEN 1 AND 300 THEN RAISE EXCEPTION 'Invalid lease';END IF;
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;
+ IF (SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id=o AND operation_id=row.operation_id)>inbox_reply_preparation.recipient_limit() THEN
+  RAISE EXCEPTION 'INBOX_REPLY_RECIPIENT_LIMIT';
+ END IF;
+ IF row.state='approved' OR (row.state='claimed' AND row.lease_until<=clock_timestamp() AND row.dispatch_started_at IS NULL) THEN
+  UPDATE inbox_reply_send.attempts SET state='claimed',generation=generation+1,lease_until=clock_timestamp()+make_interval(secs=>seconds) WHERE org_id=o AND id=attempt_id RETURNING generation INTO new_generation;
+  RETURN jsonb_build_object('kind','claimed','generation',new_generation::text);
+ ELSIF row.state='claimed' THEN
+  RETURN jsonb_build_object('kind','busy');
+ ELSIF row.state='dispatch_started' THEN
+  UPDATE inbox_reply_send.attempts SET state='uncertain',evidence='reentered_without_result',lease_until=NULL,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','existing','state','uncertain');
+ ELSE
+  RETURN jsonb_build_object('kind','existing','state',row.state);
+ END IF;
+END $$;
+ RAISE NOTICE '#3 dispatch_started_at-clause mutation (confirmed no-op under the D-5 CHECK; restored) OK';
+
+ -- #4: remove ONE trigger edge (uncertain->provider_accepted), not the
+ -- whole trigger. persist(accepted) from uncertain must then raise from the
+ -- trigger itself (independent of persist()'s own logic, which still tries
+ -- the UPDATE).
+ INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state)
+  VALUES(o,gen_random_uuid(),op_id,prep_id,(item24->>'id')::uuid,1,(item24->'recipient'->>'contactId')::uuid,item24->'recipient'->>'from',item24->'recipient'->>'to',inbox_reply_send.body_hash(item24->'recipient'->>'renderedBody',item24->'recipient'->>'from',item24->'recipient'->>'to'),'approved')
+  RETURNING id INTO att24;
+ PERFORM inbox_reply_send.claim(o,att24);
+ a:=inbox_reply_send.start_dispatch(o,att24,1);
+ IF a->>'kind'<>'dispatch' THEN RAISE EXCEPTION 'item24 start_dispatch mismatch: %',a;END IF;
+ DECLARE tok24 uuid:=(a->>'token')::uuid;
+ BEGIN
+  PERFORM inbox_reply_send.claim(o,att24); -- re-entry -> uncertain
+  IF (SELECT state FROM inbox_reply_send.attempts WHERE org_id=o AND id=att24)<>'uncertain' THEN RAISE EXCEPTION 'item24 not uncertain before trigger mutation';END IF;
+CREATE OR REPLACE FUNCTION inbox_reply_send.guard_attempt() RETURNS trigger LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE frozen jsonb;recomputed text;
+BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Immutable send attempt';END IF;
+ IF TG_OP='INSERT' THEN
+  IF NEW.state<>'approved' THEN RAISE EXCEPTION 'Invalid initial send attempt state';END IF;
+  IF NEW.generation<>0 OR NEW.receipt_version<>0 OR NEW.lease_until IS NOT NULL OR NEW.dispatch_started_at IS NOT NULL OR NEW.dispatch_token IS NOT NULL OR NEW.provider_reference IS NOT NULL OR NEW.provider_status IS NOT NULL OR NEW.evidence IS NOT NULL THEN
+   RAISE EXCEPTION 'Invalid initial send attempt fields';
+  END IF;
+  PERFORM 1 FROM inbox_reply_send.operations WHERE org_id=NEW.org_id AND id=NEW.operation_id AND preparation_id=NEW.preparation_id FOR NO KEY UPDATE;
+  IF NOT FOUND THEN
+   RAISE EXCEPTION 'Attempt preparation does not match operation';
+  END IF;
+  frozen:=inbox_reply_send.frozen_item(NEW.org_id,NEW.preparation_id,NEW.item_id);
+  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+  IF NEW.contact_id IS DISTINCT FROM (frozen->'recipient'->>'contactId')::uuid
+     OR NEW.from_e164 IS DISTINCT FROM frozen->'recipient'->>'from'
+     OR NEW.to_e164 IS DISTINCT FROM frozen->'recipient'->>'to'
+     OR NEW.body_hash IS DISTINCT FROM recomputed THEN
+   RAISE EXCEPTION 'Attempt does not match frozen recipient';
+  END IF;
+  IF (SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id=NEW.org_id AND operation_id=NEW.operation_id AND item_id<>NEW.item_id)+1>inbox_reply_preparation.recipient_limit() THEN
+   RAISE EXCEPTION 'INBOX_REPLY_RECIPIENT_LIMIT';
+  END IF;
+  RETURN NEW;
+ END IF;
+ IF NEW.org_id IS DISTINCT FROM OLD.org_id OR NEW.id IS DISTINCT FROM OLD.id OR NEW.operation_id IS DISTINCT FROM OLD.operation_id
+    OR NEW.preparation_id IS DISTINCT FROM OLD.preparation_id OR NEW.item_id IS DISTINCT FROM OLD.item_id
+    OR NEW.attempt_ordinal IS DISTINCT FROM OLD.attempt_ordinal OR NEW.prior_attempt_id IS DISTINCT FROM OLD.prior_attempt_id
+    OR NEW.contact_id IS DISTINCT FROM OLD.contact_id OR NEW.from_e164 IS DISTINCT FROM OLD.from_e164
+    OR NEW.to_e164 IS DISTINCT FROM OLD.to_e164 OR NEW.body_hash IS DISTINCT FROM OLD.body_hash
+    OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+  RAISE EXCEPTION 'Immutable send attempt identity';
+ END IF;
+ IF NEW.generation<OLD.generation OR NEW.receipt_version<OLD.receipt_version THEN RAISE EXCEPTION 'Send attempt counters may not decrease';END IF;
+ IF OLD.dispatch_started_at IS NOT NULL AND NEW.dispatch_started_at IS DISTINCT FROM OLD.dispatch_started_at THEN RAISE EXCEPTION 'dispatch_started_at is immutable once set';END IF;
+ IF OLD.dispatch_token IS NOT NULL AND NEW.dispatch_token IS DISTINCT FROM OLD.dispatch_token THEN RAISE EXCEPTION 'dispatch_token is immutable once set';END IF;
+ NEW.updated_at:=clock_timestamp();
+ CASE
+  WHEN OLD.state='approved' AND NEW.state='claimed' THEN NULL;
+  WHEN OLD.state='claimed' AND NEW.state='claimed' THEN
+   IF NEW.generation<=OLD.generation THEN RAISE EXCEPTION 'Reclaim must strictly increase generation';END IF;
+  WHEN OLD.state='claimed' AND NEW.state='dispatch_started' THEN
+   IF NEW.dispatch_started_at IS NULL OR NEW.dispatch_token IS NULL THEN RAISE EXCEPTION 'Dispatch marker must be set exactly once here';END IF;
+  WHEN OLD.state='claimed' AND NEW.state='skipped_ineligible' THEN NULL;
+  WHEN OLD.state='dispatch_started' AND NEW.state IN ('provider_accepted','uncertain','confirmed_not_submitted') THEN NULL;
+  -- MUTATION: uncertain->provider_accepted edge removed.
+  WHEN OLD.state='provider_accepted' AND NEW.state IN ('delivered','delivery_failed') THEN NULL;
+  ELSE RAISE EXCEPTION 'Invalid send attempt transition: % -> %',OLD.state,NEW.state;
+ END CASE;
+ RETURN NEW;
+END $$;
+  failed:=false;BEGIN PERFORM inbox_reply_send.persist(o,att24,tok24,jsonb_build_object('kind','accepted','externalId','PROV-24'));EXCEPTION WHEN raise_exception THEN failed:=true;END;
+  IF NOT failed THEN RAISE EXCEPTION 'Removing the uncertain->provider_accepted edge did not block persist()';END IF;
+  IF (SELECT state FROM inbox_reply_send.attempts WHERE org_id=o AND id=att24)<>'uncertain' THEN RAISE EXCEPTION 'item24 row mutated despite the blocked trigger edge';END IF;
+CREATE OR REPLACE FUNCTION inbox_reply_send.guard_attempt() RETURNS trigger LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE frozen jsonb;recomputed text;
+BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Immutable send attempt';END IF;
+ IF TG_OP='INSERT' THEN
+  IF NEW.state<>'approved' THEN RAISE EXCEPTION 'Invalid initial send attempt state';END IF;
+  IF NEW.generation<>0 OR NEW.receipt_version<>0 OR NEW.lease_until IS NOT NULL OR NEW.dispatch_started_at IS NOT NULL OR NEW.dispatch_token IS NOT NULL OR NEW.provider_reference IS NOT NULL OR NEW.provider_status IS NOT NULL OR NEW.evidence IS NOT NULL THEN
+   RAISE EXCEPTION 'Invalid initial send attempt fields';
+  END IF;
+  PERFORM 1 FROM inbox_reply_send.operations WHERE org_id=NEW.org_id AND id=NEW.operation_id AND preparation_id=NEW.preparation_id FOR NO KEY UPDATE;
+  IF NOT FOUND THEN
+   RAISE EXCEPTION 'Attempt preparation does not match operation';
+  END IF;
+  frozen:=inbox_reply_send.frozen_item(NEW.org_id,NEW.preparation_id,NEW.item_id);
+  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+  IF NEW.contact_id IS DISTINCT FROM (frozen->'recipient'->>'contactId')::uuid
+     OR NEW.from_e164 IS DISTINCT FROM frozen->'recipient'->>'from'
+     OR NEW.to_e164 IS DISTINCT FROM frozen->'recipient'->>'to'
+     OR NEW.body_hash IS DISTINCT FROM recomputed THEN
+   RAISE EXCEPTION 'Attempt does not match frozen recipient';
+  END IF;
+  IF (SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id=NEW.org_id AND operation_id=NEW.operation_id AND item_id<>NEW.item_id)+1>inbox_reply_preparation.recipient_limit() THEN
+   RAISE EXCEPTION 'INBOX_REPLY_RECIPIENT_LIMIT';
+  END IF;
+  RETURN NEW;
+ END IF;
+ IF NEW.org_id IS DISTINCT FROM OLD.org_id OR NEW.id IS DISTINCT FROM OLD.id OR NEW.operation_id IS DISTINCT FROM OLD.operation_id
+    OR NEW.preparation_id IS DISTINCT FROM OLD.preparation_id OR NEW.item_id IS DISTINCT FROM OLD.item_id
+    OR NEW.attempt_ordinal IS DISTINCT FROM OLD.attempt_ordinal OR NEW.prior_attempt_id IS DISTINCT FROM OLD.prior_attempt_id
+    OR NEW.contact_id IS DISTINCT FROM OLD.contact_id OR NEW.from_e164 IS DISTINCT FROM OLD.from_e164
+    OR NEW.to_e164 IS DISTINCT FROM OLD.to_e164 OR NEW.body_hash IS DISTINCT FROM OLD.body_hash
+    OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+  RAISE EXCEPTION 'Immutable send attempt identity';
+ END IF;
+ IF NEW.generation<OLD.generation OR NEW.receipt_version<OLD.receipt_version THEN RAISE EXCEPTION 'Send attempt counters may not decrease';END IF;
+ IF OLD.dispatch_started_at IS NOT NULL AND NEW.dispatch_started_at IS DISTINCT FROM OLD.dispatch_started_at THEN RAISE EXCEPTION 'dispatch_started_at is immutable once set';END IF;
+ IF OLD.dispatch_token IS NOT NULL AND NEW.dispatch_token IS DISTINCT FROM OLD.dispatch_token THEN RAISE EXCEPTION 'dispatch_token is immutable once set';END IF;
+ NEW.updated_at:=clock_timestamp();
+ CASE
+  WHEN OLD.state='approved' AND NEW.state='claimed' THEN NULL;
+  WHEN OLD.state='claimed' AND NEW.state='claimed' THEN
+   IF NEW.generation<=OLD.generation THEN RAISE EXCEPTION 'Reclaim must strictly increase generation';END IF;
+  WHEN OLD.state='claimed' AND NEW.state='dispatch_started' THEN
+   IF NEW.dispatch_started_at IS NULL OR NEW.dispatch_token IS NULL THEN RAISE EXCEPTION 'Dispatch marker must be set exactly once here';END IF;
+  WHEN OLD.state='claimed' AND NEW.state='skipped_ineligible' THEN NULL;
+  WHEN OLD.state='dispatch_started' AND NEW.state IN ('provider_accepted','uncertain','confirmed_not_submitted') THEN NULL;
+  WHEN OLD.state='uncertain' AND NEW.state='provider_accepted' THEN NULL;
+  WHEN OLD.state='provider_accepted' AND NEW.state IN ('delivered','delivery_failed') THEN NULL;
+  ELSE RAISE EXCEPTION 'Invalid send attempt transition: % -> %',OLD.state,NEW.state;
+ END CASE;
+ RETURN NEW;
+END $$;
+  a:=inbox_reply_send.persist(o,att24,tok24,jsonb_build_object('kind','accepted','externalId','PROV-24'));
+  IF a->>'state'<>'provider_accepted' THEN RAISE EXCEPTION 'item24 final persist mismatch after trigger restore: %',a;END IF;
+  RAISE NOTICE '#4 single-edge trigger mutation (uncertain->provider_accepted removed, then restored) OK';
+ END;
+
  RAISE NOTICE 'ALL PR-D SINGLE-CONNECTION CHECKS PASSED';
 END $test$;
 
@@ -642,6 +1019,17 @@ if sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamespac
   '#12 E4 live re-derivation at dispatch: sms_phone_suppressions added after claim, sender marked inactive, validUntil forced into the past, and a bumped inbound head revision each independently produce the matching skipped_ineligible/exclusion code with no token ever issued. Mutation: start_dispatch redefined to skip item_current() entirely -> a suppressed item wrongly reaches dispatch_started; start_dispatch restored -> a further suppressed item is correctly skipped again',
   '#13 admission: claim() raises INBOX_REPLIES_NOT_ENABLED (55000) while admission is disabled; persist() is never admission-gated (a wrong-token call still fails on the token check, not on admission, even with admission off). Mutation: require_admission() replaced with a no-op -> claim() wrongly proceeds while disabled; restored -> raises again',
   '#14 grants: no table, function or schema in inbox_reply_send is reachable by anon/authenticated/service_role. Mutation: USAGE granted to authenticated and observed via has_schema_privilege, then revoked and re-verified closed',
+  'Round 2 B1/#5/B2: persist() computes kind before checking it (a {} or {"kind":null} result raises, not falls through to a silent confirmed_not_submitted); kind=rejected raises; not_attempted is bound to reason IN (invalid_input, cancelled_before_dispatch) — a provider timeout or any other reason raises rather than freeing a successor attempt via a false non-submit',
+  'Round 2 #9: persist() redefined without token equality lets a wrong token wrongly reconcile the row; restored, a wrong token is rejected (INBOX_REPLY_STALE_TOKEN) again',
+  'Round 2 #10: claim() redefined so dispatch_started re-entry LIES that it re-claimed ({claimed} without touching the row) instead of labelling uncertain — start_dispatch still independently re-verifies the row'"'"'s real state and raises INBOX_REPLY_STALE_CLAIM, so no second token is ever produced by this lie; restored, re-entry correctly labels uncertain and the original token still reconciles',
+  'Round 2 #3: claim()'"'"'s reclaim predicate redefined without "AND dispatch_started_at IS NULL" — confirmed a documented no-op (identical reclaim outcome) because CHECK((dispatch_started_at IS NULL)=(state IN (approved,claimed,skipped_ineligible))) already guarantees it structurally; restored',
+  'Round 2 #4: the trigger'"'"'s uncertain->provider_accepted edge removed (not the whole trigger) — persist(accepted) from uncertain now raises from the trigger itself with the row left unchanged; edge restored, the same persist() call succeeds',
+  'Round 2 P1.2: item_current() now acquires its sender and inbound-head FOR SHARE locks BEFORE evaluating destination_policy()/quiet_hours/validUntil — each is a fresh READ COMMITTED snapshot, so a suppression committed while item_current was blocked on either lock is guaranteed visible (proven with a genuine two-connection lock-wait + concurrent suppression commit in concurrency.py); start_dispatch'"'"'s sender-busy pre-check moved before item_current so no statement sits between the eligibility reads and the marker UPDATE; item_current and destination_policy() remain VOLATILE',
+  'Round 2 P2.3: the INSERT trigger'"'"'s operation-admission check now does SELECT ... FOR NO KEY UPDATE on the operations row before the distinct-item-count cap, serializing concurrent inserts against one operation (proven with a genuine two-connection race in concurrency.py — the second insert at the cap correctly raises INBOX_REPLY_RECIPIENT_LIMIT instead of both committing past 50)',
+  'Round 2 P2.4: start_dispatch'"'"'s marker UPDATE is wrapped to catch unique_violation, and only re-raises as the sanitized INBOX_REPLY_SENDER_BUSY (55P03, no DETAIL/HINT) when the violated constraint is inbox_reply_send_sender_inflight — every other constraint violation re-raises unchanged, and no phone number ever appears in the error',
+  'Round 2 REVOKE reconcile: the unconditional PUBLIC,anon,authenticated,service_role REVOKEs at schema/table/function level were narrowed to PUBLIC only; the guarded absence-checking loop is now the sole role-conditional revocation path',
+  'Round 2 frozen_item(): returns ONLY {recipient, validUntil, state, target, dependencies:{head}} — never the whole frozen item (id/exclusion/duplicateDestination/full dependencies excluded)',
+  'Round 2 harness: quiet_hours() is pinned to always-open for the duration of this rolled-back transaction only (no proof here concerns quiet_hours transitions), removing a wall-clock-dependent setup failure when every state in its table falls outside its local 08:00-21:00 window during the same UTC hour the harness happens to run in',
   'The whole test is rolled back; inbox_reply_context/inbox_reply_preparation/inbox_reply_review/inbox_reply_send are all absent afterward'
  ],
  'limits':[

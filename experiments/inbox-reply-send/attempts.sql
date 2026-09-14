@@ -13,9 +13,12 @@
 --    function body below: even a buggy claim/start_dispatch/persist cannot
 --    resurrect a terminal row or rewind a marker, because the trigger raises
 --    on any UPDATE that isn't a listed edge, and DELETE always raises.
---  - Lock order: the attempt row is always FOR UPDATE first; every canonical
---    read after that (sender, inbound head) is FOR SHARE only, matching the
---    prepare/worker inversion note — never FOR UPDATE on heads/versions here.
+--  - Lock order: the operations row (FOR NO KEY UPDATE, via the INSERT
+--    trigger's per-operation admission check) precedes any attempts row.
+--    Within an attempt, the attempt row is always FOR UPDATE first; every
+--    canonical read after that (sender, inbound head) is FOR SHARE only,
+--    matching the prepare/worker inversion note — never FOR UPDATE on
+--    heads/versions here.
 --  - No body/phone is ever put in an evidence string or RAISE message
 --    (S11 audit trail). evidence is always a short lowercase code;
 --    provider_reference is the provider's own id, never message content.
@@ -27,7 +30,11 @@ DO $$ BEGIN IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT
 -- attempts by callers (PR-E). Reuses the same immutable_row trigger as every
 -- other operations/preparations table in this codebase.
 CREATE SCHEMA inbox_reply_send AUTHORIZATION postgres;
-REVOKE ALL ON SCHEMA inbox_reply_send FROM PUBLIC,anon,authenticated,service_role;
+-- Named-role (anon/authenticated/service_role) revocation is the guarded
+-- absence-checking loop near the end of this file (its only mechanism —
+-- these unconditional grants would otherwise duplicate and could error on a
+-- fixture missing one of those roles). Only the PUBLIC revoke belongs here.
+REVOKE ALL ON SCHEMA inbox_reply_send FROM PUBLIC;
 
 -- Ships (e): additive identity anchor for inbox_reply_send.operations' FK.
 -- Reply preparations were only ever looked up by (org_id,requester_id,id)
@@ -132,7 +139,14 @@ BEGIN
   IF NEW.generation<>0 OR NEW.receipt_version<>0 OR NEW.lease_until IS NOT NULL OR NEW.dispatch_started_at IS NOT NULL OR NEW.dispatch_token IS NOT NULL OR NEW.provider_reference IS NOT NULL OR NEW.provider_status IS NOT NULL OR NEW.evidence IS NOT NULL THEN
    RAISE EXCEPTION 'Invalid initial send attempt fields';
   END IF;
-  IF NOT EXISTS(SELECT 1 FROM inbox_reply_send.operations WHERE org_id=NEW.org_id AND id=NEW.operation_id AND preparation_id=NEW.preparation_id) THEN
+  -- Serialize per-operation admission: FOR NO KEY UPDATE (not FOR UPDATE —
+  -- stays compatible with the attempts FK's KEY SHARE lock and never fires
+  -- operations' own immutable_row trigger) makes two concurrent inserts
+  -- against the same operation queue behind each other, so the distinct-
+  -- item-count cap below can never be raced past 50 by two inserts that
+  -- both read "49" before either commits.
+  PERFORM 1 FROM inbox_reply_send.operations WHERE org_id=NEW.org_id AND id=NEW.operation_id AND preparation_id=NEW.preparation_id FOR NO KEY UPDATE;
+  IF NOT FOUND THEN
    RAISE EXCEPTION 'Attempt preparation does not match operation';
   END IF;
   -- P-GATE 4: frozen_item raises on a missing row or exclusion IS NOT NULL.
@@ -194,7 +208,11 @@ BEGIN
  IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ITEM_UNAVAILABLE';END IF;
  SELECT value INTO item FROM jsonb_array_elements(prep.items) value WHERE (value->>'id')::uuid=item_id;
  IF item IS NULL OR item->>'exclusion' IS NOT NULL THEN RAISE EXCEPTION 'INBOX_REPLY_ITEM_UNAVAILABLE';END IF;
- RETURN item;
+ -- D-7: return ONLY recipient, validUntil, state, dependencies->>'head' and
+ -- target — never the whole frozen item (which also carries id, exclusion,
+ -- duplicateDestination and the full dependencies snapshot no caller here
+ -- needs or should see).
+ RETURN jsonb_build_object('recipient',item->'recipient','validUntil',item->'validUntil','state',item->'state','target',item->'target','dependencies',jsonb_build_object('head',item->'dependencies'->>'head'));
 END $$;
 
 -- D-8: live eligibility re-check at dispatch time. NULL = eligible, else the
@@ -210,15 +228,27 @@ BEGIN
  IF qh->>'ok' IS DISTINCT FROM 'true' THEN
   IF qh->>'reason'='unknown_state' THEN RETURN 'unknown_state';ELSE RETURN 'outside_window';END IF;
  END IF;
+ -- P1.2: acquire BOTH canonical FOR SHARE locks — sender, then head — BEFORE
+ -- evaluating destination_policy() or reading either row's own value. Each
+ -- plpgsql statement takes a fresh snapshot under READ COMMITTED, so if a
+ -- concurrent writer holds either row locked (e.g. touching it as part of
+ -- committing a suppression) we block here, and once we unblock,
+ -- destination_policy() below — a later, separate statement — is guaranteed
+ -- to see whatever that writer just committed. Evaluating destination_policy
+ -- BEFORE this wait (the original ordering) could miss a suppression that
+ -- committed during the wait. Only the lock acquisition moved earlier; the
+ -- exclusion precedence below (validUntil -> quiet_hours -> destination_policy
+ -- -> sender -> head) is unchanged. This function and destination_policy()
+ -- MUST stay VOLATILE (never STABLE) — STABLE would pin the snapshot for the
+ -- whole function call and silently revert this fix. Never FOR UPDATE on
+ -- heads/versions or any suppression table, matching the prepare/worker lock
+ -- inversion note.
+ SELECT * INTO sender FROM public.provider_sender_numbers WHERE org_id=o AND provider='sendillo' AND phone_e164=item->'recipient'->>'from' FOR SHARE;
+ SELECT * INTO head FROM public.inbox_inbound_heads WHERE org_id=o AND conversation_id=(item->'target'->>'id')::uuid FOR SHARE;
  policy_result:=inbox_reply_preparation.destination_policy(o,item->'recipient'->>'to',(item->'recipient'->>'contactId')::uuid,true);
  IF policy_result->>'exclusion' IS NOT NULL THEN RETURN policy_result->>'exclusion';END IF;
- -- Canonical reads FOR SHARE only, never FOR UPDATE — the attempt row (locked
- -- by the caller before this is invoked) is the only row this path takes an
- -- exclusive lock on, avoiding the prepare/worker lock inversion.
- SELECT * INTO sender FROM public.provider_sender_numbers WHERE org_id=o AND provider='sendillo' AND phone_e164=item->'recipient'->>'from' FOR SHARE;
- IF NOT FOUND OR sender.status IS DISTINCT FROM 'active' THEN RETURN 'sender_unavailable';END IF;
- SELECT * INTO head FROM public.inbox_inbound_heads WHERE org_id=o AND conversation_id=(item->'target'->>'id')::uuid FOR SHARE;
- IF NOT FOUND OR head.revision::text IS DISTINCT FROM item->'dependencies'->>'head' THEN RETURN 'inbound_changed';END IF;
+ IF sender.status IS DISTINCT FROM 'active' THEN RETURN 'sender_unavailable';END IF;
+ IF head.revision::text IS DISTINCT FROM item->'dependencies'->>'head' THEN RETURN 'inbound_changed';END IF;
  RETURN NULL;
 END $$;
 
@@ -252,7 +282,7 @@ END $$;
 -- in its transaction — the caller (PR-F) commits and releases every lock
 -- before making the outbound provider call.
 CREATE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;cn text;
 BEGIN
  PERFORM inbox_reply_review.require_admission();
  SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
@@ -262,16 +292,37 @@ BEGIN
  frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
  IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ -- P2.4 fast path (kept) — a cheap pre-check that avoids running item_current
+ -- at all when the sender is obviously already busy. The real fence is the
+ -- unique index guarding the marker UPDATE below.
+ IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
+  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+ END IF;
+ -- P1.2: item_current()'s eligibility reads (and the FOR SHARE locks they
+ -- acquire) must be the LAST thing evaluated before the marker UPDATE — no
+ -- statement may sit between them, or a suppression/DNC/sender/head change
+ -- committed in that gap could go unseen right up to the moment we hand out
+ -- a token.
  ev:=inbox_reply_send.item_current(o,frozen);
  IF ev IS NOT NULL THEN
   UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
   RETURN jsonb_build_object('kind','skipped','reason',ev);
  END IF;
- IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
-  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
- END IF;
  token:=gen_random_uuid();
- UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+ -- P2.4: the fast path above can miss a same-instant competitor (it only
+ -- sees already-committed dispatch_started rows). The D-6(5) unique index on
+ -- (org_id,from_e164) WHERE state='dispatch_started' is the real fence; a
+ -- unique_violation here is only ever this specific race — anything else
+ -- re-raises unchanged. The 55P03 carries no DETAIL/HINT so the raw 23505
+ -- detail (which would include the phone number) never leaks.
+ BEGIN
+  UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+ EXCEPTION WHEN unique_violation THEN
+  GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+  IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+  ELSE RAISE;
+  END IF;
+ END;
  -- Body is read VERBATIM from the frozen row (P-GATE 3/R4) — never copied
  -- into this table, never re-rendered, never re-parsed as template syntax.
  RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
@@ -285,8 +336,17 @@ DECLARE row inbox_reply_send.attempts;kind text;reference text;reason text;v big
 BEGIN
  SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
  IF NOT FOUND OR token IS NULL OR row.dispatch_token IS DISTINCT FROM token THEN RAISE EXCEPTION 'INBOX_REPLY_STALE_TOKEN';END IF;
- IF jsonb_typeof(result) IS DISTINCT FROM 'object' OR result->>'kind' NOT IN ('accepted','not_attempted','uncertain') THEN RAISE EXCEPTION 'Invalid dispatch result';END IF;
+ -- B1: compute kind first and check it for NULL explicitly. `result->>'kind'
+ -- NOT IN (...)` is itself NULL (never TRUE) when the key is absent or JSON
+ -- null, so a `{}` or `{"kind":null}` result previously sailed past this
+ -- guard and fell into the ELSE branch below as a silent not_attempted ->
+ -- confirmed_not_submitted (a terminal state that frees a successor attempt
+ -- for the same item) — a double/wrong-send door with no explicit result at
+ -- all. jsonb_typeof(result) is checked first so kind:=result->>'kind' is
+ -- always evaluated against a genuine object.
+ IF jsonb_typeof(result) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION 'Invalid dispatch result';END IF;
  kind:=result->>'kind';
+ IF kind IS NULL OR kind NOT IN ('accepted','not_attempted','uncertain') THEN RAISE EXCEPTION 'Invalid dispatch result';END IF;
  IF row.state='dispatch_started' THEN
   IF kind='accepted' THEN
    reference:=result->>'externalId';
@@ -297,8 +357,14 @@ BEGIN
    reason:=coalesce(result->>'reason','unknown');
    UPDATE inbox_reply_send.attempts SET state='uncertain',evidence=left(reason,128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
    RETURN jsonb_build_object('state','uncertain','receipt_version',v::text);
-  ELSE
-   reason:=coalesce(result->>'reason','unknown');
+  ELSIF kind='not_attempted' THEN
+   -- B2: D-4 bounds not_attempted's reason to the two proven-non-submit
+   -- codes. A provider TIMEOUT (or any other reason) is NOT a proven
+   -- non-submit — it is uncertain by definition — so it must never reach
+   -- confirmed_not_submitted, a terminal state that frees a successor
+   -- attempt. Any other reason raises rather than silently defaulting.
+   reason:=result->>'reason';
+   IF reason IS NULL OR reason NOT IN ('invalid_input','cancelled_before_dispatch') THEN RAISE EXCEPTION 'Invalid not_attempted reason';END IF;
    UPDATE inbox_reply_send.attempts SET state='confirmed_not_submitted',evidence=left('local_not_attempted:'||reason,128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
    RETURN jsonb_build_object('state','confirmed_not_submitted','receipt_version',v::text);
   END IF;
@@ -332,8 +398,8 @@ BEGIN
 END $$;
 
 DO $$ DECLARE t record;BEGIN FOR t IN SELECT tablename FROM pg_tables WHERE schemaname='inbox_reply_send' LOOP EXECUTE format('ALTER TABLE inbox_reply_send.%I ENABLE ROW LEVEL SECURITY',t.tablename);END LOOP;END $$;
-REVOKE ALL ON ALL TABLES IN SCHEMA inbox_reply_send FROM PUBLIC,anon,authenticated,service_role;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_reply_send FROM PUBLIC,anon,authenticated,service_role;
+REVOKE ALL ON ALL TABLES IN SCHEMA inbox_reply_send FROM PUBLIC;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_reply_send FROM PUBLIC;
 DO $$ DECLARE r record;BEGIN
  FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('anon','authenticated','service_role') LOOP
   EXECUTE format('REVOKE ALL ON SCHEMA inbox_reply_send FROM %I',r.rolname);

@@ -5,11 +5,11 @@
     "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
     "inbox-reply-review/setup.sql": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
     "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772",
-    "inbox-reply-send/attempts.sql": "fba359a4a0b23159529a8eb691f8489fd2228cb5bb5cce06ed63f697a7f1aa92"
+    "inbox-reply-send/attempts.sql": "f2ae6986c75d0e96e2967ba8d8fa8303d582ee5581d3fc4f5f5d2714b70a274f"
   },
-  "setup_sha256": "ee92103e003dffe14d49bd0b71a43046fe84e9e5f03f5428c710dfff8de04adf",
-  "runner_sha256": "91f6b10224142eed234f0d7a44a410cf0cfb643d8152fa3d54346b799dea7636",
-  "owned_org_id": "4562d574-c846-4d9a-b20d-e65b4ebdbafb",
+  "setup_sha256": "415fde1115623e98385a8a42ca3ea547715b1d031f71a57d637b0494e9a7eb27",
+  "runner_sha256": "41374008a543a71a60a558b20303564c975eefadd07719694991797103b54350",
+  "owned_org_id": "dd3b79a6-453c-46d8-bbd3-6175556e4f68",
   "checks": [
     "#1 double-claim: two real connections, reader observed waiting on the writer row lock (pg_stat_activity wait_event_type=Lock) before the writer committed; writer got {claimed}, reader got {busy}; generation bumped exactly once",
     "#1 mutation: claim() redefined without FOR UPDATE \u2014 the reader still blocks on the writer row lock (its own UPDATE has no state re-check), but on unblocking it blindly re-applies the transition: both connections report {kind:claimed} for the same row, generation double-bumped to 2 \u2014 the real double-claim the FOR UPDATE + reclaim predicate prevents; restored below",
@@ -18,7 +18,11 @@
     "#2 mutation: start_dispatch redefined without the generation=g fence \u2014 the ORIGINAL stale generation (1) from before a real reclaim (3) wrongly dispatches; restored below",
     "#2 restore: with the generation fence back in place, the original stale generation (1) is rejected again and only the current one (3) dispatches",
     "#3 reclaim-after-dispatch: two real connections \u2014 reader observed waiting on the writer row lock while the writer held start_dispatch open mid-transaction; once the writer committed (dispatch_started, token issued), the reader's claim() on the now-dispatch_started row labelled uncertain (never re-claimed, generation unchanged, no second token); the original token still reconciles the row to provider_accepted afterward",
-    "#8 sender one-in-flight: two real connections launched back-to-back, each start_dispatch()-ing a DIFFERENT row sharing one sender \u2014 Postgres serializes the two on the D-6(5) unique index; exactly one row reached dispatch_started and the other failed on the sender guard (unique index), never both"
+    "#8 sender one-in-flight: two real connections launched back-to-back, each start_dispatch()-ing a DIFFERENT row sharing one sender \u2014 Postgres serializes the two on the D-6(5) unique index; exactly one row reached dispatch_started and the other received the sanitized INBOX_REPLY_SENDER_BUSY (55P03) with no raw constraint DETAIL, never both dispatched",
+    "P1.2 positive case: two real connections \u2014 a start_dispatch call observed waiting on an inbound-head row lock (pg_stat_activity wait_event_type=Lock); a suppression committed by a third connection WHILE it waited was still seen (item_current's destination_policy read is a fresh statement issued only after the lock wait resolves) \u2014 the row ended skipped_ineligible/sms_suppressed with no token ever issued",
+    "P1.2 positive control: with the pre-round-2 read-before-lock item_current() restored temporarily, the IDENTICAL race (suppression committed during the same head-lock wait) is MISSED \u2014 a token is wrongly issued despite the suppression, confirming the reorder in the real function is what makes the positive case above actually work",
+    "P2.3 positive case: two real connections each INSERT a different distinct item into the same operation under a cap of 1 \u2014 the INSERT trigger's SELECT ... FOR NO KEY UPDATE on the operations row serializes them; exactly one commits, the other raises INBOX_REPLY_RECIPIENT_LIMIT",
+    "P2.3 positive control: with FOR NO KEY UPDATE removed from the INSERT trigger, two real connections concurrently inserting different items (B, C) into the same operation under a cap of 2 BOTH commit \u2014 3 distinct items admitted, one past the cap \u2014 the exact overrun the fix prevents"
   ],
   "cleanup": "Private inbox_reply_* schemas and the two public wrapper functions removed; uniquely marked synthetic organizations/contacts/properties/messages rows retained in the owned fixture (same precedent as inbox-reply-preparation/recipient-concurrency.py)",
   "limitations": [
