@@ -33,6 +33,12 @@ second worker cannot restart it until an operator records explicit
 reconciliation evidence. A stale worker's token cannot mutate state after
 reconciliation.
 
+An investigate worker is read-only and never marks an issue resolved. After
+its evidence is collected, the operator must run
+`finish-investigation --attempt-id ID --evidence TEXT` with the fencing token.
+That explicit transition closes the attempt and releases the global lease;
+letting the lease expire instead requires normal stale-lease reconciliation.
+
 Investigate and repair claims require an existing absolute Git worktree (and
 optionally an exact branch). The controller verifies it is a linked worktree,
 not the main checkout, before claiming and launches Codex with that worktree as
@@ -60,7 +66,8 @@ The review command is also dry-run by default. With --execute, it requires an
 existing repair session plus persisted PR/CI, deployment, functional-probe,
 and Sentry evidence. It invokes an explicit Astra medium Codex command in
 read-only mode from a fresh clean detached checkout at the persisted PR SHA,
-ignores repository execpolicy rules, parses a strict raw JSON decision only
+ignores repository execpolicy rules and sets `-c project_doc_max_bytes=0`,
+parses a strict raw JSON decision only
 from a final `agent_message`, obtains the session ID from a real thread event,
 and only then persists an immutable evidence snapshot for the independent
 review gate. Review execution and format failures leave the repair attempt

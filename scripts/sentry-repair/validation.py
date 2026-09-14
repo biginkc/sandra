@@ -92,6 +92,8 @@ def validate_completion_record(
         raise CompletionError("completion CI status does not match persisted CI status")
 
     deployment_persisted = _mapping(context.get("deployment"), "persisted deployment")
+    if str(deployment_persisted.get("environment")) != str(attempt.get("environment")):
+        raise CompletionError("persisted deployment environment does not match attempt environment")
     deployment = _mapping(record.get("deployment"), "deployment")
     if str(deployment.get("environment")) != str(deployment_persisted["environment"]):
         raise CompletionError("deployment environment does not match persisted deployment")
@@ -162,8 +164,12 @@ def validate_completion_record(
         or review_command[:3] != ["codex", "exec", "--model"]
         or "gpt-6-astra" not in review_command
         or 'model_reasoning_effort="medium"' not in review_command
+        or not any(
+            review_command[index : index + 2] == ["-c", "project_doc_max_bytes=0"]
+            for index in range(len(review_command) - 1)
+        )
     ):
-        raise CompletionError("review command provenance is not Astra medium")
+        raise CompletionError("review command provenance is not an isolated Astra medium review")
     if str(persisted_review.get("session_id")) == str(attempt.get("session_id")):
         raise CompletionError("review session must be independent")
     snapshot_fields = (

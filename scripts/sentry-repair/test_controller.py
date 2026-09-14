@@ -875,6 +875,109 @@ class ControllerTests(unittest.TestCase):
             "running",
         )
 
+    def test_review_nonapproval_cannot_repeat_unchanged_evidence(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101,
+            owner="one", mode="repair",
+        )
+        self.store.mark_running(
+            attempt.attempt_id, attempt.fencing_token,
+            model=SPARK_MODEL, effort="low", session_id="repair-session",
+        )
+        self.seed_review_evidence(attempt)
+        rejected = FakeExecutor(
+            ProcessResult("available"),
+            ProcessResult(
+                "success",
+                stdout=(
+                    '{"type":"thread.started","thread_id":"review-rejected"}\n'
+                    '{"type":"item.completed","item":{"type":"agent_message",'
+                    '"text":"{\\"decision\\":\\"rejected\\",'
+                    '\\"evidence\\":\\"scope is unsafe\\"}"}}'
+                ),
+                session_id="review-rejected",
+            ),
+        )
+        first = dispatch_review(
+            self.store, attempt.attempt_id, attempt.fencing_token,
+            executor=rejected, execute=True,
+        )
+        self.assertEqual(first["review"]["decision"], "rejected")
+        retry = FakeExecutor(
+            ProcessResult("available"),
+            ProcessResult("success", stdout="should not run", session_id="review-retry"),
+        )
+        with self.assertRaises(StateError):
+            dispatch_review(
+                self.store, attempt.attempt_id, attempt.fencing_token,
+                executor=retry, execute=True,
+            )
+        self.assertEqual(retry.run_calls, [])
+        self.assertEqual(
+            self.store.db.execute(
+                "SELECT status FROM attempts WHERE attempt_id=?", (attempt.attempt_id,)
+            ).fetchone()[0],
+            "running",
+        )
+
+    def test_deployment_environment_must_match_attempt(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101,
+            owner="one", mode="repair",
+        )
+        self.store.mark_running(
+            attempt.attempt_id, attempt.fencing_token,
+            model=SPARK_MODEL, effort="low", session_id="repair-session",
+        )
+        with self.assertRaises(StateError):
+            self.store.record_deployment(
+                attempt.attempt_id, attempt.fencing_token,
+                environment="preview", deployed_sha=self.head_sha(),
+            )
+        self.assertIsNone(
+            self.store.db.execute(
+                "SELECT * FROM deployments WHERE attempt_id=?", (attempt.attempt_id,)
+            ).fetchone()
+        )
+
+    def test_finish_investigation_is_explicit_terminal_transition(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101,
+            owner="one", mode="investigate",
+        )
+        self.store.mark_running(
+            attempt.attempt_id, attempt.fencing_token,
+            model=SPARK_MODEL, effort="low", session_id="investigation-session",
+        )
+        self.store.finish_investigation(
+            attempt.attempt_id, attempt.fencing_token,
+            evidence="root cause documented; no patch authorized",
+        )
+        row = self.store.db.execute(
+            "SELECT status,finished_at FROM attempts WHERE attempt_id=?",
+            (attempt.attempt_id,),
+        ).fetchone()
+        self.assertEqual(row["status"], "completed")
+        self.assertIsNotNone(row["finished_at"])
+        self.assertIsNone(self.store.db.execute("SELECT * FROM active_lease").fetchone())
+        self.assertEqual(
+            self.store.get_issue(
+                "bmh-group", "sandra", "vercel-production", 101
+            )["status"],
+            "investigated",
+        )
+        self.assertEqual(
+            self.store.db.execute(
+                "SELECT event_type FROM notifications_outbox WHERE attempt_id=?",
+                (attempt.attempt_id,),
+            ).fetchone()[0],
+            "investigation_completed",
+        )
+        with self.assertRaises(FencingError):
+            self.store.finish_investigation(
+                attempt.attempt_id, attempt.fencing_token, evidence="duplicate",
+            )
+
     def test_worker_environment_scrubs_provider_secrets(self):
         with patch.dict(
             os.environ,
@@ -946,6 +1049,20 @@ class ControllerTests(unittest.TestCase):
         finally:
             pid_file.unlink(missing_ok=True)
 
+    @unittest.skipUnless(hasattr(signal, "SIGHUP"), "SIGHUP is Unix-only")
+    def test_subprocess_cleanup_traps_terminal_hangup(self):
+        # The worker is in a new process group and signals its controller
+        # parent.  The SIGHUP handler must make the controller's finally block
+        # kill that group before the controller exits.
+        code = "import os, signal, time; time.sleep(.2); os.kill(os.getppid(), signal.SIGHUP); time.sleep(30)"
+        executor = SubprocessExecutor(sys.executable, worktree=str(self.worktree))
+        with self.assertRaises(SystemExit):
+            executor._run(
+                [sys.executable, "-c", code],
+                timeout_seconds=10,
+                heartbeat_interval_seconds=1,
+            )
+
     def test_cli_exposes_fenced_heartbeat_without_token_argv(self):
         args = cli_parser().parse_args(
             [
@@ -961,6 +1078,57 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(args.command, "heartbeat")
         self.assertEqual(args.lease_seconds, 7200)
         self.assertFalse(hasattr(args, "fencing_token"))
+
+    def test_cli_exposes_explicit_investigation_finish(self):
+        args = cli_parser().parse_args(
+            [
+                "finish-investigation",
+                "--attempt-id",
+                "attempt-1",
+                "--fencing-token-file",
+                "/secure/token",
+                "--evidence",
+                "root cause recorded",
+            ]
+        )
+        self.assertEqual(args.command, "finish-investigation")
+        self.assertEqual(args.evidence, "root cause recorded")
+
+    def test_review_argv_disables_committed_project_documents(self):
+        from dispatch import review_argv
+
+        argv = review_argv("review")
+        self.assertIn(["-c", "project_doc_max_bytes=0"], [argv[i : i + 2] for i in range(len(argv) - 1)])
+
+    def test_review_record_rejects_provenance_without_project_doc_disable(self):
+        from dispatch import review_argv
+
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101,
+            owner="one", mode="repair",
+        )
+        self.store.mark_running(
+            attempt.attempt_id, attempt.fencing_token,
+            model=SPARK_MODEL, effort="low", session_id="repair-session",
+        )
+        self.seed_review_evidence(attempt)
+        command = review_argv("review")
+        index = command.index("project_doc_max_bytes=0")
+        del command[index - 1 : index + 1]
+        with self.assertRaises(ValueError):
+            self.store.record_review(
+                attempt.attempt_id,
+                attempt.fencing_token,
+                model="gpt-6-astra",
+                effort="medium",
+                session_id="review-session",
+                decision="rejected",
+                evidence="project docs were not disabled",
+                source="codex_exec",
+                command=command,
+                result_status="success",
+                verified=True,
+            )
 
     def test_completion_requires_repair_mode(self):
         with self.assertRaises(CompletionError):

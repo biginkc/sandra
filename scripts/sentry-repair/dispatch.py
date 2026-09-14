@@ -292,7 +292,14 @@ class SubprocessExecutor:
             # the child group is also fenced before the controller exits.
             try:
                 if threading.current_thread() is threading.main_thread():
-                    for signum in (signal.SIGINT, signal.SIGTERM):
+                    termination_signals = [signal.SIGINT, signal.SIGTERM]
+                    # SIGHUP is the normal terminal/session hangup signal on
+                    # Unix.  It must fence the child process group as well;
+                    # otherwise closing a controller terminal can leave a
+                    # detached worker running after the lease owner died.
+                    if hasattr(signal, "SIGHUP"):
+                        termination_signals.append(signal.SIGHUP)
+                    for signum in termination_signals:
                         try:
                             previous_handlers[signum] = signal.signal(signum, stop_child_on_signal)
                         except (OSError, ValueError):
@@ -677,6 +684,11 @@ def review_argv(prompt: str) -> list[str]:
     # execpolicy rules so a reviewee-controlled instruction file cannot grant
     # commands or approvals to the reviewer.
     argv = codex_argv(ASTRA_REVIEW_MODEL, "medium", prompt, sandbox="read-only")
+    # Disable repository project-document loading in the independent clone.
+    # A repair PR can change AGENTS.md or similar files; review policy must
+    # come from this controller invocation, not reviewee-controlled content.
+    argv.insert(-1, "-c")
+    argv.insert(-1, "project_doc_max_bytes=0")
     argv.insert(-1, "--ignore-rules")
     return argv
 
@@ -763,6 +775,20 @@ def dispatch_review(
     if not context["attempt"].get("session_id"):
         raise ValueError("review requires a persisted repair session")
     snapshot = store.review_snapshot(attempt_id)
+    existing_review = context.get("review")
+    if (
+        existing_review is not None
+        and existing_review.get("decision") in {"rejected", "needs_changes"}
+    ):
+        previous_snapshot = existing_review.get("evidence_snapshot_json")
+        if not previous_snapshot:
+            raise StateError("nonapproval review has no immutable evidence snapshot")
+        if previous_snapshot == snapshot.get("evidence_snapshot_json"):
+            # A non-approval is bound to the immutable evidence it examined.
+            # Re-running the same review cannot change its answer and would
+            # only create an unbounded review loop; update evidence before
+            # retrying.
+            raise StateError("nonapproval review requires changed evidence before rerun")
     # A review does not replace the repair model/session on the attempt. Its
     # independent session is persisted in reviews after actual output parses.
     # First inspect and clone the exact clean commit. Checkout failures are

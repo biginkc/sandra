@@ -100,6 +100,14 @@ def parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--outcome", choices=("abandoned", "failed"), required=True)
     reconcile.add_argument("--evidence", required=True)
 
+    finish_investigation = sub.add_parser(
+        "finish-investigation",
+        help="explicitly finish a successful read-only investigation and release its lease",
+    )
+    finish_investigation.add_argument("--attempt-id", required=True)
+    _add_fencing_input(finish_investigation)
+    finish_investigation.add_argument("--evidence", required=True)
+
     heartbeat = sub.add_parser("heartbeat", help="extend one active lease without shortening it")
     heartbeat.add_argument("--attempt-id", required=True)
     _add_fencing_input(heartbeat)
@@ -230,6 +238,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.attempt_id, outcome=args.outcome, evidence=args.evidence
             )
             print(json.dumps({"reconciled": args.attempt_id}))
+            return 0
+        if args.command == "finish-investigation":
+            store.finish_investigation(
+                args.attempt_id, _fencing_token(args), evidence=args.evidence
+            )
+            print(json.dumps({"investigation_finished": args.attempt_id}))
             return 0
         if args.command == "heartbeat":
             lease_until = store.heartbeat(

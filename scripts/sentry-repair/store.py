@@ -935,7 +935,9 @@ class RepairStore:
             raise ValueError("deployment environment and deployed SHA are required")
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            self._fenced_attempt_locked(attempt_id, fencing_token)
+            attempt = self._fenced_attempt_locked(attempt_id, fencing_token)
+            if str(environment) != str(attempt["environment"]):
+                raise StateError("deployment environment must match attempt environment")
             self._ensure_evidence_mutable_locked(attempt_id)
             self.db.execute(
                 """INSERT INTO deployments(attempt_id,environment,deployed_sha,provider,recorded_at)
@@ -943,6 +945,69 @@ class RepairStore:
                    environment=excluded.environment,deployed_sha=excluded.deployed_sha,
                    provider=excluded.provider,recorded_at=excluded.recorded_at""",
                 (attempt_id, environment, deployed_sha, provider, self._now()),
+            )
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def finish_investigation(
+        self,
+        attempt_id: str,
+        fencing_token: str,
+        *,
+        evidence: str,
+        now: float | None = None,
+    ) -> None:
+        """Close a successful investigation and release its global lease.
+
+        Investigation is deliberately separate from ``complete_attempt``:
+        investigation cannot claim a repair outcome or mark Sentry resolved,
+        but it still needs an explicit terminal transition so a successful
+        read-only worker does not expire into reconciliation and block every
+        later attempt.
+        """
+
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ValueError("investigation completion requires evidence")
+        current = self._now(now)
+        fencing_digest = self._fence_digest(fencing_token)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            attempt = self._fenced_attempt_locked(attempt_id, fencing_token, now=current)
+            if attempt["mode"] != "investigate":
+                raise StateError("finish-investigation requires an investigate attempt")
+            self.db.execute(
+                "UPDATE attempts SET status='completed',finished_at=? WHERE attempt_id=?",
+                (current, attempt_id),
+            )
+            self.db.execute(
+                "DELETE FROM active_lease WHERE singleton=1 AND attempt_id=? AND fencing_token=?",
+                (attempt_id, fencing_digest),
+            )
+            self.db.execute(
+                """UPDATE issues SET status='investigated',updated_at=?
+                   WHERE organization=? AND project=? AND environment=? AND issue_number=?
+                   AND generation=?""",
+                (
+                    current,
+                    attempt["organization"],
+                    attempt["project"],
+                    attempt["environment"],
+                    attempt["issue_number"],
+                    attempt["generation"],
+                ),
+            )
+            self._enqueue_locked(
+                "investigation_completed",
+                f"investigation_completed:{attempt_id}",
+                {
+                    "attempt_id": attempt_id,
+                    "issue_number": attempt["issue_number"],
+                    "generation": attempt["generation"],
+                    "evidence": evidence.strip(),
+                },
+                current,
             )
             self.db.execute("COMMIT")
         except Exception:
@@ -1012,17 +1077,32 @@ class RepairStore:
             raise ValueError("review command must explicitly run Astra through codex exec")
         if 'model_reasoning_effort="medium"' not in command:
             raise ValueError("review command must explicitly use medium reasoning effort")
+        if not any(
+            command[index : index + 2] == ["-c", "project_doc_max_bytes=0"]
+            for index in range(len(command) - 1)
+        ):
+            raise ValueError("review command must disable repository project documents")
         self.db.execute("BEGIN IMMEDIATE")
         try:
             row = self._fenced_attempt_locked(attempt_id, fencing_token)
             if row["session_id"] and row["session_id"] == session_id:
                 raise ValueError("review session must be independent from repair session")
             existing_review = self.db.execute(
-                "SELECT decision FROM reviews WHERE attempt_id=?", (attempt_id,)
+                "SELECT decision,evidence_snapshot_json FROM reviews WHERE attempt_id=?",
+                (attempt_id,),
             ).fetchone()
             if existing_review is not None and existing_review["decision"] == "approved":
                 raise StateError("approved review cannot be replaced")
             reviewed = self._review_snapshot_locked(attempt_id)
+            if existing_review is not None and existing_review["decision"] in {
+                "rejected",
+                "needs_changes",
+            }:
+                previous_snapshot = existing_review["evidence_snapshot_json"]
+                if not previous_snapshot:
+                    raise StateError("nonapproval review has no immutable evidence snapshot")
+                if previous_snapshot == reviewed["evidence_snapshot_json"]:
+                    raise StateError("nonapproval review requires changed evidence before rerun")
             if snapshot is not None and any(
                 snapshot.get(key) != reviewed.get(key)
                 for key in reviewed
