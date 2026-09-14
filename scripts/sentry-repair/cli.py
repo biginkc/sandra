@@ -29,6 +29,13 @@ if str(HERE) not in sys.path:
 
 from dispatch import SubprocessExecutor, dispatch_attempt, dispatch_review  # noqa: E402
 from github import github_dry_run  # noqa: E402
+from github_publisher import (  # noqa: E402
+    DEFAULT_REPOSITORY,
+    GitHubClient,
+    GitHubPublisher,
+    enqueue_candidate,
+    publisher_dry_run,
+)
 from schedule import due_slot  # noqa: E402
 from sentry import SentryClient, SentryConfig, intake_from_sentry, numeric_issue_key  # noqa: E402
 from store import IssueInput, RepairStore, default_db_path  # noqa: E402
@@ -178,6 +185,28 @@ def parser() -> argparse.ArgumentParser:
         help="render a sanitized GitHub-incident proposal without any network or state mutation",
     )
     github_dry_run_command.add_argument("--issue", type=int, required=True)
+    github_publish = sub.add_parser(
+        "github-publish",
+        help="preview or explicitly publish one sanitized GitHub issue (dry-run by default)",
+    )
+    github_publish.add_argument("--issue", type=int, required=True)
+    github_publish.add_argument(
+        "--repository",
+        default=os.environ.get("SANDRA_GITHUB_REPOSITORY", DEFAULT_REPOSITORY),
+    )
+    github_publish.add_argument(
+        "--owner",
+        default=os.environ.get("SANDRA_GITHUB_PUBLISHER_OWNER", "sandra-controller"),
+    )
+    github_publish.add_argument(
+        "--token-env",
+        default="GITHUB_TOKEN",
+        help="environment variable containing the controller-only GitHub token",
+    )
+    github_publish.add_argument("--timeout-seconds", type=int, default=20)
+    github_publish.add_argument(
+        "--execute", action="store_true", help="enqueue and perform the GitHub API operation"
+    )
     return root
 
 
@@ -190,7 +219,8 @@ def main(argv: list[str] | None = None) -> int:
         allowed_worktree_root=args.worktree_root,
         # A dry run must neither initialize nor migrate durable state.  An
         # absent or unreadable database is therefore a fail-closed error.
-        read_only=args.command == "github-dry-run",
+        read_only=args.command == "github-dry-run"
+        or (args.command == "github-publish" and not args.execute),
     )
     try:
         if args.command == "init":
@@ -352,6 +382,53 @@ def main(argv: list[str] | None = None) -> int:
                 args.issue,
             )
             print(json.dumps(report.__dict__, sort_keys=True))
+            return 0
+        if args.command == "github-publish":
+            config = SentryConfig()
+            if not args.execute:
+                report = publisher_dry_run(
+                    store,
+                    organization=config.organization,
+                    project=config.project,
+                    environment=config.environment,
+                    issue_number=args.issue,
+                    repository=args.repository,
+                )
+                print(json.dumps(report, sort_keys=True))
+                return 0
+            existing_jobs = store.list_github_outbox_for_source(
+                config.organization,
+                config.project,
+                config.environment,
+                args.issue,
+            )
+            if any(str(job["repository"]) != args.repository for job in existing_jobs):
+                raise ValueError("--repository does not match the issue's claimed GitHub outbox")
+            token = os.environ.get(args.token_env)
+            if not token:
+                raise ValueError(f"{args.token_env} is required for explicit GitHub publishing")
+            queued = enqueue_candidate(
+                store,
+                organization=config.organization,
+                project=config.project,
+                environment=config.environment,
+                issue_number=args.issue,
+                repository=args.repository,
+            )
+            if queued.action in {"suppressed", "linked"}:
+                print(json.dumps(queued.as_dict(), sort_keys=True))
+                return 0
+            result = GitHubPublisher(
+                store,
+                GitHubClient(
+                    repository=args.repository,
+                    token=token,
+                    timeout_seconds=args.timeout_seconds,
+                ),
+                owner=args.owner,
+                dedupe_key=queued.dedupe_key,
+            ).publish_one()
+            print(json.dumps(None if result is None else result.as_dict(), sort_keys=True))
             return 0
         raise AssertionError(args.command)
     finally:

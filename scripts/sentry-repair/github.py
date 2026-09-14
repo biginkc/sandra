@@ -16,10 +16,12 @@ from store import RepairStore
 
 
 MARKER_VERSION = 1
+GITHUB_LABELS = ("sentry", "sentry-production", "automated-repair")
 SAFE_TAG_NAMES = frozenset({"surface", "operation", "kind", "code"})
 SAFE_LEVELS = frozenset({"fatal", "error", "warning", "info", "debug"})
 SAFE_RELEASE = re.compile(r"[0-9a-fA-F]{7,64}\Z")
 SAFE_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z")
+SAFE_SOURCE_IDENTIFIER = re.compile(r"[A-Za-z0-9_.:-]{1,80}\Z")
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,32 @@ def _body(row: Mapping[str, Any]) -> str:
         _marker(row["organization"], row["project"], row["environment"], int(row["issue_number"]), int(row["generation"])),
     ])
     return "\n".join(lines)
+
+
+def github_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the complete, bounded GitHub payload from a stored issue row.
+
+    Sentry titles, culprits, event bodies, tag values, and all other
+    telemetry text are intentionally absent.  The publisher persists this
+    object in its outbox before contacting GitHub, so the privacy boundary is
+    enforced before any credential-bearing code is reached.
+    """
+
+    organization = str(row.get("organization") or "")
+    project = str(row.get("project") or "")
+    environment = str(row.get("environment") or "")
+    if not all(SAFE_SOURCE_IDENTIFIER.fullmatch(value) for value in (organization, project, environment)):
+        raise ValueError("Sentry source identifiers are invalid")
+    issue_number = int(row["issue_number"])
+    generation = int(row["generation"])
+    marker = _marker(organization, project, environment, issue_number, generation)
+    title = f"Sandra Sentry production incident #{issue_number}"
+    return {
+        "title": title,
+        "body": _body(row),
+        "labels": list(GITHUB_LABELS),
+        "marker": marker,
+    }
 
 
 def github_dry_run(store: RepairStore, organization: str, project: str, environment: str, issue_number: int) -> GitHubDryRun:
