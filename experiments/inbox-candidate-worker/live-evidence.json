@@ -1,0 +1,46 @@
+{
+  "runner_sha256": "5338ebf41a98a96ade65d34ce081d68c2a4416b0f1685486d5c5a70826c74269",
+  "frontend_evidence_sha256": "c0c2533937a2097212c841ece8cb02bd593ba13b0a8ea383795f55d2c3c8b595",
+  "frontend_evidence_path": "experiments/inbox-live-read-proof/evidence.json",
+  "result": {
+    "passed": true,
+    "messageId": "29ef8a12-9c6e-48fd-8f09-e13bd7f5b426",
+    "arrivalVisibleMs": 1360.037209,
+    "readProjectionVisibleMs": 2297.854125,
+    "receipt": {
+      "boundaryId": "852e72e9-b5b0-4f9d-84de-a38e571877b9",
+      "batch": 0,
+      "changed": 2,
+      "completed": true
+    },
+    "canonical": {
+      "messages": 2,
+      "unread_inbound": 0
+    },
+    "navigations": 1,
+    "worker": {
+      "rounds": 1,
+      "processed": {
+        "baseline": 1,
+        "backfill": 0,
+        "parent": 0,
+        "summary": 1,
+        "expiry": 0
+      },
+      "readiness": {
+        "due_expiry": false,
+        "baseline_done": true,
+        "queue_pending": false,
+        "parent_pending": false,
+        "serving_enabled": true,
+        "backfill_pending": false,
+        "collisions_unresolved": false
+      },
+      "elapsed_seconds": 0.529
+    },
+    "sourceSha256": "078c5cb50609aa8f7d08e5368922b9f30a659f649321939a8b2acab434e3f1a0",
+    "proof": "canonical inbound insert \u2192 bounded candidate projector \u2192 Electric \u2192 visible preview/Unread; actual read acknowledgment \u2192 projector \u2192 visible unread removal, no reload",
+    "limitations": "Two-conversation owned local fixture, not production scale/SLO evidence"
+  },
+  "scope": "Actual local continuous projector proof; small fixture, not a production service or volume benchmark"
+}
