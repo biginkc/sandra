@@ -1,4 +1,5 @@
 import Image from "next/image";
+import { recordingViewer } from "@/lib/recordings/data";
 import { GlobalSearchProvider } from "@/components/search/global-search-provider";
 import { GlobalSearchTrigger } from "@/components/search/global-search-trigger";
 import Link from "next/link";
@@ -32,6 +33,7 @@ export default async function DashboardLayout({
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
   const showAdmin = isAdminEmail(user.email);
+  const recordingAccess = await recordingViewer().catch(() => null);
   const [rosterResult, badgeResult] = await Promise.allSettled([
     getAcquisitionRoster(),
     getAcquisitionBadge(),
@@ -69,6 +71,8 @@ export default async function DashboardLayout({
             />
           </Link>
           <DashboardAdminNav showAdmin={showAdmin} />
+          {recordingAccess?.owner && <Link href="/owner/recordings" className="rounded-lg px-3 py-2 text-sm font-semibold text-white">Recordings</Link>}
+          {recordingAccess?.mine && <Link href="/my-recordings" className="rounded-lg px-3 py-2 text-sm font-semibold text-white">My Recordings</Link>}
         </div>
         <div className="flex min-w-0 items-center gap-[14px] text-sm [&>*:not(:first-child)]:shrink-0">
           {/* The provider keeps this client control mounted across route changes. */}
