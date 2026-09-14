@@ -1,0 +1,31 @@
+{
+  "sources": {
+    "inbox-reply-boundary/context.sql": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+    "inbox-reply-preparation/recipient.sql": "90d1e6d24f954a7ae809962c8f7181a4f9a21b973303163c9655940e4c18cdf1",
+    "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
+    "inbox-reply-review/setup.sql": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
+    "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772",
+    "inbox-reply-send/attempts.sql": "fba359a4a0b23159529a8eb691f8489fd2228cb5bb5cce06ed63f697a7f1aa92"
+  },
+  "runner_sha256": "f12d4fec644f081f9c9742d7f451a1150354effd216117a1ce013bebb66824d7",
+  "checks": [
+    "Happy path: insert (frozen-matching) -> claim -> expired-lease reclaim (generation strictly increases) -> start_dispatch (body/from/to byte-identical to frozen row) -> re-entry claim labels uncertain (never re-claims, never re-issues a token) -> persist wrong token raises, correct token reconciles to provider_accepted -> idempotent re-ack and post-accept uncertain are no-ops -> contradictory externalId raises -> provider_accepted->delivered (trigger edge, PR-G territory)",
+    "#4 terminal resurrection: every out-of-matrix UPDATE on a terminal (delivered) row raises (approved/claimed/rejected_unsent); claim()/persist(uncertain) on a terminal row return stored data without mutating receipt_version; persist(not_attempted) on a terminal row raises. Mutation: trigger disabled -> both resurrection and rejected_unsent forcing succeed; trigger re-enabled -> both blocked again",
+    "#5 rejected_unsent has no inbound edge under the live trigger in any of the above; covered by the same disable/re-enable mutation as #4",
+    "#6 partial-unique bypass: ordinal-2 successor blocked (unique_violation) while prior sits in each of {approved,claimed,dispatch_started,provider_accepted,uncertain,delivered,delivery_failed,skipped_ineligible}; succeeds only when prior is confirmed_not_submitted. Mutation: live-attempt index widened to also exempt uncertain -> a successor wrongly admitted while prior is uncertain; index restored -> a further successor is blocked again",
+    "#7 D2 destination guard: two live attempts to the same to_e164 (shared contact, two conversations) conflict; once the first becomes uncertain the second succeeds. Mutation: destination-guard index widened to also cover uncertain -> the same insert wrongly fails; index restored -> succeeds again",
+    "#8 sender one-in-flight (single-connection mutation half; the real two-real-connection race is concurrency.py): a second claimed attempt cannot start_dispatch while another shares its sender and is already dispatch_started (INBOX_REPLY_SENDER_BUSY, 55P03, lease left intact). Mutation: sender-inflight index dropped and the guard trigger bypassed for one write -> two simultaneous dispatch_started rows for one sender; index restored",
+    "#9 token fence + reconcile: wrong token never mutates; correct token from uncertain reconciles to provider_accepted; idempotent re-ack with the same externalId and a stray uncertain-after-accepted are both no-ops; a different externalId after provider_accepted raises INBOX_REPLY_CONTRADICTORY_RECEIPT",
+    "#10 re-entry labelling: claim() on a dispatch_started row labels uncertain with evidence reentered_without_result and never re-claims; a subsequent persist(accepted) with the original token still reconciles to provider_accepted",
+    "#11 P-GATE binding: start_dispatch returns from/to/body byte-identical to the frozen recipient; an owner tamper of the frozen renderedBody is caught at dispatch as INBOX_REPLY_FROZEN_MISMATCH; a frozen item with exclusion forced non-NULL is uninsertable (frozen_item raises at the INSERT trigger); an attempt with a to_e164 that does not match the frozen recipient is uninsertable; the operation-wide recipient_limit is enforced at INSERT (temporarily lowered to the operation's current distinct-item count, a new distinct item is refused, then admitted again once the real 50-cap is restored)",
+    "#12 E4 live re-derivation at dispatch: sms_phone_suppressions added after claim, sender marked inactive, validUntil forced into the past, and a bumped inbound head revision each independently produce the matching skipped_ineligible/exclusion code with no token ever issued. Mutation: start_dispatch redefined to skip item_current() entirely -> a suppressed item wrongly reaches dispatch_started; start_dispatch restored -> a further suppressed item is correctly skipped again",
+    "#13 admission: claim() raises INBOX_REPLIES_NOT_ENABLED (55000) while admission is disabled; persist() is never admission-gated (a wrong-token call still fails on the token check, not on admission, even with admission off). Mutation: require_admission() replaced with a no-op -> claim() wrongly proceeds while disabled; restored -> raises again",
+    "#14 grants: no table, function or schema in inbox_reply_send is reachable by anon/authenticated/service_role. Mutation: USAGE granted to authenticated and observed via has_schema_privilege, then revoked and re-verified closed",
+    "The whole test is rolled back; inbox_reply_context/inbox_reply_preparation/inbox_reply_review/inbox_reply_send are all absent afterward"
+  ],
+  "limits": [
+    "Trusted SQL calls (no HTTP/JWT signature proof; this PR ships no public RPC)",
+    "No accept/status/recover, worker, callback or UI \u2014 SQL ledger only (PR-E..H)",
+    "Proofs 1 (double-claim), 2 (stale-fence), 3 (reclaim-after-dispatch, two-connection half) and 8 (sender one-in-flight, two-connection half) use two real connections and observed lock-waits in concurrency.py, not this rollback-only single-connection harness"
+  ]
+}
