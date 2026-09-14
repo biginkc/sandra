@@ -12,6 +12,14 @@ CREATE TABLE inbox_reply_review.preparations(
  expires_at timestamptz NOT NULL,created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  UNIQUE(org_id,requester_id,request_key)
 );
+-- immutable_row only guarantees immutability against ordinary DML from a
+-- non-superuser role. It does not defend against TRUNCATE (no per-row
+-- trigger fires), SET session_replication_role='replica' (suppresses
+-- non-replica triggers), or ALTER TABLE ... DISABLE TRIGGER — all three
+-- require superuser or table-owner privilege, which authenticated/
+-- service_role never hold here (REVOKE ALL below), so the app-facing
+-- boundary holds even though the guarantee is not absolute against the
+-- table owner itself.
 CREATE TRIGGER immutable_reply_preparation BEFORE UPDATE OR DELETE ON inbox_reply_review.preparations FOR EACH ROW EXECUTE FUNCTION inbox_operations.immutable_row();
 -- JS message length is UTF-16 code units, not PostgreSQL Unicode characters.
 CREATE FUNCTION inbox_reply_review.text_length(body text) RETURNS integer LANGUAGE sql IMMUTABLE SET search_path='' AS $$
@@ -30,20 +38,34 @@ CREATE FUNCTION inbox_reply_review.view(p inbox_reply_review.preparations) RETUR
  counts AS (SELECT count(DISTINCT value->'recipient'->>'to')::integer n,coalesce(bool_or((value->>'duplicateDestination')::boolean),false) duplicates FROM eligible)
  SELECT jsonb_build_object('preparationId',p.id,'idempotencyKey',p.request_key,'inputHash',p.input_hash,'expiresAt',p.expires_at,
   'items',(SELECT jsonb_agg(value-'dependencies'-'validUntil'-'state' ORDER BY value->'target'->>'id') FROM jsonb_array_elements(p.items)),
-  'recipientCount',n,'blockers',to_jsonb(array_remove(ARRAY[CASE WHEN n=0 THEN 'empty' END,CASE WHEN n>50 THEN 'recipient_limit' END,CASE WHEN duplicates THEN 'duplicate_destination' END],NULL))) FROM counts
+  'recipientCount',n,'blockers',to_jsonb(array_remove(ARRAY[CASE WHEN n=0 THEN 'empty' END,CASE WHEN n>inbox_reply_preparation.recipient_limit() THEN 'recipient_limit' END,CASE WHEN duplicates THEN 'duplicate_destination' END],NULL))) FROM counts
 $$;
 CREATE FUNCTION inbox_reply_review.freeze(raw_input text,k uuid) RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path='' AS $$
 DECLARE a jsonb;o uuid;u uuid;input jsonb;target jsonb;draft jsonb;capture jsonb;item jsonb;items jsonb:='[]';ids uuid[];captures jsonb;found_count integer;reason text;duplicates text[];hash text;existing inbox_reply_review.preparations;prep inbox_reply_review.preparations;expires timestamptz;at_time timestamptz;
 BEGIN
  IF k IS NULL OR raw_input IS NULL OR octet_length(raw_input)>2097152 THEN RAISE EXCEPTION 'Invalid bounded reply preparation';END IF;
  PERFORM inbox_action_api.assert_json_shape(raw_input::json);input:=raw_input::jsonb;
- IF jsonb_typeof(input) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(input))<>2 OR NOT(input ?& ARRAY['targets','drafts']) OR jsonb_typeof(input->'targets') IS DISTINCT FROM 'array' OR jsonb_array_length(input->'targets') NOT BETWEEN 1 AND 500 OR jsonb_typeof(input->'drafts') IS DISTINCT FROM 'array' OR jsonb_array_length(input->'drafts')>500 THEN RAISE EXCEPTION 'Invalid reply envelope';END IF;
+ IF jsonb_typeof(input) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(input))<>3 OR NOT(input ?& ARRAY['targets','drafts','template']) OR jsonb_typeof(input->'targets') IS DISTINCT FROM 'array' OR jsonb_array_length(input->'targets') NOT BETWEEN 1 AND 500 OR jsonb_typeof(input->'drafts') IS DISTINCT FROM 'array' OR jsonb_array_length(input->'drafts')>500 OR jsonb_typeof(input->'template') IS DISTINCT FROM 'string' OR btrim(input->>'template')='' OR inbox_reply_review.text_length(input->>'template')>1600 THEN RAISE EXCEPTION 'Invalid reply envelope';END IF;
  a:=inbox_action_api.authorize(NULL);o:=(a->>'org_id')::uuid;u:=(a->>'user_id')::uuid;
  PERFORM inbox_action_api.lock_request_key(o,u,k);
- hash:=encode(sha256(convert_to('sandra:inbox:reply:v1','utf8')||decode('00','hex')||convert_to(raw_input,'utf8')),'hex');
+ -- Idempotency keys on CLIENT INTENT — which targets, what raw template text
+ -- the operator typed — not on the server-rendered per-recipient body/
+ -- dependencies snapshot in 'drafts' below. Those legitimately drift between
+ -- attempts (a new inbound bumps the head revision, a policy/sender/context/
+ -- contact-name revision changes) without the user having asked for anything
+ -- different. A same-key replay compares ONLY this intent hash; dependency
+ -- drift against the frozen snapshot is the accept/claim recheck's job, never
+ -- freeze replay's. Targets are sorted before hashing so request-order alone
+ -- never produces a spurious mismatch.
+ -- Component-hash-then-concatenate (not string-join-then-hash): a text value
+ -- can never contain chr(0), so any single fixed separator risks collision
+ -- between a crafted targets/template split and a different one. Hashing
+ -- each component to a fixed-width digest before combining removes that
+ -- ambiguity entirely.
+ hash:=encode(sha256(convert_to('sandra:inbox:reply:intent:v1','utf8')||sha256(convert_to((SELECT coalesce(jsonb_agg(value ORDER BY value->>'kind',value->>'id'),'[]'::jsonb) FROM jsonb_array_elements(input->'targets'))::text,'utf8'))||sha256(convert_to(input->>'template','utf8'))),'hex');
  SELECT * INTO existing FROM inbox_reply_review.preparations WHERE org_id=o AND requester_id=u AND request_key=k;
  IF FOUND THEN
-  IF existing.input_hash<>hash OR existing.canonical_input<>raw_input THEN RAISE EXCEPTION 'INBOX_REPLY_IDEMPOTENCY_MISMATCH';END IF;
+  IF existing.input_hash<>hash THEN RAISE EXCEPTION 'INBOX_REPLY_IDEMPOTENCY_MISMATCH';END IF;
   PERFORM inbox_action_api.authorize(o,u);
   RETURN inbox_reply_review.view(existing);
  END IF;
@@ -90,6 +112,9 @@ BEGIN
  SELECT least(expires,min((value->>'validUntil')::timestamptz)) INTO expires FROM jsonb_array_elements(items) WHERE value->>'exclusion' IS NULL;
  PERFORM inbox_action_api.authorize(o,u);
  IF expires<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_REPLY_PREPARATION_EXPIRED';END IF;
+ -- canonical_input retains the full first-successful raw_input (targets +
+ -- drafts + template) for audit/debugging only; it is never read by the
+ -- replay gate above, which compares input_hash (client intent) alone.
  INSERT INTO inbox_reply_review.preparations(id,org_id,requester_id,request_key,input_hash,canonical_input,items,expires_at) VALUES(gen_random_uuid(),o,u,k,hash,raw_input,items,expires) RETURNING * INTO prep;
  RETURN inbox_reply_review.view(prep);
 END $$;

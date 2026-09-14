@@ -6,10 +6,25 @@ export type InboxReplyExclusion =
   | "unsupported_target" | "conversation_unavailable" | "property_unavailable"
   | "property_suppressed" | "contact_mapping_unavailable" | "contact_suppressed"
   | "inbound_unavailable" | "conversation_changed" | "inbound_mapping_changed"
-  | "reply_route_unavailable" | "phone_not_saved" | "landline" | "sms_suppressed"
+  | "reply_route_unavailable" | "phone_not_saved" | "landline"
+  /** Saved slot exists but is not affirmatively 'mobile' (e.g. never
+   * classified). Fails closed like landline — v1 has no bulk-queue-style
+   * operator opt-in toggle for unknown line types. */
+  | "unclassified_phone"
+  | "sms_suppressed"
+  /** No affirmative opt-in event on file. Deliberately stricter than
+   * send.ts/bulk-queue.ts, which let a no-consent contact through as long
+   * as they haven't explicitly opted out — this boundary has no per-message
+   * human review at send time, so it requires affirmative consent instead. */
+  | "no_consent"
   | "sender_unavailable" | "context_unavailable" | "conversation_window_expired"
   | "unknown_state" | "outside_window" | "missing_variable" | "invalid_template"
   | "invalid_body";
+/** Single source of truth for the D5 bulk-reply recipient cap. Must stay in
+ * parity with inbox_reply_preparation.recipient_limit() in
+ * experiments/inbox-reply-preparation/recipient.sql — checked by
+ * reply-api-contract.test.ts, which reads that SQL source directly. */
+export const INBOX_REPLY_RECIPIENT_LIMIT = 50;
 export interface InboxReplyPrepareRequest {
   targets: readonly InboxReplyTarget[];
   template: string;
@@ -21,6 +36,8 @@ export interface PreparedInboxReplyItem {
   exclusion: InboxReplyExclusion | null;
   /** Present only for a canonically eligible, successfully rendered recipient. */
   recipient: null | {
+    contactName: string;
+    propertyAddress: string;
     propertyId: string;
     contactId: string;
     from: string;
@@ -46,6 +63,9 @@ export interface AcceptedInboxReply extends AcceptInboxReplyRequest { operationI
 export type InboxReplyReceiptState =
   | "pending" | "blocked" | "dispatch_started" | "uncertain"
   | "provider_accepted" | "delivered" | "delivery_failed"
+  /** D3-unreachable in v1: no dispatch worker/provider adapter exists yet
+   * (PRs B–H). Kept in the vocabulary now so a future terminal-rejection
+   * receipt state doesn't require a wire-contract/consumer migration later. */
   | "rejected_unsent" | "confirmed_not_submitted";
 export interface InboxReplyReceipt {
   itemId: string;

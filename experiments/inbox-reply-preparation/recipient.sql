@@ -9,6 +9,13 @@ REVOKE ALL ON SCHEMA inbox_reply_preparation FROM PUBLIC,anon,authenticated,serv
 CREATE FUNCTION inbox_reply_preparation.phone(raw text) RETURNS text LANGUAGE sql IMMUTABLE SET search_path='' AS $$
  SELECT CASE WHEN length(d)=10 THEN '+1'||d WHEN length(d)=11 AND left(d,1)='1' THEN '+'||d END FROM (SELECT regexp_replace(raw,'[^0-9]','','g') d) s
 $$;
+-- Single source of truth for the D5 bulk-reply recipient cap. batch.sql and
+-- inbox_reply_review.view() (setup.sql) both call this instead of repeating
+-- the literal; src/lib/inbox/reply-api-contract.ts's INBOX_REPLY_RECIPIENT_LIMIT
+-- constant must stay in parity (checked by a TS test reading this source file).
+CREATE FUNCTION inbox_reply_preparation.recipient_limit() RETURNS integer LANGUAGE sql IMMUTABLE SET search_path='' AS $$
+ SELECT 50
+$$;
 CREATE FUNCTION inbox_reply_preparation.recipient(o uuid,c uuid) RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path='' AS $$
 DECLARE initial jsonb;resolved jsonb;p public.properties;contact public.contacts;inbound public.messages;head public.inbox_inbound_heads;
  target_revision bigint;content_revision bigint;capture_generation uuid;destination text;business text;line_type text;consent text;sender uuid;inventory jsonb;organization jsonb;market jsonb;requirements jsonb;policy jsonb;
@@ -43,7 +50,13 @@ BEGIN
  IF destination IS NULL OR business IS NULL THEN RETURN jsonb_build_object('exclusion','reply_route_unavailable');END IF;
  SELECT t INTO line_type FROM (VALUES(1,contact.phone_1,contact.phone_1_type),(2,contact.phone_2,contact.phone_2_type),(3,contact.phone_3,contact.phone_3_type)) slots(ordinal,phone,t) WHERE inbox_reply_preparation.phone(phone)=destination ORDER BY ordinal LIMIT 1;
  IF NOT FOUND THEN RETURN jsonb_build_object('exclusion','phone_not_saved');END IF;
+ -- Fail closed: eligible only when the saved slot is affirmatively mobile.
+ -- Mirrors the bulk-queue precedent (audience-assessment.ts/bulk-queue.ts) —
+ -- landline is a hard block, 'unknown' (never classified) needs an explicit
+ -- operator opt-in there. Bulk-reply v1 has no such toggle, so 'unknown'
+ -- fails closed the same as landline; it never falls through as eligible.
  IF line_type='landline' THEN RETURN jsonb_build_object('exclusion','landline');END IF;
+ IF line_type IS DISTINCT FROM 'mobile' THEN RETURN jsonb_build_object('exclusion','unclassified_phone');END IF;
  requirements:=jsonb_build_array(
   jsonb_build_object('namespace','property_identity','key',jsonb_build_array(p.id)),jsonb_build_object('namespace','property_policy','key',jsonb_build_array(p.id)),
   jsonb_build_object('namespace','property_outcome','key',jsonb_build_array(p.id)),jsonb_build_object('namespace','property_reply_content','key',jsonb_build_array(p.id)),
@@ -51,10 +64,18 @@ BEGIN
   jsonb_build_object('namespace','contact_reply_content','key',jsonb_build_array(contact.id)),jsonb_build_object('namespace','contact_channel_consent','key',jsonb_build_array(contact.id,'sms')),
   jsonb_build_object('namespace','route_policy','key',jsonb_build_array('sms',destination)),jsonb_build_object('namespace','conversation_identity','key',jsonb_build_array(c)));
  policy:=inbox_action_api.policy(o,requirements);
- -- Explicit opt-outs block the existing manual composer. Ambiguous same-time
- -- opt-in/opt-out ties prefer opt-out rather than an accidental allow.
+ -- Deliberately stricter than the existing single-send/bulk-queue paths
+ -- (src/lib/messaging/send.ts, suppression.ts's evaluateAutomatedSuppression
+ -- used by bulk-queue.ts), which only hard-block explicit opt-out and let
+ -- 'no_consent' fall through as eligible. Automated bulk-reply composition
+ -- has no per-message human review at send time, so this boundary requires
+ -- an affirmative opt-in event on file; 'no_consent' fails closed instead
+ -- of defaulting to eligible. Ambiguous same-time opt-in/opt-out ties still
+ -- prefer opt-out.
  SELECT event_type INTO consent FROM public.consent_events WHERE org_id=o AND contact_id=contact.id AND channel='sms' AND event_type IN ('opt_in_marketing_written','opt_in_confirmed','opt_in_informational','opt_out','provider_auto_opt_out') ORDER BY occurred_at DESC,(event_type IN ('opt_out','provider_auto_opt_out')) DESC,id DESC LIMIT 1;
- IF consent IN ('opt_out','provider_auto_opt_out') OR EXISTS(SELECT 1 FROM public.sms_phone_suppressions WHERE org_id=o AND channel='sms' AND phone_e164=destination) THEN RETURN jsonb_build_object('exclusion','sms_suppressed');END IF;
+ IF EXISTS(SELECT 1 FROM public.sms_phone_suppressions WHERE org_id=o AND channel='sms' AND phone_e164=destination) THEN RETURN jsonb_build_object('exclusion','sms_suppressed');END IF;
+ IF consent IN ('opt_out','provider_auto_opt_out') THEN RETURN jsonb_build_object('exclusion','sms_suppressed');END IF;
+ IF consent IS DISTINCT FROM 'opt_in_marketing_written' AND consent IS DISTINCT FROM 'opt_in_confirmed' AND consent IS DISTINCT FROM 'opt_in_informational' THEN RETURN jsonb_build_object('exclusion','no_consent');END IF;
  SELECT id INTO sender FROM public.provider_sender_numbers WHERE org_id=o AND provider='sendillo' AND phone_e164=business;
  IF NOT FOUND THEN RETURN jsonb_build_object('exclusion','sender_unavailable');END IF;
  inventory:=inbox_reply_context.snapshot(o,'sender_inventory',sender);

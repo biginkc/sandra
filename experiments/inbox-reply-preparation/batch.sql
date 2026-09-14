@@ -83,7 +83,7 @@ BEGIN
  SELECT array_agg(destination) INTO duplicates FROM (SELECT value->>'to' destination FROM jsonb_array_elements(items) WHERE value->>'exclusion' IS NULL GROUP BY value->>'to' HAVING count(*)>1) q;
  SELECT jsonb_agg(value||jsonb_build_object('duplicate_destination',coalesce((value->>'to')=ANY(duplicates),false)) ORDER BY value->>'conversation_id') INTO items FROM jsonb_array_elements(items);
  SELECT count(DISTINCT value->>'to') INTO eligible FROM jsonb_array_elements(items) WHERE value->>'exclusion' IS NULL;
- RETURN jsonb_build_object('items',items,'distinct_recipient_count',eligible,'over_recipient_limit',eligible>50,'has_duplicate_destinations',coalesce(cardinality(duplicates)>0,false));
+ RETURN jsonb_build_object('items',items,'distinct_recipient_count',eligible,'over_recipient_limit',eligible>inbox_reply_preparation.recipient_limit(),'has_duplicate_destinations',coalesce(cardinality(duplicates)>0,false));
 END $$;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_reply_preparation FROM PUBLIC,anon,authenticated,service_role;
 COMMIT;

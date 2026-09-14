@@ -19,13 +19,16 @@ context=(P.parent/'inbox-reply-boundary'/'context.sql').read_text();recipient=(P
 if not all(s.endswith('COMMIT;\n') and '\nBEGIN;\n' in s for s in [context,recipient,batch]):raise RuntimeError('Expected source transaction boundary')
 test=r"""
 DO $test$
-DECLARE o uuid:=gen_random_uuid();foreign_org uuid:=gen_random_uuid();p uuid:=gen_random_uuid();c uuid:=gen_random_uuid();contact uuid:=gen_random_uuid();m uuid:=gen_random_uuid();sender uuid:=gen_random_uuid();missing uuid:=gen_random_uuid();c2 uuid:=gen_random_uuid();a jsonb;b jsonb;before_count bigint;
+DECLARE o uuid:=gen_random_uuid();foreign_org uuid:=gen_random_uuid();p uuid:=gen_random_uuid();c uuid:=gen_random_uuid();contact uuid:=gen_random_uuid();m uuid:=gen_random_uuid();sender uuid:=gen_random_uuid();missing uuid:=gen_random_uuid();c2 uuid:=gen_random_uuid();no_consent_contact uuid:=gen_random_uuid();no_consent_property uuid:=gen_random_uuid();no_consent_conversation uuid:=gen_random_uuid();a jsonb;b jsonb;before_count bigint;
 BEGIN
  INSERT INTO organizations(id,name) VALUES(o,'Owned reply preparation'),(foreign_org,'Foreign reply preparation');
  INSERT INTO contacts(id,org_id,first_name,phone_1,phone_1_type) VALUES(contact,o,'Ada','(816) 555-0100','mobile');
  INSERT INTO properties(id,org_id,address,state,market,homeowner_contact_id) VALUES(p,o,'Owned reply property','MO','KC',contact);
  INSERT INTO provider_sender_numbers(id,org_id,provider,phone_e164,status) VALUES(sender,o,'sendillo','+18165550101','active');
  INSERT INTO messages(id,org_id,conversation_id,contact_id,property_id,channel,direction,status,body,from_address,to_address) VALUES(m,o,c,contact,p,'sms','inbound','received','Owned inbound','+18165550100','+18165550101');
+ -- Baseline eligibility requires an affirmative opt-in on file (fail-closed
+ -- consent, B2); without this the very first assertion below would now fail.
+ INSERT INTO consent_events(org_id,contact_id,channel,event_type,source) VALUES(o,contact,'sms','opt_in_confirmed','owned_reply_test');
  a:=inbox_reply_preparation.recipient(o,c);
  IF a->>'exclusion' IS NOT NULL OR a->>'from'<>'+18165550101' OR a->>'to'<>'+18165550100' OR a->'variables'->>'first_name'<>'Ada' OR a->'variables'->>'market'<>'KC' THEN RAISE EXCEPTION 'Canonical route/personalization mismatch: %',a;END IF;
 
@@ -48,6 +51,10 @@ BEGIN
  IF (SELECT count(*) FROM public.inbox_inbound_heads)<>before_count THEN RAISE EXCEPTION 'Missing target allocated head';END IF;
  UPDATE contacts SET phone_1_type='landline' WHERE id=contact;
  IF inbox_reply_preparation.recipient(o,c)->>'exclusion'<>'landline' THEN RAISE EXCEPTION 'Landline admitted';END IF;
+ -- B1: a saved but never-classified line type must fail closed too, not
+ -- fall through as eligible just because it isn't specifically 'landline'.
+ UPDATE contacts SET phone_1_type='unknown' WHERE id=contact;
+ IF inbox_reply_preparation.recipient(o,c)->>'exclusion'<>'unclassified_phone' THEN RAISE EXCEPTION 'Unclassified line type admitted';END IF;
  UPDATE contacts SET phone_1_type='mobile',phone_1='+18165550999' WHERE id=contact;
  IF inbox_reply_preparation.recipient(o,c)->>'exclusion'<>'phone_not_saved' THEN RAISE EXCEPTION 'Unsaved route admitted';END IF;
  UPDATE contacts SET phone_1='+18165550100' WHERE id=contact;
@@ -56,6 +63,12 @@ BEGIN
  UPDATE provider_sender_numbers SET status='active' WHERE id=sender;
  INSERT INTO consent_events(org_id,contact_id,channel,event_type,source) VALUES(o,contact,'sms','opt_out','owned_reply_test');
  IF inbox_reply_preparation.recipient(o,c)->>'exclusion'<>'sms_suppressed' THEN RAISE EXCEPTION 'Opt-out admitted';END IF;
+ -- B2: a saved mobile with a clean record but NO consent event at all must
+ -- fail closed, not default to eligible the way send.ts/bulk-queue.ts do.
+ INSERT INTO contacts(id,org_id,first_name,phone_1,phone_1_type) VALUES(no_consent_contact,o,'Bea','+18165550222','mobile');
+ INSERT INTO properties(id,org_id,address,state,homeowner_contact_id) VALUES(no_consent_property,o,'Owned no-consent property','MO',no_consent_contact);
+ INSERT INTO messages(org_id,conversation_id,contact_id,property_id,channel,direction,status,body,from_address,to_address) VALUES(o,no_consent_conversation,no_consent_contact,no_consent_property,'sms','inbound','received','Owned no-consent inbound','+18165550222','+18165550101');
+ IF inbox_reply_preparation.recipient(o,no_consent_conversation)->>'exclusion'<>'no_consent' THEN RAISE EXCEPTION 'No-consent contact admitted';END IF;
  IF has_schema_privilege('authenticated','inbox_reply_preparation','USAGE') OR has_function_privilege('authenticated','inbox_reply_preparation.recipient(uuid,uuid)','EXECUTE') THEN RAISE EXCEPTION 'Private recipient exposed';END IF;
 END $test$;
 DO $cap$
@@ -67,6 +80,7 @@ BEGIN
   p:=gen_random_uuid();contact:=gen_random_uuid();c:=gen_random_uuid();ids:=array_append(ids,c);destination:='+120255501'||lpad(i::text,2,'0');
   IF i=1 THEN first_contact:=contact;END IF;
   INSERT INTO contacts(id,org_id,phone_1,phone_1_type) VALUES(contact,o,destination,'mobile');
+  INSERT INTO consent_events(org_id,contact_id,channel,event_type,source) VALUES(o,contact,'sms','opt_in_confirmed','owned_reply_test');
   INSERT INTO properties(id,org_id,address,state,homeowner_contact_id) VALUES(p,o,'Owned cap property','MO',contact);
   INSERT INTO messages(org_id,conversation_id,contact_id,property_id,channel,direction,status,body,from_address,to_address) VALUES(o,c,contact,p,'sms','inbound','received','Owned cap inbound',destination,'+18165550101');
  END LOOP;
@@ -81,5 +95,5 @@ ROLLBACK;
 """
 sql(context.removesuffix('COMMIT;\n')+recipient.removesuffix('COMMIT;\n').replace('\nBEGIN;\n','\n',1)+batch.removesuffix('COMMIT;\n').replace('\nBEGIN;\n','\n',1)+test)
 if sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamespace('inbox_reply_preparation') IS NULL")!='t':raise RuntimeError('Rollback failed')
-(P/'recipient-evidence.json').write_text(json.dumps({'source_sha256':hashlib.sha256(recipient.encode()).hexdigest(),'batch_sha256':hashlib.sha256(batch.encode()).hexdigest(),'context_sha256':hashlib.sha256(context.encode()).hexdigest(),'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'checks':['canonical contact, normalized saved destination, sender inventory and variables','read status leaves known-reply content revision unchanged','edited inbound advances reply revision','foreign and missing target denied without head allocation','landline and unsaved destination excluded','inactive inventory sender excluded','canonical consent opt-out excluded','private API grants denied; whole proof rolled back','same destination flags every affected conversation; no silent deduplication','duplicate/null/empty target rejection','winter opening and closing boundaries','summer DST, territory and unknown state policy','51 canonical destinations blocked, 50 after one opt-out exclusion retained in review','501 target envelope rejected'],'limits':['Private recipient capture only; not public preparation or dispatch authorization','Batch limit signal is not acceptance enforcement; immutable approval and actual dispatch still required','No provider call or production change']},indent=2)+'\n')
-print('Fourteen actual canonical recipient/batch groups passed; all new schema/data rolled back')
+(P/'recipient-evidence.json').write_text(json.dumps({'source_sha256':hashlib.sha256(recipient.encode()).hexdigest(),'batch_sha256':hashlib.sha256(batch.encode()).hexdigest(),'context_sha256':hashlib.sha256(context.encode()).hexdigest(),'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'checks':['canonical contact, normalized saved destination, sender inventory and variables','read status leaves known-reply content revision unchanged','edited inbound advances reply revision','foreign and missing target denied without head allocation','landline and unsaved destination excluded','never-classified line type fails closed (unclassified_phone), not silently eligible','inactive inventory sender excluded','canonical consent opt-out excluded','saved mobile with zero consent history fails closed (no_consent), not silently eligible','private API grants denied; whole proof rolled back','same destination flags every affected conversation; no silent deduplication','duplicate/null/empty target rejection','winter opening and closing boundaries','summer DST, territory and unknown state policy','51 canonical destinations blocked, 50 after one opt-out exclusion retained in review','501 target envelope rejected'],'limits':['Private recipient capture only; not public preparation or dispatch authorization','Batch limit signal is not acceptance enforcement; immutable approval and actual dispatch still required','No provider call or production change']},indent=2)+'\n')
+print('Sixteen actual canonical recipient/batch groups passed; all new schema/data rolled back')

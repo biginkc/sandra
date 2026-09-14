@@ -12,12 +12,17 @@ BEGIN
  SELECT enabled INTO admitted FROM inbox_reply_review.admission WHERE singleton FOR SHARE;
  IF admitted IS DISTINCT FROM true THEN RAISE EXCEPTION 'INBOX_REPLIES_NOT_ENABLED' USING ERRCODE='55000';END IF;
 END $$;
-CREATE FUNCTION public.inbox_capture_reply_recipients(conversation_ids uuid[]) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+-- SECURITY DEFINER wrappers run as postgres regardless of the calling role's
+-- own session GUCs, so each bounds its own worst case explicitly rather than
+-- trusting an authenticated caller's session settings: a batch of up to 500
+-- targets/drafts must not be able to hold row locks indefinitely or run
+-- unbounded.
+CREATE FUNCTION public.inbox_capture_reply_recipients(conversation_ids uuid[]) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
 BEGIN
  PERFORM inbox_reply_review.require_admission();
  RETURN inbox_reply_review.capture(conversation_ids);
 END $$;
-CREATE FUNCTION public.inbox_freeze_reply_review(canonical_input text,idempotency_key uuid) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+CREATE FUNCTION public.inbox_freeze_reply_review(canonical_input text,idempotency_key uuid) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
 BEGIN
  PERFORM inbox_reply_review.require_admission();
  RETURN inbox_reply_review.freeze(canonical_input,idempotency_key);
