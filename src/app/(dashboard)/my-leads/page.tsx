@@ -6,7 +6,7 @@ import { getAcquisitionRoster,getAcquisitionQueue,getAcquisitionKpis } from '@/l
 import { MyLeadsClient } from './client';
 export default async function MyLeadsPage() {
   const {viewer,roster}=await getAcquisitionRoster();
-  if(!canViewMyLeads(roster,viewer.userId)) notFound();
+  if(!canViewMyLeads(roster,viewer.userId,viewer.isOwner)) notFound();
   let data;
   let failure:string|null=null;
   try {
