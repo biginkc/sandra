@@ -42,6 +42,16 @@ bypass it too, but all three need superuser/table-owner privilege that
   (more than `inbox_reply_preparation.recipient_limit()` distinct eligible
   destinations — same D5 single-source-of-truth function `inbox-reply-preparation`
   uses, not a repeated literal), `duplicate_destination`.
+- Returns a `replayed` flag alongside the view: `false` on a fresh freeze,
+  `true` when the response is the untouched original row for an
+  already-used `(org_id, requester_id, request_key)`. The TS coordinator
+  (`reply-api.ts`) reads this flag and applies fresh-render body equality
+  only when `replayed` is `false`; on a replay it trusts the immutable row
+  structurally instead, so a legitimate idempotent retry after a dependency
+  has drifted (a new inbound, a policy/sender/context/contact-name change)
+  still returns the original 200 instead of spuriously failing on a body
+  comparison against dependencies that no longer match. Every other DTO
+  invariant is still enforced identically on a replayed row.
 
 `public-api.sql` wires `public.inbox_capture_reply_recipients(conversation_ids uuid[])`
 and `public.inbox_freeze_reply_review(canonical_input text, idempotency_key uuid)` as
@@ -75,6 +85,11 @@ fixture while other concurrent sessions depend on it. Re-run it only against a
 freshly-rebuilt isolated fixture (Lane-2). There is no `verify.py` in this directory
 yet (unlike `inbox-reply-preparation`); source hashes are recorded in
 `review-evidence.json` but nothing currently checks them in CI.
+
+Envelopes over 2 MiB return 503 `action_unavailable` before freeze; reachable
+only for selections far above the 50-recipient cap (which always end in a
+`recipient_limit` blocker); right-sizing the bound via F-C9 dependency
+hashing is a follow-up SQL change.
 
 Remaining gates: cap enforcement/duplicate resolution at acceptance (a separate,
 not-yet-written `accept()`); current actor/dependency/time rechecks at dispatch;

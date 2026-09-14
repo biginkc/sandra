@@ -1,9 +1,10 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import type { OutreachDispo } from "@/app/(dashboard)/messages/dispo-actions";
+import { INBOX_REPLY_RECIPIENT_LIMIT } from "./reply-api-contract";
 
 /** Transport ceilings, not authorization or production capacity guarantees. */
-export const INBOX_ACTION_LIMITS = Object.freeze({ bytes: 128 * 1024, targets: 500, steps: 5, replyRecipients: 50, textLength: 1600 });
+export const INBOX_ACTION_LIMITS = Object.freeze({ bytes: 128 * 1024, targets: 500, steps: 5, replyRecipients: INBOX_REPLY_RECIPIENT_LIMIT, textLength: 1600 });
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Matches setOutreachDispo's VALID_DISPOS. A label never authorizes enrollment,
 // scheduling, or bypassing the existing opt-out/locked-property side effects.
@@ -189,4 +190,15 @@ export function compareInboxActionIdentity(existingHash: string, requestedHash: 
 export function parseInboxActionAcceptance(raw: string) {
   const request = object(wire(raw), ["preparationId", "idempotencyKey"]);
   return freeze({ preparationId: uuid(request.preparationId), idempotencyKey: uuid(request.idempotencyKey) });
+}
+
+/** Bulk-reply prepare intent only: which conversations, and the raw operator
+ * template text. Never a rendered body, route, or recipient claim — the reply
+ * coordinator (reply-api.ts) renders and freezes those separately, inside one
+ * request. Deliberately independent of parseReviewedInboxReply, which parses
+ * an acceptance reference to an already-frozen server-owned preview. */
+export function parseInboxReplyPrepareRequest(raw: string): { idempotencyKey: string; targets: readonly InboxActionTarget[]; template: string } {
+  const request = object(wire(raw), ["idempotencyKey", "targets", "template"]);
+  valid(typeof request.template === "string");
+  return freeze({ idempotencyKey: uuid(request.idempotencyKey), targets: targets(request.targets), template: persistentText(request.template) });
 }

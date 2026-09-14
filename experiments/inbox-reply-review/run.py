@@ -48,17 +48,20 @@ BEGIN
  EXECUTE 'SET LOCAL ROLE authenticated';
  a:=public.inbox_freeze_reply_review(intent::text,k);
  EXECUTE 'RESET ROLE';
- IF a->>'recipientCount'<>'1' OR a->'blockers'<>'[]'::jsonb OR a->'items'->0->'recipient'->>'renderedBody'<>'Hi Ada' OR a->'items'->0->'recipient'->>'from'<>'+18165550101' OR a->'items'->0 ? 'dependencies' THEN RAISE EXCEPTION 'Frozen review mismatch: %',a;END IF;
+ IF a->>'recipientCount'<>'1' OR a->'blockers'<>'[]'::jsonb OR a->'items'->0->'recipient'->>'renderedBody'<>'Hi Ada' OR a->'items'->0->'recipient'->>'from'<>'+18165550101' OR a->'items'->0 ? 'dependencies' OR a->>'replayed' IS DISTINCT FROM 'false' THEN RAISE EXCEPTION 'Frozen review mismatch: %',a;END IF;
  UPDATE messages SET read_at=clock_timestamp() WHERE id=m;
+ -- B2: freeze the same key twice. The second call must return replayed:true
+ -- with byte-identical items to the first (fresh, replayed:false) call —
+ -- everything except the 'replayed' flag itself must match exactly.
  b:=inbox_reply_review.freeze(intent::text,k);
- IF a IS DISTINCT FROM b THEN RAISE EXCEPTION 'Same-key replay changed immutable review';END IF;
+ IF b->>'replayed' IS DISTINCT FROM 'true' OR b->'items' IS DISTINCT FROM a->'items' OR (a-'replayed') IS DISTINCT FROM (b-'replayed') THEN RAISE EXCEPTION 'Same-key replay changed immutable review or wrong replayed flag: %',b;END IF;
  -- B3: idempotency keys on CLIENT INTENT (targets+template) only — a same-key
  -- replay with a DIFFERENT rendered 'drafts[0].body' but the SAME template is
  -- accepted and returns the ORIGINAL frozen view (drafts/dependencies are not
  -- part of intent, by design; see the drift case below). A different TEMPLATE
  -- under the same key is a genuine intent change and must still be rejected.
  b:=inbox_reply_review.freeze(jsonb_set(intent,'{drafts,0,body}','"Some other rendering"')::text,k);
- IF b IS DISTINCT FROM a THEN RAISE EXCEPTION 'Same-key/same-template replay with a different draft body changed the frozen view: %',b;END IF;
+ IF b->>'replayed' IS DISTINCT FROM 'true' OR (b-'replayed') IS DISTINCT FROM (a-'replayed') THEN RAISE EXCEPTION 'Same-key/same-template replay with a different draft body changed the frozen view or replayed flag: %',b;END IF;
  failed:=false;BEGIN PERFORM inbox_reply_review.freeze(jsonb_set(intent,'{template}','"Different template"')::text,k);EXCEPTION WHEN raise_exception THEN IF SQLERRM='INBOX_REPLY_IDEMPOTENCY_MISMATCH' THEN failed:=true;ELSE RAISE;END IF;END;
  IF NOT failed THEN RAISE EXCEPTION 'Same key accepted a changed template';END IF;
  failed:=false;BEGIN UPDATE inbox_reply_review.preparations SET items='[]' WHERE id=(a->>'preparationId')::uuid;EXCEPTION WHEN raise_exception THEN failed:=true;END;
@@ -72,8 +75,11 @@ BEGIN
  -- a replay of the ORIGINAL key with the ORIGINAL (now stale) intent must
  -- still return the exact frozen view from the first successful freeze —
  -- dependency drift is the accept/claim recheck's job, never freeze replay's.
+ -- This is the legitimate-replay-after-drift case: the coordinator must
+ -- trust this immutable replayed row structurally and NEVER compare it
+ -- against a fresh render of the now-drifted dependency.
  c2v:=inbox_reply_review.freeze(intent::text,k);
- IF c2v IS DISTINCT FROM a THEN RAISE EXCEPTION 'Same-key replay after dependency drift returned a different view: %',c2v;END IF;
+ IF c2v->>'replayed' IS DISTINCT FROM 'true' OR (c2v-'replayed') IS DISTINCT FROM (a-'replayed') THEN RAISE EXCEPTION 'Same-key replay after dependency drift returned a different view or wrong replayed flag: %',c2v;END IF;
  capture:=inbox_reply_review.capture(ARRAY[c])->'items'->0;intent:=jsonb_set(intent,'{drafts,0,dependencies}',capture->'dependencies');
  FOREACH body IN ARRAY ARRAY[E'\n\t',chr(160),repeat('😀',801)] LOOP
   failed:=false;BEGIN PERFORM inbox_reply_review.freeze(jsonb_set(intent,'{drafts,0,body}',to_jsonb(body))::text,gen_random_uuid());EXCEPTION WHEN raise_exception THEN failed:=true;END;
