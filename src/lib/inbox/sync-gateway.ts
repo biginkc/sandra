@@ -116,6 +116,10 @@ export function createInboxSyncGateway(options: InboxGatewayOptions) {
           (access.expiresAt!==null&&(!Number.isFinite(access.expiresAt)||access.expiresAt<=now())))throw new Denied(403);
         return Math.min(started+15000,session.expiresAt,scope.expiresAt,access.expiresAt??Infinity);
       };
+      // First pass reuses `initial` (the RPC's own authority proof) instead of reauthorizing —
+      // this is not a redundant no-op to simplify later: the atomic SQL already performed the
+      // authoritative check when it produced `initial`, so authorize(initial) here only replays
+      // that proof through the same identity/epoch/expiry assertions the legacy path uses.
       let deadline=await authorize(initial??undefined);
       clearTimeout(timer);timer=setTimeout(()=>leaseController.abort(),Math.max(0,deadline-now()));
       const url=new URL(request.url), allowed=new Set(["offset","handle","live","cursor","log","partition"]);

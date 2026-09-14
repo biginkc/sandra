@@ -1,0 +1,34 @@
+BEGIN;
+SET LOCAL statement_timeout='10s';
+DO $$ BEGIN IF current_database()<>'sandra_inbox_install_20260913' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-production-candidate-owned-synthetic') THEN RAISE EXCEPTION 'Owned candidate required';END IF;END $$;
+CREATE TEMP TABLE sync_test_state AS SELECT id AS sid,user_id AS uid FROM auth.sessions WHERE user_id='d2f74985-78be-43d0-8fcd-35db01309abd' ORDER BY created_at DESC LIMIT 1;
+SELECT set_config('request.jwt.claims',jsonb_build_object('sub',uid,'session_id',sid,'role','authenticated','exp',extract(epoch FROM clock_timestamp()+interval '1 hour')::bigint)::text,true) FROM sync_test_state;
+INSERT INTO inbox_bridge.worksets(id,org_id,user_id,session_id,access_epoch,generation,created_at,expires_at,filter,targets,handles)
+SELECT 'adadadad-adad-4dad-8dad-adadadadadad','00000000-0000-0000-0000-000000000bbb',uid,sid,(SELECT revision FROM inbox_bridge.access_epochs WHERE user_id=uid),999999,clock_timestamp(),clock_timestamp()+interval '15 minutes','{"view":"all"}',jsonb_build_array(jsonb_build_object('kind','known_conversation','id','ff060da3-89d9-4d7a-a880-0875601b996d')),'[null]' FROM sync_test_state;
+SET LOCAL ROLE authenticated;
+DO $$DECLARE snap jsonb;done jsonb;BEGIN
+ snap:=public.inbox_sync_snapshot_v1('adadadad-adad-4dad-8dad-adadadadadad');IF snap IS NULL THEN RAISE EXCEPTION 'Snapshot missing';END IF;
+ done:=public.inbox_sync_finalize_v1('adadadad-adad-4dad-8dad-adadadadadad',snap->'scope',0,NULL,'first');IF done IS NULL OR done#>>'{scope,handles,0}'<>'first' THEN RAISE EXCEPTION 'CAS failed';END IF;
+ IF public.inbox_sync_finalize_v1('adadadad-adad-4dad-8dad-adadadadadad',snap->'scope',0,NULL,'stale') IS DISTINCT FROM '{"conflict":true}'::jsonb THEN RAISE EXCEPTION 'Stale CAS not classified as conflict';END IF;
+ IF public.inbox_sync_finalize_v1('adadadad-adad-4dad-8dad-adadadadadad',snap->'scope',1,NULL,'other') IS NOT NULL THEN RAISE EXCEPTION 'Extra partition accepted';END IF;
+ IF public.inbox_sync_finalize_v1('adadadad-adad-4dad-8dad-adadadadadad',jsonb_set(snap->'scope','{targets}','[]'),0,'first','other') IS NOT NULL THEN RAISE EXCEPTION 'Changed targets accepted';END IF;
+ IF public.inbox_sync_finalize_v1('adadadad-adad-4dad-8dad-adadadadadad',snap->'scope',0,'first',NULL) IS NULL THEN RAISE EXCEPTION 'No-handle finalization denied';END IF;
+END $$;
+RESET ROLE;
+SAVEPOINT access_change;
+UPDATE public.memberships SET access_status='suspended' WHERE user_id=(SELECT uid FROM sync_test_state);
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM public.inbox_sync_snapshot_v1('adadadad-adad-4dad-8dad-adadadadadad');RAISE EXCEPTION 'Suspension accepted';EXCEPTION WHEN insufficient_privilege THEN NULL;END $$;
+RESET ROLE;ROLLBACK TO SAVEPOINT access_change;
+SAVEPOINT session_change;
+DELETE FROM auth.sessions WHERE id=(SELECT sid FROM sync_test_state);
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM public.inbox_sync_snapshot_v1('adadadad-adad-4dad-8dad-adadadadadad');RAISE EXCEPTION 'Session deletion accepted';EXCEPTION WHEN insufficient_privilege THEN NULL;END $$;
+RESET ROLE;ROLLBACK TO SAVEPOINT session_change;
+UPDATE inbox_bridge.worksets SET revoked=true WHERE id='adadadad-adad-4dad-8dad-adadadadadad';
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN IF public.inbox_sync_snapshot_v1('adadadad-adad-4dad-8dad-adadadadadad') IS NOT NULL THEN RAISE EXCEPTION 'Replacement accepted';END IF;END $$;
+RESET ROLE;
+DO $$ BEGIN IF has_function_privilege('anon','public.inbox_sync_snapshot_v1(uuid)','execute') OR has_function_privilege('service_role','public.inbox_sync_finalize_v1(uuid,jsonb,integer,text,text)','execute') OR has_function_privilege('authenticated','inbox_bridge.finalize_scope(uuid,jsonb,integer,text,text)','execute') THEN RAISE EXCEPTION 'Unexpected grant';END IF;END $$;
+SELECT 'snapshot/finalize/CAS/targets/partition/suspension/session/replacement/grants passed';
+ROLLBACK;

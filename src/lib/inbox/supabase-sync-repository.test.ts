@@ -67,3 +67,16 @@ it("preserves exact SQL timestamp precision in atomic finalization proof",async(
   const snapshot=await repo.loadAuthorizedScope!(id,signal);expect(snapshot).not.toBeNull();await repo.finalizeAuthorizedScope!(snapshot!,0,null,"handle",signal);
   expect(rpc.mock.calls).toEqual([["inbox_sync_snapshot_v1",{scope_id:id}],["inbox_sync_finalize_v1",{scope_id:id,expected_scope:precise,partition_index:0,expected_handle:null,next_handle:"handle"}]]);
 });
+it.each(["org","user","session","epoch"])("rejects authority/scope cross-mismatch on %s before returning an authorized snapshot",async(field)=>{
+  const mismatched={...authority,...(field==="org"?{org_id:"dddddddd-dddd-4ddd-8ddd-dddddddddddd"}:field==="user"?{user_id:"dddddddd-dddd-4ddd-8ddd-dddddddddddd"}:field==="session"?{session_id:"dddddddd-dddd-4ddd-8ddd-dddddddddddd"}:{access_epoch:"other"})};
+  const rpc=vi.fn(()=>({abortSignal:()=>Promise.resolve({data:{authority:mismatched,scope:record},error:null})}));
+  const repo=createSupabaseInboxRepository({rpc} as unknown as InboxRpcClient),signal=new AbortController().signal;
+  await expect(repo.loadAuthorizedScope!(id,signal)).rejects.toThrow("Inbox authority unavailable");
+});
+it("passes through a null snapshot/finalize RPC result as null rather than throwing",async()=>{
+  const rpc=vi.fn(()=>({abortSignal:()=>Promise.resolve({data:null,error:null})}));
+  const repo=createSupabaseInboxRepository({rpc} as unknown as InboxRpcClient),signal=new AbortController().signal;
+  await expect(repo.loadAuthorizedScope!(id,signal)).resolves.toBeNull();
+  const snapshot={session:{userId:user,sessionId:id,expiresAt:Date.parse(authority.expires_at)},access:{sessionActive:true as const,activeMembershipCount:1,status:"active" as const,epoch:"2",expiresAt:null,deletionPrepared:false},scope:{id,orgId:org,userId:user,sessionId:id,accessEpoch:"2",generation:"1",expiresAt:Date.parse(record.expires_at),targets:record.targets as { kind: "known_conversation" | "unknown_sender"; id: string }[],handles:record.handles},proof:record};
+  await expect(repo.finalizeAuthorizedScope!(snapshot,0,null,"handle",signal)).resolves.toBeNull();
+});
