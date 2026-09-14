@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DialpadVoiceClient, DialpadVoiceError } from "./client";
 
-const userId = "4904023124647936";
-const input = { userId, deviceId: "browser-device", phoneNumber: "+15555550101", outboundCallerId: "+18163706846", customData: "opaque-intent" };
+const userId = "1234567890123456";
+const input = { userId, deviceId: "browser-device", phoneNumber: "+15555550101", outboundCallerId: "+12025550101", customData: "opaque-intent" };
 const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
 afterEach(() => vi.useRealTimers());
 
@@ -46,6 +46,28 @@ describe("DialpadVoiceClient", () => {
     await expect(client.hangupCall("123")).resolves.toEqual({});
     expect(String(fetcher.mock.calls[0][0])).toBe("https://dialpad.com/api/v2/call/123/actions/hangup");
     expect(fetcher.mock.calls[0][1]?.method).toBe("PUT");
+  });
+
+  it.each(["office", "department", "callcenter"] as const)("preserves the authorized %s identity without changing the calling user", async type => {
+    const { client, fetcher } = setup();
+    await client.initiateSelectedDeviceCall({ ...input, group: { id: "42", type } });
+    expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string)).toMatchObject({ user_id: Number(userId), group_id: 42, group_type: type, outbound_caller_id: input.outboundCallerId });
+  });
+
+  it("rejects malformed shared-group identity before any provider request", () => {
+    const { client, fetcher } = setup();
+    for (const group of [{ id: "9007199254740993", type: "office" }, { id: "42", type: "OfficeGroup" }, { id: "", type: "department" }]) {
+      expect(() => client.initiateSelectedDeviceCall({ ...input, group: group as { id: string; type: "office" } })).toThrow(DialpadVoiceError);
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("reads the mapped provider user without accepting path injection", async () => {
+    const { client, fetcher } = setup();
+    await client.getUser(userId);
+    expect(new URL(String(fetcher.mock.calls[0][0])).pathname).toBe(`/api/v2/users/${userId}`);
+    expect(() => client.getUser("123/other")).toThrow(DialpadVoiceError);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it("rejects unsafe numeric identifiers, missing device/correlation and invalid caller numbers before dispatch", () => {

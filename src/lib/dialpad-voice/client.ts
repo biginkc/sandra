@@ -55,6 +55,10 @@ export class DialpadVoiceClient {
     return this.request("GET", `/users/${id(userId)}/caller_id`);
   }
 
+  getUser(userId: string) {
+    return this.request("GET", `/users/${id(userId)}`);
+  }
+
   getCall(callId: string) {
     return this.request("GET", `/call/${id(callId)}`);
   }
@@ -74,14 +78,20 @@ export class DialpadVoiceClient {
     return this.request("GET", "/call", query);
   }
 
-  initiateSelectedDeviceCall(input: { userId: string; deviceId: string; phoneNumber: string; outboundCallerId: string; customData: string }) {
+  initiateSelectedDeviceCall(input: { userId: string; deviceId: string; phoneNumber: string; outboundCallerId: string; customData: string; group?: { id: string; type: "office" | "department" | "callcenter" } }) {
     if (!input.deviceId.trim() || input.deviceId.length > 512 || !input.customData.trim() || input.customData.length > 2000) {
+      throw new DialpadVoiceError("invalid_input");
+    }
+    // Group ownership is resolved from the server's authorized number grant.
+    // A selected shared caller ID must not silently inherit another group.
+    if (input.group && !["office", "department", "callcenter"].includes(input.group.type)) {
       throw new DialpadVoiceError("invalid_input");
     }
     return this.request("POST", "/call", undefined, {
       user_id: numericId(input.userId), device_id: input.deviceId,
       phone_number: phone(input.phoneNumber), outbound_caller_id: phone(input.outboundCallerId),
       custom_data: input.customData, is_consult: false,
+      ...(input.group ? { group_id: numericId(input.group.id), group_type: input.group.type } : {}),
     });
   }
 
