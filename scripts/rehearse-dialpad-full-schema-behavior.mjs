@@ -32,6 +32,14 @@ try {
  const hash=createHash('sha256').update(intent).digest('hex');
  await client.query('select fn_bind_acquisition_call_context($1,$2,$3,$4)',[org,lead,rep,hash]);
  await client.query("insert into dialpad_voice_intents(id,org_id,actor_user_id,property_id,assignment_episode_id,binding_token_hash,dialpad_user_id,destination_e164,caller_id_e164,client_idempotency_key) values($1,$2,$3,$4,$5,$6,'4904023124647936','+12025550101','+12025550102',$1)",[intent,org,rep,lead,episode,hash]);
+ // Current reconciliation intentionally ignores unsnapshotted pilot intents.
+ // Seed the exact frozen configuration this behavior proof is exercising.
+ await client.query("insert into dialpad_org_connections(id,org_id,provider_company_id,credential_reference,enabled,verified_at) values($1,$1,'101','env:DIALPAD_REHEARSAL_KEY',true,statement_timestamp())",[org]);
+ const caller=[{identity_type:'user',provider_identity_id:'4904023124647936',number_e164:'+12025550102'}];
+ const verification=(await client.query("insert into dialpad_inventory_verifications(org_id,connection_id,connection_version,provider_company_id,member_user_id,provider_user_id,member_email_matched,callers,verified_at) values($1,$1,1,'101',$2,'4904023124647936',true,$3,statement_timestamp()) returning id",[org,rep,JSON.stringify(caller)])).rows[0].id;
+ const binding=(await client.query("insert into dialpad_member_bindings(org_id,connection_id,connection_version,member_user_id,revision,provider_user_id,verification_reference,verification_sha256,verified_at) select $1,$1,1,$2,1,'4904023124647936',id,verification_sha256,verified_at from dialpad_inventory_verifications where id=$3 returning id",[org,rep,verification])).rows[0].id;
+ const grant=(await client.query("insert into dialpad_number_grants(org_id,binding_id,revision,identity_type,provider_identity_id,number_e164,verification_reference,verification_sha256,verified_at) select $1,$2,1,'user','4904023124647936','+12025550102',id,verification_sha256,verified_at from dialpad_inventory_verifications where id=$3 returning id",[org,binding,verification])).rows[0].id;
+ await client.query("insert into dialpad_intent_configuration(org_id,intent_id,connection_id,connection_version,binding_id,binding_revision,grant_id,grant_revision,verification_id,device_id,device_verified_at) values($1,$2,$1,1,$3,1,$4,1,$5,'rehearsal-native-device',statement_timestamp())",[org,intent,binding,grant,verification]);
  receipt.checks.push('real org/user/membership/contact/lead/assignment/intent constraints');
  const now=Date.now(),body={call_id:'9007199254740993',state:'calling',custom_data:intent,direction:'outbound',target:{id:'4904023124647936',type:'User'},internal_number:'+12025550102',external_number:'+12025550101',date_started:now,event_timestamp:now};
  const secret=randomUUID();
