@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   memberships: vi.fn(),
   detail: vi.fn(),
+  getUser: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.create }));
@@ -30,7 +31,9 @@ const request = new Request(
 beforeEach(() => {
   vi.clearAllMocks();
   vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1");
-  mocks.create.mockResolvedValue({});
+  mocks.create.mockResolvedValue({ auth: { getUser: mocks.getUser } });
+  mocks.getUser.mockResolvedValue({ data: { user: { id: "pilot" } } });
+  vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", "pilot");
   mocks.memberships.mockResolvedValue([
     {
       user_id: "member",
@@ -73,4 +76,20 @@ describe("workspace inbox conversation detail", () => {
     expect(response.status).toBe(404);
     expect(mocks.detail).not.toHaveBeenCalled();
   });
+});
+
+it("denies non-pilot users before detail or membership work", async () => {
+  mocks.getUser.mockResolvedValue({ data: { user: { id: "other" } } });
+  expect((await GET(request, {params: Promise.resolve({conversationId})})).status).toBe(404);
+  expect(mocks.detail).not.toHaveBeenCalled();
+  expect(mocks.memberships).not.toHaveBeenCalled();
+});
+it("denies empty cohort and disabled deployment", async () => {
+  vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", "");
+  expect((await GET(request, {params: Promise.resolve({conversationId})})).status).toBe(404);
+  expect(mocks.detail).not.toHaveBeenCalled();
+  vi.clearAllMocks();
+  vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "0");
+  expect((await GET(request, {params: Promise.resolve({conversationId})})).status).toBe(404);
+  expect(mocks.create).not.toHaveBeenCalled();
 });
