@@ -278,6 +278,41 @@ describe("<CockpitView /> URL deep-linking", () => {
     expect(sendSmsFromLead).toHaveBeenCalledOnce();
   });
 
+  it("refreshes the current Unread inbox scope when a send finishes after switching conversations", async () => {
+    navigationMocks.search = "filter=unread&thread=conv-a";
+    window.history.replaceState(null, "", "/messages?filter=unread&thread=conv-a");
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    let finishSend!: (value: Awaited<ReturnType<typeof sendSmsFromLead>>) => void;
+    vi.mocked(sendSmsFromLead).mockImplementationOnce(() => new Promise(resolve => { finishSend = resolve; }));
+    const threads = [makeThread({ contactId: "a", unreadCount: 1 }), makeThread({ contactId: "b", unreadCount: 1 })];
+    const inboxRefreshCalls: string[] = [];
+    vi.mocked(fetch).mockImplementation((input) => {
+      const url = String(input);
+      if (url.includes("thread-detail?thread=conv-b")) return Promise.resolve({ ok: true, json: async () => ({ detail: makeDetail("b", "Message B") }) } as Response);
+      if (url.includes("inbox-refresh?")) {
+        inboxRefreshCalls.push(url);
+        return Promise.resolve({ ok: true, json: async () => ({
+          page: { threads, counts: baseProps.filterCounts, hiddenCount: 0, degraded: false, page: 1, pageSize: 200, total: threads.length },
+          unknown: 0, dismissed: 0,
+        }) } as Response);
+      }
+      return new Promise(() => {});
+    });
+    render(<CockpitView {...baseProps} activeTab="inbox" filter="unread" threads={threads}
+      selectedThreadId="conv-a" threadDetail={makeDetail("a", "Message A")} />);
+    fireEvent.change(screen.getByLabelText("Reply to this lead"), { target: { value: "Owned synthetic reply A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByTestId("inbox-thread-conv-b"));
+    await screen.findByText("Message B");
+    await waitFor(() => expect(inboxRefreshCalls.some(url => url.includes("thread=conv-b"))).toBe(true));
+    const before = inboxRefreshCalls.length;
+    await act(async () => finishSend({ ok: true, data: { outcome: { status: "sent", messageId: "sent-a", externalId: "test-provider" } } } as Awaited<ReturnType<typeof sendSmsFromLead>>));
+    await waitFor(() => expect(inboxRefreshCalls.length).toBeGreaterThan(before));
+    expect(inboxRefreshCalls[inboxRefreshCalls.length - 1]).toContain("thread=conv-b");
+    expect(navigationMocks.refresh).not.toHaveBeenCalled();
+  });
+
   it("activeTab='outbox' renders the Outbox tab as aria-selected (test 32)", () => {
     render(<CockpitView {...baseProps} activeTab="outbox" />);
 

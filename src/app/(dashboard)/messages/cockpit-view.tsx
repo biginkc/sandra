@@ -135,11 +135,18 @@ export function CockpitView({
   const [queueStatsRefreshSignal, setQueueStatsRefreshSignal] = useState(0);
   const refreshSelectedDetail = conversation.revalidate;
   const refreshInbox = inbox.refresh;
-  const handleReplySent = useCallback(() => {
-    refreshSelectedDetail();
-    refreshInbox();
-    setQueueStatsRefreshSignal(value => value + 1);
+  // A send can finish after the operator switched conversations (or the
+  // Unread scope changed). The composer that started it captured an older
+  // callback, so always dispatch through the refreshers of the current scope.
+  const latestRefresh = useRef({ refreshSelectedDetail, refreshInbox });
+  useEffect(() => {
+    latestRefresh.current = { refreshSelectedDetail, refreshInbox };
   }, [refreshSelectedDetail, refreshInbox]);
+  const handleReplySent = useCallback(() => {
+    latestRefresh.current.refreshSelectedDetail();
+    latestRefresh.current.refreshInbox();
+    setQueueStatsRefreshSignal(value => value + 1);
+  }, []);
   if (lastServerQueueStatsFailed !== queueStatsFailed) {
     setLastServerQueueStatsFailed(queueStatsFailed);
     setLiveQueueStatsFailed(queueStatsFailed);
