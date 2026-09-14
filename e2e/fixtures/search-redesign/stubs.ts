@@ -28,3 +28,11 @@ export function createSoftphoneCallTransport(): CallTransport {
     hangup: async () => { document.body.dataset.fixtureHangups = "1"; listener("ended"); return { durationSeconds: 1, outcome: "connected_human" }; },
   };
 }
+
+// Synthetic search overlay never invokes provider-backed server actions.
+export const getMyActiveDialpadCall = async () => ({ ok: true, call: null });
+export const getMyDialpadCallStatus = async () => ({ ok: false, error: "fixture_only" });
+export const loadMyDialpadCallerOptions = async () => ({ ok: true, options: [] });
+export const listMyDialpadDesktopDevices = async () => ({ ok: false, error: "fixture_only" });
+export const startConfiguredDialpadCall = async () => ({ ok: false, error: "fixture_only" });
+export const hangupConfiguredDialpadCall = async () => ({ ok: false, error: "fixture_only" });

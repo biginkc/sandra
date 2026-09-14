@@ -28,6 +28,9 @@ test.beforeAll(async () => {
     plugins: [{
       name: "synthetic-coach-browser-boundaries",
       setup(build) {
+        build.onResolve({ filter: /dialpad-voice\/(?:call-status|rep-callers|configured-start|configured-desktop|configured-hangup)$/ }, () => ({
+          path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/dialpad-server-actions-browser-stub.ts"),
+        }));
         build.onResolve({ filter: /coach-context-actions$/ }, () => ({
           path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-context-actions-browser-stub.ts"),
         }));
