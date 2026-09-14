@@ -1,6 +1,5 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, fireEvent, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { fireEvent } from "@testing-library/react";
 import { useInboxRefresh, type InboxRefreshSnapshot } from "./use-inbox-refresh";
 const initial = { page: { threads: [], counts: { all: 1, mine: 0, unassigned: 0, unread: 0, escalated: 0, dispo: 0, needs_outcome: 0 }, total: 1, page: 1, pageSize: 200, hiddenCount: 0, degraded: false }, unknown: 2, dismissed: 1 } as InboxRefreshSnapshot;
 const fetchMock = vi.fn();
@@ -76,4 +75,43 @@ it("throttles a window focus/online storm to at most one auto-refresh per window
   // Still inside the cooldown window — further ambient triggers are dropped.
   act(() => { fireEvent.focus(window); fireEvent(window, new Event("online")); });
   expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+it("re-allows an ambient auto-refresh once the cooldown window elapses", async () => {
+  // Control only Date.now() (what the cooldown gate reads) rather than
+  // vi.useFakeTimers(), which also fakes the scheduler/setTimeout React's
+  // own `act` flushing relies on and hangs this test.
+  const start = Date.now();
+  const nowSpy = vi.spyOn(Date, "now").mockReturnValue(start);
+  try {
+    fetchMock.mockResolvedValue(response(5));
+    renderHook(() => useInboxRefresh(initial, "filter=all", true));
+    act(() => { fireEvent.focus(window); });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Let the in-flight request settle so it isn't mistaken for a
+    // still-pending request (a separate, existing coalescing guard) once
+    // the cooldown window "elapses" below.
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    act(() => { fireEvent.focus(window); });
+    expect(fetchMock).toHaveBeenCalledTimes(1); // still inside the window
+    nowSpy.mockReturnValue(start + 10_001);
+    act(() => { fireEvent.focus(window); });
+    expect(fetchMock).toHaveBeenCalledTimes(2); // window elapsed — allowed again
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  } finally {
+    nowSpy.mockRestore();
+  }
+});
+
+it("an online event while hidden does not burn the cooldown for the next focus", async () => {
+  const originalVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+  fetchMock.mockResolvedValue(response(5));
+  renderHook(() => useInboxRefresh(initial, "filter=all", true));
+  act(() => { fireEvent(window, new Event("online")); }); // fires while hidden — must not stamp
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+  act(() => { fireEvent.focus(window); }); // must NOT be dropped by a bogus stamp
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  if (originalVisibility) Object.defineProperty(document, "visibilityState", originalVisibility);
 });

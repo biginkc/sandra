@@ -74,6 +74,12 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
   const lastAutoRefreshAt = useRef(0);
   useEffect(() => {
     const requestAutoRefresh = () => {
+      // `refresh()` itself no-ops while hidden — stamping the cooldown here
+      // regardless would let an `online` event that fires while the tab is
+      // backgrounded burn the window without ever dispatching, dropping the
+      // next legitimate `focus` refresh for up to 10s. Only stamp when the
+      // call is actually going to dispatch.
+      if (document.visibilityState !== "visible") return;
       const now = Date.now();
       if (now - lastAutoRefreshAt.current < AUTO_REFRESH_MIN_INTERVAL_MS) return;
       lastAutoRefreshAt.current = now;
