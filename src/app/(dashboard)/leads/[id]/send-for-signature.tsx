@@ -56,6 +56,7 @@ const MERGE_FIELDS: ReadonlyArray<{
   { name: "closing_agent_name", label: "Closing agent name", type: "text" },
   { name: "closing_agent_phone", label: "Closing agent phone", type: "text" },
   { name: "closing_agent_address", label: "Closing agent address", type: "text" },
+  { name: "seller_closing_cost_cap", label: "Seller closing cost contribution cap", type: "text", placeholder: "0.00" },
   { name: "due_diligence_days", label: "Due diligence business days", type: "text" },
   { name: "access_days_per_week", label: "Property access days per week", type: "text" },
   { name: "access_hours_per_visit", label: "Property access hours per visit", type: "text" },

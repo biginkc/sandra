@@ -4,7 +4,7 @@ begin;
 create or replace function public.esign_merge_fields_are_valid(p_fields text[])
 returns boolean language sql immutable set search_path = public, pg_temp as $$
   select coalesce((select array_agg(field order by field) from unnest(p_fields) field)
-    in (array['closing_date', 'earnest_money', 'offer_price', 'property_address', 'seller_name']::text[], array['additional_terms', 'buyer_name', 'cash_balance', 'closing_date', 'earnest_money', 'earnest_money_holder', 'legal_description', 'offer_price', 'property_address', 'property_city', 'property_state', 'property_zip', 'seller_name']::text[], array['acceptance_date', 'access_days_per_week', 'access_hours_per_visit', 'agreement_date', 'attorney_in_fact', 'buyer_email', 'buyer_name', 'buyer_phone', 'closing_agent_address', 'closing_agent_name', 'closing_agent_phone', 'closing_date', 'due_diligence_days', 'earnest_money', 'earnest_money_holder', 'legal_description', 'offer_expiration', 'offer_price', 'property_address', 'property_state', 'release_date', 'seller_email', 'seller_name', 'seller_phone']::text[]), false);
+    in (array['closing_date', 'earnest_money', 'offer_price', 'property_address', 'seller_name']::text[], array['additional_terms', 'buyer_name', 'cash_balance', 'closing_date', 'earnest_money', 'earnest_money_holder', 'legal_description', 'offer_price', 'property_address', 'property_city', 'property_state', 'property_zip', 'seller_name']::text[], array['acceptance_date', 'access_days_per_week', 'access_hours_per_visit', 'agreement_date', 'attorney_in_fact', 'buyer_email', 'buyer_name', 'buyer_phone', 'closing_agent_address', 'closing_agent_name', 'closing_agent_phone', 'closing_date', 'due_diligence_days', 'earnest_money', 'earnest_money_holder', 'legal_description', 'offer_expiration', 'offer_price', 'property_address', 'property_state', 'release_date', 'seller_closing_cost_cap', 'seller_email', 'seller_name', 'seller_phone']::text[]), false);
 $$;
 
 create or replace function public.esign_website_sender_field_names(p_metadata jsonb)
@@ -115,13 +115,13 @@ as $$
     and public.esign_merge_fields_are_valid(public.esign_website_sender_field_names(p_metadata))
     and (select count(*) from custom_fields) = (select count(*) from sender_custom_fields)
     and (select count(*) from sender_merge_fields) = (select count(*) from sender_custom_fields)
-    and (cardinality(public.esign_website_sender_field_names(p_metadata)) = 24
+    and (cardinality(public.esign_website_sender_field_names(p_metadata)) = 25
       or (select count(*) from sender_custom_fields) = cardinality(public.esign_website_sender_field_names(p_metadata)))
     and (cardinality(public.esign_website_sender_field_names(p_metadata)) <> 13 or not exists (
       select 1 from sender_custom_fields
       where field -> 'required' is distinct from to_jsonb(field ->> 'name' <> 'additional_terms')
     ))
-    and (cardinality(public.esign_website_sender_field_names(p_metadata)) <> 24 or not exists (
+    and (cardinality(public.esign_website_sender_field_names(p_metadata)) <> 25 or not exists (
       select 1 from sender_custom_fields where field -> 'required' is distinct from 'true'::jsonb
     ))
     and not exists (

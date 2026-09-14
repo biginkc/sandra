@@ -6,7 +6,7 @@ export async function rehearseNovationSchema(client, ids, legacyMetadata) {
   const sql = readFileSync("supabase/migrations/20260915001000_esign_novation_schema.sql", "utf8");
   const fields = [
     "seller_name", "buyer_name", "property_address", "agreement_date",
-    "legal_description", "offer_price", "earnest_money_holder", "earnest_money",
+    "legal_description", "offer_price", "seller_closing_cost_cap", "earnest_money_holder", "earnest_money",
     "property_state", "closing_date", "closing_agent_name", "due_diligence_days",
     "access_days_per_week", "access_hours_per_visit", "offer_expiration",
     "acceptance_date", "buyer_phone", "seller_phone", "buyer_email",
